@@ -53,7 +53,7 @@ Rencana 1 dan ledger-nya: `docs/superpowers/plans/2026-10-30-01-fondasi-panel-ag
   `^[A-Za-z0-9_$]{1,64}$` dan dikutip dengan backtick.
 - Akun MySQL admin per server: dikirim ke agent lewat mTLS, disimpan
   terenkripsi di `/etc/dbpanel/mysql.cred` (0600; kunci
-  `/etc/dbpanel/agent.key` 0600); tidak pernah ke log/argv/file config
+  `/etc/dbpanel/secrets.key` 0600; `agent.key` adalah kunci TLS); tidak pernah ke log/argv/file config
   MySQL; mysqldump/mysql memakai `--defaults-extra-file` sementara 0600.
 - Password user replikasi dibuat panel (24 karakter acak), disimpan
   terenkripsi di panel (AES-256-GCM, kunci `/etc/dbpanel/panel.key`).
@@ -327,7 +327,7 @@ func (d *Driver) Register(reg *commands.Registry)     // "mysql.status" di task 
 
 **Files:**
 - Create: `internal/agent/drivers/mysql/credentials.go`, `internal/agent/drivers/mysql/connect.go`
-- Modify: `internal/proto/mysql.go`, `internal/agent/cli.go` (buat `secrets.Box` dari `/etc/dbpanel/agent.key`)
+- Modify: `internal/proto/mysql.go`, `internal/agent/cli.go` (buat `secrets.Box` dari `/etc/dbpanel/secrets.key`)
 - Test: `internal/agent/drivers/mysql/credentials_test.go`, `connect_test.go`
 
 **Interfaces:**
