@@ -36,7 +36,9 @@ apa yang terjadi dan apa yang harus dilakukan.
 
 1. Satu panel mengelola banyak master dan banyak replika sekaligus.
 2. Pembuatan replika MySQL "sekali klik" dari server yang sudah ada MySQL
-   maupun server kosong (panel memasang MySQL-nya).
+   maupun server kosong (panel memasang MySQL-nya). User memilih database
+   mana saja dari master yang direplikasi (default semua), dan bisa
+   menambah atau melepas database dari replika yang sudah berjalan.
 3. Pemantauan status replikasi yang andal: terhubung/putus, jalan/berhenti
    (dengan error-nya), ketinggalan berapa lama, kesehatan dasar server.
 4. Verifikasi isi data (checksum) yang bisa diaktifkan dan dijadwalkan
@@ -57,6 +59,10 @@ apa yang terjadi dan apa yang harus dilakukan.
   berikutnya.
 - Replikasi multi-master, replikasi berantai (replika dari replika), Group
   Replication, InnoDB Cluster.
+- Server replika yang berbagi dengan database aplikasi lain. Versi 1
+  hanya mendukung **server replika khusus** yang seluruh instance
+  MySQL-nya dikunci hanya-baca (lihat 7.3). Panel menolak server tujuan
+  yang masih berisi database lain dan menjelaskan alasannya.
 - Backup terjadwal, point-in-time recovery, manajemen user aplikasi.
 - Mendukung Windows Server (semua server target Linux).
 - Multi-tenant, banyak akun dengan peran berbeda. Versi 1 cukup satu
@@ -77,6 +83,19 @@ apa yang terjadi dan apa yang harus dilakukan.
 - Semua server target Linux dengan `systemd`, `curl`, `sudo`. Distro
   yang didukung versi 1: Ubuntu 20.04+/Debian 11+ (apt) dan
   RHEL/Rocky/Alma 8+ (dnf).
+- MySQL boleh terpasang dengan cara apa pun: paket distro, repositori
+  resmi MySQL, aaPanel (`/www/server/mysql`, config `/etc/my.cnf`,
+  service lewat `mysqld_safe`/init script), atau tarball. Driver tidak
+  mengasumsikan tata letak; ia membaca lokasi config, datadir, socket,
+  dan cara service dijalankan dari MySQL dan sistem itu sendiri, dan
+  menulis konfigurasinya sebagai file di `conf.d` bila ada atau sebagai
+  blok bertanda `# BEGIN dbpanel` / `# END dbpanel` di file config
+  utama bila tidak ada.
+- Agent tidak mengandalkan `root@localhost` tanpa password. Untuk tiap
+  server yang punya MySQL, user memasukkan satu akun MySQL admin di
+  panel ("Hubungkan MySQL"); kredensial dikirim ke agent lewat mTLS dan
+  disimpan terenkripsi hanya di server itu. Preflight memeriksa hak akun
+  itu dan menampilkan `GRANT` yang kurang.
 - Engine versi 1: **Oracle MySQL 8.0.26 ke atas, 8.4, dan 9.x**. Itulah
   yang dijumpai di lapangan. Batas bawah 8.0.26 dipilih karena sintaks
   `CHANGE REPLICATION SOURCE TO` / `SHOW REPLICA STATUS` (8.0.22–8.0.23)
@@ -192,18 +211,22 @@ diterima, semuanya dengan parameter terstruktur:
 - `mysql.configure(role, params)`: tulis `/etc/mysql/conf.d/dbpanel.cnf`
   (atau `/etc/my.cnf.d/dbpanel.cnf`) dan/atau `SET PERSIST`.
 - `mysql.restart` (hanya dijalankan setelah konfirmasi manusia di panel).
-- `mysql.createReplUser`, `mysql.cloneFrom`, `mysql.dumpFrom`,
-  `mysql.configureReplication`, `mysql.start/stopReplica`,
-  `mysql.resetReplica`, `mysql.setReadOnly`, `mysql.promote`.
+- `mysql.connect(credentials)`: simpan akun admin terenkripsi, uji
+  login, kembalikan versi, daftar database + ukuran, hak akun.
+- `mysql.createReplUser`, `mysql.cloneFrom`, `mysql.dumpFrom(databases)`,
+  `mysql.configureReplication(filter)`, `mysql.start/stopReplica`,
+  `mysql.resetReplica`, `mysql.setReadOnly`, `mysql.addDatabases`,
+  `mysql.removeDatabases`, `mysql.promote`.
 - `mysql.status`: hasil `SHOW REPLICA STATUS`, `@@gtid_executed`, nilai
   heartbeat, `read_only`, koneksi aktif, ukuran data.
 - `mysql.checksum.run/pause/resume/cancel`.
 - `job.status(id)`, `job.cancel(id)`, `job.log(id, since)`.
 
-Akses agent ke MySQL lokal: `root@localhost` lewat unix socket
-(auth_socket) saat berjalan sebagai root; kalau instalasi lama memakai
-password root, user memasukkannya sekali saat pendaftaran server dan
-agent menyimpannya di `/etc/dbpanel/agent.yaml` (mode 0600).
+Akses agent ke MySQL lokal: akun admin yang user masukkan lewat
+"Hubungkan MySQL" (bagian 4), disimpan terenkripsi di
+`/etc/dbpanel/mysql.cred` (mode 0600, kunci di agent). Bila belum ada
+akun, agent mencoba `root@localhost` lewat unix socket (auth_socket)
+sebagai jalan terakhir.
 
 ### 6.5 Model data (panel, SQLite)
 
@@ -211,7 +234,10 @@ agent menyimpannya di `/etc/dbpanel/agent.yaml` (mode 0600).
   terlihat), versi agent, versi MySQL, peran saat ini (master / replika /
   belum dipakai), catatan.
 - `topologies`: satu master dan daftar replikanya. Master = server;
-  replika = server + status replikasi + opsi.
+  replika = server + daftar database yang diikuti (kosong = semua) +
+  status replikasi + opsi.
+- `mysql_inventory`: per server, hasil terakhir "Hubungkan MySQL": versi,
+  daftar database dengan ukuran, hasil preflight terakhir, waktu.
 - `repl_users`: kredensial user replikasi per master (password
   terenkripsi; kunci di `/etc/dbpanel/panel.key`).
 - `jobs`: id, jenis (create_replica, resync, promote, checksum, install),
@@ -258,11 +284,33 @@ detik dengan hasil `probe`. Perintah ini bekerja di server tanpa internet.
 
 ### 7.3 Buat replika sekali klik
 
-Dari halaman master, tombol **Buat replika** meminta: server tujuan
-(dari daftar server yang online dan belum berperan), dan kalau master
-belum punya user replikasi, kredensial admin master untuk membuatnya
-(dipakai sekali, tidak disimpan). Lalu job `create_replica` berjalan
-dalam tahap-tahap, masing-masing tampil dengan status, durasi, dan log:
+Alur user, dari awal: (1) pasang panel; (2) tambah server master,
+pasang agent; (3) **Hubungkan MySQL**: isi akun admin, panel menampilkan
+versi dan daftar database beserta ukurannya; (4) **Siapkan sebagai
+master**: agent memeriksa dan memperbaiki pengaturan, membuat user
+replikasi, dan bertanya dulu bila MySQL perlu restart; (5) tambah server
+tujuan (replika khusus; MySQL dipasang panel bila belum ada); (6) **Buat
+replika**: pilih server tujuan, centang database (default semua), pilih
+cara salinan awal; (7) pantau progres tahap demi tahap sampai Sinkron.
+
+Cara salinan awal: **CLONE** menyalin seluruh instance file per file,
+cepat untuk data besar, tidak bisa memilih database, dan membuang semua
+isi server tujuan; **dump** mengekspor database terpilih sebagai SQL,
+lebih lambat, bisa memilih. Panel memilih otomatis: semua database
+dicentang dan tujuan kosong → CLONE; sebagian → dump database terpilih.
+User boleh memaksa dump walau memilih semua. Sebelum CLONE, panel
+menampilkan peringatan bahwa semua database yang ada di server tujuan
+akan hilang dan meminta konfirmasi eksplisit. Database yang tidak
+dicentang tidak ada di replika sama sekali. Replika menerapkan hanya
+perubahan untuk database terpilih lewat filter replikasi
+(`REPLICATE_WILD_DO_TABLE 'db.%'`); format binlog ROW wajib.
+
+Form Buat replika memberi tahu bahwa server tujuan akan dikunci
+hanya-baca seluruhnya (`super_read_only`): aplikasi masih bisa membaca
+dari replika, tidak ada yang bisa menulis selain proses replikasi, dan
+aplikasi lain di server itu yang butuh menulis akan gagal. Job
+`create_replica` berjalan dalam tahap-tahap, masing-masing tampil dengan
+status, durasi, dan log:
 
 1. **Preflight master** (lewat agent master): versi MySQL 8.0/8.4,
    `server_id` != 0, `log_bin=ON`, `binlog_format=ROW`,
@@ -292,16 +340,20 @@ dalam tahap-tahap, masing-masing tampil dengan status, durasi, dan log:
    `read_only=ON`, `super_read_only=ON`, `relay_log` dsb.), restart
    MySQL replika (boleh otomatis: belum melayani siapa pun), `INSTALL
    PLUGIN clone`, `SET GLOBAL clone_valid_donor_list`.
-5. **Snapshot**: `CLONE INSTANCE FROM 'repl'@'master':3306 IDENTIFIED BY
-   '...'`. Progres dibaca dari
-   `performance_schema.clone_progress`. MySQL replika restart sendiri di
-   akhir clone; agent menunggu sampai siap. Jalur fallback `mysqldump
-   --single-transaction --set-gtid-purged=ON` hanya untuk kasus CLONE tidak
-   mungkin (misalnya plugin tidak bisa diaktifkan) dan selalu diberitahukan.
-6. **Sambungkan**: `CHANGE REPLICATION SOURCE TO SOURCE_HOST=...,
-   SOURCE_USER=..., SOURCE_PASSWORD=..., SOURCE_AUTO_POSITION=1,
-   SOURCE_SSL=1 (jika master mendukung), GET_SOURCE_PUBLIC_KEY=1` lalu
-   `START REPLICA`.
+5. **Snapshot**: CLONE (`CLONE INSTANCE FROM 'repl'@'master':3306
+   IDENTIFIED BY '...'`, progres dari `performance_schema.clone_progress`,
+   MySQL replika restart sendiri di akhir dan agent menunggu sampai siap)
+   bila semua database dipilih, tujuan kosong, dan user tidak memaksa
+   dump; selain itu `mysqldump --single-transaction --set-gtid-purged=ON
+   --databases <terpilih>` dimuat ke replika setelah binlog dan GTID
+   replika direset. Dump juga dipakai bila CLONE tidak mungkin (plugin
+   tidak bisa aktif, patch berbeda di bawah 8.0.37) dan selalu
+   diberitahukan.
+6. **Sambungkan**: `CHANGE REPLICATION FILTER REPLICATE_WILD_DO_TABLE =
+   ('db1.%', ...)` (kosong bila semua database), `CHANGE REPLICATION
+   SOURCE TO SOURCE_HOST=..., SOURCE_USER=..., SOURCE_PASSWORD=...,
+   SOURCE_AUTO_POSITION=1, SOURCE_SSL=1 (jika master mendukung),
+   GET_SOURCE_PUBLIC_KEY=1` lalu `START REPLICA`.
 7. **Verifikasi**: tunggu IO dan SQL thread `Yes`, `gtid_executed` replika
    mencakup milik master, heartbeat (7.5) tiba, lag turun ke 0. Baru
    replika ditandai **Sinkron**.
@@ -309,6 +361,18 @@ dalam tahap-tahap, masing-masing tampil dengan status, durasi, dan log:
 Semua tahap idempoten: job yang gagal bisa "Ulangi dari tahap ini".
 Password user replikasi dibuat panel (acak, 24 karakter) dan disimpan
 terenkripsi.
+
+### 7.3a Tambah atau lepas database pada replika yang berjalan
+
+Di halaman replika, **Tambah database** menampilkan database master yang
+belum diikuti. Urutan yang dijalankan panel agar data tidak dobel:
+tunggu replika menyusul master (`WAIT_FOR_EXECUTED_GTID_SET`), `STOP
+REPLICA`, dump database baru dari master (catat posisi GTID P2 saat
+snapshot), muat ke replika dengan `sql_log_bin=0`, lalu `START REPLICA
+UNTIL SQL_AFTER_GTIDS = P2` dengan filter lama, tunggu sampai, `STOP
+REPLICA`, perluas filter dengan database baru, `START REPLICA`. **Lepas
+database**: `STOP REPLICA`, kecilkan filter, `START REPLICA`, lalu
+tawarkan `DROP DATABASE` di replika dengan konfirmasi.
 
 ### 7.4 Pasang MySQL di server kosong
 
@@ -534,6 +598,18 @@ js, aset), `scripts/` (install.sh, agent-install.sh.tmpl), `docs/`.
 - Mekanisme pembaruan panel dan agent (minimal: tombol "Perbarui" yang
   mengunduh binary baru dan restart service; agent diperbarui oleh panel).
 - Tata letak detail halaman di dalam kerangka bagian 8.
+
+## 10a. Keputusan dari brainstorming Rencana 2
+
+- Produk umum; aaPanel hanya salah satu tata letak yang dikenali.
+- Akun MySQL admin per server dimasukkan di panel, disimpan di agent.
+- Pilih database per replika; tambah/lepas database di replika yang
+  berjalan (7.3a).
+- CLONE hanya bila semua database dan tujuan kosong, dengan peringatan
+  dan konfirmasi hilangnya data di tujuan; dump bisa dipaksa.
+- Versi 1 hanya server replika khusus, dikunci `super_read_only`;
+  diberitahukan di form, di preflight, dan (Rencana 3) saat kunci
+  dimatikan.
 
 ## 11. Jawaban pemilik produk atas pertanyaan builder check
 
