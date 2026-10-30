@@ -6,16 +6,25 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// fakeConn records calls made through the Conn interface.
+// fakeConn records calls made through the Conn interface. Close sleeps for
+// closeDelay, then signals on closed.
 type fakeConn struct {
+	closeDelay time.Duration
+	closed     chan struct{}
+
 	mu     sync.Mutex
 	calls  []string
 	closes int
+}
+
+func newFakeConn(closeDelay time.Duration) *fakeConn {
+	return &fakeConn{closeDelay: closeDelay, closed: make(chan struct{}, 8)}
 }
 
 func (f *fakeConn) Call(ctx context.Context, cmd string, params any, result any) error {
@@ -26,10 +35,22 @@ func (f *fakeConn) Call(ctx context.Context, cmd string, params any, result any)
 }
 
 func (f *fakeConn) Close() error {
+	time.Sleep(f.closeDelay)
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.closes++
+	f.mu.Unlock()
+	f.closed <- struct{}{}
 	return nil
+}
+
+// waitClosed waits for one Close call to finish.
+func (f *fakeConn) waitClosed(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("conn was not closed")
+	}
 }
 
 func (f *fakeConn) closeCount() int {
@@ -79,10 +100,11 @@ func (l *fakeListener) counts() (online, offline int) {
 func TestAttachReplacesExistingAndClosesOld(t *testing.T) {
 	l := &fakeListener{}
 	h := New(l)
-	oldConn, newConn := &fakeConn{}, &fakeConn{}
+	oldConn, newConn := newFakeConn(0), newFakeConn(0)
 
 	h.Attach(7, oldConn)
 	h.Attach(7, newConn)
+	oldConn.waitClosed(t)
 
 	on, off := l.counts()
 	if on != 2 || off != 0 {
@@ -105,10 +127,26 @@ func TestAttachReplacesExistingAndClosesOld(t *testing.T) {
 	}
 }
 
+func TestAttachDoesNotBlockOnSlowClose(t *testing.T) {
+	h := New(&fakeListener{})
+	slow := newFakeConn(200 * time.Millisecond)
+	h.Attach(1, slow)
+
+	start := time.Now()
+	h.Attach(1, newFakeConn(0))
+	if d := time.Since(start); d >= 50*time.Millisecond {
+		t.Errorf("Attach took %v, want < 50ms", d)
+	}
+	slow.waitClosed(t)
+	if n := slow.closeCount(); n != 1 {
+		t.Errorf("old conn closed %d times, want 1", n)
+	}
+}
+
 func TestDetachOnlyActive(t *testing.T) {
 	l := &fakeListener{}
 	h := New(l)
-	oldConn, newConn := &fakeConn{}, &fakeConn{}
+	oldConn, newConn := newFakeConn(0), newFakeConn(0)
 	h.Attach(3, oldConn)
 	h.Attach(3, newConn)
 
@@ -136,9 +174,9 @@ func TestDetachOnlyActive(t *testing.T) {
 
 func TestOnlineIDs(t *testing.T) {
 	h := New(&fakeListener{})
-	h.Attach(9, &fakeConn{})
-	h.Attach(2, &fakeConn{})
-	h.Attach(5, &fakeConn{})
+	h.Attach(9, newFakeConn(0))
+	h.Attach(2, newFakeConn(0))
+	h.Attach(5, newFakeConn(0))
 	got := h.OnlineIDs()
 	want := []int64{2, 5, 9}
 	if len(got) != len(want) {

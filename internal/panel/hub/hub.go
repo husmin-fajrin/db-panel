@@ -51,7 +51,8 @@ func New(l Listener) *Hub {
 }
 
 // Attach makes c the active connection for serverID. An existing connection
-// is closed and replaced without an OnOffline; OnOnline is reported for c.
+// is replaced without an OnOffline and closed in the background, so a slow
+// close handshake does not delay c; OnOnline is reported for c.
 func (h *Hub) Attach(serverID int64, c Conn) {
 	h.mu.Lock()
 	old := h.conns[serverID]
@@ -59,7 +60,7 @@ func (h *Hub) Attach(serverID int64, c Conn) {
 	h.mu.Unlock()
 
 	if old != nil && old != c {
-		old.Close()
+		go old.Close()
 	}
 	h.l.OnOnline(serverID)
 }
