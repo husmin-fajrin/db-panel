@@ -178,9 +178,17 @@ func discoverService(ctx context.Context, sys probe.System) (kind, name string) 
 	if out, err := sys.Output(ctx, "systemctl", "list-unit-files", "--type=service", "--no-legend"); err == nil {
 		units := map[string]bool{}
 		for _, line := range strings.Split(string(out), "\n") {
-			if f := strings.Fields(line); len(f) > 0 {
-				units[f[0]] = true
+			f := strings.Fields(line)
+			if len(f) == 0 {
+				continue
 			}
+			// systemd-sysv-generator lists init scripts as "generated" units.
+			// systemd does not track a server the script started (aaPanel),
+			// so such a unit is driven through the script instead.
+			if len(f) > 1 && f[1] == "generated" && sys.Exists("/etc/init.d/"+strings.TrimSuffix(f[0], ".service")) {
+				continue
+			}
+			units[f[0]] = true
 		}
 		for _, u := range systemdUnits {
 			if units[u] {

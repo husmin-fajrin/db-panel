@@ -18,7 +18,7 @@ type Host interface {
 	// socket when none is stored.
 	Open(ctx context.Context) (*sql.DB, error)
 	Service() ServiceController
-	// WriteConfig writes content (a [mysqld] section) to IncludeDir/dbpanel.cnf,
+	// WriteConfig writes content (a [mysqld] section) to IncludeDir/zz-dbpanel.cnf (IncludeFile),
 	// or replaces the managed block in ConfigFile when there is no IncludeDir.
 	// It returns the file written.
 	WriteConfig(content string) (path string, err error)

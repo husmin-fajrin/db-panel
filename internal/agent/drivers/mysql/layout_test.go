@@ -112,42 +112,60 @@ func TestDiscoverLayoutDebianPackage(t *testing.T) {
 		ServiceName: "mysql.service",
 	}
 	assertLayout(t, l, want)
+	// Stock files in that directory (mysqld.cnf) sort before ours.
+	if got := filepath.Join(l.IncludeDir, IncludeFile); got != "/etc/mysql/mysql.conf.d/zz-dbpanel.cnf" {
+		t.Errorf("managed include file = %q", got)
+	}
 }
 
 func TestDiscoverLayoutAAPanel(t *testing.T) {
-	sys := &fakeSystem{
-		exists: map[string]bool{
-			"/www/server/mysql/bin/mysqld": true,
-			"/etc/init.d/mysqld":           true,
-		},
-		files: map[string]string{
-			"/etc/my.cnf": "[client]\nport = 3306\nsocket = /tmp/mysql.sock\n\n[mysqld]\nport = 3306\n" +
-				"socket = /tmp/mysql.sock\ndatadir = /www/server/data\nlog-bin = mysql-bin\n",
-		},
-		outputs: map[string]string{
-			"/www/server/mysql/bin/mysqld --verbose --help": mysqldHelp("/etc/my.cnf /etc/mysql/my.cnf /www/server/mysql/etc/my.cnf ~/.my.cnf",
-				"3306", "/tmp/mysql.sock", "/www/server/data/", "/www/server/data/db1.pid"),
-			// systemd is present but knows no MySQL unit.
-			"systemctl list-unit-files --type=service --no-legend": "cron.service enabled enabled\n",
-		},
+	tests := []struct {
+		name, units, kind, service string
+	}{
+		// systemd-sysv-generator turns /etc/init.d/mysqld into a "generated"
+		// unit that systemd reports inactive while the script's server runs.
+		{"generated unit from init script", "cron.service enabled enabled\nmysqld.service generated -\n",
+			"initscript", "/etc/init.d/mysqld"},
+		{"systemd unknown to MySQL", "cron.service enabled enabled\n", "initscript", "/etc/init.d/mysqld"},
+		{"real systemd unit", "cron.service enabled enabled\nmysqld.service enabled disabled\n",
+			"systemd", "mysqld.service"},
 	}
-	l, err := DiscoverLayout(context.Background(), sys)
-	if err != nil {
-		t.Fatal(err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sys := &fakeSystem{
+				exists: map[string]bool{
+					"/www/server/mysql/bin/mysqld": true,
+					"/etc/init.d/mysqld":           true,
+				},
+				files: map[string]string{
+					"/etc/my.cnf": "[client]\nport = 3306\nsocket = /tmp/mysql.sock\n\n[mysqld]\nport = 3306\n" +
+						"socket = /tmp/mysql.sock\ndatadir = /www/server/data\nlog-bin = mysql-bin\n",
+				},
+				outputs: map[string]string{
+					"/www/server/mysql/bin/mysqld --verbose --help": mysqldHelp("/etc/my.cnf /etc/mysql/my.cnf /www/server/mysql/etc/my.cnf ~/.my.cnf",
+						"3306", "/tmp/mysql.sock", "/www/server/data/", "/www/server/data/db1.pid"),
+					"systemctl list-unit-files --type=service --no-legend": tt.units,
+				},
+			}
+			l, err := DiscoverLayout(context.Background(), sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Layout{
+				MysqldPath:  "/www/server/mysql/bin/mysqld",
+				ConfigFile:  "/etc/my.cnf",
+				ConfigFiles: []string{"/etc/my.cnf", "/etc/mysql/my.cnf", "/www/server/mysql/etc/my.cnf", "~/.my.cnf"},
+				IncludeDir:  "",
+				DataDir:     "/www/server/data",
+				Socket:      "/tmp/mysql.sock",
+				PIDFile:     "/www/server/data/db1.pid",
+				Port:        3306,
+				ServiceKind: tt.kind,
+				ServiceName: tt.service,
+			}
+			assertLayout(t, l, want)
+		})
 	}
-	want := Layout{
-		MysqldPath:  "/www/server/mysql/bin/mysqld",
-		ConfigFile:  "/etc/my.cnf",
-		ConfigFiles: []string{"/etc/my.cnf", "/etc/mysql/my.cnf", "/www/server/mysql/etc/my.cnf", "~/.my.cnf"},
-		IncludeDir:  "",
-		DataDir:     "/www/server/data",
-		Socket:      "/tmp/mysql.sock",
-		PIDFile:     "/www/server/data/db1.pid",
-		Port:        3306,
-		ServiceKind: "initscript",
-		ServiceName: "/etc/init.d/mysqld",
-	}
-	assertLayout(t, l, want)
 }
 
 func assertLayout(t *testing.T, got, want Layout) {
@@ -207,13 +225,20 @@ func TestWriteConfigManagedBlockReplaces(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		want := filepath.Join(dir, "dbpanel.cnf")
+		want := filepath.Join(dir, "zz-dbpanel.cnf")
+		path, err := h.WriteConfig("[mysqld]\nserver_id=3\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if path != want || !strings.HasSuffix(path, "/zz-dbpanel.cnf") {
+			t.Errorf("path = %q, want %q", path, want)
+		}
 		b, err := os.ReadFile(want)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := string(b); got != "[mysqld]\nserver_id=3\n" {
-			t.Errorf("dbpanel.cnf = %q", got)
+			t.Errorf("zz-dbpanel.cnf = %q", got)
 		}
 		if st, _ := os.Stat(want); st.Mode().Perm() != 0o644 {
 			t.Errorf("mode = %v, want 0644", st.Mode().Perm())

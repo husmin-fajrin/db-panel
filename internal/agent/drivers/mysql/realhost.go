@@ -24,8 +24,10 @@ import (
 const (
 	blockBegin = "# BEGIN dbpanel"
 	blockEnd   = "# END dbpanel"
-	// includeFile is the file written in Layout.IncludeDir.
-	includeFile = "dbpanel.cnf"
+	// IncludeFile is the file written in Layout.IncludeDir. Files in an
+	// included directory are read in name order and later ones win, so the
+	// "zz-" prefix keeps it after stock files such as Ubuntu's mysqld.cnf.
+	IncludeFile = "zz-dbpanel.cnf"
 )
 
 // NewRealHost discovers the host's MySQL layout and returns a Host for it.
@@ -91,7 +93,7 @@ func (h *host) WriteConfig(content string) (string, error) {
 		content += "\n"
 	}
 	if h.l.IncludeDir != "" {
-		path := filepath.Join(h.l.IncludeDir, includeFile)
+		path := filepath.Join(h.l.IncludeDir, IncludeFile)
 		if err := writeFileAtomic(path, []byte(content), 0o644); err != nil {
 			return "", err
 		}
