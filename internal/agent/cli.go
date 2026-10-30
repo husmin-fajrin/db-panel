@@ -21,6 +21,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
+	"github.com/husmin-fajrin/db-panel/internal/secrets"
 	"github.com/husmin-fajrin/db-panel/internal/version"
 )
 
@@ -36,6 +37,13 @@ const usage = `Penggunaan:
 // tokenEnv carries the pairing token. Unlike argv (/proc/<pid>/cmdline),
 // a process's environment is readable only by its owner and root.
 const tokenEnv = "DBPANEL_TOKEN"
+
+// Files in the agent directory for MySQL credentials: the key that seals
+// them and the sealed admin account.
+const (
+	secretsKeyFile = "secrets.key"
+	credFile       = "mysql.cred"
+)
 
 // getenv and stdin are replaced by tests.
 var (
@@ -95,7 +103,7 @@ func mainRun(args []string, stderr io.Writer) int {
 	a := New(cfg, reg, logger)
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
-	registerMySQL(reg, cfg, sys, runner, logger)
+	registerMySQL(reg, cfg, *dir, sys, runner, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,10 +117,19 @@ func mainRun(args []string, stderr io.Writer) int {
 }
 
 // registerMySQL adds the mysql.* commands. Without a MySQL installation the
-// driver has no Host and its commands report that MySQL is missing.
-func registerMySQL(reg *commands.Registry, cfg config.Config, sys probe.System, runner *jobs.Runner, logger *slog.Logger) {
+// driver has no Host and its commands report that MySQL is missing. The
+// admin account the user connects with is kept sealed in dir/mysql.cred,
+// whether or not MySQL is installed yet (the panel may install it later).
+func registerMySQL(reg *commands.Registry, cfg config.Config, dir string, sys probe.System, runner *jobs.Runner, logger *slog.Logger) {
 	d := &mysql.Driver{Jobs: runner, Logger: logger}
-	host, err := mysql.NewRealHost(cfg, nil, sys, logger)
+	// agent.key is the TLS private key, so the sealing key is a separate file.
+	box, err := secrets.LoadOrCreate(filepath.Join(dir, secretsKeyFile))
+	if err != nil {
+		logger.Error("cannot open the credential sealing key; MySQL cannot be connected", "err", err)
+	} else {
+		d.Creds = mysql.NewFileCredentialStore(filepath.Join(dir, credFile), box)
+	}
+	host, err := mysql.NewRealHost(cfg, d.Creds, sys, logger)
 	if err != nil {
 		logger.Warn("mysql not available", "err", err)
 	} else {

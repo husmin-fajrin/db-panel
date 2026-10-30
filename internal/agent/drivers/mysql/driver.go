@@ -14,7 +14,10 @@ var ErrNoHost = errors.New("MySQL tidak ditemukan di server ini")
 // Driver implements the mysql.* commands on one host. Host is nil when the
 // agent found no MySQL installation at startup.
 type Driver struct {
-	Host   Host
+	Host Host
+	// Creds stores the admin account mysql.connect verifies; nil when the
+	// agent has no place to keep one.
+	Creds  CredentialStore
 	Jobs   *jobs.Runner
 	Logger *slog.Logger
 }
@@ -23,6 +26,7 @@ type Driver struct {
 // its own file and registers itself through a register<Name> method.
 func (d *Driver) Register(reg *commands.Registry) {
 	d.registerStatus(reg)
+	d.registerConnect(reg)
 }
 
 func (d *Driver) host() (Host, error) {

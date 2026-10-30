@@ -62,13 +62,8 @@ func OpenDB(ctx context.Context, creds CredentialStore, socket, rootPassword str
 	if !stored {
 		p = proto.ConnectParams{User: "root", Password: rootPassword}
 	}
-	db, err := sql.Open("mysql", DSN(p, socket))
+	db, err := openWith(ctx, socket, p)
 	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(maxOpenConns)
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
 		if !stored {
 			if logger != nil {
 				logger.Warn("mysql root login over socket failed", "socket", socket, "err", err)
@@ -76,6 +71,21 @@ func OpenDB(ctx context.Context, creds CredentialStore, socket, rootPassword str
 			return nil, ErrNotConnected
 		}
 		return nil, fmt.Errorf("login MySQL gagal: %w", err)
+	}
+	return db, nil
+}
+
+// openWith connects with p (over socket for a local account) and pings. The
+// error is the driver's own, so callers can read its *drv.MySQLError.
+func openWith(ctx context.Context, socket string, p proto.ConnectParams) (*sql.DB, error) {
+	db, err := sql.Open("mysql", DSN(p, socket))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return db, nil
 }

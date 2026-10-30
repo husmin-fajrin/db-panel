@@ -1,0 +1,60 @@
+package mysql
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestMissingGrants(t *testing.T) {
+	const acct = "adm@10.0.0.%"
+	to := " ON *.* TO 'adm'@'10.0.0.%'"
+	allStatic := "SELECT, INSERT, UPDATE, DELETE, CREATE USER, RELOAD, PROCESS, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE"
+	cases := []struct {
+		name   string
+		grants []string
+		want   []string
+	}{
+		{"all privileges with grant option", []string{"GRANT ALL PRIVILEGES ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION"}, nil},
+		{"all privileges without grant option", []string{"GRANT ALL PRIVILEGES ON *.* TO `adm`@`10.0.0.%`"},
+			[]string{"GRANT USAGE" + to + " WITH GRANT OPTION"}},
+		{"explicit lists as MySQL 8.0 shows root", []string{
+			"GRANT " + allStatic + " ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+		}, nil},
+		{"super stands in for the dynamic set", []string{
+			"GRANT " + allStatic + ", SUPER ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION"}, nil},
+		{"one dynamic privilege missing", []string{
+			"GRANT " + allStatic + " ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+			"GRANT SYSTEM_VARIABLES_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`10.0.0.%`",
+		}, []string{"GRANT REPLICATION_SLAVE_ADMIN" + to}},
+		{"database-level grants do not count", []string{
+			"GRANT USAGE ON *.* TO `adm`@`10.0.0.%`",
+			"GRANT ALL PRIVILEGES ON `app`.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+			"GRANT `reader`@`%` TO `adm`@`10.0.0.%`",
+		}, []string{
+			"GRANT CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE" + to,
+			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN" + to,
+			"GRANT USAGE" + to + " WITH GRANT OPTION",
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := missingGrants(c.grants, acct); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("got\n%q\nwant\n%q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestQuoteAccount(t *testing.T) {
+	for in, want := range map[string]string{
+		"root@localhost": "'root'@'localhost'",
+		"o'neil@%":       "'o''neil'@'%'",
+		`a\b@h`:          `'a\\b'@'h'`,
+		"we@ird@host":    "'we@ird'@'host'",
+	} {
+		if got := quoteAccount(in); got != want {
+			t.Errorf("quoteAccount(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

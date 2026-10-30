@@ -204,9 +204,16 @@ func (noMySQLSystem) Arch() string                          { return "amd64" }
 // accepts mysql.status and answers that MySQL is missing.
 func TestRegisterMySQLWithoutMySQL(t *testing.T) {
 	reg := commands.NewRegistry()
-	registerMySQL(reg, config.Config{}, noMySQLSystem{}, jobs.NewRunner(nil, nil), slog.New(slog.DiscardHandler))
-	resp := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.status"})
-	if resp.Error == nil || resp.Error.Message != "MySQL tidak ditemukan di server ini" {
-		t.Fatalf("response = %+v", resp)
+	dir := t.TempDir()
+	registerMySQL(reg, config.Config{}, dir, noMySQLSystem{}, jobs.NewRunner(nil, nil), slog.New(slog.DiscardHandler))
+	for _, cmd := range []string{"mysql.status", "mysql.connect", "mysql.inventory"} {
+		resp := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: cmd, Params: json.RawMessage(`{"user":"root"}`)})
+		if resp.Error == nil || resp.Error.Message != "MySQL tidak ditemukan di server ini" {
+			t.Fatalf("%s: response = %+v", cmd, resp)
+		}
+	}
+	// The sealing key is its own file: agent.key is the TLS private key.
+	if fi, err := os.Stat(filepath.Join(dir, "secrets.key")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("secrets.key: %v, %v", fi, err)
 	}
 }

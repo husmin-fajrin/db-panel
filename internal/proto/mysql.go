@@ -17,6 +17,14 @@ type ConnectParams struct {
 	Port     int    `json:"port"`
 }
 
+// ConnectResult is the answer to mysql.connect and mysql.inventory.
+type ConnectResult struct {
+	Status        MySQLStatus    `json:"status"`
+	Databases     []DatabaseInfo `json:"databases"`      // without mysql, sys, information_schema, performance_schema
+	MissingGrants []string       `json:"missing_grants"` // GRANT statements for what the account lacks; empty = enough
+	Account       string         `json:"account"`        // the effective 'user'@'host' (CURRENT_USER())
+}
+
 // MySQLStatus is a snapshot of a MySQL server's replication-relevant state.
 type MySQLStatus struct {
 	Version           string         `json:"version"`
