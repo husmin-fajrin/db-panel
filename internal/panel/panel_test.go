@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -351,6 +352,9 @@ func TestResetPassword(t *testing.T) {
 	if auth.CheckPassword(u.PasswordHash, initial) {
 		t.Fatal("initial password still works after reset")
 	}
+	if _, err := os.Stat(filepath.Join(o.ConfigDir, "admin-initial-password")); !os.IsNotExist(err) {
+		t.Fatalf("admin-initial-password still exists after reset (stat err %v)", err)
+	}
 }
 
 func TestResetPasswordUnknownUser(t *testing.T) {
@@ -380,5 +384,92 @@ func TestMainUsage(t *testing.T) {
 		if code := Main(args, io.Discard, &stderr); code != 2 {
 			t.Errorf("%v: exit %d, want 2 (stderr %q)", args, code, stderr.String())
 		}
+	}
+}
+
+func TestNewAdoptsExistingHostnameServer(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A crash between CreateServer and saving local_server_id leaves this row.
+	if err := os.MkdirAll(o.DataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(o.DataDir, "panel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan, err := st.CreateServer(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	p := newPanel(t, o)
+	if p.localID != orphan.ID {
+		t.Fatalf("local id = %d, want the existing row %d", p.localID, orphan.ID)
+	}
+	servers, err := p.Store.ListServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("got %d servers, want 1: %+v", len(servers), servers)
+	}
+	if srv := servers[0]; srv.ID != orphan.ID || !srv.Paired || srv.CertSerial != "local" {
+		t.Fatalf("server = %+v, want row %d paired with serial local", srv, orphan.ID)
+	}
+	if v, err := p.Store.GetSetting("local_server_id"); err != nil || v != strconv.FormatInt(orphan.ID, 10) {
+		t.Fatalf("local_server_id = %q, %v; want %d", v, err, orphan.ID)
+	}
+}
+
+// eventRecorder records what the panel publishes to browsers.
+type eventRecorder struct {
+	mu     sync.Mutex
+	events []string // "event id online", online only for server_status
+}
+
+func (r *eventRecorder) publish(event string, data any) {
+	m, _ := data.(map[string]any)
+	line := fmt.Sprintf("%s %v %v", event, m["id"], m["online"])
+	r.mu.Lock()
+	r.events = append(r.events, line)
+	r.mu.Unlock()
+}
+
+func (r *eventRecorder) count(line string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, e := range r.events {
+		if e == line {
+			n++
+		}
+	}
+	return n
+}
+
+func TestProbeLoopReprobesOnlineServers(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	p.probeInterval = 50 * time.Millisecond
+	rec := &eventRecorder{}
+	broker := p.publish
+	p.publish = func(event string, data any) {
+		rec.publish(event, data)
+		broker(event, data)
+	}
+	startPanel(t, p)
+
+	online := fmt.Sprintf("server_status %d true", p.localID)
+	probed := fmt.Sprintf("server_probe %d <nil>", p.localID)
+	// One probe comes from OnOnline; at least two more need the loop.
+	waitFor(t, "three probes of the local server", func() bool { return rec.count(probed) >= 3 })
+	if n := rec.count(online); n != 1 {
+		t.Fatalf("got %d %q events, want 1", n, online)
 	}
 }

@@ -99,9 +99,7 @@ func mainResetPassword(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("panel reset-password", stderr)
 	username := fs.String("username", adminUsername, "nama pengguna")
 	dataDir := fs.String("data-dir", DefaultDataDir, "direktori data (panel.db)")
-	// Accepted for symmetry with "dbpanel panel"; the password lives in the
-	// database only.
-	fs.String("config-dir", DefaultConfigDir, "direktori konfigurasi (tidak dipakai)")
+	configDir := fs.String("config-dir", DefaultConfigDir, "direktori konfigurasi (admin-initial-password dihapus)")
 	if !parse(fs, args) {
 		return 2
 	}
@@ -109,6 +107,11 @@ func mainResetPassword(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "kesalahan: %v\n", err)
 		return 1
+	}
+	// The initial password no longer works; do not leave it lying around.
+	path := filepath.Join(*configDir, initialPasswordFile)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "peringatan: gagal menghapus %s: %v\n", path, err)
 	}
 	fmt.Fprintf(stdout, "Kata sandi baru untuk %s: %s\n", *username, pw)
 	return 0

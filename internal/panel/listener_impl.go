@@ -23,7 +23,7 @@ func (p *Panel) setOnline(id int64, online bool) {
 	if err := p.Store.TouchSeen(id, p.now()); err != nil {
 		p.log.Warn("record last seen", "server_id", id, "err", err)
 	}
-	p.Broker.Publish("server_status", map[string]any{"id": id, "online": online})
+	p.publish("server_status", map[string]any{"id": id, "online": online})
 	if online {
 		p.goProbe(id)
 	}
@@ -88,5 +88,5 @@ func (p *Panel) probeOne(ctx context.Context, id int64) {
 		p.log.Warn("store probe result", "server_id", id, "err", err)
 		return
 	}
-	p.Broker.Publish("server_probe", map[string]any{"id": id})
+	p.publish("server_probe", map[string]any{"id": id})
 }

@@ -73,6 +73,7 @@ type Panel struct {
 	now           func() time.Time
 	localID       int64
 	probeInterval time.Duration
+	publish       func(event string, data any) // Broker.Publish; tests wrap it
 
 	addrMu    sync.Mutex
 	uiAddr    string // bound UI address once Run listens
@@ -111,6 +112,7 @@ func New(o Options) (*Panel, error) {
 		now:           time.Now,
 		probeInterval: defaultProbeInterval,
 	}
+	p.publish = p.Broker.Publish
 	p.Hub = hub.New(&listenerImpl{p: p})
 	if err := p.init(); err != nil {
 		st.Close()
