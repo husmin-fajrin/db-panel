@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -20,7 +21,8 @@ func (l *listenerImpl) OnEvent(serverID int64, ev proto.Event) {
 }
 
 func (p *Panel) setOnline(id int64, online bool) {
-	if err := p.Store.TouchSeen(id, p.now()); err != nil {
+	// A server deleted from the UI goes offline after its row is gone.
+	if err := p.Store.TouchSeen(id, p.now()); err != nil && !errors.Is(err, store.ErrNotFound) {
 		p.log.Warn("record last seen", "server_id", id, "err", err)
 	}
 	p.publish("server_status", map[string]any{"id": id, "online": online})

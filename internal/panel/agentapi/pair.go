@@ -23,6 +23,9 @@ import (
 // maxPairBody caps the pairing request body.
 const maxPairBody = 64 << 10
 
+// localCertSerial marks the panel host's own server.
+const localCertSerial = "local"
+
 // Deps are the panel services the agent endpoints use.
 type Deps struct {
 	Store *store.Store
@@ -96,6 +99,24 @@ func PairHandler(d Deps) http.Handler {
 		if err != nil {
 			log.Error("pairing: consume token", "err", err)
 			writeError(w, http.StatusInternalServerError, "kesalahan internal")
+			return
+		}
+		// The panel host's own server runs the embedded agent; a token left
+		// over from before it was adopted must not hand it to another host.
+		srv, err := d.Store.GetServer(pt.ServerID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusForbidden, "token ditolak")
+			return
+		}
+		if err != nil {
+			log.Error("pairing: get server", "server_id", pt.ServerID, "err", err)
+			writeError(w, http.StatusInternalServerError, "kesalahan internal")
+			return
+		}
+		if srv.CertSerial == localCertSerial {
+			log.Warn("pairing rejected: token for the panel host's own server", "server_id", pt.ServerID,
+				"remote", ip, "hostname", req.Hostname)
+			writeError(w, http.StatusForbidden, "token ditolak")
 			return
 		}
 		certPEM, serial, err := d.CA.IssueAgentCert([]byte(req.CSRPEM), pt.ServerID)

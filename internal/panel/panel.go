@@ -173,15 +173,21 @@ func (p *Panel) resolvePublicHost() error {
 		return nil
 	}
 	p.opts.PublicHost = detectPublicHost()
+	if p.opts.PublicHost == loopbackHost {
+		p.log.Warn("public host tidak terdeteksi; memakai 127.0.0.1, gunakan --public-host")
+	}
 	return nil
 }
+
+// loopbackHost is the public host used when none can be detected.
+const loopbackHost = "127.0.0.1"
 
 // detectPublicHost returns the first non-loopback IPv4 address of an
 // interface that is up, or 127.0.0.1.
 func detectPublicHost() string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "127.0.0.1"
+		return loopbackHost
 	}
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
@@ -201,7 +207,7 @@ func detectPublicHost() string {
 			}
 		}
 	}
-	return "127.0.0.1"
+	return loopbackHost
 }
 
 // bootstrapAdmin creates the admin account with a random password when the

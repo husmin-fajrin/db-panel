@@ -345,6 +345,33 @@ func TestPairRejectsUsedToken(t *testing.T) {
 	}
 }
 
+// TestPairRefusesLocalServer: the panel host's own server (cert serial
+// "local") must never be taken over by an agent pairing with a token.
+func TestPairRefusesLocalServer(t *testing.T) {
+	e := newEnv(t)
+	srv, err := e.st.CreateServer("host-panel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.MarkPaired(srv.ID, "local", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	_, token := e.newToken(t, srv.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	if _, err := agent.Pair(ctx, e.pairURL, token, t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "token ditolak") {
+		t.Fatalf("pairing the local server: err = %v, want token ditolak", err)
+	}
+	got, err := e.st.GetServer(srv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CertSerial != "local" || got.Address != "127.0.0.1" {
+		t.Fatalf("local server after refused pairing = %+v", got)
+	}
+}
+
 func TestPairHandlerMethodAndSize(t *testing.T) {
 	e := newEnv(t)
 	resp, err := http.Get(e.pairURL + "/agent/pair")

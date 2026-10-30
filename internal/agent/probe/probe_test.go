@@ -17,6 +17,7 @@ type statfsResult struct{ total, free uint64 }
 type fakeSystem struct {
 	files    map[string][]byte
 	bins     map[string]bool
+	paths    map[string]bool   // files that exist but are not on PATH
 	outputs  map[string]string // "name arg arg" -> stdout
 	failCmds map[string]bool   // commands whose Output returns stdout and an error
 	statfs   map[string]statfsResult
@@ -48,6 +49,11 @@ func (f *fakeSystem) Output(ctx context.Context, name string, args ...string) ([
 		return []byte(out), errors.New("exit status 3")
 	}
 	return []byte(out), nil
+}
+
+func (f *fakeSystem) Exists(path string) bool {
+	_, isFile := f.files[path]
+	return isFile || f.paths[path]
 }
 
 func (f *fakeSystem) Hostname() (string, error) { return f.host, f.hostErr }
@@ -217,6 +223,33 @@ func TestCollectRockyWithoutMySQL(t *testing.T) {
 	}
 	if len(res.Disks) != 1 || res.Disks[0].Mount != "/" {
 		t.Errorf("Disks = %+v", res.Disks)
+	}
+}
+
+// TestCollectRockyMysqldInLibexec: RHEL-family AppStream installs mysqld as
+// /usr/libexec/mysqld, which is not on PATH.
+func TestCollectRockyMysqldInLibexec(t *testing.T) {
+	sys := &fakeSystem{
+		host: "db3",
+		files: map[string][]byte{
+			"/etc/os-release": td(t, "os-release-rocky"),
+		},
+		paths: map[string]bool{"/usr/libexec/mysqld": true},
+		outputs: map[string]string{
+			"/usr/libexec/mysqld --version":        "/usr/libexec/mysqld  Ver 8.0.36 for Linux on x86_64 (Source distribution)\n",
+			"/usr/libexec/mysqld --verbose --help": mysqldHelp,
+			"systemctl is-active mysql":            "unknown\n",
+			"systemctl is-active mysqld":           "active\n",
+		},
+		failCmds: map[string]bool{"systemctl is-active mysql": true},
+	}
+	res, err := Collect(context.Background(), sys, "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := res.MySQL
+	if !m.Installed || m.Version != "8.0.36" || m.ServiceName != "mysqld" || !m.ServiceActive || m.Port != 3307 || m.DataDir != "/var/lib/mysql" {
+		t.Errorf("MySQL = %+v", m)
 	}
 }
 

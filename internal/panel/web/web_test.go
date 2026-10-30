@@ -38,11 +38,25 @@ var adminHash = sync.OnceValue(func() string {
 	return string(h)
 })
 
-type fakeListener struct{}
+// fakeListener records the servers reported offline.
+type fakeListener struct {
+	mu      sync.Mutex
+	offline []int64
+}
 
-func (fakeListener) OnOnline(int64)             {}
-func (fakeListener) OnOffline(int64)            {}
-func (fakeListener) OnEvent(int64, proto.Event) {}
+func (*fakeListener) OnOnline(int64) {}
+func (l *fakeListener) OnOffline(id int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.offline = append(l.offline, id)
+}
+func (*fakeListener) OnEvent(int64, proto.Event) {}
+
+func (l *fakeListener) offlineIDs() []int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]int64(nil), l.offline...)
+}
 
 // fakeConn is a live agent connection that never answers.
 type fakeConn struct{}
@@ -50,8 +64,21 @@ type fakeConn struct{}
 func (fakeConn) Call(context.Context, string, any, any) error { return errors.New("tidak dipakai") }
 func (fakeConn) Close() error                                 { return nil }
 
+// closingConn is a fakeConn that reports when it is closed.
+type closingConn struct {
+	fakeConn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *closingConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return nil
+}
+
 type env struct {
 	st       *store.Store
+	l        *fakeListener
 	hub      *hub.Hub
 	sessions *auth.Sessions
 	broker   *web.Broker
@@ -68,9 +95,11 @@ func newEnv(t *testing.T) *env {
 	if err := st.CreateUser("admin", adminHash()); err != nil {
 		t.Fatal(err)
 	}
+	l := &fakeListener{}
 	e := &env{
 		st:       st,
-		hub:      hub.New(fakeListener{}),
+		l:        l,
+		hub:      hub.New(l),
 		sessions: auth.NewSessions(time.Hour, time.Now),
 		broker:   web.NewBroker(),
 	}
@@ -325,7 +354,7 @@ func TestCreateServerShowsPairingCommand(t *testing.T) {
 	rec = e.do("GET", loc, nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "db-utama", "/agent/install?token=",
-		"curl -fsSL "+testPublicURL+"/agent/install?token="+tok.Token+" | sudo bash",
+		"curl -fsSL &#39;"+testPublicURL+"/agent/install?token="+tok.Token+"&#39; | sudo bash",
 		`action="/servers/1/token"`, "Buat token baru")
 
 	// A new token replaces the old one in the command.
@@ -422,6 +451,93 @@ func TestDeleteServer(t *testing.T) {
 	rec = e.do("POST", "/servers/1/delete", url.Values{}, c)
 	wantCode(t, rec, http.StatusNotFound)
 	wantBody(t, rec, "Server tidak ditemukan")
+}
+
+func TestDeleteServerDisconnectsAgent(t *testing.T) {
+	e := newEnv(t)
+	srv, _ := e.st.CreateServer("db-terhubung")
+	e.st.MarkPaired(srv.ID, "serial", "10.0.0.8")
+	conn := &closingConn{closed: make(chan struct{})}
+	e.hub.Attach(srv.ID, conn)
+
+	rec := e.do("POST", "/servers/1/delete", url.Values{}, e.cookie())
+	wantCode(t, rec, http.StatusSeeOther)
+	if e.hub.IsOnline(srv.ID) {
+		t.Fatal("deleted server is still online in the hub")
+	}
+	if got := e.l.offlineIDs(); len(got) != 1 || got[0] != srv.ID {
+		t.Fatalf("OnOffline calls = %v, want [%d]", got, srv.ID)
+	}
+	select {
+	case <-conn.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent connection of the deleted server was not closed")
+	}
+}
+
+func TestDeleteLocalServerRefused(t *testing.T) {
+	e := newEnv(t)
+	srv, _ := e.st.CreateServer("host-panel")
+	e.st.MarkPaired(srv.ID, "local", "127.0.0.1")
+	c := e.cookie()
+
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	for _, s := range []string{`action="/servers/1/delete"`, "Hapus server", "Pasang ulang agent"} {
+		if strings.Contains(rec.Body.String(), s) {
+			t.Errorf("detail page of the panel host shows %q", s)
+		}
+	}
+	rec = e.do("POST", "/servers/1/delete", url.Values{}, c)
+	wantCode(t, rec, http.StatusConflict)
+	wantBody(t, rec, "Server ini adalah host panel dan tidak bisa dihapus")
+	if _, err := e.st.GetServer(srv.ID); err != nil {
+		t.Fatalf("local server gone after refused delete: %v", err)
+	}
+	wantCode(t, e.do("POST", "/servers/1/token", url.Values{}, c), http.StatusConflict)
+}
+
+func TestRepairPairedServer(t *testing.T) {
+	e := newEnv(t)
+	srv, _ := e.st.CreateServer("db-diganti")
+	e.st.MarkPaired(srv.ID, "serial-lama", "10.0.0.9")
+	c := e.cookie()
+
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Pasang ulang agent", `id="modal-pasang-ulang"`, `action="/servers/1/token"`)
+	if strings.Contains(rec.Body.String(), "/agent/install") {
+		t.Fatal("paired server shows a pairing command before re-pairing was asked for")
+	}
+
+	rec = e.do("POST", "/servers/1/token", url.Values{}, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	if l := rec.Header().Get("Location"); l != "/servers/1" {
+		t.Errorf("Location = %q", l)
+	}
+	tok, ok, err := e.st.ActivePairToken(srv.ID, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("no active token after re-pair: %v %v", ok, err)
+	}
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "/agent/install?token="+tok.Token, "Agent lama tetap bekerja")
+	if got, _ := e.st.GetServer(srv.ID); got.CertSerial != "serial-lama" || !got.Paired {
+		t.Fatalf("server after asking to re-pair = %+v, want the old pairing kept", got)
+	}
+}
+
+func TestFramingForbidden(t *testing.T) {
+	e := newEnv(t)
+	for _, p := range []string{"/login", "/servers"} {
+		rec := e.do("GET", p, nil, e.cookie())
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("GET %s: X-Frame-Options = %q, want DENY", p, got)
+		}
+		if got := rec.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+			t.Errorf("GET %s: Content-Security-Policy = %q", p, got)
+		}
+	}
 }
 
 func TestStaticAssets(t *testing.T) {

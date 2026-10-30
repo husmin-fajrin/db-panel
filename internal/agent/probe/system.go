@@ -12,6 +12,8 @@ import (
 type System interface {
 	ReadFile(path string) ([]byte, error)
 	LookPath(file string) (string, error)
+	// Exists reports whether path exists (for programs not on PATH).
+	Exists(path string) bool
 	Output(ctx context.Context, name string, args ...string) ([]byte, error)
 	Hostname() (string, error)
 	Statfs(path string) (totalBytes, freeBytes uint64, err error)
@@ -26,6 +28,11 @@ type realSystem struct{}
 func (realSystem) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 func (realSystem) LookPath(file string) (string, error) { return exec.LookPath(file) }
+
+func (realSystem) Exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 func (realSystem) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).Output()

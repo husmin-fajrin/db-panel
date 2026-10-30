@@ -19,13 +19,7 @@
      x-init="new EventSource('/events').addEventListener('server_status', (e) => { const d = JSON.parse(e.data); if (d.id === {{.Server.ID}} && d.online) location.reload() })">
   <div class="card-body gap-3">
     <h2 class="card-title">Pasang agent di server ini</h2>
-    <p>Masuk ke server <strong>{{.Server.Name}}</strong> lewat SSH, lalu jalankan perintah berikut sebagai pengguna dengan akses <code>sudo</code>:</p>
-    <div class="flex flex-col md:flex-row gap-2 items-stretch" x-data="{ tersalin: false }">
-      <pre class="bg-base-200 rounded-box p-3 overflow-x-auto flex-1 text-sm"><code x-ref="perintah">{{.Command}}</code></pre>
-      <button type="button" class="btn btn-primary"
-              @click="salinTeks($refs.perintah).then(() => { tersalin = true; setTimeout(() => tersalin = false, 2000) })"
-              x-text="tersalin ? 'Tersalin' : 'Salin'">Salin</button>
-    </div>
+    {{template "pair-command" .}}
     <p class="text-sm text-base-content/70">Token berlaku sampai {{fmtTime .TokenExpires}} dan hanya bisa dipakai sekali. Halaman ini diperbarui otomatis setelah agent terhubung.</p>
     <form method="post" action="/servers/{{.Server.ID}}/token">
       <button type="submit" class="btn btn-outline btn-sm">Buat token baru</button>
@@ -33,6 +27,15 @@
   </div>
 </div>
 {{else}}
+{{if .Command}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Pasang ulang agent</h2>
+    {{template "pair-command" .}}
+    <p class="text-sm text-base-content/70">Token berlaku sampai {{fmtTime .TokenExpires}} dan hanya bisa dipakai sekali. Agent lama tetap bekerja sampai agent baru berhasil dipasangkan; setelah itu sertifikat agent lama tidak diterima lagi.</p>
+  </div>
+</div>
+{{end}}
 <div class="grid gap-6 md:grid-cols-2 mb-6">
   <div class="card bg-base-100 shadow">
     <div class="card-body">
@@ -96,15 +99,37 @@
 {{end}}{{end}}
 {{end}}
 
-<div class="flex justify-between">
+<div class="flex flex-wrap justify-between gap-2">
   <a href="/servers" class="btn btn-ghost">Kembali ke daftar server</a>
-  <button type="button" class="btn btn-error btn-outline" onclick="document.getElementById('modal-hapus').showModal()">Hapus server</button>
+  {{if not .Local}}
+  <div class="flex flex-wrap gap-2">
+    {{if .Server.Paired}}
+    <button type="button" class="btn btn-outline" onclick="document.getElementById('modal-pasang-ulang').showModal()">Pasang ulang agent</button>
+    {{end}}
+    <button type="button" class="btn btn-error btn-outline" onclick="document.getElementById('modal-hapus').showModal()">Hapus server</button>
+  </div>
+  {{end}}
 </div>
+
+{{if not .Local}}
+{{if .Server.Paired}}
+<dialog id="modal-pasang-ulang" class="modal">
+  <div class="modal-box">
+    <h3 class="text-lg font-bold">Pasang ulang agent di {{.Server.Name}}?</h3>
+    <p class="py-4">Gunakan ini bila server dipasang ulang atau isi <code>/etc/dbpanel</code> hilang. Panel membuat token pemasangan baru dan menampilkan perintahnya. Begitu agent baru berhasil dipasangkan, sertifikat agent lama tidak berlaku lagi dan agent lama tidak bisa terhubung. Sampai saat itu agent lama tetap bekerja.</p>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn">Batal</button></form>
+      <form method="post" action="/servers/{{.Server.ID}}/token"><button type="submit" class="btn btn-primary">Ya, buat token</button></form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
 
 <dialog id="modal-hapus" class="modal">
   <div class="modal-box">
     <h3 class="text-lg font-bold">Hapus server {{.Server.Name}}?</h3>
-    <p class="py-4">Server akan dihapus dari panel dan agent-nya tidak bisa terhubung lagi. Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang dan pasang agent dengan token baru.</p>
+    <p class="py-4">Server akan dihapus dari panel, koneksi agent-nya langsung diputus, dan sertifikatnya tidak diterima lagi. Service <code>dbpanel-agent</code> di server itu tetap terpasang dan terus mencoba terhubung sampai dimatikan (<code>sudo systemctl disable --now dbpanel-agent</code>). Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang server ini dan jalankan perintah pemasangan yang baru.</p>
     <div class="modal-action">
       <form method="dialog"><button class="btn">Batal</button></form>
       <form method="post" action="/servers/{{.Server.ID}}/delete"><button type="submit" class="btn btn-error">Ya, hapus</button></form>
@@ -112,4 +137,15 @@
   </div>
   <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
 </dialog>
+{{end}}
+{{end}}
+
+{{define "pair-command"}}
+    <p>Masuk ke server <strong>{{.Server.Name}}</strong> lewat SSH, lalu jalankan perintah berikut sebagai pengguna dengan akses <code>sudo</code>:</p>
+    <div class="flex flex-col md:flex-row gap-2 items-stretch" x-data="{ tersalin: false }">
+      <pre class="bg-base-200 rounded-box p-3 overflow-x-auto flex-1 text-sm"><code x-ref="perintah">{{.Command}}</code></pre>
+      <button type="button" class="btn btn-primary"
+              @click="salinTeks($refs.perintah).then(() => { tersalin = true; setTimeout(() => tersalin = false, 2000) })"
+              x-text="tersalin ? 'Tersalin' : 'Salin'">Salin</button>
+    </div>
 {{end}}

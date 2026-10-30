@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
@@ -95,6 +96,12 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--panel dan --token wajib diisi")
 		fs.Usage()
 		return 2
+	}
+	// The panel keeps its CA in the same default directory; pairing here
+	// would mix the agent's files into the panel's config.
+	if _, err := os.Stat(filepath.Join(*dir, "ca.key")); err == nil {
+		fmt.Fprintln(stderr, "Direktori ini milik panel (ada ca.key). Jangan pasang agent di host panel; panel sudah punya agent tertanam.")
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

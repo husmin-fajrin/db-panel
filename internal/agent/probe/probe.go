@@ -142,15 +142,34 @@ func parseMemTotalMB(b []byte) int64 {
 	return 0
 }
 
+// mysqldPaths are where distributions put mysqld outside PATH: RHEL, Rocky
+// and Alma AppStream install /usr/libexec/mysqld.
+var mysqldPaths = []string{"/usr/sbin/mysqld", "/usr/libexec/mysqld"}
+
+// findMysqld returns the command to run mysqld with, or "" when it is not
+// installed.
+func findMysqld(sys System) string {
+	if _, err := sys.LookPath("mysqld"); err == nil {
+		return "mysqld"
+	}
+	for _, p := range mysqldPaths {
+		if sys.Exists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 func probeMySQL(ctx context.Context, sys System) proto.MySQLInfo {
 	info := proto.MySQLInfo{}
-	if _, err := sys.LookPath("mysqld"); err != nil {
+	mysqld := findMysqld(sys)
+	if mysqld == "" {
 		return info
 	}
 	info.Installed = true
 	info.Port = defaultMySQLPort
 
-	if out, err := sys.Output(ctx, "mysqld", "--version"); err == nil {
+	if out, err := sys.Output(ctx, mysqld, "--version"); err == nil {
 		info.Version = parseMySQLVersion(string(out))
 	}
 
@@ -167,7 +186,7 @@ func probeMySQL(ctx context.Context, sys System) proto.MySQLInfo {
 		break
 	}
 
-	if out, err := sys.Output(ctx, "mysqld", "--verbose", "--help"); err == nil {
+	if out, err := sys.Output(ctx, mysqld, "--verbose", "--help"); err == nil {
 		port, dir := parseMysqldHelp(out)
 		if port > 0 {
 			info.Port = port

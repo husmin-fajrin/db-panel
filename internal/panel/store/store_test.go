@@ -234,6 +234,36 @@ func TestCreatePairTokenReplacesOld(t *testing.T) {
 	}
 }
 
+func TestMarkPairedDeletesUnusedTokens(t *testing.T) {
+	s := openTemp(t)
+	srv, _ := s.CreateServer("db1")
+	other, _ := s.CreateServer("db2")
+	now := time.Date(2026, 10, 30, 10, 0, 0, 0, time.UTC)
+	used, _ := s.CreatePairToken(srv.ID, now, time.Hour)
+	if _, err := s.ConsumePairToken(used.Token, now); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := s.CreatePairToken(srv.ID, now, time.Hour)
+	otherTok, _ := s.CreatePairToken(other.ID, now, time.Hour)
+
+	if err := s.MarkPaired(srv.ID, "local", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PeekPairToken(pending.Token, now); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("unused token survived MarkPaired: %v", err)
+	}
+	if _, ok, _ := s.ActivePairToken(srv.ID, now); ok {
+		t.Fatal("server still has an active token after MarkPaired")
+	}
+	if _, err := s.PeekPairToken(otherTok.Token, now); err != nil {
+		t.Fatalf("another server's token was deleted: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pair_tokens WHERE token = ?`, used.Token).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("used token rows = %d err=%v, want it kept", n, err)
+	}
+}
+
 func TestCreatePairTokenMissingServer(t *testing.T) {
 	s := openTemp(t)
 	now := time.Date(2026, 10, 30, 10, 0, 0, 0, time.UTC)

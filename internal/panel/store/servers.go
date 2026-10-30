@@ -125,10 +125,31 @@ func (s *Store) execOne(query string, args ...any) error {
 	return nil
 }
 
-// MarkPaired records a completed pairing.
+// MarkPaired records a completed pairing and deletes the server's unused
+// pairing tokens, so none of them can later pair over this certificate.
 func (s *Store) MarkPaired(id int64, certSerial string, address string) error {
-	return s.execOne(`UPDATE servers SET paired = 1, cert_serial = ?, address = ? WHERE id = ?`,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE servers SET paired = 1, cert_serial = ?, address = ? WHERE id = ?`,
 		certSerial, address, id)
+	if err != nil {
+		return fmt.Errorf("mark paired: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("mark paired: %w", err)
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(`DELETE FROM pair_tokens WHERE server_id = ? AND used_at IS NULL`, id); err != nil {
+		return fmt.Errorf("delete unused tokens: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }
 
 // UpdateProbe stores the latest probe result and marks the server as seen.

@@ -14,8 +14,13 @@ import (
 const (
 	pairTokenTTL      = 24 * time.Hour
 	msgServerNotFound = "Server tidak ditemukan"
-	msgAlreadyPaired  = "Server sudah dipasangkan"
+	msgLocalDelete    = "Server ini adalah host panel dan tidak bisa dihapus"
+	msgLocalToken     = "Server ini adalah host panel; agent-nya tertanam di panel dan tidak perlu dipasang"
 )
+
+// localCertSerial marks the panel host's own server, whose agent is embedded
+// in the panel process.
+const localCertSerial = "local"
 
 type dashboardPage struct {
 	Page
@@ -41,11 +46,14 @@ type serverNewPage struct {
 
 type serverDetailPage struct {
 	Page
-	Server       store.Server
-	Online       bool
-	Probe        *proto.ProbeResult // nil until the first probe
-	Command      string             // pairing command, unpaired servers only
+	Server store.Server
+	Online bool
+	Probe  *proto.ProbeResult // nil until the first probe
+	// Command is the pairing command: always for an unpaired server, and for
+	// a paired one while a re-pairing token is active.
+	Command      string
 	TokenExpires time.Time
+	Local        bool // the panel host itself: no delete, no re-pairing
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -118,49 +126,63 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p := serverDetailPage{Page: a.page(r), Server: srv}
+	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial}
+	now := a.Now()
+	tok, found, err := a.Store.ActivePairToken(srv.ID, now)
+	if err == nil && !found && !srv.Paired {
+		tok, err = a.Store.CreatePairToken(srv.ID, now, pairTokenTTL)
+		found = err == nil
+	}
+	if err != nil {
+		a.internalError(w, "pair token", err)
+		return
+	}
 	if srv.Paired {
 		p.Online = a.Hub.IsOnline(srv.ID)
 		p.Probe = a.probe(srv)
-	} else {
-		now := a.Now()
-		tok, found, err := a.Store.ActivePairToken(srv.ID, now)
-		if err == nil && !found {
-			tok, err = a.Store.CreatePairToken(srv.ID, now, pairTokenTTL)
-		}
-		if err != nil {
-			a.internalError(w, "pair token", err)
-			return
-		}
-		p.Command = "curl -fsSL " + a.PublicURL() + "/agent/install?token=" + tok.Token + " | sudo bash"
+	}
+	if found && !p.Local {
+		// Single quotes: "?" is a glob character in zsh and other shells.
+		p.Command = "curl -fsSL '" + a.PublicURL() + "/agent/install?token=" + tok.Token + "' | sudo bash"
 		p.TokenExpires = tok.ExpiresAt
 	}
 	a.render.Render(w, "server_detail", p)
 }
 
+// newToken issues a fresh pairing token. For a paired server this starts a
+// re-pairing: the current agent keeps working until an agent pairs with the
+// new token, which replaces its certificate.
 func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok {
 		return
 	}
-	if srv.Paired {
-		http.Error(w, msgAlreadyPaired, http.StatusConflict)
+	if srv.CertSerial == localCertSerial {
+		http.Error(w, msgLocalToken, http.StatusConflict)
 		return
 	}
 	if _, err := a.Store.CreatePairToken(srv.ID, a.Now(), pairTokenTTL); err != nil {
 		a.internalError(w, "create pair token", err)
 		return
 	}
+	if srv.Paired {
+		a.Logger.Info("re-pairing token created", "id", srv.ID, "by", a.page(r).Username)
+	}
 	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
 }
 
+// deleteServer removes a server and drops its agent's connection. The panel
+// host's own server cannot be deleted.
 func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(r)
+	srv, ok := a.serverFromPath(w, r)
 	if !ok {
-		http.Error(w, msgServerNotFound, http.StatusNotFound)
 		return
 	}
-	err := a.Store.DeleteServer(id)
+	if srv.CertSerial == localCertSerial {
+		http.Error(w, msgLocalDelete, http.StatusConflict)
+		return
+	}
+	err := a.Store.DeleteServer(srv.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		http.Error(w, msgServerNotFound, http.StatusNotFound)
 		return
@@ -169,7 +191,8 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "delete server", err)
 		return
 	}
-	a.Logger.Info("server deleted", "id", id, "by", a.page(r).Username)
+	a.Hub.Disconnect(srv.ID)
+	a.Logger.Info("server deleted", "id", srv.ID, "name", srv.Name, "by", a.page(r).Username)
 	http.Redirect(w, r, "/servers", http.StatusSeeOther)
 }
 

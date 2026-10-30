@@ -74,7 +74,16 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /servers/{id}/token", authedPost(a.newToken))
 	mux.Handle("POST /servers/{id}/delete", authedPost(a.deleteServer))
 	mux.Handle("GET /events", login(d.Events))
-	return mux
+	return noFraming(mux)
+}
+
+// noFraming forbids other sites from framing the panel (clickjacking).
+func noFraming(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		h.ServeHTTP(w, r)
+	})
 }
 
 // page returns the layout fields for the current request.
