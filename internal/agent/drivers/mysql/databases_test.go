@@ -1,9 +1,11 @@
 package mysql_test
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -45,7 +47,7 @@ func TestDropDatabases(t *testing.T) {
 
 func TestDropDatabasesRefusesBadNames(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
-	for _, dbs := range [][]string{nil, {"mysql"}, {"sys"}, {"a`; DROP"}, {"a", "a"}, {"performance_schema"}} {
+	for _, dbs := range [][]string{nil, {"mysql"}, {"sys"}, {"SYS"}, {"MySQL"}, {"Performance_Schema"}, {"a`; DROP"}, {"a", "a"}, {"a", "A"}, {"performance_schema"}} {
 		r := dispatch(t, inst.Host(), "mysql.dropDatabases", proto.DropDatabasesParams{Databases: dbs})
 		if r.OK || r.Error.Code != proto.CodeBadParams {
 			t.Errorf("%q: response = %+v, want bad_params", dbs, r)
@@ -70,5 +72,36 @@ func TestDropDatabasesRefusesRunningReplica(t *testing.T) {
 	}
 	if n := count(t, db, "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'a'"); n != 1 {
 		t.Fatal("database dropped while replicating")
+	}
+}
+
+// TestDropDatabasesRefusesReplicationSource: a drop without binary logging
+// on a server replicas read from would never reach them.
+func TestDropDatabasesRefusesReplicationSource(t *testing.T) {
+	source := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	sdb := rootDB(t, source)
+	execAll(t, sdb, "CREATE DATABASE a")
+	replUser(t, source)
+	rdb := rootDB(t, replica)
+	execAll(t, rdb,
+		fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '127.0.0.1', SOURCE_PORT = %d, SOURCE_USER = 'dbpanel_repl', "+
+			"SOURCE_PASSWORD = %s, SOURCE_AUTO_POSITION = 1, GET_SOURCE_PUBLIC_KEY = 1", source.Port, sqlLiteral(replPassword)),
+		"START REPLICA",
+	)
+	t.Cleanup(func() { rdb.Exec("STOP REPLICA") })
+	deadline := time.Now().Add(time.Minute)
+	for count(t, sdb, "SELECT COUNT(*) FROM information_schema.processlist WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the replica never connected")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	r := dispatch(t, source.Host(), "mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"a"}})
+	if r.OK || !strings.Contains(r.Error.Message, "replika sedang membaca binlog server ini") {
+		t.Fatalf("response = %+v", r)
+	}
+	if n := count(t, sdb, "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'a'"); n != 1 {
+		t.Fatal("database dropped on a replication source")
 	}
 }

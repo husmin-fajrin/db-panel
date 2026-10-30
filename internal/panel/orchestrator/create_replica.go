@@ -364,6 +364,20 @@ func (jr *jobRun) replicaPrepare(ctx context.Context, _ bool) (outcome, error) {
 		return outcome{}, err
 	}
 	jr.logf("info", "Server tujuan sekarang hanya-baca (super_read_only).")
+	// A first snapshot starts from no replication state. A source left by
+	// an earlier attempt would make the dump keep the target's old GTID
+	// history (COMMENTED mode), and auto-positioning would then replay
+	// transactions the fresh data already holds; its filter is stale too.
+	var st proto.MySQLStatus
+	if err := jr.call(ctx, jr.target(), "mysql.status", nil, &st); err != nil {
+		return outcome{}, err
+	}
+	if st.Replica != nil {
+		if err := jr.call(ctx, jr.target(), "mysql.resetReplica", nil, nil); err != nil {
+			return outcome{}, err
+		}
+		jr.logf("info", "Pengaturan replikasi lama di server tujuan (dari percobaan sebelumnya) dihapus.")
+	}
 	return done("server_id %d, hanya-baca", jr.st.ReplicaServerID), nil
 }
 

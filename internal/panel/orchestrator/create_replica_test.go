@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -18,7 +19,7 @@ import (
 
 // replicaCmds is what a target with MySQL receives for a full run.
 func replicaCmds(snapshot string) []string {
-	return []string{"probe", "mysql.preflight", "mysql.configure", "mysql.restart", "mysql.setReadOnly", snapshot,
+	return []string{"probe", "mysql.preflight", "mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", snapshot,
 		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"}
 }
 
@@ -157,7 +158,7 @@ func TestCreateReplicaSubsetUsesDumpWithFilter(t *testing.T) {
 	// confirmed preflight.
 	wantCmds(t, "replica", r.cmds(0), []string{"probe", "mysql.preflight", "mysql.inventory",
 		"probe", "mysql.preflight", "mysql.inventory", "mysql.preflight",
-		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.dropDatabases", "mysql.dumpFrom",
+		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.dropDatabases", "mysql.dumpFrom",
 		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
 	var drop proto.DropDatabasesParams
 	r.params("mysql.dropDatabases", &drop)
@@ -273,7 +274,7 @@ func TestCreateReplicaInstallsMySQLWhenMissing(t *testing.T) {
 		t.Fatalf("steps = %v", got)
 	}
 	wantCmds(t, "replica", r.cmds(0), []string{"probe", "probe", "mysql.install", "mysql.inventory", "mysql.preflight",
-		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.cloneFrom",
+		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.cloneFrom",
 		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
 	var ins proto.InstallParams
 	r.params("mysql.install", &ins)
@@ -549,7 +550,18 @@ func TestConnectWaitsWhenReplicaAdminReplaced(t *testing.T) {
 	e := newEnv(t)
 	m, _ := e.readyMaster("db-master")
 	r := e.replicaAgent("replica1", "clone")
-	r.fail("mysql.status", "login MySQL gagal: 1045 Access denied for user 'adm'@'localhost' (using password: YES)")
+	// The stored admin account works until the CLONE brings the master's accounts.
+	var cloned atomic.Bool
+	r.job("mysql.cloneFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		cloned.Store(true)
+		return proto.SnapshotResult{Method: "clone", GTIDExecuted: masterGTID}, nil
+	})
+	r.on("mysql.status", func(json.RawMessage) (any, error) {
+		if cloned.Load() {
+			return nil, &commands.ParamError{Msg: "login MySQL gagal: 1045 Access denied for user 'adm'@'localhost' (using password: YES)"}
+		}
+		return proto.MySQLStatus{Version: "8.4.3", ServerUUID: targetUUID}, nil
+	})
 	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
 		MasterServerID: m.id, TargetServerID: r.id, ConfirmWipe: true})
 	if err != nil {
@@ -688,5 +700,63 @@ func TestFormConfirmWipeStillShowsLeftovers(t *testing.T) {
 	}
 	if r.count("mysql.dropDatabases") != 0 {
 		t.Fatal("databases dropped before the approval")
+	}
+}
+
+// TestNewAttemptResetsStaleReplication: an attempt that failed after the
+// source was configured leaves it on the target; the next attempt resets
+// replication before its snapshot, so the dump starts the GTID history
+// afresh. A target without a source is never reset.
+func TestNewAttemptResetsStaleReplication(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	var source atomic.Bool // the target has a replication source configured
+	r.on("mysql.status", func(json.RawMessage) (any, error) {
+		st := proto.MySQLStatus{Version: "8.4.3", ServerUUID: targetUUID}
+		if source.Load() {
+			st.Replica = &proto.ReplicaStatus{IORunning: "No", SQLRunning: "No", SourceHost: "10.0.0.1", SourcePort: 3306}
+		}
+		return st, nil
+	})
+	r.on("mysql.resetReplica", func(json.RawMessage) (any, error) {
+		source.Store(false)
+		return nil, nil
+	})
+	// CHANGE SOURCE succeeded, then the filter failed.
+	r.on("mysql.configureReplication", func(json.RawMessage) (any, error) {
+		source.Store(true)
+		return nil, &commands.ParamError{Msg: "CHANGE REPLICATION FILTER: Error 1234"}
+	})
+	first, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := e.waitJob(first, store.JobFailed); j.CurrentStep != 5 {
+		t.Fatalf("first attempt failed at step %d, want 5", j.CurrentStep)
+	}
+	if n := r.count("mysql.resetReplica"); n != 0 {
+		t.Fatalf("a target without a source got %d resetReplica", n)
+	}
+
+	r.reply("mysql.configureReplication", proto.ReplicaStatus{})
+	mark := r.mark()
+	second, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(second, store.JobSucceeded)
+	wantCmds(t, "replica, second attempt", r.cmds(mark), []string{"probe", "mysql.preflight",
+		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.resetReplica", "mysql.dumpFrom",
+		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+	var snap proto.SnapshotParams
+	r.params("mysql.dumpFrom", &snap)
+	if snap.DropExisting || !slices.Equal(snap.Databases, []string{"b"}) {
+		t.Fatalf("dumpFrom params = %+v", snap)
+	}
+	if log := e.jobLog(second); !strings.Contains(log, "Pengaturan replikasi lama") {
+		t.Fatalf("job log does not mention the reset:\n%s", log)
 	}
 }

@@ -68,9 +68,8 @@ func Status(ctx context.Context, db *sql.DB) (proto.MySQLStatus, error) {
 	st.UptimeSec, _ = strconv.ParseInt(stat["Uptime"], 10, 64)
 	st.ThreadsRunning, _ = strconv.Atoi(stat["Threads_running"])
 
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.processlist
-		WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')`).Scan(&st.BinlogDumpThreads); err != nil {
-		return st, fmt.Errorf("baca daftar proses: %w", err)
+	if st.BinlogDumpThreads, err = binlogDumpThreads(ctx, db); err != nil {
+		return st, err
 	}
 
 	if st.Replica, err = replicaStatus(ctx, db); err != nil {
@@ -171,4 +170,14 @@ func replicaStatus(ctx context.Context, db *sql.DB) (*proto.ReplicaStatus, error
 		}
 	}
 	return r, frows.Err()
+}
+
+// binlogDumpThreads counts the replicas reading this server's binary log.
+func binlogDumpThreads(ctx context.Context, db *sql.DB) (int, error) {
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.processlist
+		WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("baca daftar proses: %w", err)
+	}
+	return n, nil
 }
