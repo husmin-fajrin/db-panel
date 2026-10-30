@@ -66,7 +66,21 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/dbpanel agent
 Restart=always
 RestartSec=3
+# Root: the agent will manage MySQL (Plan 2). ProtectSystem=full keeps
+# /usr, /boot and /etc read-only; Plan 2 must open what it manages
+# (e.g. ReadWritePaths=/etc/mysql) before writing there.
 User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

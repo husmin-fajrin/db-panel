@@ -17,8 +17,10 @@ Ganti `main` dengan branch/tag rilis yang dipakai.
 curl -fsSL https://raw.githubusercontent.com/husmin-fajrin/db-panel/main/scripts/install.sh | sudo bash
 ```
 
-Skrip mengunduh binary dari GitHub Releases ke `/usr/local/bin/dbpanel`,
-membuat `/etc/dbpanel/` (0700) dan `/var/lib/dbpanel/`, memasang service
+Skrip mengunduh `SHA256SUMS` dan binary dari GitHub Releases, memeriksa
+binary dengan `SHA256SUMS` (berhenti dengan "Checksum binary panel tidak
+cocok" bila berbeda), memasangnya ke `/usr/local/bin/dbpanel`, membuat
+`/etc/dbpanel/` dan `/var/lib/dbpanel/` (keduanya 0700), memasang service
 `dbpanel-panel`, lalu mencetak alamat panel, pengguna dan sandi awal.
 Rilis tertentu: tambahkan `DBPANEL_VERSION=v0.1.0` sebelum `bash`
 (`... | sudo DBPANEL_VERSION=v0.1.0 bash`).
@@ -33,7 +35,8 @@ sudo DBPANEL_BIN=/path/ke/dbpanel bash install.sh
 **Binary agent untuk arsitektur lain:** panel selalu bisa membagikan
 binary-nya sendiri ke server dengan arsitektur yang sama. Pemasangan online
 juga mengunduh `dbpanel_linux_amd64` dan `dbpanel_linux_arm64` dari rilis
-yang sama (diperiksa dengan `SHA256SUMS`), sehingga server arm64 bisa
+yang sama (dicocokkan dengan `SHA256SUMS` rilis itu; lihat "Keamanan
+rilis" untuk batasnya), sehingga server arm64 bisa
 dipasangkan ke panel amd64 dan sebaliknya; bila unduhan itu gagal, skrip
 hanya memberi peringatan. Untuk pemasangan offline, berikan direktori berisi
 `dbpanel_linux_amd64` dan/atau `dbpanel_linux_arm64`. Berkas ini dibuat oleh
@@ -59,11 +62,18 @@ dicetak di akhir instalasi dan tersimpan di
 sudo cat /etc/dbpanel/admin-initial-password
 ```
 
+Hapus berkas itu setelah login pertama (`sudo rm
+/etc/dbpanel/admin-initial-password`).
+
 Lupa sandi? Buat sandi baru (dicetak ke layar):
 
 ```sh
 sudo dbpanel panel reset-password
 ```
+
+`reset-password` juga mengakhiri semua sesi yang sedang login (dalam
+beberapa detik, tanpa restart panel). Sesi berakhir setelah 12 jam tanpa
+aktivitas dan paling lama 24 jam setelah login.
 
 ## Tambah server database
 
@@ -111,9 +121,48 @@ Nilai `--public-host` yang pernah diberikan disimpan di database panel dan
 tetap dipakai (mengalahkan deteksi otomatis) pada start berikutnya,
 walaupun flag tidak diberikan lagi.
 
+## Keamanan
+
+- Panel hanya menjawab permintaan yang header `Host`-nya alamat panel:
+  `--public-host`, `localhost`, alamat loopback, atau IP salah satu kartu
+  jaringan host panel. Nama lain (mis. alias DNS buatan sendiri) mendapat
+  HTTP 421; pakai nama itu sebagai `--public-host` bila memang diperlukan.
+- `--public-host` hanya menerima alamat IPv4/IPv6 atau nama host (huruf,
+  angka, titik, strip), karena nilainya masuk ke skrip pemasang agent yang
+  berjalan sebagai root.
+- Token pemasangan disimpan sebagai hash di `panel.db`. Perintah pemasangan
+  hanya bisa ditampilkan ulang selama panel belum dimulai ulang; sesudahnya
+  buat token baru. Skrip pemasang memberikan token ke `dbpanel agent pair`
+  lewat variabel lingkungan `DBPANEL_TOKEN` (bukan argumen, yang terlihat di
+  `ps`). Pairing manual: `sudo DBPANEL_TOKEN=... dbpanel agent pair --panel
+  http://<ip-panel>:8080`, atau `--token-stdin`.
+- Service `dbpanel-panel` dan `dbpanel-agent` berjalan sebagai root
+  (panel menjalankan agent tertanam untuk host-nya sendiri) dengan
+  hardening systemd: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`,
+  `ProtectKernel*`, dan `ProtectSystem=strict` untuk panel (hanya
+  `/var/lib/dbpanel` dan `/etc/dbpanel` yang bisa ditulis) serta
+  `ProtectSystem=full` untuk agent.
+- Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
+  tahun. Belum ada perpanjangan otomatis (dijadwalkan di Rencana 2);
+  sampai saat itu, pasang ulang agent sebelum sertifikatnya habis.
+  Listener panel membuat sertifikat baru setiap kali panel dimulai.
+
+### Keamanan rilis
+
+`SHA256SUMS` diunduh dari rilis yang sama dengan binary-nya, jadi
+pemeriksaannya hanya menangkap unduhan rusak atau tertukar, bukan rilis
+yang dipalsukan (mis. akun GitHub yang dibobol). Rilis belum
+ditandatangani; tanda tangan `SHA256SUMS` (minisign/cosign) dengan kunci
+publik yang disematkan di `install.sh` ditunda ke Rencana 2, sebelum ada
+fitur pembaruan agent otomatis. Sampai saat itu, pasang dari tag rilis
+tertentu (`DBPANEL_VERSION=...`, dan URL `install.sh` dari tag yang sama,
+bukan `main`) dan bandingkan `SHA256SUMS` dengan salinan yang didapat
+lewat jalur lain bila memungkinkan.
+
 ## Build dari sumber
 
-Butuh Go 1.26. Binary statis (`CGO_ENABLED=0`):
+Butuh Go 1.26.10 atau lebih baru (`go.mod`; Go yang lebih tua mengunduh
+toolchain itu sendiri). Binary statis (`CGO_ENABLED=0`):
 
 ```sh
 make build   # -> dist/dbpanel
@@ -133,11 +182,16 @@ agar panel dapat melayani agent berarsitektur lain tanpa internet.
 ## Mengubah tampilan
 
 Template HTML ada di `web/templates/`, CSS sumber di `web/src/app.css`.
+Panel memakai Content-Security-Policy ketat: tidak ada skrip inline,
+atribut `on...=` atau `style=` di template, dan Alpine.js yang dipakai
+adalah build CSP. Atribut Alpine (`x-data`, `x-text`, `@click`, ...) hanya
+boleh menyebut komponen, properti atau method yang didaftarkan di
+`web/static/app.js`, bukan ekspresi JavaScript.
 Aset hasil build ikut di-embed ke binary dan dikomit, jadi build biasa tidak
 butuh Node.js maupun internet. Setelah mengubah template atau CSS:
 
 ```sh
 scripts/tailwind.sh   # kompilasi Tailwind CSS + daisyUI -> web/static/app.css
-scripts/vendor.sh     # unduh ulang Alpine.js -> web/static/vendor/ (bila ganti versi)
+scripts/vendor.sh     # unduh ulang Alpine.js (build CSP) -> web/static/vendor/ (bila ganti versi)
 make build
 ```

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Periksa skrip instalasi: sintaks bash (bash -n) untuk scripts/install.sh dan
 # hasil render web/templates/agent-install.sh.tmpl, kecocokan unit systemd
-# yang ditulis skrip dengan scripts/systemd/*.service, dan shellcheck bila
-# terpasang. Jalankan dari root repo.
+# yang ditulis skrip dengan scripts/systemd/*.service, pemeriksaan
+# SHA256SUMS binary panel, dan shellcheck bila terpasang. Jalankan dari root
+# repo.
 set -euo pipefail
 
 PANEL_SCRIPT=scripts/install.sh
@@ -66,6 +67,51 @@ check_unit() { # script unit-name
 }
 check_unit "$PANEL_SCRIPT" dbpanel-panel.service
 check_unit "$rendered" dbpanel-agent.service
+
+# SEC-07: the online install checks the panel binary against SHA256SUMS.
+# Run install_binary from install.sh (without main) with curl replaced by
+# a function serving fixture files.
+release="$tmp/release"
+mkdir -p "$release"
+printf 'binary panel amd64' >"$release/dbpanel_linux_amd64"
+printf 'binary panel arm64' >"$release/dbpanel_linux_arm64"
+(cd "$release" && sha256sum dbpanel_linux_amd64 dbpanel_linux_arm64 >SHA256SUMS)
+# install_case NAME prepares the release with the given change, runs
+# install_binary amd64 and prints its output; the exit status is its own.
+install_case() {
+	(
+		# shellcheck source=/dev/null
+		source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
+		# shellcheck disable=SC2034 # read by install_binary
+		BIN="$tmp/case-$1/dbpanel"
+		AGENT_TMP="$tmp/case-$1/dl"
+		mkdir -p "$AGENT_TMP"
+		served="$tmp/case-$1/served"
+		cp -r "$release" "$served"
+		case $1 in
+		tampered) printf 'binary jahat' >"$served/dbpanel_linux_amd64" ;;
+		unlisted) sed -i '/dbpanel_linux_amd64/d' "$served/SHA256SUMS" ;;
+		esac
+		# shellcheck disable=SC2329 # called by install_binary
+		curl() { # curl -fsSL URL -o FILE
+			cp "$served/${2##*/}" "$4"
+		}
+		install_binary amd64
+	) 2>&1
+}
+if ! out=$(install_case good) || [ "$(cat "$tmp/case-good/dbpanel")" != 'binary panel amd64' ]; then
+	fail "install_binary menolak binary yang cocok dengan SHA256SUMS: $out"
+fi
+for c in tampered unlisted; do
+	if out=$(install_case "$c"); then
+		fail "install_binary memasang binary $c"
+	elif [[ $out != *"Checksum binary panel tidak cocok"* ]]; then
+		fail "install_binary $c: pesan salah: $out"
+	fi
+	if [ -e "$tmp/case-$c/dbpanel" ]; then
+		fail "install_binary $c: binary tetap terpasang"
+	fi
+done
 
 if command -v shellcheck >/dev/null 2>&1; then
 	if ! shellcheck "$PANEL_SCRIPT" "$rendered" scripts/install_test.sh; then

@@ -12,6 +12,10 @@
 #                    arm64 diunduh dari rilis yang sama dan diperiksa dengan
 #                    SHA256SUMS.
 #
+# Binary panel yang diunduh diperiksa dengan SHA256SUMS dari rilis yang sama
+# sebelum dipasang. Ini menangkap unduhan rusak atau tertukar, bukan rilis
+# palsu: rilis belum ditandatangani (lihat README, "Keamanan rilis").
+#
 # Aman dijalankan ulang: binary diganti dan service dimulai ulang.
 set -euo pipefail
 
@@ -36,18 +40,34 @@ release_url() {
 	fi
 }
 
+# verify_sha256 DIR FILE checks DIR/FILE against its line in DIR/SHA256SUMS.
+# FILE must be listed: sha256sum --ignore-missing alone would pass a file
+# that SHA256SUMS does not mention.
+verify_sha256() {
+	local dir=$1 file=$2
+	grep -qE "^[0-9a-f]{64} [ *]$file\$" "$dir/SHA256SUMS" || return 1
+	(cd "$dir" && sha256sum -c --ignore-missing --quiet SHA256SUMS)
+}
+
 # install_binary ARCH puts the dbpanel binary at $BIN atomically, from
-# DBPANEL_BIN or from GitHub Releases.
+# DBPANEL_BIN or from GitHub Releases. A downloaded binary is checked
+# against the release's SHA256SUMS (fetched first, into $AGENT_TMP, where
+# fetch_agent_binaries reuses both files).
 install_binary() {
-	local arch=$1 url
+	local arch=$1 name=dbpanel_linux_$1 url
 	if [ -n "${DBPANEL_BIN:-}" ]; then
 		[ -f "$DBPANEL_BIN" ] || die "DBPANEL_BIN tidak ditemukan: $DBPANEL_BIN"
 		echo "Memasang dbpanel dari $DBPANEL_BIN..."
 		cp "$DBPANEL_BIN" "$BIN.new"
 	else
-		url=$(release_url "dbpanel_linux_$arch")
+		url=$(release_url SHA256SUMS)
 		echo "Mengunduh $url..."
-		curl -fsSL "$url" -o "$BIN.new" || die "Gagal mengunduh $url"
+		curl -fsSL "$url" -o "$AGENT_TMP/SHA256SUMS" || die "Gagal mengunduh $url"
+		url=$(release_url "$name")
+		echo "Mengunduh $url..."
+		curl -fsSL "$url" -o "$AGENT_TMP/$name" || die "Gagal mengunduh $url"
+		verify_sha256 "$AGENT_TMP" "$name" || die "Checksum binary panel tidak cocok"
+		cp "$AGENT_TMP/$name" "$BIN.new"
 	fi
 	chmod 0755 "$BIN.new"
 	mv -f "$BIN.new" "$BIN"
@@ -74,11 +94,13 @@ copy_agent_binaries() {
 }
 
 # fetch_agent_binaries DIR downloads dbpanel_linux_{amd64,arm64} and
-# SHA256SUMS of the release into DIR and checks them. It returns non-zero on
-# any failure (it is called from an if, where set -e does not apply).
+# SHA256SUMS of the release into DIR (skipping files install_binary already
+# put there) and checks them. It returns non-zero on any failure (it is
+# called from an if, where set -e does not apply).
 fetch_agent_binaries() {
 	local dir=$1 f
 	for f in dbpanel_linux_amd64 dbpanel_linux_arm64 SHA256SUMS; do
+		[ -f "$dir/$f" ] && continue
 		curl -fsSL "$(release_url "$f")" -o "$dir/$f" || return 1
 	done
 	(cd "$dir" && sha256sum -c --ignore-missing --quiet SHA256SUMS) || return 1
@@ -109,8 +131,9 @@ main() {
 
 	install_binary "$arch"
 	mkdir -p "$CONFIG_DIR" "$DATA_DIR"
-	chmod 0700 "$CONFIG_DIR"
-	chmod 0750 "$DATA_DIR"
+	# Owner only: panel.db holds password and token hashes, the config
+	# directory the CA key and the initial password.
+	chmod 0700 "$CONFIG_DIR" "$DATA_DIR"
 	if [ -n "${DBPANEL_BIN_DIR:-}" ]; then
 		copy_agent_binaries "$DBPANEL_BIN_DIR"
 	elif [ -z "${DBPANEL_BIN:-}" ]; then
@@ -134,7 +157,21 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/dbpanel panel
 Restart=always
 RestartSec=3
+# Root: the panel runs this host's embedded agent. Hardening that still
+# allows it; the panel writes only its data and config directories.
 User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dbpanel /etc/dbpanel
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
@@ -174,6 +211,9 @@ UNIT
 	echo "Pengguna: admin"
 	if [ -s "$PASSWORD_FILE" ]; then
 		echo "Sandi   : $(cat "$PASSWORD_FILE")"
+		echo
+		echo "Sandi awal juga tersimpan di $PASSWORD_FILE."
+		echo "Peringatan: hapus file ini setelah login pertama: sudo rm $PASSWORD_FILE"
 	else
 		echo "Sandi   : (sudah diatur sebelumnya; gunakan: dbpanel panel reset-password)"
 	fi
