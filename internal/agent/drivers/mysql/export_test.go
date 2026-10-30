@@ -52,6 +52,7 @@ var (
 	SourceStatement     = sourceStatement
 	QuoteLiteral        = quotePassword
 	ValidGTIDSet        = validGTIDSet
+	DBNameRe            = dbNameRe
 )
 
 // Installer is what mysql.install runs commands, reads files and downloads

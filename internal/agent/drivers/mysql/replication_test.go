@@ -54,7 +54,8 @@ func globalFilters(t *testing.T, inst *testmysql.Instance) string {
 }
 
 func TestWildDoTablePatterns(t *testing.T) {
-	if got, want := mysql.WildDoTablePatterns([]string{"a", "x_y", "$z_"}), []string{`a.%`, `x\_y.%`, `$z\_.%`}; !slices.Equal(got, want) {
+	if got, want := mysql.WildDoTablePatterns([]string{"a", "x_y", "$z_", "toko-online"}),
+		[]string{`a.%`, `x\_y.%`, `$z\_.%`, `toko-online.%`}; !slices.Equal(got, want) {
 		t.Errorf("patterns = %q, want %q", got, want)
 	}
 	quote := func(s string) string { return mysql.QuoteLiteral(s, false) }
@@ -69,6 +70,22 @@ func TestWildDoTablePatterns(t *testing.T) {
 	}
 	if got, want := mysql.FilterStatement(nil, quote), `CHANGE REPLICATION FILTER REPLICATE_WILD_DO_TABLE = ()`; got != want {
 		t.Errorf("clearing filter statement = %s, want %s", got, want)
+	}
+}
+
+// TestDBNameRe: letters and digits of any script, _, $ and - (never
+// first); nothing that could leave a backtick-quoted identifier, a path or
+// a LIKE pattern, or read as a command-line flag.
+func TestDBNameRe(t *testing.T) {
+	for _, name := range []string{"a", "toko-online", "rs_jiwa", "データ", "$x", "db2", "x-", strings.Repeat("a", 64)} {
+		if !mysql.DBNameRe.MatchString(name) {
+			t.Errorf("%q refused", name)
+		}
+	}
+	for _, name := range []string{"", "-x", "a b", "a.b", "a/b", "a`b", "a%", "a'b", `a\b`, "a\nb", strings.Repeat("a", 65)} {
+		if mysql.DBNameRe.MatchString(name) {
+			t.Errorf("%q accepted", name)
+		}
 	}
 }
 

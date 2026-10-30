@@ -253,7 +253,7 @@ func validGTIDSet(s string) bool {
 
 // wildDoTablePatterns are the REPLICATE_WILD_DO_TABLE patterns for dbs:
 // every table of each database. The pattern is matched with LIKE, so _ in
-// a name is escaped; dbNameRe admits no %.
+// a name is escaped; dbNameRe admits no % (and - is literal in LIKE).
 func wildDoTablePatterns(dbs []string) []string {
 	out := make([]string, len(dbs))
 	for i, db := range dbs {

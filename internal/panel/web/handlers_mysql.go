@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -26,23 +26,18 @@ type Orchestrator interface {
 }
 
 const (
-	msgMySQLUserRequired  = "Nama pengguna MySQL wajib diisi"
-	msgMySQLFieldTooLong  = "Nama pengguna, kata sandi, atau host MySQL terlalu panjang"
-	msgReplicaNotFound    = "Replika tidak ditemukan"
-	msgReplicaTarget      = "Pilih server tujuan replika terlebih dahulu."
-	msgReplicaDatabases   = "Pilih minimal satu database untuk direplikasi."
-	msgReplicaBadDatabase = "Nama database tidak valid: "
-	msgReplicaConfirm     = "Replika belum dibuat: centang kotak persetujuan bahwa server tujuan dikunci hanya-baca dan database lamanya dibuang."
+	msgMySQLUserRequired = "Nama pengguna MySQL wajib diisi"
+	msgMySQLFieldTooLong = "Nama pengguna, kata sandi, atau host MySQL terlalu panjang"
+	msgReplicaNotFound   = "Replika tidak ditemukan"
+	msgReplicaTarget     = "Pilih server tujuan replika terlebih dahulu."
+	msgReplicaDatabases  = "Pilih minimal satu database untuk direplikasi."
+	msgReplicaTargetBad  = "Server tujuan tidak memenuhi syarat"
+	msgReplicaConfirm    = "Replika belum dibuat: centang kotak persetujuan bahwa server tujuan dikunci hanya-baca dan database lamanya dibuang."
 
-	defaultMySQLHost = "127.0.0.1"
 	maxMySQLUser     = 32 // MySQL's limit for a user name
 	maxMySQLPassword = 256
 	maxMySQLHost     = 255
 )
-
-// databaseName is what the UI accepts as a database name; the orchestrator
-// checks the selection against the master's databases as well.
-var databaseName = regexp.MustCompile(`^[A-Za-z0-9_$]{1,64}$`)
 
 // notices are the success messages a redirect names in ?pesan=.
 var notices = map[string]string{
@@ -104,11 +99,10 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 		fail(msgMySQLFieldTooLong)
 		return
 	}
-	host := form.Host
-	if host == "" {
-		host = defaultMySQLHost
-	}
-	_, err := a.Orchestrator.Connect(r.Context(), srv.ID, proto.ConnectParams{User: form.User, Password: password, Host: host})
+	// The host goes as typed: empty makes the agent use the local socket,
+	// which also reaches root@localhost with auth_socket, a non-default
+	// port and a server without networking.
+	_, err := a.Orchestrator.Connect(r.Context(), srv.ID, proto.ConnectParams{User: form.User, Password: password, Host: form.Host})
 	if err != nil {
 		a.Logger.Warn("mysql connect failed", "server", srv.ID, "err", err)
 		fail(err.Error())
@@ -317,9 +311,17 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		fail(msgReplicaTarget)
 		return
 	}
+	// Only a server the form offers (a stale form or a crafted post may
+	// name another one).
+	if !slices.ContainsFunc(p.Targets, func(c targetChoice) bool { return c.ID == p.Target }) {
+		fail(msgReplicaTargetBad)
+		return
+	}
+	// Only databases the master has; the orchestrator and the agent check
+	// the names again.
 	for _, d := range selected {
-		if !databaseName.MatchString(d) {
-			fail(msgReplicaBadDatabase + d)
+		if !slices.ContainsFunc(p.Inventory.Databases, func(m proto.DatabaseInfo) bool { return m.Name == d }) {
+			fail("Database " + d + " tidak ada di master")
 			return
 		}
 	}

@@ -31,7 +31,12 @@ const (
 var (
 	// dbNameRe and userNameRe are the database and user names the panel
 	// handles; anything else is refused before it can reach SQL.
-	dbNameRe   = regexp.MustCompile(`^[A-Za-z0-9_$]{1,64}$`)
+	// A database name is 1 to 64 letters, digits, _, $ and -, in any
+	// script ("toko-online", "データ"). A hyphen is never first, so a name
+	// never reads as a flag in mysqldump's argv. No space, dot, slash,
+	// backtick, quote or %: names stay safe inside `backticks`, in file
+	// paths and in LIKE patterns (where only _ needs escaping; - is literal).
+	dbNameRe   = regexp.MustCompile(`^[\p{L}\p{N}_$][\p{L}\p{N}_$-]{0,63}$`)
 	userNameRe = regexp.MustCompile(`^[A-Za-z0-9_$]{1,32}$`)
 )
 

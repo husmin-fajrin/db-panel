@@ -198,7 +198,7 @@ func TestConnectMySQLFormPostsAndShowsDatabases(t *testing.T) {
 	rec := e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, `action="/servers/1/mysql/connect"`, `name="user"`, `name="host"`,
-		`type="password" name="password" autocomplete="off"`, "127.0.0.1", "Hubungkan MySQL")
+		`type="password" name="password" autocomplete="off"`, "Kosongkan untuk memakai socket lokal (disarankan)", "Hubungkan MySQL")
 
 	// A refused login: the error as the orchestrator said it, the user name
 	// kept, the password neither shown nor logged.
@@ -224,7 +224,8 @@ func TestConnectMySQLFormPostsAndShowsDatabases(t *testing.T) {
 	f.mu.Lock()
 	connects := append([]proto.ConnectParams(nil), f.connects...)
 	f.mu.Unlock()
-	want := proto.ConnectParams{User: "admin", Password: mysqlSecret, Host: "127.0.0.1"}
+	// An empty host stays empty: the agent then uses the local socket.
+	want := proto.ConnectParams{User: "admin", Password: mysqlSecret, Host: ""}
 	if len(connects) != 2 || connects[1] != want {
 		t.Errorf("connect params = %+v, want twice %+v", connects, want)
 	}
@@ -258,6 +259,13 @@ func TestConnectMySQLShowsMissingGrants(t *testing.T) {
 		Databases: shopDatabases, MissingGrants: []string{grant}}
 	form := url.Values{"user": {"admin"}, "password": {mysqlSecret}, "host": {"10.1.1.5"}}
 	wantCode(t, e.do("POST", "/servers/1/mysql/connect", form, c), http.StatusSeeOther)
+	// A typed host goes to the agent as typed.
+	f.mu.Lock()
+	connects := append([]proto.ConnectParams(nil), f.connects...)
+	f.mu.Unlock()
+	if want := (proto.ConnectParams{User: "admin", Password: mysqlSecret, Host: "10.1.1.5"}); len(connects) != 1 || connects[0] != want {
+		t.Errorf("connect params = %+v, want %+v", connects, want)
+	}
 
 	rec := e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
@@ -341,13 +349,21 @@ func TestCreateReplicaPostsSelectedDatabases(t *testing.T) {
 	e, f, _ := newMySQLEnv(t)
 	c := e.cookie()
 	master := e.pairedOnline(t, "db-master")
-	e.pairedOnline(t, "db-calon")
-	e.makeMaster(t, master, shopDatabases...)
+	e.pairedOnline(t, "db-calon")  // 2: eligible
+	e.st.CreateServer("db-belum")  // 3: not paired
+	e.pairedOnline(t, "db-target") // 4: made a master below
+	e.makeMaster(t, master, append(shopDatabases, proto.DatabaseInfo{Name: "toko-online", Bytes: 4 << 20})...)
+	if err := e.st.SetServerRole(4, store.RoleMaster); err != nil {
+		t.Fatal(err)
+	}
+
+	// Names as MySQL allows them, such as toko-online, are offered and checked.
+	wantBody(t, e.do("GET", "/masters/1/replicas/new", nil, c), `name="databases" value="toko-online" checked`)
 
 	post := func(form url.Values) *httptest.ResponseRecorder {
 		return e.do("POST", "/masters/1/replicas", form, c)
 	}
-	ok := url.Values{"target": {"2"}, "databases": {"toko"}, "force_dump": {"1"}, "confirm_wipe": {"1"}}
+	ok := url.Values{"target": {"2"}, "databases": {"toko", "toko-online"}, "force_dump": {"1"}, "confirm_wipe": {"1"}}
 
 	// Refused before the orchestrator is asked.
 	bad := []struct {
@@ -356,8 +372,14 @@ func TestCreateReplicaPostsSelectedDatabases(t *testing.T) {
 	}{
 		{func(v url.Values) { v.Del("confirm_wipe") }, "Replika belum dibuat: centang kotak persetujuan"},
 		{func(v url.Values) { v.Del("databases") }, "Pilih minimal satu database untuk direplikasi."},
-		{func(v url.Values) { v["databases"] = []string{"toko", "x;DROP"} }, "Nama database tidak valid: x;DROP"},
+		{func(v url.Values) { v["databases"] = []string{"toko", "x;DROP"} }, "Database x;DROP tidak ada di master"},
+		{func(v url.Values) { v["databases"] = []string{"hilang"} }, "Database hilang tidak ada di master"},
 		{func(v url.Values) { v.Del("target") }, "Pilih server tujuan replika terlebih dahulu."},
+		// Not offered by the form: the master itself, unpaired, with a role, unknown.
+		{func(v url.Values) { v.Set("target", "1") }, "Server tujuan tidak memenuhi syarat"},
+		{func(v url.Values) { v.Set("target", "3") }, "Server tujuan tidak memenuhi syarat"},
+		{func(v url.Values) { v.Set("target", "4") }, "Server tujuan tidak memenuhi syarat"},
+		{func(v url.Values) { v.Set("target", "99") }, "Server tujuan tidak memenuhi syarat"},
 	}
 	for _, b := range bad {
 		form := url.Values{}
@@ -375,7 +397,7 @@ func TestCreateReplicaPostsSelectedDatabases(t *testing.T) {
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/jobs/"+f.nextID)
 	want := orchestrator.CreateReplicaParams{MasterServerID: 1, TargetServerID: 2,
-		Databases: []string{"toko"}, ForceDump: true, ConfirmWipe: true}
+		Databases: []string{"toko", "toko-online"}, ForceDump: true, ConfirmWipe: true}
 	f.mu.Lock()
 	got := append([]orchestrator.CreateReplicaParams(nil), f.replicas...)
 	f.mu.Unlock()

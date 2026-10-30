@@ -355,11 +355,17 @@ func TestCloneCancel(t *testing.T) {
 	}
 }
 
+// TestDumpSelectedDatabasesOnly dumps a and toko-online (a hyphenated
+// name, as found on real masters) and nothing else. The filter pattern for
+// a hyphenated name is covered by TestWildDoTablePatterns; following it
+// here would push this package past go test's 10-minute default.
 func TestDumpSelectedDatabasesOnly(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{})
 	replica := testmysql.Start(t, testmysql.Options{})
 	mdb := rootDB(t, master)
 	fillMaster(t, mdb)
+	execAll(t, mdb, "CREATE DATABASE `toko-online`", "CREATE TABLE `toko-online`.t (id INT PRIMARY KEY)",
+		"INSERT INTO `toko-online`.t VALUES (1), (2)")
 	dumpUser(t, mdb)
 
 	// A replica set up by hand already has transactions of its own, and a
@@ -368,7 +374,7 @@ func TestDumpSelectedDatabasesOnly(t *testing.T) {
 	execAll(t, rdb, "CREATE USER someone@localhost", "SET GLOBAL super_read_only = ON")
 
 	rig := rootRig(replica)
-	res := snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master, "a")))
+	res := snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master, "a", "toko-online")))
 	// mysqldump's FLUSH TABLES is a transaction on the master: its
 	// gtid_executed at the dump is the one after it.
 	want := gtidExecuted(t, mdb)
@@ -381,11 +387,14 @@ func TestDumpSelectedDatabasesOnly(t *testing.T) {
 	if got := gtidExecuted(t, rdb); got != want {
 		t.Errorf("replica gtid_executed = %q, want the master's %q", got, want)
 	}
-	if got := databases(t, rdb); !reflect.DeepEqual(got, []string{"a"}) {
-		t.Errorf("replica databases = %q, want only a", got)
+	if got := databases(t, rdb); !reflect.DeepEqual(got, []string{"a", "toko-online"}) {
+		t.Errorf("replica databases = %q, want only a and toko-online", got)
 	}
 	if n := count(t, rdb, "SELECT COUNT(*) FROM a.t"); n != 3 {
 		t.Errorf("a.t rows = %d", n)
+	}
+	if n := count(t, rdb, "SELECT COUNT(*) FROM `toko-online`.t"); n != 2 {
+		t.Errorf("toko-online.t rows = %d", n)
 	}
 	for q, want := range map[string]int{
 		"SELECT COUNT(*) FROM information_schema.views WHERE table_schema = 'a'":      1,
