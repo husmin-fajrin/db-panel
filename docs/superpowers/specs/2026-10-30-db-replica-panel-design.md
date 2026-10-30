@@ -77,9 +77,18 @@ apa yang terjadi dan apa yang harus dilakukan.
 - Semua server target Linux dengan `systemd`, `curl`, `sudo`. Distro
   yang didukung versi 1: Ubuntu 20.04+/Debian 11+ (apt) dan
   RHEL/Rocky/Alma 8+ (dnf).
-- Engine versi 1: **Oracle MySQL 8.0, 8.4, dan 9.x**. Itulah yang
-  dijumpai di lapangan. MySQL 5.7 dan MariaDB **ditolak saat preflight**
-  dengan pesan yang jelas; driver untuk keduanya tidak masuk versi 1.
+- Engine versi 1: **Oracle MySQL 8.0.26 ke atas, 8.4, dan 9.x**. Itulah
+  yang dijumpai di lapangan. Batas bawah 8.0.26 dipilih karena sintaks
+  `CHANGE REPLICATION SOURCE TO` / `SHOW REPLICA STATUS` (8.0.22–8.0.23)
+  dan opsi `mysqldump --source-data` (8.0.26) tersedia di semua versi yang
+  didukung, sehingga driver tidak perlu dua dialek. MySQL 5.7, 8.0 di
+  bawah 8.0.26, dan MariaDB **ditolak saat preflight** dengan pesan yang
+  jelas. Perbedaan yang tetap ditangani: `RESET MASTER` (8.0) vs `RESET
+  BINARY LOGS AND GTIDS` (8.4+).
+- `CLONE INSTANCE` membuat mysqld merestart dirinya; itu hanya bekerja
+  bila mysqld diawasi systemd (di produksi selalu). Agent menunggu
+  service kembali hidup setelah clone dan menyalakannya sendiri bila
+  perlu.
 - Database yang dijumpai sejauh ini seluruhnya InnoDB. Preflight tetap memeriksa dan menolak
   bila menemukan tabel non-InnoDB, dengan daftar tabelnya, karena CLONE
   dan GTID tidak aman untuk tabel itu.
