@@ -27,6 +27,7 @@ type Driver struct {
 func (d *Driver) Register(reg *commands.Registry) {
 	d.registerStatus(reg)
 	d.registerConnect(reg)
+	d.registerPreflight(reg)
 }
 
 func (d *Driver) host() (Host, error) {

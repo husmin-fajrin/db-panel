@@ -62,3 +62,47 @@ type ReplicaStatus struct {
 	ExecutedGTID  string   `json:"executed_gtid"`
 	Filters       []string `json:"filters"` // REPLICATE_WILD_DO_TABLE rules, e.g. "db.%"
 }
+
+// PreflightParams are the parameters of mysql.preflight.
+type PreflightParams struct {
+	Role          string   `json:"role"`            // "master" | "replica"
+	PeerHost      string   `json:"peer_host"`       // replica: the master's address as seen from this server
+	PeerPort      int      `json:"peer_port"`       // replica: the master's MySQL port
+	PeerVersion   string   `json:"peer_version"`    // replica: the master's @@version
+	PeerDataBytes uint64   `json:"peer_data_bytes"` // replica: size of the master's selected databases
+	PeerDatabases []string `json:"peer_databases"`  // replica: every user database on the master
+	ReplUser      string   `json:"repl_user"`       // master: the replication user the panel uses
+	Databases     []string `json:"databases"`       // databases to replicate; empty = all
+	ConfirmWipe   bool     `json:"confirm_wipe"`    // replica: the user agreed to drop leftover databases
+}
+
+// Preflight check statuses, from least to most severe: ok, warn,
+// needs_confirm, needs_restart, fail.
+const (
+	CheckOK           = "ok"
+	CheckWarn         = "warn"
+	CheckFail         = "fail"
+	CheckNeedsRestart = "needs_restart"
+	CheckNeedsConfirm = "needs_confirm"
+)
+
+// Check is one preflight finding. FixSQL are statements that would fix it
+// online; FixConfig is option-file content ([mysqld] lines) that fixes it
+// after a restart.
+type Check struct {
+	ID        string   `json:"id"`
+	Status    string   `json:"status"`
+	Title     string   `json:"title"`
+	Detail    string   `json:"detail"`
+	FixSQL    []string `json:"fix_sql,omitempty"`
+	FixConfig string   `json:"fix_config,omitempty"`
+}
+
+// PreflightResult is the answer to mysql.preflight.
+type PreflightResult struct {
+	Status    MySQLStatus `json:"status"`
+	Checks    []Check     `json:"checks"`
+	DataBytes uint64      `json:"data_bytes"` // master: size of the selected databases
+	Worst     string      `json:"worst"`      // the most severe Check.Status; ok when there are none
+	Method    string      `json:"method"`     // replica: "clone" | "dump"; "" for a master
+}
