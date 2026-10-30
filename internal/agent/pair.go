@@ -19,27 +19,10 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
-	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
+	"github.com/husmin-fajrin/db-panel/internal/pki"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/version"
 )
-
-// PairRequest is the body the agent POSTs to {panel}/agent/pair. CSRPEM
-// carries only the agent's public key.
-type PairRequest struct {
-	Token        string `json:"token"`
-	Hostname     string `json:"hostname"`
-	Arch         string `json:"arch"`
-	CSRPEM       string `json:"csr_pem"`
-	AgentVersion string `json:"agent_version"`
-}
-
-// PairResponse is the panel's answer to a successful pairing.
-type PairResponse struct {
-	ServerID  int64  `json:"server_id"`
-	CertPEM   string `json:"cert_pem"`
-	CAPEM     string `json:"ca_pem"`
-	AgentAddr string `json:"agent_addr"`
-}
 
 const (
 	pairTimeout      = 30 * time.Second
@@ -84,11 +67,11 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 	if err != nil {
 		return config.Config{}, fmt.Errorf("baca hostname: %w", err)
 	}
-	keyPEM, csrPEM, err := ca.NewAgentKeyAndCSR(hostname)
+	keyPEM, csrPEM, err := pki.NewAgentKeyAndCSR(hostname)
 	if err != nil {
 		return config.Config{}, err
 	}
-	body, err := json.Marshal(PairRequest{
+	body, err := json.Marshal(proto.PairRequest{
 		Token:        strings.TrimSpace(token),
 		Hostname:     hostname,
 		Arch:         runtime.GOARCH,
@@ -131,7 +114,7 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 		return config.Config{}, fmt.Errorf("panel menjawab %s", resp.Status)
 	}
 
-	var pr PairResponse
+	var pr proto.PairResponse
 	if err := json.Unmarshal(raw, &pr); err != nil {
 		return config.Config{}, fmt.Errorf("jawaban panel tidak valid: %w", err)
 	}
@@ -139,7 +122,7 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 		return config.Config{}, errors.New("jawaban panel tidak lengkap")
 	}
 	if opts.CASHA256 != "" {
-		fp, err := ca.Fingerprint([]byte(pr.CAPEM))
+		fp, err := pki.Fingerprint([]byte(pr.CAPEM))
 		if err != nil || !strings.EqualFold(fp, opts.CASHA256) {
 			return config.Config{}, ErrCAMismatch
 		}
@@ -154,7 +137,7 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 	}
 	// Reject a certificate that does not match our key or a CA that does not
 	// parse before anything is written.
-	if _, err := ca.AgentClientTLS([]byte(pr.CertPEM), keyPEM, []byte(pr.CAPEM)); err != nil {
+	if _, err := pki.AgentClientTLS([]byte(pr.CertPEM), keyPEM, []byte(pr.CAPEM)); err != nil {
 		return config.Config{}, fmt.Errorf("sertifikat dari panel tidak valid: %w", err)
 	}
 

@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
+
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // TestPairRefusesPanelConfigDir: "agent pair" into a directory holding the
@@ -62,7 +64,7 @@ func fakePairPanel(t *testing.T) (url string, tokens <-chan string) {
 	t.Helper()
 	ch := make(chan string, 4)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req PairRequest
+		var req proto.PairRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		ch <- req.Token
 		w.Header().Set("Content-Type", "application/json")

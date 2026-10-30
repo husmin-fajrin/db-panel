@@ -32,6 +32,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/pki"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -333,11 +334,11 @@ func TestPairRejectsUsedToken(t *testing.T) {
 		t.Fatalf("rejected pairing wrote a config: %v", err)
 	}
 
-	_, csrPEM, err := ca.NewAgentKeyAndCSR("h")
+	_, csrPEM, err := pki.NewAgentKeyAndCSR("h")
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(agent.PairRequest{Token: token, Hostname: "h", Arch: "amd64", CSRPEM: string(csrPEM)})
+	body, _ := json.Marshal(proto.PairRequest{Token: token, Hostname: "h", Arch: "amd64", CSRPEM: string(csrPEM)})
 	resp, err := http.Post(e.pairURL+"/agent/pair", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -511,7 +512,7 @@ func TestPairRejectsMalformedCSRWithoutConsumingToken(t *testing.T) {
 	e := newEnv(t)
 	id, token := e.newToken(t, 0)
 
-	body, _ := json.Marshal(agent.PairRequest{Token: token, Hostname: "h", Arch: "amd64",
+	body, _ := json.Marshal(proto.PairRequest{Token: token, Hostname: "h", Arch: "amd64",
 		CSRPEM: "-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n"})
 	resp, err := http.Post(e.pairURL+"/agent/pair", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -596,7 +597,7 @@ func TestAgentListenerRefusesHTTP2(t *testing.T) {
 		}
 		return b
 	}
-	tlsCfg, err := ca.AgentClientTLS(read(cfg.CertFile), read(cfg.KeyFile), read(cfg.CAFile))
+	tlsCfg, err := pki.AgentClientTLS(read(cfg.CertFile), read(cfg.KeyFile), read(cfg.CAFile))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,7 +660,7 @@ func TestPairRejectsNonP256KeyWithoutConsumingToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
-	body, _ := json.Marshal(agent.PairRequest{Token: token, Hostname: "h", Arch: "amd64", CSRPEM: string(csr)})
+	body, _ := json.Marshal(proto.PairRequest{Token: token, Hostname: "h", Arch: "amd64", CSRPEM: string(csr)})
 	resp, err := http.Post(e.pairURL+"/agent/pair", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)

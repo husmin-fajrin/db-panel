@@ -11,8 +11,8 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/pki"
 	"github.com/husmin-fajrin/db-panel/web"
 )
 
@@ -62,7 +62,7 @@ func RenderInstallScript(p InstallScriptParams) ([]byte, error) {
 // CAFingerprint returns the sha256 (lowercase hex) of the DER of the CA
 // certificate in caPEM, or "" when caPEM is not exactly one certificate.
 func CAFingerprint(caPEM []byte) string {
-	fp, err := ca.Fingerprint(caPEM)
+	fp, err := pki.Fingerprint(caPEM)
 	if err != nil {
 		return ""
 	}

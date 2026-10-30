@@ -14,7 +14,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
-	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
+	"github.com/husmin-fajrin/db-panel/internal/pki"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -125,7 +125,7 @@ func (a *Agent) dialPanel(ctx context.Context) (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	tlsCfg, err := ca.AgentClientTLS(certPEM, keyPEM, caPEM)
+	tlsCfg, err := pki.AgentClientTLS(certPEM, keyPEM, caPEM)
 	if err != nil {
 		return nil, err
 	}

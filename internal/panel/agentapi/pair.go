@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/husmin-fajrin/db-panel/internal/agent"
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -67,7 +66,7 @@ func PairHandler(d Deps) http.Handler {
 			writeError(w, http.StatusMethodNotAllowed, "metode tidak diizinkan")
 			return
 		}
-		var req agent.PairRequest
+		var req proto.PairRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPairBody)).Decode(&req); err != nil {
 			var tooBig *http.MaxBytesError
 			if errors.As(err, &tooBig) {
@@ -145,7 +144,7 @@ func PairHandler(d Deps) http.Handler {
 		}
 		log.Info("agent paired", "server_id", pt.ServerID, "remote", ip, "hostname", req.Hostname,
 			"arch", req.Arch, "agent_version", req.AgentVersion, "cert_serial", serial)
-		writeJSON(w, http.StatusOK, agent.PairResponse{
+		writeJSON(w, http.StatusOK, proto.PairResponse{
 			ServerID:  pt.ServerID,
 			CertPEM:   string(certPEM),
 			CAPEM:     string(d.CA.CAPEM()),

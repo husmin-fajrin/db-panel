@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/husmin-fajrin/db-panel/internal/pki"
 )
 
 func newCA(t *testing.T) *CA {
@@ -103,7 +105,7 @@ func TestLoadOrCreateErrorsWhenOnlyOneFile(t *testing.T) {
 
 func TestIssueAgentCertSetsCN(t *testing.T) {
 	c := newCA(t)
-	_, csrPEM, err := NewAgentKeyAndCSR("apa-saja")
+	_, csrPEM, err := pki.NewAgentKeyAndCSR("apa-saja")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +143,7 @@ func TestIssueAgentCertRejectsBadCSR(t *testing.T) {
 		t.Fatal("want error for garbage CSR")
 	}
 	// CSR dengan tanda tangan rusak.
-	_, csrPEM, err := NewAgentKeyAndCSR("h")
+	_, csrPEM, err := pki.NewAgentKeyAndCSR("h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +177,7 @@ func TestIssueServerCert(t *testing.T) {
 		t.Fatal(err)
 	}
 	cert := mustParseCert(t, certPEM)
-	if len(cert.DNSNames) != 1 || cert.DNSNames[0] != PanelServerName {
+	if len(cert.DNSNames) != 1 || cert.DNSNames[0] != pki.PanelServerName {
 		t.Fatalf("DNSNames = %v", cert.DNSNames)
 	}
 	if len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
@@ -217,7 +219,7 @@ func startPanel(t *testing.T, c *CA) *httptest.Server {
 
 func agentClient(t *testing.T, issuer *CA, trust []byte, serverID int64) *http.Client {
 	t.Helper()
-	keyPEM, csrPEM, err := NewAgentKeyAndCSR("host")
+	keyPEM, csrPEM, err := pki.NewAgentKeyAndCSR("host")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +227,7 @@ func agentClient(t *testing.T, issuer *CA, trust []byte, serverID int64) *http.C
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := AgentClientTLS(certPEM, keyPEM, trust)
+	cfg, err := pki.AgentClientTLS(certPEM, keyPEM, trust)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +240,7 @@ func TestMutualTLSHandshake(t *testing.T) {
 
 	t.Run("agent dengan cert CA diterima", func(t *testing.T) {
 		client := agentClient(t, c, c.CAPEM(), 7)
-		resp, err := client.Get(srv.URL) // URL memakai IP; ServerName dipaksa PanelServerName
+		resp, err := client.Get(srv.URL) // URL memakai IP; ServerName dipaksa pki.PanelServerName
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
@@ -255,7 +257,7 @@ func TestMutualTLSHandshake(t *testing.T) {
 		pool := x509.NewCertPool()
 		pool.AppendCertsFromPEM(c.CAPEM())
 		client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			RootCAs: pool, ServerName: PanelServerName, MinVersion: tls.VersionTLS13,
+			RootCAs: pool, ServerName: pki.PanelServerName, MinVersion: tls.VersionTLS13,
 		}}, Timeout: 5 * time.Second}
 		resp, err := client.Get(srv.URL)
 		if err == nil {
@@ -287,7 +289,7 @@ func TestMutualTLSHandshake(t *testing.T) {
 
 func TestAgentClientTLSInvalidCA(t *testing.T) {
 	c := newCA(t)
-	keyPEM, csrPEM, err := NewAgentKeyAndCSR("h")
+	keyPEM, csrPEM, err := pki.NewAgentKeyAndCSR("h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,22 +297,22 @@ func TestAgentClientTLSInvalidCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = AgentClientTLS(certPEM, keyPEM, []byte("sampah"))
+	_, err = pki.AgentClientTLS(certPEM, keyPEM, []byte("sampah"))
 	if err == nil || err.Error() != "ca tidak valid" {
 		t.Fatalf("err = %v", err)
 	}
-	cfg, err := AgentClientTLS(certPEM, keyPEM, c.CAPEM())
+	cfg, err := pki.AgentClientTLS(certPEM, keyPEM, c.CAPEM())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ServerName != PanelServerName || cfg.MinVersion != tls.VersionTLS13 {
+	if cfg.ServerName != pki.PanelServerName || cfg.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
 
 func TestIssueAgentCertRejectsNonPositiveID(t *testing.T) {
 	c := newCA(t)
-	_, csrPEM, err := NewAgentKeyAndCSR("h")
+	_, csrPEM, err := pki.NewAgentKeyAndCSR("h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +415,7 @@ func TestCertificateValidity(t *testing.T) {
 	if c.Cert.MaxPathLen != 0 || !c.Cert.MaxPathLenZero {
 		t.Errorf("CA MaxPathLen = %d (zero %v), want 0", c.Cert.MaxPathLen, c.Cert.MaxPathLenZero)
 	}
-	_, csrPEM, err := NewAgentKeyAndCSR("h")
+	_, csrPEM, err := pki.NewAgentKeyAndCSR("h")
 	if err != nil {
 		t.Fatal(err)
 	}
