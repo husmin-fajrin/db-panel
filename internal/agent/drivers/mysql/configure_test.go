@@ -235,6 +235,19 @@ func (invalidConfig) ValidateConfig(context.Context) error {
 	return errors.New("konfigurasi MySQL tidak valid: unknown variable")
 }
 
+func TestConfigureRefusesDisabledClonePlugin(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: []string{"plugin-load-add=mysql_clone.so", "clone=OFF"}})
+	root := rootDB(t, inst)
+	var plugin string
+	if err := root.QueryRow("SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'clone'").Scan(&plugin); err != nil || plugin != "DISABLED" {
+		t.Fatalf("clone plugin = %q, %v; want DISABLED", plugin, err)
+	}
+	r := dispatch(t, inst.Host(), "mysql.configure", proto.ConfigureParams{Role: "master", EnableClone: true})
+	if r.OK || !strings.Contains(r.Error.Message, "plugin clone terpasang tetapi tidak aktif (status DISABLED)") {
+		t.Errorf("configure with a disabled clone plugin = %+v", r)
+	}
+}
+
 func TestConfigureReportsRestartWhenLogBinOff(t *testing.T) {
 	// server_id 1 is the default: configure picks a new one.
 	inst := testmysql.Start(t, testmysql.Options{ServerID: 1, ExtraArgs: append([]string{"skip-log-bin", "bind-address=0.0.0.0"}, gtidOff...)})

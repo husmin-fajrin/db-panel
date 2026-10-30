@@ -301,24 +301,42 @@ func waitAnonymousDone(ctx context.Context, db *sql.DB) error {
 }
 
 // installClonePlugin installs the clone plugin unless it is active and
-// reports whether it did.
+// reports whether it did. A plugin that is installed but not ACTIVE (for
+// example disabled with clone=OFF) is an error: CLONE would not work.
 func installClonePlugin(ctx context.Context, db *sql.DB) (bool, error) {
-	var status string
-	err := db.QueryRowContext(ctx, `SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'clone'`).Scan(&status)
-	switch {
-	case err == nil && status == "ACTIVE":
-		return false, nil
-	case err != nil && !errors.Is(err, sql.ErrNoRows):
-		return false, fmt.Errorf("baca status plugin clone: %w", err)
+	status, err := clonePluginStatus(ctx, db)
+	if err != nil || status == "ACTIVE" {
+		return false, err
 	}
+	installed := true
 	if _, err := db.ExecContext(ctx, "INSTALL PLUGIN clone SONAME 'mysql_clone.so'"); err != nil {
 		var me *drv.MySQLError
-		if (errors.As(err, &me) && me.Number == errUDFExists) || strings.Contains(strings.ToLower(err.Error()), "already") {
-			return false, nil
+		if !errors.As(err, &me) || me.Number != errUDFExists {
+			return false, fmt.Errorf("pasang plugin clone: %w", err)
 		}
-		return false, fmt.Errorf("pasang plugin clone: %w", err)
+		installed = false
 	}
-	return true, nil
+	if status, err = clonePluginStatus(ctx, db); err != nil {
+		return false, err
+	}
+	if status != "ACTIVE" {
+		if status == "" {
+			status = "tidak ada"
+		}
+		return false, fmt.Errorf("plugin clone terpasang tetapi tidak aktif (status %s); periksa opsi clone di konfigurasi MySQL", status)
+	}
+	return installed, nil
+}
+
+// clonePluginStatus is the clone plugin's PLUGIN_STATUS; "" when it is not
+// installed.
+func clonePluginStatus(ctx context.Context, db *sql.DB) (string, error) {
+	var status string
+	err := db.QueryRowContext(ctx, `SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'clone'`).Scan(&status)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("baca status plugin clone: %w", err)
+	}
+	return status, nil
 }
 
 // Restart restarts MySQL after checking its config, waits until it accepts
