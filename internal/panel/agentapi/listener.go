@@ -25,26 +25,41 @@ func ListenAndServeAgents(ctx context.Context, addr string, tlsCfg *tls.Config, 
 // ServeAgents is ListenAndServeAgents on an existing listener, which it
 // closes. Requests' contexts derive from ctx, so upgraded agent connections
 // (which http.Server.Shutdown does not track) end when ctx is done; it waits
-// for every handler, including those, to return before it does.
+// (up to 5 s) for every handler, including those, to return before it does.
+// If serving fails before ctx is done, the handlers are cancelled and waited
+// for the same way before the error is returned.
 func ServeAgents(ctx context.Context, ln net.Listener, tlsCfg *tls.Config, h http.Handler) error {
+	hctx, cancelHandlers := context.WithCancel(ctx)
+	defer cancelHandlers()
 	var t handlerTracker
 	srv := &http.Server{
 		Handler:           t.wrap(h),
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
+		BaseContext:       func(net.Listener) context.Context { return hctx },
 	}
 	served := make(chan error, 1)
 	go func() { served <- srv.ServeTLS(ln, "", "") }()
 
 	select {
 	case err := <-served:
+		cancelHandlers()
+		srv.Close()
+		wctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		t.wait(wctx)
 		return err
 	case <-ctx.Done():
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err := srv.Shutdown(sctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Connections still in their TLS handshake or first request are not
+		// worth failing the shutdown for.
+		srv.Close()
+		err = nil
+	}
 	if serr := <-served; !errors.Is(serr, http.ErrServerClosed) && err == nil {
 		err = serr
 	}
@@ -90,6 +105,13 @@ func (t *handlerTracker) wait(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		// ctx may have expired before the call (a slow Shutdown); handlers
+		// that already returned still count as done.
+		select {
+		case <-done:
+			return nil
+		case <-time.After(10 * time.Millisecond):
+			return ctx.Err()
+		}
 	}
 }

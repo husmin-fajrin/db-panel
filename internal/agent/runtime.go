@@ -72,7 +72,11 @@ func (a *Agent) Run(ctx context.Context) error {
 			if time.Since(start) >= stableSession {
 				backoff = minBackoff
 			}
-			a.logger.Warn("disconnected from panel", "err", err, "retry_in", backoff)
+			if closedByPanel(err) {
+				a.logger.Info("panel closed the connection", "reason", closeReason(err), "retry_in", backoff)
+			} else {
+				a.logger.Warn("disconnected from panel", "err", err, "retry_in", backoff)
+			}
 		}
 
 		t := time.NewTimer(backoff)

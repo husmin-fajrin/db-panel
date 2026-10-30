@@ -14,7 +14,8 @@ import (
 // WSHandler serves /agent/ws on the mTLS listener. The client certificate
 // must name a paired server and be the one most recently issued to it;
 // otherwise the request gets 403 before any upgrade. The accepted connection
-// is attached to the hub until it closes.
+// is attached to the hub until it closes, or until the listener shuts down,
+// which closes it without waiting on an unresponsive agent.
 func WSHandler(d Deps) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := d.logger()
@@ -48,7 +49,10 @@ func WSHandler(d Deps) http.Handler {
 				d.OnEvent(serverID, ev)
 			}
 		})
-		d.Hub.Attach(serverID, conn)
+		if d.Hub.Attach(serverID, conn) {
+			log.Warn("agent connection replaced an existing one (cloned server or stale connection?)",
+				"server_id", serverID, "remote", r.RemoteAddr)
+		}
 		if d.OnAttach != nil {
 			d.OnAttach(serverID, conn)
 		}
@@ -56,10 +60,12 @@ func WSHandler(d Deps) http.Handler {
 
 		select {
 		case <-conn.Wait():
+			d.Hub.Detach(serverID, conn)
+			conn.Close()
 		case <-r.Context().Done(): // listener shutting down
+			d.Hub.Detach(serverID, conn)
+			conn.CloseNow()
 		}
-		d.Hub.Detach(serverID, conn)
-		conn.Close()
 		log.Info("agent disconnected", "server_id", serverID)
 	})
 }

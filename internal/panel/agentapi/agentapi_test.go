@@ -74,6 +74,7 @@ type testEnv struct {
 	agentAddr string
 	attached  chan *hub.WSConn
 	wsHits    atomic.Int64 // requests reaching the agent listener's handler
+	logs      *syncBuffer  // the panel side's log output
 	// stopPanel cancels the agent listener and returns ServeAgents' result;
 	// later calls return the same result.
 	stopPanel func() error
@@ -100,6 +101,7 @@ func newEnv(t *testing.T) *testEnv {
 		l:         newFakeListener(),
 		agentAddr: ln.Addr().String(),
 		attached:  make(chan *hub.WSConn, 16),
+		logs:      new(syncBuffer),
 	}
 	e.hub = hub.New(e.l)
 	deps := agentapi.Deps{
@@ -109,7 +111,7 @@ func newEnv(t *testing.T) *testEnv {
 		AgentAddr:    func() string { return e.agentAddr },
 		AgentVersion: "test",
 		Now:          time.Now,
-		Logger:       slog.New(slog.DiscardHandler),
+		Logger:       slog.New(slog.NewTextHandler(e.logs, nil)),
 		OnEvent:      e.l.OnEvent,
 		OnAttach:     func(_ int64, c *hub.WSConn) { e.attached <- c },
 	}
@@ -450,6 +452,27 @@ func TestAgentReconnects(t *testing.T) {
 	var res stubProbe
 	if err := e.hub.Call(ctx, id, "probe", nil, &res); err != nil || res.Hostname != "stub-host" {
 		t.Fatalf("call after reconnect: %+v %v", res, err)
+	}
+}
+
+func TestWSLogsReplacedConnection(t *testing.T) {
+	e := newEnv(t)
+	id, token := e.newToken(t, 0)
+	cfg := e.pair(t, token, t.TempDir())
+	startAgent(t, cfg, stubRegistry())
+	waitID(t, e.l.online, "first OnOnline")
+	if strings.Contains(e.logs.String(), "replaced") {
+		t.Fatalf("first connection logged as a replacement:\n%s", e.logs.String())
+	}
+
+	startAgent(t, cfg, stubRegistry()) // a cloned server with the same certificate
+	if got := waitID(t, e.l.online, "second OnOnline"); got != id {
+		t.Fatalf("online id = %d, want %d", got, id)
+	}
+	out := e.logs.String()
+	if !strings.Contains(out, `level=WARN msg="agent connection replaced an existing one`) ||
+		!strings.Contains(out, "remote=127.0.0.1:") {
+		t.Fatalf("replacement not logged at Warn with the remote address:\n%s", out)
 	}
 }
 

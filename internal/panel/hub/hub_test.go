@@ -103,8 +103,12 @@ func TestAttachReplacesExistingAndClosesOld(t *testing.T) {
 	h := New(l)
 	oldConn, newConn := newFakeConn(0), newFakeConn(0)
 
-	h.Attach(7, oldConn)
-	h.Attach(7, newConn)
+	if h.Attach(7, oldConn) {
+		t.Error("first Attach reported a replacement")
+	}
+	if !h.Attach(7, newConn) {
+		t.Error("second Attach did not report a replacement")
+	}
 	oldConn.waitClosed(t)
 
 	on, off := l.counts()
@@ -125,6 +129,27 @@ func TestAttachReplacesExistingAndClosesOld(t *testing.T) {
 	}
 	if got := oldConn.callCmds(); len(got) != 0 {
 		t.Errorf("old conn calls = %v", got)
+	}
+}
+
+func TestDisconnectClosesAndReportsOffline(t *testing.T) {
+	l := &fakeListener{}
+	h := New(l)
+	c := newFakeConn(0)
+	h.Attach(4, c)
+
+	h.Disconnect(4)
+	c.waitClosed(t)
+	if h.IsOnline(4) {
+		t.Fatal("server 4 still online after Disconnect")
+	}
+	if _, off := l.counts(); off != 1 {
+		t.Fatalf("OnOffline = %d, want 1", off)
+	}
+	h.Detach(4, c) // the connection's own handler detaching later is a no-op
+	h.Disconnect(4)
+	if _, off := l.counts(); off != 1 {
+		t.Fatalf("OnOffline after repeated Disconnect/Detach = %d, want 1", off)
 	}
 }
 

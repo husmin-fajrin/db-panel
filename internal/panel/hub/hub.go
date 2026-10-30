@@ -58,8 +58,9 @@ func New(l Listener) *Hub {
 
 // Attach makes c the active connection for serverID. An existing connection
 // is replaced without an OnOffline and closed in the background, so a slow
-// close handshake does not delay c; OnOnline is reported for c.
-func (h *Hub) Attach(serverID int64, c Conn) {
+// close handshake does not delay c; OnOnline is reported for c. It reports
+// whether an existing connection was replaced.
+func (h *Hub) Attach(serverID int64, c Conn) (replaced bool) {
 	h.lifeMu.Lock()
 	defer h.lifeMu.Unlock()
 
@@ -68,10 +69,29 @@ func (h *Hub) Attach(serverID int64, c Conn) {
 	h.conns[serverID] = c
 	h.mu.Unlock()
 
-	if old != nil && old != c {
+	replaced = old != nil && old != c
+	if replaced {
 		go old.Close()
 	}
 	h.l.OnOnline(serverID)
+	return replaced
+}
+
+// Disconnect removes the active connection of serverID, if any, closes it in
+// the background and reports OnOffline. It is used when the server is deleted.
+func (h *Hub) Disconnect(serverID int64) {
+	h.lifeMu.Lock()
+	defer h.lifeMu.Unlock()
+
+	h.mu.Lock()
+	c, ok := h.conns[serverID]
+	delete(h.conns, serverID)
+	h.mu.Unlock()
+	if !ok {
+		return
+	}
+	go c.Close()
+	h.l.OnOffline(serverID)
 }
 
 // Detach removes c if it is still the active connection for serverID and

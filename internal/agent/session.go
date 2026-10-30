@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -101,6 +102,26 @@ func (a *Agent) serve(ctx context.Context, ws *websocket.Conn) error {
 			}
 		})
 	}
+}
+
+// closedByPanel reports whether err, which ended a session, is the panel
+// closing it on purpose (normal closure, or going away when it restarts)
+// rather than a failure worth a warning.
+func closedByPanel(err error) bool {
+	switch websocket.CloseStatus(err) {
+	case websocket.StatusNormalClosure, websocket.StatusGoingAway:
+		return true
+	}
+	return false
+}
+
+// closeReason returns the reason the panel gave when closing, if any.
+func closeReason(err error) string {
+	var ce websocket.CloseError
+	if errors.As(err, &ce) {
+		return ce.Reason
+	}
+	return ""
 }
 
 // drainRequests waits up to requestDrain for the command goroutines.

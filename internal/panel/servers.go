@@ -92,8 +92,9 @@ func (p *Panel) agentDeps() agentapi.Deps {
 }
 
 // serveUI serves the UI and the unauthenticated agent endpoints on ln until
-// ctx is done, then shuts down within 5 s. Open SSE streams end with ctx
-// through BaseContext; there is no WriteTimeout because of them.
+// ctx is done, then shuts down within 5 s, closing whatever connections are
+// left after that. Open SSE streams end with ctx through BaseContext; there
+// is no WriteTimeout because of them.
 func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps) error {
 	srv := &http.Server{
 		Handler:           p.uiHandler(deps),
@@ -111,6 +112,11 @@ func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err := srv.Shutdown(sctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		p.log.Warn("UI requests still running after the shutdown timeout; closing their connections")
+		srv.Close()
+		err = nil
+	}
 	if serr := <-served; !errors.Is(serr, http.ErrServerClosed) && err == nil {
 		err = serr
 	}

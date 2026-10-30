@@ -18,6 +18,21 @@ const readLimit = 4 << 20
 // write's ctx is done, and one cancelled Call must not drop the agent.
 const writeTimeout = 10 * time.Second
 
+// The panel pings every agent itself: an agent whose host or network died
+// sends nothing, so without pings its connection would look alive until TCP
+// gives up, minutes later. A ping unanswered for pingTimeout drops it.
+const (
+	pingInterval = 10 * time.Second
+	pingTimeout  = 10 * time.Second
+)
+
+// closeGrace bounds how long CloseNow waits for the agent to answer the
+// close frame.
+const closeGrace = time.Second
+
+// reasonShutdown is the close reason sent to agents when the panel stops.
+const reasonShutdown = "panel shutting down"
+
 // WSConn is the panel side of an agent's WebSocket. Requests are correlated
 // with responses by ID; events go to onEvent from the read goroutine.
 type WSConn struct {
@@ -35,7 +50,7 @@ type WSConn struct {
 	wsOnce   sync.Once
 }
 
-// NewWSConn wraps ws and starts its read loop. onEvent may be nil.
+// NewWSConn wraps ws and starts its read and ping loops. onEvent may be nil.
 func NewWSConn(ws *websocket.Conn, onEvent func(proto.Event)) *WSConn {
 	ws.SetReadLimit(readLimit)
 	c := &WSConn{
@@ -45,6 +60,7 @@ func NewWSConn(ws *websocket.Conn, onEvent func(proto.Event)) *WSConn {
 		done:    make(chan struct{}),
 	}
 	go c.readLoop()
+	go c.pingLoop()
 	return c
 }
 
@@ -100,6 +116,54 @@ func (c *WSConn) Close() error {
 	var err error
 	c.wsOnce.Do(func() { err = c.ws.Close(websocket.StatusNormalClosure, "") })
 	return err
+}
+
+// CloseNow is Close for a panel that is stopping: it fails pending calls and
+// closes the Wait channel at once, sends the agent a "going away" close frame
+// with reasonShutdown, and waits at most closeGrace for the agent's answer.
+// Against an unresponsive agent the close handshake times out in the
+// background, so a dead peer cannot hold up the shutdown.
+func (c *WSConn) CloseNow() {
+	c.stop()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.wsOnce.Do(func() { c.ws.Close(websocket.StatusGoingAway, reasonShutdown) })
+	}()
+	t := time.NewTimer(closeGrace)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
+}
+
+// abort drops a connection whose peer stopped answering, without a close
+// handshake.
+func (c *WSConn) abort() {
+	c.stop()
+	c.wsOnce.Do(func() { c.ws.CloseNow() })
+}
+
+// pingLoop pings the agent every pingInterval until the connection is gone;
+// an unanswered ping aborts the connection, which ends the Wait channel.
+func (c *WSConn) pingLoop() {
+	t := time.NewTicker(pingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-t.C:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+		err := c.ws.Ping(ctx)
+		cancel()
+		if err != nil {
+			c.abort()
+			return
+		}
+	}
 }
 
 func (c *WSConn) readLoop() {

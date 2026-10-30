@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -594,5 +595,83 @@ func TestProbeLoopReprobesOnlineServers(t *testing.T) {
 	waitFor(t, "three probes of the local server", func() bool { return rec.count(probed) >= 3 })
 	if n := rec.count(online); n != 1 {
 		t.Fatalf("got %d %q events, want 1", n, online)
+	}
+}
+
+// freeAddr returns a 127.0.0.1 address with a port that was free a moment
+// ago, so a restarted panel can listen where its agents expect it.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().String()
+}
+
+// TestPanelRestartKeepsRemoteAgent restarts a panel that has a paired remote
+// agent: the restart must not create a second local server, and the agent
+// must reconnect on its own.
+func TestPanelRestartKeepsRemoteAgent(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	o.AgentAddr = freeAddr(t)
+	o.HTTPAddr = freeAddr(t)
+
+	p1, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stop1 := startPanel(t, p1)
+	srv, err := p1.Store.CreateServer("remote-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := p1.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg, err := agent.Pair(ctx, p1.PublicURL(), tok.Token, t.TempDir(), nil)
+	if err != nil {
+		cancel()
+		t.Fatalf("Pair: %v", err)
+	}
+	reg := commands.NewRegistry()
+	probe.Register(reg, probe.RealSystem(), "remote-test")
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- agent.New(cfg, reg, slog.New(slog.DiscardHandler)).Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-agentDone
+	})
+	waitFor(t, "the agent to connect", func() bool { return p1.Hub.IsOnline(srv.ID) })
+	localID := p1.localID
+	stop1()
+	if err := p1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p2 := newPanel(t, o)
+	if p2.localID != localID {
+		t.Fatalf("local server id changed across restart: %d -> %d", localID, p2.localID)
+	}
+	startPanel(t, p2)
+	// The agent backs off 1, 2, 4 ... s between attempts; it was dropped
+	// once, so it is back within a few seconds.
+	deadline := time.Now().Add(20 * time.Second)
+	for !p2.Hub.IsOnline(srv.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("agent did not reconnect after the panel restarted")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	servers, err := p2.Store.ListServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("servers after restart = %+v, want the local one and remote-1", servers)
 	}
 }
