@@ -27,6 +27,7 @@ type Config struct {
 	KeyFile           string `yaml:"key_file"`  // default <dir>/agent.key
 	CAFile            string `yaml:"ca_file"`   // default <dir>/ca.crt
 	MySQLRootPassword string `yaml:"mysql_root_password,omitempty"`
+	MySQLSocket       string `yaml:"mysql_socket,omitempty"` // overrides the socket found by layout discovery
 }
 
 // Load reads dir/agent.yaml, filling empty file paths with their defaults in

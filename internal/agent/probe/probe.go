@@ -231,3 +231,14 @@ func parseMysqldHelp(b []byte) (port int, dataDir string) {
 	}
 	return port, dataDir
 }
+
+// OSFamily reports the host's distribution family from /etc/os-release:
+// "debian", "rhel" or "unknown".
+func OSFamily(sys System) string {
+	b, err := sys.ReadFile("/etc/os-release")
+	if err != nil {
+		return "unknown"
+	}
+	_, family := parseOSRelease(b)
+	return family
+}

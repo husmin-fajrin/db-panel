@@ -18,6 +18,8 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	"github.com/husmin-fajrin/db-panel/internal/version"
 )
@@ -88,17 +90,38 @@ func mainRun(args []string, stderr io.Writer) int {
 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	reg := commands.NewRegistry()
-	probe.Register(reg, probe.RealSystem(), version.Version)
+	sys := probe.RealSystem()
+	probe.Register(reg, sys, version.Version)
+	a := New(cfg, reg, logger)
+	runner := jobs.NewRunner(a, logger)
+	runner.Register(reg)
+	registerMySQL(reg, cfg, sys, runner, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger.Info("agent starting", "version", version.Version, "panel", cfg.PanelAddr, "server_id", cfg.ServerID)
-	if err := New(cfg, reg, logger).Run(ctx); err != nil {
+	if err := a.Run(ctx); err != nil {
 		fmt.Fprintf(stderr, "agent berhenti: %v\n", err)
 		return 1
 	}
 	logger.Info("agent stopped")
 	return 0
+}
+
+// registerMySQL adds the mysql.* commands. Without a MySQL installation the
+// driver has no Host and its commands report that MySQL is missing.
+func registerMySQL(reg *commands.Registry, cfg config.Config, sys probe.System, runner *jobs.Runner, logger *slog.Logger) {
+	d := &mysql.Driver{Jobs: runner, Logger: logger}
+	host, err := mysql.NewRealHost(cfg, nil, sys, logger)
+	if err != nil {
+		logger.Warn("mysql not available", "err", err)
+	} else {
+		l := host.Layout()
+		logger.Info("mysql layout", "mysqld", l.MysqldPath, "config", l.ConfigFile, "include_dir", l.IncludeDir,
+			"datadir", l.DataDir, "socket", l.Socket, "service", l.ServiceKind, "service_name", l.ServiceName)
+		d.Host = host
+	}
+	d.Register(reg)
 }
 
 func mainPair(args []string, stdout, stderr io.Writer) int {

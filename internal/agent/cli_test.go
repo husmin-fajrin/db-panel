@@ -2,8 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,9 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
+	"github.com/husmin-fajrin/db-panel/internal/agent/config"
+	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -179,5 +184,29 @@ func TestCLIPairRequiresCAPin(t *testing.T) {
 	code, stderr, _, sent = runPair(t, env, "", "--agent-addr", "192.0.2.10:8443")
 	if code != 1 || !sent || strings.Contains(stderr, "Peringatan") {
 		t.Fatalf("with pin: code %d sent %v stderr %q", code, sent, stderr)
+	}
+}
+
+// noMySQLSystem is a host without any MySQL installation.
+type noMySQLSystem struct{}
+
+func (noMySQLSystem) ReadFile(string) ([]byte, error) { return nil, os.ErrNotExist }
+func (noMySQLSystem) LookPath(string) (string, error) { return "", errors.New("not found") }
+func (noMySQLSystem) Exists(string) bool              { return false }
+func (noMySQLSystem) Output(context.Context, string, ...string) ([]byte, error) {
+	return nil, errors.New("not found")
+}
+func (noMySQLSystem) Hostname() (string, error)             { return "h", nil }
+func (noMySQLSystem) Statfs(string) (uint64, uint64, error) { return 0, 0, errors.New("no") }
+func (noMySQLSystem) Arch() string                          { return "amd64" }
+
+// TestRegisterMySQLWithoutMySQL: an agent on a server without MySQL still
+// accepts mysql.status and answers that MySQL is missing.
+func TestRegisterMySQLWithoutMySQL(t *testing.T) {
+	reg := commands.NewRegistry()
+	registerMySQL(reg, config.Config{}, noMySQLSystem{}, jobs.NewRunner(nil, nil), slog.New(slog.DiscardHandler))
+	resp := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.status"})
+	if resp.Error == nil || resp.Error.Message != "MySQL tidak ditemukan di server ini" {
+		t.Fatalf("response = %+v", resp)
 	}
 }
