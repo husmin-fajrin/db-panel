@@ -47,13 +47,18 @@ func TestRunAgentVersion(t *testing.T) {
 	}
 }
 
-func TestRunPlaceholderCommands(t *testing.T) {
-	for _, name := range []string{"panel"} {
-		var errb bytes.Buffer
-		code := run([]string{name}, io.Discard, &errb)
-		want := `perintah "` + name + `" belum diimplementasikan`
-		if code != 2 || !strings.Contains(errb.String(), want) {
-			t.Fatalf("%s: got %d %q", name, code, errb.String())
-		}
+func TestRunPanelBadFlag(t *testing.T) {
+	var errb bytes.Buffer
+	code := run([]string{"panel", "--no-such-flag"}, io.Discard, &errb)
+	if code != 2 || !strings.Contains(errb.String(), "dbpanel panel reset-password") {
+		t.Fatalf("got %d %q", code, errb.String())
+	}
+}
+
+func TestRunPanelHelp(t *testing.T) {
+	var out bytes.Buffer
+	code := run([]string{"panel", "help"}, &out, io.Discard)
+	if code != 0 || !strings.Contains(out.String(), "dbpanel panel [--data-dir DIR]") {
+		t.Fatalf("got %d %q", code, out.String())
 	}
 }

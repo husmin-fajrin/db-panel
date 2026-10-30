@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent"
+	"github.com/husmin-fajrin/db-panel/internal/panel"
 	"github.com/husmin-fajrin/db-panel/internal/version"
 )
 
@@ -33,8 +34,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "agent":
 		return agent.Main(args[1:], stdout, stderr)
 	case "panel":
-		fmt.Fprintf(stderr, "perintah %q belum diimplementasikan\n", args[0])
-		return 2
+		return panel.Main(args, stdout, stderr)
 	default:
 		fmt.Fprint(stderr, usage)
 		return 2
