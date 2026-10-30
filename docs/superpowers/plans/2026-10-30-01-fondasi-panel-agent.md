@@ -23,7 +23,7 @@ UI: daisyUI 5 + Tailwind CSS 4 (standalone CLI), Alpine.js 3.
 
 ## Global Constraints
 
-- Go 1.24, `CGO_ENABLED=0`, target `linux/amd64` dan `linux/arm64`; semua
+- Go 1.26 (dinaikkan dari 1.24: modernc.org/sqlite v1.61.0 mensyaratkan go 1.26), `CGO_ENABLED=0`, target `linux/amd64` dan `linux/arm64`; semua
   dependensi pure Go.
 - Modul: `github.com/husmin-fajrin/db-panel`. Struktur: `cmd/dbpanel`,
   `internal/panel`, `internal/agent`, `internal/proto`, `web/`, `scripts/`.

@@ -426,7 +426,7 @@ dalam bahasa awam. Error MySQL selalu ditampilkan mentah di bagian
 
 ## 9. Keputusan yang sudah diambil
 
-9.1 **Stack**: Go (1.23+), `net/http` + `html/template`, SQLite
+9.1 **Stack**: Go (1.26+), `net/http` + `html/template`, SQLite
 (modernc), WebSocket (nhooyr/websocket atau gorilla), `go-sql-driver/mysql`.
 Tampilan: daisyUI 5 + Tailwind CSS 4 dikompilasi dengan Tailwind
 standalone CLI (tanpa Node; `app.css` hasil kompilasi dikomit), Alpine.js
