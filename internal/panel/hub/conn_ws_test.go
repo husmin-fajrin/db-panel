@@ -245,3 +245,47 @@ func TestWSConnAgentDisconnect(t *testing.T) {
 		t.Fatal("Wait() not closed after agent disconnect")
 	}
 }
+
+func TestWSConnCancelledCallKeepsConn(t *testing.T) {
+	c := startFakeAgent(t, nil, func(ctx context.Context, ws *websocket.Conn) {
+		for {
+			req, err := readRequest(ctx, ws)
+			if err != nil {
+				return
+			}
+			resp, err := proto.NewResponse(req.ID, req.Cmd)
+			if err != nil {
+				t.Errorf("NewResponse: %v", err)
+				return
+			}
+			if err := writeEnvelope(ctx, ws, proto.Envelope{Kind: proto.KindResponse, Response: &resp}); err != nil {
+				return
+			}
+		}
+	})
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 10 {
+		err := c.Call(cancelled, "probe", nil, nil)
+		var pe *proto.Error
+		if !errors.As(err, &pe) || pe.Code != proto.CodeTimeout {
+			t.Fatalf("cancelled Call: err = %v, want CodeTimeout", err)
+		}
+	}
+
+	ctx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	var out string
+	if err := c.Call(ctx, "probe", nil, &out); err != nil {
+		t.Fatalf("Call after cancelled calls: %v", err)
+	}
+	if out != "probe" {
+		t.Errorf("result = %q", out)
+	}
+	select {
+	case <-c.Wait():
+		t.Fatal("connection closed by a cancelled Call")
+	default:
+	}
+}

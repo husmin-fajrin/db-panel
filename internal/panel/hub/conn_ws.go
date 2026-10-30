@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -11,6 +12,11 @@ import (
 
 // readLimit caps the size of one incoming message.
 const readLimit = 4 << 20
+
+// writeTimeout bounds writing one request. The write deliberately does not
+// use the caller's ctx: coder/websocket closes the whole connection when a
+// write's ctx is done, and one cancelled Call must not drop the agent.
+const writeTimeout = 10 * time.Second
 
 // WSConn is the panel side of an agent's WebSocket. Requests are correlated
 // with responses by ID; events go to onEvent from the read goroutine.
@@ -47,6 +53,9 @@ func (c *WSConn) Wait() <-chan struct{} { return c.done }
 
 // Call sends cmd to the agent and waits for its response or ctx.
 func (c *WSConn) Call(ctx context.Context, cmd string, params any, result any) error {
+	if ctx.Err() != nil {
+		return timeoutError()
+	}
 	req, err := newRequest(cmd, params)
 	if err != nil {
 		return err
@@ -66,13 +75,12 @@ func (c *WSConn) Call(ctx context.Context, cmd string, params any, result any) e
 	c.mu.Unlock()
 	defer c.forget(req.ID)
 
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	c.writeMu.Lock()
-	err = c.ws.Write(ctx, websocket.MessageText, data)
+	err = c.ws.Write(wctx, websocket.MessageText, data)
 	c.writeMu.Unlock()
+	cancel()
 	if err != nil {
-		if ctx.Err() != nil {
-			return timeoutError()
-		}
 		return offlineError()
 	}
 
@@ -84,12 +92,13 @@ func (c *WSConn) Call(ctx context.Context, cmd string, params any, result any) e
 	}
 }
 
-// Close closes the WebSocket, fails pending calls with CodeOffline and closes
-// the Wait channel. Later calls do nothing.
+// Close fails pending calls with CodeOffline, closes the Wait channel, then
+// closes the WebSocket (the close handshake may take a few seconds against an
+// unresponsive peer). Later calls do nothing.
 func (c *WSConn) Close() error {
+	c.stop()
 	var err error
 	c.wsOnce.Do(func() { err = c.ws.Close(websocket.StatusNormalClosure, "") })
-	c.stop()
 	return err
 }
 
@@ -141,7 +150,7 @@ func (c *WSConn) stop() {
 		c.pending = make(map[string]chan proto.Response)
 		c.mu.Unlock()
 		for id, ch := range pending {
-			ch <- proto.ErrorResponse(id, proto.CodeOffline, "koneksi agent terputus")
+			ch <- proto.Response{ID: id, Error: offlineError()}
 		}
 		close(c.done)
 	})

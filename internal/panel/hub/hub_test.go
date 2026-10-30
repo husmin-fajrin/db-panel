@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -140,6 +141,45 @@ func TestAttachDoesNotBlockOnSlowClose(t *testing.T) {
 	slow.waitClosed(t)
 	if n := slow.closeCount(); n != 1 {
 		t.Errorf("old conn closed %d times, want 1", n)
+	}
+}
+
+// orderListener records the last lifecycle callback per server, yielding
+// before recording to widen any window in which callbacks could reorder.
+type orderListener struct {
+	mu   sync.Mutex
+	last map[int64]bool // true = OnOnline, false = OnOffline
+}
+
+func (l *orderListener) record(id int64, online bool) {
+	runtime.Gosched()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.last[id] = online
+}
+
+func (l *orderListener) OnOnline(id int64)          { l.record(id, true) }
+func (l *orderListener) OnOffline(id int64)         { l.record(id, false) }
+func (l *orderListener) OnEvent(int64, proto.Event) {}
+
+func TestAttachDetachOrderConsistent(t *testing.T) {
+	for i := range 200 {
+		l := &orderListener{last: make(map[int64]bool)}
+		h := New(l)
+		oldConn, newConn := newFakeConn(0), newFakeConn(0)
+		h.Attach(7, oldConn)
+
+		var wg sync.WaitGroup
+		wg.Go(func() { h.Detach(7, oldConn) })
+		wg.Go(func() { h.Attach(7, newConn) })
+		wg.Wait()
+
+		l.mu.Lock()
+		last := l.last[7]
+		l.mu.Unlock()
+		if online := h.IsOnline(7); last != online {
+			t.Fatalf("iteration %d: last callback online=%v, IsOnline=%v", i, last, online)
+		}
 	}
 }
 

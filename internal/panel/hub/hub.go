@@ -31,16 +31,22 @@ type Conn interface {
 }
 
 // Listener is notified about connection changes and agent events.
+// OnOnline and OnOffline are delivered in the order the hub applied the
+// changes, under the hub's lifecycle lock: a listener may call Call, IsOnline
+// and OnlineIDs, but must not call Attach or Detach.
 type Listener interface {
 	OnOnline(serverID int64)
 	OnOffline(serverID int64)
 	OnEvent(serverID int64, ev proto.Event)
 }
 
-// Hub maps server IDs to their active connection. Listener callbacks run
-// outside the hub's lock, so a listener may call back into the hub.
+// Hub maps server IDs to their active connection.
 type Hub struct {
-	mu    sync.Mutex
+	// lifeMu serialises Attach and Detach together with their listener
+	// callbacks, so the listener sees lifecycle changes in order.
+	lifeMu sync.Mutex
+
+	mu    sync.Mutex // guards conns
 	conns map[int64]Conn
 	l     Listener
 }
@@ -54,6 +60,9 @@ func New(l Listener) *Hub {
 // is replaced without an OnOffline and closed in the background, so a slow
 // close handshake does not delay c; OnOnline is reported for c.
 func (h *Hub) Attach(serverID int64, c Conn) {
+	h.lifeMu.Lock()
+	defer h.lifeMu.Unlock()
+
 	h.mu.Lock()
 	old := h.conns[serverID]
 	h.conns[serverID] = c
@@ -69,6 +78,9 @@ func (h *Hub) Attach(serverID int64, c Conn) {
 // reports OnOffline. Detaching a connection that was already replaced is a
 // no-op.
 func (h *Hub) Detach(serverID int64, c Conn) {
+	h.lifeMu.Lock()
+	defer h.lifeMu.Unlock()
+
 	h.mu.Lock()
 	cur, ok := h.conns[serverID]
 	if !ok || cur != c {
