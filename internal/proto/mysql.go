@@ -142,3 +142,24 @@ type ReadOnlyParams struct {
 type RestartResult struct {
 	TookMs int64 `json:"took_ms"`
 }
+
+// SnapshotParams are the parameters of mysql.cloneFrom and mysql.dumpFrom:
+// the master to copy from, as seen from this server, and the account to
+// copy with.
+type SnapshotParams struct {
+	Host          string   `json:"host"`
+	Port          int      `json:"port"`
+	User          string   `json:"user"`
+	Password      string   `json:"password"`
+	Databases     []string `json:"databases"`      // dump only; empty = every database
+	EstimateBytes uint64   `json:"estimate_bytes"` // expected size, for progress
+	DropExisting  bool     `json:"drop_existing"`  // dump: drop the local copies of Databases before loading
+}
+
+// SnapshotResult is the job.done result of mysql.cloneFrom and mysql.dumpFrom.
+type SnapshotResult struct {
+	Method       string `json:"method"`        // "clone" | "dump"
+	Bytes        uint64 `json:"bytes"`         // data cloned, or dump bytes loaded
+	GTIDExecuted string `json:"gtid_executed"` // this server's @@gtid_executed afterwards
+	TookMs       int64  `json:"took_ms"`
+}

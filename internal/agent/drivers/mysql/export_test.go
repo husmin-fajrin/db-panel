@@ -15,3 +15,12 @@ var (
 	ParseOptions   = parseOptions
 	NotInEffect    = notInEffect
 )
+
+// Snapshot helpers, testable without a server.
+var (
+	DumpArgs       = dumpArgs
+	LoadArgs       = loadArgs
+	DumpGTIDMode   = dumpGTIDMode
+	ClientDefaults = clientDefaults
+	FindClientTool = findClientTool
+)

@@ -32,6 +32,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerPreflight(reg)
 	d.registerConfigure(reg)
 	d.registerUsers(reg)
+	d.registerSnapshot(reg)
 }
 
 func (d *Driver) host() (Host, error) {
