@@ -5,24 +5,26 @@ Status: menunggu persetujuan pemilik produk
 
 ## 1. Maksud dan alasan
 
-Tim IT rumah sakit perlu punya salinan siaga (replika) dari database SIMRS
-mereka, tapi umumnya tidak punya keahlian server dan database untuk
-membangun dan merawat replikasi MySQL lewat terminal. db-panel adalah
-aplikasi web yang membuat satu replika dengan satu klik, memantau semua
-master dan replika di satu tempat, memberi tahu lewat Telegram kalau ada
-yang salah, dan menyediakan kontrol dasar (start/stop, resync, promote)
-dengan penjelasan dalam bahasa Indonesia yang bisa dipahami orang awam
-database.
+Kebutuhan dasarnya adalah backup database secara real-time: salinan
+siaga (replika) yang selalu mengikuti database utama. Tim IT yang
+membutuhkannya, pengguna pertama adalah tim IT rumah sakit, umumnya tidak
+punya keahlian server dan database untuk membangun dan merawat replikasi
+MySQL lewat terminal. db-panel adalah aplikasi web yang membuat satu
+replika dengan satu klik, memantau semua master dan replika di satu
+tempat, memberi tahu lewat Telegram kalau ada yang salah, dan menyediakan
+kontrol dasar (start/stop, resync, promote) dengan penjelasan dalam
+bahasa Indonesia yang bisa dipahami orang awam database. Panel bersifat
+umum: tidak terikat pada aplikasi tertentu yang memakai database itu.
 
-Ukuran keberhasilan: seorang staf IT rumah sakit, tanpa pernah membuka
-terminal MySQL, bisa (a) mendaftarkan dua server, (b) membuat replika,
-(c) melihat setiap saat apakah replika masih sinkron, dan (d) saat master
-rusak, tahu apa yang terjadi dan apa yang harus dilakukan.
+Ukuran keberhasilan: seorang staf IT, tanpa pernah membuka terminal
+MySQL, bisa (a) mendaftarkan dua server, (b) membuat replika, (c) melihat
+setiap saat apakah replika masih sinkron, dan (d) saat master rusak, tahu
+apa yang terjadi dan apa yang harus dilakukan.
 
 ## 2. Pengguna
 
-- **Staf IT rumah sakit.** Pengguna utama. Paham jaringan dan aplikasi,
-  tidak paham internal MySQL. Butuh status yang jelas, tombol yang sedikit,
+- **Staf IT** (pengguna pertama: tim IT rumah sakit). Paham jaringan dan
+  aplikasi, tidak paham internal MySQL. Butuh status yang jelas, tombol yang sedikit,
   dan pesan error yang menjelaskan langkah perbaikan.
 - **Tim pengembang db-panel** (programmer dengan latar PHP/CI 3, jQuery,
   Bootstrap, dan belakangan daisyUI/Tailwind/Alpine/ECharts). Perlu bisa
@@ -50,7 +52,7 @@ rusak, tahu apa yang terjadi dan apa yang harus dilakukan.
 
 - Engine selain MySQL 8.x (lihat batasan).
 - Promote otomatis / failover otomatis.
-- Mengalihkan aplikasi SIMRS ke master baru (virtual IP, proxy, DNS).
+- Mengalihkan aplikasi ke master baru (virtual IP, proxy, DNS).
   Panel hanya memberi instruksi. Virtual IP dicatat sebagai pengembangan
   berikutnya.
 - Replikasi multi-master, replikasi berantai (replika dari replika), Group
@@ -78,29 +80,26 @@ rusak, tahu apa yang terjadi dan apa yang harus dilakukan.
 - Engine versi 1: **Oracle MySQL 8.0, 8.4, dan 9.x**. Itulah yang
   dijumpai di lapangan. MySQL 5.7 dan MariaDB **ditolak saat preflight**
   dengan pesan yang jelas; driver untuk keduanya tidak masuk versi 1.
-- Semua tabel SIMRS adalah InnoDB. Preflight tetap memeriksa dan menolak
+- Database yang dijumpai sejauh ini seluruhnya InnoDB. Preflight tetap memeriksa dan menolak
   bila menemukan tabel non-InnoDB, dengan daftar tabelnya, karena CLONE
   dan GTID tidak aman untuk tabel itu.
 - Master dan replika harus satu seri versi (8.0 dengan 8.0, 8.4 dengan
   8.4, 9.x dengan 9.x); CLONE mensyaratkan ini. Saat memasang MySQL di
   server kosong, agent memasang seri yang sama dengan master.
 - Master harus bisa dijangkau dari replika di port MySQL (3306 atau yang
-  dikonfigurasi), lewat LAN atau lewat Tailscale yang sudah terpasang di
-  server database. Panel tidak membuat tunnel sendiri; alamat yang
-  didaftarkan untuk sebuah server adalah alamat mana pun yang bisa
-  dijangkau (IP LAN atau IP Tailscale 100.x), dan alamat sumber replikasi
-  per topologi bisa diubah terpisah dari alamat agent.
-- Dua pola server di lapangan: (a) **SIMRS dan MySQL di satu server**,
-  pola mayoritas, punya internet; (b) **server database terpisah**, tanpa
-  internet, dengan Tailscale. Server replika (dan panel) umumnya pola (b).
-  Konsekuensinya: panel tidak bisa mengandalkan internet di host-nya
-  sendiri (lihat 9.15), dan pemasangan MySQL di server kosong butuh
-  repositori paket yang bisa dijangkau (internet, proxy, atau mirror).
-- Karena pola (a) mayoritas, dua hal jadi kasus umum, bukan pengecualian:
-  MySQL master yang hanya mendengar di `127.0.0.1` sehingga butuh restart
-  produksi sekali saat menyiapkan master, dan master tumbang yang berarti
-  aplikasi SIMRS ikut mati.
-- Aplikasi SIMRS menunjuk database dengan IP tetap di konfigurasinya.
+  dikonfigurasi), lewat jaringan apa pun yang sudah ada (LAN, VPN). Panel
+  tidak membuat tunnel sendiri. Alamat yang didaftarkan untuk sebuah
+  server adalah alamat mana pun yang bisa dijangkau, dan alamat sumber
+  replikasi per topologi bisa diubah terpisah dari alamat agent.
+- Panel tidak boleh mengandalkan internet di host-nya sendiri; sebagian
+  server database tidak punya internet (lihat 9.15). Pemasangan MySQL di
+  server kosong butuh repositori paket yang bisa dijangkau (internet,
+  proxy, atau mirror).
+- Panel tidak mengasumsikan di mana aplikasi pengguna database berada.
+  MySQL master yang hanya mendengar di `127.0.0.1` (umum bila aplikasi
+  satu server dengan database) ditangani preflight seperti kasus lain:
+  butuh restart sekali saat menyiapkan master.
+- Aplikasi menunjuk database dengan alamat IP tetap di konfigurasinya.
 - Panel dipasang di salah satu server replika, bukan di master, agar
   panel tetap hidup saat master tumbang.
 - Tidak ada akses SSH antar server. Semua pekerjaan jarak jauh lewat
@@ -268,9 +267,9 @@ dalam tahap-tahap, masing-masing tampil dengan status, durasi, dan log:
    server_id`, `enforce_gtid_consistency=ON` lalu `gtid_mode` dinaikkan
    bertahap (OFF_PERMISSIVE -> ON_PERMISSIVE -> ON) sambil menunggu
    transaksi anonim habis, `INSTALL PLUGIN clone`, buat user replikasi.
-   Yang butuh restart (`log_bin` mati, `bind-address` hanya localhost,
-   kasus umum di server SIMRS+MySQL) **menghentikan job** dengan
-   penjelasan: apa yang diubah, bahwa SIMRS akan terputus beberapa detik,
+   Yang butuh restart (`log_bin` mati, `bind-address` hanya localhost)
+   **menghentikan job** dengan penjelasan: apa yang diubah, bahwa
+   aplikasi yang memakai database ini akan terputus beberapa detik,
    dan saran melakukannya di jam sepi. Tombol "Restart MySQL di master
    sekarang" harus ditekan manusia; agent menulis config dulu, memastikan
    config valid (`mysqld --validate-config`), baru restart, lalu job
@@ -381,15 +380,12 @@ itu dari master dan muat ulang di replika dengan `sql_log_bin=0`) atau
   ditandai **dikarantina**: saat agent-nya online lagi, agent langsung
   menyetel `super_read_only=ON` sebelum hal lain, dan panel menolak
   menjadikannya master sampai dibangun ulang.
-- Kedua promote diakhiri layar instruksi yang menyesuaikan pola server
-  (ditandai saat pendaftaran: "SIMRS ada di server ini?"). Bila SIMRS di
-  server terpisah: "Ubah alamat database di konfigurasi SIMRS ke <IP
-  baru>, lalu restart aplikasi". Bila SIMRS satu server dengan master
-  yang tumbang: instruksi menegaskan bahwa aplikasi juga mati dan harus
-  dijalankan di server lain yang menunjuk ke <IP baru>; panel tidak
-  memindahkan aplikasi. Tombol "Sudah saya alihkan" menutup job. Sampai
-  ditekan, dashboard menampilkan banner "Promote menunggu pengalihan
-  aplikasi".
+- Kedua promote diakhiri layar instruksi umum: "Arahkan semua aplikasi
+  yang memakai database ini ke <IP baru>, lalu restart aplikasinya",
+  disertai alamat lama dan baru. Panel tidak tahu dan tidak perlu tahu
+  aplikasi apa yang memakai database. Tombol "Sudah saya alihkan" menutup
+  job. Sampai ditekan, dashboard menampilkan banner "Promote menunggu
+  pengalihan aplikasi".
 - **Lepas replika** (berhenti dikelola, MySQL dibiarkan) dan **Hapus
   server** dari panel.
 
@@ -502,11 +498,10 @@ opsi tambahan. Bila repo dijadikan privat, `install.sh` memakai token
 baca yang dimasukkan user.
 
 9.15 **Pengiriman Telegram bisa dirutekan lewat agent yang punya
-internet.** Host panel (replika, pola b) biasanya tanpa internet,
-sedangkan server SIMRS+MySQL (pola a) punya. Pengaturan notifikasi
+internet.** Host panel belum tentu punya internet. Pengaturan notifikasi
 menyediakan: kirim langsung dari panel (dengan proxy HTTP opsional), atau
-kirim lewat agent pilihan (misalnya agent di server SIMRS), dengan
-urutan cadangan bila agent itu offline. Agent mendapat perintah
+kirim lewat agent pilihan yang punya internet, dengan urutan cadangan
+bila agent itu offline. Agent mendapat perintah
 `notify.telegram.send` yang hanya menerima teks pesan dan kredensial bot
 dari panel. Tombol "Kirim tes" mencoba jalur yang dipilih. Kanal
 notifikasi kedua (SMTP) ditunda. Pembaruan panel memakai jalur yang sama
@@ -533,11 +528,9 @@ js, aset), `scripts/` (install.sh, agent-install.sh.tmpl), `docs/`.
 
 ## 11. Jawaban pemilik produk atas pertanyaan builder check
 
-1. Semua tabel SIMRS InnoDB. Preflight tetap menjaga (bagian 4).
+1. Semua tabel aplikasi InnoDB. Preflight tetap menjaga (bagian 4).
 2. Versi MySQL di lapangan 8.0 sampai 9.x. Tidak ada 5.7/MariaDB.
 3. Tidak ada master yang tidak boleh dipasangi agent.
-4. Sebagian besar SIMRS satu server dengan MySQL master; sebagian
-   terpisah. Dicatat di batasan, alur siapkan master, dan instruksi
-   pasca-promote.
-5. Server gabungan SIMRS+database punya internet; server database
-   terpisah tidak, tapi punya Tailscale. Dicatat di batasan dan 9.15.
+4. Letak aplikasi relatif terhadap database bervariasi dan panel tidak
+   membedakannya; mekanisme replikasi sama. Dicatat di batasan.
+5. Tidak semua server punya internet. Dicatat di batasan dan 9.15.
