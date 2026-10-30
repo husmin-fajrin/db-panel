@@ -2,6 +2,8 @@ package panel
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/http"
@@ -141,10 +143,12 @@ func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps
 // and every response, the agent endpoints included, gets the security
 // headers of web.SecurityHeaders.
 func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
+	binDir := filepath.Join(p.opts.DataDir, "bin")
+	hashes := agentapi.NewBinHashes(binDir)
 	mux := http.NewServeMux()
 	mux.Handle("POST /agent/pair", agentapi.PairHandler(deps))
-	mux.Handle("GET /agent/install", agentapi.InstallScriptHandler(deps, p.PublicURL))
-	mux.Handle("GET /agent/bin/{arch}", agentapi.BinaryHandler(deps, filepath.Join(p.opts.DataDir, "bin")))
+	mux.Handle("GET /agent/install", agentapi.InstallScriptHandler(deps, p.PublicURL, hashes))
+	mux.Handle("GET /agent/bin/{arch}", agentapi.BinaryHandler(deps, binDir))
 	mux.Handle("/", web.NewRouter(web.Deps{
 		Store:       p.Store,
 		Hub:         p.Hub,
@@ -156,6 +160,16 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 		Now:         p.now,
 		Version:     p.opts.Version,
 		Logger:      p.log,
+		// The same parameters as GET /agent/install, so the hash in the
+		// pairing command is that of the script the endpoint serves.
+		InstallScriptSHA256: func(token string) (string, error) {
+			script, err := agentapi.RenderInstallScript(agentapi.NewInstallScriptParams(deps, p.PublicURL(), token, hashes))
+			if err != nil {
+				return "", err
+			}
+			sum := sha256.Sum256(script)
+			return hex.EncodeToString(sum[:]), nil
+		},
 	}))
 	// Headers outermost, so the 421 of a refused Host carries them too.
 	return web.SecurityHeaders(web.RequireHost(p.hostAllowed)(mux))

@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 # Pemasang agent dbpanel, dibuat oleh panel di PANEL_URL (lihat di bawah).
-# Jalankan di server database (bash; token tidak masuk argumen curl):
-#   curl -fsSL -K - <<<'url = "<alamat ini>"' | sudo bash
+# Perintah pairing di panel mengunduh skrip ini ke berkas, mencocokkan
+# sha256-nya dengan yang ditampilkan panel, baru menjalankannya dengan sudo.
 #
-# Skrip ini mengunduh binary dbpanel dari panel (tanpa internet), menulis
-# service systemd dbpanel-agent, memasangkan agent ke panel dengan token
-# sekali pakai, lalu menyalakan service. Aman dijalankan ulang.
+# Skrip ini mengunduh binary dbpanel dari panel (tanpa internet) dan
+# mencocokkan sha256-nya, menulis service systemd dbpanel-agent, memasangkan
+# agent ke panel dengan token sekali pakai (agent hanya menerima CA panel
+# dengan sidik jari CA_SHA256), lalu menyalakan service. Aman dijalankan
+# ulang.
 set -euo pipefail
 
 BIN=/usr/local/bin/dbpanel
 # Nilai dari panel, dalam kutip tunggal: shell tidak mengekspansi isinya.
 PANEL_URL={{shq .PanelURL}}
 AGENT_ADDR={{shq .AgentAddr}}
+# sha256 sertifikat CA panel (DER). Panel lain, mis. penyusup di jaringan
+# yang menjawab pairing, ditolak oleh "dbpanel agent pair".
+CA_SHA256={{shq .CASHA256}}
+# sha256 binary agent yang disajikan panel per arsitektur (kosong: panel
+# tidak punya binary untuk arsitektur itu).
+BIN_SHA256_AMD64={{shq (index .BinSHA256 "amd64")}}
+BIN_SHA256_ARM64={{shq (index .BinSHA256 "arm64")}}
 # Token sekali pakai. Tidak pernah ditaruh di argumen perintah (argv bisa
 # dibaca semua pengguna lewat ps): curl menerimanya lewat konfigurasi di
 # stdin, dbpanel lewat variabel lingkungan DBPANEL_TOKEN.
@@ -22,18 +31,19 @@ die() {
 	exit 1
 }
 
-main() {
-	if [ "$(id -u)" -ne 0 ]; then
-		die "Jalankan dengan sudo"
-	fi
-
-	local machine arch
+# download_agent installs the panel's dbpanel binary for this machine at
+# $BIN, after checking it against the hash the panel put in this script.
+download_agent() {
+	local machine arch want
 	machine=$(uname -m)
 	case "$machine" in
-	x86_64) arch=amd64 ;;
-	aarch64) arch=arm64 ;;
+	x86_64) arch=amd64 want=$BIN_SHA256_AMD64 ;;
+	aarch64) arch=arm64 want=$BIN_SHA256_ARM64 ;;
 	*) die "arsitektur tidak didukung: $machine" ;;
 	esac
+	if [ -z "$want" ]; then
+		die "binary untuk arsitektur ini belum tersedia di panel"
+	fi
 
 	echo "Mengunduh dbpanel ($arch) dari panel..."
 	trap 'rm -f "$BIN.new"' EXIT
@@ -54,8 +64,20 @@ main() {
 	if [ "$(head -c 4 "$BIN.new" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
 		die "Unduhan bukan binary yang valid (mungkin proxy/portal jaringan). Periksa koneksi ke panel."
 	fi
+	# The binary runs as root: it must be exactly the one the panel hashed.
+	if ! echo "$want  $BIN.new" | sha256sum -c --status -; then
+		die "Checksum binary agent tidak cocok; kemungkinan ada yang menyusup di jaringan"
+	fi
 	chmod 0755 "$BIN.new"
 	mv -f "$BIN.new" "$BIN"
+}
+
+main() {
+	if [ "$(id -u)" -ne 0 ]; then
+		die "Jalankan dengan sudo"
+	fi
+
+	download_agent
 
 	cat >/etc/systemd/system/dbpanel-agent.service <<'UNIT'
 [Unit]
@@ -88,7 +110,7 @@ WantedBy=multi-user.target
 UNIT
 
 	echo "Memasangkan agent ke panel..."
-	if ! DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL"; then
+	if ! DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"; then
 		die "Pairing gagal. Periksa token dan alamat panel, lalu ulangi."
 	fi
 

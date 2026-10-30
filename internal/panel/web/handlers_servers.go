@@ -151,21 +151,32 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 		p.TokenHidden = true
 		p.TokenExpires = tok.ExpiresAt
 	default:
-		p.Command = pairCommand(a.PublicURL(), tok.Token)
+		sum, err := a.InstallScriptSHA256(tok.Token)
+		if err != nil {
+			a.internalError(w, "install script hash", err)
+			return
+		}
+		p.Command = pairCommand(a.PublicURL(), tok.Token, sum)
 		p.TokenExpires = tok.ExpiresAt
 	}
 	a.render.Render(w, "server_detail", p)
 }
 
-// pairCommand is the command an operator runs on a new database server.
+// pairCommand is the command an operator runs on a new database server. It
+// saves the install script to a file, checks it against scriptSHA256 (the
+// hash of the script the panel serves for this token) and only then runs it
+// as root, so a script swapped on the network is never run (SEC-23).
+//
 // The URL with the token reaches curl as a config on stdin through a bash
 // here-string, which the shell writes to a pipe or temporary file, so the
 // token is in no process's argv (readable by every local user through
 // /proc). Single quotes: nothing in them is expanded, and "?" would be a
-// glob character in zsh. PublicURL is an IP or a validated host name and
-// the token is Crockford base32, so neither contains a quote.
-func pairCommand(publicURL, token string) string {
-	return `curl -fsSL -K - <<<'url = "` + publicURL + "/agent/install?token=" + token + `"' | sudo bash`
+// glob character in zsh. PublicURL is an IP or a validated host name, the
+// token is Crockford base32 and the hash is hex, so none contains a quote.
+func pairCommand(publicURL, token, scriptSHA256 string) string {
+	const file = "/tmp/dbpanel-agent.sh"
+	return `curl -fsSL -K - <<<'url = "` + publicURL + "/agent/install?token=" + token + `"' -o ` + file +
+		` && echo '` + scriptSHA256 + "  " + file + `' | sha256sum -c - && sudo bash ` + file
 }
 
 // newToken issues a fresh pairing token. For a paired server this starts a

@@ -3,6 +3,8 @@ package web_test
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,6 +33,13 @@ const (
 	testPublicURL = "http://192.168.1.10:8080"
 	testOrigin    = "http://example.com" // httptest.NewRequest uses Host example.com
 )
+
+// fakeScriptSHA256 stands in for the hash of the install script the panel
+// would serve for token.
+func fakeScriptSHA256(token string) (string, error) {
+	s := sha256.Sum256([]byte("skrip " + token))
+	return hex.EncodeToString(s[:]), nil
+}
 
 // adminHash uses the minimum bcrypt cost: auth.HashPassword's cost 12 makes
 // every login test take seconds (much more under -race).
@@ -112,15 +121,16 @@ func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 		broker:   web.NewBroker(),
 	}
 	d := web.Deps{
-		Store:     st,
-		Hub:       e.hub,
-		Sessions:  e.sessions,
-		Limiter:   auth.NewRateLimiter(5, 15*time.Minute, time.Now),
-		PublicURL: func() string { return testPublicURL },
-		Events:    e.broker,
-		Now:       time.Now,
-		Version:   "v-test",
-		Logger:    slog.New(slog.DiscardHandler),
+		Store:               st,
+		Hub:                 e.hub,
+		Sessions:            e.sessions,
+		Limiter:             auth.NewRateLimiter(5, 15*time.Minute, time.Now),
+		PublicURL:           func() string { return testPublicURL },
+		Events:              e.broker,
+		InstallScriptSHA256: fakeScriptSHA256,
+		Now:                 time.Now,
+		Version:             "v-test",
+		Logger:              slog.New(slog.DiscardHandler),
 	}
 	for _, m := range mods {
 		m(&d)
@@ -501,8 +511,11 @@ func TestCreateServerShowsPairingCommand(t *testing.T) {
 	}
 	rec = e.do("GET", loc, nil, c)
 	wantCode(t, rec, http.StatusOK)
+	sum, _ := fakeScriptSHA256(tok.Token)
 	wantBody(t, rec, "db-utama", "/agent/install?token=",
-		"curl -fsSL -K - &lt;&lt;&lt;&#39;url = &#34;"+testPublicURL+"/agent/install?token="+tok.Token+"&#34;&#39; | sudo bash",
+		"curl -fsSL -K - &lt;&lt;&lt;&#39;url = &#34;"+testPublicURL+"/agent/install?token="+tok.Token+
+			"&#34;&#39; -o /tmp/dbpanel-agent.sh &amp;&amp; echo &#39;"+sum+
+			"  /tmp/dbpanel-agent.sh&#39; | sha256sum -c - &amp;&amp; sudo bash /tmp/dbpanel-agent.sh",
 		`action="/servers/1/token"`, "Buat token baru")
 
 	// A new token replaces the old one in the command.
@@ -973,22 +986,39 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
-// TestPairCommandKeepsTokenOutOfArgv (SEC-02): run the command shown to
-// operators in bash with curl and sudo stubbed: the URL with the token
-// reaches curl on stdin, and curl's arguments do not contain the token.
+// TestPairCommandKeepsTokenOutOfArgv (SEC-02, SEC-23): run the command
+// shown to operators in bash with curl, sha256sum and sudo stubbed: the URL
+// with the token reaches curl on stdin, curl's arguments do not contain the
+// token, the script is saved to a file, checked against the panel's hash,
+// and only then run with sudo.
 func TestPairCommandKeepsTokenOutOfArgv(t *testing.T) {
 	const token = "ABCDE-FGHJK-MNPQR"
-	cmd := web.PairCommand(testPublicURL, token)
+	sum, _ := fakeScriptSHA256(token)
+	cmd := web.PairCommand(testPublicURL, token, sum)
 	script := `curl() { printf 'ARGS:%s\n' "$*"; cat; }
-sudo() { cat; }
+sha256sum() { printf 'SUM:%s\n' "$*"; cat; }
+sudo() { printf 'SUDO:%s\n' "$*"; }
 ` + cmd + "\n"
 	out, err := exec.Command("bash", "-c", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash: %v\n%s", err, out)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 || lines[0] != "ARGS:-fsSL -K -" ||
-		lines[1] != `url = "`+testPublicURL+`/agent/install?token=`+token+`"` {
-		t.Fatalf("curl saw:\n%s", out)
+	want := []string{
+		"ARGS:-fsSL -K - -o /tmp/dbpanel-agent.sh",
+		`url = "` + testPublicURL + `/agent/install?token=` + token + `"`,
+		"SUM:-c -",
+		sum + "  /tmp/dbpanel-agent.sh",
+		"SUDO:bash /tmp/dbpanel-agent.sh",
+	}
+	if got := strings.Split(strings.TrimSpace(string(out)), "\n"); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("command ran:\n%s\nwant:\n%s", out, strings.Join(want, "\n"))
+	}
+	// A failed check stops before sudo.
+	script = `curl() { cat >/dev/null; }
+sha256sum() { cat >/dev/null; return 1; }
+sudo() { echo SUDO; }
+` + cmd + "\n"
+	if out, _ := exec.Command("bash", "-c", script).CombinedOutput(); strings.Contains(string(out), "SUDO") {
+		t.Fatalf("sudo ran after a failed checksum:\n%s", out)
 	}
 }

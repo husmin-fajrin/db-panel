@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +25,9 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/agent"
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
+	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
+	"github.com/husmin-fajrin/db-panel/internal/panel/agentapi"
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -260,7 +266,7 @@ func TestRemoteAgentPairsAndIsProbed(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cfg, err := agent.Pair(ctx, p.PublicURL(), tok.Token, t.TempDir(), nil)
+	cfg, err := agent.Pair(ctx, p.PublicURL(), tok.Token, t.TempDir(), nil, agent.PairOptions{})
 	if err != nil {
 		t.Fatalf("Pair: %v", err)
 	}
@@ -315,7 +321,8 @@ func TestAgentInstallEndpoints(t *testing.T) {
 		"PANEL_URL='" + p.PublicURL() + "'\n",
 		"AGENT_ADDR='" + p.AgentAddr() + "'\n",
 		"TOKEN='" + tok.Token + "'\n",
-		`DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL"`,
+		`DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"`,
+		"CA_SHA256='" + agentapi.CAFingerprint(p.CA.CAPEM()) + "'\n",
 		"systemctl enable --now dbpanel-agent",
 	} {
 		if !strings.Contains(script, want) {
@@ -340,6 +347,161 @@ func TestAgentInstallEndpoints(t *testing.T) {
 	if _, err := p.Store.PeekPairToken(tok.Token, time.Now()); err != nil {
 		t.Fatalf("token after downloads: %v", err)
 	}
+}
+
+// pairCommandRE matches the pairing command on a server page (unescaped).
+var pairCommandRE = regexp.MustCompile(`curl -fsSL -K - <<<'url = "([^"]+)"' -o /tmp/dbpanel-agent\.sh && ` +
+	`echo '([0-9a-f]{64})  /tmp/dbpanel-agent\.sh' \| sha256sum -c - && sudo bash /tmp/dbpanel-agent\.sh`)
+
+// TestPairingCommandContainsScriptHash (SEC-23): the hash in the command
+// the UI shows is the sha256 of the script GET /agent/install serves for
+// that token, so the operator's shell can refuse a script swapped on the
+// way, and the script it vouches for pins the CA and the binary hash.
+func TestPairingCommandContainsScriptHash(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	uiAddr, _ := startPanel(t, p)
+	base := "http://" + uiAddr
+
+	// An arm64 build in <data dir>/bin: its hash goes into the script too.
+	binDir := filepath.Join(o.DataDir, "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "dbpanel_linux_arm64"), []byte("dbpanel arm64"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := p.Store.CreateServer("db-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := getBodyWith(t, base+"/servers/"+strconv.FormatInt(srv.ID, 10), login(t, o, base))
+	m := pairCommandRE.FindStringSubmatch(html.UnescapeString(page))
+	if m == nil {
+		t.Fatalf("no pairing command with a script hash on the server page:\n%s", page)
+	}
+	if want := p.PublicURL() + "/agent/install?token=" + tok.Token; m[1] != want {
+		t.Fatalf("command URL = %q, want %q", m[1], want)
+	}
+	script := getBody(t, m[1])
+	sum := sha256.Sum256([]byte(script))
+	if got := hex.EncodeToString(sum[:]); got != m[2] {
+		t.Fatalf("command says the script hash is %s, the served script hashes to %s", m[2], got)
+	}
+	armSum := sha256.Sum256([]byte("dbpanel arm64"))
+	for _, want := range []string{
+		"CA_SHA256='" + agentapi.CAFingerprint(p.CA.CAPEM()) + "'\n",
+		"BIN_SHA256_ARM64='" + hex.EncodeToString(armSum[:]) + "'\n",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script does not contain %q", want)
+		}
+	}
+}
+
+// TestPairRejectsCAMismatch (SEC-23): a pairing answer carrying a CA other
+// than the pinned one (an on-path attacker's) is refused and nothing is
+// written.
+func TestPairRejectsCAMismatch(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	startPanel(t, p)
+	srv, err := p.Store.CreateServer("db-ca")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := agentapi.CAFingerprint(p.CA.CAPEM())
+	wrong := []byte(pin)
+	// One hex digit changed.
+	if wrong[0] == '0' {
+		wrong[0] = '1'
+	} else {
+		wrong[0] = '0'
+	}
+	dir := t.TempDir()
+	_, err = agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil, agent.PairOptions{CASHA256: string(wrong)})
+	if err == nil || !strings.Contains(err.Error(), "CA panel tidak cocok dengan yang diharapkan") {
+		t.Fatalf("Pair with a wrong pin: err = %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("refused pairing wrote %v", entries)
+	}
+
+	// The right pin (any case) pairs.
+	tok, err = p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil,
+		agent.PairOptions{CASHA256: strings.ToUpper(pin)}); err != nil {
+		t.Fatalf("Pair with the right pin: %v", err)
+	}
+}
+
+// TestPairPinsAgentAddr (SEC-23): the agent dials the address from the
+// verified install script, not the one in the unauthenticated pairing
+// answer.
+func TestPairPinsAgentAddr(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	startPanel(t, p)
+	srv, err := p.Store.CreateServer("db-addr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pinned = "192.0.2.77:8443"
+	dir := t.TempDir()
+	cfg, err := agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil,
+		agent.PairOptions{CASHA256: agentapi.CAFingerprint(p.CA.CAPEM()), AgentAddr: pinned})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PanelAddr != pinned {
+		t.Fatalf("PanelAddr = %q, want %q (pinned), panel said %q", cfg.PanelAddr, pinned, p.AgentAddr())
+	}
+	saved, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.PanelAddr != pinned {
+		t.Fatalf("saved PanelAddr = %q, want %q", saved.PanelAddr, pinned)
+	}
+}
+
+// getBodyWith GETs url with cookie c, requires 200 and returns the body.
+func getBodyWith(t *testing.T, url string, c *http.Cookie) string {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(c)
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200", url, resp.StatusCode)
+	}
+	return string(b)
 }
 
 // getBody GETs url, requires 200 and returns the body.
@@ -636,7 +798,7 @@ func TestPanelRestartKeepsRemoteAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg, err := agent.Pair(ctx, p1.PublicURL(), tok.Token, t.TempDir(), nil)
+	cfg, err := agent.Pair(ctx, p1.PublicURL(), tok.Token, t.TempDir(), nil, agent.PairOptions{})
 	if err != nil {
 		cancel()
 		t.Fatalf("Pair: %v", err)

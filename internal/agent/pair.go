@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,11 +46,27 @@ const (
 	pairResponseSize = 1 << 20
 )
 
+// PairOptions pin what the pairing answer, which travels over plain HTTP,
+// may not choose by itself. Both come from the install script, whose hash
+// the operator checked against the panel UI.
+type PairOptions struct {
+	// CASHA256 is the sha256 (hex) of the panel CA certificate's DER. When
+	// set, a pairing answer carrying any other CA is refused before
+	// anything is written.
+	CASHA256 string
+	// AgentAddr, when set, is the host:port the agent dials, replacing the
+	// one in the pairing answer.
+	AgentAddr string
+}
+
+// ErrCAMismatch is Pair's error when the panel's CA is not the pinned one.
+var ErrCAMismatch = errors.New("CA panel tidak cocok dengan yang diharapkan")
+
 // Pair exchanges a one-time token for a client certificate. It generates the
 // agent's key locally, sends only a CSR, and on success writes agent.key,
 // agent.crt, ca.crt and finally agent.yaml into dir. A nil client uses one
 // with a 30 s timeout.
-func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client) (config.Config, error) {
+func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client, opts PairOptions) (config.Config, error) {
 	if client == nil {
 		client = &http.Client{Timeout: pairTimeout}
 	}
@@ -108,6 +125,20 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client)
 	if pr.ServerID <= 0 || pr.AgentAddr == "" {
 		return config.Config{}, errors.New("jawaban panel tidak lengkap")
 	}
+	if opts.CASHA256 != "" {
+		fp, err := ca.Fingerprint([]byte(pr.CAPEM))
+		if err != nil || !strings.EqualFold(fp, opts.CASHA256) {
+			return config.Config{}, ErrCAMismatch
+		}
+	}
+	panelAddr := pr.AgentAddr
+	if opts.AgentAddr != "" {
+		if opts.AgentAddr != pr.AgentAddr {
+			slog.Info("using the pinned agent address, not the one in the pairing answer",
+				"pinned", opts.AgentAddr, "answer", pr.AgentAddr)
+		}
+		panelAddr = opts.AgentAddr
+	}
 	// Reject a certificate that does not match our key or a CA that does not
 	// parse before anything is written.
 	if _, err := ca.AgentClientTLS([]byte(pr.CertPEM), keyPEM, []byte(pr.CAPEM)); err != nil {
@@ -115,7 +146,7 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client)
 	}
 
 	cfg := config.Config{
-		PanelAddr: pr.AgentAddr,
+		PanelAddr: panelAddr,
 		ServerID:  pr.ServerID,
 		CertFile:  filepath.Join(dir, "agent.crt"),
 		KeyFile:   filepath.Join(dir, "agent.key"),

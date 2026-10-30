@@ -31,12 +31,26 @@ unit_from() {
 # Render the agent template with sample values in place of its actions
 # (each value goes through shq, which single-quotes it).
 rendered="$tmp/agent-install.sh"
+sha_a=$(printf 'a%.0s' {1..64})
+sha_b=$(printf 'b%.0s' {1..64})
+sha_c=$(printf 'c%.0s' {1..64})
 sed -e "s|{{shq \.PanelURL}}|'http://192.0.2.10:8080'|g" \
 	-e "s|{{shq \.Token}}|'ABCDE-FGHJK-MNPQR'|g" \
 	-e "s|{{shq \.AgentAddr}}|'192.0.2.10:8443'|g" \
+	-e "s|{{shq \.CASHA256}}|'$sha_a'|g" \
+	-e "s|{{shq (index \.BinSHA256 \"amd64\")}}|'$sha_b'|g" \
+	-e "s|{{shq (index \.BinSHA256 \"arm64\")}}|'$sha_c'|g" \
 	"$AGENT_TEMPLATE" >"$rendered"
 if grep -q '{{' "$rendered"; then
-	fail "$AGENT_TEMPLATE memakai aksi template selain shq PanelURL, Token, AgentAddr"
+	fail "$AGENT_TEMPLATE memakai aksi template selain shq PanelURL, Token, AgentAddr, CASHA256, BinSHA256 amd64/arm64"
+fi
+# SEC-23: the agent pins the panel CA and the binary is checked.
+# shellcheck disable=SC2016 # the literal text of the script
+if ! grep -q -- '--ca-sha256 "$CA_SHA256"' "$rendered"; then
+	fail "$AGENT_TEMPLATE tidak memanggil agent pair dengan --ca-sha256"
+fi
+if ! grep -q 'sha256sum -c' "$rendered"; then
+	fail "$AGENT_TEMPLATE tidak memeriksa sha256 binary agent"
 fi
 # The token must never be on a command line (argv is visible in ps).
 if grep -n -- '--token' "$rendered"; then

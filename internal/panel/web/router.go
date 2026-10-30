@@ -54,6 +54,10 @@ type Deps struct {
 	// LoginConcurrency is the number of password checks allowed to run at
 	// once; 0 means min(4, max(1, NumCPU/2)).
 	LoginConcurrency int
+	// InstallScriptSHA256 returns the sha256 (hex) of the install script
+	// GET /agent/install serves for token. It goes into the pairing command,
+	// so the operator's shell refuses a script changed on the way.
+	InstallScriptSHA256 func(token string) (string, error)
 }
 
 // app carries the dependencies into the handlers.

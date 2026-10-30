@@ -3,11 +3,13 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,9 +24,9 @@ import (
 
 const usage = `Penggunaan:
   dbpanel agent [--dir DIR]                              jalankan agent
-  DBPANEL_TOKEN=TOKEN dbpanel agent pair --panel URL [--dir DIR]
-                                                         pasangkan agent ke panel
-  dbpanel agent pair --panel URL --token-stdin [--dir DIR]
+  DBPANEL_TOKEN=TOKEN dbpanel agent pair --panel URL --ca-sha256 HEX
+      [--agent-addr HOST:PORT] [--dir DIR]               pasangkan agent ke panel
+  dbpanel agent pair --panel URL --ca-sha256 HEX --token-stdin [--dir DIR]
                                                          idem, token dari stdin
   dbpanel agent version                                  tampilkan versi
 `
@@ -104,6 +106,9 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	panelURL := fs.String("panel", "", "alamat panel, mis. http://192.168.1.10:8080")
 	tokenFlag := fs.String("token", "", "token pemasangan (usang: terlihat di daftar proses; pakai "+tokenEnv+")")
 	tokenStdin := fs.Bool("token-stdin", false, "baca token pemasangan dari baris pertama stdin")
+	caPin := fs.String("ca-sha256", "", "sha256 sertifikat CA panel (64 digit heksadesimal, dari perintah pairing di panel)")
+	skipPin := fs.Bool("insecure-skip-ca-pin", false, "terima CA apa pun dari jawaban pairing (tidak aman)")
+	agentAddr := fs.String("agent-addr", "", "HOST:PORT listener agent di panel (menimpa jawaban pairing)")
 	dir := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -112,6 +117,25 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--panel wajib diisi")
 		fs.Usage()
 		return 2
+	}
+	// The pairing answer travels over plain HTTP; without a pin an on-path
+	// attacker could hand the agent its own CA and impersonate the panel.
+	switch {
+	case *caPin != "" && !validSHA256Hex(*caPin):
+		fmt.Fprintln(stderr, "--ca-sha256 harus 64 digit heksadesimal")
+		return 2
+	case *caPin == "" && !*skipPin:
+		fmt.Fprintln(stderr, "--ca-sha256 wajib (lihat perintah pairing di panel)")
+		fs.Usage()
+		return 2
+	case *caPin == "":
+		fmt.Fprintln(stderr, "Peringatan: verifikasi CA panel dimatikan")
+	}
+	if *agentAddr != "" {
+		if host, port, err := net.SplitHostPort(*agentAddr); err != nil || host == "" || port == "" {
+			fmt.Fprintln(stderr, "--agent-addr harus berbentuk HOST:PORT")
+			return 2
+		}
 	}
 	token, err := pairToken(*tokenFlag, *tokenStdin, stderr)
 	if err != nil {
@@ -128,7 +152,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cfg, err := Pair(ctx, *panelURL, token, *dir, nil)
+	cfg, err := Pair(ctx, *panelURL, token, *dir, nil, PairOptions{CASHA256: *caPin, AgentAddr: *agentAddr})
 	if err != nil {
 		fmt.Fprintf(stderr, "pemasangan gagal: %v\n", err)
 		return 1
@@ -136,6 +160,12 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Agent terpasang sebagai server #%d (panel %s). Jalankan: dbpanel agent --dir %s\n",
 		cfg.ServerID, cfg.PanelAddr, *dir)
 	return 0
+}
+
+// validSHA256Hex reports whether s is a sha256 in hex (either case).
+func validSHA256Hex(s string) bool {
+	b, err := hex.DecodeString(s)
+	return err == nil && len(b) == 32
 }
 
 // pairToken picks the pairing token: from stdin with --token-stdin, else

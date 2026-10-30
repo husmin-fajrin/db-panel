@@ -23,7 +23,7 @@ func TestPairRefusesPanelConfigDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := Main([]string{"pair", "--panel", "http://127.0.0.1:1", "--token", "AAAAA-BBBBB-CCCCC", "--dir", dir}, &stdout, &stderr)
+	code := Main([]string{"pair", "--panel", "http://127.0.0.1:1", "--ca-sha256", testCAPin, "--token", "AAAAA-BBBBB-CCCCC", "--dir", dir}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -73,8 +73,17 @@ func fakePairPanel(t *testing.T) (url string, tokens <-chan string) {
 	return ts.URL, ch
 }
 
-// runPair runs "agent pair" with the given environment and stdin.
+// testCAPin is a well-formed --ca-sha256 value.
+var testCAPin = strings.Repeat("ab", 32)
+
+// runPair runs "agent pair" with a CA pin and the given environment and stdin.
 func runPair(t *testing.T, env map[string]string, in string, args ...string) (code int, stderr string, token string, sent bool) {
+	t.Helper()
+	return runPairNoPin(t, env, in, append([]string{"--ca-sha256", testCAPin}, args...)...)
+}
+
+// runPairNoPin is runPair without the default --ca-sha256.
+func runPairNoPin(t *testing.T, env map[string]string, in string, args ...string) (code int, stderr string, token string, sent bool) {
 	t.Helper()
 	url, tokens := fakePairPanel(t)
 	oldEnv, oldIn := getenv, stdin
@@ -136,5 +145,37 @@ func TestPairTokenMissingOrConflicting(t *testing.T) {
 	}
 	if code, stderr, _, sent := runPair(t, nil, "X\n", "--token", "A", "--token-stdin"); code != 2 || sent {
 		t.Fatalf("both flags: code %d sent %v stderr %q", code, sent, stderr)
+	}
+}
+
+// TestCLIPairRequiresCAPin (SEC-23): without --ca-sha256 an on-path
+// attacker could hand the agent its own CA, so "agent pair" refuses to run
+// unless the operator explicitly opts out with --insecure-skip-ca-pin.
+func TestCLIPairRequiresCAPin(t *testing.T) {
+	env := map[string]string{"DBPANEL_TOKEN": "ENVTK-AAAAA-BBBBB"}
+	code, stderr, _, sent := runPairNoPin(t, env, "")
+	if code != 2 || sent || !strings.Contains(stderr, "--ca-sha256 wajib (lihat perintah pairing di panel)") {
+		t.Fatalf("no pin: code %d sent %v stderr %q", code, sent, stderr)
+	}
+	for _, bad := range []string{"abc", strings.Repeat("zz", 32), strings.Repeat("ab", 33)} {
+		if code, stderr, _, sent := runPairNoPin(t, env, "", "--ca-sha256", bad); code != 2 || sent {
+			t.Errorf("--ca-sha256 %q: code %d sent %v stderr %q", bad, code, sent, stderr)
+		}
+	}
+	if code, stderr, _, sent := runPairNoPin(t, env, "", "--ca-sha256", testCAPin, "--agent-addr", "tanpa-port"); code != 2 || sent {
+		t.Errorf("bad --agent-addr: code %d sent %v stderr %q", code, sent, stderr)
+	}
+
+	code, stderr, token, sent := runPairNoPin(t, env, "", "--insecure-skip-ca-pin")
+	if code != 1 || !sent || token != "ENVTK-AAAAA-BBBBB" {
+		t.Fatalf("skip pin: code %d sent %v token %q stderr %q", code, sent, token, stderr)
+	}
+	if !strings.Contains(stderr, "Peringatan: verifikasi CA panel dimatikan") {
+		t.Fatalf("skip pin: stderr %q lacks the warning", stderr)
+	}
+
+	code, stderr, _, sent = runPair(t, env, "", "--agent-addr", "192.0.2.10:8443")
+	if code != 1 || !sent || strings.Contains(stderr, "Peringatan") {
+		t.Fatalf("with pin: code %d sent %v stderr %q", code, sent, stderr)
 	}
 }

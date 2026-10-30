@@ -169,7 +169,7 @@ func (e *testEnv) pair(t *testing.T, token, dir string) config.Config {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	cfg, err := agent.Pair(ctx, e.pairURL, token, dir, nil)
+	cfg, err := agent.Pair(ctx, e.pairURL, token, dir, nil, agent.PairOptions{})
 	if err != nil {
 		t.Fatalf("pair: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestPairRejectsUsedToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	dir := t.TempDir()
-	_, err := agent.Pair(ctx, e.pairURL, token, dir, nil)
+	_, err := agent.Pair(ctx, e.pairURL, token, dir, nil, agent.PairOptions{})
 	if err == nil || !strings.Contains(err.Error(), "token ditolak") {
 		t.Fatalf("second pair: err = %v, want token ditolak", err)
 	}
@@ -364,7 +364,7 @@ func TestPairRefusesLocalServer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	if _, err := agent.Pair(ctx, e.pairURL, token, t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "token ditolak") {
+	if _, err := agent.Pair(ctx, e.pairURL, token, t.TempDir(), nil, agent.PairOptions{}); err == nil || !strings.Contains(err.Error(), "token ditolak") {
 		t.Fatalf("pairing the local server: err = %v, want token ditolak", err)
 	}
 	got, err := e.st.GetServer(srv.ID)

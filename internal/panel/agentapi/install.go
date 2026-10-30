@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/web"
 )
@@ -34,11 +35,63 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// installData fills agent-install.sh.tmpl.
-type installData struct {
+// InstallScriptParams fill agent-install.sh.tmpl.
+type InstallScriptParams struct {
 	PanelURL  string // UI base URL, e.g. http://192.168.1.10:8080
 	Token     string // pairing token (Crockford base32, safe in the script)
 	AgentAddr string // host:port of the mTLS agent listener
+	CASHA256  string // CAFingerprint of the panel's CA, pinned by the agent
+	// BinSHA256 maps an architecture (amd64, arm64) to the sha256 of the
+	// agent binary the panel serves for it; a missing one is rendered empty
+	// and the script refuses that architecture.
+	BinSHA256 map[string]string
+}
+
+// RenderInstallScript renders the agent install script. The output depends
+// only on p, so the UI can put its hash in the pairing command and the
+// operator's shell can check that the script GET /agent/install serves is
+// the one the panel rendered.
+func RenderInstallScript(p InstallScriptParams) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := installScript.Execute(&buf, p); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// CAFingerprint returns the sha256 (lowercase hex) of the DER of the CA
+// certificate in caPEM, or "" when caPEM is not exactly one certificate.
+func CAFingerprint(caPEM []byte) string {
+	fp, err := ca.Fingerprint(caPEM)
+	if err != nil {
+		return ""
+	}
+	return fp
+}
+
+// NewInstallScriptParams are the parameters GET /agent/install renders the
+// script with for token: the panel's public URL, its agent address, its CA
+// fingerprint and the hash of every agent binary it can serve. The UI uses
+// the same function, so the hash it shows matches the served script.
+func NewInstallScriptParams(d Deps, publicURL, token string, hashes *BinHashes) InstallScriptParams {
+	p := InstallScriptParams{
+		PanelURL:  publicURL,
+		Token:     token,
+		AgentAddr: d.AgentAddr(),
+		CASHA256:  CAFingerprint(d.CA.CAPEM()),
+		BinSHA256: map[string]string{},
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		sum, err := hashes.For(arch)
+		if err != nil {
+			if !errors.Is(err, errNoBinary) {
+				d.logger().Warn("hash agent binary", "arch", arch, "err", err)
+			}
+			continue
+		}
+		p.BinSHA256[arch] = sum
+	}
+	return p
 }
 
 // agentArches are the architectures agents are built for.
@@ -64,18 +117,14 @@ func (d Deps) peekToken(w http.ResponseWriter, r *http.Request, what string) (st
 // InstallScriptHandler serves GET /agent/install?token=T: the agent install
 // script for a valid, unused pairing token. The token is only checked, not
 // consumed; "dbpanel agent pair" run by the script consumes it.
-func InstallScriptHandler(d Deps, publicURL func() string) http.Handler {
+func InstallScriptHandler(d Deps, publicURL func() string, hashes *BinHashes) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pt, ok := d.peekToken(w, r, "install script")
 		if !ok {
 			return
 		}
-		var buf bytes.Buffer
-		if err := installScript.Execute(&buf, installData{
-			PanelURL:  publicURL(),
-			Token:     pt.Token,
-			AgentAddr: d.AgentAddr(),
-		}); err != nil {
+		script, err := RenderInstallScript(NewInstallScriptParams(d, publicURL(), pt.Token, hashes))
+		if err != nil {
 			d.logger().Error("render install script", "err", err)
 			http.Error(w, "kesalahan internal", http.StatusInternalServerError)
 			return
@@ -83,7 +132,7 @@ func InstallScriptHandler(d Deps, publicURL func() string) http.Handler {
 		d.logger().Info("agent install script served", "server_id", pt.ServerID, "remote", remoteIP(r))
 		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(buf.Bytes())
+		w.Write(script)
 	})
 }
 

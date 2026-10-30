@@ -88,15 +88,42 @@ menghapusnya (semua sesi yang sedang login juga berakhir).
 
 1. Di panel buka **Server > Tambah server**, isi nama, simpan.
 2. Salin perintah pemasangan yang ditampilkan, misalnya
-   `curl -fsSL -K - <<<'url = "http://192.168.1.10:8080/agent/install?token=..."' | sudo bash`.
+
+   ```sh
+   curl -fsSL -K - <<<'url = "http://192.168.1.10:8080/agent/install?token=..."' -o /tmp/dbpanel-agent.sh && echo '<sha256 skrip>  /tmp/dbpanel-agent.sh' | sha256sum -c - && sudo bash /tmp/dbpanel-agent.sh
+   ```
+
+   Perintah ini terdiri dari tiga langkah:
+   1. `curl` mengunduh skrip pemasang ke `/tmp/dbpanel-agent.sh`;
+   2. `sha256sum -c` mencocokkan isi skrip dengan sha256 yang ditampilkan
+      panel (dihitung dari skrip yang sama persis yang disajikan untuk token
+      itu);
+   3. hanya bila cocok, skrip dijalankan dengan `sudo`.
+
+   Pairing berjalan lewat HTTP polos, jadi pihak yang bisa menyadap atau
+   mengubah lalu lintas antara server database dan panel (on-path) bisa
+   mengganti skrip, binary agent, atau CA panel di jawaban pairing. Hash
+   menutup celah itu: skrip yang diubah ditolak oleh `sha256sum -c` sebelum
+   apa pun berjalan sebagai root. Skrip yang sudah terverifikasi membawa
+   sha256 binary agent (unduhan yang tidak cocok ditolak dengan "Checksum
+   binary agent tidak cocok; kemungkinan ada yang menyusup di jaringan") dan
+   sidik jari CA panel, yang diberikan ke `dbpanel agent pair --ca-sha256`:
+   agent menolak jawaban pairing dengan CA lain ("CA panel tidak cocok dengan
+   yang diharapkan") dan menghubungi alamat agent dari skrip
+   (`--agent-addr`), bukan dari jawaban pairing. Hash di perintah berubah
+   bila token, alamat panel, CA, atau binary agent di panel berubah; bila
+   `sha256sum -c` gagal tanpa alasan jelas, muat ulang halaman server lalu
+   salin perintah yang baru.
+
    Perintah ini butuh shell bash (atau zsh): URL bertoken diberikan ke
    `curl` lewat here-string (`<<<`), bukan sebagai argumen, sehingga token
    tidak terlihat di `ps`. Perintah tetap tercatat di riwayat shell; awali
    dengan spasi bila `HISTCONTROL` berisi `ignorespace`/`ignoreboth`
    (bawaan Ubuntu), atau jalankan `export HISTCONTROL=ignorespace` dulu.
 3. Jalankan perintah itu di server database. Binary agent diunduh dari
-   panel (tidak perlu internet), service `dbpanel-agent` dipasang, dan
-   agent dipasangkan dengan token sekali pakai.
+   panel (tidak perlu internet) dan diperiksa sha256-nya, service
+   `dbpanel-agent` dipasang, dan agent dipasangkan dengan token sekali pakai
+   serta CA panel yang dipin.
 4. Server tampil online di panel beserta info sistem dan MySQL.
 
 Server database harus bisa menjangkau panel di port 8080 (unduhan dan
@@ -149,7 +176,11 @@ walaupun flag tidak diberikan lagi.
   buat token baru. Skrip pemasang memberikan token ke `dbpanel agent pair`
   lewat variabel lingkungan `DBPANEL_TOKEN` (bukan argumen, yang terlihat di
   `ps`). Pairing manual: `sudo DBPANEL_TOKEN=... dbpanel agent pair --panel
-  http://<ip-panel>:8080`, atau `--token-stdin`.
+  http://<ip-panel>:8080 --ca-sha256 <sidik jari CA>`, atau `--token-stdin`.
+  Sidik jari CA ada di skrip pemasang (`CA_SHA256=...`), atau hitung di host
+  panel dengan `openssl x509 -in /etc/dbpanel/ca.crt -outform DER | sha256sum`.
+  `--ca-sha256` wajib; `--insecure-skip-ca-pin` mematikan pemeriksaan itu
+  (tidak aman, hanya untuk jaringan yang sepenuhnya tepercaya).
 - Service `dbpanel-panel` dan `dbpanel-agent` berjalan sebagai root
   (panel menjalankan agent tertanam untuk host-nya sendiri) dengan
   hardening systemd: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`,

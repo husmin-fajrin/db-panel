@@ -5,12 +5,15 @@
 package ca
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -335,6 +338,25 @@ func AgentClientTLS(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
 		ServerName:   PanelServerName,
 		MinVersion:   tls.VersionTLS13,
 	}, nil
+}
+
+// Fingerprint returns the sha256 (lowercase hex) of the DER of the one
+// certificate in certPEM. Anything else in certPEM (a second certificate,
+// trailing data) is an error: a CA bundle pinned by the fingerprint of its
+// first certificate could smuggle in another trusted root.
+func Fingerprint(certPEM []byte) (string, error) {
+	block, rest := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", errors.New("bukan PEM CERTIFICATE")
+	}
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return "", errors.New("PEM berisi lebih dari satu sertifikat")
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func parseCertPEM(b []byte) (*x509.Certificate, error) {
