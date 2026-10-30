@@ -40,12 +40,17 @@ release_url() {
 	fi
 }
 
+# listed DIR FILE reports whether DIR/SHA256SUMS has a line for FILE.
+# sha256sum -c --ignore-missing passes a file that SHA256SUMS does not
+# mention, so every check asks this first.
+listed() {
+	grep -qE "^[0-9a-f]{64} [ *]$2\$" "$1/SHA256SUMS"
+}
+
 # verify_sha256 DIR FILE checks DIR/FILE against its line in DIR/SHA256SUMS.
-# FILE must be listed: sha256sum --ignore-missing alone would pass a file
-# that SHA256SUMS does not mention.
 verify_sha256() {
 	local dir=$1 file=$2
-	grep -qE "^[0-9a-f]{64} [ *]$file\$" "$dir/SHA256SUMS" || return 1
+	listed "$dir" "$file" || return 1
 	(cd "$dir" && sha256sum -c --ignore-missing --quiet SHA256SUMS)
 }
 
@@ -95,13 +100,22 @@ copy_agent_binaries() {
 
 # fetch_agent_binaries DIR downloads dbpanel_linux_{amd64,arm64} and
 # SHA256SUMS of the release into DIR (skipping files install_binary already
-# put there) and checks them. It returns non-zero on any failure (it is
-# called from an if, where set -e does not apply).
+# put there) and checks them: a binary SHA256SUMS does not list is removed
+# with a warning (never served unchecked), and a mismatch fails. It returns
+# non-zero on any failure (it is called from an if, where set -e does not
+# apply).
 fetch_agent_binaries() {
-	local dir=$1 f
+	local dir=$1 f name
 	for f in dbpanel_linux_amd64 dbpanel_linux_arm64 SHA256SUMS; do
 		[ -f "$dir/$f" ] && continue
 		curl -fsSL "$(release_url "$f")" -o "$dir/$f" || return 1
+	done
+	for f in "$dir"/dbpanel_linux_*; do
+		name=${f##*/}
+		if [ -f "$f" ] && ! listed "$dir" "$name"; then
+			echo "Peringatan: $name tidak tercantum di SHA256SUMS; dilewati" >&2
+			rm -f "$f"
+		fi
 	done
 	(cd "$dir" && sha256sum -c --ignore-missing --quiet SHA256SUMS) || return 1
 }

@@ -41,7 +41,8 @@ const (
 	sessionTTL       = 12 * time.Hour // sliding: since the last request
 	sessionMaxAge    = 24 * time.Hour // absolute: since login
 	epochCacheTTL    = 5 * time.Second
-	loginMaxAttempts = 5
+	loginMaxAttempts = 5  // per client IP, every attempt
+	loginMaxFailures = 20 // per username, wrong passwords only
 	loginWindow      = 15 * time.Minute
 
 	defaultProbeInterval = 60 * time.Second
@@ -64,12 +65,13 @@ type Options struct {
 
 // Panel is an assembled panel, ready to Run.
 type Panel struct {
-	Store    *store.Store
-	CA       *ca.CA
-	Hub      *hub.Hub
-	Sessions *auth.Sessions
-	Limiter  *auth.RateLimiter
-	Broker   *web.Broker
+	Store       *store.Store
+	CA          *ca.CA
+	Hub         *hub.Hub
+	Sessions    *auth.Sessions
+	Limiter     *auth.RateLimiter // login attempts per IP
+	UserLimiter *auth.RateLimiter // failed logins per username
+	Broker      *web.Broker
 
 	opts          Options
 	log           *slog.Logger
@@ -77,6 +79,7 @@ type Panel struct {
 	now           func() time.Time
 	localID       int64
 	probeInterval time.Duration
+	readTimeout   time.Duration                // UI server ReadTimeout; tests shorten it
 	publish       func(event string, data any) // Broker.Publish; tests wrap it
 
 	addrMu       sync.Mutex
@@ -126,6 +129,7 @@ func New(o Options) (*Panel, error) {
 		Sessions: auth.NewSessions(sessionTTL, time.Now,
 			auth.WithMaxAge(sessionMaxAge), auth.WithValidator(epoch.valid)),
 		Limiter:       auth.NewRateLimiter(loginMaxAttempts, loginWindow, time.Now),
+		UserLimiter:   auth.NewRateLimiter(loginMaxFailures, loginWindow, time.Now),
 		epoch:         epoch,
 		evLogged:      make(map[int64]time.Time),
 		Broker:        web.NewBroker(),
@@ -133,6 +137,7 @@ func New(o Options) (*Panel, error) {
 		log:           o.Logger,
 		now:           time.Now,
 		probeInterval: defaultProbeInterval,
+		readTimeout:   readTimeout,
 	}
 	p.publish = p.Broker.Publish
 	p.Hub = hub.New(&listenerImpl{p: p})

@@ -17,6 +17,12 @@ const (
 	idleTimeout = 120 * time.Second
 )
 
+// readTimeout bounds reading a whole request, so a slow body cannot hold a
+// connection. An upgraded WebSocket is unaffected: net/http clears the
+// connection's deadlines when the handler hijacks it. A variable so tests
+// can shorten it.
+var readTimeout = 30 * time.Second
+
 // ListenAndServeAgents serves h over TLS on addr until ctx is done, then
 // shuts down within 5 s. It returns nil after a clean shutdown.
 func ListenAndServeAgents(ctx context.Context, addr string, tlsCfg *tls.Config, h http.Handler) error {
@@ -41,6 +47,7 @@ func ServeAgents(ctx context.Context, ln net.Listener, tlsCfg *tls.Config, h htt
 		Handler:           t.wrap(h),
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       readTimeout,
 		IdleTimeout:       idleTimeout,
 		BaseContext:       func(net.Listener) context.Context { return hctx },
 		// Agents speak HTTP/1.1 (WebSocket) only; a non-nil empty map turns

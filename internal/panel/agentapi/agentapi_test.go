@@ -673,3 +673,29 @@ func TestPairRejectsNonP256KeyWithoutConsumingToken(t *testing.T) {
 		t.Fatalf("token consumed by a rejected CSR: %v", err)
 	}
 }
+
+// TestAgentConnectionOutlivesReadTimeout (SEC-10): the agent listener's
+// ReadTimeout does not touch an upgraded WebSocket.
+func TestAgentConnectionOutlivesReadTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits past the read timeout")
+	}
+	t.Cleanup(agentapi.SetReadTimeout(time.Second))
+	e := newEnv(t)
+	id, token := e.newToken(t, 0)
+	cfg := e.pair(t, token, t.TempDir())
+	startAgent(t, cfg, stubRegistry())
+	waitID(t, e.l.online, "agent online")
+	time.Sleep(2500 * time.Millisecond)
+	select {
+	case got := <-e.l.offline:
+		t.Fatalf("server %d went offline within the read timeout", got)
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	var res stubProbe
+	if err := e.hub.Call(ctx, id, "probe", nil, &res); err != nil || res.Hostname != "stub-host" {
+		t.Fatalf("call after the read timeout: %+v %v", res, err)
+	}
+}

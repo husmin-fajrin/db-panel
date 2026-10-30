@@ -151,11 +151,21 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 		p.TokenHidden = true
 		p.TokenExpires = tok.ExpiresAt
 	default:
-		// Single quotes: "?" is a glob character in zsh and other shells.
-		p.Command = "curl -fsSL '" + a.PublicURL() + "/agent/install?token=" + tok.Token + "' | sudo bash"
+		p.Command = pairCommand(a.PublicURL(), tok.Token)
 		p.TokenExpires = tok.ExpiresAt
 	}
 	a.render.Render(w, "server_detail", p)
+}
+
+// pairCommand is the command an operator runs on a new database server.
+// The URL with the token reaches curl as a config on stdin through a bash
+// here-string, which the shell writes to a pipe or temporary file, so the
+// token is in no process's argv (readable by every local user through
+// /proc). Single quotes: nothing in them is expanded, and "?" would be a
+// glob character in zsh. PublicURL is an IP or a validated host name and
+// the token is Crockford base32, so neither contains a quote.
+func pairCommand(publicURL, token string) string {
+	return `curl -fsSL -K - <<<'url = "` + publicURL + "/agent/install?token=" + token + `"' | sudo bash`
 }
 
 // newToken issues a fresh pairing token. For a paired server this starts a

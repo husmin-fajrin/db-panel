@@ -66,6 +66,12 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer b.unsubscribe(ch)
 
 	rc := http.NewResponseController(w)
+	// This stream is meant to stay open. net/http already lifts the
+	// server's ReadTimeout once a request's body has been read; clearing
+	// both deadlines here keeps the stream independent of that detail and
+	// of a WriteTimeout, should one ever be set.
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(time.Time{})
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")

@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1080,4 +1081,69 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// slowBody sends a request whose body never arrives and returns how long
+// the server took to close the connection (or max if it did not).
+func slowBody(t *testing.T, addr, reqLine string, max time.Duration) time.Duration {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	start := time.Now()
+	fmt.Fprintf(c, "%s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 10000\r\n\r\n{", reqLine)
+	c.SetReadDeadline(time.Now().Add(max))
+	io.Copy(io.Discard, c) // returns when the server closes (or the deadline hits)
+	return time.Since(start)
+}
+
+// TestSlowBodyCut (SEC-10): a request body that never finishes is cut by
+// the UI server's ReadTimeout on any route, not only on form posts, while
+// the SSE stream stays open past that timeout.
+func TestSlowBodyCut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for read timeouts")
+	}
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	p.readTimeout = time.Second
+	uiAddr, _ := startPanel(t, p)
+	for _, line := range []string{"GET /login", "POST /agent/pair"} {
+		if d := slowBody(t, uiAddr, line, 10*time.Second); d > 5*time.Second {
+			t.Errorf("%s with a slow body held the connection %v, want it cut after ~1 s", line, d)
+		}
+	}
+
+	c := login(t, o, "http://"+uiAddr)
+	req, _ := http.NewRequest("GET", "http://"+uiAddr+"/events", nil)
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	time.Sleep(2500 * time.Millisecond) // well past the 1 s ReadTimeout
+	p.publish("server_status", map[string]any{"id": 99, "online": true})
+	got := make(chan string, 1)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			if strings.HasPrefix(sc.Text(), "event: server_status") {
+				got <- sc.Text()
+				return
+			}
+		}
+		got <- "stream ended: " + fmt.Sprint(sc.Err())
+	}()
+	select {
+	case s := <-got:
+		if s != "event: server_status" {
+			t.Fatalf("SSE after the read timeout: %s", s)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no SSE event after the read timeout")
+	}
 }

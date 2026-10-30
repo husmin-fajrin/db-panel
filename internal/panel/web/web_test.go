@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -219,18 +220,89 @@ func (e *env) loginFrom(ip, user, pw string) *httptest.ResponseRecorder {
 	return rec
 }
 
+// fastCheck is a password check without bcrypt's cost, for tests that make
+// many attempts; only testPassword matches.
+func fastCheck(_, pw string) bool { return pw == testPassword }
+
 // TestLoginRateLimitedPerUsername (SEC-05): rotating the source address does
-// not buy more guesses for one account.
+// not buy more than 20 wrong guesses per 15 min for one account, whatever
+// the case of the username.
 func TestLoginRateLimitedPerUsername(t *testing.T) {
-	e := newEnv(t)
-	for i := 1; i <= 5; i++ {
-		wantCode(t, e.loginFrom(fmt.Sprintf("10.9.0.%d", i), "admin", "salah"), http.StatusOK)
+	e := newEnv(t, func(d *web.Deps) { d.CheckPassword = fastCheck })
+	for i := 1; i <= 20; i++ {
+		user := "admin"
+		if i%2 == 0 {
+			user = "ADMIN" // same account key
+		}
+		wantCode(t, e.loginFrom(fmt.Sprintf("10.9.0.%d", i), user, "salah"), http.StatusOK)
 	}
-	rec := e.loginFrom("10.9.0.6", "admin", "salah")
+	rec := e.loginFrom("10.9.0.21", "admin", "salah")
 	wantCode(t, rec, http.StatusTooManyRequests)
 	wantBody(t, rec, "Terlalu banyak percobaan, coba lagi dalam 15 menit")
+	// Blocked even with the right password.
+	wantCode(t, e.loginFrom("10.9.0.22", "admin", testPassword), http.StatusTooManyRequests)
 	// Another username from a fresh address is not affected.
-	wantCode(t, e.loginFrom("10.9.0.7", "operator", "salah"), http.StatusOK)
+	wantCode(t, e.loginFrom("10.9.0.23", "operator", "salah"), http.StatusOK)
+}
+
+// TestLoginRejectsLongInput (R1): an over-long username or password is
+// refused with 400 before any limiter key or password check exists.
+func TestLoginRejectsLongInput(t *testing.T) {
+	var checks atomic.Int32
+	ipLim := auth.NewRateLimiter(5, 15*time.Minute, time.Now)
+	userLim := auth.NewRateLimiter(20, 15*time.Minute, time.Now)
+	e := newEnv(t, func(d *web.Deps) {
+		d.Limiter, d.UserLimiter = ipLim, userLim
+		d.CheckPassword = func(string, string) bool { checks.Add(1); return false }
+	})
+	for _, f := range []url.Values{
+		loginForm(strings.Repeat("u", 65), "x", ""),
+		loginForm("admin", strings.Repeat("p", 73), ""),
+	} {
+		rec := e.do("POST", "/login", f, nil)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, "Nama pengguna atau kata sandi terlalu panjang")
+	}
+	if n := ipLim.Len() + userLim.Len(); n != 0 || checks.Load() != 0 {
+		t.Fatalf("limiter keys %d, password checks %d; want 0 and 0", n, checks.Load())
+	}
+	// 64 and 72 bytes are still accepted.
+	wantCode(t, e.do("POST", "/login", loginForm(strings.Repeat("u", 64), strings.Repeat("p", 72), ""), nil), http.StatusOK)
+}
+
+// TestLoginFloodKeepsLimitersBounded (R1): a flood of distinct usernames
+// from rotating addresses cannot grow the limiters past their cap, and
+// long usernames never become keys at all.
+func TestLoginFloodKeepsLimitersBounded(t *testing.T) {
+	ipLim := auth.NewRateLimiter(5, 15*time.Minute, time.Now)
+	userLim := auth.NewRateLimiter(20, 15*time.Minute, time.Now)
+	ipLim.SetMaxKeys(50)
+	userLim.SetMaxKeys(50)
+	e := newEnv(t, func(d *web.Deps) {
+		d.Limiter, d.UserLimiter = ipLim, userLim
+		d.CheckPassword = fastCheck
+	})
+	long := strings.Repeat("x", 60<<10)
+	for i := 0; i < 500; i++ {
+		ip := fmt.Sprintf("10.%d.%d.1", i/250, i%250)
+		e.loginFrom(ip, fmt.Sprintf("%s%d", long, i), "x")
+	}
+	if n := ipLim.Len() + userLim.Len(); n != 0 {
+		t.Fatalf("long usernames created %d limiter keys", n)
+	}
+	refused := 0
+	for i := 0; i < 500; i++ {
+		ip := fmt.Sprintf("10.%d.%d.2", i/250, i%250)
+		if e.loginFrom(ip, fmt.Sprintf("user%d", i), "x").Code == http.StatusTooManyRequests {
+			refused++
+		}
+	}
+	if ipLim.Len() > 50 || userLim.Len() > 50 {
+		t.Fatalf("limiter keys ip %d user %d, want <= 50", ipLim.Len(), userLim.Len())
+	}
+	if refused < 400 {
+		t.Fatalf("refused %d of 500 new keys once full, want >= 400", refused)
+	}
 }
 
 // TestLoginConcurrencyCap (SEC-05): once the password-check slots are taken,
@@ -240,8 +312,10 @@ func TestLoginConcurrencyCap(t *testing.T) {
 		running atomic.Int32
 		release = make(chan struct{})
 	)
+	userLim := auth.NewRateLimiter(20, 15*time.Minute, time.Now)
 	e := newEnv(t, func(d *web.Deps) {
 		d.LoginConcurrency = 2
+		d.UserLimiter = userLim
 		d.CheckPassword = func(string, string) bool {
 			running.Add(1)
 			<-release
@@ -264,6 +338,11 @@ func TestLoginConcurrencyCap(t *testing.T) {
 	wg.Wait()
 	// Slots are free again.
 	wantCode(t, e.loginFrom("10.8.0.4", "u4", "x"), http.StatusOK)
+	// Failures counted per username: u1, u2, u4 (real mismatches), not u3,
+	// which was refused as busy.
+	if n := userLim.Len(); n != 3 {
+		t.Fatalf("per-username failures recorded for %d names, want 3", n)
+	}
 }
 
 func TestLoginSuccessSetsCookie(t *testing.T) {
@@ -423,7 +502,7 @@ func TestCreateServerShowsPairingCommand(t *testing.T) {
 	rec = e.do("GET", loc, nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "db-utama", "/agent/install?token=",
-		"curl -fsSL &#39;"+testPublicURL+"/agent/install?token="+tok.Token+"&#39; | sudo bash",
+		"curl -fsSL -K - &lt;&lt;&lt;&#39;url = &#34;"+testPublicURL+"/agent/install?token="+tok.Token+"&#34;&#39; | sudo bash",
 		`action="/servers/1/token"`, "Buat token baru")
 
 	// A new token replaces the old one in the command.
@@ -891,5 +970,25 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met within 5s")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestPairCommandKeepsTokenOutOfArgv (SEC-02): run the command shown to
+// operators in bash with curl and sudo stubbed: the URL with the token
+// reaches curl on stdin, and curl's arguments do not contain the token.
+func TestPairCommandKeepsTokenOutOfArgv(t *testing.T) {
+	const token = "ABCDE-FGHJK-MNPQR"
+	cmd := web.PairCommand(testPublicURL, token)
+	script := `curl() { printf 'ARGS:%s\n' "$*"; cat; }
+sudo() { cat; }
+` + cmd + "\n"
+	out, err := exec.Command("bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || lines[0] != "ARGS:-fsSL -K -" ||
+		lines[1] != `url = "`+testPublicURL+`/agent/install?token=`+token+`"` {
+		t.Fatalf("curl saw:\n%s", out)
 	}
 }

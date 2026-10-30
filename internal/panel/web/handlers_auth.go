@@ -1,6 +1,8 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/http"
@@ -16,7 +18,13 @@ const (
 	msgLoginFailed  = "Nama pengguna atau kata sandi salah"
 	msgLoginBlocked = "Terlalu banyak percobaan, coba lagi dalam 15 menit"
 	msgLoginBusy    = "Server sibuk, coba lagi sebentar"
-	msgForbidden    = "permintaan ditolak"
+	msgLoginTooLong = "Nama pengguna atau kata sandi terlalu panjang"
+
+	// Longer input is refused before any limiter or hashing: a username
+	// would otherwise become a limiter key, and bcrypt ignores bytes past 72.
+	maxUsernameLen = 64
+	maxPasswordLen = 72
+	msgForbidden   = "permintaan ditolak"
 )
 
 // dummyHash is a bcrypt hash (same cost as auth.HashPassword) checked when
@@ -44,10 +52,15 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		a.render.renderStatus(w, status, "login", p)
 	}
 
+	if len(username) > maxUsernameLen || len(password) > maxPasswordLen {
+		retry(http.StatusBadRequest, msgLoginTooLong)
+		return
+	}
 	ip := clientIP(r)
-	// Per IP, and per username so that rotating source addresses (IPv6
-	// link-local, IPv4 aliases) does not buy more guesses for one account.
-	if !a.Limiter.Allow("ip:"+ip) || !a.Limiter.Allow("user:"+username) {
+	userKey := usernameKey(username)
+	// Every attempt counts per IP; per username only wrong passwords count
+	// (below), so a flood refused as busy cannot lock an account out.
+	if !a.Limiter.Allow(ip) || a.UserLimiter.Blocked(userKey) {
 		a.Logger.Warn("login rate limited", "ip", ip)
 		retry(http.StatusTooManyRequests, msgLoginBlocked)
 		return
@@ -74,16 +87,24 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	}
 	// Always run bcrypt, even for an unknown user.
 	if ok := a.CheckPassword(hash, password); !ok || err != nil {
+		a.UserLimiter.Fail(userKey)
 		a.Logger.Info("login failed", "username", username, "ip", ip)
 		retry(http.StatusOK, msgLoginFailed)
 		return
 	}
 
-	a.Limiter.Reset("ip:" + ip)
-	a.Limiter.Reset("user:" + username)
+	a.Limiter.Reset(ip)
+	a.UserLimiter.Reset(userKey)
 	auth.SetSessionCookie(w, a.Sessions.Create(user.Username), r.TLS != nil)
 	a.Logger.Info("login", "username", user.Username, "ip", ip)
 	http.Redirect(w, r, safeNext(next), http.StatusSeeOther)
+}
+
+// usernameKey is the per-username limiter key: the hex SHA-256 of the
+// lowercased username, fixed-size whatever was typed.
+func usernameKey(username string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(username)))
+	return hex.EncodeToString(sum[:])
 }
 
 func (a *app) logout(w http.ResponseWriter, r *http.Request) {

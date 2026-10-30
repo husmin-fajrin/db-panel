@@ -113,6 +113,42 @@ for c in tampered unlisted; do
 	fi
 done
 
+# fetch_agent_binaries: an agent binary missing from SHA256SUMS is dropped
+# with a warning (not passed by --ignore-missing), a listed one that does
+# not match fails the whole fetch.
+fetch_case() {
+	(
+		# shellcheck source=/dev/null
+		source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
+		dl="$tmp/fetch-$1/dl"
+		served="$tmp/fetch-$1/served"
+		mkdir -p "$dl"
+		cp -r "$release" "$served"
+		case $1 in
+		unlisted) sed -i '/dbpanel_linux_arm64/d' "$served/SHA256SUMS" ;;
+		tampered) printf 'binary jahat' >"$served/dbpanel_linux_arm64" ;;
+		esac
+		# shellcheck disable=SC2329 # called by fetch_agent_binaries
+		curl() { # curl -fsSL URL -o FILE
+			cp "$served/${2##*/}" "$4"
+		}
+		fetch_agent_binaries "$dl"
+	) 2>&1
+}
+if ! out=$(fetch_case good) || [ ! -f "$tmp/fetch-good/dl/dbpanel_linux_arm64" ]; then
+	fail "fetch_agent_binaries menolak rilis yang benar: $out"
+fi
+if ! out=$(fetch_case unlisted); then
+	fail "fetch_agent_binaries gagal karena arm64 tidak tercantum (harusnya dilewati): $out"
+elif [ -e "$tmp/fetch-unlisted/dl/dbpanel_linux_arm64" ] || [[ $out != *"dbpanel_linux_arm64 tidak tercantum di SHA256SUMS; dilewati"* ]]; then
+	fail "fetch_agent_binaries tidak membuang arm64 yang tidak tercantum: $out"
+elif [ ! -f "$tmp/fetch-unlisted/dl/dbpanel_linux_amd64" ]; then
+	fail "fetch_agent_binaries membuang amd64 yang tercantum"
+fi
+if out=$(fetch_case tampered); then
+	fail "fetch_agent_binaries menerima arm64 yang tidak cocok: $out"
+fi
+
 if command -v shellcheck >/dev/null 2>&1; then
 	if ! shellcheck "$PANEL_SCRIPT" "$rendered" scripts/install_test.sh; then
 		fail shellcheck

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pemasang agent dbpanel, dibuat oleh panel di PANEL_URL (lihat di bawah).
-# Jalankan di server database: curl -fsSL "<alamat ini>" | sudo bash
+# Jalankan di server database (bash; token tidak masuk argumen curl):
+#   curl -fsSL -K - <<<'url = "<alamat ini>"' | sudo bash
 #
 # Skrip ini mengunduh binary dbpanel dari panel (tanpa internet), menulis
 # service systemd dbpanel-agent, memasangkan agent ke panel dengan token

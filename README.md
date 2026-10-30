@@ -35,8 +35,10 @@ sudo DBPANEL_BIN=/path/ke/dbpanel bash install.sh
 **Binary agent untuk arsitektur lain:** panel selalu bisa membagikan
 binary-nya sendiri ke server dengan arsitektur yang sama. Pemasangan online
 juga mengunduh `dbpanel_linux_amd64` dan `dbpanel_linux_arm64` dari rilis
-yang sama (dicocokkan dengan `SHA256SUMS` rilis itu; lihat "Keamanan
-rilis" untuk batasnya), sehingga server arm64 bisa
+yang sama dan mencocokkannya dengan `SHA256SUMS` rilis itu: binary yang
+tidak tercantum di `SHA256SUMS` dibuang dengan peringatan, dan binary yang
+tidak cocok membatalkan penyalinan binary agent (lihat "Keamanan rilis"
+untuk batas pemeriksaan ini). Dengan begitu server arm64 bisa
 dipasangkan ke panel amd64 dan sebaliknya; bila unduhan itu gagal, skrip
 hanya memberi peringatan. Untuk pemasangan offline, berikan direktori berisi
 `dbpanel_linux_amd64` dan/atau `dbpanel_linux_arm64`. Berkas ini dibuat oleh
@@ -75,11 +77,23 @@ sudo dbpanel panel reset-password
 beberapa detik, tanpa restart panel). Sesi berakhir setelah 12 jam tanpa
 aktivitas dan paling lama 24 jam setelah login.
 
+Login dibatasi 5 percobaan per alamat IP dan 20 sandi salah per nama
+pengguna dalam 15 menit, dan hanya beberapa pemeriksaan sandi yang berjalan
+bersamaan (selebihnya "Server sibuk, coba lagi sebentar"). Bila akun
+terkunci, misalnya karena orang lain sengaja salah sandi berulang kali,
+penghitung itu ada di memori panel: `sudo systemctl restart dbpanel-panel`
+menghapusnya (semua sesi yang sedang login juga berakhir).
+
 ## Tambah server database
 
 1. Di panel buka **Server > Tambah server**, isi nama, simpan.
 2. Salin perintah pemasangan yang ditampilkan, misalnya
-   `curl -fsSL 'http://192.168.1.10:8080/agent/install?token=...' | sudo bash`.
+   `curl -fsSL -K - <<<'url = "http://192.168.1.10:8080/agent/install?token=..."' | sudo bash`.
+   Perintah ini butuh shell bash (atau zsh): URL bertoken diberikan ke
+   `curl` lewat here-string (`<<<`), bukan sebagai argumen, sehingga token
+   tidak terlihat di `ps`. Perintah tetap tercatat di riwayat shell; awali
+   dengan spasi bila `HISTCONTROL` berisi `ignorespace`/`ignoreboth`
+   (bawaan Ubuntu), atau jalankan `export HISTCONTROL=ignorespace` dulu.
 3. Jalankan perintah itu di server database. Binary agent diunduh dari
    panel (tidak perlu internet), service `dbpanel-agent` dipasang, dan
    agent dipasangkan dengan token sekali pakai.

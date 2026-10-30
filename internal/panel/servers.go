@@ -16,9 +16,10 @@ import (
 
 const (
 	readHeaderTimeout = 10 * time.Second
-	// idleTimeout closes keep-alive connections idle between requests. There
-	// is no ReadTimeout: it would also cut the long-lived SSE stream. Form
-	// posts get their own body size and read deadline in the web package.
+	// readTimeout bounds reading a whole request, body included, so a slow
+	// body cannot hold a connection; the SSE stream clears it for itself.
+	readTimeout = 30 * time.Second
+	// idleTimeout closes keep-alive connections idle between requests.
 	idleTimeout     = 120 * time.Second
 	maxHeaderBytes  = 64 << 10
 	shutdownTimeout = 5 * time.Second
@@ -105,6 +106,7 @@ func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps
 	srv := &http.Server{
 		Handler:           p.uiHandler(deps),
 		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       p.readTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
@@ -144,15 +146,16 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 	mux.Handle("GET /agent/install", agentapi.InstallScriptHandler(deps, p.PublicURL))
 	mux.Handle("GET /agent/bin/{arch}", agentapi.BinaryHandler(deps, filepath.Join(p.opts.DataDir, "bin")))
 	mux.Handle("/", web.NewRouter(web.Deps{
-		Store:     p.Store,
-		Hub:       p.Hub,
-		Sessions:  p.Sessions,
-		Limiter:   p.Limiter,
-		PublicURL: p.PublicURL,
-		Events:    p.Broker,
-		Now:       p.now,
-		Version:   p.opts.Version,
-		Logger:    p.log,
+		Store:       p.Store,
+		Hub:         p.Hub,
+		Sessions:    p.Sessions,
+		Limiter:     p.Limiter,
+		UserLimiter: p.UserLimiter,
+		PublicURL:   p.PublicURL,
+		Events:      p.Broker,
+		Now:         p.now,
+		Version:     p.opts.Version,
+		Logger:      p.log,
 	}))
 	// Headers outermost, so the 421 of a refused Host carries them too.
 	return web.SecurityHeaders(web.RequireHost(p.hostAllowed)(mux))

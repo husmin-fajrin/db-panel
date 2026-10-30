@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -411,5 +412,57 @@ func TestSessionsValidator(t *testing.T) {
 	s.mu.Unlock()
 	if present {
 		t.Error("invalidated session not deleted")
+	}
+}
+
+// TestRateLimiterBounded (R1): the number of tracked keys never exceeds
+// maxKeys; expired keys make room, and new keys are refused while full.
+func TestRateLimiterBounded(t *testing.T) {
+	c := newClock()
+	r := NewRateLimiter(5, time.Minute, c.now)
+	r.SetMaxKeys(100)
+	for i := 0; i < 1000; i++ {
+		r.Allow(fmt.Sprintf("k%d", i))
+		r.Fail(fmt.Sprintf("f%d", i))
+	}
+	if n := r.Len(); n != 100 {
+		t.Fatalf("keys = %d, want 100 (the cap)", n)
+	}
+	if r.Allow("baru") || !r.Blocked("baru") {
+		t.Fatal("new key accepted while full")
+	}
+	if !r.Allow("k0") {
+		t.Fatal("known key refused while full")
+	}
+	c.advance(2 * time.Minute)
+	if !r.Allow("baru") || r.Len() != 1 {
+		t.Fatalf("after expiry: new key refused or not evicted (keys %d)", r.Len())
+	}
+	if DefaultMaxKeys != 10000 {
+		t.Fatalf("DefaultMaxKeys = %d", DefaultMaxKeys)
+	}
+}
+
+// TestRateLimiterBlockedAndFail: Blocked records nothing; Fail counts.
+func TestRateLimiterBlockedAndFail(t *testing.T) {
+	c := newClock()
+	r := NewRateLimiter(3, time.Minute, c.now)
+	for i := 0; i < 10; i++ {
+		if r.Blocked("u") {
+			t.Fatal("Blocked counted attempts")
+		}
+	}
+	if r.Len() != 0 {
+		t.Fatalf("Blocked created %d keys", r.Len())
+	}
+	for i := 0; i < 3; i++ {
+		r.Fail("u")
+	}
+	if !r.Blocked("u") {
+		t.Fatal("not blocked after 3 failures")
+	}
+	c.advance(time.Minute)
+	if r.Blocked("u") {
+		t.Fatal("still blocked after the window")
 	}
 }

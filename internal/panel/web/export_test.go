@@ -6,3 +6,6 @@ func SubscriberCount(b *Broker) int {
 	defer b.mu.Unlock()
 	return len(b.subs)
 }
+
+// PairCommand exposes pairCommand to web_test.
+var PairCommand = pairCommand

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,28 +20,39 @@ import (
 const msgInternal = "Terjadi kesalahan pada panel. Lihat log panel untuk detailnya."
 
 // defaultLoginConcurrency caps how many password checks (bcrypt, ~0.3 s of
-// CPU each) run at once; further login attempts get 429 straight away.
-const defaultLoginConcurrency = 4
+// CPU each) run at once: half the CPUs, at least 1 and at most 4. Further
+// login attempts get 429 straight away.
+var defaultLoginConcurrency = min(4, max(1, runtime.NumCPU()/2))
+
+// Default per-username limit when Deps.UserLimiter is nil.
+const (
+	defaultUserMaxFailures = 20
+	defaultUserWindow      = 15 * time.Minute
+)
 
 // Deps are the panel services the UI uses. All fields except Now, Version,
-// Logger, CheckPassword and LoginConcurrency are required. Sessions and
-// Limiter are configured (TTL, limits) by the caller; Limiter counts login
-// attempts both per client IP and per username.
+// Logger, CheckPassword, LoginConcurrency and UserLimiter are required.
+// Sessions and the limiters are configured (TTL, limits) by the caller.
 type Deps struct {
-	Store     *store.Store
-	Hub       *hub.Hub
-	Sessions  *auth.Sessions
-	Limiter   *auth.RateLimiter
-	PublicURL func() string // e.g. "http://192.168.1.10:8080", used in the pairing command
-	Events    *Broker
-	Now       func() time.Time // nil means time.Now
-	Version   string
-	Logger    *slog.Logger // nil means slog.Default()
+	Store    *store.Store
+	Hub      *hub.Hub
+	Sessions *auth.Sessions
+	// Limiter counts every login attempt per client IP.
+	Limiter *auth.RateLimiter
+	// UserLimiter counts failed logins (wrong password) per username, so
+	// rotating source addresses does not buy more guesses for one account;
+	// nil means 20 per 15 minutes.
+	UserLimiter *auth.RateLimiter
+	PublicURL   func() string // e.g. "http://192.168.1.10:8080", used in the pairing command
+	Events      *Broker
+	Now         func() time.Time // nil means time.Now
+	Version     string
+	Logger      *slog.Logger // nil means slog.Default()
 	// CheckPassword compares a password with a stored hash; nil means
 	// auth.CheckPassword. Tests replace it with a slow fake.
 	CheckPassword func(hash, password string) bool
 	// LoginConcurrency is the number of password checks allowed to run at
-	// once; 0 means 4.
+	// once; 0 means min(4, max(1, NumCPU/2)).
 	LoginConcurrency int
 }
 
@@ -66,6 +78,9 @@ func NewRouter(d Deps) http.Handler {
 	}
 	if d.LoginConcurrency <= 0 {
 		d.LoginConcurrency = defaultLoginConcurrency
+	}
+	if d.UserLimiter == nil {
+		d.UserLimiter = auth.NewRateLimiter(defaultUserMaxFailures, defaultUserWindow, d.Now)
 	}
 	render, err := NewRenderer()
 	if err != nil {
