@@ -22,23 +22,26 @@ membuat `/etc/dbpanel/` (0700) dan `/var/lib/dbpanel/`, memasang service
 Rilis tertentu: tambahkan `DBPANEL_VERSION=v0.1.0` sebelum `bash`
 (`... | sudo DBPANEL_VERSION=v0.1.0 bash`).
 
-**Tanpa internet (offline):** salin binary dan `scripts/install.sh` ke
-server, lalu:
+**Tanpa internet (offline):** salin binary (dari halaman rilis, atau
+`dist/dbpanel` hasil `make build`) dan `scripts/install.sh` ke server, lalu:
 
 ```sh
-sudo DBPANEL_BIN=/path/ke/dbpanel_linux_amd64 bash install.sh
+sudo DBPANEL_BIN=/path/ke/dbpanel bash install.sh
 ```
 
 **Binary agent untuk arsitektur lain:** panel selalu bisa membagikan
 binary-nya sendiri ke server dengan arsitektur yang sama. Agar server arm64
 bisa dipasangkan ke panel amd64 (atau sebaliknya), berikan direktori berisi
-`dbpanel_linux_amd64` dan/atau `dbpanel_linux_arm64`:
+`dbpanel_linux_amd64` dan/atau `dbpanel_linux_arm64`. Berkas ini dibuat oleh
+`make release` (segera hadir; `make build` hanya membuat `dist/dbpanel`):
 
 ```sh
+make release   # segera hadir: dist/dbpanel_linux_amd64, dist/dbpanel_linux_arm64
 sudo DBPANEL_BIN=dist/dbpanel_linux_amd64 DBPANEL_BIN_DIR=dist bash scripts/install.sh
 ```
 
-Berkas `dbpanel_linux_*` disalin ke `/var/lib/dbpanel/bin/`. Skrip aman
+Berkas `dbpanel_linux_amd64`/`dbpanel_linux_arm64` disalin ke
+`/var/lib/dbpanel/bin/` (nama lain diabaikan). Skrip aman
 dijalankan ulang untuk memperbarui panel: binary diganti dan service dimulai
 ulang.
 
@@ -62,7 +65,7 @@ sudo dbpanel panel reset-password
 
 1. Di panel buka **Server > Tambah server**, isi nama, simpan.
 2. Salin perintah pemasangan yang ditampilkan, misalnya
-   `curl -sSL http://192.168.1.10:8080/agent/install?token=... | sudo bash`.
+   `curl -fsSL http://192.168.1.10:8080/agent/install?token=... | sudo bash`.
 3. Jalankan perintah itu di server database. Binary agent diunduh dari
    panel (tidak perlu internet), service `dbpanel-agent` dipasang, dan
    agent dipasangkan dengan token sekali pakai.

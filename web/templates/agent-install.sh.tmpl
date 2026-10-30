@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pemasang agent dbpanel, dibuat oleh panel {{.PanelURL}}.
-# Jalankan di server database: curl -sSL "<alamat ini>" | sudo bash
+# Jalankan di server database: curl -fsSL "<alamat ini>" | sudo bash
 #
 # Skrip ini mengunduh binary dbpanel dari panel (tanpa internet), menulis
 # service systemd dbpanel-agent, memasangkan agent ke panel dengan token
@@ -29,8 +29,15 @@ main() {
 
 	echo "Mengunduh dbpanel ($arch) dari panel..."
 	trap 'rm -f "$BIN.new"' EXIT
-	if ! curl -fsSL "{{.PanelURL}}/agent/bin/${arch}?token={{.Token}}" -o "$BIN.new"; then
-		die "Gagal mengunduh binary dari panel. Periksa token dan alamat panel, lalu ulangi."
+	# No curl -f: on an error the body is the panel's own message (e.g. no
+	# binary for this arch), which -f would discard. --fail-with-body needs
+	# curl 7.76, newer than RHEL 8 and Ubuntu 20.04 ship.
+	local code
+	if ! code=$(curl -sSL -o "$BIN.new" -w '%{http_code}' "{{.PanelURL}}/agent/bin/${arch}?token={{.Token}}"); then
+		die "Gagal menghubungi panel {{.PanelURL}}. Periksa alamat panel dan jaringan, lalu ulangi."
+	fi
+	if [ "$code" != 200 ]; then
+		die "Panel menolak unduhan binary (HTTP $code): $(head -c 512 "$BIN.new")"
 	fi
 	chmod 0755 "$BIN.new"
 	mv -f "$BIN.new" "$BIN"
@@ -61,11 +68,18 @@ UNIT
 	if systemctl is-active --quiet dbpanel-agent; then
 		was_active=1
 	fi
-	systemctl daemon-reload && systemctl enable --now dbpanel-agent
+	# Separate statements: set -e would ignore a failure early in an && list.
+	systemctl daemon-reload || die "Gagal memuat ulang systemd (systemctl daemon-reload)."
+	systemctl enable --now dbpanel-agent || die "Gagal menyalakan service dbpanel-agent. Periksa: journalctl -u dbpanel-agent"
 	if [ "$was_active" -eq 1 ]; then
-		systemctl restart dbpanel-agent
+		systemctl restart dbpanel-agent || die "Gagal memulai ulang service dbpanel-agent. Periksa: journalctl -u dbpanel-agent"
 	fi
 
+	# Give a crashing agent time to exit (or sit in auto-restart) first.
+	sleep 3
+	if ! systemctl is-active --quiet dbpanel-agent; then
+		die "Agent terpasang tetapi service tidak berjalan. Periksa: journalctl -u dbpanel-agent"
+	fi
 	echo "Agent terpasang dan terhubung ke panel"
 	echo "Bila server tetap offline di panel, pastikan server ini dapat menjangkau {{.AgentAddr}}."
 }

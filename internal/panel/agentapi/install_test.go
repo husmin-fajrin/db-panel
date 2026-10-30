@@ -100,12 +100,14 @@ func TestInstallScriptRendersToken(t *testing.T) {
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
 		"systemctl enable --now dbpanel-agent",
-		`"` + installPanelURL + `/agent/bin/${arch}?token=` + token + `"`,
+		`curl -sSL -o "$BIN.new" -w '%{http_code}' "` + installPanelURL + `/agent/bin/${arch}?token=` + token + `"`,
 		`agent pair --panel "` + installPanelURL + `" --token "` + token + `"`,
 		installAgentAddr,
 		"Jalankan dengan sudo",
 		"Pairing gagal. Periksa token dan alamat panel, lalu ulangi.",
 		"Agent terpasang dan terhubung ke panel",
+		"systemctl is-active --quiet dbpanel-agent",
+		"Agent terpasang tetapi service tidak berjalan. Periksa: journalctl -u dbpanel-agent",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script does not contain %q", want)
@@ -113,6 +115,11 @@ func TestInstallScriptRendersToken(t *testing.T) {
 	}
 	if strings.Contains(script, "{{") || strings.Contains(script, "set -x") {
 		t.Error("script has an unrendered action or set -x")
+	}
+	// set -e ignores a failure anywhere but last in an && list, so each
+	// systemctl step must stand alone.
+	if strings.Contains(script, "daemon-reload &&") {
+		t.Error("script chains systemctl daemon-reload with &&")
 	}
 
 	// The script is served from the token without consuming it, so the

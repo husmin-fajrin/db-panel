@@ -46,19 +46,24 @@ install_binary() {
 	mv -f "$BIN.new" "$BIN"
 }
 
-# copy_agent_binaries copies DBPANEL_BIN_DIR/dbpanel_linux_* to the directory
-# the panel serves agent binaries from.
+# copy_agent_binaries copies DBPANEL_BIN_DIR/dbpanel_linux_{amd64,arm64} to
+# the directory the panel serves agent binaries from, each one atomically.
 copy_agent_binaries() {
-	local dir=$DATA_DIR/bin files
+	local dir=$DATA_DIR/bin f name copied=()
 	[ -d "$DBPANEL_BIN_DIR" ] || die "DBPANEL_BIN_DIR bukan direktori: $DBPANEL_BIN_DIR"
-	shopt -s nullglob
-	files=("$DBPANEL_BIN_DIR"/dbpanel_linux_*)
-	shopt -u nullglob
-	[ "${#files[@]}" -gt 0 ] || die "Tidak ada berkas dbpanel_linux_* di $DBPANEL_BIN_DIR"
 	mkdir -p "$dir"
 	chmod 0750 "$dir"
-	install -m 0644 "${files[@]}" "$dir/"
-	echo "Binary agent disalin ke $dir: ${files[*]##*/}"
+	for f in "$DBPANEL_BIN_DIR"/dbpanel_linux_*; do
+		name=${f##*/}
+		if [[ ! -f $f || ! $name =~ ^dbpanel_linux_(amd64|arm64)$ ]]; then
+			continue
+		fi
+		install -m 0644 "$f" "$dir/$name.new"
+		mv -f "$dir/$name.new" "$dir/$name"
+		copied+=("$name")
+	done
+	[ "${#copied[@]}" -gt 0 ] || die "Tidak ada dbpanel_linux_amd64 atau dbpanel_linux_arm64 di $DBPANEL_BIN_DIR"
+	echo "Binary agent disalin ke $dir: ${copied[*]}"
 }
 
 main() {
@@ -109,9 +114,11 @@ UNIT
 	if systemctl is-active --quiet dbpanel-panel; then
 		was_active=1
 	fi
-	systemctl daemon-reload && systemctl enable --now dbpanel-panel
+	# Separate statements: set -e would ignore a failure early in an && list.
+	systemctl daemon-reload || die "Gagal memuat ulang systemd (systemctl daemon-reload)."
+	systemctl enable --now dbpanel-panel || die "Gagal menyalakan service dbpanel-panel. Periksa: journalctl -u dbpanel-panel"
 	if [ "$was_active" -eq 1 ]; then
-		systemctl restart dbpanel-panel
+		systemctl restart dbpanel-panel || die "Gagal memulai ulang service dbpanel-panel. Periksa: journalctl -u dbpanel-panel"
 	fi
 
 	if [ "$first_install" -eq 1 ]; then
@@ -121,6 +128,8 @@ UNIT
 			sleep 0.5
 		done
 	fi
+	# Give a crashing panel time to exit (or sit in auto-restart) first.
+	sleep 3
 	if ! systemctl is-active --quiet dbpanel-panel; then
 		die "Panel gagal berjalan. Periksa log: journalctl -u dbpanel-panel"
 	fi

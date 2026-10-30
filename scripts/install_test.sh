@@ -44,6 +44,11 @@ for f in "$PANEL_SCRIPT" "$rendered"; do
 	if grep -qE '^[[:space:]]*set -[a-wyz]*x' "$f"; then
 		fail "$f memakai set -x (token/sandi bisa bocor ke log)"
 	fi
+	# set -e ignores a failure anywhere but last in an && list, so a
+	# systemctl step chained with && could fail silently.
+	if grep -nE '^[^#]*systemctl[^#]*&&' "$f"; then
+		fail "$f merangkai systemctl dengan && (kegagalan bisa terlewat oleh set -e)"
+	fi
 done
 
 check_unit() { # script unit-name

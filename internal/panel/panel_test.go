@@ -309,7 +309,7 @@ func TestAgentInstallEndpoints(t *testing.T) {
 	}
 	script := getBody(t, base+"/agent/install?token="+tok.Token)
 	for _, want := range []string{
-		`curl -fsSL "` + p.PublicURL() + `/agent/bin/${arch}?token=` + tok.Token + `"`,
+		`-w '%{http_code}' "` + p.PublicURL() + `/agent/bin/${arch}?token=` + tok.Token + `"`,
 		`agent pair --panel "` + p.PublicURL() + `" --token "` + tok.Token + `"`,
 		p.AgentAddr(),
 		"systemctl enable --now dbpanel-agent",

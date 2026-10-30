@@ -132,7 +132,7 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 			a.internalError(w, "pair token", err)
 			return
 		}
-		p.Command = "curl -sSL " + a.PublicURL() + "/agent/install?token=" + tok.Token + " | sudo bash"
+		p.Command = "curl -fsSL " + a.PublicURL() + "/agent/install?token=" + tok.Token + " | sudo bash"
 		p.TokenExpires = tok.ExpiresAt
 	}
 	a.render.Render(w, "server_detail", p)

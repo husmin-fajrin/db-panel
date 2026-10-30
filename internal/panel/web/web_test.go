@@ -325,7 +325,7 @@ func TestCreateServerShowsPairingCommand(t *testing.T) {
 	rec = e.do("GET", loc, nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "db-utama", "/agent/install?token=",
-		"curl -sSL "+testPublicURL+"/agent/install?token="+tok.Token+" | sudo bash",
+		"curl -fsSL "+testPublicURL+"/agent/install?token="+tok.Token+" | sudo bash",
 		`action="/servers/1/token"`, "Buat token baru")
 
 	// A new token replaces the old one in the command.
