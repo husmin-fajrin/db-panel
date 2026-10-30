@@ -204,3 +204,17 @@ type StartUntilParams struct {
 	GTIDSet    string `json:"gtid_set"` // the applier stops after these transactions
 	TimeoutSec int    `json:"timeout_sec"`
 }
+
+// InstallParams are the parameters of mysql.install.
+type InstallParams struct {
+	Series string `json:"series"` // "8.0" | "8.4" | "9"
+	// ExactVersion is the version the panel expects; a different one is
+	// only a warning in the job log.
+	ExactVersion string `json:"exact_version,omitempty"`
+}
+
+// InstallResult is the job.done result of mysql.install.
+type InstallResult struct {
+	Version string `json:"version"` // @@version of the installed server
+	Source  string `json:"source"`  // "distro" | "mysql-repo"
+}

@@ -1,6 +1,13 @@
 package mysql
 
-import "io"
+import (
+	"io"
+	"log/slog"
+	"net/http"
+
+	"github.com/husmin-fajrin/db-panel/internal/agent/config"
+	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
+)
 
 // Internals the external tests (package mysql_test) exercise directly.
 
@@ -46,3 +53,31 @@ var (
 	QuoteLiteral        = quotePassword
 	ValidGTIDSet        = validGTIDSet
 )
+
+// Installer is what mysql.install runs commands, reads files and downloads
+// through before MySQL is installed.
+type Installer = installer
+
+// SetInstallHooks makes mysql.install use inst, and newHost to find the
+// MySQL it installed.
+func SetInstallHooks(d *Driver, inst Installer, newHost func(config.Config, CredentialStore, probe.System, *slog.Logger) (Host, error)) {
+	d.inst, d.newHost = inst, newHost
+}
+
+// NewRealInstaller is the production installer; rt replaces the HTTP
+// transport when not nil.
+func NewRealInstaller(sys probe.System, rt http.RoundTripper) Installer {
+	return realInstaller{sys: sys, transport: rt}
+}
+
+// Install helpers, testable without a server.
+var (
+	TemporaryPassword = temporaryPassword
+	RandomPassword    = randomPassword
+)
+
+// MissingReplicaGrants is what the replica preflight finds missing in
+// grants (SHOW GRANTS rows) of account.
+func MissingReplicaGrants(grants []string, account string) []string {
+	return missingGrants(grants, account, replicaGrants)
+}
