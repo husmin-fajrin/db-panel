@@ -229,6 +229,28 @@ sudo DBPANEL_BIN=dist/dbpanel_linux_amd64 DBPANEL_BIN_DIR=dist bash scripts/inst
 `DBPANEL_BIN_DIR=dist` menyalin kedua binary ke `/var/lib/dbpanel/bin/`
 agar panel dapat melayani agent berarsitektur lain tanpa internet.
 
+## Menjalankan test
+
+```sh
+make test       # go vet, semua test (batas waktu 30 menit), dan pemeriksaan skrip instalasi
+make test-e2e   # hanya test end-to-end
+go test -short ./...   # cepat: tanpa test end-to-end
+```
+
+Test driver MySQL dan test end-to-end menjalankan `mysqld` sungguhan
+(sekali pakai, di `/var/tmp`, port acak di 127.0.0.1), jadi `mysqld` harus
+terpasang di mesin ini, mis. `sudo apt install mysql-server-8.0`. Tanpa
+`mysqld` test itu dilewati (skip), bukan gagal. Bila dijalankan sebagai
+root, `mysqld` berjalan sebagai user `nobody` (ganti dengan
+`DBPANEL_TEST_MYSQL_USER`); direktori dasar bisa diganti dengan
+`DBPANEL_TEST_MYSQL_DIR`.
+
+Test end-to-end (`TestE2ECreateReplica`, perintah `make test-e2e` atau
+`go test -timeout 30m -run TestE2E ./internal/panel/`) menjalankan panel,
+dua agent dan dua `mysqld`, lalu lewat UI: hubungkan MySQL, siapkan master,
+buat replika untuk satu database, dan tambah database kedua. Test ini
+dilewati dengan `-short`.
+
 ## Mengubah tampilan
 
 Template HTML ada di `web/templates/`, CSS sumber di `web/src/app.css`.
