@@ -427,6 +427,63 @@ func TestNewAdoptsExistingHostnameServer(t *testing.T) {
 	}
 }
 
+func TestNewKeepsPairedRemoteWithHostname(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(o.DataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(o.DataDir, "panel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := st.CreateServer(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkPaired(remote.ID, "abc", "10.0.0.5"); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	for range 2 { // the second start must adopt the -panel row, not add a third
+		p, err := New(o)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		got, err := p.Store.GetServer(remote.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Name != host || !got.Paired || got.CertSerial != "abc" || got.Address != "10.0.0.5" {
+			t.Fatalf("remote server changed: %+v", got)
+		}
+		local, err := p.Store.GetServer(p.localID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if local.ID == remote.ID || local.Name != host+"-panel" || !local.Paired || local.CertSerial != "local" {
+			t.Fatalf("local server = %+v, want a separate row %q paired as local", local, host+"-panel")
+		}
+		servers, err := p.Store.ListServers()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(servers) != 2 {
+			t.Fatalf("got %d servers, want 2: %+v", len(servers), servers)
+		}
+		// Forget the setting so the next start goes through adoption again.
+		if err := p.Store.SetSetting("local_server_id", ""); err != nil {
+			t.Fatal(err)
+		}
+		p.Close()
+	}
+}
+
 // eventRecorder records what the panel publishes to browsers.
 type eventRecorder struct {
 	mu     sync.Mutex

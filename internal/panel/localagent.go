@@ -27,15 +27,19 @@ func (p *Panel) attachLocal() (detach func()) {
 }
 
 // ensureLocalServer returns the id of the panel host's own server. When the
-// local_server_id setting is missing or names a deleted server, it adopts the
-// server named after the hostname (left behind if a previous start stopped
-// before saving the setting) or creates it, marks it paired as "local" and
-// saves the setting. Every step is safe to repeat.
+// local_server_id setting is missing or names a deleted server, it adopts a
+// server named after the hostname, or <hostname>-panel, that is unpaired or
+// already paired as "local" (left behind if a previous start stopped before
+// saving the setting); a name held by a really paired remote server is
+// skipped. Without such a row it creates one under the first free name. It
+// then marks the server paired as "local" and saves the setting, so every
+// step is safe to repeat.
 func (p *Panel) ensureLocalServer() (int64, error) {
 	v, err := p.Store.GetSetting(settingLocalServerID)
 	if err != nil {
 		return 0, err
 	}
+	var previous int64 // id of a local server that was deleted, for the log
 	if v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -46,23 +50,12 @@ func (p *Panel) ensureLocalServer() (int64, error) {
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return 0, err
 		}
-		p.log.Warn("local server was deleted, creating it again", "old_id", id)
+		previous = id
 	}
 
-	name := localServerName()
-	id, found, err := p.serverIDByName(name)
+	id, name, adopted, err := p.adoptOrCreateLocal()
 	if err != nil {
 		return 0, err
-	}
-	if found {
-		p.log.Info("adopting existing server as the local server", "id", id, "name", name)
-	} else {
-		srv, err := p.Store.CreateServer(name)
-		if err != nil {
-			return 0, err
-		}
-		id = srv.ID
-		p.log.Info("local server created", "id", id, "name", name)
 	}
 	if err := p.Store.MarkPaired(id, "local", "127.0.0.1"); err != nil {
 		return 0, err
@@ -70,7 +63,45 @@ func (p *Panel) ensureLocalServer() (int64, error) {
 	if err := p.Store.SetSetting(settingLocalServerID, strconv.FormatInt(id, 10)); err != nil {
 		return 0, err
 	}
+	msg := "local server created"
+	if adopted {
+		msg = "adopting existing server as the local server"
+	}
+	attrs := []any{"id", id, "name", name}
+	if previous != 0 {
+		attrs = append(attrs, "deleted_id", previous)
+	}
+	p.log.Info(msg, attrs...)
 	return id, nil
+}
+
+// adoptOrCreateLocal picks the row for the local server among the names
+// <hostname> and <hostname>-panel: the first one that is free is created, the
+// first one that holds an unpaired or "local" server is adopted.
+func (p *Panel) adoptOrCreateLocal() (id int64, name string, adopted bool, err error) {
+	servers, err := p.Store.ListServers()
+	if err != nil {
+		return 0, "", false, err
+	}
+	byName := make(map[string]store.Server, len(servers))
+	for _, s := range servers {
+		byName[s.Name] = s
+	}
+	host := localServerName()
+	for _, name := range []string{host, host + "-panel"} {
+		srv, exists := byName[name]
+		if !exists {
+			created, err := p.Store.CreateServer(name)
+			if err != nil {
+				return 0, "", false, err
+			}
+			return created.ID, name, false, nil
+		}
+		if !srv.Paired || srv.CertSerial == "local" {
+			return srv.ID, name, true, nil
+		}
+	}
+	return 0, "", false, fmt.Errorf("nama %q dan %q sudah dipakai server lain; ganti nama salah satunya", host, host+"-panel")
 }
 
 // localServerName is the hostname, or "panel" when it is unknown.
@@ -80,18 +111,4 @@ func localServerName() string {
 		return "panel"
 	}
 	return strings.TrimSpace(name)
-}
-
-// serverIDByName returns the id of the server called name, if any.
-func (p *Panel) serverIDByName(name string) (int64, bool, error) {
-	servers, err := p.Store.ListServers()
-	if err != nil {
-		return 0, false, err
-	}
-	for _, s := range servers {
-		if s.Name == name {
-			return s.ID, true, nil
-		}
-	}
-	return 0, false, nil
 }
