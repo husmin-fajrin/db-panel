@@ -33,6 +33,10 @@ type Error struct {
 	Message string `json:"message"`
 }
 
+// Error returns the user-facing message, so a *Error can be returned and
+// matched (errors.As) as a Go error.
+func (e *Error) Error() string { return e.Message }
+
 // Response answers the Request with the same ID.
 type Response struct {
 	ID     string          `json:"id"`
