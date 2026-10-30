@@ -6,6 +6,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -74,7 +75,8 @@ func (r *Registry) Dispatch(ctx context.Context, req proto.Request) (resp proto.
 
 	result, err := h(ctx, req.Params)
 	if err != nil {
-		if pe, ok := err.(*ParamError); ok {
+		var pe *ParamError
+		if errors.As(err, &pe) {
 			return proto.ErrorResponse(req.ID, proto.CodeBadParams, pe.Msg)
 		}
 		return proto.ErrorResponse(req.ID, proto.CodeInternal, err.Error())

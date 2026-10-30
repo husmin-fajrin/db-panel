@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -101,5 +102,19 @@ func TestNamesSorted(t *testing.T) {
 	got := r.Names()
 	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
 		t.Errorf("Names = %v", got)
+	}
+}
+
+func TestDispatchWrappedParamError(t *testing.T) {
+	r := NewRegistry()
+	r.Register("bad", func(ctx context.Context, params json.RawMessage) (any, error) {
+		return nil, fmt.Errorf("validasi: %w", &ParamError{Msg: "parameter salah"})
+	})
+	resp := r.Dispatch(context.Background(), proto.Request{ID: "6", Cmd: "bad"})
+	if resp.OK || resp.Error == nil || resp.Error.Code != proto.CodeBadParams {
+		t.Fatalf("resp = %+v", resp)
+	}
+	if resp.Error.Message != "parameter salah" {
+		t.Errorf("message = %q", resp.Error.Message)
 	}
 }

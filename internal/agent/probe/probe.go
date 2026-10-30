@@ -157,14 +157,13 @@ func probeMySQL(ctx context.Context, sys System) proto.MySQLInfo {
 	for _, name := range []string{"mysql", "mysqld"} {
 		// systemctl exits non-zero for "inactive", so use stdout regardless of err.
 		out, _ := sys.Output(ctx, "systemctl", "is-active", name)
-		switch strings.TrimSpace(string(out)) {
-		case "active":
-			info.ServiceName, info.ServiceActive = name, true
-		case "inactive":
-			info.ServiceName = name
-		default:
-			continue
+		state := strings.TrimSpace(string(out))
+		if state == "" || state == "unknown" {
+			continue // unit does not exist (or lookup failed)
 		}
+		// Any other state (active, inactive, failed, activating, ...) means the
+		// unit exists; only "active" counts as running.
+		info.ServiceName, info.ServiceActive = name, state == "active"
 		break
 	}
 

@@ -80,7 +80,7 @@ Variables (--variable-name=value)
 and boolean options {FALSE|TRUE}  Value (after reading options)
 --------------------------------- ----------------------------------------
 datadir                                                          /var/lib/mysql/
-port                                                             3306
+port                                                             3307
 `
 
 func ubuntuSystem(t *testing.T) *fakeSystem {
@@ -126,7 +126,7 @@ func TestCollectUbuntuWithMySQL(t *testing.T) {
 		t.Errorf("MemTotalMB = %d", res.MemTotalMB)
 	}
 	m := res.MySQL
-	if !m.Installed || m.Version != "8.4.3" || m.ServiceName != "mysql" || !m.ServiceActive || m.Port != 3306 || m.DataDir != "/var/lib/mysql" {
+	if !m.Installed || m.Version != "8.4.3" || m.ServiceName != "mysql" || !m.ServiceActive || m.Port != 3307 || m.DataDir != "/var/lib/mysql" {
 		t.Errorf("MySQL = %+v", m)
 	}
 	if len(res.Disks) != 2 {
@@ -149,6 +149,33 @@ func TestCollectInactiveService(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.MySQL.ServiceName != "mysql" || res.MySQL.ServiceActive {
+		t.Errorf("MySQL = %+v", res.MySQL)
+	}
+}
+
+func TestCollectFailedServiceExists(t *testing.T) {
+	sys := ubuntuSystem(t)
+	sys.outputs["systemctl is-active mysql"] = "failed\n"
+	sys.failCmds = map[string]bool{"systemctl is-active mysql": true}
+	res, err := Collect(context.Background(), sys, "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.MySQL.ServiceName != "mysql" || res.MySQL.ServiceActive {
+		t.Errorf("MySQL = %+v", res.MySQL)
+	}
+}
+
+func TestCollectNoServiceWhenBothUnknown(t *testing.T) {
+	sys := ubuntuSystem(t)
+	sys.outputs["systemctl is-active mysql"] = "unknown\n"
+	sys.outputs["systemctl is-active mysqld"] = "unknown\n"
+	sys.failCmds = map[string]bool{"systemctl is-active mysql": true, "systemctl is-active mysqld": true}
+	res, err := Collect(context.Background(), sys, "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.MySQL.ServiceName != "" || res.MySQL.ServiceActive {
 		t.Errorf("MySQL = %+v", res.MySQL)
 	}
 }
