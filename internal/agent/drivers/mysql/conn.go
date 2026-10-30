@@ -70,10 +70,18 @@ func OpenDB(ctx context.Context, creds CredentialStore, socket, rootPassword str
 			}
 			return nil, ErrNotConnected
 		}
-		return nil, fmt.Errorf("login MySQL gagal: %w", err)
+		return nil, &LoginError{Err: err}
 	}
 	return db, nil
 }
+
+// LoginError is Open's error when the stored account is refused or cannot
+// connect. Err is the driver's error (a *mysql.MySQLError when the server
+// answered).
+type LoginError struct{ Err error }
+
+func (e *LoginError) Error() string { return "login MySQL gagal: " + e.Err.Error() }
+func (e *LoginError) Unwrap() error { return e.Err }
 
 // openWith connects with p (over socket for a local account) and pings. The
 // error is the driver's own, so callers can read its *drv.MySQLError.

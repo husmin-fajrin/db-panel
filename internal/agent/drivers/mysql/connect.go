@@ -17,23 +17,29 @@ import (
 
 // Privileges the admin account needs to set up replication, as reported by
 // SHOW GRANTS. The panel creates the replication user, so the account must
-// also hold GRANT OPTION and every privilege it hands out.
+// hold every privilege it hands out (REPLICATION SLAVE, BACKUP_ADMIN) with
+// the right to grant it.
 var (
 	staticGrants = []string{
 		"CREATE USER", "RELOAD", "PROCESS", "SELECT", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT",
 		"REPLICATION CLIENT", "REPLICATION SLAVE",
 	}
-	// dynamicGrants are satisfied by SUPER as well.
 	dynamicGrants = []string{
 		"SYSTEM_VARIABLES_ADMIN", "REPLICATION_SLAVE_ADMIN", "BACKUP_ADMIN", "CLONE_ADMIN", "PERSIST_RO_VARIABLES_ADMIN",
 	}
+	// superCovers are the dynamic privileges SUPER implies; SUPER does not
+	// stand in for the others (BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_...).
+	superCovers = map[string]bool{"SYSTEM_VARIABLES_ADMIN": true, "REPLICATION_SLAVE_ADMIN": true}
+	// grantableDynamic is the dynamic privilege handed to the replication user.
+	grantableDynamic = "BACKUP_ADMIN"
 )
 
 const grantOption = "GRANT OPTION"
 
 // RequiredGrants lists the global privileges checked by mysql.connect:
-// the static ones, the dynamic ones (SUPER can stand in for them), and
-// GRANT OPTION. ALL PRIVILEGES ON *.* with GRANT OPTION covers everything.
+// the static ones, the dynamic ones, and GRANT OPTION (on the static
+// privileges and on BACKUP_ADMIN: MySQL 8 keeps it per privilege line).
+// ALL PRIVILEGES ON *.* WITH GRANT OPTION covers everything.
 func RequiredGrants() []string {
 	out := append([]string{}, staticGrants...)
 	out = append(out, dynamicGrants...)
@@ -89,6 +95,10 @@ func (d *Driver) registerConnect(reg *commands.Registry) {
 				return nil, fmt.Errorf("baca kredensial MySQL: %w", err)
 			} else if ok {
 				db, err := h.Open(ctx)
+				var le *LoginError
+				if errors.As(err, &le) {
+					return nil, &commands.ParamError{Msg: loginFailure(le.Err)}
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -230,36 +240,52 @@ func showGrants(ctx context.Context, db *sql.DB) ([]string, error) {
 // grants on one database or table do not match.
 var globalGrant = regexp.MustCompile("(?s)^GRANT (.+?) ON \\*\\.\\* TO .*?( WITH GRANT OPTION)?$")
 
+// isDynamic reports whether a privilege is a dynamic one (SYSTEM_VARIABLES_ADMIN);
+// static privileges have no underscore (SELECT, LOCK TABLES, SUPER, USAGE).
+func isDynamic(priv string) bool { return strings.Contains(priv, "_") }
+
 // missingGrants returns the GRANT statements that would give account what
 // RequiredGrants lists and the statements in grants (SHOW GRANTS rows) lack.
+// WITH GRANT OPTION belongs to its statement: the static privileges share
+// one flag, every dynamic privilege has its own.
 func missingGrants(grants []string, account string) []string {
-	have := map[string]bool{}
+	held := map[string]bool{}      // privilege -> held
+	grantable := map[string]bool{} // privilege -> held WITH GRANT OPTION
+	staticGO, all, allGO := false, false, false
 	for _, g := range grants {
 		m := globalGrant.FindStringSubmatch(strings.TrimSpace(g))
 		if m == nil {
 			continue
 		}
+		withGO := m[2] != ""
 		for _, priv := range strings.Split(m[1], ",") {
-			have[strings.ToUpper(strings.TrimSpace(priv))] = true
-		}
-		if m[2] != "" {
-			have[grantOption] = true
+			priv = strings.ToUpper(strings.TrimSpace(priv))
+			if priv == "ALL" || priv == "ALL PRIVILEGES" {
+				all, allGO = true, allGO || withGO
+			}
+			held[priv] = true
+			if withGO {
+				grantable[priv] = true
+				if !isDynamic(priv) {
+					staticGO = true
+				}
+			}
 		}
 	}
-	if (have["ALL PRIVILEGES"] || have["ALL"]) && have[grantOption] {
-		return nil
-	}
-	all := have["ALL PRIVILEGES"] || have["ALL"]
+	has := func(p string) bool { return all || held[p] }
 
 	var static, dynamic []string
 	for _, p := range staticGrants {
-		if !all && !have[p] {
+		if !has(p) {
 			static = append(static, p)
 		}
 	}
 	for _, p := range dynamicGrants {
-		if !all && !have["SUPER"] && !have[p] {
+		switch {
+		case !has(p) && !(superCovers[p] && held["SUPER"]):
 			dynamic = append(dynamic, p)
+		case p == grantableDynamic && !allGO && !grantable[p]:
+			dynamic = append(dynamic, p) // held, but cannot pass it on
 		}
 	}
 
@@ -269,9 +295,15 @@ func missingGrants(grants []string, account string) []string {
 		out = append(out, "GRANT "+strings.Join(static, ", ")+to)
 	}
 	if len(dynamic) > 0 {
-		out = append(out, "GRANT "+strings.Join(dynamic, ", ")+to)
+		stmt := "GRANT " + strings.Join(dynamic, ", ") + to
+		for _, p := range dynamic {
+			if p == grantableDynamic {
+				stmt += " WITH GRANT OPTION" // applies to every privilege in the statement
+			}
+		}
+		out = append(out, stmt)
 	}
-	if !have[grantOption] {
+	if !staticGO {
 		out = append(out, "GRANT USAGE"+to+" WITH GRANT OPTION")
 	}
 	return out

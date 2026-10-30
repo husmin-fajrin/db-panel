@@ -16,24 +16,37 @@ func TestMissingGrants(t *testing.T) {
 	}{
 		{"all privileges with grant option", []string{"GRANT ALL PRIVILEGES ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION"}, nil},
 		{"all privileges without grant option", []string{"GRANT ALL PRIVILEGES ON *.* TO `adm`@`10.0.0.%`"},
-			[]string{"GRANT USAGE" + to + " WITH GRANT OPTION"}},
+			[]string{"GRANT BACKUP_ADMIN" + to + " WITH GRANT OPTION", "GRANT USAGE" + to + " WITH GRANT OPTION"}},
 		{"explicit lists as MySQL 8.0 shows root", []string{
 			"GRANT " + allStatic + " ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
 			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
 		}, nil},
-		{"super stands in for the dynamic set", []string{
-			"GRANT " + allStatic + ", SUPER ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION"}, nil},
-		{"one dynamic privilege missing", []string{
+		{"super stands in only for two dynamic privileges", []string{
+			"GRANT " + allStatic + ", SUPER ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION"},
+			[]string{"GRANT BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN" + to + " WITH GRANT OPTION"}},
+		{"dynamic privilege missing; BACKUP_ADMIN held but not grantable", []string{
 			"GRANT " + allStatic + " ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
 			"GRANT SYSTEM_VARIABLES_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`10.0.0.%`",
-		}, []string{"GRANT REPLICATION_SLAVE_ADMIN" + to}},
+		}, []string{"GRANT REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN" + to + " WITH GRANT OPTION"}},
+		{"only CLONE_ADMIN missing, BACKUP_ADMIN grantable", []string{
+			"GRANT " + allStatic + " ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+		}, []string{"GRANT CLONE_ADMIN" + to}},
+		{"static WITH GRANT OPTION, dynamic without", []string{
+			"GRANT " + allStatic + " ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`10.0.0.%`",
+		}, []string{"GRANT BACKUP_ADMIN" + to + " WITH GRANT OPTION"}},
+		{"dynamic WITH GRANT OPTION, static without", []string{
+			"GRANT " + allStatic + " ON *.* TO `adm`@`10.0.0.%`",
+			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
+		}, []string{"GRANT USAGE" + to + " WITH GRANT OPTION"}},
 		{"database-level grants do not count", []string{
 			"GRANT USAGE ON *.* TO `adm`@`10.0.0.%`",
 			"GRANT ALL PRIVILEGES ON `app`.* TO `adm`@`10.0.0.%` WITH GRANT OPTION",
 			"GRANT `reader`@`%` TO `adm`@`10.0.0.%`",
 		}, []string{
 			"GRANT CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE" + to,
-			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN" + to,
+			"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN" + to + " WITH GRANT OPTION",
 			"GRANT USAGE" + to + " WITH GRANT OPTION",
 		}},
 	}

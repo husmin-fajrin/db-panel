@@ -135,19 +135,23 @@ func TestConnectSavesAndLists(t *testing.T) {
 	}
 }
 
+// leakPW is a distinctive wrong password, so a leak into an error message
+// cannot hide behind words the server's own message contains.
+const leakPW = "pw-Zq81-secret"
+
 func TestConnectWrongPasswordDoesNotSave(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	e := newConnectEnv(t, inst)
 
-	r := e.call(t, "mysql.connect", proto.ConnectParams{User: "root", Password: "wrong", Host: "127.0.0.1", Port: inst.Port})
+	r := e.call(t, "mysql.connect", proto.ConnectParams{User: "root", Password: leakPW, Host: "127.0.0.1", Port: inst.Port})
 	if r.OK || r.Error == nil {
 		t.Fatalf("response = %+v, want an error", r)
 	}
 	if r.Error.Code != proto.CodeBadParams || !strings.HasPrefix(r.Error.Message, "login MySQL gagal: 1045 ") {
 		t.Errorf("error = %+v", r.Error)
 	}
-	if strings.Contains(r.Error.Message, "wrong") && !strings.Contains(r.Error.Message, "using password") {
-		t.Errorf("message may leak the password: %q", r.Error.Message)
+	if strings.Contains(r.Error.Message, leakPW) {
+		t.Errorf("message leaks the password: %q", r.Error.Message)
 	}
 	if _, err := os.Stat(e.credPath); !os.IsNotExist(err) {
 		t.Errorf("credential file exists after a failed login: %v", err)
@@ -157,11 +161,28 @@ func TestConnectWrongPasswordDoesNotSave(t *testing.T) {
 	good := proto.ConnectParams{User: "root"}
 	want := proto.ConnectParams{User: "root", Host: "localhost"} // the default host is filled in
 	result(t, e.call(t, "mysql.connect", good))
-	if r := e.call(t, "mysql.connect", proto.ConnectParams{User: "root", Password: "wrong", Host: "127.0.0.1", Port: inst.Port}); r.OK {
+	if r := e.call(t, "mysql.connect", proto.ConnectParams{User: "root", Password: leakPW, Host: "127.0.0.1", Port: inst.Port}); r.OK {
 		t.Fatal("wrong password accepted")
 	}
 	if p, ok, err := e.store.Load(); err != nil || !ok || p != want {
 		t.Errorf("stored = %+v, %v, %v; want %+v", p, ok, err, want)
+	}
+}
+
+// TestInventoryStaleCredentials: stored credentials the server no longer
+// accepts give the same bad_params answer as mysql.connect, without the password.
+func TestInventoryStaleCredentials(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	e := newConnectEnv(t, inst)
+	if err := e.store.Save(proto.ConnectParams{User: "root", Password: leakPW, Host: "127.0.0.1", Port: inst.Port}); err != nil {
+		t.Fatal(err)
+	}
+	r := e.call(t, "mysql.inventory", nil)
+	if r.OK || r.Error == nil || r.Error.Code != proto.CodeBadParams || !strings.HasPrefix(r.Error.Message, "login MySQL gagal: 1045 ") {
+		t.Fatalf("response = %+v / %+v", r, r.Error)
+	}
+	if strings.Contains(r.Error.Message, leakPW) {
+		t.Errorf("message leaks the password: %q", r.Error.Message)
 	}
 }
 
@@ -186,7 +207,7 @@ func TestConnectReportsMissingGrants(t *testing.T) {
 	}
 	want := []string{
 		"GRANT CREATE USER, RELOAD, PROCESS, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO 'limited'@'%'",
-		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO 'limited'@'%'",
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO 'limited'@'%' WITH GRANT OPTION",
 		"GRANT USAGE ON *.* TO 'limited'@'%' WITH GRANT OPTION",
 	}
 	if !reflect.DeepEqual(res.MissingGrants, want) {
@@ -195,6 +216,32 @@ func TestConnectReportsMissingGrants(t *testing.T) {
 	// The account still works, so it was saved: the panel shows what to fix.
 	if _, ok, _ := e.store.Load(); !ok {
 		t.Error("account with missing grants was not saved")
+	}
+
+	// The suggested statements are the remedy: after applying them the check
+	// is clean and the account can really create the replication user.
+	for _, g := range res.MissingGrants {
+		if _, err := root.Exec(g); err != nil {
+			t.Fatalf("remedy %q: %v", g, err)
+		}
+	}
+	res = result(t, e.call(t, "mysql.inventory", nil))
+	if len(res.MissingGrants) != 0 {
+		t.Fatalf("MissingGrants after the remedy = %q", res.MissingGrants)
+	}
+	p, _, _ := e.store.Load()
+	as, err := sql.Open("mysql", mysql.DSN(p, inst.Socket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer as.Close()
+	for _, q := range []string{
+		"CREATE USER 'x'@'%' IDENTIFIED BY 'pw-2'",
+		"GRANT REPLICATION SLAVE, BACKUP_ADMIN ON *.* TO 'x'@'%'",
+	} {
+		if _, err := as.Exec(q); err != nil {
+			t.Errorf("as the connected account, %q: %v", q, err)
+		}
 	}
 }
 
