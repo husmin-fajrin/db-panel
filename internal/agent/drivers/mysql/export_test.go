@@ -37,3 +37,12 @@ func CaptureDumpGTID(chunks []string) (string, bool) {
 	}
 	return parseDumpGTID(c.head)
 }
+
+// Replication statement builders and validators, testable without a server.
+var (
+	WildDoTablePatterns = wildDoTablePatterns
+	FilterStatement     = filterStatement
+	SourceStatement     = sourceStatement
+	QuoteLiteral        = quotePassword
+	ValidGTIDSet        = validGTIDSet
+)
