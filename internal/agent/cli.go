@@ -103,7 +103,7 @@ func mainRun(args []string, stderr io.Writer) int {
 	a := New(cfg, reg, logger)
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
-	registerMySQL(reg, cfg, *dir, sys, runner, logger)
+	RegisterMySQL(reg, cfg, *dir, sys, runner, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -116,11 +116,12 @@ func mainRun(args []string, stderr io.Writer) int {
 	return 0
 }
 
-// registerMySQL adds the mysql.* commands. Without a MySQL installation the
+// RegisterMySQL adds the mysql.* commands. The panel uses it for its embedded
+// agent too, so both offer the same commands. Without a MySQL installation the
 // driver has no Host and its commands report that MySQL is missing until
 // mysql.install installs it. The admin account the user connects with is
 // kept sealed in dir/mysql.cred, whether or not MySQL is installed yet.
-func registerMySQL(reg *commands.Registry, cfg config.Config, dir string, sys probe.System, runner *jobs.Runner, logger *slog.Logger) {
+func RegisterMySQL(reg *commands.Registry, cfg config.Config, dir string, sys probe.System, runner *jobs.Runner, logger *slog.Logger) {
 	d := &mysql.Driver{Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg}
 	// agent.key is the TLS private key, so the sealing key is a separate file.
 	box, err := secrets.LoadOrCreate(filepath.Join(dir, secretsKeyFile))

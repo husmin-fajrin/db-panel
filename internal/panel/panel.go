@@ -17,8 +17,10 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
+	"github.com/husmin-fajrin/db-panel/internal/secrets"
 	"github.com/husmin-fajrin/db-panel/internal/version"
 )
 
@@ -33,6 +35,7 @@ const (
 const (
 	dbFile              = "panel.db"
 	initialPasswordFile = "admin-initial-password"
+	secretsKeyFile      = "panel.key" // seals replication passwords
 	adminUsername       = "admin"
 
 	settingLocalServerID = "local_server_id"
@@ -52,7 +55,7 @@ const (
 // Options configure a Panel. Zero fields take the defaults above.
 type Options struct {
 	DataDir   string // panel.db, bin/
-	ConfigDir string // ca.crt, ca.key, admin-initial-password
+	ConfigDir string // ca.crt, ca.key, panel.key, admin-initial-password; the embedded agent's secrets.key, mysql.cred
 	HTTPAddr  string // UI listener
 	AgentAddr string // mTLS agent listener
 	// PublicHost is the IP or host agents and the pairing command use to
@@ -72,6 +75,8 @@ type Panel struct {
 	Limiter     *auth.RateLimiter // login attempts per IP
 	UserLimiter *auth.RateLimiter // failed logins per username
 	Broker      *web.Broker
+	// Orchestrator runs the prepare-master and create-replica jobs.
+	Orchestrator *orchestrator.Runner
 
 	opts          Options
 	log           *slog.Logger
@@ -145,6 +150,24 @@ func New(o Options) (*Panel, error) {
 		st.Close()
 		return nil, err
 	}
+	box, err := secrets.LoadOrCreate(filepath.Join(o.ConfigDir, secretsKeyFile))
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("kunci segel panel: %w", err)
+	}
+	p.Orchestrator = orchestrator.New(orchestrator.Deps{
+		Store:   st,
+		Hub:     p.Hub,
+		Secrets: box,
+		Publish: func(event string, data any) { p.publish(event, data) },
+		Logger:  p.log,
+		Now:     func() time.Time { return p.now() },
+		// A replica reaches the panel host's own MySQL at the public host,
+		// not at its paired address 127.0.0.1.
+		LocalServerID: p.localID,
+		PublicHost:    p.opts.PublicHost,
+	})
+	p.Orchestrator.Resume(context.Background())
 	return p, nil
 }
 
@@ -338,8 +361,12 @@ func (e *sessionEpoch) valid(created time.Time) bool {
 	return created.Unix() > e.epoch
 }
 
-// Close closes the store. Call it after Run has returned.
-func (p *Panel) Close() error { return p.Store.Close() }
+// Close stops the orchestrator's jobs and closes the store. Call it after
+// Run has returned.
+func (p *Panel) Close() error {
+	p.Orchestrator.Close()
+	return p.Store.Close()
+}
 
 // UIAddr returns the bound UI address once Run is listening, else "".
 func (p *Panel) UIAddr() string {

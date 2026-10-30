@@ -302,3 +302,54 @@ func TestCreateJobValidation(t *testing.T) {
 		t.Fatalf("jobs created despite errors: %+v", jobs)
 	}
 }
+
+func TestSetJobParams(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db1")
+	j := newJob(t, s, srv.ID, "k", time.Date(2026, 10, 30, 8, 0, 0, 0, time.UTC), "a")
+	if err := s.SetJobParams(j.ID, `{"b":2}`); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.GetJob(j.ID); got.ParamsJSON != `{"b":2}` {
+		t.Fatalf("params = %q", got.ParamsJSON)
+	}
+	if err := s.SetJobParams("nope", `{}`); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing id: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestReopenJob(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db1")
+	t0 := time.Date(2026, 10, 30, 8, 0, 0, 0, time.UTC)
+	j := newJob(t, s, srv.ID, "k", t0, "a", "b", "c")
+	if err := s.UpdateJob(j.ID, JobRunning, 0, "", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReopenJob(j.ID, t0); err == nil || errors.Is(err, ErrJobFinished) {
+		t.Fatalf("running job: err = %v, want a not-failed error", err)
+	}
+	if err := s.UpdateJob(j.ID, JobFailed, 2, "boom", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReopenJob(j.ID, t0.Add(time.Hour)); err != nil {
+		t.Fatalf("ReopenJob: %v", err)
+	}
+	got, _, _ := s.GetJob(j.ID)
+	if got.Status != JobRunning || got.CurrentStep != 2 || got.Error != "" || got.FinishedAt != nil ||
+		got.StartedAt == nil || !got.StartedAt.Equal(t0) {
+		t.Fatalf("reopened job: %+v", got)
+	}
+	for _, terminal := range []string{JobSucceeded, JobCanceled} {
+		k := newJob(t, s, srv.ID, "k", t0, "a")
+		if err := s.UpdateJob(k.ID, terminal, 0, "", t0); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ReopenJob(k.ID, t0); !errors.Is(err, ErrJobFinished) {
+			t.Fatalf("%s: err = %v, want ErrJobFinished", terminal, err)
+		}
+	}
+	if err := s.ReopenJob("nope", t0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing id: err = %v, want ErrNotFound", err)
+	}
+}

@@ -181,3 +181,22 @@ func TestCreateTopologyRejectsReplicaServer(t *testing.T) {
 		t.Fatalf("missing server err = %v", err)
 	}
 }
+
+func TestSetTopologySource(t *testing.T) {
+	s := openTemp(t)
+	m := mustServer(t, s, "master")
+	topo, err := s.CreateTopology(m.ID, "repl", nil, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTopologySource(topo.ID, "10.0.0.9", 3307); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTopology(topo.ID)
+	if err != nil || got.SourceHost != "10.0.0.9" || got.SourcePort != 3307 {
+		t.Fatalf("topology = %+v, %v", got, err)
+	}
+	if err := s.SetTopologySource(999, "h", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing id: err = %v, want ErrNotFound", err)
+	}
+}

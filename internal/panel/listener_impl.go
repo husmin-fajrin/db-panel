@@ -37,10 +37,13 @@ func (p *Panel) setOnline(id int64, online bool) {
 const eventLogInterval = 10 * time.Second
 
 // onEvent receives events from remote and embedded agents, all of which
-// reach it through Hub.OnEvent and the hub's listener. Nothing consumes
-// them yet; they are logged at debug level, at most one per server per
-// eventLogInterval.
+// reach it through Hub.OnEvent and the hub's listener. Job events go to the
+// orchestrator (which never blocks); every event is logged at debug level,
+// at most one per server per eventLogInterval.
 func (p *Panel) onEvent(id int64, ev proto.Event) {
+	if p.Orchestrator != nil {
+		p.Orchestrator.HandleEvent(id, ev)
+	}
 	now := p.now()
 	p.evMu.Lock()
 	last, seen := p.evLogged[id]

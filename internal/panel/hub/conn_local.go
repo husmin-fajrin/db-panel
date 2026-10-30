@@ -11,7 +11,8 @@ import (
 type localConn struct {
 	reg *commands.Registry
 	// onEvent is kept for symmetry with WSConn (the panel passes a func
-	// calling Hub.OnEvent); the embedded agent does not emit events yet.
+	// calling Hub.OnEvent); the embedded agent's job runner emits through
+	// the same func.
 	onEvent func(proto.Event)
 }
 

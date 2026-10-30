@@ -97,8 +97,16 @@ func TestCreateReplUserIdempotent(t *testing.T) {
 	}
 	rows.Close()
 	all := strings.Join(grants, "\n")
-	if !strings.Contains(all, "GRANT REPLICATION SLAVE ON *.*") || !strings.Contains(all, "GRANT BACKUP_ADMIN ON *.*") {
-		t.Errorf("grants:\n%s", all)
+	// Replication, CLONE, and the dump the same account runs.
+	for _, priv := range []string{"REPLICATION SLAVE", "BACKUP_ADMIN", "SELECT", "RELOAD", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT"} {
+		if !grantsInclude(grants, priv) {
+			t.Errorf("grants lack %s:\n%s", priv, all)
+		}
+	}
+	for _, priv := range []string{"INSERT", "UPDATE", "DELETE", "DROP", "SUPER", "CREATE USER"} {
+		if grantsInclude(grants, priv) {
+			t.Errorf("grants include %s:\n%s", priv, all)
+		}
 	}
 
 	// A specific host is a separate account.
@@ -146,4 +154,25 @@ func TestReplUserRejectsBadIdentifier(t *testing.T) {
 			t.Errorf("%+v: response = %+v, want bad_params", p, r)
 		}
 	}
+}
+
+// grantsInclude reports whether one of the SHOW GRANTS lines grants priv
+// ON *.*: the privilege list sits between "GRANT " and " ON ".
+func grantsInclude(grants []string, priv string) bool {
+	for _, g := range grants {
+		list, ok := strings.CutPrefix(g, "GRANT ")
+		if !ok {
+			continue
+		}
+		list, rest, ok := strings.Cut(list, " ON ")
+		if !ok || !strings.HasPrefix(rest, "*.*") {
+			continue
+		}
+		for _, p := range strings.Split(list, ",") {
+			if strings.TrimSpace(p) == priv {
+				return true
+			}
+		}
+	}
+	return false
 }

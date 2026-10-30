@@ -7,7 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent"
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
+	"github.com/husmin-fajrin/db-panel/internal/agent/config"
+	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -16,14 +19,30 @@ import (
 
 // attachLocal attaches the agent embedded in the panel process as the
 // connection of the panel host's own server, and returns the function that
-// detaches it.
+// detaches it. The embedded agent offers the same commands as a remote one
+// (probe, mysql.*, job.*); its MySQL credential and sealing key live in the
+// panel's config directory.
 func (p *Panel) attachLocal() (detach func()) {
 	reg := commands.NewRegistry()
-	probe.Register(reg, probe.RealSystem(), p.opts.Version)
+	sys := probe.RealSystem()
+	probe.Register(reg, sys, p.opts.Version)
 	id := p.localID
-	conn := hub.NewLocalConn(reg, func(ev proto.Event) { p.Hub.OnEvent(id, ev) })
+	emit := func(ev proto.Event) { p.Hub.OnEvent(id, ev) }
+	runner := jobs.NewRunner(localEmitter(emit), p.log)
+	runner.Register(reg)
+	agent.RegisterMySQL(reg, config.Config{ServerID: id}, p.opts.ConfigDir, sys, runner, p.log)
+	conn := hub.NewLocalConn(reg, emit)
 	p.Hub.Attach(id, conn)
 	return func() { p.Hub.Detach(id, conn) }
+}
+
+// localEmitter delivers the embedded agent's job events to the hub; the
+// embedded agent is never offline.
+type localEmitter func(ev proto.Event)
+
+func (e localEmitter) Emit(ev proto.Event) error {
+	e(ev)
+	return nil
 }
 
 // ensureLocalServer returns the id of the panel host's own server. When the

@@ -184,6 +184,12 @@ func (s *Store) GetTopologyByMaster(serverID int64) (Topology, error) {
 	return t, nil
 }
 
+// SetTopologySource sets the address and MySQL port replicas use to reach
+// the topology's master.
+func (s *Store) SetTopologySource(id int64, host string, port int) error {
+	return s.execOne(`UPDATE topologies SET source_host = ?, source_port = ? WHERE id = ?`, host, port, id)
+}
+
 // ListTopologies returns all topologies ordered by id.
 func (s *Store) ListTopologies() ([]Topology, error) {
 	rows, err := s.db.Query(`SELECT ` + topologyColumns + ` FROM topologies ORDER BY id`)

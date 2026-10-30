@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -1311,5 +1312,33 @@ func TestSlowBodyCut(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no SSE event after the read timeout")
+	}
+}
+
+// TestEmbeddedAgentOffersMySQLAndJobCommands: the panel host's own agent
+// answers mysql.* and job.* like a remote agent, and the panel keeps its
+// sealing key for replication passwords in the config directory.
+func TestEmbeddedAgentOffersMySQLAndJobCommands(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	startPanel(t, p)
+	waitFor(t, "the embedded agent", func() bool { return p.Hub.IsOnline(p.localID) })
+
+	for _, c := range []struct {
+		cmd    string
+		params any
+	}{
+		{"job.status", proto.JobIDParams{JobID: "nope"}},
+		{"mysql.inventory", nil},
+	} {
+		err := p.Hub.Call(context.Background(), p.localID, c.cmd, c.params, nil)
+		var pe *proto.Error
+		if !errors.As(err, &pe) || pe.Code == proto.CodeUnknownCommand {
+			t.Errorf("%s: err = %v, want the command's own refusal", c.cmd, err)
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(o.ConfigDir, "panel.key")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("panel.key: %v, %v", fi, err)
 	}
 }

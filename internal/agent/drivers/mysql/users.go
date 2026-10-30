@@ -17,6 +17,12 @@ import (
 // or backslash.
 var accountHostRe = regexp.MustCompile(`^[A-Za-z0-9_.:%-]{1,255}$`)
 
+// replGrants are the privileges of the replication account: REPLICATION
+// SLAVE for replication, BACKUP_ADMIN for CLONE, and the static privileges
+// mysqldump --single-transaction --set-gtid-purged --no-tablespaces needs
+// (RELOAD for its brief FLUSH TABLES WITH READ LOCK).
+const replGrants = "REPLICATION SLAVE, BACKUP_ADMIN, SELECT, RELOAD, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT"
+
 func (d *Driver) registerUsers(reg *commands.Registry) {
 	reg.Register("mysql.createReplUser", func(ctx context.Context, params json.RawMessage) (any, error) {
 		var p proto.ReplUserParams
@@ -61,8 +67,13 @@ func validateReplUser(p *proto.ReplUserParams) error {
 }
 
 // CreateReplUser creates p.User@p.FromHost with p.Password, or sets the
-// password of the existing account, and grants it what replication and
-// CLONE need. Running it again is harmless.
+// password of the existing account, and grants it what replication, CLONE
+// and mysqldump need (replGrants). Running it again is harmless.
+//
+// The panel-held replication account is also the dump account, because the
+// panel never stores the master admin password. The read privileges add
+// little: REPLICATION SLAVE already streams every change and BACKUP_ADMIN
+// lets CLONE copy the whole instance.
 //
 // MySQL does not take a placeholder in IDENTIFIED BY, so the password is
 // sent as a string literal escaped for the session's sql_mode; the server
@@ -100,7 +111,7 @@ func CreateReplUser(ctx context.Context, h Host, p proto.ReplUserParams) error {
 		msg := strings.ReplaceAll(strings.ReplaceAll(err.Error(), password, "'***'"), p.Password, "***")
 		return fmt.Errorf("buat user replikasi %s: %s", account, msg)
 	}
-	if _, err := conn.ExecContext(ctx, "GRANT REPLICATION SLAVE, BACKUP_ADMIN ON *.* TO "+account); err != nil {
+	if _, err := conn.ExecContext(ctx, "GRANT "+replGrants+" ON *.* TO "+account); err != nil {
 		return fmt.Errorf("beri hak user replikasi %s: %w", account, err)
 	}
 	return nil

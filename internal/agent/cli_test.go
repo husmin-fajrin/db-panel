@@ -205,7 +205,7 @@ func (noMySQLSystem) Arch() string                          { return "amd64" }
 func TestRegisterMySQLWithoutMySQL(t *testing.T) {
 	reg := commands.NewRegistry()
 	dir := t.TempDir()
-	registerMySQL(reg, config.Config{}, dir, noMySQLSystem{}, jobs.NewRunner(nil, nil), slog.New(slog.DiscardHandler))
+	RegisterMySQL(reg, config.Config{}, dir, noMySQLSystem{}, jobs.NewRunner(nil, nil), slog.New(slog.DiscardHandler))
 	for _, cmd := range []string{"mysql.status", "mysql.connect", "mysql.inventory"} {
 		resp := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: cmd, Params: json.RawMessage(`{"user":"root"}`)})
 		if resp.Error == nil || resp.Error.Message != "MySQL tidak ditemukan di server ini" {

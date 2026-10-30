@@ -323,3 +323,39 @@ func (s *Store) PruneJobLogs(olderThan time.Time) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+// SetJobParams replaces a job's params JSON. The orchestrator keeps what a
+// job learned along the way there (choices, the agent job it waits for), so
+// a retry or an approval after a panel restart continues with it.
+func (s *Store) SetJobParams(id, paramsJSON string) error {
+	return s.execOne(`UPDATE jobs SET params_json = ? WHERE id = ?`, paramsJSON, id)
+}
+
+// ReopenJob moves a failed job back to running at its current step, for
+// "retry from this step": its error and finished_at are cleared. Any other
+// status is left alone and ErrJobFinished (succeeded, canceled) or an error
+// naming the status is returned; ErrNotFound for an unknown id.
+func (s *Store) ReopenJob(id string, now time.Time) error {
+	res, err := s.db.Exec(`UPDATE jobs SET status = ?, error = '', finished_at = NULL,
+		started_at = COALESCE(started_at, ?) WHERE id = ? AND status = ?`,
+		JobRunning, formatTime(now), id, JobFailed)
+	if err != nil {
+		return fmt.Errorf("reopen job: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("reopen job: %w", err)
+	} else if n > 0 {
+		return nil
+	}
+	var status string
+	err = s.db.QueryRow(`SELECT status FROM jobs WHERE id = ?`, id).Scan(&status)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		return fmt.Errorf("reopen job: %w", err)
+	case status == JobSucceeded || status == JobCanceled:
+		return ErrJobFinished
+	}
+	return fmt.Errorf("pekerjaan berstatus %s, bukan gagal", status)
+}

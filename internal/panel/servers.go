@@ -80,6 +80,9 @@ func (p *Panel) Run(ctx context.Context) error {
 	wg.Go(func() { p.probeLoop(ctx) })
 
 	<-ctx.Done()
+	// Stop the jobs before their agents disconnect, so none fails as
+	// "agent terputus"; Resume fails them at the next start.
+	p.Orchestrator.Close()
 	detachLocal()
 	wg.Wait()
 	p.stopBackground()
