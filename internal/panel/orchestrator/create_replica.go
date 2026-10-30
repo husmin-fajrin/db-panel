@@ -21,7 +21,10 @@ type CreateReplicaParams struct {
 	MasterServerID, TargetServerID int64
 	Databases                      []string // empty = all
 	ForceDump                      bool     // dump even when CLONE is possible
-	ConfirmWipe                    bool     // the user agreed old databases on the target are dropped
+	// ConfirmWipe: the user agreed on the form that CLONE replaces the
+	// target. It only pre-approves the CLONE wait; databases left on the
+	// target are confirmed in the job, against the list it shows.
+	ConfirmWipe bool
 }
 
 func createReplicaStepNames() []string {
@@ -62,11 +65,21 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	if err != nil {
 		return "", fmt.Errorf("topologi master: %w", err)
 	}
-	if target.Role != store.RoleUnassigned {
-		return "", fmt.Errorf("server tujuan sudah berperan sebagai %s", target.Role)
-	}
 	if err := r.refuseBusy(target.ID, "server tujuan"); err != nil {
 		return "", err
+	}
+	// A target whose earlier attempt failed is free for a new one.
+	if rep, err := r.d.Store.GetReplicaByServer(target.ID); err == nil && rep.State == store.ReplicaFailed {
+		if err := r.d.Store.RemoveReplica(target.ID); err != nil {
+			return "", err
+		}
+		target.Role = store.RoleUnassigned
+		r.log.Info("failed replica attempt removed for a new one", "server_id", target.ID)
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	if target.Role != store.RoleUnassigned {
+		return "", fmt.Errorf("server tujuan sudah berperan sebagai %s", target.Role)
 	}
 	dbs, err := selectDatabases(p.Databases, inv.Databases)
 	if err != nil {
@@ -195,8 +208,10 @@ func (jr *jobRun) replicaCheckTarget(ctx context.Context, approved bool) (outcom
 }
 
 // replicaPreflight runs mysql.preflight for the replica role and picks the
-// copy method. Databases the master also has (left from an earlier
-// attempt) are dropped only after the user approved that exact list.
+// copy method. Databases on the target that the master also has (left
+// from an earlier attempt) are shown to the user; once the user approved
+// that exact list it is kept for the snapshot step, which drops it before
+// a dump. The form's ConfirmWipe never stands in for this approval.
 func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome, error) {
 	if jr.st.MasterUUID == "" {
 		// Without it the agent cannot refuse the master as its own replica.
@@ -215,10 +230,11 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 		}, &res)
 		return res, err
 	}
-	res, err := preflight(jr.st.ConfirmWipe)
+	res, err := preflight(false)
 	if err != nil {
 		return outcome{}, err
 	}
+	jr.st.WipeList = nil
 	if res.Worst != proto.CheckFail && hasCheck(res.Checks, "leftover", proto.CheckNeedsConfirm) {
 		list, err := jr.leftoverDatabases(ctx)
 		if err != nil {
@@ -228,10 +244,11 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 		if !approved || h != jr.st.WipeHash {
 			jr.st.WipeHash = h
 			jr.save()
-			return wait("database dari percobaan sebelumnya akan dibuang: " + strings.Join(list, ", ")), nil
+			return wait("database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: " +
+				strings.Join(list, ", ")), nil
 		}
-		jr.logf("warn", "Pengguna menyetujui pembuangan database: %s.", strings.Join(list, ", "))
-		jr.st.ConfirmWipe = true
+		jr.logf("warn", "Pengguna menyetujui penghapusan database: %s.", strings.Join(list, ", "))
+		jr.st.WipeList = list
 		jr.save()
 		if res, err = preflight(true); err != nil {
 			return outcome{}, err
@@ -366,6 +383,8 @@ func replicaServerID(master uint32) (uint32, error) {
 
 func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, error) {
 	name := jr.serverName(jr.target())
+	// A clone target has no user databases (the agent picks clone only
+	// then); the form's ConfirmWipe pre-approves replacing the rest.
 	if jr.st.Method == "clone" && !jr.st.ConfirmWipe && !jr.st.CloneApproved {
 		if !approved {
 			return wait(fmt.Sprintf("CLONE akan menghapus SEMUA database di %s. Lanjutkan?", name)), nil
@@ -382,7 +401,16 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 	cmd := "mysql.cloneFrom"
 	if jr.st.Method == "dump" {
 		cmd = "mysql.dumpFrom"
-		p.Databases, p.DropExisting = jr.st.Databases, jr.st.ConfirmWipe
+		p.Databases = jr.st.Databases
+		if len(jr.st.WipeList) > 0 {
+			// Every confirmed leftover goes, also those not selected now.
+			var dr proto.DropDatabasesResult
+			if err := jr.call(ctx, jr.target(), "mysql.dropDatabases",
+				proto.DropDatabasesParams{Databases: jr.st.WipeList}, &dr); err != nil {
+				return outcome{}, err
+			}
+			jr.logf("info", "Database lama dihapus: %s.", strings.Join(dr.Dropped, ", "))
+		}
 		jr.logf("info", "Menyalin dengan dump; master dikunci sesaat (FLUSH TABLES WITH READ LOCK) saat dump dimulai.")
 	} else {
 		jr.logf("info", "Menyalin dengan CLONE; semua isi MySQL di %s diganti salinan master.", name)
@@ -450,6 +478,11 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 	var ms proto.MySQLStatus
 	if err := jr.call(ctx, jr.master(), "mysql.status", nil, &ms); err != nil {
+		return outcome{}, err
+	}
+	// A failed verify stopped replication (stopReplicaAfter); a retry
+	// starts it again. START REPLICA on running threads changes nothing.
+	if err := jr.call(ctx, jr.target(), "mysql.startReplica", nil, nil); err != nil {
 		return outcome{}, err
 	}
 	var w proto.WaitSyncedResult

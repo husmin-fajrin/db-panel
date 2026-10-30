@@ -39,7 +39,7 @@ var agentCommands = []string{
 	"probe", "mysql.status", "mysql.connect", "mysql.inventory", "mysql.preflight", "mysql.configure",
 	"mysql.restart", "mysql.createReplUser", "mysql.setReadOnly", "mysql.cloneFrom", "mysql.dumpFrom",
 	"mysql.install", "mysql.configureReplication", "mysql.setReplicationFilter", "mysql.startReplica",
-	"mysql.stopReplica", "mysql.resetReplica", "mysql.waitSynced", "mysql.startUntil",
+	"mysql.stopReplica", "mysql.resetReplica", "mysql.waitSynced", "mysql.startUntil", "mysql.dropDatabases",
 }
 
 type call struct {
@@ -421,6 +421,11 @@ func (e *env) replicaAgent(name, method string) *fakeAgent {
 	fa.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: true, Executed: masterGTID,
 		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
 	fa.reply("mysql.stopReplica", nil)
+	fa.on("mysql.dropDatabases", func(raw json.RawMessage) (any, error) {
+		var p proto.DropDatabasesParams
+		json.Unmarshal(raw, &p)
+		return proto.DropDatabasesResult{Dropped: p.Databases}, nil
+	})
 	return fa
 }
 

@@ -186,6 +186,15 @@ func (r *Runner) createJob(kind string, serverID, topologyID int64, st jobState,
 	}
 	r.d.Publish("job_update", map[string]any{"id": id, "kind": kind, "server_id": serverID, "status": store.JobQueued})
 	if err := r.launch(id, action{kind: actRun}); err != nil {
+		// No goroutine will run it: do not leave it queued, blocking the server.
+		msg := "pekerjaan tidak bisa dimulai: " + err.Error()
+		now := r.now()
+		if serr := r.d.Store.SetStep(id, 0, store.StepFailed, msg, now); serr != nil {
+			r.log.Warn("fail step of unstarted job", "job", id, "err", serr)
+		}
+		if uerr := r.d.Store.UpdateJob(id, store.JobFailed, 0, msg, now); uerr != nil {
+			r.log.Warn("fail unstarted job", "job", id, "err", uerr)
+		}
 		return "", err
 	}
 	return id, nil
@@ -211,8 +220,8 @@ const (
 )
 
 // action is what a job goroutine is asked to do. step binds an approval or
-// retry to the step the user saw, so a late double click cannot approve a
-// later step.
+// retry to the step that was current when Approve or Retry was called, so
+// a late double click cannot approve a later step.
 type action struct {
 	kind actionKind
 	step int
@@ -377,6 +386,11 @@ func (r *Runner) Retry(jobID string) error {
 	}
 	switch j.Status {
 	case store.JobFailed, store.JobWaiting:
+		if other, busy, err := r.d.Store.ActiveJobForServer(j.ServerID); err != nil {
+			return err
+		} else if busy && other.ID != jobID {
+			return errors.New("server ini sudah menjalankan pekerjaan lain")
+		}
 		return r.launch(jobID, action{kind: actRetry, step: j.CurrentStep})
 	case store.JobSucceeded, store.JobCanceled:
 		return store.ErrJobFinished
@@ -399,13 +413,23 @@ func (r *Runner) Cancel(jobID string) error {
 }
 
 // Resume runs once at startup, before any job goroutine: a job still
-// running in the store was cut off by the previous stop and is failed at
-// its step (Retry continues it); a waiting job keeps waiting.
+// running (or queued) in the store was cut off by the previous stop and is
+// failed at its step (Retry continues it); a waiting job keeps waiting.
 func (r *Runner) Resume(ctx context.Context) {
 	jobs, err := r.d.Store.RunningJobs()
 	if err != nil {
 		r.log.Error("list running jobs", "err", err)
 		return
+	}
+	all, err := r.d.Store.ListJobs(0)
+	if err != nil {
+		r.log.Error("list jobs", "err", err)
+		return
+	}
+	for _, j := range all {
+		if j.Status == store.JobQueued {
+			jobs = append(jobs, j)
+		}
 	}
 	for _, j := range jobs {
 		if ctx.Err() != nil {
@@ -414,7 +438,7 @@ func (r *Runner) Resume(ctx context.Context) {
 		r.mu.Lock()
 		_, live := r.live[j.ID]
 		r.mu.Unlock()
-		if live || j.Status != store.JobRunning {
+		if live || (j.Status != store.JobRunning && j.Status != store.JobQueued) {
 			continue
 		}
 		now := r.now()
@@ -500,7 +524,7 @@ type jobState struct {
 	MasterServerID int64    `json:"master_server_id,omitempty"`
 	Databases      []string `json:"databases,omitempty"` // empty = all
 	ForceDump      bool     `json:"force_dump,omitempty"`
-	ConfirmWipe    bool     `json:"confirm_wipe,omitempty"`
+	ConfirmWipe    bool     `json:"confirm_wipe,omitempty"` // the form's; pre-approves the CLONE wait only
 
 	// create_replica, learned.
 	MasterUUID      string   `json:"master_uuid,omitempty"`
@@ -511,6 +535,7 @@ type jobState struct {
 	DataBytes       uint64   `json:"data_bytes,omitempty"`
 	NeedsInstall    bool     `json:"needs_install,omitempty"`
 	WipeHash        string   `json:"wipe_hash,omitempty"` // sha256 of the leftover list last shown
+	WipeList        []string `json:"wipe_list,omitempty"` // leftovers the user approved; dropped before a dump
 	Method          string   `json:"method,omitempty"`    // clone | dump
 	CloneApproved   bool     `json:"clone_approved,omitempty"`
 	ReplicaServerID uint32   `json:"replica_server_id,omitempty"`

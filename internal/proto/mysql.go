@@ -186,6 +186,16 @@ type ReplicationFilterParams struct {
 	Databases []string `json:"databases"` // empty = every database
 }
 
+// DropDatabasesParams are the parameters of mysql.dropDatabases.
+type DropDatabasesParams struct {
+	Databases []string `json:"databases"`
+}
+
+// DropDatabasesResult is the answer to mysql.dropDatabases.
+type DropDatabasesResult struct {
+	Dropped []string `json:"dropped"` // the databases that existed and were dropped
+}
+
 // WaitSyncedParams are the parameters of mysql.waitSynced.
 type WaitSyncedParams struct {
 	GTIDSet    string `json:"gtid_set"` // usually the master's gtid_executed

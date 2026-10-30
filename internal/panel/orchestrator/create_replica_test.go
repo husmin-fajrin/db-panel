@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -18,7 +19,7 @@ import (
 // replicaCmds is what a target with MySQL receives for a full run.
 func replicaCmds(snapshot string) []string {
 	return []string{"probe", "mysql.preflight", "mysql.configure", "mysql.restart", "mysql.setReadOnly", snapshot,
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.waitSynced"}
+		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"}
 }
 
 func allDone(install string) []string {
@@ -111,21 +112,58 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 	}
 }
 
+// scriptLeftovers makes the target hold left (databases the master has
+// too): its preflight asks for confirmation until ConfirmWipe is sent.
+func scriptLeftovers(r *fakeAgent, method string, left ...string) {
+	r.on("mysql.preflight", func(raw json.RawMessage) (any, error) {
+		var p proto.PreflightParams
+		json.Unmarshal(raw, &p)
+		if p.ConfirmWipe {
+			return proto.PreflightResult{Worst: proto.CheckOK, Method: method}, nil
+		}
+		return proto.PreflightResult{Worst: proto.CheckNeedsConfirm, Method: method, Checks: []proto.Check{
+			{ID: "leftover", Status: proto.CheckNeedsConfirm, Title: "Database bernama sama dengan di master"}}}, nil
+	})
+	var dbs []proto.DatabaseInfo
+	for _, d := range left {
+		dbs = append(dbs, proto.DatabaseInfo{Name: d})
+	}
+	r.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: dbs})
+}
+
 func TestCreateReplicaSubsetUsesDumpWithFilter(t *testing.T) {
 	e := newEnv(t)
 	m, _ := e.readyMaster("db-master")
 	r := e.replicaAgent("replica1", "dump")
+	scriptLeftovers(r, "dump", "a", "b") // both left by an earlier attempt; only a is selected now
 
 	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
 		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, steps := e.waitJob(id, store.JobSucceeded)
+	_, steps := e.waitJob(id, store.JobWaiting)
+	if want := "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: a, b"; steps[1].Message != want {
+		t.Fatalf("waiting message = %q, want %q", steps[1].Message, want)
+	}
+	if err := e.r.Approve(id); err != nil {
+		t.Fatal(err)
+	}
+	_, steps = e.waitJob(id, store.JobSucceeded)
 	if got := stepStatuses(steps); !slices.Equal(got, allDone(store.StepSkipped)) {
 		t.Fatalf("steps = %v", got)
 	}
-	wantCmds(t, "replica", r.cmds(0), replicaCmds("mysql.dumpFrom"))
+	// Approve runs the waiting step again: probe, preflight, the list, the
+	// confirmed preflight.
+	wantCmds(t, "replica", r.cmds(0), []string{"probe", "mysql.preflight", "mysql.inventory",
+		"probe", "mysql.preflight", "mysql.inventory", "mysql.preflight",
+		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.dropDatabases", "mysql.dumpFrom",
+		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+	var drop proto.DropDatabasesParams
+	r.params("mysql.dropDatabases", &drop)
+	if !slices.Equal(drop.Databases, []string{"a", "b"}) {
+		t.Fatalf("dropDatabases = %v, want the full confirmed leftover list [a b]", drop.Databases)
+	}
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
 	if !slices.Equal(pre.Databases, []string{"a"}) || pre.PeerDataBytes != 100 {
@@ -138,7 +176,8 @@ func TestCreateReplicaSubsetUsesDumpWithFilter(t *testing.T) {
 	}
 	var snap proto.SnapshotParams
 	r.params("mysql.dumpFrom", &snap)
-	if !slices.Equal(snap.Databases, []string{"a"}) || snap.User != "dbpanel_repl" || snap.Password != replPW || snap.EstimateBytes != 100 {
+	if !slices.Equal(snap.Databases, []string{"a"}) || snap.User != "dbpanel_repl" || snap.Password != replPW ||
+		snap.EstimateBytes != 100 || snap.DropExisting {
 		t.Fatalf("dumpFrom params = %+v", snap)
 	}
 	var src proto.ReplicationSourceParams
@@ -235,7 +274,7 @@ func TestCreateReplicaInstallsMySQLWhenMissing(t *testing.T) {
 	}
 	wantCmds(t, "replica", r.cmds(0), []string{"probe", "probe", "mysql.install", "mysql.inventory", "mysql.preflight",
 		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.cloneFrom",
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.waitSynced"})
+		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
 	var ins proto.InstallParams
 	r.params("mysql.install", &ins)
 	if ins.Series != "8.4" || ins.ExactVersion != "8.4.3" {
@@ -246,8 +285,11 @@ func TestCreateReplicaInstallsMySQLWhenMissing(t *testing.T) {
 	}
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
-	if !pre.ConfirmWipe {
-		t.Fatal("ConfirmWipe from the form not passed on")
+	if pre.ConfirmWipe {
+		t.Fatal("the form's ConfirmWipe reached the preflight; only an in-job approval confirms a wipe")
+	}
+	if r.count("mysql.cloneFrom") != 1 {
+		t.Fatal("the form's ConfirmWipe did not pre-approve the CLONE")
 	}
 	if log := e.jobLog(id); !strings.Contains(log, "memasang paket mysql-server") {
 		t.Fatalf("agent job log not copied:\n%s", log)
@@ -295,7 +337,7 @@ func TestFailsWhenAgentDropsDuringSnapshot(t *testing.T) {
 		t.Fatalf("steps = %v", got)
 	}
 	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.dumpFrom", "mysql.status",
-		"mysql.configureReplication", "mysql.startReplica", "mysql.waitSynced"})
+		"mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
 	dumps := r.allParams("mysql.dumpFrom")
 	if len(dumps) != 2 || dumps[0] != dumps[1] {
 		t.Fatalf("dumpFrom params differ on retry:\n%v", dumps)
@@ -340,6 +382,7 @@ func TestResumeMarksRunningFailed(t *testing.T) {
 		status string
 		step   int
 	}{{"running-job", r1.id, store.JobRunning, 3}, {"waiting-job", r2.id, store.JobWaiting, 4}} {
+
 		if _, err := e.st.AddReplica(topo.ID, s.server, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -355,8 +398,20 @@ func TestResumeMarksRunningFailed(t *testing.T) {
 		}
 	}
 	_ = m
+	r3 := e.agent("replica3", "10.0.0.4")
+	if err := e.st.CreateJob(store.Job{ID: "queued-job", Kind: KindCreateReplica, ServerID: r3.id, TopologyID: topo.ID,
+		ParamsJSON: `{}`}, createReplicaStepNames()); err != nil {
+		t.Fatal(err)
+	}
 
 	e.r.Resume(context.Background())
+
+	if j, steps, _ := e.st.GetJob("queued-job"); j.Status != store.JobFailed || j.Error != resumeError || steps[0].Status != store.StepFailed {
+		t.Fatalf("queued job after resume = %+v, step %+v", j, steps[0])
+	}
+	if _, busy, _ := e.st.ActiveJobForServer(r3.id); busy {
+		t.Fatal("the queued job still blocks its server")
+	}
 
 	j, steps, _ := e.st.GetJob("running-job")
 	if j.Status != store.JobFailed || j.Error != "panel dimulai ulang saat job berjalan" || j.CurrentStep != 3 ||
@@ -405,6 +460,9 @@ func TestCancelSendsJobCancel(t *testing.T) {
 		return st.State == "canceled"
 	})
 	// The target is free for a new attempt.
+	if _, err := e.st.GetReplicaByServer(r.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("replica row after cancel: err = %v, want ErrNotFound", err)
+	}
 	if srv, _ := e.st.GetServer(r.id); srv.Role != store.RoleUnassigned {
 		t.Fatalf("role after cancel = %q", srv.Role)
 	}
@@ -445,7 +503,7 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 		t.Fatal(err)
 	}
 	j, steps := e.waitJob(id, store.JobWaiting)
-	if j.CurrentStep != 1 || !strings.HasSuffix(steps[1].Message, "akan dibuang: a") {
+	if j.CurrentStep != 1 || !strings.HasSuffix(steps[1].Message, "disalin ulang dari master: a") {
 		t.Fatalf("job %+v step %+v", j, steps[1])
 	}
 
@@ -457,7 +515,7 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 	}
 	e.waitFor("second waiting message", func() bool {
 		_, steps, _ := e.st.GetJob(id)
-		return strings.HasSuffix(steps[1].Message, "akan dibuang: a, b")
+		return strings.HasSuffix(steps[1].Message, "disalin ulang dari master: a, b")
 	})
 	j, _ = e.waitJob(id, store.JobWaiting)
 	for _, raw := range r.allParams("mysql.preflight") {
@@ -477,8 +535,10 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 	}
 	var snap proto.SnapshotParams
 	r.params("mysql.dumpFrom", &snap)
-	if !snap.DropExisting {
-		t.Fatal("dump does not drop the confirmed leftovers")
+	var drop proto.DropDatabasesParams
+	r.params("mysql.dropDatabases", &drop)
+	if snap.DropExisting || !slices.Equal(drop.Databases, []string{"a", "b"}) {
+		t.Fatalf("dumpFrom DropExisting %v, dropDatabases %v; want false and the approved [a b]", snap.DropExisting, drop.Databases)
 	}
 }
 
@@ -517,5 +577,116 @@ func TestHandleEventIgnoresUnknownJobs(t *testing.T) {
 	e.r.HandleEvent(42, proto.Event{Type: "other"})
 	if n := e.published("job_log"); n != 0 {
 		t.Fatalf("published %d job_log for an unknown job", n)
+	}
+}
+
+// TestRetryFromVerifyRestartsReplication: a failed verify stops replication;
+// Retry from that step starts it again before waiting for the sync.
+func TestRetryFromVerifyRestartsReplication(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	r.reply("mysql.waitSynced", proto.WaitSyncedResult{Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "No",
+		LastSQLErrno: 1146, LastSQLError: "Table 'a.x' doesn't exist"}})
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != 6 || !strings.Contains(j.Error, "1146") {
+		t.Fatalf("job = %+v", j)
+	}
+	if n := r.count("mysql.stopReplica"); n != 1 {
+		t.Fatalf("stopReplica after the failed verify: %d calls", n)
+	}
+
+	// Waiting for the sync after a stop would fail at once without a start.
+	var started atomic.Bool
+	r.on("mysql.startReplica", func(json.RawMessage) (any, error) {
+		started.Store(true)
+		return proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}, nil
+	})
+	r.on("mysql.waitSynced", func(json.RawMessage) (any, error) {
+		if !started.Load() {
+			return proto.WaitSyncedResult{Status: proto.ReplicaStatus{IORunning: "No", SQLRunning: "No"}}, nil
+		}
+		return proto.WaitSyncedResult{Synced: true, Executed: masterGTID}, nil
+	})
+	mark, mmark := r.mark(), m.mark()
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.startReplica", "mysql.waitSynced"})
+	wantCmds(t, "master after retry", m.cmds(mmark), []string{"mysql.status"})
+	if rep, _ := e.st.GetReplicaByServer(r.id); rep.State != store.ReplicaReady {
+		t.Fatalf("replica = %+v", rep)
+	}
+}
+
+// TestFailedTargetCanStartAgain: a target whose attempt failed takes a new
+// create_replica job; the failed attempt's replica row is replaced.
+func TestFailedTargetCanStartAgain(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	r.fail("mysql.configure", "tulis konfigurasi gagal: disk penuh")
+	first, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(first, store.JobFailed)
+	old, err := e.st.GetReplicaByServer(r.id)
+	if err != nil || old.State != store.ReplicaFailed {
+		t.Fatalf("replica after failure = %+v, %v", old, err)
+	}
+
+	r.on("mysql.configure", func(raw json.RawMessage) (any, error) {
+		var p proto.ConfigureParams
+		json.Unmarshal(raw, &p)
+		return proto.ConfigureResult{NeedsRestart: true, ServerID: p.ServerID}, nil
+	})
+	second, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"b"}})
+	if err != nil {
+		t.Fatalf("second StartCreateReplica: %v", err)
+	}
+	e.waitJob(second, store.JobSucceeded)
+	rep, err := e.st.GetReplicaByServer(r.id)
+	if err != nil || rep.ID == old.ID || rep.State != store.ReplicaReady || !slices.Equal(rep.Databases, []string{"b"}) {
+		t.Fatalf("replica = %+v (old id %d), %v", rep, old.ID, err)
+	}
+	// Only a failed attempt is replaced: a ready replica still refuses.
+	if _, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id}); err == nil {
+		t.Fatal("a ready replica accepted a new create_replica")
+	}
+}
+
+// TestFormConfirmWipeStillShowsLeftovers: the form's ConfirmWipe does not
+// confirm dropping databases the job has not shown yet.
+func TestFormConfirmWipeStillShowsLeftovers(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	scriptLeftovers(r, "dump", "a")
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, ConfirmWipe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps := e.waitJob(id, store.JobWaiting)
+	if j.CurrentStep != 1 || !strings.HasSuffix(steps[1].Message, "disalin ulang dari master: a") {
+		t.Fatalf("job %+v, step %+v", j, steps[1])
+	}
+	for _, raw := range r.allParams("mysql.preflight") {
+		if strings.Contains(raw, `"confirm_wipe":true`) {
+			t.Fatalf("ConfirmWipe sent before the list was shown: %s", raw)
+		}
+	}
+	if r.count("mysql.dropDatabases") != 0 {
+		t.Fatal("databases dropped before the approval")
 	}
 }

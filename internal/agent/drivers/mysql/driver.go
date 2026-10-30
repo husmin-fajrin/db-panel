@@ -48,6 +48,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerSnapshot(reg)
 	d.registerReplication(reg)
 	d.registerInstall(reg)
+	d.registerDatabases(reg)
 }
 
 func (d *Driver) host() (Host, error) {
