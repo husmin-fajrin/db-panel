@@ -1,0 +1,15 @@
+processor	: 0
+vendor_id	: GenuineIntel
+model name	: Intel(R) Xeon(R) CPU
+
+processor	: 1
+vendor_id	: GenuineIntel
+model name	: Intel(R) Xeon(R) CPU
+
+processor	: 2
+vendor_id	: GenuineIntel
+model name	: Intel(R) Xeon(R) CPU
+
+processor	: 3
+vendor_id	: GenuineIntel
+model name	: Intel(R) Xeon(R) CPU
