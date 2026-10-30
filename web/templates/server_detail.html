@@ -1,0 +1,115 @@
+{{define "title"}}{{.Server.Name}}{{end}}
+{{define "content"}}
+<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+  <h1 class="text-2xl font-bold">{{.Server.Name}}</h1>
+  {{if .Server.Paired}}
+  <span class="badge badge-lg {{if .Online}}badge-success{{else}}badge-error{{end}}"
+        x-data="{ online: {{.Online}} }"
+        x-init="new EventSource('/events').addEventListener('server_status', (e) => { const d = JSON.parse(e.data); if (d.id === {{.Server.ID}}) online = d.online })"
+        :class="{ 'badge-success': online, 'badge-error': !online }"
+        x-text="online ? 'Online' : 'Offline'">{{if .Online}}Online{{else}}Offline{{end}}</span>
+  {{else}}
+  <span class="badge badge-lg badge-ghost">Belum dipasangkan</span>
+  {{end}}
+</div>
+
+{{if not .Server.Paired}}
+<div class="card bg-base-100 shadow mb-6"
+     x-data
+     x-init="new EventSource('/events').addEventListener('server_status', (e) => { const d = JSON.parse(e.data); if (d.id === {{.Server.ID}} && d.online) location.reload() })">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Pasang agent di server ini</h2>
+    <p>Masuk ke server <strong>{{.Server.Name}}</strong> lewat SSH, lalu jalankan perintah berikut sebagai pengguna dengan akses <code>sudo</code>:</p>
+    <div class="flex flex-col md:flex-row gap-2 items-stretch" x-data="{ tersalin: false }">
+      <pre class="bg-base-200 rounded-box p-3 overflow-x-auto flex-1 text-sm"><code x-ref="perintah">{{.Command}}</code></pre>
+      <button type="button" class="btn btn-primary"
+              @click="salinTeks($refs.perintah).then(() => { tersalin = true; setTimeout(() => tersalin = false, 2000) })"
+              x-text="tersalin ? 'Tersalin' : 'Salin'">Salin</button>
+    </div>
+    <p class="text-sm text-base-content/70">Token berlaku sampai {{fmtTime .TokenExpires}} dan hanya bisa dipakai sekali. Halaman ini diperbarui otomatis setelah agent terhubung.</p>
+    <form method="post" action="/servers/{{.Server.ID}}/token">
+      <button type="submit" class="btn btn-outline btn-sm">Buat token baru</button>
+    </form>
+  </div>
+</div>
+{{else}}
+<div class="grid gap-6 md:grid-cols-2 mb-6">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">Sistem</h2>
+      {{with .Probe}}
+      <table class="table table-sm">
+        <tbody>
+          <tr><th>Hostname</th><td>{{.Hostname}}</td></tr>
+          <tr><th>Sistem operasi</th><td>{{.OS}}</td></tr>
+          <tr><th>Arsitektur</th><td>{{.Arch}}</td></tr>
+          <tr><th>Kernel</th><td>{{.Kernel}}</td></tr>
+          <tr><th>CPU</th><td>{{.CPUCores}} inti</td></tr>
+          <tr><th>RAM</th><td>{{fmtMB .MemTotalMB}}</td></tr>
+          <tr><th>Alamat</th><td>{{or $.Server.Address "-"}}</td></tr>
+          <tr><th>Terakhir terlihat</th><td>{{fmtTime $.Server.LastSeenAt}}</td></tr>
+        </tbody>
+      </table>
+      {{else}}
+      <p>Info server belum tersedia. Panel akan memeriksa server ini saat agent terhubung.</p>
+      {{end}}
+    </div>
+  </div>
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">MySQL</h2>
+      {{with .Probe}}{{with .MySQL}}
+      {{if .Installed}}
+      <table class="table table-sm">
+        <tbody>
+          <tr><th>Versi</th><td>{{.Version}}</td></tr>
+          <tr><th>Service</th><td>{{.ServiceName}} {{if .ServiceActive}}<span class="badge badge-success badge-sm">berjalan</span>{{else}}<span class="badge badge-error badge-sm">berhenti</span>{{end}}</td></tr>
+          <tr><th>Port</th><td>{{.Port}}</td></tr>
+          <tr><th>Direktori data</th><td>{{.DataDir}}</td></tr>
+        </tbody>
+      </table>
+      {{else}}
+      <p>MySQL belum terpasang di server ini.</p>
+      {{end}}
+      {{end}}{{else}}
+      <p>Belum ada data.</p>
+      {{end}}
+    </div>
+  </div>
+</div>
+{{with .Probe}}{{if .Disks}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Disk</h2>
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Mount</th><th>Ukuran</th><th>Terpakai</th><th>Sisa</th></tr></thead>
+        <tbody>
+          {{range .Disks}}
+          <tr><td>{{.Mount}}</td><td>{{fmtMB .TotalMB}}</td><td>{{fmtMB .UsedMB}}</td><td>{{fmtMB (sub .TotalMB .UsedMB)}}</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{{end}}{{end}}
+{{end}}
+
+<div class="flex justify-between">
+  <a href="/servers" class="btn btn-ghost">Kembali ke daftar server</a>
+  <button type="button" class="btn btn-error btn-outline" onclick="document.getElementById('modal-hapus').showModal()">Hapus server</button>
+</div>
+
+<dialog id="modal-hapus" class="modal">
+  <div class="modal-box">
+    <h3 class="text-lg font-bold">Hapus server {{.Server.Name}}?</h3>
+    <p class="py-4">Server akan dihapus dari panel dan agent-nya tidak bisa terhubung lagi. Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang dan pasang agent dengan token baru.</p>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn">Batal</button></form>
+      <form method="post" action="/servers/{{.Server.ID}}/delete"><button type="submit" class="btn btn-error">Ya, hapus</button></form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}

@@ -1,0 +1,38 @@
+{{define "title"}}Server{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-bold">Server</h1>
+  <a href="/servers/new" class="btn btn-primary">Tambah server</a>
+</div>
+{{if .Rows}}
+<div class="overflow-x-auto bg-base-100 rounded-box shadow">
+  <table class="table">
+    <thead>
+      <tr><th>Nama</th><th>Alamat</th><th>Status</th><th>Versi MySQL</th><th>OS</th><th>Terakhir terlihat</th></tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr class="hover:bg-base-200">
+        <td><a href="/servers/{{.ID}}" class="link link-primary font-semibold">{{.Name}}</a></td>
+        <td>{{or .Address "-"}}</td>
+        <td>
+          {{if not .Paired}}<span class="badge badge-ghost">Belum dipasangkan</span>
+          {{else if .Online}}<span class="badge badge-success">Online</span>
+          {{else}}<span class="badge badge-error">Offline</span>{{end}}
+        </td>
+        <td>{{or .MySQLVersion "-"}}</td>
+        <td>{{or .OS "-"}}</td>
+        <td>{{fmtTime .LastSeenAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <p>Belum ada server. Tambahkan server pertama, lalu jalankan perintah pemasangan agent di server tersebut.</p>
+  </div>
+</div>
+{{end}}
+{{end}}

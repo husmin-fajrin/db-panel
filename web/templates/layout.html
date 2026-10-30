@@ -1,0 +1,52 @@
+{{define "layout"}}<!doctype html>
+<html lang="id" data-theme="corporate">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{template "title" .}} · dbpanel</title>
+<link rel="stylesheet" href="/static/app.css">
+<script>
+// Salin teks elemen ke clipboard. navigator.clipboard hanya ada di HTTPS
+// atau localhost, jadi panel lewat HTTP biasa memakai seleksi + execCommand.
+function salinTeks(el) {
+  const teks = el.textContent.trim();
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(teks);
+  }
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  document.execCommand("copy");
+  sel.removeAllRanges();
+  return Promise.resolve();
+}
+</script>
+<script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body class="min-h-screen bg-base-200 flex flex-col">
+{{if .Username}}
+<div class="navbar bg-base-100 shadow-sm px-4">
+  <div class="flex-1">
+    <a href="/" class="text-xl font-bold">dbpanel</a>
+  </div>
+  <ul class="menu menu-horizontal gap-1 items-center">
+    <li><a href="/">Dashboard</a></li>
+    <li><a href="/servers">Server</a></li>
+    <li>
+      <form method="post" action="/logout" class="p-0">
+        <button type="submit" class="btn btn-ghost btn-sm" title="Masuk sebagai {{.Username}}">Keluar ({{.Username}})</button>
+      </form>
+    </li>
+  </ul>
+</div>
+{{end}}
+<main class="flex-1 w-full max-w-5xl mx-auto p-4 md:p-6">
+{{with .Flash}}<div role="alert" class="alert alert-error mb-4"><span>{{.}}</span></div>{{end}}
+{{template "content" .}}
+</main>
+<footer class="text-center text-xs text-base-content/60 p-4">dbpanel {{.Version}}</footer>
+</body>
+</html>
+{{end}}

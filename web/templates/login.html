@@ -1,0 +1,18 @@
+{{define "title"}}Masuk{{end}}
+{{define "content"}}
+<div class="flex justify-center mt-12">
+  <div class="card bg-base-100 w-full max-w-sm shadow">
+    <form method="post" action="/login" class="card-body gap-4">
+      <h1 class="card-title text-2xl">Masuk ke dbpanel</h1>
+      <input type="hidden" name="next" value="{{.Next}}">
+      <fieldset class="fieldset">
+        <label class="label" for="username">Nama pengguna</label>
+        <input type="text" id="username" name="username" value="{{.FormUsername}}" class="input w-full" autocomplete="username" required autofocus>
+        <label class="label" for="password">Kata sandi</label>
+        <input type="password" id="password" name="password" class="input w-full" autocomplete="current-password" required>
+      </fieldset>
+      <button type="submit" class="btn btn-primary w-full">Masuk</button>
+    </form>
+  </div>
+</div>
+{{end}}
