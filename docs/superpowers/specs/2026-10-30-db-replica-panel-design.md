@@ -208,8 +208,8 @@ diterima, semuanya dengan parameter terstruktur:
   replika (lihat 7.3).
 - `mysql.install(series)`: pasang MySQL seri yang diminta dari repositori
   resmi MySQL (apt/dnf), set root lokal via auth_socket, aktifkan service.
-- `mysql.configure(role, params)`: tulis `/etc/mysql/conf.d/dbpanel.cnf`
-  (atau `/etc/my.cnf.d/dbpanel.cnf`) dan/atau `SET PERSIST`.
+- `mysql.configure(role, params)`: tulis `/etc/mysql/conf.d/zz-dbpanel.cnf`
+  (atau `/etc/my.cnf.d/zz-dbpanel.cnf`; nama `zz-` agar dibaca terakhir dan menang atas file bawaan distro) dan/atau `SET PERSIST`.
 - `mysql.restart` (hanya dijalankan setelah konfirmasi manusia di panel).
 - `mysql.connect(credentials)`: simpan akun admin terenkripsi, uji
   login, kembalikan versi, daftar database + ukuran, hak akun.

@@ -297,7 +297,7 @@ type Host interface {
     Layout() Layout
     Open(ctx context.Context) (*sql.DB, error)              // akun admin tersimpan (Task 6); bila belum ada: root via socket
     Service() ServiceController
-    WriteConfig(content string) (path string, err error)    // IncludeDir/dbpanel.cnf atau blok bertanda di ConfigFile (ganti blok lama)
+    WriteConfig(content string) (path string, err error)    // IncludeDir/zz-dbpanel.cnf atau blok bertanda di ConfigFile (ganti blok lama)
     ValidateConfig(ctx context.Context) error               // mysqld --validate-config (dengan --defaults-file=ConfigFile)
     DiskFree(path string) (free, total uint64, err error)
     Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error
