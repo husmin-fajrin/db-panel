@@ -23,12 +23,17 @@
   </div>
 </div>
 {{else}}
-{{if .Command}}
+{{if or .Command .TokenHidden}}
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body gap-3">
     <h2 class="card-title">Pasang ulang agent</h2>
     {{template "pair-command" .}}
-    <p class="text-sm text-base-content/70">Token berlaku sampai {{fmtTime .TokenExpires}} dan hanya bisa dipakai sekali. Agent lama tetap bekerja sampai agent baru berhasil dipasangkan; setelah itu sertifikat agent lama tidak diterima lagi.</p>
+    {{if .TokenHidden}}
+    <form method="post" action="/servers/{{.Server.ID}}/token">
+      <button type="submit" class="btn btn-outline btn-sm">Buat token baru</button>
+    </form>
+    {{end}}
+    <p class="text-sm text-base-content/70">Token berlaku sampai {{fmtTime .TokenExpires}} dan hanya bisa dipakai sekali. Agent lama tetap bekerja sampai agent baru berhasil dipasangkan; saat itu koneksi agent lama langsung diputus dan sertifikatnya tidak diterima lagi.</p>
   </div>
 </div>
 {{end}}
@@ -112,7 +117,7 @@
 <dialog id="modal-pasang-ulang" class="modal">
   <div class="modal-box">
     <h3 class="text-lg font-bold">Pasang ulang agent di {{.Server.Name}}?</h3>
-    <p class="py-4">Gunakan ini bila server dipasang ulang atau isi <code>/etc/dbpanel</code> hilang. Panel membuat token pemasangan baru dan menampilkan perintahnya. Begitu agent baru berhasil dipasangkan, sertifikat agent lama tidak berlaku lagi dan agent lama tidak bisa terhubung. Sampai saat itu agent lama tetap bekerja.</p>
+    <p class="py-4">Gunakan ini bila server dipasang ulang atau isi <code>/etc/dbpanel</code> hilang. Panel membuat token pemasangan baru dan menampilkan perintahnya. Begitu agent baru berhasil dipasangkan, koneksi agent lama langsung diputus, sertifikatnya tidak berlaku lagi, dan agent lama tidak bisa terhubung. Sampai saat itu agent lama tetap bekerja.</p>
     <div class="modal-action">
       <form method="dialog"><button class="btn">Batal</button></form>
       <form method="post" action="/servers/{{.Server.ID}}/token"><button type="submit" class="btn btn-primary">Ya, buat token</button></form>
@@ -137,9 +142,13 @@
 {{end}}
 
 {{define "pair-command"}}
+    {{if .TokenHidden}}
+    <div role="alert" class="alert"><span>Perintah pemasangan tidak bisa ditampilkan lagi: panel hanya menyimpan sidik token (hash), dan panel sudah dimulai ulang sejak token dibuat. Perintah yang sudah disalin tetap berlaku. Untuk perintah baru, klik <strong>Buat token baru</strong>.</span></div>
+    {{else}}
     <p>Masuk ke server <strong>{{.Server.Name}}</strong> lewat SSH, lalu jalankan perintah berikut sebagai pengguna dengan akses <code>sudo</code>:</p>
     <div class="flex flex-col md:flex-row gap-2 items-stretch" x-data="copyCommand">
       <pre class="bg-base-200 rounded-box p-3 overflow-x-auto flex-1 text-sm"><code x-ref="perintah">{{.Command}}</code></pre>
       <button type="button" class="btn btn-primary" @click="copy" x-text="buttonLabel">Salin</button>
     </div>
+    {{end}}
 {{end}}

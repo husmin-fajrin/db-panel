@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -84,6 +85,9 @@ type Panel struct {
 	localAddrs   []net.IP  // interface addresses, for hostAllowed
 	localAddrsAt time.Time // when localAddrs was read
 
+	evMu     sync.Mutex
+	evLogged map[int64]time.Time // last logged agent event per server
+
 	// bgMu guards the background probe goroutines: runCtx is set while Run
 	// is serving, and bgClosed refuses new probes once Run is shutting down.
 	bgMu     sync.Mutex
@@ -97,8 +101,13 @@ type Panel struct {
 // returns a Panel ready to Run. Close releases it.
 func New(o Options) (*Panel, error) {
 	o = withDefaults(o)
-	if err := os.MkdirAll(o.DataDir, 0o750); err != nil {
+	// The data directory holds panel.db (password and token hashes): owner
+	// only, also when it already existed with a looser mode.
+	if err := os.MkdirAll(o.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("buat direktori data: %w", err)
+	}
+	if err := os.Chmod(o.DataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("atur izin direktori data: %w", err)
 	}
 	if err := os.MkdirAll(o.ConfigDir, 0o700); err != nil {
 		return nil, fmt.Errorf("buat direktori konfigurasi: %w", err)
@@ -118,6 +127,7 @@ func New(o Options) (*Panel, error) {
 			auth.WithMaxAge(sessionMaxAge), auth.WithValidator(epoch.valid)),
 		Limiter:       auth.NewRateLimiter(loginMaxAttempts, loginWindow, time.Now),
 		epoch:         epoch,
+		evLogged:      make(map[int64]time.Time),
 		Broker:        web.NewBroker(),
 		opts:          o,
 		log:           o.Logger,
@@ -174,6 +184,9 @@ func (p *Panel) init() error {
 // public_host setting; otherwise the setting is used, else auto-detection.
 func (p *Panel) resolvePublicHost() error {
 	if p.opts.PublicHost != "" {
+		if !validPublicHost(p.opts.PublicHost) {
+			return fmt.Errorf("public host %q tidak valid: %s", p.opts.PublicHost, publicHostRule)
+		}
 		return p.Store.SetSetting(settingPublicHost, p.opts.PublicHost)
 	}
 	saved, err := p.Store.GetSetting(settingPublicHost)
@@ -181,6 +194,10 @@ func (p *Panel) resolvePublicHost() error {
 		return err
 	}
 	if saved != "" {
+		if !validPublicHost(saved) {
+			return fmt.Errorf("public host tersimpan %q tidak valid: %s; jalankan panel dengan --public-host yang benar",
+				saved, publicHostRule)
+		}
 		p.opts.PublicHost = saved
 		return nil
 	}
@@ -189,6 +206,18 @@ func (p *Panel) resolvePublicHost() error {
 		p.log.Warn("public host tidak terdeteksi; memakai 127.0.0.1, gunakan --public-host")
 	}
 	return nil
+}
+
+// hostnameRe is the host name form accepted for the public host.
+var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}$`)
+
+const publicHostRule = "harus alamat IPv4/IPv6 atau nama host dari huruf, angka, titik dan strip (maks. 253)"
+
+// validPublicHost reports whether h is an IP literal or a plain host name.
+// The public host is written into the agent install script that runs as
+// root, so nothing else (spaces, quotes, $, `) may get through.
+func validPublicHost(h string) bool {
+	return net.ParseIP(h) != nil || hostnameRe.MatchString(h)
 }
 
 // loopbackHost is the public host used when none can be detected.

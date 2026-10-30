@@ -1,10 +1,17 @@
 package store
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -42,8 +49,8 @@ func TestOpenRunsMigrationsIdempotently(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("schema_migrations rows = %d, want 1", n)
+	if n != 2 {
+		t.Fatalf("schema_migrations rows = %d, want 2", n)
 	}
 	list, err := s.ListServers()
 	if err != nil || len(list) != 1 {
@@ -259,7 +266,7 @@ func TestMarkPairedDeletesUnusedTokens(t *testing.T) {
 		t.Fatalf("another server's token was deleted: %v", err)
 	}
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pair_tokens WHERE token = ?`, used.Token).Scan(&n); err != nil || n != 1 {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pair_tokens WHERE token_hash = ?`, hashToken(used.Token)).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("used token rows = %d err=%v, want it kept", n, err)
 	}
 }
@@ -347,5 +354,184 @@ func TestSessionEpoch(t *testing.T) {
 	}
 	if e, err := s.SessionEpoch(); err != nil || e != 1_800_000_000 {
 		t.Fatalf("epoch = %d %v, want 1800000000", e, err)
+	}
+}
+
+// TestCreateServerNamePolicy (SEC-16).
+func TestCreateServerNamePolicy(t *testing.T) {
+	s := openTemp(t)
+	for _, ok := range []string{"db-utama", "DB Replika 2", "srv_01.rs", strings.Repeat("a", 64), "  spasi-tepi  "} {
+		if _, err := s.CreateServer(ok); err != nil {
+			t.Errorf("CreateServer(%q): %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		strings.Repeat("a", 65), "db\nbaru", "db\x1b[31m", "evil‮exe", "db/../x", "db;rm", "dbé",
+	} {
+		_, err := s.CreateServer(bad)
+		if !errors.Is(err, ErrServerName) || err.Error() != "nama server hanya boleh huruf, angka, spasi, titik, garis bawah dan strip (maks. 64)" {
+			t.Errorf("CreateServer(%q) err = %v", bad, err)
+		}
+	}
+	if got, _ := s.GetServer(5); got.Name != "spasi-tepi" {
+		t.Errorf("name not trimmed: %q", got.Name)
+	}
+}
+
+// TestPairTokenStoredAsHash (SEC-13): the database holds only SHA-256 of
+// each token; the plaintext lives in the creating process only.
+func TestPairTokenStoredAsHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := s.CreateServer("db1")
+	now := time.Now()
+	tok, err := s.CreatePairToken(srv.ID, now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := s.db.QueryRow(`SELECT token_hash FROM pair_tokens WHERE server_id = ?`, srv.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(tok.Token))
+	if stored != hex.EncodeToString(sum[:]) {
+		t.Fatalf("stored %q, want sha256 of the token", stored)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wal, err := os.ReadFile(path + "-wal"); err == nil {
+		raw = append(raw, wal...)
+	}
+	if bytes.Contains(raw, []byte(tok.Token)) {
+		t.Fatal("plaintext token found in the database files")
+	}
+
+	// A new process (panel restart) still accepts the token but cannot show it.
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	act, ok, err := s.ActivePairToken(srv.ID, now)
+	if err != nil || !ok || act.Token != "" {
+		t.Fatalf("active after reopen = %+v %v %v, want found with Token \"\"", act, ok, err)
+	}
+	if pt, err := s.PeekPairToken(tok.Token, now); err != nil || pt.Token != tok.Token || pt.ServerID != srv.ID {
+		t.Fatalf("peek after reopen = %+v %v", pt, err)
+	}
+	if _, err := s.ConsumePairToken(tok.Token, now); err != nil {
+		t.Fatalf("consume after reopen: %v", err)
+	}
+}
+
+// TestMigrationDropsPlaintextTokens: upgrading a database from schema 1
+// removes the plaintext tokens it holds.
+func TestMigrationDropsPlaintextTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1, err := migrationsFS.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		string(v1),
+		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)`,
+		`INSERT INTO schema_migrations (version) VALUES (1)`,
+		`INSERT INTO servers (name, created_at) VALUES ('db1', '2026-10-30T10:00:00Z')`,
+		`INSERT INTO pair_tokens (token, server_id, expires_at) VALUES ('PLAIN-TOKEN-AAAAA', 1, '2099-01-01T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pair_tokens`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("pair_tokens after upgrade = %d %v, want 0", n, err)
+	}
+	if _, err := s.PeekPairToken("PLAIN-TOKEN-AAAAA", time.Now()); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("old plaintext token after upgrade: %v", err)
+	}
+	if _, err := s.CreatePairToken(1, time.Now(), time.Hour); err != nil {
+		t.Fatalf("create token after upgrade: %v", err)
+	}
+}
+
+// TestOpenFileModes (SEC-13): panel.db and its -wal/-shm are 0600 whatever
+// the umask, and Open tightens files left with a looser mode.
+func TestOpenFileModes(t *testing.T) {
+	old := syscall.Umask(0o022)
+	defer syscall.Umask(old)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panel.db")
+	check := func(when string) {
+		t.Helper()
+		for _, p := range []string{path, path + "-wal", path + "-shm"} {
+			fi, err := os.Stat(p)
+			if err != nil {
+				t.Fatalf("%s: %v", when, err)
+			}
+			if m := fi.Mode().Perm(); m != 0o600 {
+				t.Errorf("%s: %s mode %o, want 600", when, filepath.Base(p), m)
+			}
+		}
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateServer("db1"); err != nil {
+		t.Fatal(err)
+	}
+	check("new database")
+	s.Close()
+
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		os.Chmod(p, 0o644)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.ListServers(); err != nil {
+		t.Fatal(err)
+	}
+	check("reopened 0644 database")
+}
+
+// TestUpdateProbeTooLarge (SEC-11): a probe result over 64 KiB is refused
+// and the previous one kept.
+func TestUpdateProbeTooLarge(t *testing.T) {
+	s := openTemp(t)
+	srv, _ := s.CreateServer("db1")
+	small := proto.ProbeResult{Hostname: "kecil"}
+	if err := s.UpdateProbe(srv.ID, small, "v1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	big := proto.ProbeResult{Hostname: strings.Repeat("x", 64<<10)}
+	if err := s.UpdateProbe(srv.ID, big, "v2", time.Now()); !errors.Is(err, ErrProbeTooLarge) {
+		t.Fatalf("UpdateProbe(big) err = %v, want ErrProbeTooLarge", err)
+	}
+	got, _ := s.GetServer(srv.ID)
+	if !strings.Contains(got.ProbeJSON, `"kecil"`) || got.AgentVersion != "v1" {
+		t.Fatalf("server after refused probe = %+v, want the previous probe", got)
 	}
 }

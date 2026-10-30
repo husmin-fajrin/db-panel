@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -58,11 +59,23 @@ func scanServer(r rowScanner) (Server, error) {
 	return srv, nil
 }
 
-// CreateServer adds an unpaired server with a unique, non-empty name.
+// serverNameRe is what a server name may contain. Names end up in pages,
+// logs and later in file names and messages; no control or bidi
+// characters, no long strings.
+var serverNameRe = regexp.MustCompile(`^[A-Za-z0-9 ._-]{1,64}$`)
+
+// ErrServerName is returned for a server name outside serverNameRe.
+var ErrServerName = errors.New("nama server hanya boleh huruf, angka, spasi, titik, garis bawah dan strip (maks. 64)")
+
+// CreateServer adds an unpaired server with a unique name: trimmed, 1-64
+// characters from [A-Za-z0-9 ._-].
 func (s *Store) CreateServer(name string) (Server, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Server{}, errors.New("nama server tidak boleh kosong")
+	}
+	if !serverNameRe.MatchString(name) {
+		return Server{}, ErrServerName
 	}
 	res, err := s.db.Exec(`INSERT INTO servers (name, role, created_at) VALUES (?, ?, ?)`,
 		name, RoleUnassigned, formatTime(time.Now()))
@@ -149,14 +162,27 @@ func (s *Store) MarkPaired(id int64, certSerial string, address string) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
+	s.forget(id)
 	return nil
 }
 
+// MaxProbeJSON caps the stored probe result. A real one is a few KiB; an
+// agent sending more would bloat panel.db and every page that shows it.
+const MaxProbeJSON = 64 << 10
+
+// ErrProbeTooLarge is returned by UpdateProbe for a result over MaxProbeJSON.
+var ErrProbeTooLarge = errors.New("hasil probe terlalu besar")
+
 // UpdateProbe stores the latest probe result and marks the server as seen.
+// A result whose JSON exceeds MaxProbeJSON is refused (ErrProbeTooLarge)
+// and the previous one kept.
 func (s *Store) UpdateProbe(id int64, probe proto.ProbeResult, agentVersion string, seen time.Time) error {
 	b, err := json.Marshal(probe)
 	if err != nil {
 		return fmt.Errorf("marshal probe: %w", err)
+	}
+	if len(b)+len(agentVersion) > MaxProbeJSON {
+		return fmt.Errorf("%w: %d byte", ErrProbeTooLarge, len(b)+len(agentVersion))
 	}
 	return s.execOne(`UPDATE servers SET probe_json = ?, agent_version = ?, last_seen_at = ? WHERE id = ?`,
 		string(b), agentVersion, formatTime(seen), id)
@@ -169,5 +195,9 @@ func (s *Store) TouchSeen(id int64, seen time.Time) error {
 
 // DeleteServer removes a server (and, by cascade, its pair tokens).
 func (s *Store) DeleteServer(id int64) error {
-	return s.execOne(`DELETE FROM servers WHERE id = ?`, id)
+	if err := s.execOne(`DELETE FROM servers WHERE id = ?`, id); err != nil {
+		return err
+	}
+	s.forget(id)
+	return nil
 }

@@ -3,6 +3,9 @@ package agentapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -605,5 +608,68 @@ func TestAgentListenerRefusesHTTP2(t *testing.T) {
 	defer conn.Close()
 	if p := conn.ConnectionState().NegotiatedProtocol; p == "h2" {
 		t.Fatalf("NegotiatedProtocol = %q, want HTTP/1.1 only", p)
+	}
+}
+
+// TestRepairDisconnectsOldAgent (SEC-03): once a new agent pairs for a
+// server, the connection made with the old certificate is cut at once (it
+// does not wait for the new agent), the old certificate cannot reconnect,
+// and the new agent is accepted.
+func TestRepairDisconnectsOldAgent(t *testing.T) {
+	e := newEnv(t)
+	id, token1 := e.newToken(t, 0)
+	cfg1 := e.pair(t, token1, filepath.Join(t.TempDir(), "old"))
+	startAgent(t, cfg1, stubRegistry())
+	if got := waitID(t, e.l.online, "old agent online"); got != id {
+		t.Fatalf("online id = %d, want %d", got, id)
+	}
+
+	_, token2 := e.newToken(t, id)
+	cfg2 := e.pair(t, token2, filepath.Join(t.TempDir(), "new"))
+	if got := waitID(t, e.l.offline, "old agent cut after re-pairing"); got != id {
+		t.Fatalf("offline id = %d, want %d", got, id)
+	}
+	if e.hub.IsOnline(id) {
+		t.Fatal("server still online through the old agent after re-pairing")
+	}
+	// The old agent keeps retrying with its certificate and is refused.
+	hits := e.wsHits.Load()
+	deadline := time.Now().Add(wait)
+	for e.wsHits.Load() == hits && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	assertNeverOnline(t, e, 500*time.Millisecond)
+
+	startAgent(t, cfg2, stubRegistry())
+	if got := waitID(t, e.l.online, "new agent online"); got != id {
+		t.Fatalf("online id = %d, want %d", got, id)
+	}
+}
+
+// TestPairRejectsNonP256KeyWithoutConsumingToken (SEC-18).
+func TestPairRejectsNonP256KeyWithoutConsumingToken(t *testing.T) {
+	e := newEnv(t)
+	_, token := e.newToken(t, 0)
+	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+	body, _ := json.Marshal(agent.PairRequest{Token: token, Hostname: "h", Arch: "amd64", CSRPEM: string(csr)})
+	resp, err := http.Post(e.pairURL+"/agent/pair", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(b), "kunci CSR harus ECDSA P-256") {
+		t.Fatalf("status %d body %s, want 400 with the key policy message", resp.StatusCode, b)
+	}
+	if _, err := e.st.PeekPairToken(token, time.Now()); err != nil {
+		t.Fatalf("token consumed by a rejected CSR: %v", err)
 	}
 }

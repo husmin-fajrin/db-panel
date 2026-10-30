@@ -31,9 +31,23 @@ func (p *Panel) setOnline(id int64, online bool) {
 	}
 }
 
+// eventLogInterval is the minimum time between two logged events of one
+// server, so an agent flooding events cannot flood the journal.
+const eventLogInterval = 10 * time.Second
+
 // onEvent receives events from remote and embedded agents. Nothing consumes
-// them yet.
+// them yet; they are logged at debug level, at most one per server per
+// eventLogInterval.
 func (p *Panel) onEvent(id int64, ev proto.Event) {
+	now := p.now()
+	p.evMu.Lock()
+	last, seen := p.evLogged[id]
+	if seen && now.Sub(last) < eventLogInterval {
+		p.evMu.Unlock()
+		return
+	}
+	p.evLogged[id] = now
+	p.evMu.Unlock()
 	p.log.Debug("agent event", "server_id", id, "type", ev.Type)
 }
 
@@ -87,6 +101,10 @@ func (p *Panel) probeOne(ctx context.Context, id int64) {
 		return
 	}
 	if err := p.Store.UpdateProbe(id, res, res.AgentVersion, p.now()); err != nil {
+		if errors.Is(err, store.ErrProbeTooLarge) {
+			p.log.Warn("probe result too large; keeping the previous one", "server_id", id, "err", err)
+			return
+		}
 		p.log.Warn("store probe result", "server_id", id, "err", err)
 		return
 	}

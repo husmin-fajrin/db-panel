@@ -1,8 +1,15 @@
 package ca
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -72,8 +79,8 @@ func TestLoadOrCreatePersists(t *testing.T) {
 	if a.Cert.Subject.CommonName != "dbpanel-ca" || !a.Cert.IsCA {
 		t.Fatalf("cert CA salah: %+v", a.Cert.Subject)
 	}
-	if got := a.Cert.NotAfter.Sub(a.Cert.NotBefore); got < 19*365*24*time.Hour {
-		t.Fatalf("validitas CA terlalu pendek: %v", got)
+	if got := a.Cert.NotAfter.Sub(a.Cert.NotBefore); got < 9*365*24*time.Hour || got > 11*365*24*time.Hour {
+		t.Fatalf("validitas CA = %v, want ~10 tahun", got)
 	}
 }
 
@@ -344,5 +351,103 @@ func TestCreateCARemovesKeyWhenCertWriteFails(t *testing.T) {
 	// Direktori tidak tertinggal dalam keadaan "hanya satu file".
 	if _, err := LoadOrCreate(dir); err != nil {
 		t.Fatalf("LoadOrCreate setelah kegagalan: %v", err)
+	}
+}
+
+// csrWith returns a PEM CSR signed by key.
+func csrWith(t *testing.T, key crypto.Signer) []byte {
+	t.Helper()
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "h"},
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+}
+
+// TestIssueAgentCertKeyPolicy (SEC-18): only ECDSA P-256 agent keys.
+func TestIssueAgentCertKeyPolicy(t *testing.T) {
+	c := newCA(t)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, key := range map[string]crypto.Signer{"rsa-1024": rsaKey, "p384": p384, "ed25519": edKey} {
+		_, _, err := c.IssueAgentCert(csrWith(t, key), 1)
+		if !errors.Is(err, ErrCSRKey) || err.Error() != "kunci CSR harus ECDSA P-256" {
+			t.Errorf("%s: err = %v, want %q", name, err, ErrCSRKey)
+		}
+		if _, err := ParseAgentCSR(csrWith(t, key)); !errors.Is(err, ErrCSRKey) {
+			t.Errorf("%s: ParseAgentCSR err = %v", name, err)
+		}
+	}
+	p256, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.IssueAgentCert(csrWith(t, p256), 1); err != nil {
+		t.Fatalf("P-256: %v", err)
+	}
+}
+
+// TestCertificateValidity (SEC-18): CA 10 years, agent and server
+// certificates 2 years, never past the CA's own expiry.
+func TestCertificateValidity(t *testing.T) {
+	c := newCA(t)
+	near := func(got time.Time, want time.Duration) bool {
+		d := time.Until(got) - want
+		return d > -time.Hour && d < time.Hour
+	}
+	if !near(c.Cert.NotAfter, 10*365*24*time.Hour) {
+		t.Errorf("CA NotAfter = %v, want ~10 years", c.Cert.NotAfter)
+	}
+	if c.Cert.MaxPathLen != 0 || !c.Cert.MaxPathLenZero {
+		t.Errorf("CA MaxPathLen = %d (zero %v), want 0", c.Cert.MaxPathLen, c.Cert.MaxPathLenZero)
+	}
+	_, csrPEM, err := NewAgentKeyAndCSR("h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPEM, _, err := c.IssueAgentCert(csrPEM, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if na := mustParseCert(t, agentPEM).NotAfter; !near(na, 2*365*24*time.Hour) {
+		t.Errorf("agent NotAfter = %v, want ~2 years", na)
+	}
+	serverPEM, _, err := c.IssueServerCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if na := mustParseCert(t, serverPEM).NotAfter; !near(na, 2*365*24*time.Hour) {
+		t.Errorf("server NotAfter = %v, want ~2 years", na)
+	}
+
+	// A CA close to its end caps the leaves at its own NotAfter.
+	short := *c.Cert
+	short.NotAfter = time.Now().Add(30 * 24 * time.Hour).Truncate(time.Second)
+	cs := &CA{Cert: &short, Key: c.Key}
+	agentPEM, _, err = cs.IssueAgentCert(csrPEM, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if na := mustParseCert(t, agentPEM).NotAfter; !na.Equal(short.NotAfter) {
+		t.Errorf("agent NotAfter = %v, want capped at CA NotAfter %v", na, short.NotAfter)
+	}
+	serverPEM, _, err = cs.IssueServerCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if na := mustParseCert(t, serverPEM).NotAfter; !na.Equal(short.NotAfter) {
+		t.Errorf("server NotAfter = %v, want capped at CA NotAfter %v", na, short.NotAfter)
 	}
 }

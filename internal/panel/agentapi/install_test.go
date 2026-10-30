@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -100,9 +101,12 @@ func TestInstallScriptRendersToken(t *testing.T) {
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
 		"systemctl enable --now dbpanel-agent",
-		`curl -sSL -o "$BIN.new" -w '%{http_code}' "` + installPanelURL + `/agent/bin/${arch}?token=` + token + `"`,
-		`agent pair --panel "` + installPanelURL + `" --token "` + token + `"`,
-		installAgentAddr,
+		"PANEL_URL='" + installPanelURL + "'\n",
+		"AGENT_ADDR='" + installAgentAddr + "'\n",
+		"TOKEN='" + token + "'\n",
+		`printf 'url = "%s"\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |`,
+		`curl -sSL -o "$BIN.new" -w '%{http_code}' -K -)`,
+		`DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL"`,
 		"Jalankan dengan sudo",
 		"Pairing gagal. Periksa token dan alamat panel, lalu ulangi.",
 		"Agent terpasang dan terhubung ke panel",
@@ -115,6 +119,13 @@ func TestInstallScriptRendersToken(t *testing.T) {
 	}
 	if strings.Contains(script, "{{") || strings.Contains(script, "set -x") {
 		t.Error("script has an unrendered action or set -x")
+	}
+	// SEC-02: the token never goes on a command line.
+	if strings.Contains(script, "--token") {
+		t.Error("script passes the token with --token (visible in ps)")
+	}
+	if n := strings.Count(script, token); n != 1 {
+		t.Errorf("token appears %d times in the script, want once (TOKEN=...)", n)
 	}
 	// set -e ignores a failure anywhere but last in an && list, so each
 	// systemctl step must stand alone.
@@ -227,5 +238,30 @@ func TestBinaryHandlerRejectsBadToken(t *testing.T) {
 	for _, q := range []string{"?token=SALAH", ""} {
 		resp, body := get(t, base+"/agent/bin/arm64"+q)
 		wantTextError(t, resp, body, http.StatusForbidden, "token tidak valid")
+	}
+}
+
+// TestShellQuote (SEC-09): values rendered into the root install script
+// cannot run commands, whatever they contain.
+func TestShellQuote(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "pwned")
+	for _, v := range []string{
+		"http://127.0.0.1$(touch " + marker + "):8080",
+		"`touch " + marker + "`",
+		"a'b; touch " + marker + "; 'c",
+		"$HOME \\ \" ! *",
+	} {
+		script := "v=" + agentapi.ShellQuote(v) + "\nprintf '%s' \"$v\"\n"
+		out, err := exec.Command("bash", "-c", script).Output()
+		if err != nil {
+			t.Fatalf("bash: %v", err)
+		}
+		if string(out) != v {
+			t.Errorf("round trip of %q = %q", v, out)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("value %q ran a command", v)
+		}
 	}
 }

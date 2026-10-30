@@ -53,7 +53,11 @@ type serverDetailPage struct {
 	// a paired one while a re-pairing token is active.
 	Command      string
 	TokenExpires time.Time
-	Local        bool // the panel host itself: no delete, no re-pairing
+	// TokenHidden: a token is active, but only its hash is stored and this
+	// panel process did not create it (it was restarted since), so the
+	// command cannot be shown; a new token has to be created.
+	TokenHidden bool
+	Local       bool // the panel host itself: no delete, no re-pairing
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +145,12 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 		p.Online = a.Hub.IsOnline(srv.ID)
 		p.Probe = a.probe(srv)
 	}
-	if found && !p.Local {
+	switch {
+	case !found || p.Local:
+	case tok.Token == "":
+		p.TokenHidden = true
+		p.TokenExpires = tok.ExpiresAt
+	default:
 		// Single quotes: "?" is a glob character in zsh and other shells.
 		p.Command = "curl -fsSL '" + a.PublicURL() + "/agent/install?token=" + tok.Token + "' | sudo bash"
 		p.TokenExpires = tok.ExpiresAt

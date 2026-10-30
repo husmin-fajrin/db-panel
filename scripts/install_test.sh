@@ -27,14 +27,22 @@ unit_from() {
 	' "$1"
 }
 
-# Render the agent template with sample values in place of its actions.
+# Render the agent template with sample values in place of its actions
+# (each value goes through shq, which single-quotes it).
 rendered="$tmp/agent-install.sh"
-sed -e 's|{{\.PanelURL}}|http://192.0.2.10:8080|g' \
-	-e 's|{{\.Token}}|ABCDEFGHJKMNPQRS|g' \
-	-e 's|{{\.AgentAddr}}|192.0.2.10:8443|g' \
+sed -e "s|{{shq \.PanelURL}}|'http://192.0.2.10:8080'|g" \
+	-e "s|{{shq \.Token}}|'ABCDE-FGHJK-MNPQR'|g" \
+	-e "s|{{shq \.AgentAddr}}|'192.0.2.10:8443'|g" \
 	"$AGENT_TEMPLATE" >"$rendered"
 if grep -q '{{' "$rendered"; then
-	fail "$AGENT_TEMPLATE memakai aksi template selain PanelURL, Token, AgentAddr"
+	fail "$AGENT_TEMPLATE memakai aksi template selain shq PanelURL, Token, AgentAddr"
+fi
+# The token must never be on a command line (argv is visible in ps).
+if grep -n -- '--token' "$rendered"; then
+	fail "$AGENT_TEMPLATE memberikan token lewat --token"
+fi
+if [ "$(grep -c 'ABCDE-FGHJK-MNPQR' "$rendered")" -ne 1 ]; then
+	fail "$AGENT_TEMPLATE memakai token di luar TOKEN=..."
 fi
 
 for f in "$PANEL_SCRIPT" "$rendered"; do

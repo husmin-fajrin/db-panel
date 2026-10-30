@@ -311,9 +311,10 @@ func TestAgentInstallEndpoints(t *testing.T) {
 	}
 	script := getBody(t, base+"/agent/install?token="+tok.Token)
 	for _, want := range []string{
-		`-w '%{http_code}' "` + p.PublicURL() + `/agent/bin/${arch}?token=` + tok.Token + `"`,
-		`agent pair --panel "` + p.PublicURL() + `" --token "` + tok.Token + `"`,
-		p.AgentAddr(),
+		"PANEL_URL='" + p.PublicURL() + "'\n",
+		"AGENT_ADDR='" + p.AgentAddr() + "'\n",
+		"TOKEN='" + tok.Token + "'\n",
+		`DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL"`,
 		"systemctl enable --now dbpanel-agent",
 	} {
 		if !strings.Contains(script, want) {
@@ -910,4 +911,172 @@ func TestHostAllowlist(t *testing.T) {
 	if !strings.Contains(string(b), "Alamat host tidak dikenal panel") {
 		t.Errorf("421 body = %q", b)
 	}
+}
+
+// TestPublicHostValidated (SEC-09): the public host ends up in a root shell
+// script, so only IP literals and plain host names are accepted, from the
+// flag and from the saved setting.
+func TestPublicHostValidated(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{
+		"127.0.0.1$(id)", "`id`", "a b", "host;id", "x'y", "[::1]", "", "a\nb",
+		strings.Repeat("a", 254),
+	} {
+		if bad == "" {
+			continue // empty means auto-detect
+		}
+		o := testOptions(t)
+		o.PublicHost = bad
+		p, err := New(o)
+		if err == nil {
+			p.Close()
+			t.Errorf("New with --public-host %q succeeded", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "public host") || !strings.Contains(err.Error(), "tidak valid") {
+			t.Errorf("--public-host %q: err = %v", bad, err)
+		}
+	}
+	for _, good := range []string{"192.168.1.10", "::1", "fe80::1", "panel.rs-umum.local", "PANEL01"} {
+		o := testOptions(t)
+		o.PublicHost = good
+		p, err := New(o)
+		if err != nil {
+			t.Errorf("New with --public-host %q: %v", good, err)
+			continue
+		}
+		p.Close()
+	}
+
+	// A bad value already saved in the database (written by an older
+	// version) is refused too, and a valid flag replaces it.
+	o := testOptions(t)
+	p := newPanel(t, o)
+	if err := p.Store.SetSetting("public_host", "127.0.0.1$(id)"); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	o.PublicHost = ""
+	if p, err := New(o); err == nil {
+		p.Close()
+		t.Fatal("New accepted a saved public host with $(id)")
+	} else if !strings.Contains(err.Error(), "--public-host") {
+		t.Errorf("saved bad host: err = %v, want a hint to use --public-host", err)
+	}
+	o.PublicHost = "10.0.0.5"
+	p2, err := New(o)
+	if err != nil {
+		t.Fatalf("New with a valid flag over a bad saved host: %v", err)
+	}
+	p2.Close()
+}
+
+// TestDataFileModes (SEC-13): an existing 0755 data directory is tightened
+// to 0700 and panel.db is 0600.
+func TestDataFileModes(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	if err := os.MkdirAll(o.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(o.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newPanel(t, o)
+	for path, want := range map[string]os.FileMode{
+		o.DataDir:                            0o700,
+		filepath.Join(o.DataDir, "panel.db"): 0o600,
+		o.ConfigDir:                          0o700,
+	} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != want {
+			t.Errorf("%s mode %o, want %o", path, got, want)
+		}
+	}
+}
+
+// bigProbeConn answers probe with a result over the stored size cap.
+type bigProbeConn struct{}
+
+func (bigProbeConn) Call(_ context.Context, _ string, _ any, result any) error {
+	b, _ := json.Marshal(proto.ProbeResult{Hostname: strings.Repeat("x", 70<<10), AgentVersion: "evil"})
+	return json.Unmarshal(b, result)
+}
+func (bigProbeConn) Close() error { return nil }
+
+// TestOversizedProbeKeepsPrevious (SEC-11).
+func TestOversizedProbeKeepsPrevious(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	var logs syncBuffer
+	o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	p := newPanel(t, o)
+	srv, _ := p.Store.CreateServer("db-besar")
+	p.Store.MarkPaired(srv.ID, "serial", "10.0.0.3")
+	if err := p.Store.UpdateProbe(srv.ID, proto.ProbeResult{Hostname: "lama"}, "v1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	p.Hub.Attach(srv.ID, bigProbeConn{})
+	p.probeOne(context.Background(), srv.ID)
+	got, _ := p.Store.GetServer(srv.ID)
+	if !strings.Contains(got.ProbeJSON, `"lama"`) || got.AgentVersion != "v1" {
+		t.Fatalf("probe after oversized result = %q (agent %q), want the previous one", got.ProbeJSON, got.AgentVersion)
+	}
+	if !strings.Contains(logs.String(), `level=WARN msg="probe result too large; keeping the previous one"`) {
+		t.Fatalf("no warning logged:\n%s", logs.String())
+	}
+}
+
+// TestAgentEventLogRateLimited (SEC-11): at most one debug line per server
+// per 10 s, however fast an agent sends events.
+func TestAgentEventLogRateLimited(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	var logs syncBuffer
+	o.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := newPanel(t, o)
+	now := time.Unix(1_800_000_000, 0)
+	p.now = func() time.Time { return now }
+	count := func() int { return strings.Count(logs.String(), `msg="agent event"`) }
+	for range 100 {
+		p.onEvent(7, proto.Event{Type: "flood"})
+	}
+	p.onEvent(8, proto.Event{Type: "other"})
+	if n := count(); n != 2 {
+		t.Fatalf("event lines = %d, want 2 (one per server)", n)
+	}
+	now = now.Add(9 * time.Second)
+	p.onEvent(7, proto.Event{Type: "flood"})
+	if n := count(); n != 2 {
+		t.Fatalf("event lines after 9 s = %d, want 2", n)
+	}
+	now = now.Add(time.Second)
+	p.onEvent(7, proto.Event{Type: "flood"})
+	if n := count(); n != 3 {
+		t.Fatalf("event lines after 10 s = %d, want 3", n)
+	}
+	if strings.Contains(logs.String(), "level=INFO msg=\"agent event\"") {
+		t.Fatal("agent events logged above debug level")
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writes (log output).
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

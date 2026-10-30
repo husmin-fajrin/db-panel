@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pemasang agent dbpanel, dibuat oleh panel {{.PanelURL}}.
+# Pemasang agent dbpanel, dibuat oleh panel di PANEL_URL (lihat di bawah).
 # Jalankan di server database: curl -fsSL "<alamat ini>" | sudo bash
 #
 # Skrip ini mengunduh binary dbpanel dari panel (tanpa internet), menulis
@@ -8,6 +8,13 @@
 set -euo pipefail
 
 BIN=/usr/local/bin/dbpanel
+# Nilai dari panel, dalam kutip tunggal: shell tidak mengekspansi isinya.
+PANEL_URL={{shq .PanelURL}}
+AGENT_ADDR={{shq .AgentAddr}}
+# Token sekali pakai. Tidak pernah ditaruh di argumen perintah (argv bisa
+# dibaca semua pengguna lewat ps): curl menerimanya lewat konfigurasi di
+# stdin, dbpanel lewat variabel lingkungan DBPANEL_TOKEN.
+TOKEN={{shq .Token}}
 
 die() {
 	echo "$*" >&2
@@ -33,8 +40,10 @@ main() {
 	# binary for this arch), which -f would discard. --fail-with-body needs
 	# curl 7.76, newer than RHEL 8 and Ubuntu 20.04 ship.
 	local code
-	if ! code=$(curl -sSL -o "$BIN.new" -w '%{http_code}' "{{.PanelURL}}/agent/bin/${arch}?token={{.Token}}"); then
-		die "Gagal menghubungi panel {{.PanelURL}}. Periksa alamat panel dan jaringan, lalu ulangi."
+	# printf is a bash builtin, so the URL with the token is never in argv.
+	if ! code=$(printf 'url = "%s"\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |
+		curl -sSL -o "$BIN.new" -w '%{http_code}' -K -); then
+		die "Gagal menghubungi panel $PANEL_URL. Periksa alamat panel dan jaringan, lalu ulangi."
 	fi
 	if [ "$code" != 200 ]; then
 		die "Panel menolak unduhan binary (HTTP $code): $(head -c 512 "$BIN.new")"
@@ -64,7 +73,7 @@ WantedBy=multi-user.target
 UNIT
 
 	echo "Memasangkan agent ke panel..."
-	if ! "$BIN" agent pair --panel "{{.PanelURL}}" --token "{{.Token}}"; then
+	if ! DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL"; then
 		die "Pairing gagal. Periksa token dan alamat panel, lalu ulangi."
 	fi
 
@@ -87,7 +96,7 @@ UNIT
 		die "Agent terpasang tetapi service tidak berjalan. Periksa: journalctl -u dbpanel-agent"
 	fi
 	echo "Agent terpasang dan terhubung ke panel"
-	echo "Bila server tetap offline di panel, pastikan server ini dapat menjangkau {{.AgentAddr}}."
+	echo "Bila server tetap offline di panel, pastikan server ini dapat menjangkau $AGENT_ADDR."
 }
 
 # Everything runs from main so a download cut short never runs half a script.

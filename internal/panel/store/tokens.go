@@ -2,7 +2,9 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -12,11 +14,45 @@ import (
 var ErrTokenInvalid = errors.New("token tidak valid atau kedaluwarsa")
 
 // PairToken is a one-time token an agent presents to pair with the panel.
+// The database stores only the token's SHA-256; Token is the plaintext when
+// it is known (the caller supplied it, or this process created it), else "".
 type PairToken struct {
 	Token     string
 	ServerID  int64
 	ExpiresAt time.Time
 	UsedAt    *time.Time
+}
+
+// hashToken returns the hex SHA-256 of a token. Tokens are 75 random bits,
+// so an unsalted hash is enough to keep them unusable from a copy of the
+// database.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// remember keeps the plaintext of the token just created for serverID.
+func (s *Store) remember(serverID int64, hash, token string) {
+	s.plainMu.Lock()
+	defer s.plainMu.Unlock()
+	s.plain[serverID] = plainToken{hash: hash, token: token}
+}
+
+// forget drops the remembered plaintext token of serverID.
+func (s *Store) forget(serverID int64) {
+	s.plainMu.Lock()
+	defer s.plainMu.Unlock()
+	delete(s.plain, serverID)
+}
+
+// plainFor returns the remembered plaintext of the token with hash, or "".
+func (s *Store) plainFor(serverID int64, hash string) string {
+	s.plainMu.Lock()
+	defer s.plainMu.Unlock()
+	if p, ok := s.plain[serverID]; ok && p.hash == hash {
+		return p.token
+	}
+	return ""
 }
 
 // Crockford base32 alphabet (no I, L, O, U).
@@ -52,6 +88,7 @@ func (s *Store) CreatePairToken(serverID int64, now time.Time, ttl time.Duration
 		return PairToken{}, err
 	}
 	pt := PairToken{Token: token, ServerID: serverID, ExpiresAt: now.Add(ttl).UTC().Truncate(time.Second)}
+	hash := hashToken(token)
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -68,45 +105,51 @@ func (s *Store) CreatePairToken(serverID int64, now time.Time, ttl time.Duration
 	if _, err := tx.Exec(`DELETE FROM pair_tokens WHERE server_id = ? AND used_at IS NULL`, serverID); err != nil {
 		return PairToken{}, fmt.Errorf("delete old tokens: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO pair_tokens (token, server_id, expires_at) VALUES (?, ?, ?)`,
-		pt.Token, serverID, formatTime(pt.ExpiresAt)); err != nil {
+	if _, err := tx.Exec(`INSERT INTO pair_tokens (token_hash, server_id, expires_at) VALUES (?, ?, ?)`,
+		hash, serverID, formatTime(pt.ExpiresAt)); err != nil {
 		return PairToken{}, fmt.Errorf("insert token: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return PairToken{}, fmt.Errorf("commit: %w", err)
 	}
+	s.remember(serverID, hash, token)
 	return pt, nil
 }
 
-func scanToken(r rowScanner) (PairToken, error) {
+// scanToken reads a token row; the plaintext is not stored, so Token is
+// left empty and the hash is returned instead.
+func scanToken(r rowScanner) (PairToken, string, error) {
 	var (
 		pt      PairToken
+		hash    string
 		expires string
 		used    sql.NullString
 	)
-	if err := r.Scan(&pt.Token, &pt.ServerID, &expires, &used); err != nil {
-		return PairToken{}, err
+	if err := r.Scan(&hash, &pt.ServerID, &expires, &used); err != nil {
+		return PairToken{}, "", err
 	}
 	var err error
 	if pt.ExpiresAt, err = parseTime(expires); err != nil {
-		return PairToken{}, err
+		return PairToken{}, "", err
 	}
 	if pt.UsedAt, err = parseNullTime(used); err != nil {
-		return PairToken{}, err
+		return PairToken{}, "", err
 	}
-	return pt, nil
+	return pt, hash, nil
 }
 
-const tokenColumns = `token, server_id, expires_at, used_at`
+const tokenColumns = `token_hash, server_id, expires_at, used_at`
 
+// getToken looks token up by its hash.
 func (s *Store) getToken(token string) (PairToken, error) {
-	pt, err := scanToken(s.db.QueryRow(`SELECT `+tokenColumns+` FROM pair_tokens WHERE token = ?`, token))
+	pt, _, err := scanToken(s.db.QueryRow(`SELECT `+tokenColumns+` FROM pair_tokens WHERE token_hash = ?`, hashToken(token)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return PairToken{}, ErrTokenInvalid
 	}
 	if err != nil {
 		return PairToken{}, fmt.Errorf("get token: %w", err)
 	}
+	pt.Token = token
 	return pt, nil
 }
 
@@ -126,8 +169,8 @@ func (s *Store) PeekPairToken(token string, now time.Time) (PairToken, error) {
 // ConsumePairToken atomically marks the token used. It returns
 // ErrTokenInvalid if the token is unknown, already used or expired.
 func (s *Store) ConsumePairToken(token string, now time.Time) (PairToken, error) {
-	res, err := s.db.Exec(`UPDATE pair_tokens SET used_at = ? WHERE token = ? AND used_at IS NULL AND expires_at > ?`,
-		formatTime(now), token, formatTime(now))
+	res, err := s.db.Exec(`UPDATE pair_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`,
+		formatTime(now), hashToken(token), formatTime(now))
 	if err != nil {
 		return PairToken{}, fmt.Errorf("consume token: %w", err)
 	}
@@ -138,12 +181,18 @@ func (s *Store) ConsumePairToken(token string, now time.Time) (PairToken, error)
 	if n == 0 {
 		return PairToken{}, ErrTokenInvalid
 	}
-	return s.getToken(token)
+	pt, err := s.getToken(token)
+	if err == nil {
+		s.forget(pt.ServerID)
+	}
+	return pt, err
 }
 
 // ActivePairToken returns the newest unused, unexpired token for a server.
+// Its Token is "" when this process did not create it (e.g. the panel was
+// restarted since): the plaintext is not stored and cannot be shown again.
 func (s *Store) ActivePairToken(serverID int64, now time.Time) (PairToken, bool, error) {
-	pt, err := scanToken(s.db.QueryRow(`SELECT `+tokenColumns+` FROM pair_tokens
+	pt, hash, err := scanToken(s.db.QueryRow(`SELECT `+tokenColumns+` FROM pair_tokens
 		WHERE server_id = ? AND used_at IS NULL AND expires_at > ?
 		ORDER BY expires_at DESC, rowid DESC LIMIT 1`, serverID, formatTime(now)))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -152,5 +201,6 @@ func (s *Store) ActivePairToken(serverID int64, now time.Time) (PairToken, bool,
 	if err != nil {
 		return PairToken{}, false, fmt.Errorf("active token: %w", err)
 	}
+	pt.Token = s.plainFor(serverID, hash)
 	return pt, true, nil
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
@@ -20,9 +22,22 @@ import (
 
 const usage = `Penggunaan:
   dbpanel agent [--dir DIR]                              jalankan agent
-  dbpanel agent pair --panel URL --token TOKEN [--dir DIR]  pasangkan agent ke panel
+  DBPANEL_TOKEN=TOKEN dbpanel agent pair --panel URL [--dir DIR]
+                                                         pasangkan agent ke panel
+  dbpanel agent pair --panel URL --token-stdin [--dir DIR]
+                                                         idem, token dari stdin
   dbpanel agent version                                  tampilkan versi
 `
+
+// tokenEnv carries the pairing token. Unlike argv (/proc/<pid>/cmdline),
+// a process's environment is readable only by its owner and root.
+const tokenEnv = "DBPANEL_TOKEN"
+
+// getenv and stdin are replaced by tests.
+var (
+	getenv           = os.Getenv
+	stdin  io.Reader = os.Stdin
+)
 
 // Main runs the "dbpanel agent" command; args exclude "agent" itself. It
 // returns the process exit code.
@@ -87,13 +102,20 @@ func mainRun(args []string, stderr io.Writer) int {
 func mainPair(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("agent pair", stderr)
 	panelURL := fs.String("panel", "", "alamat panel, mis. http://192.168.1.10:8080")
-	token := fs.String("token", "", "token pemasangan dari panel")
+	tokenFlag := fs.String("token", "", "token pemasangan (usang: terlihat di daftar proses; pakai "+tokenEnv+")")
+	tokenStdin := fs.Bool("token-stdin", false, "baca token pemasangan dari baris pertama stdin")
 	dir := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *panelURL == "" || *token == "" || fs.NArg() > 0 {
-		fmt.Fprintln(stderr, "--panel dan --token wajib diisi")
+	if *panelURL == "" || fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "--panel wajib diisi")
+		fs.Usage()
+		return 2
+	}
+	token, err := pairToken(*tokenFlag, *tokenStdin, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		fs.Usage()
 		return 2
 	}
@@ -106,7 +128,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cfg, err := Pair(ctx, *panelURL, *token, *dir, nil)
+	cfg, err := Pair(ctx, *panelURL, token, *dir, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "pemasangan gagal: %v\n", err)
 		return 1
@@ -114,4 +136,30 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Agent terpasang sebagai server #%d (panel %s). Jalankan: dbpanel agent --dir %s\n",
 		cfg.ServerID, cfg.PanelAddr, *dir)
 	return 0
+}
+
+// pairToken picks the pairing token: from stdin with --token-stdin, else
+// from --token (with a warning: argv is visible to every local user), else
+// from DBPANEL_TOKEN.
+func pairToken(flagValue string, fromStdin bool, stderr io.Writer) (string, error) {
+	switch {
+	case fromStdin && flagValue != "":
+		return "", errors.New("pilih salah satu: --token-stdin atau --token")
+	case fromStdin:
+		line, err := bufio.NewReader(stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("baca token dari stdin: %w", err)
+		}
+		if t := strings.TrimSpace(line); t != "" {
+			return t, nil
+		}
+		return "", errors.New("token kosong di stdin")
+	case flagValue != "":
+		fmt.Fprintln(stderr, "Peringatan: --token terlihat di daftar proses; gunakan "+tokenEnv)
+		return flagValue, nil
+	}
+	if t := strings.TrimSpace(getenv(tokenEnv)); t != "" {
+		return t, nil
+	}
+	return "", errors.New("token pemasangan wajib diisi lewat " + tokenEnv + " atau --token-stdin")
 }

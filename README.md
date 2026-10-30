@@ -83,8 +83,9 @@ atau sudah dipakai), buat token baru dari halaman server lalu ulangi.
 `/etc/dbpanel` di server itu hilang, buka halaman server lalu klik **Pasang
 ulang agent**. Panel membuat token baru dan menampilkan perintah pemasangan;
 jalankan perintah itu di server tersebut. Agent lama tetap bekerja sampai
-agent baru berhasil dipasangkan; setelah itu sertifikat agent lama tidak
-diterima lagi. Server panel sendiri tidak perlu (dan tidak bisa) dipasangi
+agent baru berhasil dipasangkan; saat itu koneksi agent lama langsung
+diputus dan sertifikatnya tidak diterima lagi. Ini juga cara mencabut
+sertifikat agent yang kuncinya diduga bocor. Server panel sendiri tidak perlu (dan tidak bisa) dipasangi
 agent: agent-nya tertanam di panel.
 
 **Hapus server:** koneksi agent-nya langsung diputus dan sertifikatnya

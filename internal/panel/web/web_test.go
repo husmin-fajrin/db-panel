@@ -81,6 +81,7 @@ func (c *closingConn) Close() error {
 
 type env struct {
 	st       *store.Store
+	dbPath   string
 	l        *fakeListener
 	hub      *hub.Hub
 	sessions *auth.Sessions
@@ -91,7 +92,8 @@ type env struct {
 // newEnv builds the router; mods adjust its Deps before it is built.
 func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
+	dbPath := filepath.Join(t.TempDir(), "panel.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +104,7 @@ func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 	l := &fakeListener{}
 	e := &env{
 		st:       st,
+		dbPath:   dbPath,
 		l:        l,
 		hub:      hub.New(l),
 		sessions: auth.NewSessions(time.Hour, time.Now),
@@ -443,6 +446,20 @@ func TestCreateServerEmptyName(t *testing.T) {
 	wantBody(t, rec, "nama server tidak boleh kosong")
 }
 
+// TestCreateServerBadName (SEC-16): control characters, bidi overrides and
+// long names are refused with the store's message.
+func TestCreateServerBadName(t *testing.T) {
+	e := newEnv(t)
+	for _, name := range []string{"db\x1b[31m\u202eevil", strings.Repeat("a", 65)} {
+		rec := e.do("POST", "/servers", url.Values{"name": {name}}, e.cookie())
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, "nama server hanya boleh huruf, angka, spasi, titik, garis bawah dan strip (maks. 64)")
+	}
+	if list, _ := e.st.ListServers(); len(list) != 0 {
+		t.Errorf("servers = %d, want 0", len(list))
+	}
+}
+
 func TestCreateServerDuplicateName(t *testing.T) {
 	e := newEnv(t)
 	if _, err := e.st.CreateServer("db-utama"); err != nil {
@@ -466,6 +483,41 @@ func TestServerDetailUnpairedCreatesMissingToken(t *testing.T) {
 		t.Fatal("detail page did not create a token")
 	}
 	wantBody(t, rec, "token="+tok.Token)
+}
+
+// TestServerDetailTokenFromEarlierProcess (SEC-13): a token created before
+// a panel restart is stored only as a hash; the page says so and offers a
+// new token instead of showing a command it cannot rebuild.
+func TestServerDetailTokenFromEarlierProcess(t *testing.T) {
+	e := newEnv(t)
+	other, err := store.Open(e.dbPath) // the panel process before a restart
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	unpaired, _ := other.CreateServer("db-unpaired")
+	paired, _ := other.CreateServer("db-paired")
+	other.MarkPaired(paired.ID, "serial", "10.0.0.2")
+	for _, id := range []int64{unpaired.ID, paired.ID} {
+		if _, err := other.CreatePairToken(id, time.Now(), time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := e.cookie()
+	for _, id := range []int64{unpaired.ID, paired.ID} {
+		before, _, _ := e.st.ActivePairToken(id, time.Now())
+		rec := e.do("GET", fmt.Sprintf("/servers/%d", id), nil, c)
+		wantCode(t, rec, http.StatusOK)
+		wantBody(t, rec, "Perintah pemasangan tidak bisa ditampilkan lagi", "Buat token baru",
+			fmt.Sprintf(`action="/servers/%d/token"`, id))
+		if strings.Contains(rec.Body.String(), "/agent/install") {
+			t.Errorf("server %d: page shows a pairing command without the token", id)
+		}
+		after, _, _ := e.st.ActivePairToken(id, time.Now())
+		if !after.ExpiresAt.Equal(before.ExpiresAt) {
+			t.Errorf("server %d: viewing the page replaced the active token", id)
+		}
+	}
 }
 
 func TestServerDetailPairedShowsProbe(t *testing.T) {

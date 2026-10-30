@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"text/template"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -20,8 +21,18 @@ const (
 )
 
 // installScript is the agent installer served at GET /agent/install. It is
-// a shell script, so it is rendered with text/template.
-var installScript = template.Must(template.ParseFS(web.FS, "templates/agent-install.sh.tmpl"))
+// a shell script, so it is rendered with text/template; every value goes
+// through shq.
+var installScript = template.Must(template.New("agent-install.sh.tmpl").
+	Funcs(template.FuncMap{"shq": shellQuote}).
+	ParseFS(web.FS, "templates/agent-install.sh.tmpl"))
+
+// shellQuote returns s as one single-quoted shell word: nothing inside is
+// expanded. A single quote in s ends the quoting, is written escaped (\')
+// and the quoting resumes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // installData fills agent-install.sh.tmpl.
 type installData struct {

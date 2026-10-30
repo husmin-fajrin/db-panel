@@ -4,9 +4,7 @@
 package agentapi
 
 import (
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"log/slog"
 	"net"
@@ -81,8 +79,12 @@ func PairHandler(d Deps) http.Handler {
 		}
 		// Check the CSR before consuming the token, so a malformed request
 		// does not burn it.
-		if !validCSR([]byte(req.CSRPEM)) {
-			writeError(w, http.StatusBadRequest, "csr tidak valid")
+		if _, err := ca.ParseAgentCSR([]byte(req.CSRPEM)); err != nil {
+			msg := "csr tidak valid"
+			if errors.Is(err, ca.ErrCSRKey) {
+				msg = err.Error()
+			}
+			writeError(w, http.StatusBadRequest, msg)
 			return
 		}
 		ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -134,6 +136,13 @@ func PairHandler(d Deps) http.Handler {
 			writeError(w, http.StatusInternalServerError, "kesalahan internal")
 			return
 		}
+		// The old certificate is refused from now on, but a connection made
+		// with it is already past that check: cut it, so re-pairing revokes
+		// a leaked agent key at once rather than when the new agent connects.
+		if d.Hub.IsOnline(pt.ServerID) {
+			d.Hub.Disconnect(pt.ServerID)
+			log.Info("previous agent connection closed after re-pairing", "server_id", pt.ServerID)
+		}
 		log.Info("agent paired", "server_id", pt.ServerID, "remote", ip, "hostname", req.Hostname,
 			"arch", req.Arch, "agent_version", req.AgentVersion, "cert_serial", serial)
 		writeJSON(w, http.StatusOK, agent.PairResponse{
@@ -143,17 +152,6 @@ func PairHandler(d Deps) http.Handler {
 			AgentAddr: d.AgentAddr(),
 		})
 	})
-}
-
-// validCSR reports whether b is a PEM certificate request with a valid
-// self-signature.
-func validCSR(b []byte) bool {
-	block, _ := pem.Decode(b)
-	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return false
-	}
-	csr, err := x509.ParseCertificateRequest(block.Bytes)
-	return err == nil && csr.CheckSignature() == nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

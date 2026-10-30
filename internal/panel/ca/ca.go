@@ -30,10 +30,17 @@ const (
 	caCertFile    = "ca.crt"
 	caKeyFile     = "ca.key"
 	agentCNPrefix = "agent-"
-	caValidity    = 20 * 365 * 24 * time.Hour
-	leafValidity  = 10 * 365 * 24 * time.Hour
-	clockSkew     = 5 * time.Minute
+	caValidity    = 10 * 365 * 24 * time.Hour
+	// leafValidity applies to agent and panel server certificates. There is
+	// no automatic renewal yet (Plan 2): an agent re-pairs before expiry,
+	// and the panel issues a fresh server certificate on every start.
+	leafValidity = 2 * 365 * 24 * time.Hour
+	clockSkew    = 5 * time.Minute
 )
+
+// ErrCSRKey is returned for a CSR whose public key is not ECDSA P-256, the
+// only kind dbpanel agents generate.
+var ErrCSRKey = errors.New("kunci CSR harus ECDSA P-256")
 
 // ErrNotAgent is returned by ServerIDFromCert for certificates whose CN is not
 // "agent-<positive int>".
@@ -110,6 +117,7 @@ func createCA(dir, certPath, keyPath string) (*CA, error) {
 		NotAfter:              now.Add(caValidity),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
+		MaxPathLenZero:        true, // signs leaves only, never another CA
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
@@ -160,6 +168,35 @@ func (c *CA) CAPEM() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Cert.Raw})
 }
 
+// ParseAgentCSR parses a PEM CSR from an agent and checks its signature and
+// key: only ECDSA P-256 is accepted (ErrCSRKey otherwise).
+func ParseAgentCSR(csrPEM []byte) (*x509.CertificateRequest, error) {
+	block, _ := pem.Decode(csrPEM)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, errors.New("csr bukan PEM CERTIFICATE REQUEST")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse csr: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("tanda tangan csr tidak valid: %w", err)
+	}
+	if pub, ok := csr.PublicKey.(*ecdsa.PublicKey); !ok || pub.Curve != elliptic.P256() {
+		return nil, ErrCSRKey
+	}
+	return csr, nil
+}
+
+// leafNotAfter is the expiry of a certificate issued now: leafValidity,
+// but never past the CA's own expiry.
+func (c *CA) leafNotAfter(now time.Time) time.Time {
+	if na := now.Add(leafValidity); na.Before(c.Cert.NotAfter) {
+		return na
+	}
+	return c.Cert.NotAfter
+}
+
 // IssueAgentCert signs the CSR as a client certificate for the given server.
 // The subject CN is always "agent-<serverID>"; the CSR's own subject is ignored.
 // The returned serial is the certificate serial as 32 lowercase hex digits.
@@ -167,16 +204,9 @@ func (c *CA) IssueAgentCert(csrPEM []byte, serverID int64) (certPEM []byte, seri
 	if serverID <= 0 {
 		return nil, "", errors.New("id server tidak valid")
 	}
-	block, _ := pem.Decode(csrPEM)
-	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return nil, "", errors.New("csr bukan PEM CERTIFICATE REQUEST")
-	}
-	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	csr, err := ParseAgentCSR(csrPEM)
 	if err != nil {
-		return nil, "", fmt.Errorf("parse csr: %w", err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, "", fmt.Errorf("tanda tangan csr tidak valid: %w", err)
+		return nil, "", err
 	}
 	sn, err := randomSerial()
 	if err != nil {
@@ -187,7 +217,7 @@ func (c *CA) IssueAgentCert(csrPEM []byte, serverID int64) (certPEM []byte, seri
 		SerialNumber:          sn,
 		Subject:               pkix.Name{CommonName: agentCNPrefix + strconv.FormatInt(serverID, 10)},
 		NotBefore:             now.Add(-clockSkew),
-		NotAfter:              now.Add(leafValidity),
+		NotAfter:              c.leafNotAfter(now),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
@@ -216,7 +246,7 @@ func (c *CA) IssueServerCert() (certPEM, keyPEM []byte, err error) {
 		Subject:               pkix.Name{CommonName: PanelServerName},
 		DNSNames:              []string{PanelServerName},
 		NotBefore:             now.Add(-clockSkew),
-		NotAfter:              now.Add(leafValidity),
+		NotAfter:              c.leafNotAfter(now),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
