@@ -139,7 +139,7 @@ func TestPreflightMasterHealthy(t *testing.T) {
 	if res.Worst != proto.CheckOK || res.Method != "" {
 		t.Errorf("Worst = %q, Method = %q", res.Worst, res.Method)
 	}
-	if res.Status.Version == "" || res.Status.ServerID != inst.ServerID || res.Status.DataDir == "" {
+	if res.Status.Version == "" || res.Status.ServerID != inst.ServerID || res.Status.DataDir == "" || len(res.Status.ServerUUID) != 36 {
 		t.Errorf("Status = %+v", res.Status)
 	}
 	if res.DataBytes == 0 {
@@ -147,6 +147,9 @@ func TestPreflightMasterHealthy(t *testing.T) {
 	}
 	if d := check(t, res, "data_size").Detail; !strings.Contains(d, " GB") {
 		t.Errorf("data_size detail = %q, want GB", d)
+	}
+	if d := check(t, res, "grants").Detail; d != "hak yang diperiksa lengkap untuk peran master" {
+		t.Errorf("grants detail = %q", d)
 	}
 
 	// A replication user that does not exist yet is created later: a warning.
@@ -264,7 +267,7 @@ func TestPreflightMasterMissingGrantsFails(t *testing.T) {
 		// The other checks would read a partial picture with this account.
 		want := []string{"version", "grants"}
 		if role == "replica" {
-			want = []string{"version", "same_series", "grants"}
+			want = []string{"version", "same_series", "self_peer", "grants"}
 		}
 		if got := checkIDs(res); !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s: checks = %v, want %v", role, got, want)
@@ -276,21 +279,29 @@ func TestPreflightMasterMissingGrantsFails(t *testing.T) {
 		if !strings.Contains(c.Detail, "limited@%") {
 			t.Errorf("%s: detail = %q, want the account", role, c.Detail)
 		}
+		// A replica also loads data with a dump: it needs the data privileges.
+		if hasDrop := strings.Contains(c.FixSQL[0], "DROP, CREATE, INSERT"); hasDrop != (role == "replica") {
+			t.Errorf("%s: FixSQL[0] = %q", role, c.FixSQL[0])
+		}
 		if res.Worst != proto.CheckFail || res.Method != "" {
 			t.Errorf("%s: Worst = %q, Method = %q", role, res.Worst, res.Method)
 		}
 	}
 }
 
-// replicaParams preflights inst as a replica of a master at inst's own port
-// (reachable) with the same version.
+// otherUUID is a master server_uuid no test instance has.
+const otherUUID = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+
+// replicaParams preflights inst as a replica of another master (otherUUID)
+// that listens at inst's own port (reachable) and runs the same version.
 func replicaParams(t *testing.T, inst *testmysql.Instance) proto.PreflightParams {
 	t.Helper()
 	var version string
 	if err := rootDB(t, inst).QueryRow("SELECT @@version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	return proto.PreflightParams{Role: "replica", PeerHost: "127.0.0.1", PeerPort: inst.Port, PeerVersion: version, PeerDataBytes: 1 << 20}
+	return proto.PreflightParams{Role: "replica", PeerHost: "127.0.0.1", PeerPort: inst.Port, PeerVersion: version,
+		PeerServerUUID: otherUUID, PeerDataBytes: 1 << 20}
 }
 
 func TestPreflightReplicaUnreachable(t *testing.T) {
@@ -298,7 +309,7 @@ func TestPreflightReplicaUnreachable(t *testing.T) {
 	p := replicaParams(t, inst)
 
 	res := callPreflight(t, inst.Host(), p)
-	want := []string{"version", "same_series", "grants", "reachable", "disk", "dedicated", "leftover", "not_master", "clone_patch"}
+	want := []string{"version", "same_series", "self_peer", "grants", "reachable", "disk", "dedicated", "leftover", "not_master", "clone_patch"}
 	if got := checkIDs(res); !reflect.DeepEqual(got, want) {
 		t.Fatalf("checks = %v, want %v", got, want)
 	}
@@ -362,7 +373,7 @@ func TestPreflightReplicaLeftoverNeedsConfirm(t *testing.T) {
 
 	res := callPreflight(t, inst.Host(), p)
 	c := wantCheck(t, res, "leftover", proto.CheckNeedsConfirm)
-	if want := "database dari percobaan sebelumnya akan dibuang: crm, shop"; c.Detail != want {
+	if want := "database bernama sama dengan di master akan dibuang: crm, shop"; c.Detail != want {
 		t.Errorf("leftover detail = %q, want %q", c.Detail, want)
 	}
 	wantCheck(t, res, "dedicated", proto.CheckOK)
@@ -379,6 +390,42 @@ func TestPreflightReplicaLeftoverNeedsConfirm(t *testing.T) {
 	// The server still holds databases, so CLONE is not chosen.
 	if res.Method != "dump" {
 		t.Errorf("Method = %q, want dump", res.Method)
+	}
+}
+
+// TestPreflightReplicaRefusesSelfAsPeer: the master's own server picked as
+// the target would have every database count as a leftover to wipe.
+func TestPreflightReplicaRefusesSelfAsPeer(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	root := rootDB(t, inst)
+	execAll(t, root, "CREATE DATABASE shop")
+	var uuid string
+	if err := root.QueryRow("SELECT @@server_uuid").Scan(&uuid); err != nil {
+		t.Fatal(err)
+	}
+	p := replicaParams(t, inst)
+	p.PeerServerUUID = strings.ToUpper(uuid)
+	p.PeerDatabases = []string{"shop"}
+	p.ConfirmWipe = true
+
+	res := callPreflight(t, inst.Host(), p)
+	c := wantCheck(t, res, "self_peer", proto.CheckFail)
+	if want := "server tujuan sama dengan master (server_uuid identik); pilih server lain"; c.Detail != want {
+		t.Errorf("self_peer detail = %q, want %q", c.Detail, want)
+	}
+	ids := strings.Join(checkIDs(res), " ")
+	if !strings.HasPrefix(ids, "version same_series self_peer ") {
+		t.Errorf("checks = %s, want self_peer right after same_series", ids)
+	}
+	// Even with ConfirmWipe nothing offers to drop the master's databases.
+	if c := wantCheck(t, res, "leftover", proto.CheckFail); strings.Contains(c.Detail, "akan dibuang") {
+		t.Errorf("leftover detail = %q", c.Detail)
+	}
+	if c := check(t, res, "dedicated"); strings.Contains(c.Detail, "akan dibuang") {
+		t.Errorf("dedicated detail = %q", c.Detail)
+	}
+	if res.Worst != proto.CheckFail || res.Method != "" {
+		t.Errorf("Worst = %q, Method = %q; want fail, none", res.Worst, res.Method)
 	}
 }
 
@@ -414,13 +461,21 @@ func TestPreflightReplicaMethodDumpWhenSubset(t *testing.T) {
 }
 
 func TestPreflightRejectsMariaDBVersion(t *testing.T) {
-	for _, v := range []string{"10.11.6-MariaDB-0ubuntu0.24.04.1", "5.7.44-log", "8.0.25"} {
+	for _, vc := range [][2]string{
+		{"10.11.6-MariaDB-0ubuntu0.24.04.1", "Ubuntu 24.04"},
+		{"10.11.6", "mariadb.org binary distribution"},
+		{"8.0.36-28", "Percona Server (GPL), Release 28, Revision 47601f19"},
+		{"5.7.44-log", "MySQL Community Server (GPL)"},
+		{"8.0.25", "MySQL Community Server - GPL"},
+	} {
+		v := vc[0]
 		for _, role := range []string{"master", "replica"} {
 			// Facts that would fail most other checks: none of them may run.
 			f := mysql.PreflightFacts{
-				Status:        proto.MySQLStatus{Version: v, BinlogFormat: "STATEMENT", BindAddress: "127.0.0.1", BinlogDumpThreads: 2},
-				MissingGrants: []string{"GRANT RELOAD ON *.* TO 'x'@'%'"},
-				NonInnoDB:     []string{"a.b (MyISAM)"}, NonInnoDBCount: 1,
+				VersionComment: vc[1],
+				Status:         proto.MySQLStatus{Version: v, BinlogFormat: "STATEMENT", BindAddress: "127.0.0.1", BinlogDumpThreads: 2},
+				MissingGrants:  []string{"GRANT RELOAD ON *.* TO 'x'@'%'"},
+				NonInnoDB:      []string{"a.b (MyISAM)"}, NonInnoDBCount: 1,
 				Unreachable: errors.New("refused"),
 				Databases:   []proto.DatabaseInfo{{Name: "lain"}},
 			}
@@ -467,12 +522,18 @@ func TestPreflightRules(t *testing.T) {
 	wantCheck(t, res, "gtid_mode", proto.CheckWarn)
 	wantCheck(t, res, "enforce_gtid_consistency", proto.CheckWarn)
 
-	// The server itself replicating from elsewhere is a warning even without GTID.
+	// The server itself replicating from elsewhere is a warning with GTID on,
+	// and a failure when raising gtid_mode would break that replication.
 	f = healthy()
-	f.Status.GTIDMode = "OFF"
 	f.Status.Replica = &proto.ReplicaStatus{SourceHost: "10.0.0.9", SourcePort: 3306}
 	res = mysql.EvaluatePreflight(master, f)
 	if c := wantCheck(t, res, "existing_replication", proto.CheckWarn); !strings.Contains(c.Detail, "10.0.0.9:3306") {
+		t.Errorf("existing_replication detail = %q", c.Detail)
+	}
+	f.Status.GTIDMode = "OFF"
+	res = mysql.EvaluatePreflight(master, f)
+	if c := wantCheck(t, res, "existing_replication", proto.CheckFail); !strings.Contains(c.Detail,
+		"server ini sudah menjadi replika tanpa GTID; menaikkan gtid_mode akan memutus replikasinya") {
 		t.Errorf("existing_replication detail = %q", c.Detail)
 	}
 
@@ -524,6 +585,30 @@ func TestPreflightRules(t *testing.T) {
 	if res := mysql.EvaluatePreflight(replica, f); res.Method != "clone" {
 		t.Errorf("same patch: Method = %q, want clone", res.Method)
 	}
+	// A master version that cannot be read or is another series: no method,
+	// and clone_patch does not claim CLONE is possible.
+	for peerVersion, detail := range map[string]string{"": "versi master tidak bisa dibaca", "8.4.3": "seri berbeda"} {
+		p := replica
+		p.PeerVersion = peerVersion
+		res := mysql.EvaluatePreflight(p, f)
+		wantCheck(t, res, "same_series", proto.CheckFail)
+		if c := wantCheck(t, res, "clone_patch", proto.CheckWarn); c.Detail != detail {
+			t.Errorf("peer %q: clone_patch detail = %q, want %q", peerVersion, c.Detail, detail)
+		}
+		if res.Method != "" || res.Worst != proto.CheckFail {
+			t.Errorf("peer %q: Method = %q, Worst = %q", peerVersion, res.Method, res.Worst)
+		}
+	}
+	// The same server as the master is refused; no method.
+	self := replica
+	self.PeerServerUUID = "3E11FA47-71CA-11E1-9E33-C80AA9429562"
+	f.Status.ServerUUID = otherUUID
+	res = mysql.EvaluatePreflight(self, f)
+	wantCheck(t, res, "self_peer", proto.CheckFail)
+	if res.Method != "" {
+		t.Errorf("self as peer: Method = %q", res.Method)
+	}
+	f.Status.ServerUUID = ""
 	f.DiskErr = errors.New("statfs: no such file")
 	if c := wantCheck(t, mysql.EvaluatePreflight(replica, f), "disk", proto.CheckFail); !strings.Contains(c.Detail, "statfs") {
 		t.Errorf("disk detail = %q", c.Detail)

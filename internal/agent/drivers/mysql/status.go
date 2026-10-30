@@ -32,7 +32,7 @@ func (d *Driver) registerStatus(reg *commands.Registry) {
 func Status(ctx context.Context, db *sql.DB) (proto.MySQLStatus, error) {
 	var st proto.MySQLStatus
 	vars, err := nameValues(ctx, db, `SHOW GLOBAL VARIABLES WHERE Variable_name IN
-		('version', 'server_id', 'log_bin', 'gtid_mode', 'enforce_gtid_consistency', 'binlog_format',
+		('version', 'server_id', 'server_uuid', 'log_bin', 'gtid_mode', 'enforce_gtid_consistency', 'binlog_format',
 		 'read_only', 'super_read_only', 'datadir', 'socket', 'port', 'bind_address')`)
 	if err != nil {
 		return st, fmt.Errorf("baca variabel MySQL: %w", err)
@@ -44,6 +44,7 @@ func Status(ctx context.Context, db *sql.DB) (proto.MySQLStatus, error) {
 	if id, err := strconv.ParseUint(vars["server_id"], 10, 32); err == nil {
 		st.ServerID = uint32(id)
 	}
+	st.ServerUUID = vars["server_uuid"]
 	st.LogBin = on(vars["log_bin"])
 	st.GTIDMode = vars["gtid_mode"]
 	st.EnforceGTID = on(vars["enforce_gtid_consistency"])

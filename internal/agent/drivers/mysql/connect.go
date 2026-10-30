@@ -36,15 +36,54 @@ var (
 
 const grantOption = "GRANT OPTION"
 
-// RequiredGrants lists the global privileges checked by mysql.connect:
-// the static ones, the dynamic ones, and GRANT OPTION (on the static
-// privileges and on BACKUP_ADMIN: MySQL 8 keeps it per privilege line).
-// ALL PRIVILEGES ON *.* WITH GRANT OPTION covers everything.
-func RequiredGrants() []string {
-	out := append([]string{}, staticGrants...)
-	out = append(out, dynamicGrants...)
+// replicaDataGrants are the static privileges a replica needs on top of a
+// master's to load a dump (and replay what replication applies).
+var replicaDataGrants = []string{
+	"DROP", "CREATE", "INSERT", "UPDATE", "DELETE", "ALTER", "INDEX", "CREATE VIEW", "CREATE ROUTINE",
+	"ALTER ROUTINE", "REFERENCES", "TRIGGER", "EVENT", "CREATE TEMPORARY TABLES",
+}
+
+// grantSet is a set of required global privileges. GRANT OPTION is always
+// required too (on the static privileges and on BACKUP_ADMIN).
+type grantSet struct{ static, dynamic []string }
+
+var (
+	masterGrants  = grantSet{static: staticGrants, dynamic: dynamicGrants}
+	replicaGrants = grantSet{static: union(staticGrants, replicaDataGrants), dynamic: dynamicGrants}
+)
+
+func (s grantSet) list() []string {
+	out := append([]string{}, s.static...)
+	out = append(out, s.dynamic...)
 	return append(out, grantOption)
 }
+
+// union is a followed by the elements of b not in a.
+func union(a, b []string) []string {
+	out := append([]string{}, a...)
+	in := map[string]bool{}
+	for _, s := range a {
+		in[s] = true
+	}
+	for _, s := range b {
+		if !in[s] {
+			in[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// RequiredGrants lists the global privileges checked by mysql.connect and
+// by the master preflight: the static ones, the dynamic ones, and GRANT
+// OPTION (on the static privileges and on BACKUP_ADMIN: MySQL 8 keeps it
+// per privilege line). ALL PRIVILEGES ON *.* WITH GRANT OPTION covers
+// everything.
+func RequiredGrants() []string { return masterGrants.list() }
+
+// RequiredReplicaGrants lists the global privileges the replica preflight
+// checks: RequiredGrants plus the data privileges a dump load needs.
+func RequiredReplicaGrants() []string { return replicaGrants.list() }
 
 func (d *Driver) registerConnect(reg *commands.Registry) {
 	reg.Register("mysql.connect", func(ctx context.Context, params json.RawMessage) (any, error) {
@@ -168,7 +207,7 @@ func inventory(ctx context.Context, db *sql.DB) (proto.ConnectResult, error) {
 	if err != nil {
 		return res, err
 	}
-	res.MissingGrants = missingGrants(grants, res.Account)
+	res.MissingGrants = missingGrants(grants, res.Account, masterGrants)
 	return res, nil
 }
 
@@ -245,10 +284,10 @@ var globalGrant = regexp.MustCompile("(?s)^GRANT (.+?) ON \\*\\.\\* TO .*?( WITH
 func isDynamic(priv string) bool { return strings.Contains(priv, "_") }
 
 // missingGrants returns the GRANT statements that would give account what
-// RequiredGrants lists and the statements in grants (SHOW GRANTS rows) lack.
+// req requires and the statements in grants (SHOW GRANTS rows) lack.
 // WITH GRANT OPTION belongs to its statement: the static privileges share
 // one flag, every dynamic privilege has its own.
-func missingGrants(grants []string, account string) []string {
+func missingGrants(grants []string, account string, req grantSet) []string {
 	held := map[string]bool{}      // privilege -> held
 	grantable := map[string]bool{} // privilege -> held WITH GRANT OPTION
 	staticGO, all, allGO := false, false, false
@@ -275,12 +314,12 @@ func missingGrants(grants []string, account string) []string {
 	has := func(p string) bool { return all || held[p] }
 
 	var static, dynamic []string
-	for _, p := range staticGrants {
+	for _, p := range req.static {
 		if !has(p) {
 			static = append(static, p)
 		}
 	}
-	for _, p := range dynamicGrants {
+	for _, p := range req.dynamic {
 		switch {
 		case !has(p) && !(superCovers[p] && held["SUPER"]):
 			dynamic = append(dynamic, p)

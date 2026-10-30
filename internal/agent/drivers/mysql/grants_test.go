@@ -52,10 +52,42 @@ func TestMissingGrants(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := missingGrants(c.grants, acct); !reflect.DeepEqual(got, c.want) {
+			if got := missingGrants(c.grants, acct, masterGrants); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("got\n%q\nwant\n%q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestMissingGrantsReplicaSet: a replica loads dumps, so it needs the data
+// privileges on top of everything a master needs.
+func TestMissingGrantsReplicaSet(t *testing.T) {
+	const acct = "adm@%"
+	masterOK := []string{
+		"GRANT CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO `adm`@`%` WITH GRANT OPTION",
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO `adm`@`%` WITH GRANT OPTION",
+	}
+	if got := missingGrants(masterOK, acct, masterGrants); got != nil {
+		t.Fatalf("master set: %q", got)
+	}
+	want := []string{"GRANT DROP, CREATE, INSERT, UPDATE, DELETE, ALTER, INDEX, CREATE VIEW, CREATE ROUTINE, ALTER ROUTINE, REFERENCES, CREATE TEMPORARY TABLES ON *.* TO 'adm'@'%'"}
+	if got := missingGrants(masterOK, acct, replicaGrants); !reflect.DeepEqual(got, want) {
+		t.Errorf("replica set:\n%q\nwant\n%q", got, want)
+	}
+	all := []string{"GRANT ALL PRIVILEGES ON *.* TO `adm`@`%` WITH GRANT OPTION"}
+	if got := missingGrants(all, acct, replicaGrants); got != nil {
+		t.Errorf("ALL PRIVILEGES: %q", got)
+	}
+
+	req := RequiredReplicaGrants()
+	seen := map[string]int{}
+	for _, g := range req {
+		seen[g]++
+	}
+	for _, g := range append(RequiredGrants(), "DROP", "CREATE TEMPORARY TABLES", "TRIGGER", "EVENT") {
+		if seen[g] != 1 {
+			t.Errorf("RequiredReplicaGrants lists %q %d times: %q", g, seen[g], req)
+		}
 	}
 }
 

@@ -30,6 +30,7 @@ type MySQLStatus struct {
 	Version           string         `json:"version"`
 	Series            string         `json:"series"` // "8.0" | "8.4" | "9"; "" when the version is unsupported
 	ServerID          uint32         `json:"server_id"`
+	ServerUUID        string         `json:"server_uuid"`
 	LogBin            bool           `json:"log_bin"`
 	GTIDMode          string         `json:"gtid_mode"`
 	EnforceGTID       bool           `json:"enforce_gtid"`
@@ -65,15 +66,16 @@ type ReplicaStatus struct {
 
 // PreflightParams are the parameters of mysql.preflight.
 type PreflightParams struct {
-	Role          string   `json:"role"`            // "master" | "replica"
-	PeerHost      string   `json:"peer_host"`       // replica: the master's address as seen from this server
-	PeerPort      int      `json:"peer_port"`       // replica: the master's MySQL port
-	PeerVersion   string   `json:"peer_version"`    // replica: the master's @@version
-	PeerDataBytes uint64   `json:"peer_data_bytes"` // replica: size of the master's selected databases
-	PeerDatabases []string `json:"peer_databases"`  // replica: every user database on the master
-	ReplUser      string   `json:"repl_user"`       // master: the replication user the panel uses
-	Databases     []string `json:"databases"`       // databases to replicate; empty = all
-	ConfirmWipe   bool     `json:"confirm_wipe"`    // replica: the user agreed to drop leftover databases
+	Role           string   `json:"role"`             // "master" | "replica"
+	PeerHost       string   `json:"peer_host"`        // replica: the master's address as seen from this server
+	PeerPort       int      `json:"peer_port"`        // replica: the master's MySQL port
+	PeerVersion    string   `json:"peer_version"`     // replica: the master's @@version
+	PeerServerUUID string   `json:"peer_server_uuid"` // replica: the master's @@server_uuid; the target must differ
+	PeerDataBytes  uint64   `json:"peer_data_bytes"`  // replica: size of the master's selected databases
+	PeerDatabases  []string `json:"peer_databases"`   // replica: every user database on the master
+	ReplUser       string   `json:"repl_user"`        // master: the replication user the panel uses
+	Databases      []string `json:"databases"`        // databases to replicate; empty = all
+	ConfirmWipe    bool     `json:"confirm_wipe"`     // replica: the user agreed to drop leftover databases
 }
 
 // Preflight check statuses, from least to most severe: ok, warn,

@@ -55,6 +55,7 @@ func (d *Driver) registerPreflight(reg *commands.Registry) {
 // validatePreflight checks p and trims its free-text fields.
 func validatePreflight(p *proto.PreflightParams) error {
 	p.Role, p.PeerHost, p.PeerVersion = strings.TrimSpace(p.Role), strings.TrimSpace(p.PeerHost), strings.TrimSpace(p.PeerVersion)
+	p.PeerServerUUID = strings.TrimSpace(p.PeerServerUUID)
 	switch p.Role {
 	case roleMaster:
 	case roleReplica:
@@ -105,10 +106,11 @@ func Preflight(ctx context.Context, h Host, p proto.PreflightParams) (proto.Pref
 // Gathering stops after an unsupported version (only Status.Version is set)
 // or missing grants (Status, Account and MissingGrants are set).
 type preflightFacts struct {
-	Status        proto.MySQLStatus
-	Account       string   // CURRENT_USER()
-	MissingGrants []string // GRANT statements the account lacks
-	Databases     []proto.DatabaseInfo
+	Status         proto.MySQLStatus
+	VersionComment string   // @@version_comment, which names forks such as Percona Server
+	Account        string   // CURRENT_USER()
+	MissingGrants  []string // GRANT statements the account lacks
+	Databases      []proto.DatabaseInfo
 
 	// Master.
 	SkipNetworking bool
@@ -128,10 +130,10 @@ func gatherPreflight(ctx context.Context, h Host, db *sql.DB, p proto.PreflightP
 	var f preflightFacts
 	// The version alone first: on MariaDB or an old MySQL the queries in
 	// Status may fail, and the answer must be the version check.
-	if err := db.QueryRowContext(ctx, "SELECT @@version").Scan(&f.Status.Version); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT @@version, @@version_comment").Scan(&f.Status.Version, &f.VersionComment); err != nil {
 		return f, fmt.Errorf("baca versi MySQL: %w", err)
 	}
-	if _, err := ParseVersion(f.Status.Version); err != nil {
+	if _, err := supportedVersion(f.Status.Version, f.VersionComment); err != nil {
 		return f, nil
 	}
 
@@ -142,6 +144,10 @@ func gatherPreflight(ctx context.Context, h Host, db *sql.DB, p proto.PreflightP
 		return f, statusErr
 	}
 	f.Status = st
+	required := masterGrants
+	if p.Role == roleReplica {
+		required = replicaGrants
+	}
 	if err := db.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&f.Account); err != nil {
 		return f, fmt.Errorf("baca akun MySQL: %w", err)
 	}
@@ -149,7 +155,7 @@ func gatherPreflight(ctx context.Context, h Host, db *sql.DB, p proto.PreflightP
 	if err != nil {
 		return f, err
 	}
-	if f.MissingGrants = missingGrants(grants, f.Account); len(f.MissingGrants) > 0 {
+	if f.MissingGrants = missingGrants(grants, f.Account, required); len(f.MissingGrants) > 0 {
 		return f, nil
 	}
 	if statusErr != nil {
@@ -248,26 +254,20 @@ func evaluatePreflight(p proto.PreflightParams, f preflightFacts) proto.Prefligh
 		return res
 	}
 
-	local, err := ParseVersion(f.Status.Version)
+	local, err := supportedVersion(f.Status.Version, f.VersionComment)
 	if err != nil {
-		l.add("version", proto.CheckFail, "Versi MySQL", fmt.Sprintf("%v; server ini menjalankan %s", ErrUnsupported, f.Status.Version))
+		running := f.Status.Version
+		if f.VersionComment != "" {
+			running += " (" + f.VersionComment + ")"
+		}
+		l.add("version", proto.CheckFail, "Versi MySQL", fmt.Sprintf("%v; server ini menjalankan %s", ErrUnsupported, running))
 		return finish()
 	}
 	l.add("version", proto.CheckOK, "Versi MySQL", fmt.Sprintf("MySQL %s (seri %s)", f.Status.Version, local.Series))
 
-	peer, peerErr := ParseVersion(p.PeerVersion)
+	var v peerVersions
 	if p.Role == roleReplica {
-		const title = "Seri versi sama dengan master"
-		switch {
-		case peerErr != nil:
-			l.add("same_series", proto.CheckFail, title, fmt.Sprintf("versi MySQL master %s tidak didukung", p.PeerVersion))
-		case !local.SameSeries(peer):
-			l.add("same_series", proto.CheckFail, title, fmt.Sprintf(
-				"master menjalankan MySQL %s (seri %s), server ini %s (seri %s); keduanya harus satu seri",
-				p.PeerVersion, peer.Series, f.Status.Version, local.Series))
-		default:
-			l.add("same_series", proto.CheckOK, title, "seri "+local.Series+" sama dengan master")
-		}
+		v = replicaIdentityChecks(&l, p, f, local)
 	}
 
 	if len(f.MissingGrants) > 0 {
@@ -276,19 +276,75 @@ func evaluatePreflight(p proto.PreflightParams, f preflightFacts) proto.Prefligh
 		c.FixSQL = f.MissingGrants
 		return finish()
 	}
-	l.add("grants", proto.CheckOK, "Hak akses akun admin", fmt.Sprintf("akun %s punya semua hak yang dibutuhkan", f.Account))
+	l.add("grants", proto.CheckOK, "Hak akses akun admin", "hak yang diperiksa lengkap untuk peran "+p.Role)
 
 	switch p.Role {
 	case roleMaster:
 		masterChecks(&l, &res, p, f)
 	case roleReplica:
-		cloneOK := replicaChecks(&l, p, f, local, peer, peerErr == nil)
-		res.Method = "dump"
-		if cloneOK && len(p.Databases) == 0 && len(f.Databases) == 0 {
+		cloneOK := replicaChecks(&l, p, f, v)
+		switch {
+		case v.peerErr != nil || !v.sameSeries || v.self:
+			// No copy method for a master this server cannot replicate from.
+		case cloneOK && len(p.Databases) == 0 && len(f.Databases) == 0:
 			res.Method = "clone"
+		default:
+			res.Method = "dump"
 		}
 	}
 	return finish()
+}
+
+// supportedVersion is ParseVersion that also refuses forks recognisable only
+// by @@version_comment: Percona Server, and MariaDB builds without
+// "MariaDB" in @@version.
+func supportedVersion(version, comment string) (Dialect, error) {
+	if c := strings.ToLower(comment); strings.Contains(c, "percona") || strings.Contains(c, "mariadb") {
+		return Dialect{}, ErrUnsupported
+	}
+	return ParseVersion(version)
+}
+
+// peerVersions is how this server's version and identity compare with the
+// master's.
+type peerVersions struct {
+	local, peer Dialect
+	peerErr     error // the master's version does not parse
+	sameSeries  bool
+	self        bool // the master is this very server
+}
+
+// replicaIdentityChecks adds same_series and self_peer. They come before
+// grants: @@version and @@server_uuid are readable by any account.
+func replicaIdentityChecks(l *checkList, p proto.PreflightParams, f preflightFacts, local Dialect) peerVersions {
+	v := peerVersions{local: local}
+	v.peer, v.peerErr = ParseVersion(p.PeerVersion)
+	v.sameSeries = v.peerErr == nil && local.SameSeries(v.peer)
+	const title = "Seri versi sama dengan master"
+	switch {
+	case p.PeerVersion == "":
+		l.add("same_series", proto.CheckFail, title, "versi MySQL master tidak diketahui")
+	case v.peerErr != nil:
+		l.add("same_series", proto.CheckFail, title, fmt.Sprintf("versi MySQL master %s tidak didukung", p.PeerVersion))
+	case !v.sameSeries:
+		l.add("same_series", proto.CheckFail, title, fmt.Sprintf(
+			"master menjalankan MySQL %s (seri %s), server ini %s (seri %s); keduanya harus satu seri",
+			p.PeerVersion, v.peer.Series, f.Status.Version, local.Series))
+	default:
+		l.add("same_series", proto.CheckOK, title, "seri "+local.Series+" sama dengan master")
+	}
+
+	const selfTitle = "Server tujuan bukan master itu sendiri"
+	v.self = p.PeerServerUUID != "" && strings.EqualFold(p.PeerServerUUID, f.Status.ServerUUID)
+	switch {
+	case v.self:
+		l.add("self_peer", proto.CheckFail, selfTitle, "server tujuan sama dengan master (server_uuid identik); pilih server lain")
+	case p.PeerServerUUID == "":
+		l.add("self_peer", proto.CheckWarn, selfTitle, "server_uuid master tidak diketahui; tidak bisa dipastikan server ini bukan master")
+	default:
+		l.add("self_peer", proto.CheckOK, selfTitle, "server_uuid server ini berbeda dari master")
+	}
+	return v
 }
 
 func masterChecks(l *checkList, res *proto.PreflightResult, p proto.PreflightParams, f preflightFacts) {
@@ -382,11 +438,19 @@ func masterChecks(l *checkList, res *proto.PreflightResult, p proto.PreflightPar
 	if st.Replica != nil {
 		found = append(found, "server ini adalah replika dari "+net.JoinHostPort(st.Replica.SourceHost, strconv.Itoa(st.Replica.SourcePort)))
 	}
+	// Raising gtid_mode breaks replication that does not use GTID, in
+	// either direction.
+	var breaks []string
+	if st.BinlogDumpThreads > 0 && !gtidOn {
+		breaks = append(breaks, "menaikkan gtid_mode akan memutus replika lama yang belum GTID")
+	}
+	if st.Replica != nil && !gtidOn {
+		breaks = append(breaks, "server ini sudah menjadi replika tanpa GTID; menaikkan gtid_mode akan memutus replikasinya")
+	}
 	const replTitle = "Replikasi yang sudah ada"
 	switch {
-	case st.BinlogDumpThreads > 0 && !gtidOn:
-		l.add("existing_replication", proto.CheckFail, replTitle,
-			strings.Join(found, "; ")+"; menaikkan gtid_mode akan memutus replika lama yang belum GTID")
+	case len(breaks) > 0:
+		l.add("existing_replication", proto.CheckFail, replTitle, strings.Join(append(found, breaks...), "; "))
 	case len(found) > 0:
 		l.add("existing_replication", proto.CheckWarn, replTitle, strings.Join(found, "; ")+"; panel tidak mengelola replikasi ini")
 	default:
@@ -418,9 +482,9 @@ func masterChecks(l *checkList, res *proto.PreflightResult, p proto.PreflightPar
 	}
 }
 
-// replicaChecks adds the replica role's checks and reports whether CLONE is
-// possible as far as versions go.
-func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, local, peer Dialect, peerOK bool) (cloneOK bool) {
+// replicaChecks adds the replica role's checks after grants and reports
+// whether CLONE is possible as far as versions go.
+func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, v peerVersions) (cloneOK bool) {
 	addr := net.JoinHostPort(p.PeerHost, strconv.Itoa(p.PeerPort))
 	if f.Unreachable != nil {
 		l.add("reachable", proto.CheckFail, "Koneksi ke master", fmt.Sprintf(
@@ -458,14 +522,18 @@ func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, loca
 	} else {
 		l.add("dedicated", proto.CheckOK, "Server replika khusus", "tidak ada database lain di server ini")
 	}
-	wipe := "database dari percobaan sebelumnya akan dibuang: " + strings.Join(leftover, ", ")
+	const leftTitle = "Database bernama sama dengan di master"
+	wipe := "database bernama sama dengan di master akan dibuang: " + strings.Join(leftover, ", ")
 	switch {
+	case v.self:
+		// These are the master's own databases: never offer to drop them.
+		l.add("leftover", proto.CheckFail, leftTitle, "server tujuan sama dengan master; databasenya tidak boleh dibuang")
 	case len(leftover) == 0:
-		l.add("leftover", proto.CheckOK, "Database sisa percobaan sebelumnya", "tidak ada database sisa")
+		l.add("leftover", proto.CheckOK, leftTitle, "tidak ada database bernama sama dengan di master")
 	case p.ConfirmWipe:
-		l.add("leftover", proto.CheckOK, "Database sisa percobaan sebelumnya", wipe+" (sudah dikonfirmasi)")
+		l.add("leftover", proto.CheckOK, leftTitle, wipe+" (sudah dikonfirmasi)")
 	default:
-		l.add("leftover", proto.CheckNeedsConfirm, "Database sisa percobaan sebelumnya", wipe)
+		l.add("leftover", proto.CheckNeedsConfirm, leftTitle, wipe)
 	}
 
 	if n := f.Status.BinlogDumpThreads; n > 0 {
@@ -476,15 +544,23 @@ func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, loca
 	}
 
 	// Before 8.0.37 (on either side) CLONE needs the exact same release.
+	const cloneTitle = "Versi untuk CLONE"
+	local, peer := v.local, v.peer
 	samePatch := local.Major == peer.Major && local.Minor == peer.Minor && local.Patch == peer.Patch
-	if peerOK && (local.CloneNeedsExactPatch() || peer.CloneNeedsExactPatch()) && !samePatch {
-		l.add("clone_patch", proto.CheckWarn, "Versi untuk CLONE", fmt.Sprintf(
+	switch {
+	case v.peerErr != nil:
+		l.add("clone_patch", proto.CheckWarn, cloneTitle, "versi master tidak bisa dibaca")
+	case !v.sameSeries:
+		l.add("clone_patch", proto.CheckWarn, cloneTitle, "seri berbeda")
+	case (local.CloneNeedsExactPatch() || peer.CloneNeedsExactPatch()) && !samePatch:
+		l.add("clone_patch", proto.CheckWarn, cloneTitle, fmt.Sprintf(
 			"CLONE di bawah 8.0.37 butuh versi yang persis sama (master %s, server ini %s); data akan disalin dengan dump",
 			p.PeerVersion, f.Status.Version))
-		return false
+	default:
+		l.add("clone_patch", proto.CheckOK, cloneTitle, "versi master dan server ini bisa memakai CLONE")
+		return true
 	}
-	l.add("clone_patch", proto.CheckOK, "Versi untuk CLONE", "versi master dan server ini bisa memakai CLONE")
-	return true
+	return false
 }
 
 // isLocalBind reports whether every address in bind_address (comma-separated
