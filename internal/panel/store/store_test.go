@@ -148,7 +148,7 @@ var tokenRe = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}-[
 func TestPairTokenLifecycle(t *testing.T) {
 	s := openTemp(t)
 	srv, _ := s.CreateServer("db1")
-	now := time.Date(2026, 10, 30, 10, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 10, 30, 10, 0, 0, 500_000_000, time.UTC)
 
 	tok, err := s.CreatePairToken(srv.ID, now, 15*time.Minute)
 	if err != nil {
@@ -157,13 +157,16 @@ func TestPairTokenLifecycle(t *testing.T) {
 	if !tokenRe.MatchString(tok.Token) {
 		t.Fatalf("token format: %q", tok.Token)
 	}
-	if tok.ServerID != srv.ID || !tok.ExpiresAt.Equal(now.Add(15*time.Minute)) || tok.UsedAt != nil {
+	if want := now.Add(15 * time.Minute).Truncate(time.Second); tok.ServerID != srv.ID || !tok.ExpiresAt.Equal(want) || tok.UsedAt != nil {
 		t.Fatalf("token: %+v", tok)
 	}
 
 	act, ok, err := s.ActivePairToken(srv.ID, now)
 	if err != nil || !ok || act.Token != tok.Token {
 		t.Fatalf("active: %+v %v %v", act, ok, err)
+	}
+	if !act.ExpiresAt.Equal(tok.ExpiresAt) {
+		t.Fatalf("ExpiresAt read back %v, created %v", act.ExpiresAt, tok.ExpiresAt)
 	}
 	if _, err := s.PeekPairToken(tok.Token, now); err != nil {
 		t.Fatalf("peek: %v", err)
@@ -176,7 +179,7 @@ func TestPairTokenLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if got.ServerID != srv.ID || got.UsedAt == nil || !got.UsedAt.Equal(now) {
+	if got.ServerID != srv.ID || got.UsedAt == nil || !got.UsedAt.Equal(now.Truncate(time.Second)) {
 		t.Fatalf("consumed: %+v", got)
 	}
 	if _, err := s.ConsumePairToken(tok.Token, now); !errors.Is(err, ErrTokenInvalid) {
@@ -228,6 +231,14 @@ func TestCreatePairTokenReplacesOld(t *testing.T) {
 	}
 	if _, err := s.ConsumePairToken(fresh.Token, now); err != nil {
 		t.Fatalf("fresh token: %v", err)
+	}
+}
+
+func TestCreatePairTokenMissingServer(t *testing.T) {
+	s := openTemp(t)
+	now := time.Date(2026, 10, 30, 10, 0, 0, 0, time.UTC)
+	if _, err := s.CreatePairToken(999, now, time.Hour); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 

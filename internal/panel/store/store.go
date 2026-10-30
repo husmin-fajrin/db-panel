@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
@@ -55,4 +56,10 @@ func parseNullTime(v sql.NullString) (*time.Time, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+// isUniqueViolation reports whether err is a SQLite UNIQUE constraint failure
+// on the given qualified column, e.g. "servers.name".
+func isUniqueViolation(err error, column string) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: "+column)
 }

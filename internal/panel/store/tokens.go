@@ -51,13 +51,20 @@ func (s *Store) CreatePairToken(serverID int64, now time.Time, ttl time.Duration
 	if err != nil {
 		return PairToken{}, err
 	}
-	pt := PairToken{Token: token, ServerID: serverID, ExpiresAt: now.Add(ttl).UTC()}
+	pt := PairToken{Token: token, ServerID: serverID, ExpiresAt: now.Add(ttl).UTC().Truncate(time.Second)}
 
 	tx, err := s.db.Begin()
 	if err != nil {
 		return PairToken{}, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM servers WHERE id = ?`, serverID).Scan(&exists); err != nil {
+		return PairToken{}, fmt.Errorf("check server: %w", err)
+	}
+	if exists == 0 {
+		return PairToken{}, ErrNotFound
+	}
 	if _, err := tx.Exec(`DELETE FROM pair_tokens WHERE server_id = ? AND used_at IS NULL`, serverID); err != nil {
 		return PairToken{}, fmt.Errorf("delete old tokens: %w", err)
 	}

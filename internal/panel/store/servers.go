@@ -67,7 +67,7 @@ func (s *Store) CreateServer(name string) (Server, error) {
 	res, err := s.db.Exec(`INSERT INTO servers (name, role, created_at) VALUES (?, ?, ?)`,
 		name, RoleUnassigned, formatTime(time.Now()))
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if isUniqueViolation(err, "servers.name") {
 			return Server{}, errors.New("nama server sudah dipakai")
 		}
 		return Server{}, fmt.Errorf("insert server: %w", err)

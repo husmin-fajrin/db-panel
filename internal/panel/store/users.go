@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // User is a panel login account.
@@ -18,7 +17,7 @@ type User struct {
 func (s *Store) CreateUser(username, hash string) error {
 	_, err := s.db.Exec(`INSERT INTO users (username, password_hash) VALUES (?, ?)`, username, hash)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if isUniqueViolation(err, "users.username") {
 			return errors.New("nama pengguna sudah ada")
 		}
 		return fmt.Errorf("insert user: %w", err)
