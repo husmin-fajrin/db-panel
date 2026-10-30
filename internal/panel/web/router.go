@@ -15,9 +15,14 @@ import (
 
 const msgInternal = "Terjadi kesalahan pada panel. Lihat log panel untuk detailnya."
 
-// Deps are the panel services the UI uses. All fields except Now, Version
-// and Logger are required. Sessions and Limiter are configured (TTL, limits)
-// by the caller.
+// defaultLoginConcurrency caps how many password checks (bcrypt, ~0.3 s of
+// CPU each) run at once; further login attempts get 429 straight away.
+const defaultLoginConcurrency = 4
+
+// Deps are the panel services the UI uses. All fields except Now, Version,
+// Logger, CheckPassword and LoginConcurrency are required. Sessions and
+// Limiter are configured (TTL, limits) by the caller; Limiter counts login
+// attempts both per client IP and per username.
 type Deps struct {
 	Store     *store.Store
 	Hub       *hub.Hub
@@ -28,12 +33,19 @@ type Deps struct {
 	Now       func() time.Time // nil means time.Now
 	Version   string
 	Logger    *slog.Logger // nil means slog.Default()
+	// CheckPassword compares a password with a stored hash; nil means
+	// auth.CheckPassword. Tests replace it with a slow fake.
+	CheckPassword func(hash, password string) bool
+	// LoginConcurrency is the number of password checks allowed to run at
+	// once; 0 means 4.
+	LoginConcurrency int
 }
 
 // app carries the dependencies into the handlers.
 type app struct {
 	Deps
-	render *Renderer
+	render   *Renderer
+	loginSem chan struct{} // one slot per running password check
 }
 
 // NewRouter returns the UI handler. It does not serve the agent endpoints
@@ -46,12 +58,18 @@ func NewRouter(d Deps) http.Handler {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
+	if d.CheckPassword == nil {
+		d.CheckPassword = auth.CheckPassword
+	}
+	if d.LoginConcurrency <= 0 {
+		d.LoginConcurrency = defaultLoginConcurrency
+	}
 	render, err := NewRenderer()
 	if err != nil {
 		panic("web: " + err.Error())
 	}
 	render.logger = d.Logger
-	a := &app{Deps: d, render: render}
+	a := &app{Deps: d, render: render, loginSem: make(chan struct{}, d.LoginConcurrency)}
 
 	static, err := fs.Sub(webfs.FS, "static")
 	if err != nil {

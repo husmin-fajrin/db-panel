@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,7 +87,8 @@ type env struct {
 	h        http.Handler
 }
 
-func newEnv(t *testing.T) *env {
+// newEnv builds the router; mods adjust its Deps before it is built.
+func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
@@ -103,7 +106,7 @@ func newEnv(t *testing.T) *env {
 		sessions: auth.NewSessions(time.Hour, time.Now),
 		broker:   web.NewBroker(),
 	}
-	e.h = web.NewRouter(web.Deps{
+	d := web.Deps{
 		Store:     st,
 		Hub:       e.hub,
 		Sessions:  e.sessions,
@@ -113,7 +116,11 @@ func newEnv(t *testing.T) *env {
 		Now:       time.Now,
 		Version:   "v-test",
 		Logger:    slog.New(slog.DiscardHandler),
-	})
+	}
+	for _, m := range mods {
+		m(&d)
+	}
+	e.h = web.NewRouter(d)
 	return e
 }
 
@@ -195,6 +202,64 @@ func TestLoginRateLimited(t *testing.T) {
 	if len(rec.Result().Cookies()) != 0 {
 		t.Error("cookie set while rate limited")
 	}
+}
+
+// loginFrom posts a login form from the given client IP.
+func (e *env) loginFrom(ip, user, pw string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/login", strings.NewReader(loginForm(user, pw, "").Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", testOrigin)
+	req.RemoteAddr = ip + ":40000"
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestLoginRateLimitedPerUsername (SEC-05): rotating the source address does
+// not buy more guesses for one account.
+func TestLoginRateLimitedPerUsername(t *testing.T) {
+	e := newEnv(t)
+	for i := 1; i <= 5; i++ {
+		wantCode(t, e.loginFrom(fmt.Sprintf("10.9.0.%d", i), "admin", "salah"), http.StatusOK)
+	}
+	rec := e.loginFrom("10.9.0.6", "admin", "salah")
+	wantCode(t, rec, http.StatusTooManyRequests)
+	wantBody(t, rec, "Terlalu banyak percobaan, coba lagi dalam 15 menit")
+	// Another username from a fresh address is not affected.
+	wantCode(t, e.loginFrom("10.9.0.7", "operator", "salah"), http.StatusOK)
+}
+
+// TestLoginConcurrencyCap (SEC-05): once the password-check slots are taken,
+// further logins get 429 at once instead of queueing more bcrypt work.
+func TestLoginConcurrencyCap(t *testing.T) {
+	var (
+		running atomic.Int32
+		release = make(chan struct{})
+	)
+	e := newEnv(t, func(d *web.Deps) {
+		d.LoginConcurrency = 2
+		d.CheckPassword = func(string, string) bool {
+			running.Add(1)
+			<-release
+			return false
+		}
+	})
+	var wg sync.WaitGroup
+	for i := 1; i <= 2; i++ {
+		wg.Go(func() { e.loginFrom(fmt.Sprintf("10.8.0.%d", i), fmt.Sprintf("u%d", i), "x") })
+	}
+	waitFor(t, func() bool { return running.Load() == 2 })
+
+	rec := e.loginFrom("10.8.0.3", "u3", "x")
+	wantCode(t, rec, http.StatusTooManyRequests)
+	wantBody(t, rec, "Server sibuk, coba lagi sebentar")
+	if n := running.Load(); n != 2 {
+		t.Fatalf("password checks started = %d, want 2 (the refused login must not hash)", n)
+	}
+	close(release)
+	wg.Wait()
+	// Slots are free again.
+	wantCode(t, e.loginFrom("10.8.0.4", "u4", "x"), http.StatusOK)
 }
 
 func TestLoginSuccessSetsCookie(t *testing.T) {

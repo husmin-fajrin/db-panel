@@ -15,6 +15,7 @@ import (
 const (
 	msgLoginFailed  = "Nama pengguna atau kata sandi salah"
 	msgLoginBlocked = "Terlalu banyak percobaan, coba lagi dalam 15 menit"
+	msgLoginBusy    = "Server sibuk, coba lagi sebentar"
 	msgForbidden    = "permintaan ditolak"
 )
 
@@ -43,10 +44,22 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		a.render.renderStatus(w, status, "login", p)
 	}
 
-	key := clientIP(r)
-	if !a.Limiter.Allow(key) {
-		a.Logger.Warn("login rate limited", "ip", key)
+	ip := clientIP(r)
+	// Per IP, and per username so that rotating source addresses (IPv6
+	// link-local, IPv4 aliases) does not buy more guesses for one account.
+	if !a.Limiter.Allow("ip:"+ip) || !a.Limiter.Allow("user:"+username) {
+		a.Logger.Warn("login rate limited", "ip", ip)
 		retry(http.StatusTooManyRequests, msgLoginBlocked)
+		return
+	}
+	// Each check costs ~0.3 s of CPU; refuse rather than queue when the
+	// slots are taken, so a flood cannot saturate the panel host.
+	select {
+	case a.loginSem <- struct{}{}:
+		defer func() { <-a.loginSem }()
+	default:
+		a.Logger.Warn("login refused: password checks busy", "ip", ip)
+		retry(http.StatusTooManyRequests, msgLoginBusy)
 		return
 	}
 
@@ -60,23 +73,24 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Always run bcrypt, even for an unknown user.
-	if ok := auth.CheckPassword(hash, password); !ok || err != nil {
-		a.Logger.Info("login failed", "username", username, "ip", key)
+	if ok := a.CheckPassword(hash, password); !ok || err != nil {
+		a.Logger.Info("login failed", "username", username, "ip", ip)
 		retry(http.StatusOK, msgLoginFailed)
 		return
 	}
 
-	a.Limiter.Reset(key)
+	a.Limiter.Reset("ip:" + ip)
+	a.Limiter.Reset("user:" + username)
 	auth.SetSessionCookie(w, a.Sessions.Create(user.Username), r.TLS != nil)
-	a.Logger.Info("login", "username", user.Username, "ip", key)
+	a.Logger.Info("login", "username", user.Username, "ip", ip)
 	http.Redirect(w, r, safeNext(next), http.StatusSeeOther)
 }
 
 func (a *app) logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(auth.CookieName); err == nil {
-		a.Sessions.Delete(c.Value)
+	if tok, ok := auth.SessionToken(r); ok {
+		a.Sessions.Delete(tok)
 	}
-	auth.ClearSessionCookie(w)
+	auth.ClearSessionCookie(w, r.TLS != nil)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 

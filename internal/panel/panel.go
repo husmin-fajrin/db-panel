@@ -37,7 +37,9 @@ const (
 	settingLocalServerID = "local_server_id"
 	settingPublicHost    = "public_host"
 
-	sessionTTL       = 12 * time.Hour
+	sessionTTL       = 12 * time.Hour // sliding: since the last request
+	sessionMaxAge    = 24 * time.Hour // absolute: since login
+	epochCacheTTL    = 5 * time.Second
 	loginMaxAttempts = 5
 	loginWindow      = 15 * time.Minute
 
@@ -70,6 +72,7 @@ type Panel struct {
 
 	opts          Options
 	log           *slog.Logger
+	epoch         *sessionEpoch
 	now           func() time.Time
 	localID       int64
 	probeInterval time.Duration
@@ -102,10 +105,17 @@ func New(o Options) (*Panel, error) {
 	if err != nil {
 		return nil, err
 	}
+	epoch := &sessionEpoch{st: st, log: o.Logger, ttl: epochCacheTTL, now: time.Now}
+	if _, err := epoch.load(); err != nil {
+		st.Close()
+		return nil, err
+	}
 	p := &Panel{
-		Store:         st,
-		Sessions:      auth.NewSessions(sessionTTL, time.Now),
+		Store: st,
+		Sessions: auth.NewSessions(sessionTTL, time.Now,
+			auth.WithMaxAge(sessionMaxAge), auth.WithValidator(epoch.valid)),
 		Limiter:       auth.NewRateLimiter(loginMaxAttempts, loginWindow, time.Now),
+		epoch:         epoch,
 		Broker:        web.NewBroker(),
 		opts:          o,
 		log:           o.Logger,
@@ -254,6 +264,42 @@ func writeSecret(path, data string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// sessionEpoch decides whether a session is still valid: sessions created
+// at or before the store's session epoch (bumped by reset-password, which
+// runs in another process) are not. The epoch is re-read from the store at
+// most every ttl.
+type sessionEpoch struct {
+	st  *store.Store
+	log *slog.Logger
+	ttl time.Duration
+	now func() time.Time
+
+	mu      sync.Mutex
+	epoch   int64
+	fetched time.Time
+}
+
+// load reads the epoch from the store into the cache.
+func (e *sessionEpoch) load() (int64, error) {
+	v, err := e.st.SessionEpoch()
+	if err != nil {
+		return 0, err
+	}
+	e.epoch, e.fetched = v, e.now()
+	return v, nil
+}
+
+func (e *sessionEpoch) valid(created time.Time) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.now().Sub(e.fetched) >= e.ttl {
+		if _, err := e.load(); err != nil {
+			e.log.Warn("read session epoch; using the cached value", "err", err)
+		}
+	}
+	return created.Unix() > e.epoch
 }
 
 // Close closes the store. Call it after Run has returned.

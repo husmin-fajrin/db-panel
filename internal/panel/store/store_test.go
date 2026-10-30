@@ -335,3 +335,17 @@ func TestUsersAndSettings(t *testing.T) {
 		t.Fatalf("setting = %q", v)
 	}
 }
+
+func TestSessionEpoch(t *testing.T) {
+	s := openTemp(t)
+	if e, err := s.SessionEpoch(); err != nil || e != 0 {
+		t.Fatalf("initial epoch = %d %v, want 0", e, err)
+	}
+	now := time.Unix(1_800_000_000, 500_000_000)
+	if err := s.BumpSessionEpoch(now); err != nil {
+		t.Fatal(err)
+	}
+	if e, err := s.SessionEpoch(); err != nil || e != 1_800_000_000 {
+		t.Fatalf("epoch = %d %v, want 1800000000", e, err)
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 )
 
 // GetSetting returns the value for key, or "" if it is not set.
@@ -27,4 +29,27 @@ func (s *Store) SetSetting(key, value string) error {
 		return fmt.Errorf("set setting: %w", err)
 	}
 	return nil
+}
+
+// settingSessionEpoch holds the unix time (seconds) of the last password
+// reset or change; sessions created at or before it are no longer valid.
+const settingSessionEpoch = "session_epoch"
+
+// SessionEpoch returns the session epoch in unix seconds, 0 if never set.
+func (s *Store) SessionEpoch() (int64, error) {
+	v, err := s.GetSetting(settingSessionEpoch)
+	if err != nil || v == "" {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s %q: %w", settingSessionEpoch, v, err)
+	}
+	return n, nil
+}
+
+// BumpSessionEpoch sets the session epoch to now, ending every session that
+// already exists (also in a panel process other than the caller).
+func (s *Store) BumpSessionEpoch(now time.Time) error {
+	return s.SetSetting(settingSessionEpoch, strconv.FormatInt(now.Unix(), 10))
 }

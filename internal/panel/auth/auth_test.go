@@ -307,7 +307,7 @@ func TestCookies(t *testing.T) {
 	rec := httptest.NewRecorder()
 	SetSessionCookie(rec, "tok", true)
 	c := rec.Result().Cookies()[0]
-	if c.Name != CookieName || c.Value != "tok" || c.Path != "/" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
+	if c.Name != SecureCookieName || c.Value != "tok" || c.Path != "/" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
 		t.Errorf("cookie = %+v", c)
 	}
 	rec = httptest.NewRecorder()
@@ -317,9 +317,99 @@ func TestCookies(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	ClearSessionCookie(rec)
+	ClearSessionCookie(rec, false)
 	c = rec.Result().Cookies()[0]
 	if c.Name != CookieName || c.Value != "" || c.MaxAge >= 0 || c.Path != "/" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
 		t.Errorf("clear cookie = %+v", c)
+	}
+	if n := len(rec.Result().Cookies()); n != 1 {
+		t.Errorf("plain-HTTP clear sets %d cookies, want 1", n)
+	}
+	rec = httptest.NewRecorder()
+	ClearSessionCookie(rec, true)
+	if cs := rec.Result().Cookies(); len(cs) != 2 || cs[1].Name != SecureCookieName || !cs[1].Secure || cs[1].MaxAge >= 0 {
+		t.Errorf("secure clear cookies = %+v", cs)
+	}
+}
+
+// TestSecureCookieUsesHostPrefix: over TLS the cookie is "__Host-" prefixed
+// (Secure, Path=/, no Domain) and RequireLogin accepts it.
+func TestSecureCookieUsesHostPrefix(t *testing.T) {
+	rec := httptest.NewRecorder()
+	SetSessionCookie(rec, "tok", true)
+	c := rec.Result().Cookies()[0]
+	if c.Name != "__Host-dbpanel_session" || !c.Secure || c.Path != "/" || c.Domain != "" {
+		t.Fatalf("secure cookie = %+v", c)
+	}
+	rec = httptest.NewRecorder()
+	SetSessionCookie(rec, "tok", false)
+	if c := rec.Result().Cookies()[0]; c.Name != CookieName {
+		t.Fatalf("plain cookie name = %q, want %q", c.Name, CookieName)
+	}
+
+	s := NewSessions(time.Hour, time.Now)
+	tok := s.Create("admin")
+	var got string
+	h := RequireLogin(s, "/login")(okHandler(&got))
+	req := httptest.NewRequest("GET", "/servers", nil)
+	req.AddCookie(&http.Cookie{Name: SecureCookieName, Value: tok})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || got != "admin" {
+		t.Fatalf("code = %d, user = %q", rec.Code, got)
+	}
+}
+
+// TestSessionsAbsoluteLifetime (SEC-04): activity slides the idle expiry but
+// never past the absolute lifetime.
+func TestSessionsAbsoluteLifetime(t *testing.T) {
+	c := newClock()
+	s := NewSessions(12*time.Hour, c.now, WithMaxAge(24*time.Hour))
+	tok := s.Create("admin")
+	for elapsed := time.Duration(0); elapsed < 23*time.Hour; elapsed += time.Hour {
+		c.advance(time.Hour)
+		if _, ok := s.Get(tok); !ok {
+			t.Fatalf("session ended after %v of activity, want it alive until 24h", elapsed+time.Hour)
+		}
+	}
+	c.advance(time.Hour) // 24h since login
+	if _, ok := s.Get(tok); ok {
+		t.Fatal("session still valid 24h after login")
+	}
+	s.mu.Lock()
+	_, present := s.m[tok]
+	s.mu.Unlock()
+	if present {
+		t.Error("session past its absolute lifetime not deleted")
+	}
+}
+
+// TestSessionsValidator (SEC-04): sessions the validator rejects (created
+// before a password reset) are refused and deleted.
+func TestSessionsValidator(t *testing.T) {
+	c := newClock()
+	var epoch time.Time
+	s := NewSessions(time.Hour, c.now, WithValidator(func(created time.Time) bool {
+		return created.After(epoch)
+	}))
+	old := s.Create("admin")
+	if _, ok := s.Get(old); !ok {
+		t.Fatal("session rejected before any reset")
+	}
+	c.advance(time.Minute)
+	epoch = c.now() // password reset
+	c.advance(time.Second)
+	fresh := s.Create("admin")
+	if _, ok := s.Get(old); ok {
+		t.Fatal("session created before the reset still accepted")
+	}
+	if _, ok := s.Get(fresh); !ok {
+		t.Fatal("session created after the reset rejected")
+	}
+	s.mu.Lock()
+	_, present := s.m[old]
+	s.mu.Unlock()
+	if present {
+		t.Error("invalidated session not deleted")
 	}
 }

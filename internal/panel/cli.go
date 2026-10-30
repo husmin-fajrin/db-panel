@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -139,6 +140,10 @@ func resetPassword(dataDir, username string) (string, error) {
 			return "", fmt.Errorf("pengguna %q tidak ditemukan", username)
 		}
 		return "", err
+	}
+	// End every existing session; a running panel notices within seconds.
+	if err := st.BumpSessionEpoch(time.Now()); err != nil {
+		return "", fmt.Errorf("kata sandi sudah diganti, tetapi sesi lama gagal diakhiri (mulai ulang panel): %w", err)
 	}
 	return pw, nil
 }

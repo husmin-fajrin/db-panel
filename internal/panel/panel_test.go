@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -673,5 +674,106 @@ func TestPanelRestartKeepsRemoteAgent(t *testing.T) {
 	}
 	if len(servers) != 2 {
 		t.Fatalf("servers after restart = %+v, want the local one and remote-1", servers)
+	}
+}
+
+// login logs in to the panel at base with the initial password and returns
+// the session cookie.
+func login(t *testing.T, o Options, base string) *http.Cookie {
+	t.Helper()
+	form := url.Values{"username": {"admin"}, "password": {readInitialPassword(t, o)}}
+	req, err := http.NewRequest("POST", base+"/login", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", base)
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	for _, c := range resp.Cookies() {
+		if c.Name == auth.CookieName {
+			return c
+		}
+	}
+	t.Fatalf("login: status %d, no session cookie", resp.StatusCode)
+	return nil
+}
+
+var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+// getWith GETs url with cookie c, without following redirects.
+func getWith(t *testing.T, url string, c *http.Cookie) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c != nil {
+		req.AddCookie(c)
+	}
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp
+}
+
+// TestResetPasswordEndsSessions (SEC-04): reset-password runs in another
+// process, yet a session from before it stops working in the running panel.
+func TestResetPasswordEndsSessions(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	p.epoch.ttl = 0 // read the epoch on every request instead of every 5 s
+	uiAddr, _ := startPanel(t, p)
+	base := "http://" + uiAddr
+	c := login(t, o, base)
+	if resp := getWith(t, base+"/servers", c); resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /servers before reset = %d, want 200", resp.StatusCode)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"panel", "reset-password", "--data-dir", o.DataDir, "--config-dir", o.ConfigDir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("reset-password exit %d: %s", code, stderr.String())
+	}
+	resp := getWith(t, base+"/servers", c)
+	if resp.StatusCode != http.StatusSeeOther || !strings.HasPrefix(resp.Header.Get("Location"), "/login") {
+		t.Fatalf("GET /servers with the pre-reset cookie = %d %q, want 303 to /login",
+			resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+// TestSessionEpochCache: the epoch is re-read at most every ttl.
+func TestSessionEpochCache(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	now := time.Unix(1_800_000_000, 0)
+	e := &sessionEpoch{st: p.Store, log: slog.New(slog.DiscardHandler), ttl: 5 * time.Second,
+		now: func() time.Time { return now }}
+	if _, err := e.load(); err != nil {
+		t.Fatal(err)
+	}
+	created := now.Add(-time.Minute)
+	if !e.valid(created) {
+		t.Fatal("session rejected without any reset")
+	}
+	if err := p.Store.BumpSessionEpoch(now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(4 * time.Second)
+	if !e.valid(created) {
+		t.Fatal("epoch re-read before the cache ttl elapsed")
+	}
+	now = now.Add(time.Second)
+	if e.valid(created) {
+		t.Fatal("session created before the reset still valid after the cache ttl")
+	}
+	if !e.valid(now.Add(time.Second)) {
+		t.Fatal("session created after the reset rejected")
 	}
 }
