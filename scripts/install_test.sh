@@ -46,7 +46,7 @@ for f in "$PANEL_SCRIPT" "$rendered"; do
 	fi
 	# set -e ignores a failure anywhere but last in an && list, so a
 	# systemctl step chained with && could fail silently.
-	if grep -nE '^[^#]*systemctl[^#]*&&' "$f"; then
+	if grep -nE '^[[:space:]]*systemctl[^#]*&&' "$f"; then
 		fail "$f merangkai systemctl dengan && (kegagalan bisa terlewat oleh set -e)"
 	fi
 done

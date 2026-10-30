@@ -33,10 +33,10 @@ sudo DBPANEL_BIN=/path/ke/dbpanel bash install.sh
 binary-nya sendiri ke server dengan arsitektur yang sama. Agar server arm64
 bisa dipasangkan ke panel amd64 (atau sebaliknya), berikan direktori berisi
 `dbpanel_linux_amd64` dan/atau `dbpanel_linux_arm64`. Berkas ini dibuat oleh
-`make release` (segera hadir; `make build` hanya membuat `dist/dbpanel`):
+`make release` (`make build` hanya membuat `dist/dbpanel`):
 
 ```sh
-make release   # segera hadir: dist/dbpanel_linux_amd64, dist/dbpanel_linux_arm64
+make release   # dist/dbpanel_linux_amd64, dist/dbpanel_linux_arm64, dist/SHA256SUMS
 sudo DBPANEL_BIN=dist/dbpanel_linux_amd64 DBPANEL_BIN_DIR=dist bash scripts/install.sh
 ```
 
@@ -103,8 +103,15 @@ make build   # -> dist/dbpanel
 make test    # go vet, go test, dan pemeriksaan skrip instalasi
 ```
 
-Target `make release` (binary `dbpanel_linux_amd64` dan
-`dbpanel_linux_arm64`) menyusul.
+Untuk dua arsitektur sekaligus (`linux/amd64` dan `linux/arm64`):
+
+```sh
+make release VERSION=0.1.0   # -> dist/dbpanel_linux_{amd64,arm64} dan dist/SHA256SUMS
+sudo DBPANEL_BIN=dist/dbpanel_linux_amd64 DBPANEL_BIN_DIR=dist bash scripts/install.sh
+```
+
+`DBPANEL_BIN_DIR=dist` menyalin kedua binary ke `/var/lib/dbpanel/bin/`
+agar panel dapat melayani agent berarsitektur lain tanpa internet.
 
 ## Mengubah tampilan
 

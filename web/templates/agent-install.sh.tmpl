@@ -39,6 +39,10 @@ main() {
 	if [ "$code" != 200 ]; then
 		die "Panel menolak unduhan binary (HTTP $code): $(head -c 512 "$BIN.new")"
 	fi
+	# A proxy or captive portal can answer 200 with an HTML page.
+	if ! head -c 4 "$BIN.new" | cmp -s - <(printf '\177ELF'); then
+		die "Unduhan bukan binary yang valid (mungkin proxy/portal jaringan). Periksa koneksi ke panel."
+	fi
 	chmod 0755 "$BIN.new"
 	mv -f "$BIN.new" "$BIN"
 
@@ -75,8 +79,9 @@ UNIT
 		systemctl restart dbpanel-agent || die "Gagal memulai ulang service dbpanel-agent. Periksa: journalctl -u dbpanel-agent"
 	fi
 
-	# Give a crashing agent time to exit (or sit in auto-restart) first.
-	sleep 3
+	# Give a crashing agent time to exit (or sit in auto-restart) first; must
+	# exceed RestartSec=3.
+	sleep 5
 	if ! systemctl is-active --quiet dbpanel-agent; then
 		die "Agent terpasang tetapi service tidak berjalan. Periksa: journalctl -u dbpanel-agent"
 	fi

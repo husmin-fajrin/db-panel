@@ -128,8 +128,9 @@ UNIT
 			sleep 0.5
 		done
 	fi
-	# Give a crashing panel time to exit (or sit in auto-restart) first.
-	sleep 3
+	# Give a crashing panel time to exit (or sit in auto-restart) first; must
+	# exceed RestartSec=3.
+	sleep 5
 	if ! systemctl is-active --quiet dbpanel-panel; then
 		die "Panel gagal berjalan. Periksa log: journalctl -u dbpanel-panel"
 	fi
