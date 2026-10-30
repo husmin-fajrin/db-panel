@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -610,6 +611,16 @@ func TestDumpArgs(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("selected databases:\n got %q\nwant %q", got, want)
 	}
+	// The trial run: the same arguments, schema only, no GTID set and so no
+	// FLUSH TABLES WITH READ LOCK on the master.
+	for _, dbs := range [][]string{nil, {"a", "b"}} {
+		want := mysql.DumpArgs("/tmp/src.cnf", dbs, "OFF")
+		want = append([]string{want[0], "--no-data"}, want[1:]...)
+		got := mysql.ProbeArgs("/tmp/src.cnf", dbs)
+		if !reflect.DeepEqual(got, want) || !slices.Contains(got, "--set-gtid-purged=OFF") || got[1] != "--no-data" {
+			t.Errorf("ProbeArgs(%q):\n got %q\nwant %q", dbs, got, want)
+		}
+	}
 	if got := mysql.LoadArgs("/tmp/local.cnf"); !reflect.DeepEqual(got, []string{"--defaults-file=/tmp/local.cnf", "--init-command=SET sql_log_bin=0"}) {
 		t.Errorf("LoadArgs = %q", got)
 	}
@@ -670,7 +681,8 @@ func TestClientDefaults(t *testing.T) {
 // escaped password back exactly.
 func TestClientDefaultsAcceptedByMysql(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
-	execAll(t, rootDB(t, inst), "CREATE USER dumper@'%' IDENTIFIED BY "+sqlLiteral(dumpPassword))
+	root := rootDB(t, inst)
+	dumpUser(t, root)
 	content, err := mysql.ClientDefaults(proto.ConnectParams{User: "dumper", Password: dumpPassword, Host: "127.0.0.1", Port: inst.Port}, "", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -689,6 +701,27 @@ func TestClientDefaultsAcceptedByMysql(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) != "dumper@%" {
 		t.Errorf("CURRENT_USER() = %q", out.String())
+	}
+
+	// The trial run leaves no transaction on the master; the real dump's
+	// FLUSH TABLES does, which shows the check would see one.
+	execAll(t, root, "CREATE DATABASE a", "CREATE TABLE a.t (id INT)")
+	dump, err := mysql.FindClientTool(inst.Layout().MysqldPath, "mysqldump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := gtidExecuted(t, root)
+	if err := inst.Host().Exec(context.Background(), nil, io.Discard, dump, mysql.ProbeArgs(path, []string{"a"})...); err != nil {
+		t.Fatal(err)
+	}
+	if got := gtidExecuted(t, root); got != before {
+		t.Errorf("trial run changed gtid_executed from %q to %q", before, got)
+	}
+	if err := inst.Host().Exec(context.Background(), nil, io.Discard, dump, mysql.DumpArgs(path, []string{"a"}, "ON")...); err != nil {
+		t.Fatal(err)
+	}
+	if got := gtidExecuted(t, root); got == before {
+		t.Error("the real dump left no FLUSH TABLES transaction; the trial-run check proves nothing")
 	}
 }
 

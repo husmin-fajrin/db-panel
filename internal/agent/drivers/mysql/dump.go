@@ -49,6 +49,10 @@ var errLoadEnded = errors.New("mysql load ended")
 // the local copies of the databases, and, in ON mode, the binary logs and
 // GTID history are reset so the dump's SET @@GLOBAL.GTID_PURGED applies.
 //
+// The real run takes a brief FLUSH TABLES WITH READ LOCK on the master
+// until its consistent snapshot opens (mysqldump does so to read the GTID
+// set); the trial run does not.
+//
 // The result's GTIDExecuted is the master's GTID set at the dump: in ON
 // mode this server's gtid_executed after the load (the purged set); in
 // COMMENTED mode (see dumpGTIDMode) the set in the dump's commented header,
@@ -97,7 +101,7 @@ func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	}
 	defer os.Remove(localFile)
 	args := dumpArgs(srcFile, p.Databases, gtidMode)
-	if err := checkClients(ctx, h, loadBin, localFile, dumpBin, args); err != nil {
+	if err := checkClients(ctx, h, loadBin, localFile, dumpBin, srcFile, p.Databases); err != nil {
 		return res, err
 	}
 
@@ -145,18 +149,27 @@ func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 }
 
 // checkClients proves both sides before anything local is changed: the
-// local mysql logs in, and a schema-only run of the dump (dumpArgs with
-// --no-data) succeeds on the master, which covers its login, privileges
+// local mysql logs in with the load's own arguments (so the init command's
+// sql_log_bin privilege is checked too), and a trial run of the dump
+// (probeArgs) succeeds on the master, which covers its login, privileges
 // and database names.
-func checkClients(ctx context.Context, h Host, loadBin, localFile, dumpBin string, dumpArgs []string) error {
-	if err := h.Exec(ctx, nil, io.Discard, loadBin, "--defaults-file="+localFile, "-N", "-e", "SELECT 1"); err != nil {
+func checkClients(ctx context.Context, h Host, loadBin, localFile, dumpBin, srcFile string, databases []string) error {
+	if err := h.Exec(ctx, nil, io.Discard, loadBin, append(loadArgs(localFile), "-N", "-e", "SELECT 1")...); err != nil {
 		return fmt.Errorf("login MySQL lokal dengan akun tersimpan gagal: %v", err)
 	}
-	probe := append([]string{dumpArgs[0], "--no-data"}, dumpArgs[1:]...)
-	if err := h.Exec(ctx, nil, io.Discard, dumpBin, probe...); err != nil {
+	if err := h.Exec(ctx, nil, io.Discard, dumpBin, probeArgs(srcFile, databases)...); err != nil {
 		return fmt.Errorf("uji dump dari master gagal (login, hak akses, atau nama database); data di server ini belum diubah: %v", err)
 	}
 	return nil
+}
+
+// probeArgs are the dump's arguments for a schema-only trial run that
+// takes no lock on the master: with --set-gtid-purged other than OFF,
+// mysqldump runs FLUSH TABLES (binary-logged) and FLUSH TABLES WITH READ
+// LOCK even with --no-data.
+func probeArgs(defaultsFile string, databases []string) []string {
+	args := dumpArgs(defaultsFile, databases, "OFF")
+	return append([]string{args[0], "--no-data"}, args[1:]...)
 }
 
 // dumpGTIDMode is mysqldump's --set-gtid-purged for a load into a server

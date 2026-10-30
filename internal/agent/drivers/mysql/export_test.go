@@ -21,6 +21,7 @@ var (
 // Snapshot helpers, testable without a server.
 var (
 	DumpArgs       = dumpArgs
+	ProbeArgs      = probeArgs
 	LoadArgs       = loadArgs
 	DumpGTIDMode   = dumpGTIDMode
 	ClientDefaults = clientDefaults

@@ -107,28 +107,35 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	if err := restartAfterClone(context.WithoutCancel(ctx), h, cloneErr); err != nil {
 		return res, err
 	}
-	after, err := openAdmin(ctx, h)
+	// The checks below report on data that is already replaced: a late
+	// cancel does not stop them, and the job keeps its result.
+	vctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartReadyTimeout)
+	defer cancel()
+	after, err := openAdmin(vctx, h)
 	if err != nil {
 		return res, fmt.Errorf("CLONE selesai, tetapi login ke MySQL gagal: %w", err)
 	}
 	defer after.Close()
-	st, err := readCloneStatus(ctx, after)
+	st, err := readCloneStatus(vctx, after)
 	if err != nil {
 		return res, err
 	}
 	if st.State != "Completed" || st.ErrNo != 0 {
 		return res, fmt.Errorf("CLONE tidak selesai: status %s, %d %s", st.State, st.ErrNo, st.ErrMsg)
 	}
-	if res.GTIDExecuted, err = localGTIDExecuted(ctx, after); err != nil {
+	if res.GTIDExecuted, err = localGTIDExecuted(vctx, after); err != nil {
 		return res, err
 	}
-	if prog, err := readCloneProgress(ctx, after); err == nil {
+	if prog, err := readCloneProgress(vctx, after); err == nil {
 		res.Bytes = prog.data
 	}
 	if res.Bytes == 0 {
 		res.Bytes = p.EstimateBytes
 	}
 	res.TookMs = time.Since(start).Milliseconds()
+	if ctx.Err() != nil {
+		j.Logf("warn", "cancellation arrived after the clone data phase; the clone result stands")
+	}
 	j.Logf("info", "clone completed: %d bytes, gtid_executed %s", res.Bytes, res.GTIDExecuted)
 	return res, nil
 }
