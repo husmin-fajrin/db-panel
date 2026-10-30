@@ -4,7 +4,9 @@
 package agentapi
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"log/slog"
 	"net"
@@ -74,6 +76,12 @@ func PairHandler(d Deps) http.Handler {
 			writeError(w, http.StatusBadRequest, "permintaan tidak valid")
 			return
 		}
+		// Check the CSR before consuming the token, so a malformed request
+		// does not burn it.
+		if !validCSR([]byte(req.CSRPEM)) {
+			writeError(w, http.StatusBadRequest, "csr tidak valid")
+			return
+		}
 		ip, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
 			ip = r.RemoteAddr
@@ -92,8 +100,8 @@ func PairHandler(d Deps) http.Handler {
 		}
 		certPEM, serial, err := d.CA.IssueAgentCert([]byte(req.CSRPEM), pt.ServerID)
 		if err != nil {
-			log.Warn("pairing rejected: bad csr", "server_id", pt.ServerID, "remote", ip, "err", err)
-			writeError(w, http.StatusBadRequest, "csr tidak valid: "+err.Error())
+			log.Error("pairing: issue agent certificate", "server_id", pt.ServerID, "err", err)
+			writeError(w, http.StatusInternalServerError, "kesalahan internal")
 			return
 		}
 		if err := d.Store.MarkPaired(pt.ServerID, serial, ip); err != nil {
@@ -114,6 +122,17 @@ func PairHandler(d Deps) http.Handler {
 			AgentAddr: d.AgentAddr(),
 		})
 	})
+}
+
+// validCSR reports whether b is a PEM certificate request with a valid
+// self-signature.
+func validCSR(b []byte) bool {
+	block, _ := pem.Decode(b)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return false
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	return err == nil && csr.CheckSignature() == nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

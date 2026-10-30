@@ -16,7 +16,9 @@ import (
 
 // Handler runs one command. params is the raw request params (possibly empty).
 // A returned *ParamError becomes a bad_params response; any other error
-// becomes an internal error.
+// becomes an internal error. Handlers must honour ctx: it is cancelled when
+// the request times out or the agent's connection to the panel ends, and the
+// agent does not wait for a handler that keeps running after that.
 type Handler func(ctx context.Context, params json.RawMessage) (any, error)
 
 // ParamError reports invalid command parameters. Msg is shown to the user.

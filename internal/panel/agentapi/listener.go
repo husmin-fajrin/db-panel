@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -23,10 +24,12 @@ func ListenAndServeAgents(ctx context.Context, addr string, tlsCfg *tls.Config, 
 
 // ServeAgents is ListenAndServeAgents on an existing listener, which it
 // closes. Requests' contexts derive from ctx, so upgraded agent connections
-// (which Shutdown does not track) are closed when ctx is done.
+// (which http.Server.Shutdown does not track) end when ctx is done; it waits
+// for every handler, including those, to return before it does.
 func ServeAgents(ctx context.Context, ln net.Listener, tlsCfg *tls.Config, h http.Handler) error {
+	var t handlerTracker
 	srv := &http.Server{
-		Handler:           h,
+		Handler:           t.wrap(h),
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
@@ -45,5 +48,48 @@ func ServeAgents(ctx context.Context, ln net.Listener, tlsCfg *tls.Config, h htt
 	if serr := <-served; !errors.Is(serr, http.ErrServerClosed) && err == nil {
 		err = serr
 	}
+	if werr := t.wait(sctx); err == nil {
+		err = werr
+	}
 	return err
+}
+
+// handlerTracker counts running handlers, including hijacked ones.
+type handlerTracker struct {
+	mu     sync.Mutex
+	closed bool
+	wg     sync.WaitGroup
+}
+
+func (t *handlerTracker) wrap(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.mu.Lock()
+		if t.closed {
+			t.mu.Unlock()
+			http.Error(w, "panel sedang berhenti", http.StatusServiceUnavailable)
+			return
+		}
+		t.wg.Add(1)
+		t.mu.Unlock()
+		defer t.wg.Done()
+		h.ServeHTTP(w, r)
+	})
+}
+
+// wait refuses new handlers and waits for running ones until ctx is done.
+func (t *handlerTracker) wait(ctx context.Context) error {
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

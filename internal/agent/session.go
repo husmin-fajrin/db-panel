@@ -18,6 +18,9 @@ const (
 	pingInterval   = 15 * time.Second
 	pingTimeout    = 10 * time.Second
 	requestTimeout = 10 * time.Minute
+	// requestDrain bounds how long a closing session waits for running
+	// commands (whose ctx is already cancelled) before it returns anyway.
+	requestDrain = 2 * time.Second
 )
 
 // session is one live WebSocket to the panel.
@@ -41,17 +44,21 @@ func (s *session) send(env proto.Envelope) error {
 }
 
 // serve runs one connection until it drops or ctx is done, and returns the
-// read error that ended it. Every goroutine it starts has exited on return.
+// read error that ended it. On return the session's own goroutines have
+// exited; command goroutines get their ctx cancelled and up to requestDrain
+// to finish, so a command that ignores ctx cannot hold up a reconnect or a
+// shutdown (its late response is dropped).
 func (a *Agent) serve(ctx context.Context, ws *websocket.Conn) error {
 	ws.SetReadLimit(readLimit)
 	s := &session{ws: ws}
 
 	sctx, cancel := context.WithCancel(ctx)
-	var wg sync.WaitGroup
+	var wg, requests sync.WaitGroup
 	defer func() {
 		cancel()
 		ws.CloseNow() // unblocks a ping or write still in flight
 		wg.Wait()
+		a.drainRequests(&requests)
 	}()
 
 	// Reads use a background ctx (a cancelled read ctx drops the connection);
@@ -85,7 +92,7 @@ func (a *Agent) serve(ctx context.Context, ws *websocket.Conn) error {
 			continue
 		}
 		req := *env.Request
-		wg.Go(func() {
+		requests.Go(func() {
 			rctx, rcancel := context.WithTimeout(sctx, requestTimeout)
 			defer rcancel()
 			resp := a.reg.Dispatch(rctx, req)
@@ -93,6 +100,22 @@ func (a *Agent) serve(ctx context.Context, ws *websocket.Conn) error {
 				a.logger.Warn("cannot send response", "cmd", req.Cmd, "id", req.ID, "err", err)
 			}
 		})
+	}
+}
+
+// drainRequests waits up to requestDrain for the command goroutines.
+func (a *Agent) drainRequests(requests *sync.WaitGroup) {
+	done := make(chan struct{})
+	go func() {
+		requests.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(requestDrain)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		a.logger.Warn("commands still running after disconnect; not waiting for them")
 	}
 }
 

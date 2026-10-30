@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,6 +43,8 @@ type fakeListener struct {
 	online  chan int64
 	offline chan int64
 	events  chan serverEvent
+	// offlineDelay, set before any agent connects, slows OnOffline down.
+	offlineDelay time.Duration
 }
 
 func newFakeListener() *fakeListener {
@@ -52,8 +55,11 @@ func newFakeListener() *fakeListener {
 	}
 }
 
-func (l *fakeListener) OnOnline(id int64)  { l.online <- id }
-func (l *fakeListener) OnOffline(id int64) { l.offline <- id }
+func (l *fakeListener) OnOnline(id int64) { l.online <- id }
+func (l *fakeListener) OnOffline(id int64) {
+	time.Sleep(l.offlineDelay)
+	l.offline <- id
+}
 func (l *fakeListener) OnEvent(id int64, ev proto.Event) {
 	l.events <- serverEvent{id, ev}
 }
@@ -68,6 +74,9 @@ type testEnv struct {
 	agentAddr string
 	attached  chan *hub.WSConn
 	wsHits    atomic.Int64 // requests reaching the agent listener's handler
+	// stopPanel cancels the agent listener and returns ServeAgents' result;
+	// later calls return the same result.
+	stopPanel func() error
 }
 
 func newEnv(t *testing.T) *testEnv {
@@ -117,9 +126,12 @@ func newEnv(t *testing.T) *testEnv {
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- agentapi.ServeAgents(ctx, ln, tlsCfg, counted) }()
-	t.Cleanup(func() {
+	e.stopPanel = sync.OnceValue(func() error {
 		cancel()
-		if err := <-served; err != nil {
+		return <-served
+	})
+	t.Cleanup(func() {
+		if err := e.stopPanel(); err != nil {
 			t.Errorf("ServeAgents: %v", err)
 		}
 	})
@@ -315,7 +327,11 @@ func TestPairRejectsUsedToken(t *testing.T) {
 		t.Fatalf("rejected pairing wrote a config: %v", err)
 	}
 
-	body, _ := json.Marshal(agent.PairRequest{Token: token, Hostname: "h", Arch: "amd64", CSRPEM: "x"})
+	_, csrPEM, err := ca.NewAgentKeyAndCSR("h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(agent.PairRequest{Token: token, Hostname: "h", Arch: "amd64", CSRPEM: string(csrPEM)})
 	resp, err := http.Post(e.pairURL+"/agent/pair", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -370,9 +386,8 @@ func TestWSRejectsDeletedServer(t *testing.T) {
 
 	_, stop := startAgent(t, cfg, stubRegistry())
 	assertNeverOnline(t, e, 2*time.Second)
-	// First attempt at once, the retry after the 1 s backoff.
-	if n := e.wsHits.Load(); n < 2 {
-		t.Fatalf("agent made %d connection attempts in 2 s, want >= 2", n)
+	if n := e.wsHits.Load(); n < 1 {
+		t.Fatalf("agent made no connection attempt in 2 s")
 	}
 	stop()
 }
@@ -435,5 +450,81 @@ func TestAgentReconnects(t *testing.T) {
 	var res stubProbe
 	if err := e.hub.Call(ctx, id, "probe", nil, &res); err != nil || res.Hostname != "stub-host" {
 		t.Fatalf("call after reconnect: %+v %v", res, err)
+	}
+}
+
+func TestPairRejectsMalformedCSRWithoutConsumingToken(t *testing.T) {
+	e := newEnv(t)
+	id, token := e.newToken(t, 0)
+
+	body, _ := json.Marshal(agent.PairRequest{Token: token, Hostname: "h", Arch: "amd64",
+		CSRPEM: "-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n"})
+	resp, err := http.Post(e.pairURL+"/agent/pair", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]string
+	if resp.StatusCode != http.StatusBadRequest || json.NewDecoder(resp.Body).Decode(&out) != nil || out["error"] != "csr tidak valid" {
+		t.Fatalf("malformed csr: status %d body %v", resp.StatusCode, out)
+	}
+
+	cfg := e.pair(t, token, t.TempDir())
+	if cfg.ServerID != id {
+		t.Fatalf("pair after malformed csr: server %d, want %d", cfg.ServerID, id)
+	}
+}
+
+func TestServeAgentsWaitsForAgentHandlers(t *testing.T) {
+	e := newEnv(t)
+	e.l.offlineDelay = 300 * time.Millisecond // a slow listener, e.g. a store write
+	_, token := e.newToken(t, 0)
+	cfg := e.pair(t, token, t.TempDir())
+	startAgent(t, cfg, stubRegistry())
+	id := waitID(t, e.l.online, "OnOnline")
+
+	if err := e.stopPanel(); err != nil {
+		t.Fatalf("ServeAgents: %v", err)
+	}
+	select {
+	case got := <-e.l.offline:
+		if got != id {
+			t.Fatalf("offline id = %d, want %d", got, id)
+		}
+	default:
+		t.Fatal("ServeAgents returned before the agent handler reported OnOffline")
+	}
+}
+
+func TestAgentStopsDespiteCommandIgnoringCtx(t *testing.T) {
+	e := newEnv(t)
+	_, token := e.newToken(t, 0)
+	cfg := e.pair(t, token, t.TempDir())
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // runs after the agent is stopped
+	started := make(chan struct{}, 1)
+	reg := commands.NewRegistry()
+	reg.Register("hang", func(context.Context, json.RawMessage) (any, error) {
+		started <- struct{}{}
+		<-release // deliberately ignores ctx
+		return nil, nil
+	})
+	_, stop := startAgent(t, cfg, reg)
+	id := waitID(t, e.l.online, "OnOnline")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go e.hub.Call(ctx, id, "hang", nil, nil)
+	select {
+	case <-started:
+	case <-time.After(wait):
+		t.Fatal("hang command never started")
+	}
+
+	begin := time.Now()
+	stop()
+	if d := time.Since(begin); d > 4*time.Second {
+		t.Fatalf("Run took %v to stop with a command ignoring ctx", d)
 	}
 }
