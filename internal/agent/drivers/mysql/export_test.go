@@ -7,3 +7,11 @@ type PreflightFacts = preflightFacts
 
 // EvaluatePreflight turns facts into checks without a server.
 var EvaluatePreflight = evaluatePreflight
+
+// Config rendering and the restart decision, testable without a server.
+var (
+	RenderConfig   = renderConfig
+	RestartReasons = restartReasons
+	ParseOptions   = parseOptions
+	NotInEffect    = notInEffect
+)

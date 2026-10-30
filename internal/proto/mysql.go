@@ -108,3 +108,37 @@ type PreflightResult struct {
 	Worst     string      `json:"worst"`      // the most severe Check.Status; ok when there are none
 	Method    string      `json:"method"`     // replica: "clone" | "dump"; "" for a master
 }
+
+// ConfigureParams are the parameters of mysql.configure.
+type ConfigureParams struct {
+	Role        string `json:"role"`         // "master" | "replica"
+	ServerID    uint32 `json:"server_id"`    // 0 = keep a non-default server_id, else pick a random one
+	EnableClone bool   `json:"enable_clone"` // install the clone plugin when it is not active
+	GTID        bool   `json:"gtid"`         // raise enforce_gtid_consistency and gtid_mode to ON online
+}
+
+// ConfigureResult is the answer to mysql.configure.
+type ConfigureResult struct {
+	Applied        []string `json:"applied"`         // online changes made, e.g. "gtid_mode=ON_PERMISSIVE"
+	NeedsRestart   bool     `json:"needs_restart"`   // the written config takes full effect only after a restart
+	RestartReasons []string `json:"restart_reasons"` // why, for the UI
+	ConfigPath     string   `json:"config_path"`     // the option file written
+	ServerID       uint32   `json:"server_id"`       // the server_id in effect and in the config
+}
+
+// ReplUserParams are the parameters of mysql.createReplUser.
+type ReplUserParams struct {
+	User     string `json:"user"`
+	Password string `json:"password"`
+	FromHost string `json:"from_host"` // host part of the account; "" = "%"
+}
+
+// ReadOnlyParams are the parameters of mysql.setReadOnly.
+type ReadOnlyParams struct {
+	On bool `json:"on"`
+}
+
+// RestartResult is the answer to mysql.restart.
+type RestartResult struct {
+	TookMs int64 `json:"took_ms"`
+}

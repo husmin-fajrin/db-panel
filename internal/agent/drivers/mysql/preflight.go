@@ -84,14 +84,8 @@ func validatePreflight(p *proto.PreflightParams) error {
 // Preflight checks whether this server can take p.Role. It logs in with the
 // stored admin account (Host.Open) and reads the server's state itself.
 func Preflight(ctx context.Context, h Host, p proto.PreflightParams) (proto.PreflightResult, error) {
-	db, err := h.Open(ctx)
-	var le *LoginError
-	switch {
-	case errors.As(err, &le):
-		return proto.PreflightResult{}, &commands.ParamError{Msg: loginFailure(le.Err)}
-	case errors.Is(err, ErrNotConnected):
-		return proto.PreflightResult{}, &commands.ParamError{Msg: err.Error()}
-	case err != nil:
+	db, err := openAdmin(ctx, h)
+	if err != nil {
 		return proto.PreflightResult{}, err
 	}
 	defer db.Close()

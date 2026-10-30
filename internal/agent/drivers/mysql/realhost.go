@@ -92,20 +92,15 @@ func (h *host) WriteConfig(content string) (string, error) {
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
-	if h.l.IncludeDir != "" {
-		path := filepath.Join(h.l.IncludeDir, IncludeFile)
+	path, block, err := managedConfigPath(h.l)
+	if err != nil {
+		return "", err
+	}
+	if !block {
 		if err := writeFileAtomic(path, []byte(content), 0o644); err != nil {
 			return "", err
 		}
 		return path, nil
-	}
-	if h.l.ConfigFile == "" {
-		return "", errors.New("file konfigurasi MySQL tidak diketahui")
-	}
-	path := h.l.ConfigFile
-	// Write through symlinks (e.g. Debian alternatives) instead of replacing them.
-	if p, err := filepath.EvalSymlinks(path); err == nil {
-		path = p
 	}
 	old, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -123,6 +118,23 @@ func (h *host) WriteConfig(content string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// managedConfigPath is the file WriteConfig writes for l: IncludeDir/IncludeFile
+// (block false), or ConfigFile, through symlinks, holding the managed block.
+func managedConfigPath(l Layout) (path string, block bool, err error) {
+	if l.IncludeDir != "" {
+		return filepath.Join(l.IncludeDir, IncludeFile), false, nil
+	}
+	if l.ConfigFile == "" {
+		return "", false, errors.New("file konfigurasi MySQL tidak diketahui")
+	}
+	path = l.ConfigFile
+	// Write through symlinks (e.g. Debian alternatives) instead of replacing them.
+	if p, err := filepath.EvalSymlinks(path); err == nil {
+		path = p
+	}
+	return path, true, nil
 }
 
 // replaceBlock replaces the managed block in file with content, or appends

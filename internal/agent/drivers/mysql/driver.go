@@ -1,6 +1,8 @@
 package mysql
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 
@@ -28,6 +30,8 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerStatus(reg)
 	d.registerConnect(reg)
 	d.registerPreflight(reg)
+	d.registerConfigure(reg)
+	d.registerUsers(reg)
 }
 
 func (d *Driver) host() (Host, error) {
@@ -35,4 +39,18 @@ func (d *Driver) host() (Host, error) {
 		return nil, ErrNoHost
 	}
 	return d.Host, nil
+}
+
+// openAdmin is Host.Open with the failures the user can fix (a refused
+// stored account, no account at all) turned into ParamErrors.
+func openAdmin(ctx context.Context, h Host) (*sql.DB, error) {
+	db, err := h.Open(ctx)
+	var le *LoginError
+	switch {
+	case errors.As(err, &le):
+		return nil, &commands.ParamError{Msg: loginFailure(le.Err)}
+	case errors.Is(err, ErrNotConnected):
+		return nil, &commands.ParamError{Msg: err.Error()}
+	}
+	return db, err
 }
