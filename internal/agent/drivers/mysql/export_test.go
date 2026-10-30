@@ -1,5 +1,7 @@
 package mysql
 
+import "io"
+
 // Internals the external tests (package mysql_test) exercise directly.
 
 // PreflightFacts is what mysql.preflight reads from the server and the host.
@@ -24,3 +26,13 @@ var (
 	ClientDefaults = clientDefaults
 	FindClientTool = findClientTool
 )
+
+// CaptureDumpGTID writes chunks through the dump's counting writer and
+// parses the GTID header from what it kept.
+func CaptureDumpGTID(chunks []string) (string, bool) {
+	c := &countingWriter{w: io.Discard}
+	for _, ch := range chunks {
+		c.Write([]byte(ch))
+	}
+	return parseDumpGTID(c.head)
+}

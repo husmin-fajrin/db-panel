@@ -158,8 +158,13 @@ type SnapshotParams struct {
 
 // SnapshotResult is the job.done result of mysql.cloneFrom and mysql.dumpFrom.
 type SnapshotResult struct {
-	Method       string `json:"method"`        // "clone" | "dump"
-	Bytes        uint64 `json:"bytes"`         // data cloned, or dump bytes loaded
-	GTIDExecuted string `json:"gtid_executed"` // this server's @@gtid_executed afterwards
+	Method string `json:"method"` // "clone" | "dump"
+	Bytes  uint64 `json:"bytes"`  // data cloned, or dump bytes loaded
+	// GTIDExecuted is the master's GTID set at the snapshot. Clone and a
+	// dump in ON mode: this server's @@gtid_executed afterwards (the same
+	// set). A dump into a replica that keeps its own history (COMMENTED
+	// mode): the set from the dump's header, which this server's
+	// gtid_executed does not include yet.
+	GTIDExecuted string `json:"gtid_executed"`
 	TookMs       int64  `json:"took_ms"`
 }

@@ -77,6 +77,13 @@ type snapshotRig struct {
 	events *jobEvents
 }
 
+// rootRig is a rig over inst whose stored admin account is the harness's
+// root (no password, over the socket).
+func rootRig(inst *testmysql.Instance) *snapshotRig {
+	creds := &memCreds{p: proto.ConnectParams{User: "root"}}
+	return newSnapshotRig(inst.HostWith(creds), creds)
+}
+
 func newSnapshotRig(h mysql.Host, creds mysql.CredentialStore) *snapshotRig {
 	ev := &jobEvents{done: make(chan proto.JobDone, 4)}
 	runner := jobs.NewRunner(ev, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -222,7 +229,7 @@ func TestCloneFromReplicatesData(t *testing.T) {
 	replUser(t, master)
 	want := gtidExecuted(t, mdb)
 
-	rig := newSnapshotRig(replica.Host(), nil)
+	rig := rootRig(replica)
 	p := cloneParams(master)
 	p.EstimateBytes = 0 // Bytes must come from clone_progress
 	res := snapshotResult(t, rig.run(t, "mysql.cloneFrom", p))
@@ -263,7 +270,7 @@ func TestCloneFailsWithWrongPassword(t *testing.T) {
 	rdb := rootDB(t, replica)
 	execAll(t, rdb, "CREATE DATABASE keepme")
 
-	rig := newSnapshotRig(replica.Host(), nil)
+	rig := rootRig(replica)
 	p := cloneParams(master)
 	p.Password = "wrong'pass\\word"
 	d := rig.run(t, "mysql.cloneFrom", p)
@@ -312,7 +319,7 @@ func TestCloneCancel(t *testing.T) {
 	rdb := rootDB(t, replica)
 	execAll(t, rdb, "SET GLOBAL clone_max_data_bandwidth = 1")
 
-	rig := newSnapshotRig(replica.Host(), nil)
+	rig := rootRig(replica)
 	id := rig.start(t, "mysql.cloneFrom", cloneParams(master))
 	deadline := time.Now().Add(time.Minute)
 	for {
@@ -359,7 +366,7 @@ func TestDumpSelectedDatabasesOnly(t *testing.T) {
 	rdb := rootDB(t, replica)
 	execAll(t, rdb, "CREATE USER someone@localhost", "SET GLOBAL super_read_only = ON")
 
-	rig := newSnapshotRig(replica.Host(), nil)
+	rig := rootRig(replica)
 	res := snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master, "a")))
 	// mysqldump's FLUSH TABLES is a transaction on the master: its
 	// gtid_executed at the dump is the one after it.
@@ -404,7 +411,7 @@ func TestDumpAllDatabases(t *testing.T) {
 	fillMaster(t, mdb)
 	dumpUser(t, mdb)
 
-	rig := newSnapshotRig(replica.Host(), nil)
+	rig := rootRig(replica)
 	res := snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master)))
 	want := gtidExecuted(t, mdb) // the master is idle: its set at the dump
 	if res.GTIDExecuted != want {
@@ -436,7 +443,7 @@ func TestDumpDropExistingReplaces(t *testing.T) {
 		"INSERT INTO a.t VALUES (99, 'lama')",
 	)
 
-	rig := newSnapshotRig(replica.Host(), nil)
+	rig := rootRig(replica)
 	p := dumpParams(master, "a")
 	p.DropExisting = true
 	snapshotResult(t, rig.run(t, "mysql.dumpFrom", p))
@@ -465,7 +472,7 @@ func TestSnapshotRefusesWhileReplicaRunning(t *testing.T) {
 		"START REPLICA",
 	)
 
-	rig := newSnapshotRig(replica.Host(), nil)
+	rig := rootRig(replica)
 	for cmd, p := range map[string]proto.SnapshotParams{
 		"mysql.cloneFrom": cloneParams(master),
 		"mysql.dumpFrom":  dumpParams(master, "a"),
@@ -488,8 +495,13 @@ func TestSnapshotRefusesWhileReplicaRunning(t *testing.T) {
 	execAll(t, mdb, "CREATE DATABASE c", "CREATE TABLE c.t (id INT PRIMARY KEY)", "INSERT INTO c.t VALUES (1), (2)")
 	before := gtidExecuted(t, rdb)
 	res := snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master, "c")))
-	if res.GTIDExecuted != before {
-		t.Errorf("GTIDExecuted = %q, want the replica's own %q", res.GTIDExecuted, before)
+	// The result is the master's set at the dump (from the commented
+	// header); the replica keeps its own history.
+	if want := gtidExecuted(t, mdb); res.GTIDExecuted != want {
+		t.Errorf("GTIDExecuted = %q, want the master's %q", res.GTIDExecuted, want)
+	}
+	if got := gtidExecuted(t, rdb); got != before {
+		t.Errorf("replica gtid_executed = %q, want it kept as %q", got, before)
 	}
 	if n := count(t, rdb, "SELECT COUNT(*) FROM c.t"); n != 2 {
 		t.Errorf("c.t rows = %d", n)
@@ -585,7 +597,7 @@ func TestSnapshotRejectsBadParams(t *testing.T) {
 
 func TestDumpArgs(t *testing.T) {
 	args := func(gtid string, selection ...string) []string {
-		return append([]string{"--defaults-extra-file=/tmp/src.cnf", "--single-transaction", "--set-gtid-purged=" + gtid,
+		return append([]string{"--defaults-file=/tmp/src.cnf", "--single-transaction", "--set-gtid-purged=" + gtid,
 			"--triggers", "--routines", "--events", "--skip-lock-tables", "--column-statistics=0", "--no-tablespaces"}, selection...)
 	}
 	got := mysql.DumpArgs("/tmp/src.cnf", nil, "ON")
@@ -598,7 +610,7 @@ func TestDumpArgs(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("selected databases:\n got %q\nwant %q", got, want)
 	}
-	if got := mysql.LoadArgs("/tmp/local.cnf"); !reflect.DeepEqual(got, []string{"--defaults-extra-file=/tmp/local.cnf", "--init-command=SET sql_log_bin=0"}) {
+	if got := mysql.LoadArgs("/tmp/local.cnf"); !reflect.DeepEqual(got, []string{"--defaults-file=/tmp/local.cnf", "--init-command=SET sql_log_bin=0"}) {
 		t.Errorf("LoadArgs = %q", got)
 	}
 }
@@ -628,22 +640,28 @@ func TestDumpGTIDMode(t *testing.T) {
 }
 
 func TestClientDefaults(t *testing.T) {
-	got, err := mysql.ClientDefaults(proto.ConnectParams{User: "dumper", Password: `a"b\c#d 'e `, Host: "10.0.0.5", Port: 3307}, "/run/mysqld.sock")
+	got, err := mysql.ClientDefaults(proto.ConnectParams{User: "dumper", Password: `a"b\c#d 'e `, Host: "10.0.0.5", Port: 3307}, "/run/mysqld.sock", 3306)
 	want := "[client]\nuser=\"dumper\"\npassword=\"a\\\"b\\\\c#d 'e \"\nhost=\"10.0.0.5\"\nport=3307\nget-server-public-key\n"
 	if err != nil || got != want {
 		t.Errorf("remote:\n got %q, %v\nwant %q", got, err, want)
 	}
-	got, err = mysql.ClientDefaults(proto.ConnectParams{User: "root"}, "/run/my sql.sock")
+	got, err = mysql.ClientDefaults(proto.ConnectParams{User: "root"}, "/run/my sql.sock", 3310)
 	want = "[client]\nuser=\"root\"\nsocket=\"/run/my sql.sock\"\n"
 	if err != nil || got != want {
 		t.Errorf("local socket:\n got %q, %v\nwant %q", got, err, want)
 	}
-	got, err = mysql.ClientDefaults(proto.ConnectParams{User: "admin", Password: "p", Host: "localhost", Port: 3306}, "/s")
+	got, err = mysql.ClientDefaults(proto.ConnectParams{User: "admin", Password: "p", Host: "localhost", Port: 3306}, "/s", 3310)
 	want = "[client]\nuser=\"admin\"\npassword=\"p\"\nhost=\"127.0.0.1\"\nport=3306\nget-server-public-key\n"
 	if err != nil || got != want {
 		t.Errorf("local over TCP:\n got %q, %v\nwant %q", got, err, want)
 	}
-	if _, err := mysql.ClientDefaults(proto.ConnectParams{User: "u", Password: "new\nline"}, "/s"); err == nil {
+	// No socket known: the local server's port on 127.0.0.1.
+	got, err = mysql.ClientDefaults(proto.ConnectParams{User: "root"}, "", 3310)
+	want = "[client]\nuser=\"root\"\nhost=\"127.0.0.1\"\nport=3310\nget-server-public-key\n"
+	if err != nil || got != want {
+		t.Errorf("local without socket:\n got %q, %v\nwant %q", got, err, want)
+	}
+	if _, err := mysql.ClientDefaults(proto.ConnectParams{User: "u", Password: "new\nline"}, "/s", 0); err == nil {
 		t.Error("a control character in the password was accepted")
 	}
 }
@@ -653,7 +671,7 @@ func TestClientDefaults(t *testing.T) {
 func TestClientDefaultsAcceptedByMysql(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	execAll(t, rootDB(t, inst), "CREATE USER dumper@'%' IDENTIFIED BY "+sqlLiteral(dumpPassword))
-	content, err := mysql.ClientDefaults(proto.ConnectParams{User: "dumper", Password: dumpPassword, Host: "127.0.0.1", Port: inst.Port}, "")
+	content, err := mysql.ClientDefaults(proto.ConnectParams{User: "dumper", Password: dumpPassword, Host: "127.0.0.1", Port: inst.Port}, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +684,7 @@ func TestClientDefaultsAcceptedByMysql(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out strings.Builder
-	if err := inst.Host().Exec(context.Background(), nil, &out, client, "--defaults-extra-file="+path, "-N", "-e", "SELECT CURRENT_USER()"); err != nil {
+	if err := inst.Host().Exec(context.Background(), nil, &out, client, "--defaults-file="+path, "-N", "-e", "SELECT CURRENT_USER()"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(out.String()) != "dumper@%" {
@@ -688,4 +706,106 @@ func TestFindClientTool(t *testing.T) {
 	if err == nil || err.Error() != "mysqldump tidak ditemukan; pasang paket mysql-client" {
 		t.Errorf("missing mysqldump: %v", err)
 	}
+}
+
+// Dump heads as mysqldump 8.0.46 writes them.
+const (
+	headON = "SET @@SESSION.SQL_LOG_BIN= 0;\n\n--\n-- GTID state at the beginning of the backup \n--\n\n" +
+		"SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3,\n" +
+		"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-7:9-12,\nee89ab1c-d48a-11f1-817f-02fc00000001:1-6';\n\n--\n-- Current Database: `a`\n"
+	headCommented = "SET @@SESSION.SQL_LOG_BIN= 0;\n\n--\n-- GTID state at the beginning of the backup \n--\n\n" +
+		"/* SET @@GLOBAL.GTID_PURGED='+aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3,\n" +
+		"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-7:9-12,\nee89ab1c-d48a-11f1-817f-02fc00000001:1-5';*/\n\n--\n-- Current Database: `a`\n"
+)
+
+func TestParseDumpGTID(t *testing.T) {
+	const set = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-7:9-12,ee89ab1c-d48a-11f1-817f-02fc00000001:"
+	if got, ok := mysql.CaptureDumpGTID([]string{headON}); !ok || got != set+"1-6" {
+		t.Errorf("ON head: %q, %v", got, ok)
+	}
+	if got, ok := mysql.CaptureDumpGTID([]string{headCommented}); !ok || got != set+"1-5" {
+		t.Errorf("COMMENTED head: %q, %v", got, ok)
+	}
+	// Split byte by byte, after a prefix: the header still parses.
+	var chunks []string
+	for i := range headCommented {
+		chunks = append(chunks, headCommented[i:i+1])
+	}
+	if got, ok := mysql.CaptureDumpGTID(append([]string{strings.Repeat("-- x\n", 1000)}, chunks...)); !ok || got != set+"1-5" {
+		t.Errorf("split COMMENTED head: %q, %v", got, ok)
+	}
+	// Beyond the first 64 KB the header is not looked for.
+	if _, ok := mysql.CaptureDumpGTID([]string{strings.Repeat("x", 64<<10), headON}); ok {
+		t.Error("found a header after the first 64 KB")
+	}
+	if _, ok := mysql.CaptureDumpGTID([]string{"-- no gtid here\n"}); ok {
+		t.Error("found a header in a dump without one")
+	}
+}
+
+// TestDumpFailsBeforeChangingData: nothing local is dropped, reset or made
+// writable when the dump cannot run.
+func TestDumpFailsBeforeChangingData(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	fillMaster(t, mdb)
+	dumpUser(t, mdb)
+	rdb := rootDB(t, replica)
+	execAll(t, rdb,
+		"CREATE DATABASE a",
+		"CREATE TABLE a.mine (x INT)",
+		"INSERT INTO a.mine VALUES (1)",
+		"SET GLOBAL super_read_only = ON",
+	)
+	before := gtidExecuted(t, rdb)
+	if before == "" {
+		t.Fatal("the replica has no GTID history to lose")
+	}
+	intact := func(what string) {
+		t.Helper()
+		if n := count(t, rdb, "SELECT COUNT(*) FROM a.mine"); n != 1 {
+			t.Errorf("%s: a.mine rows = %d", what, n)
+		}
+		if got := gtidExecuted(t, rdb); got != before {
+			t.Errorf("%s: gtid_executed = %q, want %q", what, got, before)
+		}
+		if v := variable(t, rdb, "super_read_only"); v != "ON" {
+			t.Errorf("%s: super_read_only = %s", what, v)
+		}
+	}
+
+	// No stored admin account.
+	d := newSnapshotRig(replica.Host(), nil).run(t, "mysql.dumpFrom", dumpParams(master, "a"))
+	if d.OK || d.Error != "akun MySQL belum terhubung; jalankan Hubungkan MySQL dulu" {
+		t.Errorf("dump without a stored account = %+v", d)
+	}
+	intact("no stored account")
+
+	rig := rootRig(replica)
+	p := dumpParams(master, "a")
+	p.DropExisting = true
+	p.Password = "wrong"
+	d = rig.run(t, "mysql.dumpFrom", p)
+	if d.OK || !strings.Contains(d.Error, "uji dump dari master gagal") || !strings.Contains(d.Error, "1045") {
+		t.Errorf("dump with a wrong master password = %+v", d)
+	}
+	intact("wrong master password")
+
+	// A database the master does not have.
+	p = dumpParams(master, "a", "nosuch")
+	p.DropExisting = true
+	d = rig.run(t, "mysql.dumpFrom", p)
+	if d.OK || !strings.Contains(d.Error, "uji dump dari master gagal") {
+		t.Errorf("dump of a missing database = %+v", d)
+	}
+	intact("missing database")
+
+	// The stored local account is refused.
+	bad := &memCreds{p: proto.ConnectParams{User: "root", Password: "wrong"}}
+	d = newSnapshotRig(replica.HostWith(bad), bad).run(t, "mysql.dumpFrom", dumpParams(master, "a"))
+	if d.OK || !strings.Contains(d.Error, "login MySQL") {
+		t.Errorf("dump with a refused local account = %+v", d)
+	}
+	intact("refused local account")
 }

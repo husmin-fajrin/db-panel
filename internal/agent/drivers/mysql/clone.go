@@ -68,9 +68,11 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	if err != nil {
 		return res, err
 	}
+	// began is the server's clock before CLONE, to tell this attempt's
+	// clone_status row from an older one (BEGIN_TIME has milliseconds).
 	var connID int64
-	var mode string
-	if err := conn.QueryRowContext(ctx, "SELECT CONNECTION_ID(), @@SESSION.sql_mode").Scan(&connID, &mode); err != nil {
+	var mode, began string
+	if err := conn.QueryRowContext(ctx, "SELECT CONNECTION_ID(), @@SESSION.sql_mode, CAST(NOW(3) AS CHAR)").Scan(&connID, &mode, &began); err != nil {
 		conn.Close()
 		return res, fmt.Errorf("baca sesi MySQL: %w", err)
 	}
@@ -94,13 +96,15 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 		return res, err
 	}
 	if cloneErr != nil && !isCloneRestart(cloneErr) {
-		return res, cloneFailure(ctx, db, cloneErr, p.Password, password)
+		return res, cloneFailure(ctx, db, cloneErr, began, p.Password, password)
 	}
 
-	j.Logf("info", "clone data phase finished (%v); waiting for MySQL to restart", cloneErr)
+	// The data is replaced: MySQL must come back even if the job is
+	// cancelled now, or a server nothing supervises stays down.
+	j.Logf("info", "clone data phase finished (%v); waiting for MySQL to restart, cancellation is ignored until it is up", cloneErr)
 	j.Progress(99, "menunggu MySQL hidup kembali")
 	db.Close() // its sessions died with the old server
-	if err := restartAfterClone(ctx, h, cloneErr); err != nil {
+	if err := restartAfterClone(context.WithoutCancel(ctx), h, cloneErr); err != nil {
 		return res, err
 	}
 	after, err := openAdmin(ctx, h)
@@ -149,6 +153,12 @@ func waitClone(j *jobs.Job, db *sql.DB, connID int64, done <-chan error, estimat
 			}
 			select {
 			case err := <-done:
+				if err != nil && isCloneRestart(err) {
+					// Too late to stop: the data is replaced and MySQL
+					// must be brought back.
+					j.Logf("warn", "cancel came after the clone data phase: %v", err)
+					return err, nil
+				}
 				j.Logf("info", "clone statement stopped: %v", err)
 			case <-time.After(cloneKillWait):
 				j.Logf("warn", "clone statement still running %s after KILL QUERY", cloneKillWait)
@@ -191,14 +201,17 @@ func isCloneRestart(err error) bool {
 
 // restartAfterClone brings MySQL back after the clone's data phase. After
 // 3707 the server is still shutting down: it waits for it to stop first, so
-// the readiness check does not see the old server.
+// the readiness check does not see the old server. Every step is bounded by
+// restartReadyTimeout; callers pass a context that is not cancelled.
 func restartAfterClone(ctx context.Context, h Host, cloneErr error) error {
 	svc := h.Service()
 	var me *drv.MySQLError
 	if errors.As(cloneErr, &me) && me.Number == errCloneRestart {
 		waitStopped(ctx, svc, restartReadyTimeout)
 	}
-	if err := svc.Start(ctx); err != nil {
+	sctx, cancel := context.WithTimeout(ctx, restartReadyTimeout)
+	defer cancel()
+	if err := svc.Start(sctx); err != nil {
 		return fmt.Errorf("CLONE selesai, tetapi MySQL gagal dinyalakan: %w", err)
 	}
 	if err := svc.WaitReady(ctx, restartReadyTimeout); err != nil {
@@ -270,11 +283,17 @@ func readCloneProgress(ctx context.Context, db *sql.DB) (cloneProgress, error) {
 }
 
 // cloneFailure words a CLONE that failed before its data phase ended,
-// preferring clone_status's message. Neither password form survives.
-func cloneFailure(ctx context.Context, db *sql.DB, err error, password, literal string) error {
+// preferring clone_status's message when that row is this attempt's (it
+// began at or after began, in the server's clock). Neither password form
+// survives.
+func cloneFailure(ctx context.Context, db *sql.DB, err error, began, password, literal string) error {
 	msg := err.Error()
-	if st, serr := readCloneStatus(ctx, db); serr == nil && st.ErrNo != 0 {
-		msg = fmt.Sprintf("%d %s", st.ErrNo, st.ErrMsg)
+	var errNo int
+	var errMsg string
+	serr := db.QueryRowContext(ctx, "SELECT ERROR_NO, ERROR_MESSAGE FROM performance_schema.clone_status WHERE BEGIN_TIME >= ?", began).
+		Scan(&errNo, &errMsg)
+	if serr == nil && errNo != 0 {
+		msg = fmt.Sprintf("%d %s", errNo, errMsg)
 	}
 	msg = strings.ReplaceAll(strings.ReplaceAll(msg, literal, "'***'"), password, "***")
 	return fmt.Errorf("CLONE gagal: %s", msg)
