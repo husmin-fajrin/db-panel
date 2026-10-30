@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@source "../templates";
+@plugin "../../.tools/daisyui.js" {
+  themes: corporate --default;
+}
