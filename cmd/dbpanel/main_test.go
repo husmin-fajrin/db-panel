@@ -31,8 +31,24 @@ func TestRunNoArgsPrintsUsage(t *testing.T) {
 	}
 }
 
+func TestRunAgentWithoutConfig(t *testing.T) {
+	var errb bytes.Buffer
+	code := run([]string{"agent", "--dir", t.TempDir()}, io.Discard, &errb)
+	if code != 2 || !strings.Contains(errb.String(), "agent belum dipasangkan") {
+		t.Fatalf("got %d %q", code, errb.String())
+	}
+}
+
+func TestRunAgentVersion(t *testing.T) {
+	var out bytes.Buffer
+	code := run([]string{"agent", "version"}, &out, io.Discard)
+	if code != 0 || !strings.Contains(out.String(), "dbpanel agent dev") {
+		t.Fatalf("got %d %q", code, out.String())
+	}
+}
+
 func TestRunPlaceholderCommands(t *testing.T) {
-	for _, name := range []string{"panel", "agent"} {
+	for _, name := range []string{"panel"} {
 		var errb bytes.Buffer
 		code := run([]string{name}, io.Discard, &errb)
 		want := `perintah "` + name + `" belum diimplementasikan`
