@@ -136,12 +136,13 @@ func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps
 // own executable for its architecture.
 //
 // Every request must name the panel in its Host header (see hostAllowed),
-// and the agent endpoints get the same security headers as the UI.
+// and every response, the agent endpoints included, gets the security
+// headers of web.SecurityHeaders.
 func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /agent/pair", web.SecurityHeaders(agentapi.PairHandler(deps)))
-	mux.Handle("GET /agent/install", web.SecurityHeaders(agentapi.InstallScriptHandler(deps, p.PublicURL)))
-	mux.Handle("GET /agent/bin/{arch}", web.SecurityHeaders(agentapi.BinaryHandler(deps, filepath.Join(p.opts.DataDir, "bin"))))
+	mux.Handle("POST /agent/pair", agentapi.PairHandler(deps))
+	mux.Handle("GET /agent/install", agentapi.InstallScriptHandler(deps, p.PublicURL))
+	mux.Handle("GET /agent/bin/{arch}", agentapi.BinaryHandler(deps, filepath.Join(p.opts.DataDir, "bin")))
 	mux.Handle("/", web.NewRouter(web.Deps{
 		Store:     p.Store,
 		Hub:       p.Hub,
@@ -153,7 +154,8 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 		Version:   p.opts.Version,
 		Logger:    p.log,
 	}))
-	return web.RequireHost(p.hostAllowed)(mux)
+	// Headers outermost, so the 421 of a refused Host carries them too.
+	return web.SecurityHeaders(web.RequireHost(p.hostAllowed)(mux))
 }
 
 // localAddrsTTL is how long the list of local interface addresses is kept

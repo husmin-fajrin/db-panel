@@ -911,6 +911,7 @@ func TestHostAllowlist(t *testing.T) {
 	if !strings.Contains(string(b), "Alamat host tidak dikenal panel") {
 		t.Errorf("421 body = %q", b)
 	}
+	wantSecurityHeaders(t, "421", resp.Header)
 }
 
 // TestPublicHostValidated (SEC-09): the public host ends up in a root shell
