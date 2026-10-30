@@ -196,11 +196,11 @@ func TestRunServesLoginAndProbesLocal(t *testing.T) {
 	if code := getStatus(t, base+"/login"); code != http.StatusOK {
 		t.Fatalf("GET /login = %d, want 200", code)
 	}
-	if code := getStatus(t, base+"/agent/install?token=x"); code != http.StatusNotFound {
-		t.Fatalf("GET /agent/install = %d, want 404", code)
+	if code := getStatus(t, base+"/agent/install?token=x"); code != http.StatusForbidden {
+		t.Fatalf("GET /agent/install with a bad token = %d, want 403", code)
 	}
-	if code := getStatus(t, base+"/agent/bin/amd64?token=x"); code != http.StatusNotFound {
-		t.Fatalf("GET /agent/bin/amd64 = %d, want 404", code)
+	if code := getStatus(t, base+"/agent/bin/amd64?token=x"); code != http.StatusForbidden {
+		t.Fatalf("GET /agent/bin/amd64 with a bad token = %d, want 403", code)
 	}
 	resp, err := http.Post(base+"/agent/pair", "application/json", strings.NewReader("{"))
 	if err != nil {
@@ -288,6 +288,72 @@ func TestRemoteAgentPairsAndIsProbed(t *testing.T) {
 
 	stopAgent()
 	waitFor(t, "the remote server to go offline", func() bool { return !p.Hub.IsOnline(srv.ID) })
+}
+
+// TestAgentInstallEndpoints fetches the agent install script and binaries
+// from a running panel, as "curl ... | sudo bash" on a new server does.
+func TestAgentInstallEndpoints(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	uiAddr, _ := startPanel(t, p)
+	base := "http://" + uiAddr
+
+	srv, err := p.Store.CreateServer("db-baru")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := getBody(t, base+"/agent/install?token="+tok.Token)
+	for _, want := range []string{
+		`curl -fsSL "` + p.PublicURL() + `/agent/bin/${arch}?token=` + tok.Token + `"`,
+		`agent pair --panel "` + p.PublicURL() + `" --token "` + tok.Token + `"`,
+		p.AgentAddr(),
+		"systemctl enable --now dbpanel-agent",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("install script does not contain %q", want)
+		}
+	}
+
+	// Binaries come from <data dir>/bin.
+	binDir := filepath.Join(o.DataDir, "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const fake = "dbpanel arm64 build"
+	if err := os.WriteFile(filepath.Join(binDir, "dbpanel_linux_arm64"), []byte(fake), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := getBody(t, base+"/agent/bin/arm64?token="+tok.Token); got != fake {
+		t.Fatalf("GET /agent/bin/arm64 = %q, want %q", got, fake)
+	}
+
+	// Serving the script and binaries does not use the token up.
+	if _, err := p.Store.PeekPairToken(tok.Token, time.Now()); err != nil {
+		t.Fatalf("token after downloads: %v", err)
+	}
+}
+
+// getBody GETs url, requires 200 and returns the body.
+func getBody(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d %q, want 200", url, resp.StatusCode, b)
+	}
+	return string(b)
 }
 
 func portOf(t *testing.T, addr string) string {

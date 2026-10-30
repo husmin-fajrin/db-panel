@@ -1,0 +1,13 @@
+[Unit]
+Description=dbpanel agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/dbpanel agent
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

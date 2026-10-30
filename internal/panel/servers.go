@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -117,12 +118,13 @@ func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps
 }
 
 // uiHandler mounts the agent pairing and install endpoints next to the web UI.
+// Agent binaries are served from <data dir>/bin, falling back to the panel's
+// own executable for its architecture.
 func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /agent/pair", agentapi.PairHandler(deps))
-	// Task 11 serves the install script and agent binaries here.
-	mux.Handle("GET /agent/install", http.NotFoundHandler())
-	mux.Handle("GET /agent/bin/{arch}", http.NotFoundHandler())
+	mux.Handle("GET /agent/install", agentapi.InstallScriptHandler(deps, p.PublicURL))
+	mux.Handle("GET /agent/bin/{arch}", agentapi.BinaryHandler(deps, filepath.Join(p.opts.DataDir, "bin")))
 	mux.Handle("/", web.NewRouter(web.Deps{
 		Store:     p.Store,
 		Hub:       p.Hub,

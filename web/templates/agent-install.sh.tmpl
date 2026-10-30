@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Pemasang agent dbpanel, dibuat oleh panel {{.PanelURL}}.
+# Jalankan di server database: curl -sSL "<alamat ini>" | sudo bash
+#
+# Skrip ini mengunduh binary dbpanel dari panel (tanpa internet), menulis
+# service systemd dbpanel-agent, memasangkan agent ke panel dengan token
+# sekali pakai, lalu menyalakan service. Aman dijalankan ulang.
+set -euo pipefail
+
+BIN=/usr/local/bin/dbpanel
+
+die() {
+	echo "$*" >&2
+	exit 1
+}
+
+main() {
+	if [ "$(id -u)" -ne 0 ]; then
+		die "Jalankan dengan sudo"
+	fi
+
+	local machine arch
+	machine=$(uname -m)
+	case "$machine" in
+	x86_64) arch=amd64 ;;
+	aarch64) arch=arm64 ;;
+	*) die "arsitektur tidak didukung: $machine" ;;
+	esac
+
+	echo "Mengunduh dbpanel ($arch) dari panel..."
+	trap 'rm -f "$BIN.new"' EXIT
+	if ! curl -fsSL "{{.PanelURL}}/agent/bin/${arch}?token={{.Token}}" -o "$BIN.new"; then
+		die "Gagal mengunduh binary dari panel. Periksa token dan alamat panel, lalu ulangi."
+	fi
+	chmod 0755 "$BIN.new"
+	mv -f "$BIN.new" "$BIN"
+
+	cat >/etc/systemd/system/dbpanel-agent.service <<'UNIT'
+[Unit]
+Description=dbpanel agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/dbpanel agent
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+	echo "Memasangkan agent ke panel..."
+	if ! "$BIN" agent pair --panel "{{.PanelURL}}" --token "{{.Token}}"; then
+		die "Pairing gagal. Periksa token dan alamat panel, lalu ulangi."
+	fi
+
+	# A running agent keeps the old binary and certificate until restarted.
+	local was_active=0
+	if systemctl is-active --quiet dbpanel-agent; then
+		was_active=1
+	fi
+	systemctl daemon-reload && systemctl enable --now dbpanel-agent
+	if [ "$was_active" -eq 1 ]; then
+		systemctl restart dbpanel-agent
+	fi
+
+	echo "Agent terpasang dan terhubung ke panel"
+	echo "Bila server tetap offline di panel, pastikan server ini dapat menjangkau {{.AgentAddr}}."
+}
+
+# Everything runs from main so a download cut short never runs half a script.
+main "$@"
