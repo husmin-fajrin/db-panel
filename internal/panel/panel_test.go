@@ -350,8 +350,8 @@ func TestAgentInstallEndpoints(t *testing.T) {
 }
 
 // pairCommandRE matches the pairing command on a server page (unescaped).
-var pairCommandRE = regexp.MustCompile(`curl -fsSL -K - <<<'url = "([^"]+)"' -o /tmp/dbpanel-agent\.sh && ` +
-	`echo '([0-9a-f]{64})  /tmp/dbpanel-agent\.sh' \| sha256sum -c - && sudo bash /tmp/dbpanel-agent\.sh`)
+var pairCommandRE = regexp.MustCompile(`^f=\$\(mktemp\) && curl -fsSL --max-redirs 0 -K - <<<'url = "([^"]+)"' -o "\$f" && ` +
+	`echo "([0-9a-f]{64})  \$f" \| sha256sum -c - && sudo bash "\$f"$`)
 
 // TestPairingCommandContainsScriptHash (SEC-23): the hash in the command
 // the UI shows is the sha256 of the script GET /agent/install serves for
@@ -381,7 +381,11 @@ func TestPairingCommandContainsScriptHash(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := getBodyWith(t, base+"/servers/"+strconv.FormatInt(srv.ID, 10), login(t, o, base))
-	m := pairCommandRE.FindStringSubmatch(html.UnescapeString(page))
+	code := regexp.MustCompile(`(?s)<code x-ref="perintah">(.*?)</code>`).FindStringSubmatch(page)
+	if code == nil {
+		t.Fatalf("no pairing command on the server page:\n%s", page)
+	}
+	m := pairCommandRE.FindStringSubmatch(html.UnescapeString(code[1]))
 	if m == nil {
 		t.Fatalf("no pairing command with a script hash on the server page:\n%s", page)
 	}

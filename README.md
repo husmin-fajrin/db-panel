@@ -90,11 +90,15 @@ menghapusnya (semua sesi yang sedang login juga berakhir).
 2. Salin perintah pemasangan yang ditampilkan, misalnya
 
    ```sh
-   curl -fsSL -K - <<<'url = "http://192.168.1.10:8080/agent/install?token=..."' -o /tmp/dbpanel-agent.sh && echo '<sha256 skrip>  /tmp/dbpanel-agent.sh' | sha256sum -c - && sudo bash /tmp/dbpanel-agent.sh
+   f=$(mktemp) && curl -fsSL --max-redirs 0 -K - <<<'url = "http://192.168.1.10:8080/agent/install?token=..."' -o "$f" && echo "<sha256 skrip>  $f" | sha256sum -c - && sudo bash "$f"
    ```
 
    Perintah ini terdiri dari tiga langkah:
-   1. `curl` mengunduh skrip pemasang ke `/tmp/dbpanel-agent.sh`;
+   1. `curl` mengunduh skrip pemasang ke berkas sementara baru dari
+      `mktemp` (nama acak, hanya bisa dibaca pemiliknya; nama tetap di
+      `/tmp` bisa disiapkan lebih dulu oleh pengguna lain di server itu
+      lalu diubah tepat sebelum `sudo`). `curl` tidak mengikuti pengalihan
+      (`--max-redirs 0`), agar token tidak ikut terkirim ke host lain;
    2. `sha256sum -c` mencocokkan isi skrip dengan sha256 yang ditampilkan
       panel (dihitung dari skrip yang sama persis yang disajikan untuk token
       itu);
@@ -110,7 +114,8 @@ menghapusnya (semua sesi yang sedang login juga berakhir).
    sidik jari CA panel, yang diberikan ke `dbpanel agent pair --ca-sha256`:
    agent menolak jawaban pairing dengan CA lain ("CA panel tidak cocok dengan
    yang diharapkan") dan menghubungi alamat agent dari skrip
-   (`--agent-addr`), bukan dari jawaban pairing. Hash di perintah berubah
+   (`--agent-addr`), bukan dari jawaban pairing. Unduhan binary dan
+   `dbpanel agent pair` juga tidak mengikuti pengalihan (redirect). Hash di perintah berubah
    bila token, alamat panel, CA, atau binary agent di panel berubah; bila
    `sha256sum -c` gagal tanpa alasan jelas, muat ulang halaman server lalu
    salin perintah yang baru.

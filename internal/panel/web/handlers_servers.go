@@ -163,9 +163,12 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 // pairCommand is the command an operator runs on a new database server. It
-// saves the install script to a file, checks it against scriptSHA256 (the
-// hash of the script the panel serves for this token) and only then runs it
-// as root, so a script swapped on the network is never run (SEC-23).
+// saves the install script to a fresh mktemp file (0600, unpredictable name:
+// a fixed /tmp name could be pre-created by a local user and rewritten
+// between the check and sudo), checks it against scriptSHA256 (the hash of
+// the script the panel serves for this token) and only then runs it as
+// root, so a script swapped on the network is never run (SEC-23). curl
+// follows no redirect: the token would go along to another host.
 //
 // The URL with the token reaches curl as a config on stdin through a bash
 // here-string, which the shell writes to a pipe or temporary file, so the
@@ -173,10 +176,11 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 // /proc). Single quotes: nothing in them is expanded, and "?" would be a
 // glob character in zsh. PublicURL is an IP or a validated host name, the
 // token is Crockford base32 and the hash is hex, so none contains a quote.
+// --max-redirs is an argument rather than a config line because the config
+// here-string has to stay on one line.
 func pairCommand(publicURL, token, scriptSHA256 string) string {
-	const file = "/tmp/dbpanel-agent.sh"
-	return `curl -fsSL -K - <<<'url = "` + publicURL + "/agent/install?token=" + token + `"' -o ` + file +
-		` && echo '` + scriptSHA256 + "  " + file + `' | sha256sum -c - && sudo bash ` + file
+	return `f=$(mktemp) && curl -fsSL --max-redirs 0 -K - <<<'url = "` + publicURL + "/agent/install?token=" + token +
+		`"' -o "$f" && echo "` + scriptSHA256 + `  $f" | sha256sum -c - && sudo bash "$f"`
 }
 
 // newToken issues a fresh pairing token. For a paired server this starts a

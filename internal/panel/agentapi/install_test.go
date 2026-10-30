@@ -147,7 +147,8 @@ func TestInstallScriptRendersToken(t *testing.T) {
 		"PANEL_URL='" + installPanelURL + "'\n",
 		"AGENT_ADDR='" + installAgentAddr + "'\n",
 		"TOKEN='" + token + "'\n",
-		`printf 'url = "%s"\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |`,
+		// SEC-23: no redirects (the token would follow them to another host).
+		`printf 'url = "%s"\nmax-redirs = 0\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |`,
 		`curl -sSL -o "$BIN.new" -w '%{http_code}' -K -)`,
 		`DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"`,
 		// The CA the agent will pin is the panel's: sha256 of its DER.

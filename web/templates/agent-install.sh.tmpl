@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Pemasang agent dbpanel, dibuat oleh panel di PANEL_URL (lihat di bawah).
-# Perintah pairing di panel mengunduh skrip ini ke berkas, mencocokkan
-# sha256-nya dengan yang ditampilkan panel, baru menjalankannya dengan sudo.
+# Perintah pairing di panel mengunduh skrip ini ke berkas sementara baru
+# (mktemp), mencocokkan sha256-nya dengan yang ditampilkan panel, baru
+# menjalankannya dengan sudo. Tidak ada unduhan yang mengikuti pengalihan
+# (redirect): token tidak boleh ikut terkirim ke host lain.
 #
 # Skrip ini mengunduh binary dbpanel dari panel (tanpa internet) dan
 # mencocokkan sha256-nya, menulis service systemd dbpanel-agent, memasangkan
@@ -52,7 +54,8 @@ download_agent() {
 	# curl 7.76, newer than RHEL 8 and Ubuntu 20.04 ship.
 	local code
 	# printf is a bash builtin, so the URL with the token is never in argv.
-	if ! code=$(printf 'url = "%s"\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |
+	# max-redirs = 0: a redirect would send the token to another host.
+	if ! code=$(printf 'url = "%s"\nmax-redirs = 0\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |
 		curl -sSL -o "$BIN.new" -w '%{http_code}' -K -); then
 		die "Gagal menghubungi panel $PANEL_URL. Periksa alamat panel dan jaringan, lalu ulangi."
 	fi

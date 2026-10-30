@@ -513,9 +513,9 @@ func TestCreateServerShowsPairingCommand(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	sum, _ := fakeScriptSHA256(tok.Token)
 	wantBody(t, rec, "db-utama", "/agent/install?token=",
-		"curl -fsSL -K - &lt;&lt;&lt;&#39;url = &#34;"+testPublicURL+"/agent/install?token="+tok.Token+
-			"&#34;&#39; -o /tmp/dbpanel-agent.sh &amp;&amp; echo &#39;"+sum+
-			"  /tmp/dbpanel-agent.sh&#39; | sha256sum -c - &amp;&amp; sudo bash /tmp/dbpanel-agent.sh",
+		"f=$(mktemp) &amp;&amp; curl -fsSL --max-redirs 0 -K - &lt;&lt;&lt;&#39;url = &#34;"+testPublicURL+"/agent/install?token="+tok.Token+
+			"&#34;&#39; -o &#34;$f&#34; &amp;&amp; echo &#34;"+sum+
+			"  $f&#34; | sha256sum -c - &amp;&amp; sudo bash &#34;$f&#34;",
 		`action="/servers/1/token"`, "Buat token baru")
 
 	// A new token replaces the old one in the command.
@@ -987,15 +987,22 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 
 // TestPairCommandKeepsTokenOutOfArgv (SEC-02, SEC-23): run the command
-// shown to operators in bash with curl, sha256sum and sudo stubbed: the URL
-// with the token reaches curl on stdin, curl's arguments do not contain the
-// token, the script is saved to a file, checked against the panel's hash,
-// and only then run with sudo.
+// shown to operators in bash with mktemp, curl, sha256sum and sudo stubbed:
+// the script goes to a fresh mktemp file (a fixed /tmp name could be
+// pre-created by a local user), the URL with the token reaches curl on
+// stdin, curl's arguments do not contain the token and refuse redirects,
+// the file is checked against the panel's hash, and only then run with
+// sudo.
 func TestPairCommandKeepsTokenOutOfArgv(t *testing.T) {
 	const token = "ABCDE-FGHJK-MNPQR"
 	sum, _ := fakeScriptSHA256(token)
 	cmd := web.PairCommand(testPublicURL, token, sum)
-	script := `curl() { printf 'ARGS:%s\n' "$*"; cat; }
+	if strings.Contains(cmd, "/tmp/") {
+		t.Fatalf("command uses a fixed /tmp path: %s", cmd)
+	}
+	const tmp = "/tmp/tmp.Acak123"
+	script := `mktemp() { echo ` + tmp + `; }
+curl() { printf 'ARGS:%s\n' "$*"; cat; }
 sha256sum() { printf 'SUM:%s\n' "$*"; cat; }
 sudo() { printf 'SUDO:%s\n' "$*"; }
 ` + cmd + "\n"
@@ -1004,21 +1011,23 @@ sudo() { printf 'SUDO:%s\n' "$*"; }
 		t.Fatalf("bash: %v\n%s", err, out)
 	}
 	want := []string{
-		"ARGS:-fsSL -K - -o /tmp/dbpanel-agent.sh",
+		"ARGS:-fsSL --max-redirs 0 -K - -o " + tmp,
 		`url = "` + testPublicURL + `/agent/install?token=` + token + `"`,
 		"SUM:-c -",
-		sum + "  /tmp/dbpanel-agent.sh",
-		"SUDO:bash /tmp/dbpanel-agent.sh",
+		sum + "  " + tmp,
+		"SUDO:bash " + tmp,
 	}
 	if got := strings.Split(strings.TrimSpace(string(out)), "\n"); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("command ran:\n%s\nwant:\n%s", out, strings.Join(want, "\n"))
 	}
-	// A failed check stops before sudo.
-	script = `curl() { cat >/dev/null; }
-sha256sum() { cat >/dev/null; return 1; }
-sudo() { echo SUDO; }
-` + cmd + "\n"
-	if out, _ := exec.Command("bash", "-c", script).CombinedOutput(); strings.Contains(string(out), "SUDO") {
-		t.Fatalf("sudo ran after a failed checksum:\n%s", out)
+	// A failed check, or a failed mktemp, stops before sudo.
+	for _, stubs := range []string{
+		"mktemp() { echo " + tmp + "; }\ncurl() { cat >/dev/null; }\nsha256sum() { cat >/dev/null; return 1; }\n",
+		"mktemp() { return 1; }\ncurl() { cat >/dev/null; }\nsha256sum() { cat >/dev/null; }\n",
+	} {
+		script = stubs + "sudo() { echo SUDO; }\n" + cmd + "\n"
+		if out, _ := exec.Command("bash", "-c", script).CombinedOutput(); strings.Contains(string(out), "SUDO") {
+			t.Fatalf("sudo ran after a failed step:\n%s", out)
+		}
 	}
 }

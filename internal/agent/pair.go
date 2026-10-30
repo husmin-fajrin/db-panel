@@ -59,6 +59,10 @@ type PairOptions struct {
 	AgentAddr string
 }
 
+// errRedirect is Pair's error when the panel answers the pairing request
+// with a redirect.
+var errRedirect = errors.New("panel mengalihkan permintaan pairing; ditolak")
+
 // ErrCAMismatch is Pair's error when the panel's CA is not the pinned one.
 var ErrCAMismatch = errors.New("CA panel tidak cocok dengan yang diharapkan")
 
@@ -70,6 +74,12 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 	if client == nil {
 		client = &http.Client{Timeout: pairTimeout}
 	}
+	// The request carries the token: never follow a redirect (to another
+	// host, e.g. an on-path attacker's). A copy, so the caller's client is
+	// left as it was.
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirect }
+	client = &noRedirect
 	hostname, err := os.Hostname()
 	if err != nil {
 		return config.Config{}, fmt.Errorf("baca hostname: %w", err)
@@ -96,6 +106,9 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
+	if errors.Is(err, errRedirect) {
+		return config.Config{}, errRedirect
+	}
 	if err != nil {
 		return config.Config{}, fmt.Errorf("hubungi panel: %w", err)
 	}
