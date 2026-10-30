@@ -175,8 +175,7 @@ func (b *Box) Open(ct []byte) ([]byte, error)
 - Produces:
 
 ```go
-type DatabaseInfo struct { Name string `json:"name"`; Bytes uint64 `json:"bytes"`; Tables int `json:"tables"` }
-type Inventory struct { ServerID int64; Connected bool; Version, Series string; Databases []DatabaseInfo; MissingGrants []string; MasterReady bool; PreflightJSON string; UpdatedAt time.Time }
+type Inventory struct { ServerID int64; Connected bool; Version, Series string; Databases []proto.DatabaseInfo; MissingGrants []string; MasterReady bool; PreflightJSON string; UpdatedAt time.Time }   // proto.DatabaseInfo didefinisikan di Task 6; untuk Task 3 definisikan dulu di proto/mysql.go: Name string, Bytes uint64, Tables int, Engines []string (tag snake_case)
 func (s *Store) SetInventory(inv Inventory) error
 func (s *Store) GetInventory(serverID int64) (Inventory, error)   // ErrNotFound
 
@@ -338,7 +337,7 @@ func (d *Driver) Register(reg *commands.Registry)     // "mysql.status" di task 
 // proto/mysql.go
 type ConnectParams struct { User string; Password string; Host string /* default "localhost" */; Port int /* 0 = socket */ }
 type ConnectResult struct { Status MySQLStatus; Databases []DatabaseInfo /* tanpa mysql, sys, information_schema, performance_schema */; MissingGrants []string /* pernyataan GRANT yang kurang, kosong = cukup */; Account string /* 'user'@'host' efektif */ }
-type DatabaseInfo struct { Name string; Bytes uint64; Tables int; Engines []string }   // dipakai juga store (salin tipe ke store agar tidak impor proto? tidak: store boleh impor proto)
+type DatabaseInfo struct { Name string; Bytes uint64; Tables int; Engines []string }   // sudah ada sejak Task 3
 // package mysql
 type CredentialStore interface { Load() (proto.ConnectParams, bool, error); Save(proto.ConnectParams) error; Clear() error }
 func NewFileCredentialStore(path string, box *secrets.Box) CredentialStore   // /etc/dbpanel/mysql.cred, JSON tersegel, 0600
