@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,8 +17,9 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// ErrOffline is returned by Emit while the agent has no connection to the panel.
-var ErrOffline = errors.New("agent tidak terhubung ke panel")
+// ErrOffline is returned by Emit while the agent has no connection to the
+// panel. It is proto.ErrOffline, the offline error the panel uses too.
+var ErrOffline = proto.ErrOffline
 
 const (
 	dialTimeout   = 30 * time.Second

@@ -44,11 +44,7 @@ func WSHandler(d Deps) http.Handler {
 			log.Warn("agent websocket upgrade failed", "server_id", serverID, "err", err)
 			return
 		}
-		conn := hub.NewWSConn(ws, func(ev proto.Event) {
-			if d.OnEvent != nil {
-				d.OnEvent(serverID, ev)
-			}
-		})
+		conn := hub.NewWSConn(ws, func(ev proto.Event) { d.Hub.OnEvent(serverID, ev) })
 		if d.Hub.Attach(serverID, conn) {
 			log.Warn("agent connection replaced an existing one (cloned server or stale connection?)",
 				"server_id", serverID, "remote", r.RemoteAddr)

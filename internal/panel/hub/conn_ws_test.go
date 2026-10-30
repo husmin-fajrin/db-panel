@@ -224,6 +224,9 @@ func TestWSConnCloseFailsPending(t *testing.T) {
 	if !errors.As(err, &pe) || pe.Code != proto.CodeOffline {
 		t.Errorf("Call after Close: err = %v, want CodeOffline", err)
 	}
+	if !errors.Is(err, ErrOffline) {
+		t.Errorf("Call after Close: errors.Is(%v, ErrOffline) = false", err)
+	}
 }
 
 func TestWSConnAgentDisconnect(t *testing.T) {

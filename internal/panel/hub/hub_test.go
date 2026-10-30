@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"testing"
@@ -68,10 +69,11 @@ func (f *fakeConn) callCmds() []string {
 
 // fakeListener counts hub notifications.
 type fakeListener struct {
-	mu      sync.Mutex
-	online  []int64
-	offline []int64
-	events  []proto.Event
+	mu       sync.Mutex
+	online   []int64
+	offline  []int64
+	events   []proto.Event
+	eventIDs []int64
 }
 
 func (l *fakeListener) OnOnline(id int64) {
@@ -90,6 +92,7 @@ func (l *fakeListener) OnEvent(id int64, ev proto.Event) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.events = append(l.events, ev)
+	l.eventIDs = append(l.eventIDs, id)
 }
 
 func (l *fakeListener) counts() (online, offline int) {
@@ -260,7 +263,7 @@ func TestCallOfflineReturnsErrOffline(t *testing.T) {
 	if !errors.Is(err, ErrOffline) {
 		t.Fatalf("err = %v, want ErrOffline", err)
 	}
-	if err.Error() != "agent tidak terhubung" {
+	if err.Error() != "koneksi agent terputus" {
 		t.Errorf("message = %q", err.Error())
 	}
 }
@@ -298,5 +301,59 @@ func TestLocalConnDispatch(t *testing.T) {
 
 	if err := c.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestHubOnEventForwards: Hub.OnEvent is the single entry for agent events
+// (remote and embedded); it hands each one to the listener with its server.
+func TestHubOnEventForwards(t *testing.T) {
+	l := &fakeListener{}
+	h := New(l)
+	h.OnEvent(7, proto.Event{Type: "job.log", JobID: "j1"})
+	h.OnEvent(9, proto.Event{Type: "job.done"})
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.events) != 2 || l.events[0].Type != "job.log" || l.events[0].JobID != "j1" || l.events[1].Type != "job.done" {
+		t.Fatalf("events = %+v", l.events)
+	}
+	if len(l.eventIDs) != 2 || l.eventIDs[0] != 7 || l.eventIDs[1] != 9 {
+		t.Fatalf("event server IDs = %v, want [7 9]", l.eventIDs)
+	}
+}
+
+// TestErrorsIsOffline: "no connection" before a call and "connection lost"
+// during one are the same error to errors.Is, with or without wrapping, and
+// other agent errors are not.
+func TestErrorsIsOffline(t *testing.T) {
+	if ErrOffline != proto.ErrOffline {
+		t.Fatal("hub.ErrOffline is not proto.ErrOffline")
+	}
+	h := New(&fakeListener{})
+	before := h.Call(context.Background(), 42, "probe", nil, nil)
+	during := offlineError()
+	for name, err := range map[string]error{
+		"Call without connection": before,
+		"connection lost":         during,
+		"wrapped":                 fmt.Errorf("probe: %w", during),
+	} {
+		if !errors.Is(err, proto.ErrOffline) {
+			t.Errorf("%s: errors.Is(%v, proto.ErrOffline) = false", name, err)
+		}
+		if !errors.Is(err, ErrOffline) {
+			t.Errorf("%s: errors.Is(%v, hub.ErrOffline) = false", name, err)
+		}
+	}
+	for _, err := range []error{
+		timeoutError(),
+		&proto.Error{Code: proto.CodeInternal, Message: "koneksi agent terputus"},
+		errors.New("koneksi agent terputus"),
+	} {
+		if errors.Is(err, proto.ErrOffline) {
+			t.Errorf("errors.Is(%#v, proto.ErrOffline) = true", err)
+		}
+	}
+	if during.Error() != "koneksi agent terputus" {
+		t.Errorf("message = %q", during.Error())
 	}
 }

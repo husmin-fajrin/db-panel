@@ -96,7 +96,6 @@ func (p *Panel) agentDeps() agentapi.Deps {
 		AgentVersion: p.opts.Version,
 		Now:          p.now,
 		Logger:       p.log,
-		OnEvent:      p.onEvent,
 	}
 }
 

@@ -37,6 +37,19 @@ type Error struct {
 // matched (errors.As) as a Go error.
 func (e *Error) Error() string { return e.Message }
 
+// Is reports whether target is a *Error with the same Code, so errors.Is
+// matches agent errors by code whatever their message, e.g.
+// errors.Is(err, ErrOffline).
+func (e *Error) Is(target error) bool {
+	t, ok := target.(*Error)
+	return ok && e != nil && t != nil && e.Code == t.Code
+}
+
+// ErrOffline is the error for a command or event that cannot reach the
+// other side: no live connection, or the connection dropped mid-call. Match
+// it with errors.Is.
+var ErrOffline = &Error{Code: CodeOffline, Message: "koneksi agent terputus"}
+
 // Response answers the Request with the same ID.
 type Response struct {
 	ID     string          `json:"id"`

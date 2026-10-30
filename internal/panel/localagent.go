@@ -21,7 +21,7 @@ func (p *Panel) attachLocal() (detach func()) {
 	reg := commands.NewRegistry()
 	probe.Register(reg, probe.RealSystem(), p.opts.Version)
 	id := p.localID
-	conn := hub.NewLocalConn(reg, func(ev proto.Event) { p.onEvent(id, ev) })
+	conn := hub.NewLocalConn(reg, func(ev proto.Event) { p.Hub.OnEvent(id, ev) })
 	p.Hub.Attach(id, conn)
 	return func() { p.Hub.Detach(id, conn) }
 }

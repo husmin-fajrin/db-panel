@@ -10,8 +10,9 @@ import (
 )
 
 // listenerImpl turns hub lifecycle changes into store updates, browser
-// events and probes. Its callbacks run under the hub's lifecycle lock, so
-// they only touch the store briefly and hand probes to goroutines.
+// events and probes, and receives agent events from Hub.OnEvent. OnOnline
+// and OnOffline run under the hub's lifecycle lock, so they only touch the
+// store briefly and hand probes to goroutines.
 type listenerImpl struct{ p *Panel }
 
 func (l *listenerImpl) OnOnline(serverID int64)  { l.p.setOnline(serverID, true) }
@@ -35,7 +36,8 @@ func (p *Panel) setOnline(id int64, online bool) {
 // server, so an agent flooding events cannot flood the journal.
 const eventLogInterval = 10 * time.Second
 
-// onEvent receives events from remote and embedded agents. Nothing consumes
+// onEvent receives events from remote and embedded agents, all of which
+// reach it through Hub.OnEvent and the hub's listener. Nothing consumes
 // them yet; they are logged at debug level, at most one per server per
 // eventLogInterval.
 func (p *Panel) onEvent(id int64, ev proto.Event) {

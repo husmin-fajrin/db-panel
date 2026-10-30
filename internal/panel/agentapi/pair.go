@@ -33,9 +33,6 @@ type Deps struct {
 	AgentVersion string
 	Now          func() time.Time // nil means time.Now
 	Logger       *slog.Logger     // nil discards
-	// OnEvent receives every event an agent sends; nil drops them. It runs on
-	// the connection's read goroutine and must not block.
-	OnEvent func(serverID int64, ev proto.Event)
 	// OnAttach, if set, is called with each connection right after it is
 	// attached to the hub (used by tests to reach the connection).
 	OnAttach func(serverID int64, c *hub.WSConn)

@@ -50,7 +50,8 @@ type WSConn struct {
 	wsOnce   sync.Once
 }
 
-// NewWSConn wraps ws and starts its read and ping loops. onEvent may be nil.
+// NewWSConn wraps ws and starts its read and ping loops. onEvent may be nil;
+// the panel passes a func calling Hub.OnEvent.
 func NewWSConn(ws *websocket.Conn, onEvent func(proto.Event)) *WSConn {
 	ws.SetReadLimit(readLimit)
 	c := &WSConn{

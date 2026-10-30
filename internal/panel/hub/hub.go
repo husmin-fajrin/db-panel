@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -17,8 +16,10 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// ErrOffline is returned by Hub.Call when the server has no live connection.
-var ErrOffline = errors.New("agent tidak terhubung")
+// ErrOffline is returned by Hub.Call when the server has no live connection;
+// a connection that drops mid-call fails with an error errors.Is matches to
+// it as well.
+var ErrOffline = proto.ErrOffline
 
 // Conn is one live connection to an agent.
 type Conn interface {
@@ -30,7 +31,8 @@ type Conn interface {
 	Close() error
 }
 
-// Listener is notified about connection changes and agent events.
+// Listener is notified about connection changes and agent events (the
+// latter through Hub.OnEvent).
 // OnOnline and OnOffline are delivered in the order the hub applied the
 // changes, under the hub's lifecycle lock: a listener may call Call, IsOnline
 // and OnlineIDs, but must not call Attach or Detach.
@@ -125,6 +127,13 @@ func (h *Hub) Call(ctx context.Context, serverID int64, cmd string, params any, 
 	return c.Call(ctx, cmd, params, result)
 }
 
+// OnEvent is the single entry for events sent by agents, remote or embedded:
+// it passes ev to the listener. It runs on the sending connection's
+// goroutine, so the listener's OnEvent must not block.
+func (h *Hub) OnEvent(serverID int64, ev proto.Event) {
+	h.l.OnEvent(serverID, ev)
+}
+
 // IsOnline reports whether serverID has a live connection.
 func (h *Hub) IsOnline(serverID int64) bool {
 	h.mu.Lock()
@@ -177,6 +186,9 @@ func timeoutError() *proto.Error {
 	return &proto.Error{Code: proto.CodeTimeout, Message: "batas waktu perintah habis"}
 }
 
+// offlineError is a copy of proto.ErrOffline, so a caller that edits the
+// error it got cannot change the shared value.
 func offlineError() *proto.Error {
-	return &proto.Error{Code: proto.CodeOffline, Message: "koneksi agent terputus"}
+	e := *proto.ErrOffline
+	return &e
 }

@@ -117,7 +117,6 @@ func newEnv(t *testing.T) *testEnv {
 		AgentVersion: "test",
 		Now:          time.Now,
 		Logger:       slog.New(slog.NewTextHandler(e.logs, nil)),
-		OnEvent:      e.l.OnEvent,
 		OnAttach:     func(_ int64, c *hub.WSConn) { e.attached <- c },
 	}
 
@@ -313,8 +312,12 @@ func TestPairThenConnectThenProbe(t *testing.T) {
 
 func TestEmitOfflineBeforeRun(t *testing.T) {
 	a := agent.New(config.Config{PanelAddr: "127.0.0.1:1", ServerID: 1}, commands.NewRegistry(), slog.New(slog.DiscardHandler))
-	if err := a.Emit(proto.Event{Type: "x"}); !errors.Is(err, agent.ErrOffline) {
+	err := a.Emit(proto.Event{Type: "x"})
+	if !errors.Is(err, agent.ErrOffline) {
 		t.Fatalf("err = %v, want ErrOffline", err)
+	}
+	if !errors.Is(err, proto.ErrOffline) || !errors.Is(err, hub.ErrOffline) {
+		t.Fatalf("err = %v, want proto.ErrOffline (the offline error shared with the panel)", err)
 	}
 }
 
