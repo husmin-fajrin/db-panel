@@ -25,6 +25,8 @@ const localCertSerial = "local"
 type dashboardPage struct {
 	Page
 	Total, Online, Unpaired int
+	Replicas, ActiveJobs    int
+	Masters                 []store.Server
 }
 
 type serverRow struct {
@@ -58,6 +60,13 @@ type serverDetailPage struct {
 	// command cannot be shown; a new token has to be created.
 	TokenHidden bool
 	Local       bool // the panel host itself: no delete, no re-pairing
+
+	// MySQL card (paired servers).
+	Inventory  store.Inventory // Connected false until "Hubungkan MySQL"
+	ShowMySQL  bool            // MySQL is (or may be) installed: offer the account form
+	CanPrepare bool            // connected, no missing grants, not a replica
+	Connect    connectForm     // the account form after a failed attempt
+	ActiveJob  *store.Job      // the server's unfinished job, if any
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -66,13 +75,24 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "list servers", err)
 		return
 	}
-	p := dashboardPage{Page: a.page(r), Total: len(servers)}
+	active, err := a.Store.RunningJobs()
+	if err != nil {
+		a.internalError(w, "running jobs", err)
+		return
+	}
+	p := dashboardPage{Page: a.page(r), Total: len(servers), ActiveJobs: len(active)}
 	for _, s := range servers {
 		switch {
 		case !s.Paired:
 			p.Unpaired++
 		case a.Hub.IsOnline(s.ID):
 			p.Online++
+		}
+		switch s.Role {
+		case store.RoleMaster:
+			p.Masters = append(p.Masters, s)
+		case store.RoleReplica:
+			p.Replicas++
 		}
 	}
 	a.render.Render(w, "dashboard", p)
@@ -125,12 +145,10 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
 }
 
-func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
-	srv, ok := a.serverFromPath(w, r)
-	if !ok {
-		return
-	}
-	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial}
+// renderServer renders the server page with v's status and messages.
+func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView) {
+	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial, Connect: v.Form}
+	p.Flash, p.Notice = v.Flash, v.Notice
 	now := a.Now()
 	tok, found, err := a.Store.ActivePairToken(srv.ID, now)
 	if err == nil && !found && !srv.Paired {
@@ -144,6 +162,20 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 	if srv.Paired {
 		p.Online = a.Hub.IsOnline(srv.ID)
 		p.Probe = a.probe(srv)
+		if p.Inventory, err = a.inventory(srv.ID); err != nil {
+			a.internalError(w, "get inventory", err)
+			return
+		}
+		job, active, err := a.Store.ActiveJobForServer(srv.ID)
+		if err != nil {
+			a.internalError(w, "active job", err)
+			return
+		}
+		if active {
+			p.ActiveJob = &job
+		}
+		p.ShowMySQL = p.Probe == nil || p.Probe.MySQL.Installed
+		p.CanPrepare = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0 && srv.Role != store.RoleReplica
 	}
 	switch {
 	case !found || p.Local:
@@ -159,7 +191,7 @@ func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {
 		p.Command = pairCommand(a.PublicURL(), tok.Token, sum)
 		p.TokenExpires = tok.ExpiresAt
 	}
-	a.render.Render(w, "server_detail", p)
+	a.render.renderStatus(w, v.Status, "server_detail", p)
 }
 
 // pairCommand is the command an operator runs on a new database server. It

@@ -17,6 +17,7 @@
   <ul class="menu menu-horizontal gap-1 items-center">
     <li><a href="/">Dashboard</a></li>
     <li><a href="/servers">Server</a></li>
+    <li><a href="/jobs">Pekerjaan</a></li>
     <li>
       <form method="post" action="/logout" class="p-0">
         <button type="submit" class="btn btn-ghost btn-sm" title="Masuk sebagai {{.Username}}">Keluar ({{.Username}})</button>
@@ -27,9 +28,35 @@
 {{end}}
 <main class="flex-1 w-full max-w-5xl mx-auto p-4 md:p-6">
 {{with .Flash}}<div role="alert" class="alert alert-error mb-4"><span>{{.}}</span></div>{{end}}
+{{with .Notice}}<div role="status" class="alert alert-success mb-4"><span>{{.}}</span></div>{{end}}
 {{template "content" .}}
 </main>
 <footer class="text-center text-xs text-base-content/60 p-4">dbpanel {{.Version}}</footer>
 </body>
 </html>
+{{end}}
+
+{{define "status-badge"}}<span class="badge {{statusClass .}}">{{statusLabel .}}</span>{{end}}
+
+{{define "job-table"}}
+{{if .}}
+<div class="overflow-x-auto">
+  <table class="table table-sm">
+    <thead><tr><th>Pekerjaan</th><th>Server</th><th>Status</th><th>Dibuat</th><th>Selesai</th></tr></thead>
+    <tbody>
+      {{range .}}
+      <tr>
+        <td><a class="link" href="/jobs/{{.ID}}">{{kindLabel .Kind}}</a></td>
+        <td><a class="link" href="/servers/{{.ServerID}}">{{.ServerName}}</a></td>
+        <td>{{template "status-badge" .Status}}</td>
+        <td>{{fmtTime .CreatedAt}}</td>
+        <td>{{fmtTime .FinishedAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<p class="text-base-content/70">Belum ada pekerjaan.</p>
+{{end}}
 {{end}}

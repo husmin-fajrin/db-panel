@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @source "../templates";
+/* Badge classes chosen in Go (statusBadges in internal/panel/web/handlers_jobs.go). */
+@source inline("badge-ghost badge-info badge-warning badge-success badge-error badge-neutral");
 @plugin "../../.tools/daisyui.js" {
   themes: corporate --default;
 }

@@ -152,16 +152,17 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 	mux.Handle("GET /agent/install", agentapi.InstallScriptHandler(deps, p.PublicURL, hashes))
 	mux.Handle("GET /agent/bin/{arch}", agentapi.BinaryHandler(deps, binDir))
 	mux.Handle("/", web.NewRouter(web.Deps{
-		Store:       p.Store,
-		Hub:         p.Hub,
-		Sessions:    p.Sessions,
-		Limiter:     p.Limiter,
-		UserLimiter: p.UserLimiter,
-		PublicURL:   p.PublicURL,
-		Events:      p.Broker,
-		Now:         p.now,
-		Version:     p.opts.Version,
-		Logger:      p.log,
+		Store:        p.Store,
+		Hub:          p.Hub,
+		Sessions:     p.Sessions,
+		Limiter:      p.Limiter,
+		UserLimiter:  p.UserLimiter,
+		PublicURL:    p.PublicURL,
+		Events:       p.Broker,
+		Now:          p.now,
+		Version:      p.opts.Version,
+		Logger:       p.log,
+		Orchestrator: p.Orchestrator,
 		// The same parameters as GET /agent/install, so the hash in the
 		// pairing command is that of the script the endpoint serves.
 		InstallScriptSHA256: func(token string) (string, error) {

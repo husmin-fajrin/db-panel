@@ -1,0 +1,84 @@
+{{define "title"}}Master {{.Server.Name}}{{end}}
+{{define "content"}}
+<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+  <h1 class="text-2xl font-bold">Master {{.Server.Name}}</h1>
+  <span class="badge badge-lg {{if .Online}}badge-success{{else}}badge-error{{end}}"
+        x-data="serverStatus" data-server-id="{{.Server.ID}}" data-connected="{{.Online}}"
+        :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
+</div>
+
+<div class="grid gap-6 md:grid-cols-2 mb-6">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">Kesehatan</h2>
+      <table class="table table-sm">
+        <tbody>
+          <tr><th>Versi MySQL</th><td>{{or .Inventory.Version "-"}}</td></tr>
+          <tr><th>Siap jadi master</th><td>{{if .Inventory.MasterReady}}<span class="badge badge-success badge-sm">siap</span>{{else}}<span class="badge badge-warning badge-sm">belum</span>{{end}}</td></tr>
+          <tr><th>Alamat untuk replika</th><td>{{.Topology.SourceHost}}:{{.Topology.SourcePort}}</td></tr>
+          <tr><th>Akun replikasi</th><td><code>{{.Topology.ReplUser}}</code></td></tr>
+          <tr><th>Data diperbarui</th><td>{{fmtTime .Inventory.UpdatedAt}}</td></tr>
+        </tbody>
+      </table>
+      {{if not .Inventory.MasterReady}}
+      <p class="text-sm">Master belum siap. Buka <a class="link" href="/servers/{{.Server.ID}}">halaman server</a> lalu jalankan <strong>Siapkan sebagai master</strong>.</p>
+      {{end}}
+    </div>
+  </div>
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">Database</h2>
+      {{if .Inventory.Databases}}
+      <div class="overflow-x-auto">
+        <table class="table table-sm">
+          <thead><tr><th>Nama</th><th>Ukuran</th><th>Tabel</th></tr></thead>
+          <tbody>
+            {{range .Inventory.Databases}}
+            <tr><td>{{.Name}}</td><td>{{fmtBytes .Bytes}}</td><td>{{.Tables}}</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p>Belum ada database pengguna.</p>
+      {{end}}
+    </div>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h2 class="card-title">Replika</h2>
+      <a class="btn btn-primary btn-sm" href="/masters/{{.Server.ID}}/replicas/new">Buat replika</a>
+    </div>
+    {{if .Replicas}}
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Server</th><th>Status</th><th>Database yang diikuti</th></tr></thead>
+        <tbody>
+          {{range .Replicas}}
+          <tr>
+            <td><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a></td>
+            <td>{{template "status-badge" .State}}</td>
+            <td>{{if .Databases}}{{range $i, $d := .Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p>Belum ada replika. Klik <strong>Buat replika</strong> untuk menyalin database master ke server lain.</p>
+    {{end}}
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Pekerjaan terakhir</h2>
+    {{template "job-table" .Jobs}}
+  </div>
+</div>
+
+<a href="/servers/{{.Server.ID}}" class="btn btn-ghost">Kembali ke halaman server</a>
+{{end}}

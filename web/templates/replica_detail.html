@@ -1,0 +1,38 @@
+{{define "title"}}Replika {{.Server.Name}}{{end}}
+{{define "content"}}
+<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+  <h1 class="text-2xl font-bold">Replika {{.Server.Name}}</h1>
+  <span class="badge badge-lg {{if .Online}}badge-success{{else}}badge-error{{end}}"
+        x-data="serverStatus" data-server-id="{{.Server.ID}}" data-connected="{{.Online}}"
+        :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Ringkasan</h2>
+    <table class="table table-sm">
+      <tbody>
+        <tr><th>Status</th><td>{{template "status-badge" .Replica.State}}</td></tr>
+        <tr><th>Master</th><td><a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></td></tr>
+        <tr><th>Database yang diikuti</th><td>{{if .Replica.Databases}}{{range $i, $d := .Replica.Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td></tr>
+        <tr><th>Dibuat</th><td>{{fmtTime .Replica.CreatedAt}}</td></tr>
+        {{with .Replica.LastError}}<tr><th>Kesalahan terakhir</th><td class="text-error">{{.}}</td></tr>{{end}}
+      </tbody>
+    </table>
+    <div class="flex flex-wrap gap-2 mt-2">
+      <button type="button" class="btn btn-sm" disabled>Tambah database</button>
+      <button type="button" class="btn btn-sm" disabled>Lepas database</button>
+    </div>
+    <p class="text-sm text-base-content/70">Menambah atau melepas database dari replika ini belum tersedia di versi panel ini.</p>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Riwayat pekerjaan</h2>
+    {{template "job-table" .Jobs}}
+  </div>
+</div>
+
+<a href="/servers/{{.Server.ID}}" class="btn btn-ghost">Kembali ke halaman server</a>
+{{end}}

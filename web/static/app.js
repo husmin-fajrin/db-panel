@@ -38,7 +38,102 @@
     return es;
   }
 
+  // fmtWaktu menulis waktu ISO sebagai "YYYY-MM-DD HH:MM:SS" waktu lokal,
+  // sama dengan fmtTime di panel.
+  function fmtWaktu(iso) {
+    const t = new Date(iso);
+    if (Number.isNaN(t.getTime())) {
+      return "";
+    }
+    const p = (n) => String(n).padStart(2, "0");
+    return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ` +
+      `${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+  }
+
+  // kelompokTombol: status pekerjaan yang menampilkan tombol yang sama
+  // (Batalkan untuk antre dan berjalan) masuk satu kelompok.
+  function kelompokTombol(status) {
+    return status === "queued" || status === "running" ? "aktif" : status;
+  }
+
   document.addEventListener("alpine:init", () => {
+    // Halaman pekerjaan: baris log baru (event job_log) ditambahkan sebagai
+    // teks, lencana dan pesan tahap diperbarui (event job_update). Bila
+    // status pekerjaan berubah sehingga tombolnya lain (menunggu, gagal,
+    // selesai, dibatalkan), halaman dimuat ulang. Label dan kelas lencana
+    // dari data-badges (peta yang sama dengan yang dipakai panel).
+    window.Alpine.data("jobLive", () => ({
+      init() {
+        const el = this.$el;
+        const id = el.dataset.jobId;
+        let status = el.dataset.status;
+        let lastLog = Number(el.dataset.lastLogId) || 0;
+        const badges = JSON.parse(el.dataset.badges || "{}");
+        const log = el.querySelector("[data-job-log]");
+        const setBadge = (badge, st) => {
+          const info = badges[st] || { Label: st, Class: "badge-ghost" };
+          for (const b of Object.values(badges)) {
+            badge.classList.remove(b.Class);
+          }
+          badge.classList.add(info.Class);
+          badge.textContent = info.Label;
+        };
+        const es = new EventSource("/events");
+        es.addEventListener("job_log", (e) => {
+          const d = JSON.parse(e.data);
+          if (d.job_id !== id || d.id <= lastLog || !log) {
+            return;
+          }
+          lastLog = d.id;
+          const kosong = log.querySelector("[data-job-log-empty]");
+          if (kosong) {
+            kosong.remove();
+          }
+          const line = document.createElement("div");
+          line.className = "whitespace-pre-wrap";
+          if (d.level === "error") {
+            line.classList.add("text-error");
+          } else if (d.level === "warn") {
+            line.classList.add("text-warning");
+          }
+          line.textContent = `${fmtWaktu(d.ts)} [${d.level}] ${d.message}`;
+          const diBawah = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+          log.appendChild(line);
+          if (diBawah) {
+            log.scrollTop = log.scrollHeight;
+          }
+        });
+        es.addEventListener("job_update", (e) => {
+          const d = JSON.parse(e.data);
+          if (d.id !== id) {
+            return;
+          }
+          if (d.step_status !== undefined) {
+            const badge = el.querySelector(`[data-step-badge="${d.step}"]`);
+            if (badge) {
+              setBadge(badge, d.step_status);
+            }
+            const msg = el.querySelector(`[data-step-message="${d.step}"]`);
+            if (msg) {
+              msg.textContent = d.message || "";
+            }
+          }
+          if (d.status !== undefined && d.status !== status) {
+            if (kelompokTombol(d.status) !== kelompokTombol(status)) {
+              location.reload();
+              return;
+            }
+            status = d.status;
+            const badge = el.querySelector("[data-job-badge]");
+            if (badge) {
+              setBadge(badge, status);
+            }
+          }
+        });
+      },
+    }));
+
+
     // Lencana Online/Offline di halaman server yang sudah dipasangkan.
     // Data awal dari data-server-id dan data-connected. (Bukan
     // data-online: html/template memperlakukan atribut data-on* sebagai

@@ -15,6 +15,33 @@
     <div class="stat-value text-warning" data-stat="unpaired">{{.Unpaired}}</div>
   </div>
 </div>
+<div class="stats stats-vertical md:stats-horizontal bg-base-100 shadow w-full mt-4">
+  <div class="stat">
+    <div class="stat-title">Master</div>
+    <div class="stat-value" data-stat="masters">{{len .Masters}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Replika</div>
+    <div class="stat-value" data-stat="replicas">{{.Replicas}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Pekerjaan aktif</div>
+    <div class="stat-value text-info" data-stat="jobs">{{.ActiveJobs}}</div>
+    <div class="stat-desc"><a class="link" href="/jobs">Lihat semua pekerjaan</a></div>
+  </div>
+</div>
+{{if .Masters}}
+<div class="card bg-base-100 shadow mt-6">
+  <div class="card-body">
+    <h2 class="card-title">Master replikasi</h2>
+    <ul class="list">
+      {{range .Masters}}
+      <li class="list-row"><a class="link" href="/masters/{{.ID}}">{{.Name}}</a><span class="text-base-content/70">{{.Address}}</span></li>
+      {{end}}
+    </ul>
+  </div>
+</div>
+{{end}}
 <div class="mt-6 flex gap-2">
   <a href="/servers" class="btn">Lihat daftar server</a>
   <a href="/servers/new" class="btn btn-primary">Tambah server</a>

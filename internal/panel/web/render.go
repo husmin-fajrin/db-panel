@@ -19,11 +19,13 @@ type Page struct {
 	Username string // logged-in user; empty hides the navbar
 	Version  string
 	Flash    string // error message shown above the page content
+	Notice   string // success message shown above the page content
 }
 
 // pageNames are the page templates; each file templates/<name>.html defines
 // "title" and "content".
-var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail"}
+var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
+	"master_detail", "replica_new", "replica_detail", "jobs", "job_detail"}
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {
@@ -32,9 +34,13 @@ type Renderer struct {
 }
 
 var templateFuncs = template.FuncMap{
-	"fmtTime": fmtTime,
-	"fmtMB":   fmtMB,
-	"sub":     func(a, b int64) int64 { return a - b },
+	"fmtTime":     fmtTime,
+	"fmtMB":       fmtMB,
+	"fmtBytes":    fmtBytes,
+	"sub":         func(a, b int64) int64 { return a - b },
+	"statusLabel": statusLabel,
+	"statusClass": statusClass,
+	"kindLabel":   kindLabel,
 }
 
 // NewRenderer parses layout.html together with each page into its own
@@ -107,4 +113,15 @@ func fmtMB(mb int64) string {
 		return fmt.Sprintf("%.1f GB", float64(mb)/1024)
 	}
 	return fmt.Sprintf("%d MB", mb)
+}
+
+// fmtBytes shows a size in bytes as GB (from 1 GiB), MB (from 1 MiB) or KB.
+func fmtBytes(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
+	}
+	return fmt.Sprintf("%d KB", (b+1023)/1024)
 }

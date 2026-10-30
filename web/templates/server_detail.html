@@ -11,6 +11,15 @@
   {{end}}
 </div>
 
+{{if eq .Server.Role "master"}}
+<div role="status" class="alert mb-4"><span>Server ini adalah master replikasi.</span><a class="btn btn-sm" href="/masters/{{.Server.ID}}">Buka halaman master</a></div>
+{{else if eq .Server.Role "replica"}}
+<div role="status" class="alert mb-4"><span>Server ini adalah replika.</span><a class="btn btn-sm" href="/replicas/{{.Server.ID}}">Buka halaman replika</a></div>
+{{end}}
+{{with .ActiveJob}}
+<div role="status" class="alert alert-info mb-4"><span>Pekerjaan <strong>{{kindLabel .Kind}}</strong> belum selesai ({{statusLabel .Status}}).</span><a class="btn btn-sm" href="/jobs/{{.ID}}">Lihat pekerjaan</a></div>
+{{end}}
+
 {{if not .Server.Paired}}
 <div class="card bg-base-100 shadow mb-6" x-data="pairWait" data-server-id="{{.Server.ID}}">
   <div class="card-body gap-3">
@@ -78,6 +87,7 @@
       {{end}}{{else}}
       <p>Belum ada data.</p>
       {{end}}
+      {{if .ShowMySQL}}{{template "mysql-account" .}}{{end}}
     </div>
   </div>
 </div>
@@ -151,4 +161,70 @@
       <button type="button" class="btn btn-primary" @click="copy" x-text="buttonLabel">Salin</button>
     </div>
     {{end}}
+{{end}}
+
+{{define "mysql-account"}}
+<div class="divider my-1"></div>
+{{if .Inventory.Connected}}
+<h3 class="font-semibold">Akun admin MySQL terhubung</h3>
+<p class="text-sm text-base-content/70">Versi {{.Inventory.Version}}, diperbarui {{fmtTime .Inventory.UpdatedAt}}.</p>
+{{if .Inventory.Databases}}
+<div class="overflow-x-auto">
+  <table class="table table-sm">
+    <thead><tr><th>Database</th><th>Ukuran</th><th>Tabel</th></tr></thead>
+    <tbody>
+      {{range .Inventory.Databases}}
+      <tr><td>{{.Name}}</td><td>{{fmtBytes .Bytes}}</td><td>{{.Tables}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<p>Belum ada database pengguna di MySQL ini.</p>
+{{end}}
+{{if .Inventory.MissingGrants}}
+<div role="alert" class="alert alert-warning flex-col items-start gap-2">
+  <span>Akun admin MySQL ini kurang hak. Jalankan perintah berikut di MySQL server ini (sebagai root), lalu klik <strong>Segarkan</strong>:</span>
+  <pre class="bg-base-200 rounded-box p-3 w-full overflow-x-auto text-xs">{{range .Inventory.MissingGrants}}{{.}};
+{{end}}</pre>
+</div>
+{{end}}
+<div class="flex flex-wrap gap-2 mt-2">
+  <form method="post" action="/servers/{{.Server.ID}}/mysql/refresh">
+    <button type="submit" class="btn btn-sm">Segarkan</button>
+  </form>
+  {{if .CanPrepare}}
+  <form method="post" action="/servers/{{.Server.ID}}/prepare-master">
+    <button type="submit" class="btn btn-primary btn-sm">Siapkan sebagai master</button>
+  </form>
+  {{end}}
+</div>
+<details class="mt-2"{{if .Connect.Open}} open{{end}}>
+  <summary class="btn btn-ghost btn-sm">Hubungkan ulang</summary>
+  {{template "mysql-connect-form" .}}
+</details>
+{{else}}
+<h3 class="font-semibold">Hubungkan MySQL</h3>
+<p class="text-sm text-base-content/70">Masukkan akun admin MySQL di server ini (misalnya <code>root</code>). Agent menyimpannya di server itu sendiri untuk menyiapkan replikasi; panel tidak menampilkannya lagi.</p>
+{{template "mysql-connect-form" .}}
+{{end}}
+{{end}}
+
+{{define "mysql-connect-form"}}
+<form method="post" action="/servers/{{.Server.ID}}/mysql/connect" class="flex flex-col gap-2 mt-2">
+  <label class="floating-label">
+    <span>Pengguna MySQL</span>
+    <input class="input input-sm w-full" type="text" name="user" value="{{.Connect.User}}" placeholder="Pengguna MySQL" maxlength="32" required autocomplete="off">
+  </label>
+  <label class="floating-label">
+    <span>Kata sandi</span>
+    <input class="input input-sm w-full" type="password" name="password" autocomplete="off" placeholder="Kata sandi" maxlength="256">
+  </label>
+  <label class="floating-label">
+    <span>Host (opsional)</span>
+    <input class="input input-sm w-full" type="text" name="host" value="{{.Connect.Host}}" placeholder="Host (opsional)" maxlength="255" autocomplete="off">
+  </label>
+  <p class="text-xs text-base-content/70">Kosongkan host untuk memakai 127.0.0.1 (MySQL di server ini).</p>
+  <div><button type="submit" class="btn btn-primary btn-sm">Hubungkan MySQL</button></div>
+</form>
 {{end}}

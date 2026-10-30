@@ -58,6 +58,9 @@ type Deps struct {
 	// GET /agent/install serves for token. It goes into the pairing command,
 	// so the operator's shell refuses a script changed on the way.
 	InstallScriptSHA256 func(token string) (string, error)
+	// Orchestrator connects MySQL and runs the prepare-master and
+	// create-replica jobs.
+	Orchestrator Orchestrator
 }
 
 // app carries the dependencies into the handlers.
@@ -114,6 +117,18 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /servers/{id}", authed(a.serverDetail))
 	mux.Handle("POST /servers/{id}/token", authedPost(a.newToken))
 	mux.Handle("POST /servers/{id}/delete", authedPost(a.deleteServer))
+	mux.Handle("POST /servers/{id}/mysql/connect", authedPost(a.connectMySQL))
+	mux.Handle("POST /servers/{id}/mysql/refresh", authedPost(a.refreshMySQL))
+	mux.Handle("POST /servers/{id}/prepare-master", authedPost(a.prepareMaster))
+	mux.Handle("GET /masters/{id}", authed(a.masterDetail))
+	mux.Handle("GET /masters/{id}/replicas/new", authed(a.newReplicaForm))
+	mux.Handle("POST /masters/{id}/replicas", authedPost(a.createReplica))
+	mux.Handle("GET /replicas/{id}", authed(a.replicaDetail))
+	mux.Handle("GET /jobs", authed(a.listJobs))
+	mux.Handle("GET /jobs/{id}", authed(a.jobDetail))
+	mux.Handle("POST /jobs/{id}/approve", authedPost(a.approveJob))
+	mux.Handle("POST /jobs/{id}/retry", authedPost(a.retryJob))
+	mux.Handle("POST /jobs/{id}/cancel", authedPost(a.cancelJob))
 	mux.Handle("GET /events", login(d.Events))
 	return SecurityHeaders(mux)
 }

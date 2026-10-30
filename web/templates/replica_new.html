@@ -1,0 +1,62 @@
+{{define "title"}}Buat replika{{end}}
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-4">Buat replika dari {{.Master.Name}}</h1>
+{{if not .Inventory.MasterReady}}
+<div role="alert" class="alert alert-warning mb-4"><span>Master belum siap. Jalankan <strong>Siapkan sebagai master</strong> di <a class="link" href="/servers/{{.Master.ID}}">halaman server</a> dulu.</span></div>
+{{end}}
+<form method="post" action="/masters/{{.Master.ID}}/replicas" class="card bg-base-100 shadow">
+  <div class="card-body gap-4">
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">Server tujuan</legend>
+      {{if .Targets}}
+      <select class="select w-full" name="target" required>
+        <option value="" disabled{{if not .Target}} selected{{end}}>Pilih server</option>
+        {{range .Targets}}
+        <option value="{{.ID}}"{{if eq .ID $.Target}} selected{{end}}>{{.Name}}{{with .Address}} ({{.}}){{end}}{{if .Retry}} - percobaan sebelumnya gagal{{end}}</option>
+        {{end}}
+      </select>
+      <p class="label">Hanya server yang sudah dipasangkan, online, dan belum menjadi master atau replika.</p>
+      {{else}}
+      <p>Tidak ada server yang bisa dipakai. Server tujuan harus sudah dipasangkan, online, dan belum menjadi master atau replika. <a class="link" href="/servers/new">Tambah server</a></p>
+      {{end}}
+    </fieldset>
+
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">Database yang direplikasi</legend>
+      {{if .Databases}}
+      {{range .Databases}}
+      <label class="label">
+        <input type="checkbox" class="checkbox checkbox-sm" name="databases" value="{{.Name}}"{{if .Checked}} checked{{end}}>
+        <span>{{.Name}}</span> <span class="text-base-content/60">{{fmtBytes .Bytes}}</span>
+      </label>
+      {{end}}
+      <p class="label">Bila semua dicentang, database yang nanti dibuat di master ikut direplikasi juga.</p>
+      {{else}}
+      <p>Master belum punya database pengguna; semua database yang nanti dibuat ikut direplikasi.</p>
+      {{end}}
+    </fieldset>
+
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">Cara menyalin data</legend>
+      <label class="label">
+        <input type="checkbox" class="checkbox checkbox-sm" name="force_dump" value="1"{{if .ForceDump}} checked{{end}}>
+        <span>Paksa dump</span>
+      </label>
+      <p class="label whitespace-normal">Biasanya panel menyalin data dengan CLONE bila bisa (lebih cepat). Centang ini untuk selalu memakai dump.</p>
+    </fieldset>
+
+    <div role="alert" class="alert alert-warning flex-col items-start gap-2">
+      <span>Server tujuan harus server replika khusus: seluruh MySQL di server itu dikunci hanya-baca (read_only + super_read_only) dan semua database lamanya dibuang. Aplikasi lain di server itu tidak bisa menulis.</span>
+      <label class="label text-base-content">
+        <input type="checkbox" class="checkbox checkbox-sm" name="confirm_wipe" value="1" required>
+        <span>Saya mengerti</span>
+      </label>
+    </div>
+
+    <div class="card-actions justify-between">
+      <a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Batal</a>
+      <button type="submit" class="btn btn-primary"{{if not .Targets}} disabled{{end}}>Buat replika</button>
+    </div>
+  </div>
+</form>
+{{end}}

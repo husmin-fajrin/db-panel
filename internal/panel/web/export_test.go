@@ -9,3 +9,6 @@ func SubscriberCount(b *Broker) int {
 
 // PairCommand exposes pairCommand to web_test.
 var PairCommand = pairCommand
+
+// StatusLabel exposes statusLabel to web_test.
+var StatusLabel = statusLabel
