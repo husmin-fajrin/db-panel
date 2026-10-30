@@ -211,6 +211,10 @@ func TestDeleteServerCascadesInventoryReplicaJobs(t *testing.T) {
 	if _, err := s.AddReplica(topo.ID, r.ID, nil); err != nil {
 		t.Fatal(err)
 	}
+	r2 := mustServer(t, s, "replica2")
+	if _, err := s.AddReplica(topo.ID, r2.ID, nil); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetInventory(Inventory{ServerID: r.ID, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +235,7 @@ func TestDeleteServerCascadesInventoryReplicaJobs(t *testing.T) {
 	}
 	for table, n := range map[string]int{
 		"mysql_inventory": count(`SELECT COUNT(*) FROM mysql_inventory`),
-		"replicas":        count(`SELECT COUNT(*) FROM replicas`),
+		"replicas":        count(`SELECT COUNT(*) FROM replicas WHERE server_id = ?`, r.ID),
 		"jobs":            count(`SELECT COUNT(*) FROM jobs`),
 		"job_steps":       count(`SELECT COUNT(*) FROM job_steps`),
 		"job_log":         count(`SELECT COUNT(*) FROM job_log`),
@@ -250,5 +254,51 @@ func TestDeleteServerCascadesInventoryReplicaJobs(t *testing.T) {
 	}
 	if n := count(`SELECT COUNT(*) FROM topologies`); n != 0 {
 		t.Fatalf("topologies = %d after deleting master", n)
+	}
+	if got := mustRole(t, s, r2.ID); got != RoleUnassigned {
+		t.Fatalf("former replica role = %q, want unassigned", got)
+	}
+	if n := count(`SELECT COUNT(*) FROM replicas`); n != 0 {
+		t.Fatalf("replicas = %d after deleting master", n)
+	}
+}
+
+func TestUpdateJobRefusesFinishedJob(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db1")
+	t0 := time.Date(2026, 10, 30, 8, 0, 0, 0, time.UTC)
+	for _, terminal := range []string{JobSucceeded, JobFailed, JobCanceled} {
+		j := newJob(t, s, srv.ID, "k", t0, "a")
+		if err := s.UpdateJob(j.ID, terminal, 0, "", t0); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpdateJob(j.ID, JobRunning, 1, "x", t0.Add(time.Hour)); !errors.Is(err, ErrJobFinished) {
+			t.Fatalf("%s -> running: err = %v, want ErrJobFinished", terminal, err)
+		}
+		if err := s.UpdateJob(j.ID, JobFailed, 1, "x", t0.Add(time.Hour)); !errors.Is(err, ErrJobFinished) {
+			t.Fatalf("%s -> failed: err = %v, want ErrJobFinished", terminal, err)
+		}
+		got, _, _ := s.GetJob(j.ID)
+		if got.Status != terminal || got.Error != "" || got.CurrentStep != 0 || got.FinishedAt == nil || !got.FinishedAt.Equal(t0) {
+			t.Fatalf("%s job changed: %+v", terminal, got)
+		}
+	}
+	if err := s.UpdateJob("nope", JobRunning, 0, "", t0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing id: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateJobValidation(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db1")
+	now := time.Date(2026, 10, 30, 8, 0, 0, 0, time.UTC)
+	if err := s.CreateJob(Job{ID: uuid.NewString(), Kind: "k", ServerID: 999, CreatedAt: now}, []string{"a"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing server: err = %v, want ErrNotFound", err)
+	}
+	if err := s.CreateJob(Job{Kind: "k", ServerID: srv.ID, CreatedAt: now}, []string{"a"}); err == nil || err.Error() != "id pekerjaan kosong" {
+		t.Fatalf("empty id: err = %v", err)
+	}
+	if jobs, _ := s.ListJobs(10); len(jobs) != 0 {
+		t.Fatalf("jobs created despite errors: %+v", jobs)
 	}
 }

@@ -193,10 +193,31 @@ func (s *Store) TouchSeen(id int64, seen time.Time) error {
 	return s.execOne(`UPDATE servers SET last_seen_at = ? WHERE id = ?`, formatTime(seen), id)
 }
 
-// DeleteServer removes a server (and, by cascade, its pair tokens).
+// DeleteServer removes a server (and, by cascade, its pair tokens,
+// inventory, jobs and, for a master, its topology). Replica servers of a
+// deleted master are set back to unassigned.
 func (s *Store) DeleteServer(id int64) error {
-	if err := s.execOne(`DELETE FROM servers WHERE id = ?`, id); err != nil {
-		return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id IN (
+		SELECT r.server_id FROM replicas r JOIN topologies t ON t.id = r.topology_id
+		WHERE t.master_server_id = ?)`, RoleUnassigned, id); err != nil {
+		return fmt.Errorf("unassign replicas: %w", err)
+	}
+	res, err := tx.Exec(`DELETE FROM servers WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete server: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("delete server: %w", err)
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	s.forget(id)
 	return nil

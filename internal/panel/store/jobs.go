@@ -103,6 +103,9 @@ func scanStep(r rowScanner) (JobStep, error) {
 // CreateJob stores j as a queued job at step 0, with one pending step per
 // name, in one transaction. Status and CurrentStep of j are ignored.
 func (s *Store) CreateJob(j Job, stepNames []string) error {
+	if j.ID == "" {
+		return errors.New("id pekerjaan kosong")
+	}
 	created := j.CreatedAt
 	if created.IsZero() {
 		created = time.Now()
@@ -112,6 +115,13 @@ func (s *Store) CreateJob(j Job, stepNames []string) error {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM servers WHERE id = ?`, j.ServerID).Scan(&exists); err != nil {
+		return fmt.Errorf("check server: %w", err)
+	}
+	if exists == 0 {
+		return ErrNotFound
+	}
 	if _, err := tx.Exec(`INSERT INTO jobs (id, kind, server_id, topology_id, status, current_step, error, params_json, created_at)
 		VALUES (?, ?, ?, ?, ?, 0, '', ?, ?)`,
 		j.ID, j.Kind, j.ServerID, j.TopologyID, JobQueued, j.ParamsJSON, formatTime(created)); err != nil {
@@ -213,15 +223,39 @@ func (s *Store) ActiveJobForServer(serverID int64) (Job, bool, error) {
 	return j, true, nil
 }
 
+// ErrJobFinished is returned by UpdateJob for a job that already succeeded,
+// failed or was canceled: a finished job never changes again.
+var ErrJobFinished = errors.New("pekerjaan sudah selesai")
+
 // UpdateJob sets a job's status, current step and error. started_at is set
 // the first time the status becomes running, finished_at when it becomes
-// succeeded, failed or canceled.
+// succeeded, failed or canceled. A job that is already in one of those
+// terminal states is left untouched and ErrJobFinished is returned.
 func (s *Store) UpdateJob(id, status string, currentStep int, errMsg string, now time.Time) error {
 	ts := formatTime(now)
-	return s.execOne(`UPDATE jobs SET status = ?, current_step = ?, error = ?,
+	res, err := s.db.Exec(`UPDATE jobs SET status = ?, current_step = ?, error = ?,
 		started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN ? ELSE started_at END,
 		finished_at = CASE WHEN ? IN ('succeeded', 'failed', 'canceled') THEN ? ELSE finished_at END
-		WHERE id = ?`, status, currentStep, errMsg, status, ts, status, ts, id)
+		WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'canceled')`,
+		status, currentStep, errMsg, status, ts, status, ts, id)
+	if err != nil {
+		return fmt.Errorf("update job: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update job: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	var exists int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE id = ?`, id).Scan(&exists); err != nil {
+		return fmt.Errorf("update job: %w", err)
+	}
+	if exists == 0 {
+		return ErrNotFound
+	}
+	return ErrJobFinished
 }
 
 // SetStep sets a step's status and message. started_at is set the first
