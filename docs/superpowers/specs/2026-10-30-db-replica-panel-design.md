@@ -423,8 +423,16 @@ panel.
 9.4 **Tidak ada SSH, tidak ada tunnel** di versi 1. Master harus bisa
 dijangkau di port MySQL dari replika.
 
-9.5 **CLONE sebagai jalur utama**, mysqldump sebagai fallback yang
-diberitahukan.
+9.5 **CLONE sebagai jalur utama, mysqldump sebagai jalur kedua yang
+digarap setara.** Sebelum MySQL 8.0.37, CLONE mensyaratkan versi patch
+donor dan penerima persis sama, sementara repositori resmi hanya
+menyediakan patch terbaru; jadi untuk master 8.0.x lama jalur dump akan
+sering terpakai. Preflight memilih jalur secara otomatis (CLONE bila
+versi memenuhi syarat dan plugin bisa aktif, dump bila tidak) dan
+memberi tahu user jalur mana yang dipakai beserta perkiraan durasinya.
+Saat memasang MySQL di server kosong, agent mencoba memasang patch yang
+persis sama dengan master bila tersedia di repositori; bila tidak,
+memasang patch terbaru di seri yang sama dan memakai jalur dump.
 
 9.6 **Tidak ada promote otomatis.** Promote darurat mengarantina master
 lama.
@@ -443,6 +451,35 @@ preflight, install, configure, snapshot, configureReplication, status,
 checksum, promote) dan di panel (teks penjelasan error per engine).
 Versi 1 hanya implementasi `mysql`, tapi tidak ada kode panel yang
 mengasumsikan MySQL di luar driver dan teks.
+
+9.12 **Cara server menjadi master.** Server yang didaftarkan berperan
+"belum dipakai". Ia menjadi master saat user menekan "Jadikan master"
+di halaman server, atau otomatis saat dipilih sebagai sumber di alur
+Buat replika. Preflight master mendeteksi replikasi yang sudah ada di
+luar panel (thread binlog dump di `SHOW PROCESSLIST`, `SHOW REPLICAS`,
+dan apakah server itu sendiri replika dari server lain). Kalau menaikkan
+`gtid_mode` akan memutus replika lama non-GTID, job berhenti dan
+menjelaskan; panel tidak mengadopsi topologi yang sudah ada di versi 1
+(bukan tujuan), hanya memperingatkan.
+
+9.13 **Promote replika yang menjadi host panel diizinkan**, dengan
+peringatan di layar konfirmasi bahwa setelah itu panel berada di master
+dan sebaiknya dipindahkan. Memindahkan panel di versi 1 adalah prosedur
+manual yang didokumentasikan: salin `/etc/dbpanel` dan `/var/lib/dbpanel`
+ke server baru, jalankan panel di sana, ubah alamat panel di
+`/etc/dbpanel/agent.yaml` tiap agent. Fitur "pindah panel" dari UI
+ditunda.
+
+9.14 **Rilis di GitHub Releases pada repo ini.** Paket rilis berisi
+binary amd64 dan arm64 sekaligus, dan panel menyimpan keduanya agar bisa
+menyajikan binary agent untuk arsitektur apa pun tanpa internet. Mode
+offline `install.sh` (binary dibawa manual) adalah jalur resmi, bukan
+opsi tambahan. Bila repo dijadikan privat, `install.sh` memakai token
+baca yang dimasukkan user.
+
+9.15 **Pengaturan proxy HTTP** di panel untuk Telegram dan pembaruan,
+karena banyak jaringan rumah sakit hanya mengizinkan internet lewat
+proxy. Kanal notifikasi kedua (SMTP) ditunda sampai ada kebutuhan.
 
 9.11 **Struktur repo**: `cmd/dbpanel` (entry), `internal/panel` (http,
 ui, store, orchestrator, notify), `internal/agent` (server, jobs,
