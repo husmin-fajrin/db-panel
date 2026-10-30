@@ -64,3 +64,31 @@ cp -R /tmp/superpowers/skills/. .claude/skills/
 cp /tmp/superpowers/LICENSE .claude/skills/LICENSE-superpowers
 grep -rl 'superpowers:[a-z-]' .claude/skills | xargs sed -i -E 's/superpowers:([a-z][a-z-]*)/\1/g'
 ```
+
+# Graphify
+
+Skill `/graphify` dipasang lewat `graphify install --project` dari
+[Graphify-Labs/graphify](https://github.com/Graphify-Labs/graphify) (Apache-2.0).
+Yang ditulis ke repo:
+
+- `.claude/skills/graphify/` (SKILL.md + references)
+- `.claude/CLAUDE.md` dan `CLAUDE.md` (blok aturan graphify)
+- `.claude/settings.json` (PreToolUse hook `graphify hook-guard`)
+
+Skill ini butuh CLI `graphify` ada di PATH. Install sekali per mesin:
+
+```
+uv tool install graphifyy     # atau: pipx install graphifyy
+```
+
+Untuk sesi Claude Code on the web, tambahkan perintah yang sama ke setup
+script environment (menu environment di title bar sesi, lalu Edit).
+Kalau CLI tidak ada, hook-nya fail-open dan `/graphify` tidak bisa jalan.
+
+Pemakaian:
+
+```
+/graphify .            # bangun graph ke graphify-out/
+graphify query "..."   # tanya graph, dipakai Claude sebelum grep
+graphify update .      # perbarui setelah ubah kode
+```
