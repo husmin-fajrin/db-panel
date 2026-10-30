@@ -490,30 +490,18 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 }
 
 func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
-	var ms proto.MySQLStatus
-	if err := jr.call(ctx, jr.master(), "mysql.status", nil, &ms); err != nil {
-		return outcome{}, err
-	}
 	// A failed verify stopped replication (stopReplicaAfter); a retry
 	// starts it again. START REPLICA on running threads changes nothing.
 	if err := jr.call(ctx, jr.target(), "mysql.startReplica", nil, nil); err != nil {
 		return outcome{}, err
 	}
-	var w proto.WaitSyncedResult
-	if err := jr.callWithin(ctx, time.Duration(syncTimeoutSec+60)*time.Second, jr.target(), "mysql.waitSynced",
-		proto.WaitSyncedParams{GTIDSet: ms.GTIDExecuted, TimeoutSec: syncTimeoutSec}, &w); err != nil {
+	w, err := jr.waitMasterGTID(ctx, syncTimeoutSec)
+	if err != nil {
 		return outcome{}, err
 	}
 	if !w.Synced {
-		s := w.Status
-		switch {
-		case s.LastIOError != "":
-			return outcome{}, fmt.Errorf("replika belum sinkron: IO %d %s", s.LastIOErrno, s.LastIOError)
-		case s.LastSQLError != "":
-			return outcome{}, fmt.Errorf("replika belum sinkron: SQL %d %s", s.LastSQLErrno, s.LastSQLError)
-		}
-		return outcome{}, fmt.Errorf("replika belum menyusul master dalam %d menit (IO %s, SQL %s)",
-			syncTimeoutSec/60, s.IORunning, s.SQLRunning)
+		return outcome{}, notSynced(w, fmt.Sprintf("replika belum menyusul master dalam %d menit (IO %s, SQL %s)",
+			syncTimeoutSec/60, w.Status.IORunning, w.Status.SQLRunning))
 	}
 	jr.setReplicaState(store.ReplicaReady, "")
 	if err := jr.r.d.Store.SetServerRole(jr.target(), store.RoleReplica); err != nil {
@@ -521,6 +509,32 @@ func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 	}
 	jr.logf("info", "Replika sinkron dengan master.")
 	return done("sinkron"), nil
+}
+
+// waitMasterGTID reads the master's gtid_executed and waits up to
+// timeoutSec for the replica to execute it.
+func (jr *jobRun) waitMasterGTID(ctx context.Context, timeoutSec int) (proto.WaitSyncedResult, error) {
+	var ms proto.MySQLStatus
+	if err := jr.call(ctx, jr.master(), "mysql.status", nil, &ms); err != nil {
+		return proto.WaitSyncedResult{}, err
+	}
+	var w proto.WaitSyncedResult
+	err := jr.callWithin(ctx, time.Duration(timeoutSec+60)*time.Second, jr.target(), "mysql.waitSynced",
+		proto.WaitSyncedParams{GTIDSet: ms.GTIDExecuted, TimeoutSec: timeoutSec}, &w)
+	return w, err
+}
+
+// notSynced explains a replica that did not reach the set: a replication
+// thread's error when there is one, otherwise lag.
+func notSynced(w proto.WaitSyncedResult, lag string) error {
+	s := w.Status
+	switch {
+	case s.LastIOError != "":
+		return fmt.Errorf("replika belum sinkron: IO %d %s", s.LastIOErrno, s.LastIOError)
+	case s.LastSQLError != "":
+		return fmt.Errorf("replika belum sinkron: SQL %d %s", s.LastSQLErrno, s.LastSQLError)
+	}
+	return errors.New(lag)
 }
 
 func (jr *jobRun) setReplicaState(state, lastError string) {

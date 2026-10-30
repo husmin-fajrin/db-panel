@@ -30,6 +30,7 @@ var jobIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var statusBadges = map[string]struct{ Label, Class string }{
 	store.ReplicaCreating: {"Sedang dibuat", "badge-info"},
 	store.ReplicaReady:    {"Siap", "badge-success"},
+	store.ReplicaChanging: {"Sedang diubah", "badge-info"},
 	store.JobQueued:       {"Antre", "badge-ghost"},
 	store.StepPending:     {"Antre", "badge-ghost"},
 	store.JobRunning:      {"Berjalan", "badge-info"},
@@ -73,6 +74,10 @@ func kindLabel(kind string) string {
 		return "Siapkan master"
 	case orchestrator.KindCreateReplica:
 		return "Buat replika"
+	case orchestrator.KindAddDatabases:
+		return "Tambah database"
+	case orchestrator.KindRemoveDatabases:
+		return "Lepas database"
 	}
 	return kind
 }
@@ -97,9 +102,13 @@ type jobPage struct {
 	Log       []store.JobLogLine
 	LastLogID int64
 	LogCut    bool // more than jobLogMaxLines lines
+	// create_replica, add_databases and remove_databases.
+	Master *store.Server
 	// create_replica only.
-	Master                          *store.Server
-	Databases                       []string // empty = all
+	Databases []string // empty = all
+	// add_databases and remove_databases only.
+	Changed                         []string // added or removed
+	DropData                        bool     // removed ones are dropped on the replica
 	CanApprove, CanRetry, CanCancel bool
 	StatusJSON                      string
 }
@@ -174,13 +183,19 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 	case store.JobQueued, store.JobRunning:
 		p.CanCancel = true
 	}
-	if job.Kind == orchestrator.KindCreateReplica {
+	switch job.Kind {
+	case orchestrator.KindCreateReplica, orchestrator.KindAddDatabases, orchestrator.KindRemoveDatabases:
 		var params struct {
 			MasterServerID int64    `json:"master_server_id"`
 			Databases      []string `json:"databases"`
+			Change         []string `json:"change_databases"`
+			DropData       bool     `json:"drop_data"`
 		}
 		if err := json.Unmarshal([]byte(job.ParamsJSON), &params); err == nil {
-			p.Databases = params.Databases
+			if job.Kind == orchestrator.KindCreateReplica {
+				p.Databases = params.Databases
+			}
+			p.Changed, p.DropData = params.Change, params.DropData
 			if m, err := a.Store.GetServer(params.MasterServerID); err == nil {
 				p.Master = &m
 			}

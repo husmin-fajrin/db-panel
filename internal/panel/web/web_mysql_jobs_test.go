@@ -97,6 +97,22 @@ func (f *fakeOrch) StartCreateReplica(_ context.Context, p orchestrator.CreateRe
 	return f.nextID, nil
 }
 
+func (f *fakeOrch) StartAddDatabases(_ context.Context, serverID int64, dbs []string) (string, error) {
+	f.record(fmt.Sprintf("add-databases %d %s", serverID, strings.Join(dbs, ",")))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
+func (f *fakeOrch) StartRemoveDatabases(_ context.Context, serverID int64, dbs []string, dropData bool) (string, error) {
+	f.record(fmt.Sprintf("remove-databases %d %s drop=%t", serverID, strings.Join(dbs, ","), dropData))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
 func (f *fakeOrch) Approve(id string) error { f.record("approve " + id); return f.err }
 func (f *fakeOrch) Retry(id string) error   { f.record("retry " + id); return f.err }
 func (f *fakeOrch) Cancel(id string) error  { f.record("cancel " + id); return f.err }
@@ -477,6 +493,7 @@ func TestJobStatusLabels(t *testing.T) {
 		store.JobFailed: "Gagal", store.JobCanceled: "Dibatalkan",
 		store.StepSkipped: "Dilewati", "aneh": "aneh",
 		store.ReplicaCreating: "Sedang dibuat", store.ReplicaReady: "Siap", // ReplicaFailed is JobFailed
+		store.ReplicaChanging: "Sedang diubah",
 	} {
 		if got := web.StatusLabel(status); got != want {
 			t.Errorf("StatusLabel(%q) = %q, want %q", status, got, want)
@@ -519,7 +536,8 @@ func TestJobApproveRetryCancelPost(t *testing.T) {
 
 func TestJobsListRequiresLogin(t *testing.T) {
 	e, f, _ := newMySQLEnv(t)
-	for _, p := range []string{"/jobs", "/jobs/" + waitingJob, "/masters/1", "/masters/1/replicas/new", "/replicas/1"} {
+	for _, p := range []string{"/jobs", "/jobs/" + waitingJob, "/masters/1", "/masters/1/replicas/new", "/replicas/1",
+		"/replicas/1/databases"} {
 		rec := e.do("GET", p, nil, nil)
 		wantCode(t, rec, http.StatusSeeOther)
 		if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/login?next=") {
@@ -527,7 +545,8 @@ func TestJobsListRequiresLogin(t *testing.T) {
 		}
 	}
 	for _, p := range []string{"/servers/1/mysql/connect", "/servers/1/mysql/refresh", "/servers/1/prepare-master",
-		"/masters/1/replicas", "/jobs/" + waitingJob + "/approve"} {
+		"/masters/1/replicas", "/jobs/" + waitingJob + "/approve", "/replicas/1/databases/add",
+		"/replicas/1/databases/remove"} {
 		rec := e.do("POST", p, url.Values{"password": {mysqlSecret}}, nil)
 		wantCode(t, rec, http.StatusSeeOther)
 	}
@@ -550,12 +569,17 @@ func TestMySQLPagesAreCSPSafe(t *testing.T) {
 	if _, err := e.st.AddReplica(topo.ID, rep.ID, nil); err != nil {
 		t.Fatal(err)
 	}
+	subset := e.pairedOnline(t, "db-replika-sebagian")
+	if _, err := e.st.AddReplica(topo.ID, subset.ID, []string{"toko"}); err != nil {
+		t.Fatal(err)
+	}
+	e.st.SetReplicaState(subset.ID, store.ReplicaReady, "")
 	newTestJob(t, e.st, waitingJob, orchestrator.KindPrepareMaster, "Periksa master")
 	e.st.AppendJobLog(waitingJob, "info", `<script>alert(1)</script>`, time.Now())
 
 	inline := regexp.MustCompile(`(?i)<script(?:\s[^>]*)?>[^<]|\son[a-z]+=|javascript:|\sstyle=`)
 	for _, p := range []string{"/", "/servers/1", "/servers/2", "/servers/3", "/masters/1", "/masters/1/replicas/new",
-		"/replicas/2", "/jobs", "/jobs/" + waitingJob} {
+		"/replicas/2", "/replicas/4", "/replicas/4/databases", "/jobs", "/jobs/" + waitingJob} {
 		rec := e.do("GET", p, nil, c)
 		wantCode(t, rec, http.StatusOK)
 		if m := inline.FindString(rec.Body.String()); m != "" {
@@ -564,5 +588,160 @@ func TestMySQLPagesAreCSPSafe(t *testing.T) {
 		wantNoBody(t, rec, mysqlSecret)
 	}
 	rec := e.do("GET", "/", nil, c)
-	wantBody(t, rec, `href="/jobs"`, "Pekerjaan", `data-stat="masters">1<`, `data-stat="replicas">1<`)
+	wantBody(t, rec, `href="/jobs"`, "Pekerjaan", `data-stat="masters">1<`, `data-stat="replicas">2<`)
+}
+
+// subsetReplica makes server 1 a master with dbs and server 2 a ready
+// replica of it following follow (none = all).
+func (e *env) subsetReplica(t *testing.T, follow []string, dbs ...proto.DatabaseInfo) {
+	t.Helper()
+	master := e.pairedOnline(t, "db-master")
+	rep := e.pairedOnline(t, "db-replika")
+	topo := e.makeMaster(t, master, dbs...)
+	if _, err := e.st.AddReplica(topo.ID, rep.ID, follow); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(rep.ID, store.ReplicaReady, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReplicaDatabasesPageHiddenForAll(t *testing.T) {
+	e, f, _ := newMySQLEnv(t)
+	c := e.cookie()
+	e.subsetReplica(t, nil, shopDatabases...)
+
+	rec := e.do("GET", "/replicas/2", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "semua")
+	wantNoBody(t, rec, "/replicas/2/databases", "Tambah database", "Lepas database")
+
+	rec = e.do("GET", "/replicas/2/databases", nil, c)
+	wantCode(t, rec, http.StatusNotFound)
+	wantBody(t, rec, "replika ini mengikuti semua database")
+	for _, p := range []string{"/replicas/2/databases/add", "/replicas/2/databases/remove"} {
+		rec := e.do("POST", p, url.Values{"databases": {"toko"}}, c)
+		wantCode(t, rec, http.StatusNotFound)
+		wantBody(t, rec, "replika ini mengikuti semua database")
+	}
+	// Not a replica at all.
+	wantCode(t, e.do("GET", "/replicas/1/databases", nil, c), http.StatusNotFound)
+	wantCode(t, e.do("GET", "/replicas/9/databases", nil, c), http.StatusNotFound)
+	wantCalls(t, f)
+}
+
+var archiveDatabases = append([]proto.DatabaseInfo{{Name: "arsip", Bytes: 2 << 20}}, shopDatabases...)
+
+func TestReplicaDatabasesPageListsAndPosts(t *testing.T) {
+	e, f, logs := newMySQLEnv(t)
+	c := e.cookie()
+	e.subsetReplica(t, []string{"gudang", "toko"}, archiveDatabases...)
+
+	rec := e.do("GET", "/replicas/2", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `href="/replicas/2/databases#tambah"`, `href="/replicas/2/databases#lepas"`, "Tambah database", "Lepas database")
+	wantNoBody(t, rec, "disabled")
+
+	rec = e.do("GET", "/replicas/2/databases", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "db-replika", "db-master", "arsip", "2.0 MB", ">Diikuti<", ">Tidak diikuti<",
+		`action="/replicas/2/databases/add"`, `action="/replicas/2/databases/remove"`,
+		`name="drop_data"`, "Hapus datanya juga di replika",
+		`x-data="removeDatabases"`, `<dialog`, `class="modal"`)
+	body := rec.Body.String()
+	addForm, removeForm, _ := strings.Cut(body[strings.Index(body, `action="/replicas/2/databases/add"`):],
+		`action="/replicas/2/databases/remove"`)
+	if !strings.Contains(addForm, `name="databases" value="arsip"`) || strings.Contains(addForm, `value="toko"`) ||
+		strings.Contains(addForm, `value="gudang"`) {
+		t.Errorf("add form offers the wrong databases:\n%s", addForm)
+	}
+	if !strings.Contains(removeForm, `name="databases" value="toko"`) || !strings.Contains(removeForm, `name="databases" value="gudang"`) ||
+		strings.Contains(removeForm, `value="arsip"`) {
+		t.Errorf("remove form offers the wrong databases:\n%s", removeForm)
+	}
+
+	post := func(path string, form url.Values) *httptest.ResponseRecorder {
+		return e.do("POST", path, form, c)
+	}
+	bad := []struct {
+		path string
+		form url.Values
+		msg  string
+	}{
+		{"/replicas/2/databases/add", url.Values{}, "Pilih minimal satu database."},
+		{"/replicas/2/databases/add", url.Values{"databases": {"toko"}}, "Database toko sudah diikuti replika ini"},
+		{"/replicas/2/databases/add", url.Values{"databases": {"hilang"}}, "Database hilang tidak ada di master"},
+		{"/replicas/2/databases/add", url.Values{"databases": {"x;DROP"}}, "Database x;DROP tidak ada di master"},
+		{"/replicas/2/databases/remove", url.Values{}, "Pilih minimal satu database."},
+		{"/replicas/2/databases/remove", url.Values{"databases": {"arsip"}}, "Database arsip tidak diikuti replika ini"},
+		{"/replicas/2/databases/remove", url.Values{"databases": {"toko", "gudang"}, "drop_data": {"1"}},
+			"Lepas semua database tidak didukung; hapus replika"},
+	}
+	for _, b := range bad {
+		rec := post(b.path, b.form)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, b.msg, `action="/replicas/2/databases/add"`)
+	}
+	wantCalls(t, f)
+
+	rec = post("/replicas/2/databases/add", url.Values{"databases": {"arsip"}})
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/jobs/"+f.nextID)
+	rec = post("/replicas/2/databases/remove", url.Values{"databases": {"gudang"}, "drop_data": {"1"}})
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/jobs/"+f.nextID)
+	rec = post("/replicas/2/databases/remove", url.Values{"databases": {"toko"}})
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "add-databases 2 arsip", "remove-databases 2 gudang drop=true", "remove-databases 2 toko drop=false")
+	if !strings.Contains(logs.String(), "replica databases add started") {
+		t.Errorf("log lacks the start line:\n%s", logs.String())
+	}
+
+	// The orchestrator's refusal is shown on the page.
+	f.err = errors.New("server ini masih punya pekerjaan yang belum selesai")
+	rec = post("/replicas/2/databases/add", url.Values{"databases": {"arsip"}})
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "server ini masih punya pekerjaan yang belum selesai")
+	f.err = nil
+
+	// A replica that is not ready shows no forms and takes no post.
+	e.st.SetReplicaState(2, store.ReplicaChanging, "")
+	n := len(f.callList())
+	rec = e.do("GET", "/replicas/2/databases", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Sedang diubah", "hanya bisa diubah saat replika berstatus Siap")
+	wantNoBody(t, rec, `action="/replicas/2/databases/add"`, `action="/replicas/2/databases/remove"`)
+	rec = e.do("GET", "/replicas/2", nil, c)
+	wantBody(t, rec, "Tambah database", "disabled")
+	wantNoBody(t, rec, `href="/replicas/2/databases`)
+	rec = post("/replicas/2/databases/add", url.Values{"databases": {"arsip"}})
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "hanya bisa diubah saat replika berstatus Siap")
+	if len(f.callList()) != n {
+		t.Errorf("orchestrator called: %q", f.callList()[n:])
+	}
+}
+
+func TestChangeDatabasesJobLabels(t *testing.T) {
+	e, _, _ := newMySQLEnv(t)
+	c := e.cookie()
+	e.pairedOnline(t, "db-master")
+	rep := e.pairedOnline(t, "db-replika")
+	for _, j := range []struct {
+		id, kind, params, step string
+	}{
+		{waitingJob, orchestrator.KindAddDatabases, `{"master_server_id":1,"databases":["toko"],"change_databases":["arsip"]}`,
+			"Menunggu replika menyusul"},
+		{failedJob, orchestrator.KindRemoveDatabases,
+			`{"master_server_id":1,"databases":["arsip","toko"],"change_databases":["arsip"],"drop_data":true}`, "Kecilkan filter"},
+	} {
+		if err := e.st.CreateJob(store.Job{ID: j.id, Kind: j.kind, ServerID: rep.ID, ParamsJSON: j.params}, []string{j.step}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := e.do("GET", "/jobs/"+waitingJob, nil, c)
+	wantBody(t, rec, "Tambah database", "Menunggu replika menyusul", `href="/masters/1"`, "Database ditambahkan", "arsip")
+	wantNoBody(t, rec, "dihapus di replika", "toko")
+	rec = e.do("GET", "/jobs/"+failedJob, nil, c)
+	wantBody(t, rec, "Lepas database", "Kecilkan filter", "Database dilepas", "arsip (datanya dihapus di replika)")
 }

@@ -21,6 +21,7 @@
     <table class="table table-sm mb-2">
       <tbody>
         {{with .Master}}<tr><th>Master</th><td><a class="link" href="/masters/{{.ID}}">{{.Name}}</a></td></tr>{{end}}
+        {{with .Changed}}<tr><th>{{if eq $.Job.Kind "add_databases"}}Database ditambahkan{{else}}Database dilepas{{end}}</th><td>{{range $i, $d := .}}{{if $i}}, {{end}}{{$d}}{{end}}{{if $.DropData}} (datanya dihapus di replika){{end}}</td></tr>{{end}}
         {{if eq .Job.Kind "create_replica"}}<tr><th>Database</th><td>{{if .Databases}}{{range $i, $d := .Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td></tr>{{end}}
         <tr><th>Dibuat</th><td>{{fmtTime .Job.CreatedAt}}</td></tr>
         <tr><th>Selesai</th><td>{{fmtTime .Job.FinishedAt}}</td></tr>

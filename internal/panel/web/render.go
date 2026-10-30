@@ -25,7 +25,7 @@ type Page struct {
 // pageNames are the page templates; each file templates/<name>.html defines
 // "title" and "content".
 var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
-	"master_detail", "replica_new", "replica_detail", "jobs", "job_detail"}
+	"master_detail", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail"}
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {

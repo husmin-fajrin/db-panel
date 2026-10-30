@@ -168,6 +168,35 @@
       },
     }));
 
+    // Formulir "Lepas database" (x-ref="form") di halaman database replika:
+    // tombolnya membuka dialog konfirmasi (x-ref="dialog") yang menyebut
+    // database terpilih dan apakah datanya ikut dihapus. Tombol "Ya, lepas"
+    // di dialog mengirim formulir itu.
+    window.Alpine.data("removeDatabases", () => ({
+      names: "",
+      dropData: false,
+      error: "",
+      confirm() {
+        const form = this.$refs.form;
+        const dipilih = Array.from(form.querySelectorAll('input[name="databases"]:checked'), (el) => el.value);
+        if (dipilih.length === 0) {
+          this.error = "Pilih minimal satu database.";
+          return;
+        }
+        this.error = "";
+        this.names = dipilih.join(", ");
+        const hapus = form.querySelector('input[name="drop_data"]');
+        this.dropData = Boolean(hapus && hapus.checked);
+        this.$refs.dialog.showModal();
+      },
+      get keepClass() {
+        return { hidden: this.dropData };
+      },
+      get dropClass() {
+        return { hidden: !this.dropData };
+      },
+    }));
+
     // Tombol Salin untuk perintah pemasangan (x-ref="perintah").
     window.Alpine.data("copyCommand", () => ({
       tersalin: false,

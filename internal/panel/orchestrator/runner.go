@@ -1,8 +1,9 @@
 // Package orchestrator runs the panel's multi-step jobs: "Siapkan master"
-// (prepare_master) and "Buat replika" (create_replica). A job is a list of
-// steps, each of which calls agent commands through the hub; long agent
-// operations (clone, dump, install) are agent jobs whose events reach the
-// job through HandleEvent.
+// (prepare_master), "Buat replika" (create_replica), and adding or removing
+// databases on a running replica (add_databases, remove_databases). A job
+// is a list of steps, each of which calls agent commands through the hub;
+// long agent operations (clone, dump, install) are agent jobs whose events
+// reach the job through HandleEvent.
 //
 // Each job runs on one goroutine at a time, and that goroutine makes every
 // store write about the job once it exists. A job stops on its goroutine
@@ -34,9 +35,17 @@ import (
 
 // Job kinds.
 const (
-	KindPrepareMaster = "prepare_master"
-	KindCreateReplica = "create_replica"
+	KindPrepareMaster   = "prepare_master"
+	KindCreateReplica   = "create_replica"
+	KindAddDatabases    = "add_databases"
+	KindRemoveDatabases = "remove_databases"
 )
+
+// changesDatabases reports whether kind is a job that changes the databases
+// a ready replica follows.
+func changesDatabases(kind string) bool {
+	return kind == KindAddDatabases || kind == KindRemoveDatabases
+}
 
 const (
 	// replUser is the replication account the panel creates on a master.
@@ -452,7 +461,7 @@ func (r *Runner) Resume(ctx context.Context) {
 		if _, err := r.d.Store.AppendJobLog(j.ID, "error", resumeError, now); err != nil {
 			r.log.Warn("job log", "job", j.ID, "err", err)
 		}
-		if j.Kind == KindCreateReplica {
+		if j.Kind == KindCreateReplica || changesDatabases(j.Kind) {
 			if err := r.d.Store.SetReplicaState(j.ServerID, store.ReplicaFailed, resumeError); err != nil &&
 				!errors.Is(err, store.ErrNotFound) {
 				r.log.Warn("replica state on resume", "job", j.ID, "err", err)
@@ -506,13 +515,17 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 		}
 	}
 	jr := &jobRun{r: r, lj: lj, job: j, st: st, idx: j.CurrentStep}
-	if j.Kind == KindCreateReplica {
+	const msg = "dibatalkan oleh pengguna"
+	switch {
+	case j.Kind == KindCreateReplica:
 		jr.stopReplicaAfter(ctx)
 		if err := r.d.Store.RemoveReplica(j.ServerID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			r.log.Warn("remove replica on cancel", "job", j.ID, "err", err)
 		}
+	case changesDatabases(j.Kind):
+		// Replication is left as the canceled step left it.
+		jr.setReplicaState(store.ReplicaFailed, msg)
 	}
-	const msg = "dibatalkan oleh pengguna"
 	jr.setStep(store.StepFailed, msg)
 	jr.setJob(store.JobCanceled, msg)
 	jr.logf("warn", "Pekerjaan dibatalkan.")
@@ -540,6 +553,11 @@ type jobState struct {
 	CloneApproved   bool     `json:"clone_approved,omitempty"`
 	ReplicaServerID uint32   `json:"replica_server_id,omitempty"`
 	SnapshotGTID    string   `json:"snapshot_gtid,omitempty"`
+
+	// add_databases and remove_databases input; Databases above is what the
+	// replica followed when the job started.
+	Change   []string `json:"change_databases,omitempty"` // added or removed
+	DropData bool     `json:"drop_data,omitempty"`        // remove: drop them on the replica too
 
 	// prepare_master, learned.
 	MasterPort     int      `json:"master_port,omitempty"`
@@ -597,6 +615,10 @@ func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun
 		jr.steps = jr.prepareMasterSteps()
 	case KindCreateReplica:
 		jr.steps = jr.createReplicaSteps()
+	case KindAddDatabases:
+		jr.steps = jr.addDatabasesSteps()
+	case KindRemoveDatabases:
+		jr.steps = jr.removeDatabasesSteps()
 	default:
 		return nil, fmt.Errorf("jenis pekerjaan tidak dikenal: %q", j.Kind)
 	}
@@ -609,8 +631,11 @@ func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun
 // run executes the steps from from on. approved applies to the first one.
 func (jr *jobRun) run(from int, approved bool) {
 	ctx := jr.lj.ctx
-	if jr.job.Kind == KindCreateReplica {
+	switch {
+	case jr.job.Kind == KindCreateReplica:
 		jr.setReplicaState(store.ReplicaCreating, "")
+	case changesDatabases(jr.job.Kind):
+		jr.setReplicaState(store.ReplicaChanging, "")
 	}
 	for i := from; i < len(jr.steps); i++ {
 		jr.idx = i
@@ -649,10 +674,14 @@ func (jr *jobRun) fail(err error) {
 	jr.r.log.Warn("job step failed", "job", jr.job.ID, "kind", jr.job.Kind, "step", jr.idx, "err", err)
 	jr.setStep(store.StepFailed, msg)
 	jr.logf("error", "%s", msg)
-	if jr.job.Kind == KindCreateReplica {
+	switch {
+	case jr.job.Kind == KindCreateReplica:
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(jr.lj.ctx), cancelTimeout)
 		jr.stopReplicaAfter(ctx)
 		cancel()
+		jr.setReplicaState(store.ReplicaFailed, msg)
+	case changesDatabases(jr.job.Kind):
+		jr.logChangeFailure()
 		jr.setReplicaState(store.ReplicaFailed, msg)
 	}
 	jr.setJob(store.JobFailed, msg)

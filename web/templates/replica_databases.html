@@ -1,0 +1,103 @@
+{{define "title"}}Database replika {{.Server.Name}}{{end}}
+{{define "content"}}
+<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+  <h1 class="text-2xl font-bold">Database replika <a class="link" href="/replicas/{{.Server.ID}}">{{.Server.Name}}</a></h1>
+  {{template "status-badge" .Replica.State}}
+</div>
+<p class="mb-4">Master: <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></p>
+
+{{if not .Ready}}
+<div role="alert" class="alert alert-warning mb-4"><span>Database replika hanya bisa diubah saat replika berstatus Siap.</span></div>
+{{end}}
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Database master</h2>
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Database</th><th>Ukuran</th><th>Di replika ini</th></tr></thead>
+        <tbody>
+          {{range .Databases}}
+          <tr>
+            <td>{{.Name}}</td>
+            <td>{{if .OnMaster}}{{fmtBytes .Bytes}}{{else}}<span class="text-warning">tidak ada lagi di master</span>{{end}}</td>
+            <td>{{if .Followed}}<span class="badge badge-success">Diikuti</span>{{else}}<span class="badge badge-ghost">Tidak diikuti</span>{{end}}</td>
+          </tr>
+          {{else}}
+          <tr><td colspan="3">Master belum punya database pengguna.</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{{if .Ready}}
+<form method="post" action="/replicas/{{.Server.ID}}/databases/add" id="tambah" class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-4">
+    <h2 class="card-title">Tambah database</h2>
+    {{if .Unfollowed}}
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">Database yang ditambahkan</legend>
+      {{range .Unfollowed}}
+      <label class="label">
+        <input type="checkbox" class="checkbox checkbox-sm" name="databases" value="{{.Name}}">
+        <span>{{.Name}}</span> <span class="text-base-content/60">{{fmtBytes .Bytes}}</span>
+      </label>
+      {{end}}
+    </fieldset>
+    <p class="text-sm text-base-content/70">Panel menunggu replika menyusul master, menghentikan replikasi sebentar, menyalin database baru dengan dump (master dikunci sesaat saat dump dimulai), lalu memperluas filter replikasi. Database yang sudah diikuti tidak disalin ulang.</p>
+    <div class="card-actions justify-end">
+      <button type="submit" class="btn btn-primary">Tambah database</button>
+    </div>
+    {{else}}
+    <p>Semua database master sudah diikuti replika ini.</p>
+    {{end}}
+  </div>
+</form>
+
+<div x-data="removeDatabases" id="lepas" class="card bg-base-100 shadow mb-6">
+  <form method="post" action="/replicas/{{.Server.ID}}/databases/remove" id="form-lepas" x-ref="form" class="card-body gap-4">
+    <h2 class="card-title">Lepas database</h2>
+    {{if gt (len .Followed) 1}}
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">Database yang dilepas</legend>
+      {{range .Followed}}
+      <label class="label">
+        <input type="checkbox" class="checkbox checkbox-sm" name="databases" value="{{.Name}}">
+        <span>{{.Name}}</span>{{if .OnMaster}} <span class="text-base-content/60">{{fmtBytes .Bytes}}</span>{{end}}
+      </label>
+      {{end}}
+      <p class="label whitespace-normal">Minimal satu database harus tetap diikuti.</p>
+    </fieldset>
+    <label class="label">
+      <input type="checkbox" class="checkbox checkbox-sm" name="drop_data" value="1">
+      <span>Hapus datanya juga di replika</span>
+    </label>
+    <p class="text-sm text-base-content/70">Tanpa centang ini, data database yang dilepas tetap ada di replika tetapi tidak lagi diperbarui.</p>
+    <p class="text-sm text-error" x-text="error"></p>
+    <div class="card-actions justify-end">
+      <button type="button" class="btn btn-error btn-outline" @click="confirm">Lepas database</button>
+    </div>
+    {{else}}
+    <p>Replika ini hanya mengikuti satu database, dan minimal satu database harus tetap diikuti.</p>
+    {{end}}
+  </form>
+  <dialog class="modal" x-ref="dialog">
+    <div class="modal-box">
+      <h3 class="text-lg font-bold">Lepas database dari replika {{.Server.Name}}?</h3>
+      <p class="py-2">Database yang dilepas: <strong x-text="names"></strong></p>
+      <p class="py-2" :class="keepClass">Datanya tetap ada di replika tetapi tidak lagi diperbarui.</p>
+      <p class="py-2 font-semibold text-error hidden" :class="dropClass">Datanya juga dihapus dari replika dan tidak bisa dikembalikan dari panel.</p>
+      <div class="modal-action">
+        <form method="dialog"><button class="btn">Batal</button></form>
+        <button type="submit" form="form-lepas" class="btn btn-error">Ya, lepas</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+  </dialog>
+</div>
+{{end}}
+
+<a href="/replicas/{{.Server.ID}}" class="btn btn-ghost">Kembali ke halaman replika</a>
+{{end}}

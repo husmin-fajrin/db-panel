@@ -19,11 +19,18 @@
         {{with .Replica.LastError}}<tr><th>Kesalahan terakhir</th><td class="text-error">{{.}}</td></tr>{{end}}
       </tbody>
     </table>
+    {{if .Replica.Databases}}
     <div class="flex flex-wrap gap-2 mt-2">
+      {{if .Ready}}
+      <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#tambah">Tambah database</a>
+      <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#lepas">Lepas database</a>
+      {{else}}
       <button type="button" class="btn btn-sm" disabled>Tambah database</button>
       <button type="button" class="btn btn-sm" disabled>Lepas database</button>
+      {{end}}
     </div>
-    <p class="text-sm text-base-content/70">Menambah atau melepas database dari replika ini belum tersedia di versi panel ini.</p>
+    {{if not .Ready}}<p class="text-sm text-base-content/70">Database replika hanya bisa diubah saat replika berstatus Siap.</p>{{end}}
+    {{end}}
   </div>
 </div>
 

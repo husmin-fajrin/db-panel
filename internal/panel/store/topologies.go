@@ -40,6 +40,7 @@ func scanTopology(r rowScanner) (Topology, error) {
 const (
 	ReplicaCreating = "creating"
 	ReplicaReady    = "ready"
+	ReplicaChanging = "changing" // a job adds or removes databases
 	ReplicaFailed   = "failed"
 )
 

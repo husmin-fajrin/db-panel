@@ -20,6 +20,8 @@ type Orchestrator interface {
 	RefreshInventory(ctx context.Context, serverID int64) (proto.ConnectResult, error)
 	StartPrepareMaster(ctx context.Context, serverID int64) (string, error)
 	StartCreateReplica(ctx context.Context, p orchestrator.CreateReplicaParams) (string, error)
+	StartAddDatabases(ctx context.Context, replicaServerID int64, databases []string) (string, error)
+	StartRemoveDatabases(ctx context.Context, replicaServerID int64, databases []string, dropData bool) (string, error)
 	Approve(jobID string) error
 	Retry(jobID string) error
 	Cancel(jobID string) error
@@ -33,6 +35,10 @@ const (
 	msgReplicaDatabases  = "Pilih minimal satu database untuk direplikasi."
 	msgReplicaTargetBad  = "Server tujuan tidak memenuhi syarat"
 	msgReplicaConfirm    = "Replika belum dibuat: centang kotak persetujuan bahwa server tujuan dikunci hanya-baca dan database lamanya dibuang."
+	msgReplicaAll        = "replika ini mengikuti semua database"
+	msgReplicaNotReady   = "Database replika hanya bisa diubah saat replika berstatus Siap."
+	msgPickDatabase      = "Pilih minimal satu database."
+	msgRemoveAll         = "Lepas semua database tidak didukung; hapus replika ini bila tidak diperlukan lagi."
 
 	maxMySQLUser     = 32 // MySQL's limit for a user name
 	maxMySQLPassword = 256
@@ -352,30 +358,48 @@ type replicaPage struct {
 	Server  store.Server
 	Online  bool
 	Replica store.Replica
+	Ready   bool // its databases can be changed
 	Master  store.Server
 	Jobs    []jobRow
 }
 
-func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
+// replicaFromPath loads the server of {id} and its replica row, answering
+// 404 (or 500) and returning false when it cannot.
+func (a *app) replicaFromPath(w http.ResponseWriter, r *http.Request) (store.Server, store.Replica, bool) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok {
-		return
+		return store.Server{}, store.Replica{}, false
 	}
 	rep, err := a.Store.GetReplicaByServer(srv.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		http.Error(w, msgReplicaNotFound, http.StatusNotFound)
-		return
+		return store.Server{}, store.Replica{}, false
 	}
 	if err != nil {
 		a.internalError(w, "get replica", err)
+		return store.Server{}, store.Replica{}, false
+	}
+	return srv, rep, true
+}
+
+// replicaMaster is the master server of rep.
+func (a *app) replicaMaster(rep store.Replica) (store.Server, error) {
+	topo, err := a.Store.GetTopology(rep.TopologyID)
+	if err != nil {
+		return store.Server{}, err
+	}
+	return a.Store.GetServer(topo.MasterServerID)
+}
+
+func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
+	srv, rep, ok := a.replicaFromPath(w, r)
+	if !ok {
 		return
 	}
-	p := replicaPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Replica: rep}
-	topo, err := a.Store.GetTopology(rep.TopologyID)
-	if err == nil {
-		p.Master, err = a.Store.GetServer(topo.MasterServerID)
-	}
-	if err != nil {
+	p := replicaPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Replica: rep,
+		Ready: rep.State == store.ReplicaReady}
+	var err error
+	if p.Master, err = a.replicaMaster(rep); err != nil {
 		a.internalError(w, "get master", err)
 		return
 	}
@@ -388,4 +412,151 @@ func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.render.Render(w, "replica_detail", p)
+}
+
+// replicaDatabase is one database on the replica's databases page.
+type replicaDatabase struct {
+	Name     string
+	Bytes    uint64
+	OnMaster bool // the master's inventory lists it
+	Followed bool
+}
+
+type replicaDatabasesPage struct {
+	Page
+	Server     store.Server
+	Master     store.Server
+	Replica    store.Replica
+	Ready      bool
+	Databases  []replicaDatabase // the master's, then followed ones it no longer has
+	Unfollowed []replicaDatabase // can be added
+	Followed   []replicaDatabase // can be removed
+}
+
+// subsetReplicaFromPath is replicaFromPath for a replica that follows a
+// subset of the master's databases; one that follows all of them has no
+// databases page (404).
+func (a *app) subsetReplicaFromPath(w http.ResponseWriter, r *http.Request) (store.Server, store.Replica, bool) {
+	srv, rep, ok := a.replicaFromPath(w, r)
+	if ok && len(rep.Databases) == 0 {
+		http.Error(w, msgReplicaAll, http.StatusNotFound)
+		return store.Server{}, store.Replica{}, false
+	}
+	return srv, rep, ok
+}
+
+func (a *app) replicaDatabasesForm(r *http.Request, srv store.Server, rep store.Replica) (replicaDatabasesPage, error) {
+	p := replicaDatabasesPage{Page: a.page(r), Server: srv, Replica: rep, Ready: rep.State == store.ReplicaReady}
+	var err error
+	if p.Master, err = a.replicaMaster(rep); err != nil {
+		return p, err
+	}
+	inv, err := a.inventory(p.Master.ID)
+	if err != nil {
+		return p, err
+	}
+	for _, d := range inv.Databases {
+		p.Databases = append(p.Databases, replicaDatabase{Name: d.Name, Bytes: d.Bytes, OnMaster: true,
+			Followed: slices.Contains(rep.Databases, d.Name)})
+	}
+	for _, d := range rep.Databases {
+		if !slices.ContainsFunc(inv.Databases, func(m proto.DatabaseInfo) bool { return m.Name == d }) {
+			p.Databases = append(p.Databases, replicaDatabase{Name: d, Followed: true})
+		}
+	}
+	for _, d := range p.Databases {
+		if d.Followed {
+			p.Followed = append(p.Followed, d)
+		} else {
+			p.Unfollowed = append(p.Unfollowed, d)
+		}
+	}
+	return p, nil
+}
+
+func (a *app) replicaDatabases(w http.ResponseWriter, r *http.Request) {
+	srv, rep, ok := a.subsetReplicaFromPath(w, r)
+	if !ok {
+		return
+	}
+	p, err := a.replicaDatabasesForm(r, srv, rep)
+	if err != nil {
+		a.internalError(w, "replica databases", err)
+		return
+	}
+	a.render.Render(w, "replica_databases", p)
+}
+
+func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
+	a.changeReplicaDatabases(w, r, "add", func(p replicaDatabasesPage, selected []string) (string, string) {
+		for _, d := range selected {
+			i := slices.IndexFunc(p.Databases, func(rd replicaDatabase) bool { return rd.Name == d })
+			switch {
+			case i < 0 || !p.Databases[i].OnMaster:
+				return "", "Database " + d + " tidak ada di master"
+			case p.Databases[i].Followed:
+				return "", "Database " + d + " sudah diikuti replika ini"
+			}
+		}
+		id, err := a.Orchestrator.StartAddDatabases(r.Context(), p.Server.ID, selected)
+		if err != nil {
+			return "", err.Error()
+		}
+		return id, ""
+	})
+}
+
+func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
+	dropData := r.PostFormValue("drop_data") != ""
+	a.changeReplicaDatabases(w, r, "remove", func(p replicaDatabasesPage, selected []string) (string, string) {
+		for _, d := range selected {
+			if !slices.Contains(p.Replica.Databases, d) {
+				return "", "Database " + d + " tidak diikuti replika ini"
+			}
+		}
+		if !slices.ContainsFunc(p.Replica.Databases, func(d string) bool { return !slices.Contains(selected, d) }) {
+			return "", msgRemoveAll
+		}
+		id, err := a.Orchestrator.StartRemoveDatabases(r.Context(), p.Server.ID, selected, dropData)
+		if err != nil {
+			return "", err.Error()
+		}
+		return id, ""
+	})
+}
+
+// changeReplicaDatabases handles the add and remove posts of the databases
+// page: start checks the selection like the orchestrator does and starts
+// the job, answering its id or the reason it refused.
+func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, action string,
+	start func(p replicaDatabasesPage, selected []string) (jobID, refusal string)) {
+	srv, rep, ok := a.subsetReplicaFromPath(w, r)
+	if !ok {
+		return
+	}
+	p, err := a.replicaDatabasesForm(r, srv, rep)
+	if err != nil {
+		a.internalError(w, "replica databases", err)
+		return
+	}
+	selected := r.PostForm["databases"]
+	refusal := ""
+	id := ""
+	switch {
+	case !p.Ready:
+		refusal = msgReplicaNotReady
+	case len(selected) == 0:
+		refusal = msgPickDatabase
+	default:
+		id, refusal = start(p, selected)
+	}
+	if refusal != "" {
+		a.Logger.Warn("replica databases "+action+" refused", "server", srv.ID, "err", refusal)
+		p.Flash = refusal
+		a.render.renderStatus(w, http.StatusBadRequest, "replica_databases", p)
+		return
+	}
+	a.Logger.Info("replica databases "+action+" started", "server", srv.ID, "databases", selected, "job", id,
+		"by", a.page(r).Username)
+	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
