@@ -38,7 +38,7 @@ const (
 
 	aptPolicy    = "apt-cache policy mysql-server"
 	unitFilesCmd = "systemctl list-unit-files --type=service --no-legend"
-	noninteract  = "DEBIAN_FRONTEND=noninteractive "
+	noninteract  = "DEBIAN_FRONTEND=noninteractive LC_ALL=C "
 	aptConfigURL = "https://repo.mysql.com/mysql-apt-config_0.8.33-1_all.deb"
 	// tempRootPassword holds what the option file must escape.
 	tempRootPassword = `Tmp"pw\#;1x`
@@ -110,7 +110,8 @@ type fakeInstaller struct {
 	dir         string
 	files       map[string]string
 	downloadErr error
-	failOn      string // a command whose first word is this fails
+	failOn      string            // a command whose first word is this fails
+	outputs     map[string]string // scripted output by command line (without env)
 }
 
 func (f *fakeInstaller) Run(_ context.Context, stdin io.Reader, env []string, logLine func(string), name string, args ...string) error {
@@ -122,6 +123,12 @@ func (f *fakeInstaller) Run(_ context.Context, stdin io.Reader, env []string, lo
 	f.log.add(line)
 	if name == f.failOn {
 		return fmt.Errorf("%s gagal: exit status 1", name)
+	}
+	if out, ok := f.outputs[strings.Join(append([]string{name}, args...), " ")]; ok {
+		for _, l := range strings.Split(out, "\n") {
+			logLine(l)
+		}
+		return nil
 	}
 	logLine("fake output of " + name)
 	return nil
@@ -159,6 +166,7 @@ type recordingHost struct {
 	mysql.Host
 	mu    sync.Mutex
 	execs []execRecord
+	after func() // called after an Exec that succeeded
 }
 
 func (h *recordingHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
@@ -177,20 +185,26 @@ func (h *recordingHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Wri
 	h.mu.Lock()
 	h.execs = append(h.execs, rec)
 	h.mu.Unlock()
-	return h.Host.Exec(ctx, stdin, stdout, name, args...)
+	err := h.Host.Exec(ctx, stdin, stdout, name, args...)
+	if err == nil && h.after != nil {
+		h.after()
+	}
+	return err
 }
 
 // installRig is a driver on a server without MySQL, whose installer and
 // system are fakes; host is what the driver finds once MySQL is installed.
 type installRig struct {
-	log    *installLog
-	sys    *fakeSystem
-	inst   *fakeInstaller
-	creds  mysql.CredentialStore
-	reg    *commands.Registry
-	events *jobEvents
-	host   mysql.Host
-	found  int // times the driver looked for the installed MySQL
+	log     *installLog
+	sys     *fakeSystem
+	inst    *fakeInstaller
+	creds   mysql.CredentialStore
+	reg     *commands.Registry
+	events  *jobEvents
+	host    mysql.Host
+	found   int // times the driver looked for the installed MySQL
+	runner  *jobs.Runner
+	started chan string // the id of the job run started
 }
 
 func newInstallRig(t *testing.T, osRelease string) *installRig {
@@ -206,12 +220,14 @@ func newInstallRig(t *testing.T, osRelease string) *installRig {
 		sys: &fakeSystem{log: log, files: map[string]string{"/etc/os-release": osRelease}, outputs: map[string]string{
 			unitFilesCmd: "dbus.service static\nmysql.service enabled\nmysqld.service enabled\nssh.service enabled\n",
 		}},
-		inst:   &fakeInstaller{log: log, dir: t.TempDir(), files: map[string]string{}},
-		creds:  mysql.NewFileCredentialStore(filepath.Join(dir, "mysql.cred"), box),
-		reg:    commands.NewRegistry(),
-		events: &jobEvents{done: make(chan proto.JobDone, 4)},
+		inst:    &fakeInstaller{log: log, dir: t.TempDir(), files: map[string]string{}, outputs: map[string]string{}},
+		started: make(chan string, 1),
+		creds:   mysql.NewFileCredentialStore(filepath.Join(dir, "mysql.cred"), box),
+		reg:     commands.NewRegistry(),
+		events:  &jobEvents{done: make(chan proto.JobDone, 4)},
 	}
 	runner := jobs.NewRunner(r.events, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.runner = runner
 	d := &mysql.Driver{Creds: r.creds, Jobs: runner, Sys: r.sys}
 	mysql.SetInstallHooks(d, r.inst, func(_ config.Config, creds mysql.CredentialStore, sys probe.System, _ *slog.Logger) (mysql.Host, error) {
 		r.found++
@@ -236,8 +252,13 @@ func (r *installRig) dispatch(cmd string, params any) proto.Response {
 func (r *installRig) run(t *testing.T, p proto.InstallParams) proto.JobDone {
 	t.Helper()
 	resp := r.dispatch("mysql.install", p)
-	if started := decode[proto.StartedJob](t, resp); started.JobID == "" {
+	started := decode[proto.StartedJob](t, resp)
+	if started.JobID == "" {
 		t.Fatal("mysql.install: no job id")
+	}
+	select {
+	case r.started <- started.JobID:
+	default:
 	}
 	return (&snapshotRig{events: r.events}).wait(t)
 }
@@ -296,7 +317,7 @@ func TestInstallDebianUsesDistroWhenSeriesMatches(t *testing.T) {
 	version, series := instanceVersion(t, inst)
 	r := newInstallRig(t, ubuntuRelease)
 	r.host = inst.HostWith(r.creds)
-	r.sys.outputs[aptPolicy] = policyWith(series + ".40-0ubuntu0.24.04.1")
+	r.inst.outputs[aptPolicy] = policyWith(series + ".40-0ubuntu0.24.04.1")
 
 	res := installResult(t, r.run(t, proto.InstallParams{Series: series}))
 	if res.Source != "distro" || res.Version != version {
@@ -304,7 +325,7 @@ func TestInstallDebianUsesDistroWhenSeriesMatches(t *testing.T) {
 	}
 	wantLines(t, r.log.get(), []string{
 		noninteract + "apt-get update",
-		"query: " + aptPolicy,
+		noninteract + aptPolicy,
 		noninteract + "apt-get install -y mysql-server",
 		"query: " + unitFilesCmd,
 		"systemctl enable --now mysql.service",
@@ -322,7 +343,7 @@ func TestInstallDebianAddsMySQLRepoOtherwise(t *testing.T) {
 	_, series := instanceVersion(t, inst)
 	r := newInstallRig(t, ubuntuRelease)
 	r.host = inst.HostWith(r.creds)
-	r.sys.outputs[aptPolicy] = policyWith("(none)")
+	r.inst.outputs[aptPolicy] = policyWith("(none)")
 
 	res := installResult(t, r.run(t, proto.InstallParams{Series: series}))
 	if res.Source != "mysql-repo" {
@@ -331,12 +352,12 @@ func TestInstallDebianAddsMySQLRepoOtherwise(t *testing.T) {
 	deb := filepath.Join(r.inst.dir, path.Base(aptConfigURL))
 	wantLines(t, r.log.get(), []string{
 		noninteract + "apt-get update",
-		"query: " + aptPolicy,
+		noninteract + aptPolicy,
 		"download " + aptConfigURL,
 		noninteract + "debconf-set-selections <<< " + fmt.Sprintf("%q", "mysql-apt-config mysql-apt-config/select-server select mysql-8.0\n"),
 		noninteract + "apt-get install -y " + deb,
 		noninteract + "apt-get update",
-		noninteract + "apt-get install -y mysql-server",
+		noninteract + "apt-get install -y mysql-community-server",
 		"query: " + unitFilesCmd,
 		"systemctl enable --now mysql.service",
 	})
@@ -349,7 +370,7 @@ func TestInstallDebianRepoSeriesNames(t *testing.T) {
 	for series, name := range map[string]string{"8.4": "mysql-8.4-lts", "9": "mysql-innovation"} {
 		t.Run(series, func(t *testing.T) {
 			r := newInstallRig(t, ubuntuRelease)
-			r.sys.outputs[aptPolicy] = policyWith("8.0.40-0ubuntu0.24.04.1")
+			r.inst.outputs[aptPolicy] = policyWith("8.0.40-0ubuntu0.24.04.1")
 			r.inst.failOn = "debconf-set-selections"
 			if d := r.run(t, proto.InstallParams{Series: series}); d.OK {
 				t.Fatal("install succeeded with failing debconf-set-selections")
@@ -363,10 +384,11 @@ func TestInstallDebianRepoSeriesNames(t *testing.T) {
 	}
 }
 
-func TestInstallRHELSetsAuthSocket(t *testing.T) {
-	inst := testmysql.Start(t, testmysql.Options{})
-	version, series := instanceVersion(t, inst)
-	// The package leaves root with an expired temporary password.
+// rhelRig is an EL9 install rig whose MySQL is inst, left the way MySQL's
+// RPM packages leave it: root with an expired temporary password, written
+// to /var/log/mysqld.log.
+func rhelRig(t *testing.T, inst *testmysql.Instance) (*installRig, *recordingHost) {
+	t.Helper()
 	setup, err := sql.Open("mysql", inst.DSN())
 	if err != nil {
 		t.Fatal(err)
@@ -381,12 +403,19 @@ func TestInstallRHELSetsAuthSocket(t *testing.T) {
 	r.host = rec
 	r.inst.files["/var/log/mysqld.log"] = "2026-10-30T01:00:00.000000Z 0 [System] [MY-013169] [Server] mysqld initializing\n" +
 		"2026-10-30T01:00:01.000000Z 6 [Note] [MY-010454] [Server] A temporary password is generated for root@localhost: " + tempRootPassword + "\n"
+	return r, rec
+}
+
+func TestInstallRHELSetsAuthSocket(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	version, series := instanceVersion(t, inst)
+	r, rec := rhelRig(t, inst)
 
 	res := installResult(t, r.run(t, proto.InstallParams{Series: series}))
 	if res.Source != "mysql-repo" || res.Version != version {
 		t.Fatalf("result = %+v, want mysql-repo %s", res, version)
 	}
-	release := "https://repo.mysql.com/mysql80-community-release-el9-1.noarch.rpm"
+	release := "https://repo.mysql.com/mysql80-community-release-el9-5.noarch.rpm"
 	wantLines(t, r.log.get(), []string{
 		"download " + release,
 		"dnf install -y " + filepath.Join(r.inst.dir, path.Base(release)),
@@ -459,7 +488,7 @@ func TestInstallFailsWhenDownloadFails(t *testing.T) {
 	for _, tc := range []struct{ release, series string }{{ubuntuRelease, "8.4"}, {el9Release, "9"}} {
 		t.Run(tc.series, func(t *testing.T) {
 			r := newInstallRig(t, tc.release)
-			r.sys.outputs[aptPolicy] = policyWith("8.0.40-0ubuntu0.24.04.1")
+			r.inst.outputs[aptPolicy] = policyWith("8.0.40-0ubuntu0.24.04.1")
 			r.inst.downloadErr = errors.New("dial tcp: connection refused")
 			d := r.run(t, proto.InstallParams{Series: tc.series})
 			want := "server ini tidak bisa mengunduh paket MySQL; sediakan mirror lokal atau pasang manual seri " + tc.series
@@ -476,18 +505,24 @@ func TestInstallFailsWhenDownloadFails(t *testing.T) {
 }
 
 func TestInstallDownloadURLOverride(t *testing.T) {
-	t.Setenv("DBPANEL_MYSQL_APT_CONFIG", "https://mirror.example.com/mysql/mysql-apt-config_0.8.34-1_all.deb")
+	mirror := "https://dl:s3cr3t@mirror.example.com/mysql/mysql-apt-config_0.8.34-1_all.deb"
+	t.Setenv("DBPANEL_MYSQL_APT_CONFIG", mirror)
 	r := newInstallRig(t, ubuntuRelease)
-	r.sys.outputs[aptPolicy] = policyWith("(none)")
+	r.inst.outputs[aptPolicy] = policyWith("(none)")
 	r.inst.downloadErr = errors.New("unreachable")
-	r.run(t, proto.InstallParams{Series: "8.0"})
-	if got := r.log.get(); !slices.Contains(got, "download https://mirror.example.com/mysql/mysql-apt-config_0.8.34-1_all.deb") {
+	d := r.run(t, proto.InstallParams{Series: "8.0"})
+	if got := r.log.get(); !slices.Contains(got, "download "+mirror) {
 		t.Fatalf("commands = %q, want the mirror download", got)
+	}
+	// The mirror's password stays out of the job log and the error.
+	if logs := r.logs(); strings.Contains(logs, "s3cr3t") || strings.Contains(d.Error, "s3cr3t") ||
+		!strings.Contains(logs, "https://dl:xxxxx@mirror.example.com/") {
+		t.Fatalf("job logs:\n%s\nerror: %s", logs, d.Error)
 	}
 
 	t.Setenv("DBPANEL_MYSQL_RPM_RELEASE", "http://mirror.example.com/mysql84-community-release-el9-1.noarch.rpm")
 	r = newInstallRig(t, el9Release)
-	d := r.run(t, proto.InstallParams{Series: "8.4"})
+	d = r.run(t, proto.InstallParams{Series: "8.4"})
 	if d.OK || !strings.Contains(d.Error, "DBPANEL_MYSQL_RPM_RELEASE") || !strings.Contains(d.Error, "https://") {
 		t.Fatalf("done = %+v, want the https:// refusal", d)
 	}
@@ -531,7 +566,7 @@ func TestInstallFailsOnSeriesMismatch(t *testing.T) {
 	}
 	r := newInstallRig(t, ubuntuRelease)
 	r.host = inst.HostWith(r.creds)
-	r.sys.outputs[aptPolicy] = policyWith(want + ".3-1ubuntu24.04")
+	r.inst.outputs[aptPolicy] = policyWith(want + ".3-1ubuntu24.04")
 	d := r.run(t, proto.InstallParams{Series: want})
 	if d.OK || !strings.Contains(d.Error, "seri "+series) || !strings.Contains(d.Error, want) {
 		t.Fatalf("done = %+v, want a series mismatch", d)
@@ -547,7 +582,7 @@ func TestInstallCreatesAdminCredential(t *testing.T) {
 	version, series := instanceVersion(t, inst)
 	r := newInstallRig(t, ubuntuRelease)
 	r.host = inst.HostWith(r.creds)
-	r.sys.outputs[aptPolicy] = policyWith(series + ".40-0ubuntu0.24.04.1")
+	r.inst.outputs[aptPolicy] = policyWith(series + ".40-0ubuntu0.24.04.1")
 	if resp := r.dispatch("mysql.status", nil); resp.OK {
 		t.Fatal("mysql.status answered before MySQL was installed")
 	}
@@ -678,5 +713,93 @@ func TestRealInstallerDownload(t *testing.T) {
 			os.Remove(p)
 			t.Fatalf("%s: downloaded", u)
 		}
+	}
+}
+
+func TestInstallRHELKeepsInterimRootPassword(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	_, series := instanceVersion(t, inst)
+	r, rec := rhelRig(t, inst)
+	// Cancel the job right after the mysql client set the interim password.
+	rec.after = func() { r.runner.Cancel(<-r.started) }
+
+	if d := r.run(t, proto.InstallParams{Series: series}); d.OK {
+		t.Fatal("install succeeded although it was cancelled")
+	}
+	if len(rec.execs) != 1 {
+		t.Fatalf("Host.Exec calls = %d, want 1", len(rec.execs))
+	}
+	interim, ok := strings.CutPrefix(rec.execs[0].stdin, "ALTER USER 'root'@'localhost' IDENTIFIED BY '")
+	interim, _, _ = strings.Cut(interim, "'")
+	if !ok || len(interim) != 24 {
+		t.Fatalf("mysql stdin = %q", rec.execs[0].stdin)
+	}
+	p, ok, err := r.creds.Load()
+	if err != nil || !ok || p != (proto.ConnectParams{User: "root", Password: interim, Host: "localhost"}) {
+		t.Fatalf("stored account = %q@%q (ok %v, err %v), want root with the interim password", p.User, p.Host, ok, err)
+	}
+	// The stored account still gets in.
+	db, err := sql.Open("mysql", mysql.DSN(p, inst.Socket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var user string
+	if err := db.QueryRow("SELECT CURRENT_USER()").Scan(&user); err != nil || user != "root@localhost" {
+		t.Fatalf("login with the stored account: %q %v", user, err)
+	}
+	if strings.Contains(r.logs(), interim) {
+		t.Fatal("job logs hold the interim password")
+	}
+}
+
+func TestInstallRHELInnovationSeries(t *testing.T) {
+	r := newInstallRig(t, el9Release)
+	r.inst.failOn = "systemctl"
+	r.run(t, proto.InstallParams{Series: "9"})
+	release := "https://repo.mysql.com/mysql84-community-release-el9-1.noarch.rpm"
+	wantLines(t, r.log.get(), []string{
+		"download " + release,
+		"dnf install -y " + filepath.Join(r.inst.dir, path.Base(release)),
+		"dnf install -y --disablerepo=mysql-8.4-lts-community --enablerepo=mysql-innovation-community mysql-community-server",
+		"query: " + unitFilesCmd,
+		"systemctl enable --now mysqld.service",
+	})
+}
+
+func TestInstallRefusesUnsupportedRHEL(t *testing.T) {
+	for name, tc := range map[string]struct{ release, series, want string }{
+		"fedora":   {"NAME=\"Fedora Linux\"\nVERSION_ID=40\nID=fedora\n", "8.4", "OS tidak didukung untuk pemasangan otomatis"},
+		"amazon":   {"NAME=\"Amazon Linux\"\nVERSION_ID=\"2023\"\nID=\"amzn\"\nID_LIKE=\"fedora\"\n", "8.4", "OS tidak didukung untuk pemasangan otomatis"},
+		"el10-8.0": {"NAME=\"Rocky Linux\"\nVERSION_ID=\"10.0\"\nID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n", "8.0", "tidak tersedia untuk EL10"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newInstallRig(t, tc.release)
+			if d := r.run(t, proto.InstallParams{Series: tc.series}); d.OK || !strings.Contains(d.Error, tc.want) {
+				t.Fatalf("done = %+v, want %q", d, tc.want)
+			}
+			if got := r.log.get(); len(got) != 0 {
+				t.Fatalf("commands = %q, want none", got)
+			}
+		})
+	}
+}
+
+func TestInstallAdminRetryAfterHalfCreatedAccount(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	_, series := instanceVersion(t, inst)
+	// An earlier attempt created the account but never stored it.
+	execAll(t, rootDB(t, inst), "CREATE USER 'dbpanel_admin'@'localhost' IDENTIFIED BY 'lost-password'")
+	r := newInstallRig(t, ubuntuRelease)
+	r.host = inst.HostWith(r.creds)
+	r.inst.outputs[aptPolicy] = policyWith(series + ".40-0ubuntu0.24.04.1")
+
+	installResult(t, r.run(t, proto.InstallParams{Series: series}))
+	p, _, err := r.creds.Load()
+	if err != nil || p.User != "dbpanel_admin" {
+		t.Fatalf("stored account = %q, %v", p.User, err)
+	}
+	if resp := r.dispatch("mysql.status", nil); !resp.OK {
+		t.Fatalf("mysql.status with the stored account = %+v", resp.Error)
 	}
 }

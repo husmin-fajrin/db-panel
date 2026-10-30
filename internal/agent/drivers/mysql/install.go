@@ -49,23 +49,40 @@ const (
 	defaultAptConfig = "https://repo.mysql.com/mysql-apt-config_0.8.33-1_all.deb"
 	rpmReleaseBase   = "https://repo.mysql.com/"
 
+	// dnf repositories of mysql84-community-release.
+	ltsRepo        = "mysql-8.4-lts-community"
+	innovationRepo = "mysql-innovation-community"
+
 	downloadTimeout  = 10 * time.Minute
 	maxDownloadBytes = 64 << 20 // the repository packages are a few dozen KB
 	maxRedirects     = 10
 	maxLogLine       = 4096
 )
 
-// installSeries maps each series mysql.install offers to its names in
-// MySQL's repositories: the server choice of mysql-apt-config (as of
-// mysql-apt-config 0.8.33) and the dnf release package (el<major> follows).
-var installSeries = map[string]struct{ apt, rpm string }{
-	"8.0": {apt: "mysql-8.0", rpm: "mysql80-community-release"},
-	"8.4": {apt: "mysql-8.4-lts", rpm: "mysql84-community-release"},
-	"9":   {apt: "mysql-innovation", rpm: "mysql-innovation-community-release"},
+// installSeries maps each series mysql.install offers to the server choice
+// of mysql-apt-config (as of mysql-apt-config 0.8.33).
+var installSeries = map[string]string{
+	"8.0": "mysql-8.0",
+	"8.4": "mysql-8.4-lts",
+	"9":   "mysql-innovation",
 }
 
-// aptEnv keeps apt, dpkg and debconf from asking questions.
-var aptEnv = []string{"DEBIAN_FRONTEND=noninteractive"}
+// rpmReleases is the dnf release package per series and EL major release.
+// The innovation series has no release package of its own: it is a
+// repository of mysql84-community-release. The "-1" packages of 8.0 carry
+// the GPG key that expired in 2023.
+// verify against https://dev.mysql.com/downloads/repo/yum/ before release
+var rpmReleases = map[string]map[string]string{
+	"8.0": {"8": "mysql80-community-release-el8-9.noarch.rpm", "9": "mysql80-community-release-el9-5.noarch.rpm"},
+	"8.4": {"8": "mysql84-community-release-el8-1.noarch.rpm", "9": "mysql84-community-release-el9-1.noarch.rpm",
+		"10": "mysql84-community-release-el10-1.noarch.rpm"},
+	"9": {"8": "mysql84-community-release-el8-1.noarch.rpm", "9": "mysql84-community-release-el9-1.noarch.rpm",
+		"10": "mysql84-community-release-el10-1.noarch.rpm"},
+}
+
+// aptEnv keeps apt, dpkg and debconf from asking questions, and their
+// output in English, so "Candidate:" is not translated.
+var aptEnv = []string{"DEBIAN_FRONTEND=noninteractive", "LC_ALL=C"}
 
 // installer runs what mysql.install needs before MySQL, and so a Host,
 // exists. Commands run without a shell, with fixed argument lists.
@@ -190,7 +207,7 @@ func (d *Driver) install(j *jobs.Job, p proto.InstallParams) (proto.InstallResul
 
 	j.Progress(75, "membuat akun admin")
 	if family == "rhel" {
-		if err := secureRoot(ctx, j, h, s.ins); err != nil {
+		if err := secureRoot(ctx, j, h, s.ins, d.Creds); err != nil {
 			return res, err
 		}
 	}
@@ -241,10 +258,11 @@ func (s *installSteps) run(stdin io.Reader, env []string, name string, args ...s
 // download fetches a repository package; its failure is told in the
 // user's words, the cause goes to the job log.
 func (s *installSteps) download(rawURL string) (string, error) {
-	s.j.Logf("info", "downloading %s", rawURL)
+	shown := redactURL(rawURL)
+	s.j.Logf("info", "downloading %s", shown)
 	file, err := s.ins.Download(s.ctx, rawURL)
 	if err != nil {
-		s.j.Logf("error", "download %s: %v", rawURL, err)
+		s.j.Logf("error", "download %s: %v", shown, err)
 		return "", fmt.Errorf("server ini tidak bisa mengunduh paket MySQL; sediakan mirror lokal atau pasang manual seri %s", s.series)
 	}
 	return file, nil
@@ -256,7 +274,7 @@ func (s *installSteps) debian() (string, error) {
 	if err := s.run(nil, aptEnv, "apt-get", "update"); err != nil {
 		return "", err
 	}
-	candidate := aptCandidate(s.ctx, s.sys)
+	candidate := s.aptCandidate()
 	s.j.Logf("info", "distribution mysql-server candidate: %q", candidate)
 	if hasSeries(candidate, s.series) {
 		return sourceDistro, s.run(nil, aptEnv, "apt-get", "install", "-y", "mysql-server")
@@ -271,7 +289,7 @@ func (s *installSteps) debian() (string, error) {
 		return "", err
 	}
 	defer os.Remove(deb)
-	selection := "mysql-apt-config mysql-apt-config/select-server select " + installSeries[s.series].apt + "\n"
+	selection := "mysql-apt-config mysql-apt-config/select-server select " + installSeries[s.series] + "\n"
 	if err := s.run(strings.NewReader(selection), aptEnv, "debconf-set-selections"); err != nil {
 		return "", err
 	}
@@ -279,8 +297,9 @@ func (s *installSteps) debian() (string, error) {
 	// would not on a minimal image. dpkg checks no signature on a local
 	// package: this one is trusted for coming over HTTPS from repo.mysql.com,
 	// and it installs MySQL's key, which apt then checks the server
-	// packages against.
-	for _, args := range [][]string{{"install", "-y", deb}, {"update"}, {"install", "-y", "mysql-server"}} {
+	// packages against. mysql-community-server, not the virtual
+	// mysql-server, so apt cannot pick a newer series from the distribution.
+	for _, args := range [][]string{{"install", "-y", deb}, {"update"}, {"install", "-y", "mysql-community-server"}} {
 		if err := s.run(nil, aptEnv, "apt-get", args...); err != nil {
 			return "", err
 		}
@@ -294,7 +313,11 @@ func (s *installSteps) rhel() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	pkgURL, err := packageURL(envRPMRelease, rpmReleaseBase+installSeries[s.series].rpm+"-el"+major+"-1.noarch.rpm", ".rpm")
+	release, ok := rpmReleases[s.series][major]
+	if !ok {
+		return "", fmt.Errorf("MySQL seri %s tidak tersedia untuk EL%s; pilih seri lain atau pasang manual", s.series, major)
+	}
+	pkgURL, err := packageURL(envRPMRelease, rpmReleaseBase+release, ".rpm")
 	if err != nil {
 		return "", err
 	}
@@ -316,24 +339,31 @@ func (s *installSteps) rhel() (string, error) {
 			return "", err
 		}
 	}
-	return sourceRepo, s.run(nil, nil, "dnf", "install", "-y", "mysql-community-server")
+	args := []string{"install", "-y", "mysql-community-server"}
+	if s.series == "9" {
+		// The enable lasts this one transaction: a later dnf upgrade does
+		// not follow 9.x (accepted for v1).
+		args = []string{"install", "-y", "--disablerepo=" + ltsRepo, "--enablerepo=" + innovationRepo, "mysql-community-server"}
+	}
+	return sourceRepo, s.run(nil, nil, "dnf", args...)
 }
 
 // aptCandidate is the version apt would install for mysql-server; "" when
 // there is none.
-func aptCandidate(ctx context.Context, sys probe.System) string {
-	out, err := sys.Output(ctx, "apt-cache", "policy", "mysql-server")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(out), "\n") {
+func (s *installSteps) aptCandidate() string {
+	candidate := ""
+	collect := func(line string) {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "Candidate:"); ok {
 			if v = strings.TrimSpace(v); v != "(none)" {
-				return v
+				candidate = v
 			}
 		}
 	}
-	return ""
+	if err := s.ins.Run(s.ctx, nil, aptEnv, collect, "apt-cache", "policy", "mysql-server"); err != nil {
+		s.j.Logf("warn", "apt-cache policy mysql-server: %v", err)
+		return ""
+	}
+	return candidate
 }
 
 // hasSeries reports whether the Debian package version v (with or without
@@ -346,20 +376,24 @@ func hasSeries(v, series string) bool {
 }
 
 // elMajor is the major release of an RHEL-family system ("9" for 9.4).
+// Only EL 8, 9 and 10 are supported; Fedora and Amazon Linux, which share
+// the family, are not.
 func elMajor(sys probe.System) (string, error) {
 	b, err := sys.ReadFile("/etc/os-release")
 	if err != nil {
 		return "", fmt.Errorf("baca /etc/os-release: %w", err)
 	}
+	version := ""
 	for _, line := range strings.Split(string(b), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "VERSION_ID="); ok {
-			major, _, _ := strings.Cut(strings.Trim(v, `"'`), ".")
-			if major != "" && strings.Trim(major, "0123456789") == "" {
-				return major, nil
-			}
+			version = strings.Trim(v, `"'`)
 		}
 	}
-	return "", errors.New("versi sistem operasi (VERSION_ID) tidak terbaca dari /etc/os-release")
+	switch major, _, _ := strings.Cut(version, "."); major {
+	case "8", "9", "10":
+		return major, nil
+	}
+	return "", fmt.Errorf("OS tidak didukung untuk pemasangan otomatis (VERSION_ID %q); pasang MySQL secara manual", version)
 }
 
 // packageURL is the URL in the environment variable env, else def. An
@@ -374,6 +408,16 @@ func packageURL(env, def, ext string) (string, error) {
 		return "", fmt.Errorf("%s harus berupa URL https:// ke file %s", env, ext)
 	}
 	return v, nil
+}
+
+// redactURL is rawURL with any password in its userinfo masked, for logs
+// and errors.
+func redactURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "(URL tidak valid)"
+	}
+	return u.Redacted()
 }
 
 // mysqlUnit is the systemd unit the packages installed: mysqld on RHEL,
@@ -406,9 +450,9 @@ func mysqlUnit(ctx context.Context, sys probe.System, family string) (string, er
 // the mysql client can log in with an expired password, and such a session
 // may only reset it; auth_socket is a plugin Oracle's builds do not load,
 // which cannot be installed from that session. So the client sets an
-// interim random password first, and the rest goes over a normal login.
-// No password is ever in argv or a log.
-func secureRoot(ctx context.Context, j *jobs.Job, h Host, ins installer) error {
+// interim random password first, kept in creds, and the rest goes over a
+// normal login. No password is ever in argv or a log.
+func secureRoot(ctx context.Context, j *jobs.Job, h Host, ins installer, creds CredentialStore) error {
 	b, err := ins.ReadFile(mysqldLog)
 	if err != nil {
 		return fmt.Errorf("baca %s: %w", mysqldLog, err)
@@ -437,6 +481,12 @@ func secureRoot(ctx context.Context, j *jobs.Job, h Host, ins installer) error {
 	stmt := "ALTER USER 'root'@'localhost' IDENTIFIED BY " + quoteString(interim) + ";\n"
 	if err := h.Exec(ctx, strings.NewReader(stmt), nil, bin, "--defaults-file="+file, "--connect-expired-password"); err != nil {
 		return fmt.Errorf("ganti password sementara root: %s", hide.Replace(err.Error()))
+	}
+	// Until root uses auth_socket, the interim password is the only way in:
+	// keep it, so a failure or a cancel below does not lock root out.
+	// createAdmin replaces it with the admin account.
+	if err := creds.Save(proto.ConnectParams{User: "root", Password: interim, Host: "localhost"}); err != nil {
+		return fmt.Errorf("simpan kredensial MySQL: %w", err)
 	}
 	db, err := openWith(ctx, l.Socket, proto.ConnectParams{User: "root", Password: interim})
 	if err != nil {
@@ -507,8 +557,11 @@ func createAdmin(ctx context.Context, socket string, creds CredentialStore) erro
 	// a log or an error.
 	literal := quotePassword(password, strings.Contains(mode, "NO_BACKSLASH_ESCAPES"))
 	account := quoteString(adminUser) + "@" + quoteString("localhost")
-	if _, err := conn.ExecContext(ctx, "CREATE USER "+account+" IDENTIFIED BY "+literal); err != nil {
-		return fmt.Errorf("buat akun admin %s: %s", account, strings.ReplaceAll(err.Error(), password, "***"))
+	// IF NOT EXISTS and ALTER: a retry after a half-created account works.
+	for _, stmt := range []string{"CREATE USER IF NOT EXISTS ", "ALTER USER "} {
+		if _, err := conn.ExecContext(ctx, stmt+account+" IDENTIFIED BY "+literal); err != nil {
+			return fmt.Errorf("buat akun admin %s: %s", account, strings.ReplaceAll(err.Error(), password, "***"))
+		}
 	}
 	if _, err := conn.ExecContext(ctx, "GRANT ALL PRIVILEGES ON *.* TO "+account+" WITH GRANT OPTION"); err != nil {
 		return fmt.Errorf("beri hak akun admin %s: %w", account, err)
@@ -580,7 +633,7 @@ func (realInstaller) Run(ctx context.Context, stdin io.Reader, env []string, log
 func (r realInstaller) Download(ctx context.Context, rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" {
-		return "", fmt.Errorf("hanya unduhan https yang diizinkan: %s", rawURL)
+		return "", fmt.Errorf("hanya unduhan https yang diizinkan: %s", redactURL(rawURL))
 	}
 	client := &http.Client{
 		Transport: r.transport,
@@ -605,7 +658,7 @@ func (r realInstaller) Download(ctx context.Context, rawURL string) (string, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s: HTTP %s", rawURL, resp.Status)
+		return "", fmt.Errorf("%s: HTTP %s", u.Redacted(), resp.Status)
 	}
 	f, err := os.CreateTemp("", "dbpanel-*"+path.Ext(u.Path)) // mode 0600
 	if err != nil {
@@ -613,7 +666,7 @@ func (r realInstaller) Download(ctx context.Context, rawURL string) (string, err
 	}
 	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadBytes+1))
 	if err == nil && n > maxDownloadBytes {
-		err = fmt.Errorf("%s lebih besar dari %d byte", rawURL, maxDownloadBytes)
+		err = fmt.Errorf("%s lebih besar dari %d byte", u.Redacted(), maxDownloadBytes)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
