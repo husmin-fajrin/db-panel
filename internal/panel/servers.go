@@ -15,7 +15,12 @@ import (
 
 const (
 	readHeaderTimeout = 10 * time.Second
-	shutdownTimeout   = 5 * time.Second
+	// idleTimeout closes keep-alive connections idle between requests. There
+	// is no ReadTimeout: it would also cut the long-lived SSE stream. Form
+	// posts get their own body size and read deadline in the web package.
+	idleTimeout     = 120 * time.Second
+	maxHeaderBytes  = 64 << 10
+	shutdownTimeout = 5 * time.Second
 )
 
 // Run serves the UI and the agent listener, attaches the embedded agent and
@@ -99,6 +104,8 @@ func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps
 	srv := &http.Server{
 		Handler:           p.uiHandler(deps),
 		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	served := make(chan error, 1)

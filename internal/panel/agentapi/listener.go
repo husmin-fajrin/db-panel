@@ -10,7 +10,12 @@ import (
 	"time"
 )
 
-const shutdownTimeout = 5 * time.Second
+const (
+	shutdownTimeout = 5 * time.Second
+	// idleTimeout closes keep-alive connections idle between requests; an
+	// upgraded WebSocket is hijacked and not affected.
+	idleTimeout = 120 * time.Second
+)
 
 // ListenAndServeAgents serves h over TLS on addr until ctx is done, then
 // shuts down within 5 s. It returns nil after a clean shutdown.
@@ -36,7 +41,11 @@ func ServeAgents(ctx context.Context, ln net.Listener, tlsCfg *tls.Config, h htt
 		Handler:           t.wrap(h),
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       idleTimeout,
 		BaseContext:       func(net.Listener) context.Context { return hctx },
+		// Agents speak HTTP/1.1 (WebSocket) only; a non-nil empty map turns
+		// off the server's automatic HTTP/2 over TLS.
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
 	served := make(chan error, 1)
 	go func() { served <- srv.ServeTLS(ln, "", "") }()

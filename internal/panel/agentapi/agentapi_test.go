@@ -3,6 +3,7 @@ package agentapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -576,5 +577,33 @@ func TestAgentStopsDespiteCommandIgnoringCtx(t *testing.T) {
 	stop()
 	if d := time.Since(begin); d > 4*time.Second {
 		t.Fatalf("Run took %v to stop with a command ignoring ctx", d)
+	}
+}
+
+// TestAgentListenerRefusesHTTP2 (SEC-20): agents only speak HTTP/1.1, so a
+// client offering h2 must not get it.
+func TestAgentListenerRefusesHTTP2(t *testing.T) {
+	e := newEnv(t)
+	_, token := e.newToken(t, 0)
+	cfg := e.pair(t, token, t.TempDir())
+	read := func(p string) []byte {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	tlsCfg, err := ca.AgentClientTLS(read(cfg.CertFile), read(cfg.KeyFile), read(cfg.CAFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: wait}, "tcp", e.agentAddr, tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if p := conn.ConnectionState().NegotiatedProtocol; p == "h2" {
+		t.Fatalf("NegotiatedProtocol = %q, want HTTP/1.1 only", p)
 	}
 }
