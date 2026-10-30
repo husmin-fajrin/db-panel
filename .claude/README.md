@@ -52,8 +52,10 @@ claude plugin install superpowers@claude-plugins-official
 ```
 
 atau `/plugin install superpowers@claude-plugins-official` di dalam sesi.
-Jangan gabungkan keduanya di satu mesin, karena skill akan muncul dua kali
-(`/brainstorming` dan `/superpowers:brainstorming`).
+Kalau plugin itu sudah terpasang di mesin Anda, tidak masalah: `.claude/settings.json`
+repo ini menonaktifkan `superpowers@claude-plugins-official` khusus di dalam repo ini
+(setting project menang atas setting user), jadi yang terpakai hanya salinan di
+`.claude/skills/` dan skill tidak muncul dua kali. Di repo lain plugin tetap aktif.
 
 ## Update
 
