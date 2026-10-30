@@ -191,7 +191,12 @@ func TestLoginSuccessSetsCookie(t *testing.T) {
 
 func TestLoginRejectsExternalNext(t *testing.T) {
 	e := newEnv(t)
-	for _, next := range []string{"http://evil", "//evil.example", `/\evil.example`, "/\t/evil.example", "servers"} {
+	for _, next := range []string{
+		"http://evil", "//evil.example", `/\evil.example`, "/\t/evil.example", "servers",
+		// http.Redirect path.Cleans these to "/\evil.example".
+		`/./\evil.example`, `/../\evil.example`, `/a/../\evil.example`,
+		"/%5Cevil.example",
+	} {
 		rec := e.do("POST", "/login", loginForm("admin", testPassword, next), nil)
 		wantCode(t, rec, http.StatusSeeOther)
 		if loc := rec.Header().Get("Location"); loc != "/" {
@@ -230,16 +235,36 @@ func TestPostRejectsCrossOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, origin := range []string{"", "http://evil.example", "null"} {
-		req := httptest.NewRequest("POST", "/servers/1/delete", nil)
-		if origin != "" {
-			req.Header.Set("Origin", origin)
+	posts := []struct {
+		path string
+		form url.Values
+	}{
+		{"/login", loginForm("admin", testPassword, "")},
+		{"/logout", url.Values{}},
+		{"/servers", url.Values{"name": {"db-2"}}},
+		{"/servers/1/token", url.Values{}},
+		{"/servers/1/delete", url.Values{}},
+	}
+	for _, p := range posts {
+		for _, origin := range []string{"", "http://evil.example", "null"} {
+			req := httptest.NewRequest("POST", p.path, strings.NewReader(p.form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if origin != "" {
+				req.Header.Set("Origin", origin)
+			}
+			req.AddCookie(e.cookie())
+			rec := httptest.NewRecorder()
+			e.h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "permintaan ditolak") {
+				t.Errorf("POST %s origin=%q: status %d, body %q", p.path, origin, rec.Code, rec.Body.String())
+			}
+			if len(rec.Result().Cookies()) != 0 {
+				t.Errorf("POST %s origin=%q: cookie set", p.path, origin)
+			}
 		}
-		req.AddCookie(e.cookie())
-		rec := httptest.NewRecorder()
-		e.h.ServeHTTP(rec, req)
-		wantCode(t, rec, http.StatusForbidden)
-		wantBody(t, rec, "permintaan ditolak")
+	}
+	if list, _ := e.st.ListServers(); len(list) != 1 {
+		t.Errorf("servers after rejected POSTs = %d, want 1", len(list))
 	}
 	// A matching Referer is accepted when Origin is absent.
 	req := httptest.NewRequest("POST", "/servers/1/delete", nil)
@@ -321,6 +346,19 @@ func TestCreateServerEmptyName(t *testing.T) {
 	rec := e.do("POST", "/servers", url.Values{"name": {"  "}}, e.cookie())
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "nama server tidak boleh kosong")
+}
+
+func TestCreateServerDuplicateName(t *testing.T) {
+	e := newEnv(t)
+	if _, err := e.st.CreateServer("db-utama"); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("POST", "/servers", url.Values{"name": {"db-utama"}}, e.cookie())
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "nama server sudah dipakai", `value="db-utama"`)
+	if list, _ := e.st.ListServers(); len(list) != 1 {
+		t.Errorf("servers = %d, want 1", len(list))
+	}
 }
 
 func TestServerDetailUnpairedCreatesMissingToken(t *testing.T) {
@@ -448,14 +486,62 @@ func TestBrokerUnsubscribesOnDisconnect(t *testing.T) {
 		b.ServeHTTP(httptest.NewRecorder(), req)
 		close(done)
 	}()
+	waitFor(t, func() bool { return web.SubscriberCount(b) == 1 })
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("ServeHTTP did not return after the client went away")
 	}
-	// Publishing after the subscriber left never blocks.
-	for i := 0; i < 100; i++ {
-		b.Publish("server_probe", map[string]int64{"id": 1})
+	if n := web.SubscriberCount(b); n != 0 {
+		t.Errorf("subscribers after disconnect = %d, want 0", n)
+	}
+}
+
+func TestBrokerPublishDropsForFullSubscriber(t *testing.T) {
+	b := web.NewBroker()
+	// A subscriber whose writes block: its 16-slot buffer fills up and
+	// Publish must not wait for it.
+	blocked := make(chan struct{})
+	defer close(blocked)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("GET", "/events", nil).WithContext(ctx)
+	go b.ServeHTTP(&blockingWriter{ResponseRecorder: httptest.NewRecorder(), block: blocked}, req)
+	waitFor(t, func() bool { return web.SubscriberCount(b) == 1 })
+
+	finished := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			b.Publish("server_probe", map[string]int64{"id": 1})
+		}
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Publish blocked on a slow subscriber")
+	}
+}
+
+// blockingWriter blocks every body write until block is closed.
+type blockingWriter struct {
+	*httptest.ResponseRecorder
+	block chan struct{}
+}
+
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	<-w.block
+	return len(p), nil
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

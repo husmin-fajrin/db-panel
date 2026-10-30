@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
@@ -90,15 +91,23 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// safeNext returns next if it is a path on this site, else "/". "//host"
-// and "/\host" are rejected because browsers treat them as other hosts, and
-// url.Parse rejects control characters, which browsers strip ("/\t/host").
+// safeNext returns next if it is a path on this site, else "/".
+//   - "//host" is another host to browsers, and so is anything with a
+//     backslash ("/\host"), raw or percent-encoded, which browsers treat as "/".
+//   - url.Parse rejects control characters, which browsers strip ("/\t/host").
+//   - http.Redirect path.Cleans the part before "?", so that result must pass
+//     the same checks ("/./\host" becomes "/\host").
 func safeNext(next string) string {
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, `/\`) {
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" ||
+		strings.Contains(next, `\`) || strings.Contains(u.Path, `\`) {
 		return "/"
 	}
-	if u, err := url.Parse(next); err != nil || u.Scheme != "" || u.Host != "" {
-		return "/"
+	p, _, _ := strings.Cut(next, "?")
+	for _, v := range []string{next, path.Clean(p)} {
+		if !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") {
+			return "/"
+		}
 	}
 	return next
 }
