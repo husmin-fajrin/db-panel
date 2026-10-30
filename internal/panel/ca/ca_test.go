@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -155,7 +156,7 @@ func TestServerIDFromCertRejectsOther(t *testing.T) {
 	cert := &x509.Certificate{}
 	cert.Subject.CommonName = "x"
 	_, err := ServerIDFromCert(cert)
-	if err == nil || err.Error() != "sertifikat bukan milik agent" {
+	if !errors.Is(err, ErrNotAgent) || err.Error() != "sertifikat bukan milik agent" {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -297,5 +298,51 @@ func TestAgentClientTLSInvalidCA(t *testing.T) {
 	}
 	if cfg.ServerName != PanelServerName || cfg.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+func TestIssueAgentCertRejectsNonPositiveID(t *testing.T) {
+	c := newCA(t)
+	_, csrPEM, err := NewAgentKeyAndCSR("h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{0, -1} {
+		certPEM, serial, err := c.IssueAgentCert(csrPEM, id)
+		if err == nil || err.Error() != "id server tidak valid" {
+			t.Errorf("id %d: err = %v", id, err)
+		}
+		if certPEM != nil || serial != "" {
+			t.Errorf("id %d: want no cert issued", id)
+		}
+	}
+}
+
+func TestWriteNewDoesNotClobberExisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(path, []byte("lama"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNew(path, []byte("baru"), 0o600); err == nil {
+		t.Fatal("want error for existing file")
+	}
+	if b, _ := os.ReadFile(path); string(b) != "lama" {
+		t.Fatalf("file existing berubah: %q", b)
+	}
+}
+
+func TestCreateCARemovesKeyWhenCertWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "ca.key")
+	badCertPath := filepath.Join(dir, "tidak-ada", "ca.crt") // parent missing
+	if _, err := createCA(dir, badCertPath, keyPath); err == nil {
+		t.Fatal("want error when cert cannot be written")
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("ca.key harus dihapus setelah kegagalan, stat err = %v", err)
+	}
+	// Direktori tidak tertinggal dalam keadaan "hanya satu file".
+	if _, err := LoadOrCreate(dir); err != nil {
+		t.Fatalf("LoadOrCreate setelah kegagalan: %v", err)
 	}
 }

@@ -35,6 +35,10 @@ const (
 	clockSkew     = 5 * time.Minute
 )
 
+// ErrNotAgent is returned by ServerIDFromCert for certificates whose CN is not
+// "agent-<positive int>".
+var ErrNotAgent = errors.New("sertifikat bukan milik agent")
+
 // CA is the panel's certificate authority.
 type CA struct {
 	Cert *x509.Certificate
@@ -126,6 +130,8 @@ func createCA(dir, certPath, keyPath string) (*CA, error) {
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	if err := writeNew(certPath, certPEM, 0o644); err != nil {
+		// Do not leave a lone ca.key behind: that state is a permanent error.
+		os.Remove(keyPath)
 		return nil, fmt.Errorf("ca: tulis %s: %w", caCertFile, err)
 	}
 	return &CA{Cert: cert, Key: key}, nil
@@ -136,11 +142,17 @@ func writeNew(path string, data []byte, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
+	// The file was created by us (O_EXCL), so on failure remove the partial file.
 	if _, err := f.Write(data); err != nil {
 		f.Close()
+		os.Remove(path)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // CAPEM returns the CA certificate in PEM form.
@@ -152,6 +164,9 @@ func (c *CA) CAPEM() []byte {
 // The subject CN is always "agent-<serverID>"; the CSR's own subject is ignored.
 // The returned serial is the certificate serial as 32 lowercase hex digits.
 func (c *CA) IssueAgentCert(csrPEM []byte, serverID int64) (certPEM []byte, serial string, err error) {
+	if serverID <= 0 {
+		return nil, "", errors.New("id server tidak valid")
+	}
 	block, _ := pem.Decode(csrPEM)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return nil, "", errors.New("csr bukan PEM CERTIFICATE REQUEST")
@@ -242,14 +257,13 @@ func (c *CA) AgentListenerTLS() (*tls.Config, error) {
 // ServerIDFromCert extracts the server ID from a certificate whose CN is
 // "agent-<positive int>".
 func ServerIDFromCert(cert *x509.Certificate) (int64, error) {
-	errNotAgent := errors.New("sertifikat bukan milik agent")
 	rest, ok := strings.CutPrefix(cert.Subject.CommonName, agentCNPrefix)
 	if !ok {
-		return 0, errNotAgent
+		return 0, ErrNotAgent
 	}
 	id, err := strconv.ParseInt(rest, 10, 64)
 	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != rest {
-		return 0, errNotAgent
+		return 0, ErrNotAgent
 	}
 	return id, nil
 }
