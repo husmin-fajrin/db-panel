@@ -7,7 +7,7 @@ import "embed"
 
 // FS contains templates/ (the *.html pages and agent-install.sh.tmpl, the
 // agent install script the panel serves) and static/** (app.css,
-// vendor/alpine.min.js).
+// vendor/alpine-csp.min.js, app.js).
 //
 //go:embed templates static
 var FS embed.FS

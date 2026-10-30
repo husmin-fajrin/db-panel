@@ -5,25 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{template "title" .}} · dbpanel</title>
 <link rel="stylesheet" href="/static/app.css">
-<script>
-// Salin teks elemen ke clipboard. navigator.clipboard hanya ada di HTTPS
-// atau localhost, jadi panel lewat HTTP biasa memakai seleksi + execCommand.
-function salinTeks(el) {
-  const teks = el.textContent.trim();
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(teks);
-  }
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  const sel = window.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(range);
-  document.execCommand("copy");
-  sel.removeAllRanges();
-  return Promise.resolve();
-}
-</script>
-<script defer src="/static/vendor/alpine.min.js"></script>
+<script defer src="/static/app.js"></script>
+<script defer src="/static/vendor/alpine-csp.min.js"></script>
 </head>
 <body class="min-h-screen bg-base-200 flex flex-col">
 {{if .Username}}

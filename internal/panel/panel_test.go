@@ -777,3 +777,137 @@ func TestSessionEpochCache(t *testing.T) {
 		t.Fatal("session created after the reset rejected")
 	}
 }
+
+// wantSecurityHeaders checks the baseline headers on an agent endpoint
+// response (SEC-08); the web package tests the UI classes.
+func wantSecurityHeaders(t *testing.T, what string, h http.Header) {
+	t.Helper()
+	for k, v := range map[string]string{
+		"X-Content-Type-Options":       "nosniff",
+		"X-Frame-Options":              "DENY",
+		"Referrer-Policy":              "same-origin",
+		"Cross-Origin-Resource-Policy": "same-origin",
+		"Cache-Control":                "no-store",
+	} {
+		if got := h.Get(k); got != v {
+			t.Errorf("%s: %s = %q, want %q", what, k, got, v)
+		}
+	}
+	if csp := h.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") ||
+		!strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("%s: Content-Security-Policy = %q", what, csp)
+	}
+}
+
+// TestAgentEndpointsSecurityHeaders: the pairing JSON, the install script
+// and the binary carry the same baseline headers as the UI, and no-store.
+func TestAgentEndpointsSecurityHeaders(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	uiAddr, _ := startPanel(t, p)
+	base := "http://" + uiAddr
+
+	resp, err := http.Post(base+"/agent/pair", "application/json", strings.NewReader(`{"token":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("POST /agent/pair Content-Type = %q", ct)
+	}
+	wantSecurityHeaders(t, "POST /agent/pair", resp.Header)
+
+	srv, err := p.Store.CreateServer("db-hdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp = getWith(t, base+"/agent/install?token="+tok.Token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /agent/install = %d", resp.StatusCode)
+	}
+	wantSecurityHeaders(t, "GET /agent/install", resp.Header)
+	resp = getWith(t, base+"/agent/install?token=bad", nil)
+	wantSecurityHeaders(t, "GET /agent/install (bad token)", resp.Header)
+
+	binDir := filepath.Join(o.DataDir, "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "dbpanel_linux_arm64"), []byte("bin"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp = getWith(t, base+"/agent/bin/arm64?token="+tok.Token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /agent/bin/arm64 = %d", resp.StatusCode)
+	}
+	wantSecurityHeaders(t, "GET /agent/bin/arm64", resp.Header)
+}
+
+// TestHostAllowlist (SEC-14): a Host header that does not name the panel
+// (a DNS name rebound to its address) gets 421, on the UI and /agent/*.
+func TestHostAllowlist(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	o.PublicHost = "panel.rs.example"
+	p := newPanel(t, o)
+	uiAddr, _ := startPanel(t, p)
+	port := portOf(t, uiAddr)
+	do := func(host, path string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest("GET", "http://"+uiAddr+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+	for _, host := range []string{
+		"panel.rs.example:" + port, "PANEL.rs.example", "localhost:" + port,
+		"127.0.0.1:" + port, "[::1]:" + port, "127.0.0.1",
+	} {
+		if resp := do(host, "/login"); resp.StatusCode != http.StatusOK {
+			t.Errorf("Host %q: GET /login = %d, want 200", host, resp.StatusCode)
+		}
+	}
+	// Any address of a local interface is accepted too.
+	for _, ip := range interfaceIPs() {
+		if ip.IsLinkLocalUnicast() {
+			continue
+		}
+		host := net.JoinHostPort(ip.String(), port)
+		if resp := do(host, "/login"); resp.StatusCode != http.StatusOK {
+			t.Errorf("Host %q: GET /login = %d, want 200", host, resp.StatusCode)
+		}
+	}
+	for _, path := range []string{"/login", "/agent/install?token=x", "/static/app.css"} {
+		for _, host := range []string{"evil.example:" + port, "evil.example", "192.0.2.77:" + port, "panel.rs.example.evil.example"} {
+			resp := do(host, path)
+			if resp.StatusCode != http.StatusMisdirectedRequest {
+				t.Errorf("Host %q: GET %s = %d, want 421", host, path, resp.StatusCode)
+			}
+		}
+	}
+	// The body explains what to do, in Indonesian.
+	req, _ := http.NewRequest("GET", "http://"+uiAddr+"/login", nil)
+	req.Host = "evil.example"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), "Alamat host tidak dikenal panel") {
+		t.Errorf("421 body = %q", b)
+	}
+}

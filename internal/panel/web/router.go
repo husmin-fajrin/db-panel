@@ -1,10 +1,13 @@
 package web
 
 import (
+	"errors"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
@@ -77,13 +80,14 @@ func NewRouter(d Deps) http.Handler {
 	}
 	login := auth.RequireLogin(d.Sessions, "/login")
 	authed := func(h http.HandlerFunc) http.Handler { return login(h) }
-	authedPost := func(h http.HandlerFunc) http.Handler { return login(sameOrigin(h)) }
+	post := func(h http.Handler) http.Handler { return sameOrigin(limitForm(h)) }
+	authedPost := func(h http.HandlerFunc) http.Handler { return login(post(h)) }
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /static/", cacheFor(time.Hour, http.StripPrefix("/static/", http.FileServerFS(static))))
+	mux.Handle("GET /static/", cacheFor(time.Hour, http.StripPrefix("/static/", http.FileServerFS(noDirFS{static}))))
 	mux.HandleFunc("GET /login", a.loginForm)
-	mux.Handle("POST /login", sameOrigin(http.HandlerFunc(a.login)))
-	mux.Handle("POST /logout", sameOrigin(http.HandlerFunc(a.logout)))
+	mux.Handle("POST /login", post(http.HandlerFunc(a.login)))
+	mux.Handle("POST /logout", post(http.HandlerFunc(a.logout)))
 	mux.Handle("GET /{$}", authed(a.dashboard))
 	mux.Handle("GET /servers", authed(a.listServers))
 	mux.Handle("GET /servers/new", authed(a.newServerForm))
@@ -92,16 +96,111 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /servers/{id}/token", authedPost(a.newToken))
 	mux.Handle("POST /servers/{id}/delete", authedPost(a.deleteServer))
 	mux.Handle("GET /events", login(d.Events))
-	return noFraming(mux)
+	return SecurityHeaders(mux)
 }
 
-// noFraming forbids other sites from framing the panel (clickjacking).
-func noFraming(h http.Handler) http.Handler {
+// contentSecurityPolicy allows scripts, styles and connections from the
+// panel itself only: no inline script, no eval (the UI uses the CSP build
+// of Alpine.js), no framing. img-src data: is for daisyUI's inline SVG icons.
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; " +
+	"img-src 'self' data:; connect-src 'self'; object-src 'none'; " +
+	"frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+
+// SecurityHeaders sets the baseline security headers on every UI and
+// agent-bootstrap response. Cache-Control defaults to no-store (pages
+// behind the login and anything carrying a pairing token); static assets
+// and the SSE stream replace it.
+func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
-		h.ServeHTTP(w, r)
+		h := w.Header()
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		// Not no-referrer: under it browsers send "Origin: null" on
+		// same-origin form posts (Fetch spec), which sameOrigin must reject,
+		// so nobody could log in. same-origin never sends a Referer (with a
+		// pairing token in it) to another site either.
+		h.Set("Referrer-Policy", "same-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		h.Set("Cache-Control", "no-store")
+		h.Del("Server")
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
 	})
+}
+
+const (
+	msgMisdirected = "Alamat host tidak dikenal panel. Buka panel lewat alamat IP-nya atau nama host yang diatur dengan --public-host."
+	msgTooLarge    = "Permintaan terlalu besar"
+)
+
+// RequireHost answers 421 Misdirected Request when allow rejects the
+// request's Host header (without port), so a page on another site that
+// rebinds its DNS name to the panel's address cannot use the browser to
+// reach the panel (DNS rebinding).
+func RequireHost(allow func(host string) bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host := r.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+			if host == "" || !allow(host) {
+				http.Error(w, msgMisdirected, http.StatusMisdirectedRequest)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+const (
+	maxFormBody     = 64 << 10
+	formReadTimeout = 30 * time.Second
+)
+
+// limitForm caps a form post at 64 KiB read within 30 s, and parses it so
+// that an oversized body is answered with 413 instead of being silently
+// dropped by PostFormValue.
+func limitForm(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Not every ResponseWriter supports deadlines (httptest); the size
+		// cap still applies.
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(formReadTimeout))
+		r.Body = http.MaxBytesReader(w, r.Body, maxFormBody)
+		if err := r.ParseForm(); err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				http.Error(w, msgTooLarge, http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "permintaan tidak valid", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// noDirFS hides directories, so the static file server answers 404 for
+// them instead of listing their contents.
+type noDirFS struct{ fs.FS }
+
+func (f noDirFS) Open(name string) (fs.File, error) {
+	file, err := f.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		file.Close()
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return file, nil
 }
 
 // page returns the layout fields for the current request.

@@ -78,9 +78,11 @@ type Panel struct {
 	probeInterval time.Duration
 	publish       func(event string, data any) // Broker.Publish; tests wrap it
 
-	addrMu    sync.Mutex
-	uiAddr    string // bound UI address once Run listens
-	agentAddr string // bound agent listener address once Run listens
+	addrMu       sync.Mutex
+	uiAddr       string    // bound UI address once Run listens
+	agentAddr    string    // bound agent listener address once Run listens
+	localAddrs   []net.IP  // interface addresses, for hostAllowed
+	localAddrsAt time.Time // when localAddrs was read
 
 	// bgMu guards the background probe goroutines: runCtx is set while Run
 	// is serving, and bgClosed refuses new probes once Run is shutting down.

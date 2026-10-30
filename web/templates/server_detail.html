@@ -4,19 +4,15 @@
   <h1 class="text-2xl font-bold">{{.Server.Name}}</h1>
   {{if .Server.Paired}}
   <span class="badge badge-lg {{if .Online}}badge-success{{else}}badge-error{{end}}"
-        x-data="{ online: {{.Online}} }"
-        x-init="new EventSource('/events').addEventListener('server_status', (e) => { const d = JSON.parse(e.data); if (d.id === {{.Server.ID}}) online = d.online })"
-        :class="{ 'badge-success': online, 'badge-error': !online }"
-        x-text="online ? 'Online' : 'Offline'">{{if .Online}}Online{{else}}Offline{{end}}</span>
+        x-data="serverStatus" data-server-id="{{.Server.ID}}" data-connected="{{.Online}}"
+        :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
   {{else}}
   <span class="badge badge-lg badge-ghost">Belum dipasangkan</span>
   {{end}}
 </div>
 
 {{if not .Server.Paired}}
-<div class="card bg-base-100 shadow mb-6"
-     x-data
-     x-init="new EventSource('/events').addEventListener('server_status', (e) => { const d = JSON.parse(e.data); if (d.id === {{.Server.ID}} && d.online) location.reload() })">
+<div class="card bg-base-100 shadow mb-6" x-data="pairWait" data-server-id="{{.Server.ID}}">
   <div class="card-body gap-3">
     <h2 class="card-title">Pasang agent di server ini</h2>
     {{template "pair-command" .}}
@@ -104,9 +100,9 @@
   {{if not .Local}}
   <div class="flex flex-wrap gap-2">
     {{if .Server.Paired}}
-    <button type="button" class="btn btn-outline" onclick="document.getElementById('modal-pasang-ulang').showModal()">Pasang ulang agent</button>
+    <button type="button" class="btn btn-outline" data-open-modal="modal-pasang-ulang">Pasang ulang agent</button>
     {{end}}
-    <button type="button" class="btn btn-error btn-outline" onclick="document.getElementById('modal-hapus').showModal()">Hapus server</button>
+    <button type="button" class="btn btn-error btn-outline" data-open-modal="modal-hapus">Hapus server</button>
   </div>
   {{end}}
 </div>
@@ -142,10 +138,8 @@
 
 {{define "pair-command"}}
     <p>Masuk ke server <strong>{{.Server.Name}}</strong> lewat SSH, lalu jalankan perintah berikut sebagai pengguna dengan akses <code>sudo</code>:</p>
-    <div class="flex flex-col md:flex-row gap-2 items-stretch" x-data="{ tersalin: false }">
+    <div class="flex flex-col md:flex-row gap-2 items-stretch" x-data="copyCommand">
       <pre class="bg-base-200 rounded-box p-3 overflow-x-auto flex-1 text-sm"><code x-ref="perintah">{{.Command}}</code></pre>
-      <button type="button" class="btn btn-primary"
-              @click="salinTeks($refs.perintah).then(() => { tersalin = true; setTimeout(() => tersalin = false, 2000) })"
-              x-text="tersalin ? 'Tersalin' : 'Salin'">Salin</button>
+      <button type="button" class="btn btn-primary" @click="copy" x-text="buttonLabel">Salin</button>
     </div>
 {{end}}

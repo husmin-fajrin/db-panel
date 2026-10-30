@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,11 +134,14 @@ func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps
 // uiHandler mounts the agent pairing and install endpoints next to the web UI.
 // Agent binaries are served from <data dir>/bin, falling back to the panel's
 // own executable for its architecture.
+//
+// Every request must name the panel in its Host header (see hostAllowed),
+// and the agent endpoints get the same security headers as the UI.
 func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /agent/pair", agentapi.PairHandler(deps))
-	mux.Handle("GET /agent/install", agentapi.InstallScriptHandler(deps, p.PublicURL))
-	mux.Handle("GET /agent/bin/{arch}", agentapi.BinaryHandler(deps, filepath.Join(p.opts.DataDir, "bin")))
+	mux.Handle("POST /agent/pair", web.SecurityHeaders(agentapi.PairHandler(deps)))
+	mux.Handle("GET /agent/install", web.SecurityHeaders(agentapi.InstallScriptHandler(deps, p.PublicURL)))
+	mux.Handle("GET /agent/bin/{arch}", web.SecurityHeaders(agentapi.BinaryHandler(deps, filepath.Join(p.opts.DataDir, "bin"))))
 	mux.Handle("/", web.NewRouter(web.Deps{
 		Store:     p.Store,
 		Hub:       p.Hub,
@@ -149,7 +153,54 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 		Version:   p.opts.Version,
 		Logger:    p.log,
 	}))
-	return mux
+	return web.RequireHost(p.hostAllowed)(mux)
+}
+
+// localAddrsTTL is how long the list of local interface addresses is kept
+// before it is read again (addresses can change, e.g. through DHCP).
+const localAddrsTTL = 30 * time.Second
+
+// hostAllowed reports whether host (from the Host header, port removed) names
+// this panel: the public host, localhost, a loopback address or an address
+// of one of the host's interfaces. Anything else is most likely a DNS name
+// rebound to the panel's address by another site.
+func (p *Panel) hostAllowed(host string) bool {
+	if strings.EqualFold(host, p.opts.PublicHost) || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.Equal(net.ParseIP(p.opts.PublicHost)) {
+		return true
+	}
+	p.addrMu.Lock()
+	defer p.addrMu.Unlock()
+	if p.now().Sub(p.localAddrsAt) >= localAddrsTTL {
+		p.localAddrs, p.localAddrsAt = interfaceIPs(), p.now()
+	}
+	for _, a := range p.localAddrs {
+		if a.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// interfaceIPs returns the addresses of the host's network interfaces.
+func interfaceIPs() []net.IP {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	ips := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok {
+			ips = append(ips, ipn.IP)
+		}
+	}
+	return ips
 }
 
 // agentHandler serves the mTLS agent listener.

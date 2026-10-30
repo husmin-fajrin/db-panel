@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -173,7 +174,7 @@ func TestLoginPageRenders(t *testing.T) {
 	rec := e.do("GET", "/login?next=/servers", nil, nil)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "Masuk", `name="username"`, `name="password"`, `value="/servers"`,
-		`data-theme="corporate"`, "/static/app.css", "/static/vendor/alpine.min.js")
+		`data-theme="corporate"`, "/static/app.css", "/static/app.js", "/static/vendor/alpine-csp.min.js")
 }
 
 func TestLoginWrongPassword(t *testing.T) {
@@ -485,7 +486,9 @@ func TestServerDetailPairedShowsProbe(t *testing.T) {
 	rec := e.do("GET", "/servers/1", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "srv-replika", "Rocky Linux 9.4", "amd64", "5.14.0", "16.0 GB",
-		"/var/lib/mysql", "500.0 GB", "2.0 GB", "8.0.39", "mysqld", "3306", ">Online<")
+		"/var/lib/mysql", "500.0 GB", "2.0 GB", "8.0.39", "mysqld", "3306", ">Online<",
+		// Read by app.js; a data-on* name would get JS escaping (" true ").
+		`x-data="serverStatus" data-server-id="1" data-connected="true"`)
 	if strings.Contains(rec.Body.String(), "/agent/install") {
 		t.Error("paired server shows pairing command")
 	}
@@ -592,22 +595,134 @@ func TestRepairPairedServer(t *testing.T) {
 	}
 }
 
-func TestFramingForbidden(t *testing.T) {
-	e := newEnv(t)
-	for _, p := range []string{"/login", "/servers"} {
-		rec := e.do("GET", p, nil, e.cookie())
-		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
-			t.Errorf("GET %s: X-Frame-Options = %q, want DENY", p, got)
+// baseHeaders are the security headers every UI response carries (SEC-08).
+var baseHeaders = map[string]string{
+	"Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; " +
+		"img-src 'self' data:; connect-src 'self'; object-src 'none'; " +
+		"frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+	"X-Content-Type-Options":       "nosniff",
+	"X-Frame-Options":              "DENY",
+	"Referrer-Policy":              "same-origin",
+	"Permissions-Policy":           "camera=(), microphone=(), geolocation=()",
+	"Cross-Origin-Opener-Policy":   "same-origin",
+	"Cross-Origin-Resource-Policy": "same-origin",
+}
+
+func wantHeaders(t *testing.T, what string, h http.Header, cacheControl string) {
+	t.Helper()
+	for k, v := range baseHeaders {
+		if got := h.Get(k); got != v {
+			t.Errorf("%s: %s = %q, want %q", what, k, got, v)
 		}
-		if got := rec.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
-			t.Errorf("GET %s: Content-Security-Policy = %q", p, got)
+	}
+	if got := h.Get("Cache-Control"); got != cacheControl {
+		t.Errorf("%s: Cache-Control = %q, want %q", what, got, cacheControl)
+	}
+	if got := h.Get("Server"); got != "" {
+		t.Errorf("%s: Server = %q, want none", what, got)
+	}
+	if got := h.Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("%s: HSTS over plain HTTP = %q", what, got)
+	}
+}
+
+// TestSecurityHeaders (SEC-08) checks each UI response class: the login
+// page, a page behind the login, a static asset and the SSE stream.
+func TestSecurityHeaders(t *testing.T) {
+	e := newEnv(t)
+	c := e.cookie()
+	rec := e.do("GET", "/login", nil, nil)
+	wantCode(t, rec, http.StatusOK)
+	wantHeaders(t, "GET /login", rec.Header(), "no-store")
+	for _, p := range []string{"/", "/servers", "/servers/new"} {
+		rec := e.do("GET", p, nil, c)
+		wantCode(t, rec, http.StatusOK)
+		wantHeaders(t, "GET "+p, rec.Header(), "no-store")
+	}
+	e.st.CreateServer("db-header")
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "/agent/install?token=") // the page carries a pairing token
+	wantHeaders(t, "GET /servers/1", rec.Header(), "no-store")
+	rec = e.do("GET", "/static/app.css", nil, nil)
+	wantCode(t, rec, http.StatusOK)
+	wantHeaders(t, "GET /static/app.css", rec.Header(), "public, max-age=3600")
+	rec = e.do("GET", "/nope", nil, c)
+	wantCode(t, rec, http.StatusNotFound)
+	wantHeaders(t, "404", rec.Header(), "no-store")
+
+	ts := httptest.NewServer(e.h)
+	defer ts.Close()
+	req, _ := http.NewRequest("GET", ts.URL+"/events", nil)
+	req.AddCookie(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /events = %d", resp.StatusCode)
+	}
+	wantHeaders(t, "GET /events", resp.Header, "no-cache")
+}
+
+// TestPagesHaveNoInlineScript: the CSP allows scripts from the panel only,
+// so pages must not carry inline scripts or event-handler attributes.
+func TestPagesHaveNoInlineScript(t *testing.T) {
+	e := newEnv(t)
+	c := e.cookie()
+	srv, _ := e.st.CreateServer("db-paired")
+	e.st.MarkPaired(srv.ID, "serial", "10.0.0.1")
+	e.st.CreateServer("db-unpaired")
+	inline := regexp.MustCompile(`(?i)<script(?:\s[^>]*)?>[^<]|\son[a-z]+=|javascript:|\sstyle=`)
+	for _, p := range []string{"/login", "/", "/servers", "/servers/new", "/servers/1", "/servers/2"} {
+		var ck *http.Cookie
+		if p != "/login" {
+			ck = c
+		}
+		rec := e.do("GET", p, nil, ck)
+		wantCode(t, rec, http.StatusOK)
+		if m := inline.FindString(rec.Body.String()); m != "" {
+			t.Errorf("GET %s has inline script/handler/style %q", p, m)
 		}
 	}
 }
 
+// TestStaticNoDirectoryListing (SEC-12).
+func TestStaticNoDirectoryListing(t *testing.T) {
+	e := newEnv(t)
+	for _, p := range []string{"/static/", "/static/vendor/", "/static/vendor"} {
+		rec := e.do("GET", p, nil, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404; body:\n%s", p, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "<a href=") {
+			t.Errorf("GET %s lists the directory", p)
+		}
+	}
+}
+
+// TestFormBodyLimit (SEC-10): form posts are capped at 64 KiB.
+func TestFormBodyLimit(t *testing.T) {
+	e := newEnv(t)
+	big := strings.Repeat("a", 70<<10)
+	rec := e.do("POST", "/login", loginForm("admin", big, ""), nil)
+	wantCode(t, rec, http.StatusRequestEntityTooLarge)
+	wantBody(t, rec, "Permintaan terlalu besar")
+	rec = e.do("POST", "/servers", url.Values{"name": {big}}, e.cookie())
+	wantCode(t, rec, http.StatusRequestEntityTooLarge)
+	if list, _ := e.st.ListServers(); len(list) != 0 {
+		t.Errorf("servers = %d after an oversized post, want 0", len(list))
+	}
+	// A normal post still works.
+	wantCode(t, e.do("POST", "/login", loginForm("admin", testPassword, ""), nil), http.StatusSeeOther)
+}
+
 func TestStaticAssets(t *testing.T) {
 	e := newEnv(t)
-	for _, p := range []string{"/static/app.css", "/static/vendor/alpine.min.js"} {
+	for _, p := range []string{"/static/app.css", "/static/app.js", "/static/vendor/alpine-csp.min.js"} {
 		rec := e.do("GET", p, nil, nil)
 		wantCode(t, rec, http.StatusOK)
 		if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=3600" {
