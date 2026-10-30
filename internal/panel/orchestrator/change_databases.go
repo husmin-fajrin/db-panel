@@ -17,7 +17,11 @@ import (
 //
 // add_databases:
 //
-//	0 catch_up       the replica has executed the master's current GTID set
+//	0 catch_up       the filter is set to the databases followed now (an
+//	                 earlier failed or canceled change may have left another
+//	                 one, or replication stopped; setting it starts
+//	                 replication), then the replica executes the master's
+//	                 current GTID set
 //	1 stop           replication stops (a dump refuses a running replica)
 //	2 dump           the new databases are dumped from the master; the
 //	                 replica keeps its own GTID history (no DropExisting, so
@@ -39,7 +43,9 @@ import (
 //	2 verify         as above
 //
 // The replica is in state changing while the job runs, ready again when it
-// succeeds and failed (its databases unchanged) when it fails.
+// succeeds, and attention (its databases unchanged, LastError naming the
+// step) when it fails or is canceled. A replica in attention can be changed
+// again; it is never offered for re-creation as a failed one is.
 
 func addDatabasesStepNames() []string {
 	return []string{"Menunggu replika menyusul", "Hentikan replikasi", "Salin database baru",
@@ -54,6 +60,7 @@ func removeDatabasesStepNames() []string {
 const (
 	stepAddStop   = 1
 	stepAddDump   = 2
+	stepAddReplay = 3
 	stepAddExpand = 4
 )
 
@@ -137,14 +144,49 @@ func (r *Runner) changeableReplica(serverID int64) (store.Replica, store.Topolog
 	if len(rep.Databases) == 0 {
 		return rep, store.Topology{}, errors.New("replika ini mengikuti semua database")
 	}
-	if rep.State != store.ReplicaReady {
-		return rep, store.Topology{}, fmt.Errorf("replika belum siap (status %s); database hanya bisa diubah saat replika siap", rep.State)
+	if rep.State != store.ReplicaReady && rep.State != store.ReplicaAttention {
+		return rep, store.Topology{}, fmt.Errorf("replika belum siap (status %s); database hanya bisa diubah saat replika siap",
+			replicaStateText(rep.State))
 	}
 	if err := r.refuseBusy(serverID, "server ini"); err != nil {
 		return rep, store.Topology{}, err
 	}
 	topo, err := r.d.Store.GetTopology(rep.TopologyID)
 	return rep, topo, err
+}
+
+// replicaStateText names a replica state in Indonesian.
+func replicaStateText(state string) string {
+	switch state {
+	case store.ReplicaReady:
+		return "siap"
+	case store.ReplicaChanging:
+		return "sedang diubah"
+	case store.ReplicaAttention:
+		return "perlu perhatian"
+	case store.ReplicaFailed:
+		return "gagal"
+	case store.ReplicaCreating:
+		return "sedang dibuat"
+	}
+	return state
+}
+
+// stepTitle is the title of step idx of a database change job of kind.
+func stepTitle(kind string, idx int) string {
+	names := removeDatabasesStepNames()
+	if kind == KindAddDatabases {
+		names = addDatabasesStepNames()
+	}
+	if idx < 0 || idx >= len(names) {
+		return fmt.Sprintf("tahap %d", idx)
+	}
+	return names[idx]
+}
+
+// failedAt is the replica's LastError after a change job failed at idx.
+func failedAt(kind string, idx int, detail string) string {
+	return "gagal saat " + stepTitle(kind, idx) + ": " + detail
 }
 
 // pickDatabases is the selection sorted without duplicates; it may not be
@@ -191,6 +233,12 @@ func (jr *jobRun) removeDatabasesSteps() []step {
 }
 
 func (jr *jobRun) addCatchUp(ctx context.Context, _ bool) (outcome, error) {
+	// The stored list is the filter the replica must have before the
+	// replay in step 3; the agent stops, sets it and starts replication.
+	if err := jr.call(ctx, jr.target(), "mysql.setReplicationFilter",
+		proto.ReplicationFilterParams{Databases: jr.st.Databases}, nil); err != nil {
+		return outcome{}, err
+	}
 	w, err := jr.waitMasterGTID(ctx, catchUpTimeoutSec)
 	if err != nil {
 		return outcome{}, err
@@ -236,7 +284,7 @@ func (jr *jobRun) addDump(ctx context.Context, _ bool) (outcome, error) {
 
 func (jr *jobRun) addReplayUntil(ctx context.Context, _ bool) (outcome, error) {
 	if jr.st.SnapshotGTID == "" {
-		return outcome{}, errors.New("titik dump belum diketahui; ulangi dari tahap " + addDatabasesStepNames()[stepAddDump])
+		return outcome{}, errors.New("titik dump tidak diketahui; jalankan Tambah database lagi dari awal")
 	}
 	jr.logf("info", "Memutar ulang transaksi database lama sampai titik dump, dengan filter lama.")
 	if err := jr.callWithin(ctx, time.Duration(syncTimeoutSec+60)*time.Second, jr.target(), "mysql.startUntil",
@@ -324,19 +372,28 @@ func (jr *jobRun) changeVerify(timeoutSec int) func(context.Context, bool) (outc
 }
 
 // logChangeFailure tells, in the job log, what a failed database change
-// left on the replica. Retry continues from the failed step.
+// left on the replica. Retry continues from the failed step; a new add job
+// restores the filter first.
 func (jr *jobRun) logChangeFailure() {
 	names := strings.Join(jr.st.Change, ", ")
-	switch {
-	case jr.job.Kind == KindRemoveDatabases && jr.idx < 2:
-		jr.logf("warn", "Replikasi di replika mungkin berhenti; tekan Ulangi untuk melanjutkan.")
-	case jr.job.Kind != KindAddDatabases:
-	case jr.idx == stepAddDump:
-		jr.logf("warn", "Database %s mungkin sudah tersalin sebagian ke replika tetapi belum direplikasi; datanya dibiarkan.", names)
-	case jr.idx > stepAddDump && jr.idx <= stepAddExpand:
-		jr.logf("warn", "Database %s sudah tersalin ke replika tetapi belum direplikasi; datanya dibiarkan.", names)
+	const retry = " Tekan Ulangi untuk melanjutkan dari tahap yang gagal."
+	if jr.job.Kind == KindRemoveDatabases {
+		if jr.idx < 2 {
+			jr.logf("warn", "Replikasi di replika mungkin berhenti."+retry)
+		}
+		return
 	}
-	if jr.job.Kind == KindAddDatabases && jr.idx >= stepAddStop && jr.idx < stepAddExpand {
-		jr.logf("warn", "Replikasi di replika belum dijalankan lagi; tekan Ulangi untuk melanjutkan.")
+	switch jr.idx {
+	case stepAddStop:
+		jr.logf("warn", "Replikasi mungkin masih berjalan; belum ada database yang disalin."+retry)
+	case stepAddDump:
+		jr.logf("warn", "Replikasi berhenti. Database %s mungkin sudah tersalin sebagian ke replika tetapi belum "+
+			"direplikasi; datanya dibiarkan."+retry, names)
+	case stepAddReplay:
+		jr.logf("warn", "Replika mungkin masih memutar ulang sampai titik dump. Database %s sudah tersalin ke replika "+
+			"tetapi belum direplikasi; datanya dibiarkan."+retry, names)
+	case stepAddExpand:
+		jr.logf("warn", "Replikasi berhenti. Database %s sudah tersalin ke replika tetapi belum direplikasi; "+
+			"datanya dibiarkan."+retry, names)
 	}
 }

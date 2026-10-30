@@ -28,18 +28,19 @@ var jobIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 // label and daisyUI badge class (replica "failed" is the job's "failed").
 // web/src/app.css lists the classes for Tailwind.
 var statusBadges = map[string]struct{ Label, Class string }{
-	store.ReplicaCreating: {"Sedang dibuat", "badge-info"},
-	store.ReplicaReady:    {"Siap", "badge-success"},
-	store.ReplicaChanging: {"Sedang diubah", "badge-info"},
-	store.JobQueued:       {"Antre", "badge-ghost"},
-	store.StepPending:     {"Antre", "badge-ghost"},
-	store.JobRunning:      {"Berjalan", "badge-info"},
-	store.JobWaiting:      {"Menunggu persetujuan", "badge-warning"},
-	store.JobSucceeded:    {"Selesai", "badge-success"},
-	store.StepDone:        {"Selesai", "badge-success"},
-	store.JobFailed:       {"Gagal", "badge-error"},
-	store.JobCanceled:     {"Dibatalkan", "badge-neutral"},
-	store.StepSkipped:     {"Dilewati", "badge-ghost"},
+	store.ReplicaCreating:  {"Sedang dibuat", "badge-info"},
+	store.ReplicaReady:     {"Siap", "badge-success"},
+	store.ReplicaChanging:  {"Sedang diubah", "badge-info"},
+	store.ReplicaAttention: {"Perlu perhatian", "badge-warning"},
+	store.JobQueued:        {"Antre", "badge-ghost"},
+	store.StepPending:      {"Antre", "badge-ghost"},
+	store.JobRunning:       {"Berjalan", "badge-info"},
+	store.JobWaiting:       {"Menunggu persetujuan", "badge-warning"},
+	store.JobSucceeded:     {"Selesai", "badge-success"},
+	store.StepDone:         {"Selesai", "badge-success"},
+	store.JobFailed:        {"Gagal", "badge-error"},
+	store.JobCanceled:      {"Dibatalkan", "badge-neutral"},
+	store.StepSkipped:      {"Dilewati", "badge-ghost"},
 }
 
 // statusBadgesJSON is statusBadges for app.js, which updates badges live.

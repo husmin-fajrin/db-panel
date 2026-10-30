@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -45,7 +46,7 @@ func (e *env) replica(serverID int64) store.Replica {
 }
 
 func addDatabasesCmds() []string {
-	return []string{"mysql.waitSynced", "mysql.stopReplica", "mysql.dumpFrom", "mysql.startUntil",
+	return []string{"mysql.setReplicationFilter", "mysql.waitSynced", "mysql.stopReplica", "mysql.dumpFrom", "mysql.startUntil",
 		"mysql.setReplicationFilter", "mysql.startReplica", "mysql.waitSynced"}
 }
 
@@ -87,6 +88,13 @@ func TestAddDatabasesSequence(t *testing.T) {
 	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status"})
 	wantCmds(t, "replica", r.cmds(0), addDatabasesCmds())
 
+	// Step 0 first puts back the filter of the databases followed now.
+	filters := r.allParams("mysql.setReplicationFilter")
+	var f0 proto.ReplicationFilterParams
+	json.Unmarshal([]byte(filters[0]), &f0)
+	if len(filters) != 2 || !slices.Equal(f0.Databases, []string{"a"}) {
+		t.Fatalf("setReplicationFilter calls = %v", filters)
+	}
 	waits := r.allParams("mysql.waitSynced")
 	var w0 proto.WaitSyncedParams
 	json.Unmarshal([]byte(waits[0]), &w0)
@@ -141,9 +149,10 @@ func TestAddDatabasesFailsIfReplicaLagging(t *testing.T) {
 		t.Fatalf("job = %+v, steps %+v", j, steps)
 	}
 	wantCmds(t, "master", m.cmds(0), []string{"mysql.status"})
-	wantCmds(t, "replica", r.cmds(0), []string{"mysql.waitSynced"})
+	wantCmds(t, "replica", r.cmds(0), []string{"mysql.setReplicationFilter", "mysql.waitSynced"})
 	rep := e.replica(r.id)
-	if rep.State != store.ReplicaFailed || !strings.Contains(rep.LastError, lag) || !slices.Equal(rep.Databases, []string{"a"}) {
+	if rep.State != store.ReplicaAttention || !strings.HasPrefix(rep.LastError, "gagal saat Menunggu replika menyusul: ") ||
+		!strings.Contains(rep.LastError, lag) || !slices.Equal(rep.Databases, []string{"a"}) {
 		t.Fatalf("replica = %+v", rep)
 	}
 }
@@ -167,8 +176,12 @@ func TestAddDatabasesRetryAfterReplayFailure(t *testing.T) {
 	if log := e.jobLog(id); !strings.Contains(log, "Database b sudah tersalin ke replika tetapi belum direplikasi") {
 		t.Fatalf("job log lacks the leftover note:\n%s", log)
 	}
-	if rep := e.replica(r.id); rep.State != store.ReplicaFailed || !slices.Equal(rep.Databases, []string{"a"}) {
+	if rep := e.replica(r.id); rep.State != store.ReplicaAttention ||
+		!strings.HasPrefix(rep.LastError, "gagal saat Putar ulang sampai titik dump: ") || !slices.Equal(rep.Databases, []string{"a"}) {
 		t.Fatalf("replica = %+v", rep)
+	}
+	if log := e.jobLog(id); !strings.Contains(log, "Replika mungkin masih memutar ulang sampai titik dump") {
+		t.Fatalf("job log lacks the replication note:\n%s", log)
 	}
 
 	r.reply("mysql.startUntil", proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "No"})
@@ -284,7 +297,8 @@ func TestRemoveDatabasesDropFailureRestartsReplication(t *testing.T) {
 	}
 	wantCmds(t, "replica", r.cmds(0), []string{"mysql.stopReplica", "mysql.setReplicationFilter", "mysql.startReplica",
 		"mysql.stopReplica", "mysql.dropDatabases", "mysql.startReplica"})
-	if rep := e.replica(r.id); rep.State != store.ReplicaFailed || !slices.Equal(rep.Databases, []string{"a", "b"}) {
+	if rep := e.replica(r.id); rep.State != store.ReplicaAttention || !strings.HasPrefix(rep.LastError, "gagal saat Hapus data: ") ||
+		!slices.Equal(rep.Databases, []string{"a", "b"}) {
 		t.Fatalf("replica = %+v", rep)
 	}
 }
@@ -341,9 +355,11 @@ func TestChangeDatabasesRefusals(t *testing.T) {
 	}
 
 	// Not ready: a replica being created, changed or failed.
-	for _, state := range []string{store.ReplicaCreating, store.ReplicaChanging, store.ReplicaFailed} {
+	for state, label := range map[string]string{store.ReplicaCreating: "sedang dibuat", store.ReplicaChanging: "sedang diubah",
+		store.ReplicaFailed: "gagal"} {
 		e.st.SetReplicaState(two.id, state, "")
-		if _, err := e.r.StartRemoveDatabases(ctx, two.id, []string{"b"}, false); err == nil || !strings.Contains(err.Error(), "replika belum siap") {
+		if _, err := e.r.StartRemoveDatabases(ctx, two.id, []string{"b"}, false); err == nil ||
+			!strings.Contains(err.Error(), "replika belum siap (status "+label+")") {
 			t.Errorf("remove in state %s: %v", state, err)
 		}
 	}
@@ -367,7 +383,10 @@ func TestChangeDatabasesRefusals(t *testing.T) {
 	}
 }
 
-func TestAddDatabasesCancelMarksReplicaFailed(t *testing.T) {
+// A canceled add job leaves the replica stopped and in state attention; a
+// new add job puts the old filter back, which starts replication again,
+// and proceeds.
+func TestAddDatabasesCancelMarksReplicaAttention(t *testing.T) {
 	e := newEnv(t)
 	_, topo := e.readyMaster("db-master")
 	r := e.followingReplica(topo, "a")
@@ -385,8 +404,71 @@ func TestAddDatabasesCancelMarksReplicaFailed(t *testing.T) {
 	if r.count("job.cancel") != 1 {
 		t.Fatalf("agent job not canceled; calls %v", r.cmds(0))
 	}
-	if rep := e.replica(r.id); rep.State != store.ReplicaFailed || rep.LastError != "dibatalkan oleh pengguna" ||
+	if rep := e.replica(r.id); rep.State != store.ReplicaAttention || rep.LastError != "dibatalkan saat Salin database baru" ||
 		!slices.Equal(rep.Databases, []string{"a"}) {
+		t.Fatalf("replica = %+v", rep)
+	}
+
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		return proto.SnapshotResult{Method: "dump", Bytes: 200, GTIDExecuted: dumpGTID}, nil
+	})
+	from := r.mark()
+	id, err = e.r.StartAddDatabases(context.Background(), r.id, []string{"b"})
+	if err != nil {
+		t.Fatalf("StartAddDatabases on an attention replica: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	wantCmds(t, "replica", r.cmds(from), addDatabasesCmds())
+	filters := r.allParams("mysql.setReplicationFilter")
+	var first proto.ReplicationFilterParams
+	json.Unmarshal([]byte(filters[len(filters)-2]), &first)
+	if !slices.Equal(first.Databases, []string{"a"}) {
+		t.Fatalf("first filter of the new job = %+v", first)
+	}
+	if rep := e.replica(r.id); rep.State != store.ReplicaReady || rep.LastError != "" || !slices.Equal(rep.Databases, []string{"a", "b"}) {
+		t.Fatalf("replica = %+v", rep)
+	}
+}
+
+// The failure note describes the state the failed step left: a stop that
+// failed may have left replication running, and nothing was copied.
+func TestAddDatabasesStopFailureNote(t *testing.T) {
+	e := newEnv(t)
+	_, topo := e.readyMaster("db-master")
+	r := e.followingReplica(topo, "a")
+	r.fail("mysql.stopReplica", "STOP REPLICA gagal")
+
+	id, err := e.r.StartAddDatabases(context.Background(), r.id, []string{"b"})
+	if err != nil {
+		t.Fatalf("StartAddDatabases: %v", err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != 1 {
+		t.Fatalf("job = %+v", j)
+	}
+	if log := e.jobLog(id); !strings.Contains(log, "Replikasi mungkin masih berjalan") || strings.Contains(log, "tersalin") {
+		t.Fatalf("job log:\n%s", log)
+	}
+}
+
+// A change job cut off by a panel restart leaves the replica in attention.
+func TestResumeMarksChangingReplicaAttention(t *testing.T) {
+	e := newEnv(t)
+	_, topo := e.readyMaster("db-master")
+	r := e.followingReplica(topo, "a")
+	const id = "cccccccccccccccccccccccccccccccc"
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: KindAddDatabases, ServerID: r.id, ParamsJSON: "{}"},
+		addDatabasesStepNames()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobRunning, 2, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	e.st.SetReplicaState(r.id, store.ReplicaChanging, "")
+	e.r.Resume(context.Background())
+	e.waitJob(id, store.JobFailed)
+	if rep := e.replica(r.id); rep.State != store.ReplicaAttention ||
+		rep.LastError != "gagal saat Salin database baru: "+resumeError {
 		t.Fatalf("replica = %+v", rep)
 	}
 }

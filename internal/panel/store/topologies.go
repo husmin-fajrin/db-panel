@@ -41,7 +41,11 @@ const (
 	ReplicaCreating = "creating"
 	ReplicaReady    = "ready"
 	ReplicaChanging = "changing" // a job adds or removes databases
-	ReplicaFailed   = "failed"
+	// ReplicaAttention: a ready replica whose last change of databases
+	// failed or was canceled (LastError says where). It still replicates,
+	// possibly stopped; unlike ReplicaFailed it is never re-created.
+	ReplicaAttention = "attention"
+	ReplicaFailed    = "failed" // its creation failed
 )
 
 // Replica is a server that follows a topology's master.

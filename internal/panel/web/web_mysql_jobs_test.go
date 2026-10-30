@@ -493,7 +493,7 @@ func TestJobStatusLabels(t *testing.T) {
 		store.JobFailed: "Gagal", store.JobCanceled: "Dibatalkan",
 		store.StepSkipped: "Dilewati", "aneh": "aneh",
 		store.ReplicaCreating: "Sedang dibuat", store.ReplicaReady: "Siap", // ReplicaFailed is JobFailed
-		store.ReplicaChanging: "Sedang diubah",
+		store.ReplicaChanging: "Sedang diubah", store.ReplicaAttention: "Perlu perhatian",
 	} {
 		if got := web.StatusLabel(status); got != want {
 			t.Errorf("StatusLabel(%q) = %q, want %q", status, got, want)
@@ -720,6 +720,69 @@ func TestReplicaDatabasesPageListsAndPosts(t *testing.T) {
 	if len(f.callList()) != n {
 		t.Errorf("orchestrator called: %q", f.callList()[n:])
 	}
+
+	// A replica whose last change failed can be changed again; its error shows.
+	const lastErr = "gagal saat Salin database baru: disk penuh"
+	e.st.SetReplicaState(2, store.ReplicaAttention, lastErr)
+	rec = e.do("GET", "/replicas/2", nil, c)
+	wantBody(t, rec, "Perlu perhatian", lastErr, `href="/replicas/2/databases#tambah"`)
+	wantNoBody(t, rec, "disabled")
+	rec = e.do("GET", "/replicas/2/databases", nil, c)
+	wantBody(t, rec, "Perlu perhatian", lastErr, `action="/replicas/2/databases/add"`, `action="/replicas/2/databases/remove"`)
+	wantNoBody(t, rec, "hanya bisa diubah")
+	rec = post("/replicas/2/databases/add", url.Values{"databases": {"arsip"}})
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "add-databases 2 arsip", "remove-databases 2 gudang drop=true", "remove-databases 2 toko drop=false",
+		"add-databases 2 arsip", "add-databases 2 arsip")
+}
+
+// Without the master's inventory the page says so instead of offering nothing.
+func TestReplicaDatabasesPageWithoutMasterInventory(t *testing.T) {
+	e, f, _ := newMySQLEnv(t)
+	c := e.cookie()
+	master := e.pairedOnline(t, "db-master")
+	rep := e.pairedOnline(t, "db-replika")
+	topo, err := e.st.CreateTopology(master.ID, "dbpanel_repl", nil, "10.0.0.1", 3306)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddReplica(topo.ID, rep.ID, []string{"gudang", "toko"}); err != nil {
+		t.Fatal(err)
+	}
+	e.st.SetReplicaState(rep.ID, store.ReplicaReady, "")
+
+	const msg = "database master belum ada; hubungkan MySQL master dulu"
+	rec := e.do("GET", "/replicas/2/databases", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, msg, `action="/replicas/2/databases/remove"`)
+	wantNoBody(t, rec, "Master belum punya database pengguna", "Semua database master sudah diikuti")
+	rec = e.do("POST", "/replicas/2/databases/add", url.Values{"databases": {"arsip"}}, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, msg)
+	wantCalls(t, f)
+}
+
+// A replica that needs attention after a failed change is a working
+// replica: the create-replica form does not offer it for re-creation.
+func TestAttentionReplicaNotOfferedForCreate(t *testing.T) {
+	e, _, _ := newMySQLEnv(t)
+	c := e.cookie()
+	e.subsetReplica(t, []string{"toko"}, shopDatabases...)
+	failed := e.pairedOnline(t, "db-gagal") // 3: an earlier create failed
+	topo, err := e.st.GetTopologyByMaster(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddReplica(topo.ID, failed.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.st.SetReplicaState(failed.ID, store.ReplicaFailed, "disk penuh")
+	e.st.SetReplicaState(2, store.ReplicaAttention, "dibatalkan saat Salin database baru")
+
+	rec := e.do("GET", "/masters/1/replicas/new", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `<option value="3">db-gagal`)
+	wantNoBody(t, rec, `<option value="2"`)
 }
 
 func TestChangeDatabasesJobLabels(t *testing.T) {

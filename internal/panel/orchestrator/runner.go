@@ -461,8 +461,12 @@ func (r *Runner) Resume(ctx context.Context) {
 		if _, err := r.d.Store.AppendJobLog(j.ID, "error", resumeError, now); err != nil {
 			r.log.Warn("job log", "job", j.ID, "err", err)
 		}
+		state, lastErr := store.ReplicaFailed, resumeError
+		if changesDatabases(j.Kind) {
+			state, lastErr = store.ReplicaAttention, failedAt(j.Kind, j.CurrentStep, resumeError)
+		}
 		if j.Kind == KindCreateReplica || changesDatabases(j.Kind) {
-			if err := r.d.Store.SetReplicaState(j.ServerID, store.ReplicaFailed, resumeError); err != nil &&
+			if err := r.d.Store.SetReplicaState(j.ServerID, state, lastErr); err != nil &&
 				!errors.Is(err, store.ErrNotFound) {
 				r.log.Warn("replica state on resume", "job", j.ID, "err", err)
 			}
@@ -523,8 +527,9 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 			r.log.Warn("remove replica on cancel", "job", j.ID, "err", err)
 		}
 	case changesDatabases(j.Kind):
-		// Replication is left as the canceled step left it.
-		jr.setReplicaState(store.ReplicaFailed, msg)
+		// Replication is left as the canceled step left it; the next
+		// add job restores the filter and starts it.
+		jr.setReplicaState(store.ReplicaAttention, "dibatalkan saat "+stepTitle(j.Kind, j.CurrentStep))
 	}
 	jr.setStep(store.StepFailed, msg)
 	jr.setJob(store.JobCanceled, msg)
@@ -682,7 +687,7 @@ func (jr *jobRun) fail(err error) {
 		jr.setReplicaState(store.ReplicaFailed, msg)
 	case changesDatabases(jr.job.Kind):
 		jr.logChangeFailure()
-		jr.setReplicaState(store.ReplicaFailed, msg)
+		jr.setReplicaState(store.ReplicaAttention, failedAt(jr.job.Kind, jr.idx, err.Error()))
 	}
 	jr.setJob(store.JobFailed, msg)
 }

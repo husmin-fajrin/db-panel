@@ -36,7 +36,8 @@ const (
 	msgReplicaTargetBad  = "Server tujuan tidak memenuhi syarat"
 	msgReplicaConfirm    = "Replika belum dibuat: centang kotak persetujuan bahwa server tujuan dikunci hanya-baca dan database lamanya dibuang."
 	msgReplicaAll        = "replika ini mengikuti semua database"
-	msgReplicaNotReady   = "Database replika hanya bisa diubah saat replika berstatus Siap."
+	msgReplicaNotReady   = "Database replika hanya bisa diubah saat replika berstatus Siap atau Perlu perhatian."
+	msgNoMasterInventory = "daftar database master belum ada; hubungkan MySQL master dulu"
 	msgPickDatabase      = "Pilih minimal satu database."
 	msgRemoveAll         = "Lepas semua database tidak didukung; hapus replika ini bila tidak diperlukan lagi."
 
@@ -355,12 +356,12 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 
 type replicaPage struct {
 	Page
-	Server  store.Server
-	Online  bool
-	Replica store.Replica
-	Ready   bool // its databases can be changed
-	Master  store.Server
-	Jobs    []jobRow
+	Server    store.Server
+	Online    bool
+	Replica   store.Replica
+	CanChange bool // its databases can be changed now
+	Master    store.Server
+	Jobs      []jobRow
 }
 
 // replicaFromPath loads the server of {id} and its replica row, answering
@@ -397,7 +398,7 @@ func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := replicaPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Replica: rep,
-		Ready: rep.State == store.ReplicaReady}
+		CanChange: canChangeDatabases(rep)}
 	var err error
 	if p.Master, err = a.replicaMaster(rep); err != nil {
 		a.internalError(w, "get master", err)
@@ -414,6 +415,12 @@ func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
 	a.render.Render(w, "replica_detail", p)
 }
 
+// canChangeDatabases reports whether the replica's databases can be
+// changed now: it is ready, or its last change failed (attention).
+func canChangeDatabases(rep store.Replica) bool {
+	return rep.State == store.ReplicaReady || rep.State == store.ReplicaAttention
+}
+
 // replicaDatabase is one database on the replica's databases page.
 type replicaDatabase struct {
 	Name     string
@@ -424,13 +431,14 @@ type replicaDatabase struct {
 
 type replicaDatabasesPage struct {
 	Page
-	Server     store.Server
-	Master     store.Server
-	Replica    store.Replica
-	Ready      bool
-	Databases  []replicaDatabase // the master's, then followed ones it no longer has
-	Unfollowed []replicaDatabase // can be added
-	Followed   []replicaDatabase // can be removed
+	Server      store.Server
+	Master      store.Server
+	Replica     store.Replica
+	CanChange   bool
+	NoInventory bool              // the master's inventory was never read
+	Databases   []replicaDatabase // the master's, then followed ones it no longer has
+	Unfollowed  []replicaDatabase // can be added
+	Followed    []replicaDatabase // can be removed
 }
 
 // subsetReplicaFromPath is replicaFromPath for a replica that follows a
@@ -446,12 +454,15 @@ func (a *app) subsetReplicaFromPath(w http.ResponseWriter, r *http.Request) (sto
 }
 
 func (a *app) replicaDatabasesForm(r *http.Request, srv store.Server, rep store.Replica) (replicaDatabasesPage, error) {
-	p := replicaDatabasesPage{Page: a.page(r), Server: srv, Replica: rep, Ready: rep.State == store.ReplicaReady}
+	p := replicaDatabasesPage{Page: a.page(r), Server: srv, Replica: rep, CanChange: canChangeDatabases(rep)}
 	var err error
 	if p.Master, err = a.replicaMaster(rep); err != nil {
 		return p, err
 	}
-	inv, err := a.inventory(p.Master.ID)
+	inv, err := a.Store.GetInventory(p.Master.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		p.NoInventory, err = true, nil
+	}
 	if err != nil {
 		return p, err
 	}
@@ -489,6 +500,9 @@ func (a *app) replicaDatabases(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 	a.changeReplicaDatabases(w, r, "add", func(p replicaDatabasesPage, selected []string) (string, string) {
+		if p.NoInventory {
+			return "", msgNoMasterInventory
+		}
 		for _, d := range selected {
 			i := slices.IndexFunc(p.Databases, func(rd replicaDatabase) bool { return rd.Name == d })
 			switch {
@@ -543,7 +557,7 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 	refusal := ""
 	id := ""
 	switch {
-	case !p.Ready:
+	case !p.CanChange:
 		refusal = msgReplicaNotReady
 	case len(selected) == 0:
 		refusal = msgPickDatabase

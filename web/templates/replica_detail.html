@@ -21,7 +21,7 @@
     </table>
     {{if .Replica.Databases}}
     <div class="flex flex-wrap gap-2 mt-2">
-      {{if .Ready}}
+      {{if .CanChange}}
       <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#tambah">Tambah database</a>
       <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#lepas">Lepas database</a>
       {{else}}
@@ -29,7 +29,7 @@
       <button type="button" class="btn btn-sm" disabled>Lepas database</button>
       {{end}}
     </div>
-    {{if not .Ready}}<p class="text-sm text-base-content/70">Database replika hanya bisa diubah saat replika berstatus Siap.</p>{{end}}
+    {{if not .CanChange}}<p class="text-sm text-base-content/70">Database replika hanya bisa diubah saat replika berstatus Siap atau Perlu perhatian.</p>{{end}}
     {{end}}
   </div>
 </div>

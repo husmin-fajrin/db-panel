@@ -6,8 +6,14 @@
 </div>
 <p class="mb-4">Master: <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></p>
 
-{{if not .Ready}}
-<div role="alert" class="alert alert-warning mb-4"><span>Database replika hanya bisa diubah saat replika berstatus Siap.</span></div>
+{{if not .CanChange}}
+<div role="alert" class="alert alert-warning mb-4"><span>Database replika hanya bisa diubah saat replika berstatus Siap atau Perlu perhatian.</span></div>
+{{end}}
+{{with .Replica.LastError}}
+<div role="alert" class="alert alert-warning mb-4"><span>Kesalahan terakhir: {{.}}</span></div>
+{{end}}
+{{if .NoInventory}}
+<div role="alert" class="alert alert-info mb-4"><span>Daftar database master belum ada; hubungkan MySQL master dulu di <a class="link" href="/servers/{{.Master.ID}}">halaman server master</a>.</span></div>
 {{end}}
 
 <div class="card bg-base-100 shadow mb-6">
@@ -24,7 +30,7 @@
             <td>{{if .Followed}}<span class="badge badge-success">Diikuti</span>{{else}}<span class="badge badge-ghost">Tidak diikuti</span>{{end}}</td>
           </tr>
           {{else}}
-          <tr><td colspan="3">Master belum punya database pengguna.</td></tr>
+          {{if not .NoInventory}}<tr><td colspan="3">Master belum punya database pengguna.</td></tr>{{end}}
           {{end}}
         </tbody>
       </table>
@@ -32,7 +38,7 @@
   </div>
 </div>
 
-{{if .Ready}}
+{{if .CanChange}}
 <form method="post" action="/replicas/{{.Server.ID}}/databases/add" id="tambah" class="card bg-base-100 shadow mb-6">
   <div class="card-body gap-4">
     <h2 class="card-title">Tambah database</h2>
@@ -50,6 +56,8 @@
     <div class="card-actions justify-end">
       <button type="submit" class="btn btn-primary">Tambah database</button>
     </div>
+    {{else if .NoInventory}}
+    <p>Daftar database master belum ada; hubungkan MySQL master dulu.</p>
     {{else}}
     <p>Semua database master sudah diikuti replika ini.</p>
     {{end}}
