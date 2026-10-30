@@ -39,8 +39,9 @@ main() {
 	if [ "$code" != 200 ]; then
 		die "Panel menolak unduhan binary (HTTP $code): $(head -c 512 "$BIN.new")"
 	fi
-	# A proxy or captive portal can answer 200 with an HTML page.
-	if ! head -c 4 "$BIN.new" | cmp -s - <(printf '\177ELF'); then
+	# A proxy or captive portal can answer 200 with an HTML page. od, not
+	# cmp: minimal RHEL images lack diffutils.
+	if [ "$(head -c 4 "$BIN.new" | od -An -tx1 | tr -d ' \n')" != 7f454c46 ]; then
 		die "Unduhan bukan binary yang valid (mungkin proxy/portal jaringan). Periksa koneksi ke panel."
 	fi
 	chmod 0755 "$BIN.new"

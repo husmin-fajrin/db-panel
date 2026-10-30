@@ -12,6 +12,7 @@ Kebutuhan server: Linux amd64/arm64 dengan `systemd`, `curl` dan `sudo`.
 
 ## Pasang panel
 
+Ganti `main` dengan branch/tag rilis yang dipakai.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/husmin-fajrin/db-panel/main/scripts/install.sh | sudo bash
 ```
@@ -30,8 +31,11 @@ sudo DBPANEL_BIN=/path/ke/dbpanel bash install.sh
 ```
 
 **Binary agent untuk arsitektur lain:** panel selalu bisa membagikan
-binary-nya sendiri ke server dengan arsitektur yang sama. Agar server arm64
-bisa dipasangkan ke panel amd64 (atau sebaliknya), berikan direktori berisi
+binary-nya sendiri ke server dengan arsitektur yang sama. Pemasangan online
+juga mengunduh `dbpanel_linux_amd64` dan `dbpanel_linux_arm64` dari rilis
+yang sama (diperiksa dengan `SHA256SUMS`), sehingga server arm64 bisa
+dipasangkan ke panel amd64 dan sebaliknya; bila unduhan itu gagal, skrip
+hanya memberi peringatan. Untuk pemasangan offline, berikan direktori berisi
 `dbpanel_linux_amd64` dan/atau `dbpanel_linux_arm64`. Berkas ini dibuat oleh
 `make release` (`make build` hanya membuat `dist/dbpanel`):
 
@@ -65,7 +69,7 @@ sudo dbpanel panel reset-password
 
 1. Di panel buka **Server > Tambah server**, isi nama, simpan.
 2. Salin perintah pemasangan yang ditampilkan, misalnya
-   `curl -fsSL http://192.168.1.10:8080/agent/install?token=... | sudo bash`.
+   `curl -fsSL 'http://192.168.1.10:8080/agent/install?token=...' | sudo bash`.
 3. Jalankan perintah itu di server database. Binary agent diunduh dari
    panel (tidak perlu internet), service `dbpanel-agent` dipasang, dan
    agent dipasangkan dengan token sekali pakai.
@@ -74,6 +78,18 @@ sudo dbpanel panel reset-password
 Server database harus bisa menjangkau panel di port 8080 (unduhan dan
 pairing) dan 8443 (koneksi agent). Bila pairing gagal (token kedaluwarsa
 atau sudah dipakai), buat token baru dari halaman server lalu ulangi.
+
+**Pasang ulang agent:** bila server database dipasang ulang atau isi
+`/etc/dbpanel` di server itu hilang, buka halaman server lalu klik **Pasang
+ulang agent**. Panel membuat token baru dan menampilkan perintah pemasangan;
+jalankan perintah itu di server tersebut. Agent lama tetap bekerja sampai
+agent baru berhasil dipasangkan; setelah itu sertifikat agent lama tidak
+diterima lagi. Server panel sendiri tidak perlu (dan tidak bisa) dipasangi
+agent: agent-nya tertanam di panel.
+
+**Hapus server:** koneksi agent-nya langsung diputus dan sertifikatnya
+ditolak. Service `dbpanel-agent` di server itu tetap terpasang; matikan
+dengan `sudo systemctl disable --now dbpanel-agent`.
 
 ## Alamat panel untuk agent
 
