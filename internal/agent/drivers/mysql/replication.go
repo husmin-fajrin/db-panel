@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -25,6 +26,9 @@ import (
 const (
 	// maxGTIDSetLen bounds a GTID set taken from the panel.
 	maxGTIDSetLen = 64 << 10
+	// maxSourcePasswordLen is the longest SOURCE_PASSWORD MySQL accepts
+	// (longer ones fail with error 3056).
+	maxSourcePasswordLen = 32
 	// maxWaitSec bounds mysql.waitSynced and mysql.startUntil.
 	maxWaitSec = 86400
 	// startCheckTimeout is how long mysql.startReplica watches the
@@ -203,6 +207,8 @@ func validateSource(p *proto.ReplicationSourceParams) error {
 		return bad("password user replikasi wajib diisi")
 	case strings.ContainsFunc(p.Password, unicode.IsControl):
 		return bad("password user replikasi tidak boleh berisi karakter kontrol")
+	case utf8.RuneCountInString(p.Password) > maxSourcePasswordLen:
+		return bad("password user replikasi paling panjang %d karakter (batas SOURCE_PASSWORD MySQL)", maxSourcePasswordLen)
 	}
 	return validateFilter(p.Databases)
 }
@@ -358,7 +364,8 @@ func executed(ctx context.Context, db *sql.DB, set string) (bool, error) {
 }
 
 // ConfigureReplication points the default channel at p's master with p's
-// filter. It stops a configured replica first and does not start it.
+// filter. It stops a configured replica first and does not start it. A
+// refused source leaves the replica as it was, only stopped.
 func ConfigureReplication(ctx context.Context, h Host, p proto.ReplicationSourceParams) (*proto.ReplicaStatus, error) {
 	db, conn, err := adminConn(ctx, h)
 	if err != nil {
@@ -380,15 +387,18 @@ func ConfigureReplication(ctx context.Context, h Host, p proto.ReplicationSource
 	if err != nil {
 		return nil, err
 	}
-	if err := execConn(ctx, conn, filterStatement(p.Databases, quote)); err != nil {
-		return nil, fmt.Errorf("atur filter replikasi: %w", err)
-	}
-	// The statement holds the password: neither it nor a server error
-	// quoting it reaches an error or a log.
+	// The source first: if MySQL refuses it, the replica keeps its old
+	// source and filter. Without FOR CHANNEL the filter statement then
+	// replaces the channel's filter, including one a new channel copied
+	// from stale global filters. The source statement holds the password:
+	// neither it nor a server error quoting it reaches an error or a log.
 	password := quote(p.Password)
 	if _, err := conn.ExecContext(ctx, sourceStatement(p, quote)); err != nil {
 		msg := strings.ReplaceAll(strings.ReplaceAll(err.Error(), password, "'***'"), p.Password, "***")
 		return nil, fmt.Errorf("arahkan replikasi ke %s: %s", net.JoinHostPort(p.Host, strconv.Itoa(p.Port)), msg)
+	}
+	if err := execConn(ctx, conn, filterStatement(p.Databases, quote)); err != nil {
+		return nil, fmt.Errorf("atur filter replikasi: %w", err)
 	}
 	return currentStatus(ctx, db)
 }
@@ -522,9 +532,10 @@ func ResetReplica(ctx context.Context, h Host) error {
 }
 
 // WaitSynced waits up to p.TimeoutSec for this server to execute
-// p.GTIDSet. It answers at once when the set is executed or the applier is
-// not running (it could not catch up), and otherwise waits in slices so an
-// applier that stops meanwhile ends the wait.
+// p.GTIDSet. It answers at once when the set is executed, or when the
+// applier is not running or the receiver stopped on an error (the set
+// cannot arrive), and otherwise waits in slices so a thread that stops
+// meanwhile ends the wait.
 func WaitSynced(ctx context.Context, h Host, p proto.WaitSyncedParams) (proto.WaitSyncedResult, error) {
 	var res proto.WaitSyncedResult
 	db, err := openAdmin(ctx, h)
@@ -549,7 +560,9 @@ func WaitSynced(ctx context.Context, h Host, p proto.WaitSyncedParams) (proto.Wa
 			return res, err
 		}
 		left := time.Until(deadline)
-		if rs == nil || rs.SQLRunning != "Yes" || left <= 0 {
+		// A stopped applier, or a receiver that stopped on an error, cannot
+		// bring the set in: answer now rather than at the timeout.
+		if rs == nil || rs.SQLRunning != "Yes" || (rs.IORunning == "No" && rs.LastIOErrno != 0) || left <= 0 {
 			break
 		}
 		secs := min(slice, int(math.Ceil(left.Seconds())))

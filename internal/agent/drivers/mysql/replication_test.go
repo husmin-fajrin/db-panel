@@ -1,6 +1,7 @@
 package mysql_test
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -134,6 +135,7 @@ func TestReplicationRejectsBadParams(t *testing.T) {
 		"user":          func(p *proto.ReplicationSourceParams) { p.User = "re'pl" },
 		"no password":   func(p *proto.ReplicationSourceParams) { p.Password = "" },
 		"control char":  func(p *proto.ReplicationSourceParams) { p.Password = "a\nb" },
+		"long password": func(p *proto.ReplicationSourceParams) { p.Password = strings.Repeat("é", 33) },
 		"db name":       func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a%"} },
 		"db quote":      func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a'"} },
 		"system db":     func(p *proto.ReplicationSourceParams) { p.Databases = []string{"mysql"} },
@@ -147,6 +149,13 @@ func TestReplicationRejectsBadParams(t *testing.T) {
 		} else if strings.Contains(r.Error.Message, p.Password) && p.Password != "" {
 			t.Errorf("%s: error shows the password: %s", name, r.Error.Message)
 		}
+	}
+	// 32 characters is MySQL's SOURCE_PASSWORD limit, counted in characters:
+	// this one passes validation and fails only for want of a server.
+	p := good
+	p.Password = strings.Repeat("é", 32)
+	if r := dispatch(t, nil, "mysql.configureReplication", p); r.OK || r.Error.Code == proto.CodeBadParams {
+		t.Errorf("32-character password: %+v", r)
 	}
 	if r := dispatch(t, nil, "mysql.setReplicationFilter", proto.ReplicationFilterParams{Databases: []string{"a.b"}}); r.OK || r.Error.Code != proto.CodeBadParams {
 		t.Errorf("setReplicationFilter a.b: %+v", r)
@@ -331,6 +340,9 @@ func TestStartUntilStopsAtGTID(t *testing.T) {
 		if rs.SQLRunning != "No" || rs.LastSQLErrno != 0 {
 			t.Errorf("after startUntil: %+v", rs)
 		}
+		if rs.IORunning != "Yes" && rs.IORunning != "Connecting" {
+			t.Errorf("receiver after startUntil = %q, want it still running", rs.IORunning)
+		}
 		if got := gtidExecuted(t, rdb); got != until {
 			t.Errorf("replica gtid_executed = %q, want %q", got, until)
 		}
@@ -432,5 +444,59 @@ func TestWaitSyncedTimesOut(t *testing.T) {
 		proto.WaitSyncedParams{GTIDSet: res.Executed, TimeoutSec: 5}))
 	if !res.Synced {
 		t.Errorf("waitSynced on its own set = %+v", res)
+	}
+
+	// A receiver stopped on a fatal error (here: the master's server_id)
+	// fetches nothing more: the answer comes at once too.
+	rdb := rootDB(t, replica)
+	execAll(t, rdb, fmt.Sprintf("SET GLOBAL server_id = %d", master.ServerID))
+	dispatch(t, h, "mysql.startReplica", nil) // may answer before the receiver fails
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		if rs := status(t, h).Replica; rs != nil && rs.IORunning == "No" && rs.LastIOErrno != 0 {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("the receiver did not fail on the master's server_id: %+v", rs)
+		}
+	}
+	start = time.Now()
+	res = decode[proto.WaitSyncedResult](t, dispatch(t, h, "mysql.waitSynced",
+		proto.WaitSyncedParams{GTIDSet: gtidExecuted(t, mdb), TimeoutSec: 60}))
+	if took := time.Since(start); res.Synced || took > 5*time.Second {
+		t.Errorf("waitSynced with the receiver failed = %+v after %v", res, took)
+	}
+	if res.Status.IORunning != "No" || res.Status.LastIOErrno == 0 {
+		t.Errorf("status = %+v", res.Status)
+	}
+}
+
+// TestConfigureRefusedKeepsReplica: MySQL refuses SOURCE_AUTO_POSITION
+// while gtid_mode is OFF (error 1777), and the replica keeps its source
+// and filter.
+func TestConfigureRefusedKeepsReplica(t *testing.T) {
+	replica := testmysql.Start(t, testmysql.Options{ExtraArgs: gtidOff})
+	h := replica.Host()
+	oldPort := closedPort(t)
+	execAll(t, rootDB(t, replica),
+		fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '127.0.0.1', SOURCE_PORT = %d, SOURCE_USER = 'old', SOURCE_PASSWORD = 'x'", oldPort),
+		"CHANGE REPLICATION FILTER REPLICATE_WILD_DO_TABLE = ('a.%')",
+	)
+
+	p := proto.ReplicationSourceParams{Host: "127.0.0.2", Port: oldPort + 1, User: "dbpanel_repl", Password: replPassword,
+		Databases: []string{"b"}}
+	r := dispatch(t, h, "mysql.configureReplication", p)
+	if r.OK || !strings.Contains(r.Error.Message, "1777") {
+		t.Fatalf("configure with gtid_mode OFF = %+v", r)
+	}
+	if strings.Contains(r.Error.Message, replPassword) {
+		t.Errorf("error shows the password: %s", r.Error.Message)
+	}
+	rs := status(t, h).Replica
+	if rs == nil || rs.SourceHost != "127.0.0.1" || rs.SourcePort != oldPort {
+		t.Errorf("source after the refused configure = %+v", rs)
+	} else if !slices.Equal(rs.Filters, []string{"a.%"}) {
+		t.Errorf("filters after the refused configure = %q, want the old a.%%", rs.Filters)
+	}
+	if g := globalFilters(t, replica); g != "a.%" {
+		t.Errorf("global filter = %q, want the old a.%%", g)
 	}
 }
