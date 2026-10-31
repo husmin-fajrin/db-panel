@@ -89,7 +89,7 @@ tiap langkah.
 ## 4. Pendekatan yang dipertimbangkan
 
 **A. Agent memeriksa sendiri, lapor hanya bila berubah** (dipilih).
-Agent memeriksa tiap 20 detik; mengirim laporan saat ada perubahan yang
+Agent memeriksa tiap 15 detik; mengirim laporan saat ada perubahan yang
 berarti, dan ringkasan tiap 2 menit. Panel menerjemahkan laporan menjadi
 status awam, kejadian, peringatan, dan Telegram.
 Kelebihan: beban hampir nol di semua sisi; agent tetap memeriksa saat
@@ -128,7 +128,7 @@ interval.
 | `uptime_sec`, `threads_connected`, `max_connections`, `threads_running` | `SHOW GLOBAL STATUS/VARIABLES` | restart terdeteksi bila uptime mengecil |
 | `read_only`, `super_read_only`, `gtid_executed`, `server_uuid` | variabel | kunci replika; terkunci di master |
 | `binlog_dump_threads` | `performance_schema.threads` (sudah ada) | replika tersambung ke server ini |
-| `binlog_total_bytes`, `binlog_oldest_age_sec`, `binlog_expire_sec` | `SHOW BINARY LOGS`, mtime berkas binlog tertua di `log_bin_basename`, `binlog_expire_logs_seconds` | hanya bila `log_bin=ON` |
+| `binlog_total_bytes`, `binlog_oldest_age_sec`, `binlog_expire_sec` | `SHOW BINARY LOGS`, mtime berkas binlog tertua di `log_bin_basename`, `binlog_expire_logs_seconds` | hanya bila `log_bin=ON`; umur tertua untuk tampilan saja (pada master yang sudah lama hidup nilainya selalu mendekati batas simpan), bukan untuk peringatan |
 | `replica` | `SHOW REPLICA STATUS` (struktur `proto.ReplicaStatus` yang ada) | nil bila bukan replika |
 | `disk_total`, `disk_free` (datadir) | `Statfs(datadir)` | |
 | `mem_total`, `mem_available`, `load1` | `/proc/meminfo`, `/proc/loadavg` | |
@@ -153,7 +153,13 @@ terkirim. Ia langsung melapor bila salah satu berubah:
 - uptime mengecil (restart).
 
 Di luar itu ia mengirim ringkasan tiap `summary_every`. Nilai bawaan:
-`check_every=20s`, `summary_every=120s`, `lag_threshold=60s`. Panel
+`check_every=15s`, `summary_every=120s`, `lag_threshold=60s`. Rantai
+waktu terburuk sampai Telegram untuk replika berhenti: 15 dtk periksa +
+kirim segera, di bawah 30 dtk. Untuk master tumbang: hub menyadari
+koneksi agent mati paling lama 20 dtk (ping 10 + timeout 10), ditambah
+`down_after_sec=30`, ditambah kirim segera: sekitar 50 dtk. Keduanya di
+bawah batas 1 menit yang ditetapkan pemilik produk, dengan beban satu
+perintah baca memori tiap 15 detik. Panel
 mengirim nilai aktual lewat perintah `monitor.configure` saat agent
 tersambung dan saat pengaturan berubah; agent menyimpannya di memori
 saja.
@@ -185,7 +191,7 @@ menulis kejadian bila status berubah.
 | Status | Syarat | Warna |
 |---|---|---|
 | Belum siap | `replicas.state` bukan `ready`/`attention` (sedang dibuat, disinkron ulang, gagal) | abu |
-| Agent offline | hub melaporkan offline > 60 dtk, atau laporan terakhir lebih tua dari 3 × `summary_every` | merah |
+| Agent offline | hub melaporkan offline > 30 dtk, atau laporan terakhir lebih tua dari 3 × `summary_every` | merah |
 | Agent perlu dimutakhirkan | versi agent < Rencana 3 | abu |
 | Tidak terjangkau | `mysql_ok=false` | merah |
 | Berhenti | `sql_running=No`, atau `io_running=No` dengan `last_io_errno != 0` | merah |
@@ -202,8 +208,8 @@ pada replika) selalu merah dan ditampilkan di sebelah status apa pun.
 
 | Status | Syarat |
 |---|---|
-| Agent offline | seperti replika; setelah 60 dtk menjadi "Diduga tumbang (agent offline)" |
-| Tidak terjangkau | `mysql_ok=false`; setelah 60 dtk "Diduga tumbang (MySQL tidak menjawab)" |
+| Agent offline | seperti replika; setelah `down_after_sec` (bawaan 30 dtk) menjadi "Diduga tumbang (agent offline)" |
+| Tidak terjangkau | `mysql_ok=false`; setelah `down_after_sec` "Diduga tumbang (MySQL tidak menjawab)" |
 | Terkunci | `super_read_only=ON` di master (aplikasi tidak bisa menulis) |
 | Sehat | sisanya |
 
@@ -254,11 +260,11 @@ last_notified_at, notify_count, message, telegram_state
 | replica_unlocked | Kunci terlepas | terkunci lagi |
 | master_locked | Terkunci | terbuka |
 | master_down | Diduga tumbang | Sehat |
-| mysql_unreachable | Tidak terjangkau > 60 dtk (replika) | ok |
-| agent_offline | Agent offline > 60 dtk | online |
+| mysql_unreachable | Tidak terjangkau > 30 dtk (replika) | ok |
+| agent_offline | Agent offline > 30 dtk | online |
 | disk_warn / disk_crit | 85% / 95% | turun di bawah 80% / 90% |
 | connections_high | > 80% max_connections selama 5 menit | < 70% |
-| binlog_deadline | replika Terputus/Berhenti/Dihentikan dan umur binlog tertua master > 80% `binlog_expire_sec` | replika sinkron lagi atau disync ulang |
+| binlog_deadline | replika Terputus/Berhenti/Dihentikan terus-menerus (dari `status_since`) lebih lama dari 80% `binlog_expire_sec` master; tanpa `binlog_expire_sec` (0 = tanpa batas) tidak pernah | replika sinkron lagi atau disync ulang |
 | job_failed | job gagal (semua jenis) | job diulang dan berhasil, atau dibatalkan |
 
 Semua ambang dan jeda di atas adalah nilai bawaan yang bisa diubah di
@@ -309,7 +315,7 @@ tidak ada job aktif untuk server itu (`refuseBusy` yang ada).
 
 | Tombol | Di mana | Yang dilakukan | Konfirmasi |
 |---|---|---|---|
-| Stop replika | halaman replika | `mysql.stopReplica`; `replicas.paused=1` | modal: "lag akan membesar; binlog master dibatasi N hari" |
+| Stop replika | halaman replika | `mysql.stopReplica`; `replicas.paused=1` | modal: "lag akan membesar; master menyimpan binlog N hari (dari `binlog_expire_sec`); lebih dari itu replika harus disync ulang" |
 | Start replika | halaman replika | `mysql.startReplica`; `paused=0`; menunggu 10 dtk lalu tampilkan status baru | modal ringan |
 | Kunci kembali | replika, saat Kunci terlepas | `mysql.setReadOnly{on:true}` | modal: "bila ada yang sempat menulis ke replika, isi bisa berbeda; pertimbangkan Resync ulang" |
 | Buka kunci master | master, saat Terkunci | `mysql.setReadOnly{on:false}` | modal: ketik nama server |
@@ -322,12 +328,26 @@ tidak ada job aktif untuk server itu (`refuseBusy` yang ada).
 **Resync ulang** = job `resync_replica` dengan tahap "Periksa master",
 "Periksa server tujuan", "Siapkan replika", "Salin data", "Sambungkan
 replikasi", "Verifikasi" dari `create_replica` (tanpa "Pasang MySQL"),
-dengan `ConfirmWipe=true` dari konfirmasi ketik nama, database yang
-sama seperti tercatat, metode salinan dipilih ulang dengan aturan
-Rencana 2 (CLONE hanya bila semua database; dump bisa dipaksa). Selama
-berjalan `replicas.state=resyncing`; sukses → `ready`, gagal → `failed`
-dengan Ulangi/Batalkan seperti job lain. Modal menyebut ukuran data
-master dan saran menjalankannya di luar jam sibuk. Sebelum tahap
+database yang sama seperti tercatat. Perbedaan dari `create_replica`,
+karena targetnya replika terdaftar dari master yang sama:
+
+- **Satu konfirmasi, bukan dua.** Modal menampilkan daftar persis
+  database yang akan dibuang (dari inventaris replika yang disegarkan
+  saat modal dibuka) dan meminta nama server diketik. Daftar itu
+  disimpan di parameter job. Tahap "Periksa server tujuan" membandingkan
+  database yang ditemukannya dengan daftar itu: sama → lanjut tanpa
+  berhenti; ada yang tidak ada di daftar → job berhenti menunggu
+  persetujuan di dalam job seperti Rencana 2 (perlindungan 34e27c1
+  tetap untuk kasus yang tidak terduga).
+- **CLONE boleh walau tujuan tidak kosong**, bila semua database dipilih
+  dan hanya database yang ada di daftar konfirmasi yang ditemukan;
+  kalau tidak, dump. User tetap bisa memaksa dump.
+- **Pemeriksaan disk** menghitung ruang bebas ditambah ukuran data
+  replika saat ini (yang akan dibuang), bukan hanya ruang bebas.
+
+Selama berjalan `replicas.state=resyncing`; sukses → `ready`, gagal →
+`failed` dengan Ulangi/Batalkan seperti job lain. Modal menyebut ukuran
+data master dan saran menjalankannya di luar jam sibuk. Sebelum tahap
 "Siapkan replika", job menyapu akun `dbpanel_dump_%` sisa di master yang
 `password_last_changed` lebih dari 24 jam (5.6).
 
@@ -337,13 +357,16 @@ master dan saran menjalankannya di luar jam sibuk. Sebelum tahap
   Kalimat: "MySQL di server ini terus mengikuti master sampai Anda
   menghentikannya sendiri; panel tidak lagi memantaunya."
 - "Lepas dan hentikan replikasi": `mysql.stopReplica`, `mysql.resetReplica`,
-  `mysql.dropUser` akun replikasi milik replika ini di master; kunci
-  `super_read_only` **dibiarkan ON** dengan kalimat cara membukanya di
-  terminal. Alasan: agent berperan replika menolak membuka kunci (5.5).
-Bila master offline, pilihan kedua tetap jalan di sisi replika dan
-mencatat akun di master belum terhapus (penyapuan 5.6 tidak menyentuh
-akun `dbpanel_repl_*`; ditampilkan sebagai peringatan `job_failed`-style
-di halaman master).
+  lalu `mysql.releaseRole` (5.5); kunci `super_read_only` **dibiarkan
+  ON** dengan kalimat cara membukanya di terminal, karena agent berperan
+  replika menolak membuka kunci dan setelah dilepas panel tidak lagi
+  mengelola server itu.
+Akun replikasi di master **tidak disentuh**: hari ini satu topologi
+memakai satu akun `dbpanel_repl@'%'` bersama untuk semua replikanya
+(`topologies.repl_user`); menghapusnya memutus replika lain. Akun itu
+milik "Siapkan master" dan ikut hilang hanya saat topologi dihapus
+(master dilepas setelah semua replikanya pergi). Akun per replika
+ditunda ke Rencana 4, saat promote memang membangun ulang akun.
 
 **Hapus server**: ditolak dengan pesan bila server adalah master sebuah
 topologi ("lepas atau hapus semua replikanya dulu") atau replika yang
@@ -356,10 +379,19 @@ menampilkan perintah untuk mencabut agent di host.
 **Peran yang dipin di agent** (SEC-28 butir 1). Berkas
 `/etc/dbpanel/role` berisi `master`, `replica`, atau `unassigned`;
 ditulis agent (0644, milik root) saat `mysql.configure{role}` pertama
-kali berhasil, dan saat `mysql.resetReplica` dari Lepas replika →
-`unassigned`. Tidak ada perintah panel yang bisa mengubah `master` →
-`replica` atau `replica` → `master`; itu hanya lewat CLI lokal
-`dbpanel agent set-role <peran>` (root di host). Aturan registry:
+kali berhasil. Perintah panel baru `mysql.releaseRole` mengembalikan
+`replica` → `unassigned` (dan menghapus pin sumber), dan agent
+menerimanya hanya bila tidak ada konfigurasi replikasi tersisa (setelah
+`mysql.resetReplica`) dan `binlog_dump_threads=0`. Panel memanggilnya
+pada "Lepas dan hentikan replikasi", saat job `create_replica` dibatalkan
+atau gagal lalu replikanya dihapus, dan pada "Hapus server"; dengan itu
+server bisa dipakai lagi dari panel tanpa terminal. `master` tidak
+pernah bisa dilepas atau diubah oleh perintah panel, juga tidak lewat
+`releaseRole`; itu hanya lewat CLI lokal `dbpanel agent set-role <peran>`
+(root di host), karena master produksi adalah aset yang dilindungi pin
+ini (Rencana 4 merancang alur promote-nya). `mysql.resetReplica` sendiri
+tidak mengubah pin: ia juga dipakai di tengah "Siapkan replika". Aturan
+registry:
 
 | Peran | Ditolak |
 |---|---|
@@ -380,11 +412,11 @@ lewat perintah `monitor.configure{role_hint}` dari panel; selain itu
 
 **Sumber yang dipin** (SEC-28 butir 3). Berkas `/etc/dbpanel/source`
 berisi `host:port` master; ditulis saat `mysql.configureReplication`
-pertama berhasil. Sesudah itu `mysql.dumpFrom`, `mysql.cloneFrom`, dan
+pertama berhasil, dihapus oleh `mysql.releaseRole`. Sesudah itu `mysql.dumpFrom`, `mysql.cloneFrom`, dan
 `mysql.configureReplication` menolak host:port lain dengan pesan yang
 menyebut `dbpanel agent set-source <host:port>`. Halaman master yang
 mengubah alamat sumber (fitur yang ada) menampilkan perintah itu untuk
-tiap replika. Dihapus bersama berkas peran saat Lepas replika.
+tiap replika. Pin sumber tidak pernah diubah oleh perintah panel selain dihapus lewat `releaseRole`.
 
 **Catatan audit** (SEC-17). Tabel `audit_log(id, ts, username, ip,
 action, target_kind, target_id, detail_json, outcome)`, ditulis oleh
@@ -408,8 +440,9 @@ Semua halaman baru di balik login dan CSRF yang ada.
    `install.go`) sehingga pipeline dump/klien mati bersama agent
    (residual 4).
 2. Penyapuan akun `dbpanel_dump_%` sisa di master, lebih tua dari 24 jam,
-   sebelum tahap "Siapkan replika" pada `create_replika`, `resync_replica`,
-   dan `add_databases` (celah "DROP mendahului CREATE").
+   sebelum tahap "Siapkan replika" pada `create_replica`, `resync_replica`,
+   dan `add_databases` (celah "DROP mendahului CREATE"). Akun
+   `dbpanel_repl` tidak pernah disapu.
 3. Batas 1 KiB untuk semua jalur `job.log` (residual 5).
 4. `Cancel` di antara reopen dan launch menghasilkan `canceled`, bukan
    `failed` (M2).
@@ -509,8 +542,24 @@ otomatis, token konfirmasi per perintah (Rencana 4 bersama promote).
    panel; pemilik produk menyerahkan keputusan teknis kepada builder
    dengan prinsip itu.
 
-Keputusan yang saya ambil sendiri (dengan alasan di badannya): panel
+Keputusan setelah builder check (semua keputusan saya, dengan prinsip
+butir 9):
+
+1. Akun replikasi bersama per master tidak disentuh oleh Lepas replika;
+   akun per replika ditunda ke Rencana 4 (5.4).
+2. Peringatan batas binlog mengukur lama replika terputus/berhenti
+   terhadap `binlog_expire_sec`, bukan umur berkas binlog tertua (5.3).
+3. Resync ulang satu konfirmasi (ketik nama dengan daftar database yang
+   dibuang); job berhenti hanya bila menemukan yang tidak ada di daftar;
+   CLONE boleh untuk resync semua database; cek disk memperhitungkan data
+   yang dibuang (5.4).
+4. Batas 1 menit dipenuhi dengan periksa tiap 15 dtk dan ambang tumbang
+   30 dtk; beban tetap satu perintah baca memori (5.1).
+5. Panel boleh melepas pin `replica` → `unassigned` lewat `releaseRole`
+   pada alur yang aman; pin `master` hanya lewat CLI lokal (5.5).
+
+Keputusan lain yang saya ambil sendiri (dengan alasan di badannya): panel
 non-root dan CA MySQL ditunda (bagian 2); ambang bawaan 60 dtk lag, 3
-menit terputus, 60 dtk tumbang, 6 jam ulang (5.3); pin peran dan sumber
+menit terputus, 30 dtk tumbang, 6 jam ulang (5.3); pin peran dan sumber
 dengan CLI lokal untuk mengubahnya (5.5); dua pilihan Lepas replika dan
 kunci dibiarkan (5.4); tren disk tidak masuk (hanya batas binlog).
