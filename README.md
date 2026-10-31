@@ -167,6 +167,158 @@ Nilai `--public-host` yang pernah diberikan disimpan di database panel dan
 tetap dipakai (mengalahkan deteksi otomatis) pada start berikutnya,
 walaupun flag tidak diberikan lagi.
 
+## Replikasi MySQL
+
+Alurnya: **Hubungkan MySQL** di setiap server, **Siapkan sebagai master**
+di server sumber, lalu **Buat replika** dari halaman master. Setiap alur
+adalah pekerjaan bertahap di **Pekerjaan**; tahap yang butuh persetujuan
+menunggu tombol Anda dan menjelaskan akibatnya.
+
+### Hubungkan MySQL
+
+Di halaman server, masukkan akun admin MySQL di server itu (biasanya
+`root`). Kosongkan host agar agent memakai socket lokal (disarankan; juga
+bekerja untuk `root` dengan `auth_socket`). Agent menyimpan akun itu
+tersegel di `/etc/dbpanel/mysql.cred` di server itu; panel tidak
+menyimpannya dan tidak menampilkannya lagi. Bila akun kurang hak, panel
+menampilkan perintah `GRANT` yang perlu dijalankan.
+
+UI panel masih HTTP biasa: kata sandi MySQL yang Anda ketik melintas
+jaringan tanpa enkripsi. Buka panel hanya dari jaringan manajemen yang
+tepercaya, atau lewat tunnel SSH:
+
+```sh
+ssh -L 8080:127.0.0.1:8080 admin@<ip-panel>   # lalu buka http://127.0.0.1:8080
+```
+
+### Siapkan master
+
+Panel memeriksa server, lalu mengaktifkan binary log, GTID, format binlog
+ROW, `server_id` yang unik, dan plugin CLONE, serta membuat akun replikasi
+`dbpanel_repl`. Yang bisa berubah tanpa restart langsung diterapkan. Nama
+dan masa simpan binary log yang sudah ada dipertahankan.
+
+- **Restart:** bila binary log masih mati atau MySQL hanya mendengar di
+  `127.0.0.1`, MySQL harus direstart. Pilih **Restart MySQL di master
+  sekarang** (aplikasi terputus beberapa detik; lakukan di jam sepi), atau
+  restart sendiri nanti lalu klik **Sudah saya restart — periksa lagi**:
+  panel membaca nilai yang berlaku dan tidak merestart lagi.
+- **Format binlog:** bila sebelumnya `MIXED`/`STATEMENT`, koneksi aplikasi
+  yang sudah terbuka tetap memakai format lama sampai tersambung ulang.
+  Restart aplikasi (atau MySQL) di jam sepi sebelum membuat replika.
+- **Firewall:** master yang tadinya hanya mendengar di localhost akan
+  mendengar di semua alamat (`bind_address=0.0.0.0`). Buka port MySQL
+  master hanya untuk IP replika, misalnya:
+
+  ```sh
+  sudo ufw allow from 192.168.1.21 to any port 3306 proto tcp
+  # atau firewalld:
+  sudo firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=192.168.1.21 port port=3306 protocol=tcp accept'
+  sudo firewall-cmd --reload
+  ```
+- **Alamat untuk replika:** setiap replika harus bisa menjangkau port
+  MySQL master di alamat yang tertera di halaman master. Panel memakai
+  alamat tempat agent master terhubung; bila master punya beberapa kartu
+  jaringan, di balik NAT, atau dihubungi lewat VPN, ubah lewat **Ubah
+  alamat untuk replika**. Alamat itu diperiksa dari server replika saat
+  replika berikutnya dibuat.
+
+### Buat replika
+
+- **Server tujuan khusus:** server tujuan dijadikan **hanya-baca penuh**
+  (`read_only` + `super_read_only`): tidak ada akun yang bisa menulis,
+  termasuk admin; hanya replikasi yang mengubah data. Aplikasi boleh
+  membaca dari replika, tidak boleh menulis. Database lama di server
+  tujuan dibuang (panel selalu meminta persetujuan dan menyebut namanya).
+  Bila server tujuan sudah mereplikasi dari server lain, panel menyebut
+  sumber itu dan baru menghapus pengaturannya setelah Anda setujui.
+- **Cara menyalin:** semua database ke server kosong memakai CLONE (cepat);
+  sebagian database, atau **Paksa dump**, memakai mysqldump. Saat dump
+  dimulai, master dikunci sesaat (`FLUSH TABLES WITH READ LOCK`); kueri
+  panjang di master membuat kunci itu menunggu dan penulisan aplikasi ikut
+  tertahan. Buat replika dan tambah database **di jam sepi**. Selama data
+  dimuat, replika sementara bisa ditulis; jangan arahkan aplikasi ke sana.
+- **`lower_case_table_names`** master dan replika harus sama. Nilai ini
+  hanya bisa diatur saat MySQL pertama kali dipasang; bila berbeda, pasang
+  ulang MySQL di server tujuan dengan nilai master, atau pilih server lain.
+- **Akun MySQL setelah CLONE:** CLONE (dan dump semua database) menyalin
+  juga akun-akun MySQL master ke replika. Akun admin yang tersimpan untuk
+  replika (misalnya `dbpanel_admin` buatan panel) tidak berlaku lagi, dan
+  pekerjaan menunggu di tahap **Salin data**. Buka halaman server replika,
+  klik **Hubungkan MySQL**, masukkan akun admin MySQL milik **master**
+  (akun yang sama dengan di Hubungkan MySQL master), lalu kembali ke
+  halaman pekerjaan dan klik **Sudah saya hubungkan ulang — lanjutkan**.
+  Data tidak disalin ulang. Sejak itu akun-akun di replika sama dengan di
+  master.
+- **TLS:** bila master menawarkan TLS (MySQL 8 membuat sertifikatnya
+  sendiri), replikasi, CLONE dan dump berjalan terenkripsi dan akun
+  replikasi hanya bisa masuk lewat TLS. Sertifikat master belum
+  diverifikasi (belum ada CA untuk itu), jadi ini melindungi dari
+  penyadapan, belum dari penyamaran master oleh penyerang aktif di jaringan.
+
+### Akun yang dibuat panel di master
+
+- `dbpanel_repl@'%'`: hanya `REPLICATION SLAVE` dan `BACKUP_ADMIN` (untuk
+  CLONE), sandi acak 24 karakter. Sandinya tersimpan di setiap replika di
+  tabel `mysql.slave_master_info`; **jangan beri akun di replika
+  `SELECT ON *.*`** (misalnya akun laporan), pakai grant per database.
+- `dbpanel_dump_<8 heksa>@'<alamat replika>'`: akun sementara untuk satu
+  dump (baca data, kunci singkat), dibuat sesaat sebelum dump dan dihapus
+  sesudahnya, juga bila dump gagal atau dibatalkan. Bila penghapusan gagal,
+  log pekerjaan menyebut perintah `DROP USER` yang perlu dijalankan.
+
+Agent hanya mau membuat, mengubah, atau menghapus akun yang namanya
+diawali `dbpanel_`, dan menolak perintah yang menghapus data, menimpa
+server, atau mengubah replikasi di server yang sedang dibaca replika lain
+(master), apa pun yang diminta panel.
+
+### Kebijakan lokal agent
+
+Operator di server database bisa menonaktifkan perintah tertentu untuk
+agent di server itu, misalnya di master produksi. Buat
+`/etc/dbpanel/agent-policy.yaml` (milik root, mode 0644 atau 0600, tidak
+bisa ditulis grup atau pengguna lain):
+
+```yaml
+deny:
+  - mysql.dropDatabases
+  - mysql.dumpFrom
+  - mysql.cloneFrom
+  - mysql.resetReplica
+  - mysql.configureReplication
+```
+
+lalu `sudo systemctl restart dbpanel-agent`. Perintah yang ditolak dijawab
+"perintah dinonaktifkan oleh kebijakan lokal server ini". Berkas yang
+izinnya longgar membuat agent menolak berjalan (lihat
+`journalctl -u dbpanel-agent`). Agent mencatat setiap perintah yang
+diterimanya (nama, parameter dengan sandi disamarkan, hasil, durasi) di
+journal.
+
+### Cadangkan kunci panel
+
+Sandi replikasi disimpan di `panel.db` tersegel dengan
+`/etc/dbpanel/panel.key`. **Cadangkan `/etc/dbpanel/panel.key` bersama
+`/var/lib/dbpanel/panel.db`** di tempat aman di luar host panel. Tanpa
+kunci itu sandi replikasi tidak bisa dibuka lagi: menyiapkan master ulang
+membuat sandi baru, dan setiap replika harus dibuat ulang. Simpan kunci
+terpisah dari cadangan database biasa; siapa pun yang memegang keduanya
+bisa membuka sandi replikasi.
+
+### Memindahkan panel ke server lain
+
+1. Hentikan panel: `sudo systemctl stop dbpanel-panel`.
+2. Salin seluruh `/etc/dbpanel` (termasuk `ca.crt`, `ca.key`, `panel.key`)
+   dan `/var/lib/dbpanel` ke server baru dengan izin yang sama (direktori
+   0700, milik root).
+3. Pasang panel di server baru (`install.sh`), jalankan dengan
+   `--public-host <alamat baru>` bila perlu.
+4. Di setiap server database, ubah `panel_addr` di
+   `/etc/dbpanel/agent.yaml` ke `<alamat baru>:8443`, lalu
+   `sudo systemctl restart dbpanel-agent`.
+5. Matikan panel lama (`sudo systemctl disable --now dbpanel-panel`) dan
+   hapus salinan kuncinya di sana.
+
 ## Keamanan
 
 - Panel hanya menjawab permintaan yang header `Host`-nya alamat panel:
@@ -190,12 +342,17 @@ walaupun flag tidak diberikan lagi.
   (panel menjalankan agent tertanam untuk host-nya sendiri) dengan
   hardening systemd: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`,
   `ProtectKernel*`, dan `ProtectSystem=strict` untuk panel (hanya
-  `/var/lib/dbpanel` dan `/etc/dbpanel` yang bisa ditulis) serta
-  `ProtectSystem=full` untuk agent.
+  `/var/lib/dbpanel` dan `/etc/dbpanel` yang bisa ditulis). Unit agent
+  tidak memakai `ProtectSystem`: agent harus menulis `/etc/dbpanel` (akun
+  MySQL tersegel), file konfigurasi MySQL di `/etc`, dan memasang paket
+  MySQL ke `/usr`. Unit agent memakai `KillMode=process`, supaya mysqld
+  yang dinyalakan agent lewat init script atau `mysqld_safe` (misalnya di
+  aaPanel) tetap hidup saat agent di-restart atau diperbarui.
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
-  tahun. Belum ada perpanjangan otomatis (dijadwalkan di Rencana 2);
-  sampai saat itu, pasang ulang agent sebelum sertifikatnya habis.
-  Listener panel membuat sertifikat baru setiap kali panel dimulai.
+  tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan
+  setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum
+  sertifikatnya habis. Listener panel membuat sertifikat baru setiap kali
+  panel dimulai.
 
 ### Keamanan rilis
 
@@ -203,8 +360,8 @@ walaupun flag tidak diberikan lagi.
 pemeriksaannya hanya menangkap unduhan rusak atau tertukar, bukan rilis
 yang dipalsukan (mis. akun GitHub yang dibobol). Rilis belum
 ditandatangani; tanda tangan `SHA256SUMS` (minisign/cosign) dengan kunci
-publik yang disematkan di `install.sh` ditunda ke Rencana 2, sebelum ada
-fitur pembaruan agent otomatis. Sampai saat itu, pasang dari tag rilis
+publik yang disematkan di `install.sh` belum dikerjakan (Rencana 2 tidak
+memuatnya) dan harus ada sebelum fitur pembaruan agent otomatis. Sampai saat itu, pasang dari tag rilis
 tertentu (`DBPANEL_VERSION=...`, dan URL `install.sh` dari tag yang sama,
 bukan `main`) dan bandingkan `SHA256SUMS` dengan salinan yang didapat
 lewat jalur lain bila memungkinkan.
