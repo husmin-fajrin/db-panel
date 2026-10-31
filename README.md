@@ -347,7 +347,13 @@ bisa membuka sandi replikasi.
   MySQL tersegel), file konfigurasi MySQL di `/etc`, dan memasang paket
   MySQL ke `/usr`. Unit agent memakai `KillMode=process`, supaya mysqld
   yang dinyalakan agent lewat init script atau `mysqld_safe` (misalnya di
-  aaPanel) tetap hidup saat agent di-restart atau diperbarui.
+  aaPanel) tetap hidup saat agent di-restart atau diperbarui. Catatan:
+  karena unit agent memakai `PrivateTmp`, mysqld yang dinyalakan agent
+  lewat `mysqld_safe`/init script mewarisi `/tmp` privat agent, sehingga
+  socket di `/tmp/mysql.sock` tidak terlihat oleh aplikasi di host. Pada
+  server seperti itu, nyalakan MySQL lewat systemd atau aaPanel sendiri
+  (agent hanya memberi tahu), atau pindahkan `socket` ke luar `/tmp`
+  (misalnya `/run/mysqld/mysqld.sock`).
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
   tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan
   setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum
