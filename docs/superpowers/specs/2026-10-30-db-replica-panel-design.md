@@ -611,6 +611,14 @@ js, aset), `scripts/` (install.sh, agent-install.sh.tmpl), `docs/`.
   diberitahukan di form, di preflight, dan (Rencana 3) saat kunci
   dimatikan.
 
+## 10b. Rencana 3
+
+Pemantauan (7.5), kontrol dasar (7.7 tanpa promote), dan Telegram (7.8)
+dirinci ulang di `2026-10-31-rencana-3-pemantauan-notifikasi-kontrol-design.md`;
+bila berbeda, dokumen itu yang berlaku. Perubahan utama: tanpa database
+heartbeat dan tanpa polling dari panel; agent memeriksa sendiri dan
+melapor hanya saat berubah. Promote dan checksum (7.6) ke Rencana 4.
+
 ## 11. Jawaban pemilik produk atas pertanyaan builder check
 
 1. Semua tabel aplikasi InnoDB. Preflight tetap menjaga (bagian 4).
