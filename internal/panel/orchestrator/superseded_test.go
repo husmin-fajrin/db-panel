@@ -1,9 +1,13 @@
 package orchestrator
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
@@ -121,5 +125,86 @@ func TestApproveRefusesSupersededPrepareMaster(t *testing.T) {
 	}
 	if n := fa.count("mysql.restart"); n != 0 {
 		t.Fatalf("restart called %d times", n)
+	}
+}
+
+// TestRetryReopensBeforeNewJobs: Retry reopens a failed job before it
+// returns, so a new job for the same server is refused at once, even while
+// the job's goroutine has not run yet; only one job ever runs there.
+func TestRetryReopensBeforeNewJobs(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	var roFails atomic.Bool
+	roFails.Store(true)
+	r.on("mysql.setReadOnly", func(json.RawMessage) (any, error) {
+		if roFails.Load() {
+			return nil, &commands.ParamError{Msg: "read_only gagal"}
+		}
+		return nil, nil
+	})
+	newJob := CreateReplicaParams{MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}}
+	id, err := e.r.StartCreateReplica(context.Background(), newJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	gone := func() bool {
+		e.r.mu.Lock()
+		defer e.r.mu.Unlock()
+		return e.r.live[id] == nil
+	}
+	wantRefusedNew := func() {
+		t.Helper()
+		if a, busy, err := e.st.ActiveJobForServer(r.id); err != nil || !busy || a.ID != id {
+			t.Fatalf("ActiveJobForServer after Retry = %+v, %v, %v", a, busy, err)
+		}
+		if _, err := e.r.StartCreateReplica(context.Background(), newJob); err == nil || !strings.Contains(err.Error(), "belum selesai") {
+			t.Fatalf("StartCreateReplica right after Retry = %v, want refused", err)
+		}
+	}
+
+	// Real scheduling: a Start right after Retry returns is refused.
+	e.waitFor("job goroutine gone", gone)
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	wantRefusedNew()
+	e.waitFor("retried step failed again", func() bool { return r.count("mysql.setReadOnly") == 2 })
+	e.waitJob(id, store.JobFailed)
+
+	// The goroutine held back: the job is a live one still finishing, so
+	// Retry only queues the action; the store already shows it running.
+	e.waitFor("job goroutine gone", gone)
+	ctx, cancel := context.WithCancel(e.r.base)
+	held := &liveJob{id: id, ctx: ctx, cancel: cancel, notify: make(chan struct{}, 1)}
+	e.r.mu.Lock()
+	e.r.live[id] = held
+	e.r.mu.Unlock()
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	wantRefusedNew()
+
+	// Let the goroutine take the retry: it runs the reopened job.
+	roFails.Store(false)
+	e.r.mu.Lock()
+	act := *held.pending
+	held.pending = nil
+	e.r.wg.Add(1)
+	e.r.mu.Unlock()
+	go e.r.loop(held, act)
+	e.waitJob(id, store.JobSucceeded)
+	if n := r.count("mysql.setReadOnly"); n != 3 {
+		t.Fatalf("setReadOnly ran %d times", n)
+	}
+	jobs, err := e.st.ListJobs(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if j.ServerID == r.id && j.ID != id {
+			t.Fatalf("a second job was created for the server: %+v", j)
+		}
 	}
 }

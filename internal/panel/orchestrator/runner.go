@@ -370,17 +370,8 @@ func (r *Runner) execute(lj *liveJob, act action) {
 			return
 		}
 	case actRetry:
-		if j.CurrentStep != act.step {
-			return
-		}
-		switch j.Status {
-		case store.JobWaiting:
-		case store.JobFailed:
-			if err := r.d.Store.ReopenJob(j.ID, r.now()); err != nil {
-				r.log.Warn("reopen job", "job", j.ID, "err", err)
-				return
-			}
-		default:
+		// Retry already reopened a failed job (running) under startMu.
+		if j.CurrentStep != act.step || (j.Status != store.JobWaiting && j.Status != store.JobRunning) {
 			return
 		}
 	}
@@ -430,7 +421,24 @@ func (r *Runner) Retry(jobID string) error {
 		if err := r.refuseSuperseded(j); err != nil {
 			return err
 		}
-		return r.launch(jobID, action{kind: actRetry, step: j.CurrentStep})
+		// A failed job is reopened before startMu is released, so a new
+		// job for its server is refused from now on, not only once the
+		// goroutine runs.
+		if j.Status == store.JobFailed {
+			if err := r.d.Store.ReopenJob(jobID, r.now()); err != nil {
+				return err
+			}
+		}
+		if err := r.launch(jobID, action{kind: actRetry, step: j.CurrentStep}); err != nil {
+			if j.Status == store.JobFailed {
+				// No goroutine will run it: fail it again, as it was.
+				if uerr := r.d.Store.UpdateJob(jobID, store.JobFailed, j.CurrentStep, j.Error, r.now()); uerr != nil {
+					r.log.Warn("re-fail unlaunched retry", "job", jobID, "err", uerr)
+				}
+			}
+			return err
+		}
+		return nil
 	case store.JobSucceeded, store.JobCanceled:
 		return store.ErrJobFinished
 	}
