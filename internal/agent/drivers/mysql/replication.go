@@ -221,7 +221,7 @@ func validateFilter(dbs []string) error {
 		switch {
 		case !dbNameRe.MatchString(db):
 			msg = fmt.Sprintf("nama database tidak valid: %q", db)
-		case systemDatabases[db]:
+		case systemDatabases[strings.ToLower(db)]:
 			msg = fmt.Sprintf("database sistem %s tidak bisa dipilih untuk replikasi", db)
 		case seen[db]:
 			msg = fmt.Sprintf("database %s disebut dua kali", db)
@@ -277,16 +277,20 @@ func filterStatement(dbs []string, quote func(string) string) string {
 // SOURCE TO, so the validated values are literals made by quote (for the
 // session's sql_mode). SOURCE_SSL is always set, so re-pointing a replica
 // from an SSL master to one without SSL does not keep the old setting.
+//
+// Over TLS the password travels encrypted and the source's RSA key is not
+// requested (GET_SOURCE_PUBLIC_KEY = 0), so an impostor cannot hand one in;
+// without TLS caching_sha2_password needs it.
 func sourceStatement(p proto.ReplicationSourceParams, quote func(string) string) string {
-	ssl := "0"
+	ssl, pubKey := "0", "1"
 	if p.SSL {
-		ssl = "1"
+		ssl, pubKey = "1", "0"
 	}
 	return "CHANGE REPLICATION SOURCE TO SOURCE_HOST = " + quote(p.Host) +
 		", SOURCE_PORT = " + strconv.Itoa(p.Port) +
 		", SOURCE_USER = " + quote(p.User) +
 		", SOURCE_PASSWORD = " + quote(p.Password) +
-		", SOURCE_AUTO_POSITION = 1, GET_SOURCE_PUBLIC_KEY = 1, SOURCE_CONNECT_RETRY = 10, SOURCE_RETRY_COUNT = 86400" +
+		", SOURCE_AUTO_POSITION = 1, GET_SOURCE_PUBLIC_KEY = " + pubKey + ", SOURCE_CONNECT_RETRY = 10, SOURCE_RETRY_COUNT = 86400" +
 		", SOURCE_SSL = " + ssl
 }
 
@@ -374,6 +378,9 @@ func ConfigureReplication(ctx context.Context, h Host, p proto.ReplicationSource
 	defer db.Close()
 	defer conn.Close()
 
+	if err := refuseOnSource(ctx, db); err != nil {
+		return nil, err
+	}
 	rs, err := currentStatus(ctx, db)
 	if err != nil {
 		return nil, err
@@ -515,6 +522,9 @@ func ResetReplica(ctx context.Context, h Host) error {
 		return err
 	}
 	defer db.Close()
+	if err := refuseOnSource(ctx, db); err != nil {
+		return err
+	}
 	rs, err := currentStatus(ctx, db)
 	if err != nil {
 		return err

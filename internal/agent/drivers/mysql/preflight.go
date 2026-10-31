@@ -67,6 +67,8 @@ func validatePreflight(p *proto.PreflightParams) error {
 		switch {
 		case p.PeerHost == "":
 			return &commands.ParamError{Msg: "alamat master wajib diisi"}
+		case !sourceHostRe.MatchString(p.PeerHost) || (strings.Contains(p.PeerHost, ":") && net.ParseIP(p.PeerHost) == nil):
+			return &commands.ParamError{Msg: fmt.Sprintf("alamat master tidak valid: %q", p.PeerHost)}
 		case p.PeerPort < 1 || p.PeerPort > 65535:
 			return &commands.ParamError{Msg: "port master harus antara 1 dan 65535"}
 		case p.PeerVersion == "":
@@ -349,7 +351,8 @@ func replicaIdentityChecks(l *checkList, p proto.PreflightParams, f preflightFac
 func masterChecks(l *checkList, res *proto.PreflightResult, p proto.PreflightParams, f preflightFacts) {
 	st := f.Status
 	if st.ServerID == 0 {
-		c := l.add("server_id", proto.CheckFail, "server_id", "server_id masih 0; replikasi butuh server_id unik (akan diatur otomatis)")
+		// Siapkan master sets it (mysql.configure): not a reason to stop.
+		c := l.add("server_id", proto.CheckWarn, "server_id", "server_id masih 0; replikasi butuh server_id unik (akan diatur otomatis)")
 		c.FixSQL = []string{fmt.Sprintf("SET PERSIST server_id=%d", newServerID())}
 	} else {
 		l.add("server_id", proto.CheckOK, "server_id", fmt.Sprintf("server_id = %d", st.ServerID))
@@ -365,7 +368,11 @@ func masterChecks(l *checkList, res *proto.PreflightResult, p proto.PreflightPar
 	if strings.EqualFold(st.BinlogFormat, "ROW") {
 		l.add("binlog_format", proto.CheckOK, "Format binlog", "binlog_format = ROW")
 	} else {
-		c := l.add("binlog_format", proto.CheckFail, "Format binlog", fmt.Sprintf("binlog_format = %s; replikasi butuh ROW", st.BinlogFormat))
+		// mysql.configure sets it online; connections already open keep
+		// their session's format until they reconnect.
+		c := l.add("binlog_format", proto.CheckWarn, "Format binlog", fmt.Sprintf(
+			"binlog_format = %s; replikasi butuh ROW (akan diubah otomatis; koneksi aplikasi yang sudah terbuka tetap memakai format lama sampai tersambung ulang)",
+			st.BinlogFormat))
 		c.FixSQL = []string{"SET PERSIST binlog_format='ROW'"}
 	}
 
@@ -533,6 +540,27 @@ func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, v pe
 		l.add("leftover", proto.CheckOK, leftTitle, wipe+" (sudah dikonfirmasi)")
 	default:
 		l.add("leftover", proto.CheckNeedsConfirm, leftTitle, wipe)
+	}
+
+	const lctnTitle = "Aturan huruf besar-kecil nama tabel"
+	switch peer := p.PeerLowerCaseTableNames; {
+	case peer == nil:
+	case *peer != f.Status.LowerCaseTableNames:
+		l.add("lower_case_table_names", proto.CheckFail, lctnTitle, fmt.Sprintf(
+			"master memakai lower_case_table_names=%d, server ini %d; keduanya harus sama. Nilai ini hanya bisa diatur saat "+
+				"MySQL pertama kali dipasang (sebelum data dibuat): pasang ulang MySQL di server ini dengan "+
+				"lower_case_table_names=%d di konfigurasi, atau pilih server lain",
+			*peer, f.Status.LowerCaseTableNames, *peer))
+	default:
+		l.add("lower_case_table_names", proto.CheckOK, lctnTitle, fmt.Sprintf("lower_case_table_names=%d sama dengan master", *peer))
+	}
+
+	if rs := f.Status.Replica; rs != nil {
+		// The snapshot step resets it (mysql.resetReplica): the panel names
+		// it to the user before going on.
+		l.add("existing_replication", proto.CheckWarn, "Replikasi yang sudah ada", fmt.Sprintf(
+			"server ini sudah diatur sebagai replika dari %s; pengaturan replikasi itu akan dihapus",
+			net.JoinHostPort(rs.SourceHost, strconv.Itoa(rs.SourcePort))))
 	}
 
 	if n := f.Status.BinlogDumpThreads; n > 0 {

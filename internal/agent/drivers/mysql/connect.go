@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 
@@ -87,15 +88,15 @@ func RequiredReplicaGrants() []string { return replicaGrants.list() }
 
 func (d *Driver) registerConnect(reg *commands.Registry) {
 	reg.Register("mysql.connect", func(ctx context.Context, params json.RawMessage) (any, error) {
-		h, err := d.host()
-		if err != nil {
-			return nil, err
-		}
 		var p proto.ConnectParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, &commands.ParamError{Msg: "parameter tidak valid: " + err.Error()}
 		}
 		if err := normalizeParams(&p); err != nil {
+			return nil, err
+		}
+		h, err := d.host()
+		if err != nil {
 			return nil, err
 		}
 		if d.Creds == nil {
@@ -160,6 +161,11 @@ func normalizeParams(p *proto.ConnectParams) error {
 	}
 	if p.Host == "" {
 		p.Host = "localhost"
+	}
+	// An address or host name only: no space, quote, slash or @, so the
+	// value cannot carry DSN options.
+	if !sourceHostRe.MatchString(p.Host) || (strings.Contains(p.Host, ":") && net.ParseIP(p.Host) == nil) {
+		return &commands.ParamError{Msg: fmt.Sprintf("host MySQL tidak valid: %q", p.Host)}
 	}
 	return nil
 }

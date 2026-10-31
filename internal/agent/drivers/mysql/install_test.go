@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
@@ -801,5 +802,40 @@ func TestInstallAdminRetryAfterHalfCreatedAccount(t *testing.T) {
 	}
 	if resp := r.dispatch("mysql.status", nil); !resp.OK {
 		t.Fatalf("mysql.status with the stored account = %+v", resp.Error)
+	}
+}
+
+// TestInstallerCancelSendsSIGTERM: cancelling an install stops the running
+// package manager with SIGTERM, which lets apt or dpkg finish cleanly, not
+// with SIGKILL.
+func TestInstallerCancelSendsSIGTERM(t *testing.T) {
+	defer mysql.SetInstallCancelWait(10 * time.Second)()
+	mark := filepath.Join(t.TempDir(), "term")
+	inst := mysql.NewRealInstaller(probe.RealSystem(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{})
+	var once sync.Once
+	done := make(chan error, 1)
+	go func() {
+		done <- inst.Run(ctx, nil, nil, func(line string) {
+			if line == "ready" {
+				once.Do(func() { close(ready) })
+			}
+		}, "sh", "-c", `trap 'echo term > "$0"; exit 0' TERM; echo ready; while :; do sleep 0.05; done`, mark)
+	}()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("command did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled command did not end")
+	}
+	if b, err := os.ReadFile(mark); err != nil || strings.TrimSpace(string(b)) != "term" {
+		t.Fatalf("the command did not get SIGTERM (mark %q, %v)", b, err)
 	}
 }

@@ -79,13 +79,24 @@ func (h *host) Open(ctx context.Context) (*sql.DB, error) {
 	return OpenDB(ctx, h.creds, h.l.Socket, h.rootPassword, h.logger)
 }
 
-// ping is the readiness check for WaitReady.
-func (h *host) ping(ctx context.Context) error {
-	db, err := h.Open(ctx)
-	if err != nil {
-		return err
+// ping is the readiness check for WaitReady (ReadyCheck).
+func (h *host) ping(ctx context.Context) error { return ReadyCheck(h.Open)(ctx) }
+
+// ReadyCheck is a readiness check that logs in with open. A refused login
+// (1045, 1698) counts as ready: the server answered. After CLONE or a dump
+// of every database the stored account may be the donor's no longer, and
+// the restart must not be reported as MySQL failing to start.
+func ReadyCheck(open func(ctx context.Context) (*sql.DB, error)) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		db, err := open(ctx)
+		if err != nil {
+			if LoginRefused(err) {
+				return nil
+			}
+			return err
+		}
+		return db.Close()
 	}
-	return db.Close()
 }
 
 func (h *host) WriteConfig(content string) (string, error) {

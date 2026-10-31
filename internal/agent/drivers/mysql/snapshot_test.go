@@ -630,7 +630,7 @@ func TestDumpArgs(t *testing.T) {
 			t.Errorf("ProbeArgs(%q):\n got %q\nwant %q", dbs, got, want)
 		}
 	}
-	if got := mysql.LoadArgs("/tmp/local.cnf"); !reflect.DeepEqual(got, []string{"--defaults-file=/tmp/local.cnf", "--init-command=SET sql_log_bin=0"}) {
+	if got := mysql.LoadArgs("/tmp/local.cnf"); !reflect.DeepEqual(got, []string{"--defaults-file=/tmp/local.cnf", "--binary-mode", "--init-command=SET sql_log_bin=0"}) {
 		t.Errorf("LoadArgs = %q", got)
 	}
 }
@@ -850,4 +850,142 @@ func TestDumpFailsBeforeChangingData(t *testing.T) {
 		t.Errorf("dump with a refused local account = %+v", d)
 	}
 	intact("refused local account")
+}
+
+// adminRig is a rig over inst whose stored admin account is adm@localhost
+// with a password: an account the master does not have, as on a target
+// whose MySQL the panel installed (dbpanel_admin).
+func adminRig(t *testing.T, inst *testmysql.Instance) (*snapshotRig, *memCreds) {
+	t.Helper()
+	const pw = `Adm1n'pw\"x`
+	execAll(t, rootDB(t, inst),
+		"CREATE USER adm@localhost IDENTIFIED BY "+sqlLiteral(pw),
+		"GRANT ALL PRIVILEGES ON *.* TO adm@localhost WITH GRANT OPTION")
+	creds := &memCreds{p: proto.ConnectParams{User: "adm", Password: pw}}
+	return newSnapshotRig(inst.HostWith(creds), creds), creds
+}
+
+// TestCloneReplacesAdminAccount: CLONE brings the master's accounts, so the
+// target's stored account is refused afterwards. The clone still succeeds
+// (AdminReplaced), MySQL counts as up although the login is refused, and
+// once the user reconnects with the master's account the status shows the
+// completed clone and the master's GTID set. The donor account requires
+// TLS and the clone asks for it.
+func TestCloneReplacesAdminAccount(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	replica := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	mdb := rootDB(t, master)
+	fillMaster(t, mdb)
+	if err := mysql.CreateReplUser(context.Background(), master.Host(),
+		proto.ReplUserParams{User: "dbpanel_repl", Password: replPassword, RequireSSL: true}); err != nil {
+		t.Fatal(err)
+	}
+	want := gtidExecuted(t, mdb)
+
+	rig, creds := adminRig(t, replica)
+	p := cloneParams(master)
+	p.SSL = true
+	res := snapshotResult(t, rig.run(t, "mysql.cloneFrom", p))
+	if !res.AdminReplaced || res.Method != "clone" {
+		t.Fatalf("result = %+v, want AdminReplaced", res)
+	}
+	h := replica.HostWith(creds)
+	if _, err := h.Open(context.Background()); !mysql.LoginRefused(err) {
+		t.Fatalf("stored account after the clone: err = %v, want a refused login", err)
+	}
+	// Readiness: the server answered, so it is up.
+	if err := mysql.ReadyCheck(h.Open)(context.Background()); err != nil {
+		t.Errorf("ReadyCheck with a refused login = %v, want ready", err)
+	}
+
+	// The user reconnects with the master's admin account (root here).
+	creds.p = proto.ConnectParams{User: "root"}
+	st := status(t, h)
+	if st.CloneState != "Completed" || st.CloneError != "" || st.GTIDExecuted != want {
+		t.Errorf("after reconnect: clone %q %q, gtid %q (want %q)", st.CloneState, st.CloneError, st.GTIDExecuted, want)
+	}
+	if n := count(t, rootDB(t, replica), "SELECT COUNT(*) FROM a.t"); n != 3 {
+		t.Errorf("a.t rows = %d", n)
+	}
+}
+
+// TestDumpAllDatabasesReplacesAdminAccount: a dump of every database loads
+// the master's accounts and flushes privileges, so they take effect now;
+// the stored account is refused and the result says so, with the master's
+// GTID set from the dump's header.
+func TestDumpAllDatabasesReplacesAdminAccount(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	fillMaster(t, mdb)
+	dumpUser(t, mdb)
+
+	rig, creds := adminRig(t, replica)
+	res := snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master)))
+	// mysqldump's FLUSH TABLES is a transaction of the master's too.
+	want := gtidExecuted(t, mdb)
+	if !res.AdminReplaced || res.GTIDExecuted != want {
+		t.Fatalf("result = %+v, want AdminReplaced with gtid %q", res, want)
+	}
+	if _, err := replica.HostWith(creds).Open(context.Background()); !mysql.LoginRefused(err) {
+		t.Fatalf("stored account after the dump: err = %v, want a refused login", err)
+	}
+	// FLUSH PRIVILEGES ran: the master's dump account logs in on the replica.
+	if err := loginTCP(t, replica, "dumper", dumpPassword); err != nil {
+		t.Errorf("the master's account does not work on the replica yet: %v", err)
+	}
+	if got := gtidExecuted(t, rootDB(t, replica)); got != want {
+		t.Errorf("replica gtid_executed = %q, want %q", got, want)
+	}
+}
+
+// TestLoadIgnoresClientCommands: the load client runs with --binary-mode,
+// so a "\!" line in the stream (a hostile or impersonated master) runs no
+// shell command, while DELIMITER, routines and triggers before it still
+// load.
+func TestLoadIgnoresClientCommands(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	h := inst.Host()
+	loadBin, err := mysql.FindClientTool(inst.Layout().MysqldPath, "mysql")
+	if err != nil {
+		t.Skip(err)
+	}
+	content, err := mysql.ClientDefaults(proto.ConnectParams{User: "root"}, inst.Socket, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cnf := filepath.Join(dir, "local.cnf")
+	if err := os.WriteFile(cnf, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pwned := filepath.Join(dir, "pwned")
+	stream := strings.Join([]string{
+		"CREATE DATABASE evil;",
+		"CREATE TABLE evil.t (id INT PRIMARY KEY, n INT);",
+		"INSERT INTO evil.t VALUES (1, 1);",
+		"DELIMITER ;;",
+		"CREATE PROCEDURE evil.p() BEGIN SELECT 1; END ;;",
+		"CREATE TRIGGER evil.tr BEFORE UPDATE ON evil.t FOR EACH ROW BEGIN SET NEW.n = NEW.n + 1; END ;;",
+		"DELIMITER ;",
+		`\! touch ` + pwned,
+		"CREATE TABLE evil.after (id INT);",
+	}, "\n") + "\n"
+	err = h.Exec(context.Background(), strings.NewReader(stream), io.Discard, loadBin, mysql.LoadArgs(cnf)...)
+	if err == nil || !strings.Contains(err.Error(), "Unknown command") {
+		t.Errorf("load of a stream with \\! = %v, want the client to refuse the command", err)
+	}
+	if _, serr := os.Stat(pwned); serr == nil {
+		t.Fatal("the \\! line ran a shell command")
+	}
+	db := rootDB(t, inst)
+	if n := count(t, db, "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = 'evil'"); n != 1 {
+		t.Errorf("routines loaded = %d, want 1", n)
+	}
+	if n := count(t, db, "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema = 'evil'"); n != 1 {
+		t.Errorf("triggers loaded = %d, want 1", n)
+	}
+	if n := count(t, db, "SELECT COUNT(*) FROM evil.t"); n != 1 {
+		t.Errorf("evil.t rows = %d, want 1", n)
+	}
 }

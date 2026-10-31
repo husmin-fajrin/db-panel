@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
@@ -17,12 +18,16 @@ type PreflightFacts = preflightFacts
 // EvaluatePreflight turns facts into checks without a server.
 var EvaluatePreflight = evaluatePreflight
 
+// BinlogBlock is what the managed block says about the binary log.
+type BinlogBlock = binlogBlock
+
 // Config rendering and the restart decision, testable without a server.
 var (
 	RenderConfig   = renderConfig
 	RestartReasons = restartReasons
 	ParseOptions   = parseOptions
 	NotInEffect    = notInEffect
+	TLSAvailable   = tlsAvailable
 )
 
 // Snapshot helpers, testable without a server.
@@ -69,6 +74,14 @@ func SetInstallHooks(d *Driver, inst Installer, newHost func(config.Config, Cred
 // transport when not nil.
 func NewRealInstaller(sys probe.System, rt http.RoundTripper) Installer {
 	return realInstaller{sys: sys, transport: rt}
+}
+
+// SetInstallCancelWait changes how long a cancelled installer command gets
+// after SIGTERM; it returns the function that restores it.
+func SetInstallCancelWait(d time.Duration) (restore func()) {
+	old := installCancelWait
+	installCancelWait = d
+	return func() { installCancelWait = old }
 }
 
 // Install helpers, testable without a server.

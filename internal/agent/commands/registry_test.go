@@ -1,10 +1,13 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -116,5 +119,66 @@ func TestDispatchWrappedParamError(t *testing.T) {
 	}
 	if resp.Error.Message != "parameter salah" {
 		t.Errorf("message = %q", resp.Error.Message)
+	}
+}
+
+func TestDenyRefusesWithoutRunning(t *testing.T) {
+	r := NewRegistry()
+	ran := false
+	r.Register("mysql.dropDatabases", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		ran = true
+		return nil, nil
+	})
+	r.Register("probe", func(ctx context.Context, _ json.RawMessage) (any, error) { return "ok", nil })
+	r.Deny("mysql.dropDatabases")
+	resp := r.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.dropDatabases", Params: json.RawMessage(`{"databases":["simrs"]}`)})
+	if resp.OK || resp.Error.Code != proto.CodeBadParams || resp.Error.Message != ErrDenied || ran {
+		t.Fatalf("denied command: resp %+v / %+v, ran %v", resp, resp.Error, ran)
+	}
+	if resp := r.Dispatch(context.Background(), proto.Request{ID: "2", Cmd: "probe"}); !resp.OK {
+		t.Fatalf("other command refused: %+v", resp.Error)
+	}
+}
+
+func TestDispatchLogsEveryCommandRedacted(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRegistry()
+	r.SetLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	r.Register("mysql.connect", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return nil, &ParamError{Msg: "login MySQL gagal: 1045"}
+	})
+	r.Register("mysql.status", func(ctx context.Context, _ json.RawMessage) (any, error) { return "ok", nil })
+	r.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.connect",
+		Params: json.RawMessage(`{"user":"root","password":"S3cret-pw","host":"db","nested":{"token":"T0ken-x"}}`)})
+	r.Dispatch(context.Background(), proto.Request{ID: "2", Cmd: "mysql.status"})
+	r.Dispatch(context.Background(), proto.Request{ID: "3", Cmd: "no.such"})
+	out := buf.String()
+	for _, want := range []string{"cmd=mysql.connect", `\"user\":\"root\"`, `\"password\":\"***\"`, `\"token\":\"***\"`,
+		"outcome=\"error bad_params: login MySQL gagal: 1045\"", "cmd=mysql.status", "outcome=ok", "took_ms=",
+		"cmd=no.such", "unknown_command"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "S3cret-pw") || strings.Contains(out, "T0ken-x") {
+		t.Fatalf("log holds a secret:\n%s", out)
+	}
+	if n := strings.Count(out, "level=INFO msg=command"); n != 3 {
+		t.Errorf("%d info lines for 3 commands:\n%s", n, out)
+	}
+}
+
+func TestRedactParams(t *testing.T) {
+	for in, want := range map[string]string{
+		``:         ``,
+		`not json`: `(tidak terbaca)`,
+		`{"Password":"x","list":[{"secret_key":"y"}],"n":1}`: `{"Password":"***","list":[{"secret_key":"***"}],"n":1}`,
+	} {
+		if got := RedactParams(json.RawMessage(in)); got != want {
+			t.Errorf("RedactParams(%s) = %s, want %s", in, got, want)
+		}
+	}
+	if got := RedactParams(json.RawMessage(`{"gtid_set":"` + strings.Repeat("a", 5000) + `"}`)); len(got) > 1100 {
+		t.Errorf("long params logged in full (%d bytes)", len(got))
 	}
 }

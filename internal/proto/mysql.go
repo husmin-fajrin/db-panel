@@ -46,6 +46,17 @@ type MySQLStatus struct {
 	UptimeSec         int64          `json:"uptime_sec"`
 	ThreadsRunning    int            `json:"threads_running"`
 	BinlogDumpThreads int            `json:"binlog_dump_threads"` // replicas currently reading this server's binlog
+	// TLSAvailable: the server accepts encrypted connections (have_ssl, or
+	// tls_version with a loaded certificate where have_ssl is gone).
+	TLSAvailable bool `json:"tls_available"`
+	// LowerCaseTableNames is @@lower_case_table_names; it is fixed when the
+	// data directory is initialised and must match between master and
+	// replica.
+	LowerCaseTableNames int `json:"lower_case_table_names"`
+	// CloneState and CloneError are performance_schema.clone_status of the
+	// last CLONE into this server ("" when none ran or the plugin is off).
+	CloneState string `json:"clone_state,omitempty"`
+	CloneError string `json:"clone_error,omitempty"`
 }
 
 // ReplicaStatus is the default channel's row of SHOW REPLICA STATUS.
@@ -76,6 +87,9 @@ type PreflightParams struct {
 	ReplUser       string   `json:"repl_user"`        // master: the replication user the panel uses
 	Databases      []string `json:"databases"`        // databases to replicate; empty = all
 	ConfirmWipe    bool     `json:"confirm_wipe"`     // replica: the user agreed to drop leftover databases
+	// PeerLowerCaseTableNames is the master's lower_case_table_names
+	// (replica); nil when unknown.
+	PeerLowerCaseTableNames *int `json:"peer_lower_case_table_names,omitempty"`
 }
 
 // Preflight check statuses, from least to most severe: ok, warn,
@@ -126,11 +140,30 @@ type ConfigureResult struct {
 	ServerID       uint32   `json:"server_id"`       // the server_id in effect and in the config
 }
 
-// ReplUserParams are the parameters of mysql.createReplUser.
+// ReplUserParams are the parameters of mysql.createReplUser. The name
+// must start with "dbpanel_".
 type ReplUserParams struct {
+	User       string `json:"user"`
+	Password   string `json:"password"`
+	FromHost   string `json:"from_host"`   // host part of the account; "" = "%"
+	RequireSSL bool   `json:"require_ssl"` // the account may only connect over TLS
+}
+
+// DumpUserParams are the parameters of mysql.createDumpUser: a temporary
+// account a replica dumps this master with. The name must start with
+// "dbpanel_"; FromHost is the replica's address.
+type DumpUserParams struct {
+	User       string `json:"user"`
+	Password   string `json:"password"`
+	FromHost   string `json:"from_host"`
+	RequireSSL bool   `json:"require_ssl"`
+}
+
+// DropUserParams are the parameters of mysql.dropUser. The name must start
+// with "dbpanel_".
+type DropUserParams struct {
 	User     string `json:"user"`
-	Password string `json:"password"`
-	FromHost string `json:"from_host"` // host part of the account; "" = "%"
+	FromHost string `json:"from_host"`
 }
 
 // ReadOnlyParams are the parameters of mysql.setReadOnly.
@@ -154,6 +187,7 @@ type SnapshotParams struct {
 	Databases     []string `json:"databases"`      // dump only; empty = every database
 	EstimateBytes uint64   `json:"estimate_bytes"` // expected size, for progress
 	DropExisting  bool     `json:"drop_existing"`  // dump: drop the local copies of Databases before loading
+	SSL           bool     `json:"ssl"`            // the master offers TLS: the copy must be encrypted
 }
 
 // SnapshotResult is the job.done result of mysql.cloneFrom and mysql.dumpFrom.
@@ -167,6 +201,12 @@ type SnapshotResult struct {
 	// gtid_executed does not include yet.
 	GTIDExecuted string `json:"gtid_executed"`
 	TookMs       int64  `json:"took_ms"`
+	// AdminReplaced: the copy brought the master's accounts (CLONE, or a
+	// dump of every database) and the stored admin account no longer logs
+	// in. The data is in place; the clone_status check (CLONE) and the
+	// GTID set are left to the panel once the account is reconnected, and
+	// GTIDExecuted may be empty.
+	AdminReplaced bool `json:"admin_replaced,omitempty"`
 }
 
 // ReplicationSourceParams are the parameters of mysql.configureReplication:

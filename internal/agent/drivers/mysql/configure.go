@@ -121,7 +121,11 @@ func Configure(ctx context.Context, h Host, p proto.ConfigureParams) (proto.Conf
 		return res, err
 	}
 	bindAll := p.Role == roleMaster && (isLocalBind(st.BindAddress) || prev["bind_address"] == "0.0.0.0")
-	if res.ConfigPath, err = writeValidConfig(ctx, h, renderConfig(p.Role, res.ServerID, bindAll)); err != nil {
+	bl, err := binlogSettings(ctx, db, st.LogBin, prev)
+	if err != nil {
+		return res, err
+	}
+	if res.ConfigPath, err = writeValidConfig(ctx, h, renderConfig(p.Role, res.ServerID, bindAll, bl)); err != nil {
 		return res, err
 	}
 
@@ -154,7 +158,7 @@ func Configure(ctx context.Context, h Host, p proto.ConfigureParams) (proto.Conf
 		}
 	}
 	if p.EnableClone {
-		installed, err := installClonePlugin(ctx, db)
+		installed, err := installClonePlugin(ctx, db, func(string, string, ...any) {})
 		if err != nil {
 			return res, err
 		}
@@ -199,18 +203,68 @@ func restartReasons(role string, st proto.MySQLStatus) []string {
 	return reasons
 }
 
+// binlogBlock is what the managed block says about the binary log.
+type binlogBlock struct {
+	// LogBin is the log_bin value: "binlog" for a server whose binary log
+	// is off, else its current base name, so the next restart neither
+	// renames the logs (stranding the old files and breaking replicas that
+	// still need them) nor turns them off.
+	LogBin string
+	// ExpireSeconds is binlog_expire_logs_seconds, "" to leave retention as
+	// the server has it. Only a server that never expires its logs gets
+	// dbpanel's seven days; a value the block wrote before is kept.
+	ExpireSeconds string
+}
+
+// binlogBaseRe is a binary log base name dbpanel writes back into the
+// config: an absolute or relative path without spaces, quotes or #.
+var binlogBaseRe = regexp.MustCompile(`^[A-Za-z0-9_./+-]{1,512}$`)
+
+// binlogSettings reads the binary log's base name and retention and decides
+// the block's lines; prev is the managed block written before.
+func binlogSettings(ctx context.Context, db *sql.DB, logBin bool, prev map[string]string) (binlogBlock, error) {
+	b := binlogBlock{LogBin: "binlog"}
+	if logBin {
+		var base sql.NullString
+		if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.log_bin_basename").Scan(&base); err != nil {
+			return b, fmt.Errorf("baca log_bin_basename: %w", err)
+		}
+		if !binlogBaseRe.MatchString(base.String) {
+			return b, fmt.Errorf("nama berkas binary log %q tidak didukung panel; ubah log_bin di konfigurasi MySQL ke nama tanpa spasi atau tanda kutip", base.String)
+		}
+		b.LogBin = base.String
+	}
+	vars, err := nameValues(ctx, db, `SHOW GLOBAL VARIABLES WHERE Variable_name IN ('binlog_expire_logs_seconds', 'expire_logs_days')`)
+	if err != nil {
+		return b, fmt.Errorf("baca variabel MySQL: %w", err)
+	}
+	switch v := prev["binlog_expire_logs_seconds"]; {
+	case v != "" && isDigits(v):
+		b.ExpireSeconds = v
+	case (vars["binlog_expire_logs_seconds"] == "0" || vars["binlog_expire_logs_seconds"] == "") &&
+		(vars["expire_logs_days"] == "0" || vars["expire_logs_days"] == ""):
+		b.ExpireSeconds = strconv.Itoa(binlogExpireSeconds)
+	}
+	return b, nil
+}
+
+func isDigits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
+}
+
 // renderConfig is the managed [mysqld] block for role. bindAll makes a
 // master listen on every address (its bind-address is loopback only).
-func renderConfig(role string, serverID uint32, bindAll bool) string {
-	lines := []string{
-		"[mysqld]",
-		"log_bin=binlog",
-		"binlog_expire_logs_seconds=" + strconv.Itoa(binlogExpireSeconds),
+func renderConfig(role string, serverID uint32, bindAll bool, bl binlogBlock) string {
+	lines := []string{"[mysqld]", "log_bin=" + bl.LogBin}
+	if bl.ExpireSeconds != "" {
+		lines = append(lines, "binlog_expire_logs_seconds="+bl.ExpireSeconds)
+	}
+	lines = append(lines,
 		"gtid_mode=ON",
 		"enforce_gtid_consistency=ON",
-		"server_id=" + strconv.FormatUint(uint64(serverID), 10),
+		"server_id="+strconv.FormatUint(uint64(serverID), 10),
 		"binlog_format=ROW",
-	}
+	)
 	if bindAll {
 		lines = append(lines, "bind_address=0.0.0.0")
 	}
@@ -303,11 +357,19 @@ func waitAnonymousDone(ctx context.Context, db *sql.DB) error {
 // installClonePlugin installs the clone plugin unless it is active and
 // reports whether it did. A plugin that is installed but not ACTIVE (for
 // example disabled with clone=OFF) is an error: CLONE would not work.
-func installClonePlugin(ctx context.Context, db *sql.DB) (bool, error) {
+// INSTALL PLUGIN writes mysql.plugin, which super_read_only refuses (a
+// target an earlier attempt left read-only): read-only is lifted around it
+// and put back.
+func installClonePlugin(ctx context.Context, db *sql.DB, logf func(level, format string, args ...any)) (bool, error) {
 	status, err := clonePluginStatus(ctx, db)
 	if err != nil || status == "ACTIVE" {
 		return false, err
 	}
+	restore, err := liftReadOnly(ctx, logf, db)
+	if err != nil {
+		return false, err
+	}
+	defer restore()
 	installed := true
 	if _, err := db.ExecContext(ctx, "INSTALL PLUGIN clone SONAME 'mysql_clone.so'"); err != nil {
 		var me *drv.MySQLError
@@ -477,6 +539,9 @@ func normBool(v string) string {
 
 // SetReadOnly turns read_only and super_read_only on or off together and
 // persists them. read_only goes on first and comes off last.
+//
+// Turning it off is refused on a server replicas read from: a master is
+// never made read-only by dbpanel, so only a mistake would ask that there.
 func SetReadOnly(ctx context.Context, h Host, on bool) error {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
@@ -485,6 +550,9 @@ func SetReadOnly(ctx context.Context, h Host, on bool) error {
 	defer db.Close()
 	stmts := []string{"SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON"}
 	if !on {
+		if err := refuseOnSource(ctx, db); err != nil {
+			return err
+		}
 		stmts = []string{"SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF"}
 	}
 	for _, q := range stmts {

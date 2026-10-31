@@ -7,14 +7,16 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/dbpanel agent
 Restart=always
 RestartSec=3
-# Root: the agent will manage MySQL (Plan 2). ProtectSystem=full keeps
-# /usr, /boot and /etc read-only; Plan 2 must open what it manages
-# (e.g. ReadWritePaths=/etc/mysql) before writing there.
+# Root: the agent manages MySQL. No ProtectSystem: the agent writes
+# /etc/dbpanel (sealed MySQL credentials), the MySQL option files under
+# /etc and the data directory, and mysql.install installs packages into
+# /usr. KillMode=process: a mysqld the agent started through an init
+# script or mysqld_safe stays up when the agent restarts.
 User=root
+KillMode=process
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
-ProtectSystem=full
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

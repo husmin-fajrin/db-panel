@@ -53,7 +53,10 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	if _, err := refuseRunningReplica(ctx, db); err != nil {
 		return res, err
 	}
-	if _, err := installClonePlugin(ctx, db); err != nil {
+	if err := refuseOnSource(ctx, db); err != nil {
+		return res, err
+	}
+	if _, err := installClonePlugin(ctx, db, j.Logf); err != nil {
 		return res, err
 	}
 	// The host is validated (no quote, no colon) and the port an integer.
@@ -81,6 +84,10 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	password := quotePassword(p.Password, strings.Contains(mode, "NO_BACKSLASH_ESCAPES"))
 	stmt := "CLONE INSTANCE FROM " + quoteString(p.User) + "@" + quoteString(p.Host) + ":" + strconv.Itoa(p.Port) +
 		" IDENTIFIED BY " + password
+	if p.SSL {
+		// The donor offers TLS: never fall back to a plaintext copy.
+		stmt += " REQUIRE SSL"
+	}
 
 	j.Logf("info", "cloning from %s as %s", donor, p.User)
 	j.Progress(0, "CLONE dimulai")
@@ -111,7 +118,17 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	// cancel does not stop them, and the job keeps its result.
 	vctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartReadyTimeout)
 	defer cancel()
-	after, err := openAdmin(vctx, h)
+	after, err := h.Open(vctx)
+	if LoginRefused(err) {
+		// The donor's accounts replaced this server's: the stored one is
+		// gone. The data is in place; the panel checks clone_status and
+		// the GTID set once the user reconnects with the master's account.
+		res.AdminReplaced = true
+		res.Bytes = p.EstimateBytes
+		res.TookMs = time.Since(start).Milliseconds()
+		j.Logf("warn", "clone finished; the stored admin account is refused now (the master's accounts came with the copy): %v", err)
+		return res, nil
+	}
 	if err != nil {
 		return res, fmt.Errorf("CLONE selesai, tetapi login ke MySQL gagal: %w", err)
 	}

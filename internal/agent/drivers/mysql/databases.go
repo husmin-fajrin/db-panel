@@ -75,10 +75,8 @@ func DropDatabases(ctx context.Context, h Host, databases []string, logf func(le
 	if _, err := refuseRunningReplica(ctx, db); err != nil {
 		return res, err
 	}
-	if n, err := binlogDumpThreads(ctx, db); err != nil {
+	if err := refuseOnSource(ctx, db); err != nil {
 		return res, err
-	} else if n > 0 {
-		return res, fmt.Errorf("%d replika sedang membaca binlog server ini; database di server sumber tidak dihapus dari sini", n)
 	}
 	rows, err := db.QueryContext(ctx, "SELECT schema_name FROM information_schema.schemata")
 	if err != nil {

@@ -89,13 +89,20 @@ func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		return res, err
 	}
 	gtidMode := dumpGTIDMode(executed, rs != nil, p)
+	// Dropping databases, or resetting the binary logs (ON mode), on a
+	// server replicas read from would break them.
+	if p.DropExisting || gtidMode == "ON" {
+		if err := refuseOnSource(ctx, db); err != nil {
+			return res, err
+		}
+	}
 
-	srcFile, err := writeDefaultsFile(h, proto.ConnectParams{User: p.User, Password: p.Password, Host: p.Host, Port: p.Port}, "", 0)
+	srcFile, err := writeDefaultsFile(h, proto.ConnectParams{User: p.User, Password: p.Password, Host: p.Host, Port: p.Port}, "", 0, p.SSL)
 	if err != nil {
 		return res, err
 	}
 	defer os.Remove(srcFile)
-	localFile, err := writeDefaultsFile(h, local, l.Socket, l.Port)
+	localFile, err := writeDefaultsFile(h, local, l.Socket, l.Port, false)
 	if err != nil {
 		return res, err
 	}
@@ -131,9 +138,26 @@ func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	j.Progress(0, "dump dimulai")
 	var dumpGTID string
 	var found bool
-	res.Bytes, dumpGTID, found, err = pipeDump(j, h, dumpBin, args, loadBin, loadArgs(localFile), p.EstimateBytes)
+	trailer := ""
+	if len(p.Databases) == 0 {
+		trailer = flushTrailer
+	}
+	res.Bytes, dumpGTID, found, err = pipeDump(j, h, dumpBin, args, loadBin, loadArgs(localFile), trailer, p.EstimateBytes)
 	if err != nil {
 		return res, err
+	}
+	if len(p.Databases) == 0 && storedLoginRefused(ctx, h) {
+		// Every database includes the mysql schema: the master's accounts
+		// replaced this server's (the dump ends with FLUSH PRIVILEGES), and
+		// the stored one no longer logs in. In ON mode the dump's header
+		// is the purged set, which is this server's gtid_executed now.
+		res.AdminReplaced = true
+		if found {
+			res.GTIDExecuted = dumpGTID
+		}
+		res.TookMs = time.Since(start).Milliseconds()
+		j.Logf("warn", "dump loaded: %d bytes; the stored admin account is refused now (the master's accounts came with the dump)", res.Bytes)
+		return res, nil
 	}
 	if gtidMode == "COMMENTED" {
 		if !found {
@@ -146,6 +170,17 @@ func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	res.TookMs = time.Since(start).Milliseconds()
 	j.Logf("info", "dump loaded: %d bytes, gtid %s", res.Bytes, res.GTIDExecuted)
 	return res, nil
+}
+
+// storedLoginRefused reports whether a fresh login with the stored admin
+// account is refused (1045, 1698).
+func storedLoginRefused(ctx context.Context, h Host) bool {
+	db, err := h.Open(ctx)
+	if err != nil {
+		return LoginRefused(err)
+	}
+	db.Close()
+	return false
 }
 
 // checkClients proves both sides before anything local is changed: the
@@ -205,14 +240,19 @@ func dumpArgs(defaultsFile string, databases []string, gtidPurged string) []stri
 		"--no-tablespaces",
 	}
 	if len(databases) == 0 {
+		// The mysql schema comes along; DumpFrom flushes privileges at the
+		// end of the load (flushTrailer).
 		return append(args, "--all-databases")
 	}
 	return append(append(args, "--databases"), databases...)
 }
 
 // loadArgs are mysql's arguments: what it loads is not binary-logged here.
+// --binary-mode turns off the client's own commands (\! runs a shell, \.
+// reads a file, \T writes one) but delimiter and charset: the stream comes
+// from another server, and this client runs as root.
 func loadArgs(defaultsFile string) []string {
-	return []string{"--defaults-file=" + defaultsFile, "--init-command=SET sql_log_bin=0"}
+	return []string{"--defaults-file=" + defaultsFile, "--binary-mode", "--init-command=SET sql_log_bin=0"}
 }
 
 // findClientTool finds a MySQL client program next to mysqld, else on PATH.
@@ -299,11 +339,15 @@ func clientDefaults(p proto.ConnectParams, socket string, port int) (string, err
 }
 
 // writeDefaultsFile writes clientDefaults(p, socket, port) to a new 0600
-// file and returns its path; the caller removes it.
-func writeDefaultsFile(h Host, p proto.ConnectParams, socket string, port int) (string, error) {
+// file and returns its path; the caller removes it. requireTLS makes the
+// client refuse a connection without TLS.
+func writeDefaultsFile(h Host, p proto.ConnectParams, socket string, port int, requireTLS bool) (string, error) {
 	content, err := clientDefaults(p, socket, port)
 	if err != nil {
 		return "", err
+	}
+	if requireTLS {
+		content += "ssl-mode=REQUIRED\n"
 	}
 	f, err := h.TempFile("dbpanel-*.cnf", 0o600)
 	if err != nil {
@@ -394,13 +438,22 @@ func resetBinaryLogs(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// flushTrailer ends the load of every database: the master's accounts,
+// loaded with the mysql schema, take effect now rather than at the next
+// restart. It must come last: mysqldump's own --flush-privileges runs right
+// after the mysql schema, and from then on the loading account (not among
+// the master's) loses its dynamic privileges (SYSTEM_USER, SET_USER_ID), so
+// the views, routines and triggers that follow fail on their DEFINER.
+const flushTrailer = "\nFLUSH PRIVILEGES;\n"
+
 // pipeDump runs mysqldump into mysql through a pipe, reporting the bytes
-// through it against estimate. It returns that byte count and the GTID set
+// through it against estimate; trailer, when not empty, is fed to mysql
+// after a complete dump. It returns that byte count and the GTID set
 // in the dump's header (found false when there is none). Cancelling the job
 // kills both. The error is the side that failed first: mysql stopping early
 // ends mysqldump, which is then not the cause.
 func pipeDump(j *jobs.Job, h Host, dumpBin string, dumpArgs []string, loadBin string, loadArgs []string,
-	estimate uint64) (n uint64, gtid string, found bool, err error) {
+	trailer string, estimate uint64) (n uint64, gtid string, found bool, err error) {
 	ctx, cancel := context.WithCancel(j.Context())
 	defer cancel()
 	pr, pw := io.Pipe()
@@ -413,6 +466,9 @@ func pipeDump(j *jobs.Job, h Host, dumpBin string, dumpArgs []string, loadBin st
 	dumped := make(chan outcome, 1)
 	go func() {
 		err := h.Exec(ctx, nil, counter, dumpBin, dumpArgs...)
+		if err == nil && trailer != "" {
+			_, err = io.WriteString(pw, trailer)
+		}
 		o := outcome{err: err, first: err != nil && !loadEnded.Load()}
 		pw.CloseWithError(err) // nil: mysql reads EOF
 		dumped <- o

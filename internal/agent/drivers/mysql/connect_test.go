@@ -254,3 +254,25 @@ func TestInventoryWithoutCredentialsFails(t *testing.T) {
 		t.Fatalf("response = %+v / %+v", r, r.Error)
 	}
 }
+
+// TestConnectRejectsBadHost: the host is an address or a name, never text
+// that could carry DSN options or reach odd places.
+func TestConnectRejectsBadHost(t *testing.T) {
+	reg := commands.NewRegistry()
+	(&mysql.Driver{}).Register(reg) // no host: only validation can answer
+	for _, host := range []string{"a b", "db/x?allowAllFiles=true", "user@db", "db:3306", `x'"><svg/onload=alert(1)>`,
+		strings.Repeat("h", 256)} {
+		raw, _ := json.Marshal(proto.ConnectParams{User: "root", Password: "x", Host: host})
+		r := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.connect", Params: raw})
+		if r.OK || r.Error.Code != proto.CodeBadParams || !strings.Contains(r.Error.Message, "host MySQL tidak valid") {
+			t.Errorf("host %q: response = %+v / %+v, want bad_params", host, r, r.Error)
+		}
+	}
+	for _, host := range []string{"", "localhost", "10.0.0.5", "db-1.lan", "::1"} {
+		raw, _ := json.Marshal(proto.ConnectParams{User: "root", Password: "x", Host: host})
+		r := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.connect", Params: raw})
+		if r.OK || r.Error.Message != mysql.ErrNoHost.Error() {
+			t.Errorf("host %q: response = %+v / %+v, want it past validation", host, r, r.Error)
+		}
+	}
+}

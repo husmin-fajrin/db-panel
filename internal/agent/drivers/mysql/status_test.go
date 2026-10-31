@@ -45,6 +45,10 @@ func TestStatusAgainstInstance(t *testing.T) {
 	if st.ThreadsRunning < 1 {
 		t.Errorf("ThreadsRunning=%d", st.ThreadsRunning)
 	}
+	// mysqld generates its own certificate (auto_generate_certs).
+	if !st.TLSAvailable || st.LowerCaseTableNames != 0 || st.CloneState != "" {
+		t.Errorf("TLSAvailable=%v LowerCaseTableNames=%d CloneState=%q", st.TLSAvailable, st.LowerCaseTableNames, st.CloneState)
+	}
 
 	// A write shows up in gtid_executed; a second later Uptime has advanced.
 	time.Sleep(1100 * time.Millisecond)

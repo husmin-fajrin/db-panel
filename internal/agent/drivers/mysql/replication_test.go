@@ -1,6 +1,7 @@
 package mysql_test
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -132,7 +133,9 @@ func TestSourceStatement(t *testing.T) {
 		t.Errorf("statement =\n%s\nwant\n%s", got, want)
 	}
 	p.SSL = true
-	if got := mysql.SourceStatement(p, quote); !strings.HasSuffix(got, ", SOURCE_SSL = 1") {
+	// Over TLS the master's RSA key is not requested.
+	if got := mysql.SourceStatement(p, quote); !strings.HasSuffix(got, ", SOURCE_SSL = 1") ||
+		!strings.Contains(got, "GET_SOURCE_PUBLIC_KEY = 0") {
 		t.Errorf("SSL statement = %s", got)
 	}
 	noBackslash := func(s string) string { return mysql.QuoteLiteral(s, true) }
@@ -515,5 +518,65 @@ func TestConfigureRefusedKeepsReplica(t *testing.T) {
 	}
 	if g := globalFilters(t, replica); g != "a.%" {
 		t.Errorf("global filter = %q, want the old a.%%", g)
+	}
+}
+
+// TestDestructiveCommandsRefusedOnSource: on a server replicas read from,
+// the agent itself refuses every command that would drop its data, replace
+// it, point it at another source, reset its replication or make it
+// writable, whatever the panel asks.
+func TestDestructiveCommandsRefusedOnSource(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	replica := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	// The replica follows over TLS with an account that requires it.
+	if err := mysql.CreateReplUser(context.Background(), master.Host(),
+		proto.ReplUserParams{User: "dbpanel_repl", Password: replPassword, RequireSSL: true}); err != nil {
+		t.Fatal(err)
+	}
+	execAll(t, mdb, "CREATE DATABASE keep", "CREATE TABLE keep.t (id INT PRIMARY KEY)", "INSERT INTO keep.t VALUES (1)")
+	src := sourceParams(master)
+	src.SSL = true
+	decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.configureReplication", src))
+	decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.startReplica", nil))
+	synced(t, master, replica)
+	var cipher string
+	if err := rootDB(t, replica).QueryRow(`SELECT COALESCE(MAX(SSL_ALLOWED), '') FROM performance_schema.replication_connection_configuration`).
+		Scan(&cipher); err != nil || !strings.EqualFold(cipher, "yes") {
+		t.Errorf("replication connection SSL_ALLOWED = %q, %v; want Yes", cipher, err)
+	}
+	const refused = "replika sedang membaca binlog server ini"
+
+	h := master.Host()
+	for _, c := range []struct {
+		cmd    string
+		params any
+	}{
+		{"mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"keep"}}},
+		{"mysql.resetReplica", nil},
+		{"mysql.configureReplication", sourceParams(replica)},
+		{"mysql.setReadOnly", proto.ReadOnlyParams{On: false}},
+	} {
+		if r := dispatch(t, h, c.cmd, c.params); r.OK || !strings.Contains(r.Error.Message, refused) {
+			t.Errorf("%s on a source = %+v, want refused", c.cmd, r)
+		}
+	}
+	rig := rootRig(master)
+	other := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	replUser(t, other)
+	if d := rig.run(t, "mysql.cloneFrom", cloneParams(other)); d.OK || !strings.Contains(d.Error, refused) {
+		t.Errorf("cloneFrom on a source = %+v, want refused", d)
+	}
+	dp := dumpParams(other, "keep")
+	dp.DropExisting = true
+	if d := rig.run(t, "mysql.dumpFrom", dp); d.OK || !strings.Contains(d.Error, refused) {
+		t.Errorf("dumpFrom DropExisting on a source = %+v, want refused", d)
+	}
+	if n := count(t, mdb, "SELECT COUNT(*) FROM keep.t"); n != 1 {
+		t.Errorf("keep.t rows on the master = %d, want 1", n)
+	}
+	// Making a source read-only is not destructive and still allowed.
+	if r := dispatch(t, h, "mysql.setReadOnly", proto.ReadOnlyParams{On: true}); !r.OK {
+		t.Errorf("setReadOnly on = %+v", r)
 	}
 }

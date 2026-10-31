@@ -9,6 +9,7 @@ import (
 	"net"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -163,14 +164,15 @@ func TestPreflightMasterHealthy(t *testing.T) {
 }
 
 // TestPreflightMasterReportsFixes: settings that can change online are
-// reported with the statement that fixes them.
+// reported with the statement that fixes them; server_id 0 and a binlog
+// format other than ROW are warnings, as Siapkan master sets both.
 func TestPreflightMasterReportsFixes(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	execAll(t, rootDB(t, inst),
 		"SET GLOBAL server_id = 0", "SET GLOBAL binlog_format = 'STATEMENT'", "SET GLOBAL gtid_mode = ON_PERMISSIVE")
 
 	res := callPreflight(t, inst.Host(), proto.PreflightParams{Role: "master"})
-	c := wantCheck(t, res, "server_id", proto.CheckFail)
+	c := wantCheck(t, res, "server_id", proto.CheckWarn)
 	if len(c.FixSQL) != 1 {
 		t.Fatalf("server_id FixSQL = %q", c.FixSQL)
 	}
@@ -181,17 +183,21 @@ func TestPreflightMasterReportsFixes(t *testing.T) {
 	if n, err := strconv.ParseUint(m[1], 10, 32); err != nil || n < 2 {
 		t.Errorf("new server_id %s outside [2, 4294967295]: %v", m[1], err)
 	}
-	c = wantCheck(t, res, "binlog_format", proto.CheckFail)
+	c = wantCheck(t, res, "binlog_format", proto.CheckWarn)
 	if !reflect.DeepEqual(c.FixSQL, []string{"SET PERSIST binlog_format='ROW'"}) {
 		t.Errorf("binlog_format FixSQL = %q", c.FixSQL)
+	}
+	if !strings.Contains(c.Detail, "koneksi aplikasi yang sudah terbuka tetap memakai format lama") {
+		t.Errorf("binlog_format detail = %q", c.Detail)
 	}
 	if c := wantCheck(t, res, "gtid_mode", proto.CheckWarn); !strings.Contains(c.Detail, "akan dinaikkan bertahap tanpa restart") {
 		t.Errorf("gtid_mode detail = %q", c.Detail)
 	}
 	wantCheck(t, res, "enforce_gtid_consistency", proto.CheckOK)
 	wantCheck(t, res, "existing_replication", proto.CheckOK)
-	if res.Worst != proto.CheckFail {
-		t.Errorf("Worst = %q, want fail", res.Worst)
+	// Only the loopback bind (the harness's) needs more than a warning.
+	if res.Worst != proto.CheckNeedsRestart {
+		t.Errorf("Worst = %q, want needs_restart", res.Worst)
 	}
 }
 
@@ -608,6 +614,32 @@ func TestPreflightRules(t *testing.T) {
 	if res.Method != "" {
 		t.Errorf("self as peer: Method = %q", res.Method)
 	}
+	// lower_case_table_names must match the master's when it is known.
+	f = healthy()
+	one, zero := 1, 0
+	lctn := replica
+	if res := mysql.EvaluatePreflight(lctn, f); slices.Contains(checkIDs(res), "lower_case_table_names") {
+		t.Error("lower_case_table_names checked without the master's value")
+	}
+	lctn.PeerLowerCaseTableNames = &zero
+	wantCheck(t, mysql.EvaluatePreflight(lctn, f), "lower_case_table_names", proto.CheckOK)
+	lctn.PeerLowerCaseTableNames = &one
+	res = mysql.EvaluatePreflight(lctn, f)
+	if c := wantCheck(t, res, "lower_case_table_names", proto.CheckFail); !strings.Contains(c.Detail, "lower_case_table_names=1, server ini 0") ||
+		!strings.Contains(c.Detail, "pasang ulang MySQL") {
+		t.Errorf("lower_case_table_names detail = %q", c.Detail)
+	}
+	if res.Worst != proto.CheckFail {
+		t.Errorf("lctn mismatch: Worst = %q", res.Worst)
+	}
+	// A target that already replicates from somewhere is named: the
+	// snapshot step resets that replication.
+	f = healthy()
+	f.Status.Replica = &proto.ReplicaStatus{SourceHost: "10.9.9.9", SourcePort: 3307}
+	if c := wantCheck(t, mysql.EvaluatePreflight(replica, f), "existing_replication", proto.CheckWarn); !strings.Contains(c.Detail, "10.9.9.9:3307") {
+		t.Errorf("replica existing_replication detail = %q", c.Detail)
+	}
+
 	f.Status.ServerUUID = ""
 	f.DiskErr = errors.New("statfs: no such file")
 	if c := wantCheck(t, mysql.EvaluatePreflight(replica, f), "disk", proto.CheckFail); !strings.Contains(c.Detail, "statfs") {
@@ -624,6 +656,8 @@ func TestPreflightBadParams(t *testing.T) {
 		proto.PreflightParams{Role: "replica", PeerHost: "10.0.0.1", PeerPort: 3306},
 		proto.PreflightParams{Role: "master", Databases: []string{"shop`; DROP"}},
 		proto.PreflightParams{Role: "master", ReplUser: "repl'@'%"},
+		proto.PreflightParams{Role: "replica", PeerHost: "10.0.0.1 --x", PeerPort: 3306, PeerVersion: "8.0.46"},
+		proto.PreflightParams{Role: "replica", PeerHost: "db:3306", PeerPort: 3306, PeerVersion: "8.0.46"},
 	} {
 		r := dispatchPreflight(t, nil, p)
 		if r.OK || r.Error == nil || r.Error.Code != proto.CodeBadParams {

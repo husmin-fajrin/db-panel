@@ -82,6 +82,21 @@ check_unit() { # script unit-name
 check_unit "$PANEL_SCRIPT" dbpanel-panel.service
 check_unit "$rendered" dbpanel-agent.service
 
+# SEC-30: the agent writes /etc/dbpanel, MySQL's config and /usr (install),
+# so its unit has no ProtectSystem; a mysqld it started through an init
+# script must survive an agent restart (KillMode=process). The rest of the
+# hardening stays.
+agent_unit=scripts/systemd/dbpanel-agent.service
+if grep -qE '^[[:space:]]*ProtectSystem=' "$agent_unit"; then
+	fail "$agent_unit memakai ProtectSystem (agent harus bisa menulis /etc/dbpanel dan konfigurasi MySQL)"
+fi
+for want in KillMode=process NoNewPrivileges=yes PrivateTmp=yes ProtectHome=yes ProtectKernelTunables=yes \
+	ProtectKernelModules=yes ProtectControlGroups=yes RestrictSUIDSGID=yes; do
+	if ! grep -qx "$want" "$agent_unit"; then
+		fail "$agent_unit tidak memuat $want"
+	fi
+done
+
 # SEC-07: the online install checks the panel binary against SHA256SUMS.
 # Run install_binary from install.sh (without main) with curl replaced by
 # a function serving fixture files.

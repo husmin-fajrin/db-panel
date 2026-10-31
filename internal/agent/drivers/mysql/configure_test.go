@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -79,20 +81,46 @@ func variable(t *testing.T, db *sql.DB, name string) string {
 }
 
 func TestRenderConfig(t *testing.T) {
-	master := mysql.RenderConfig("master", 1234, false)
+	fresh := mysql.BinlogBlock{LogBin: "binlog", ExpireSeconds: "604800"}
+	master := mysql.RenderConfig("master", 1234, false, fresh)
 	want := "[mysqld]\nlog_bin=binlog\nbinlog_expire_logs_seconds=604800\ngtid_mode=ON\nenforce_gtid_consistency=ON\n" +
 		"server_id=1234\nbinlog_format=ROW\n"
 	if master != want {
-		t.Errorf("master block =\n%s\nwant\n%s", master, want)
+		t.Errorf("master config =\n%s\nwant\n%s", master, want)
 	}
-	if got := mysql.RenderConfig("master", 1234, true); got != want+"bind_address=0.0.0.0\n" {
-		t.Errorf("master block with bindAll =\n%s", got)
+	if got := mysql.RenderConfig("master", 1234, true, fresh); got != want+"bind_address=0.0.0.0\n" {
+		t.Errorf("master config with bindAll =\n%s", got)
 	}
-	replica := mysql.RenderConfig("replica", 99, false)
+	replica := mysql.RenderConfig("replica", 99, false, fresh)
 	want = "[mysqld]\nlog_bin=binlog\nbinlog_expire_logs_seconds=604800\ngtid_mode=ON\nenforce_gtid_consistency=ON\n" +
 		"server_id=99\nbinlog_format=ROW\nread_only=ON\nsuper_read_only=ON\nrelay_log=relay\nlog_replica_updates=ON\n"
 	if replica != want {
-		t.Errorf("replica block =\n%s\nwant\n%s", replica, want)
+		t.Errorf("replica config =\n%s\nwant\n%s", replica, want)
+	}
+	// A server that already logs keeps its base name and its retention.
+	kept := mysql.RenderConfig("master", 7, false, mysql.BinlogBlock{LogBin: "/www/server/data/mysql-bin"})
+	if want := "[mysqld]\nlog_bin=/www/server/data/mysql-bin\ngtid_mode=ON\nenforce_gtid_consistency=ON\n" +
+		"server_id=7\nbinlog_format=ROW\n"; kept != want {
+		t.Errorf("config keeping the binlog =\n%s\nwant\n%s", kept, want)
+	}
+}
+
+func TestTLSAvailable(t *testing.T) {
+	for _, c := range []struct {
+		have      string
+		known     bool
+		tls, cert string
+		want      bool
+	}{
+		{"YES", true, "TLSv1.2,TLSv1.3", "server-cert.pem", true},
+		{"DISABLED", true, "TLSv1.2", "server-cert.pem", false},
+		{"", false, "TLSv1.2,TLSv1.3", "server-cert.pem", true}, // 8.4: have_ssl is gone
+		{"", false, "TLSv1.2", "", false},
+		{"", false, "", "server-cert.pem", false},
+	} {
+		if got := mysql.TLSAvailable(c.have, c.known, c.tls, c.cert); got != c.want {
+			t.Errorf("TLSAvailable(%q, %v, %q, %q) = %v, want %v", c.have, c.known, c.tls, c.cert, got, c.want)
+		}
 	}
 }
 
@@ -135,7 +163,9 @@ func TestParseOptionsAndNotInEffect(t *testing.T) {
 }
 
 func TestConfigureMasterSetsGTIDAndWritesBlock(t *testing.T) {
-	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: append([]string{"binlog-format=MIXED"}, gtidOff...)})
+	// aaPanel-like: its own binary log name and retention, MIXED format.
+	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: append([]string{"binlog-format=MIXED", "log-bin=mysql-bin",
+		"binlog-expire-logs-seconds=86400"}, gtidOff...)})
 	h := inst.Host()
 	root, err := sql.Open("mysql", inst.DSN())
 	if err != nil {
@@ -178,7 +208,10 @@ func TestConfigureMasterSetsGTIDAndWritesBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	block := "# BEGIN dbpanel\n" + mysql.RenderConfig("master", inst.ServerID, true) + "# END dbpanel\n"
+	// The binary log keeps its name and retention: no stranded mysql-bin.*
+	// files and no changed expiry at the next restart.
+	base := filepath.Join(inst.DataDir, "mysql-bin")
+	block := "# BEGIN dbpanel\n" + mysql.RenderConfig("master", inst.ServerID, true, mysql.BinlogBlock{LogBin: base}) + "# END dbpanel\n"
 	if !strings.HasSuffix(string(cnf), block) {
 		t.Errorf("my.cnf does not end with the block:\n%s", cnf)
 	}
@@ -219,6 +252,17 @@ func TestConfigureMasterSetsGTIDAndWritesBlock(t *testing.T) {
 	if st := status(t, h); st.BindAddress != "0.0.0.0" || st.ServerID != 4242 {
 		t.Errorf("after restart: bind_address=%s server_id=%d", st.BindAddress, st.ServerID)
 	}
+	root, err = sql.Open("mysql", inst.DSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := variable(t, root, "log_bin_basename"); v != base {
+		t.Errorf("log_bin_basename after restart = %s, want %s", v, base)
+	}
+	if v := variable(t, root, "binlog_expire_logs_seconds"); v != "86400" {
+		t.Errorf("binlog_expire_logs_seconds after restart = %s, want the server's own 86400", v)
+	}
+	root.Close()
 	res = configure(t, h, proto.ConfigureParams{Role: "master", GTID: true, EnableClone: true})
 	if res.NeedsRestart || len(res.Applied) != 0 || res.ServerID != 4242 {
 		t.Errorf("after restart: NeedsRestart=%v %q Applied=%q ServerID=%d", res.NeedsRestart, res.RestartReasons, res.Applied, res.ServerID)
@@ -271,10 +315,15 @@ func TestConfigureReportsRestartWhenLogBinOff(t *testing.T) {
 	if !reflect.DeepEqual(res.Applied, []string{"server_id=" + strconv.FormatUint(uint64(res.ServerID), 10)}) {
 		t.Errorf("Applied = %q", res.Applied)
 	}
+	// The binary log is off: the block turns it on under dbpanel's name.
+	if cnf, err := os.ReadFile(inst.ConfigFile); err != nil || !strings.Contains(string(cnf), "\nlog_bin=binlog\n") {
+		t.Errorf("block without log_bin=binlog (%v):\n%s", err, cnf)
+	}
 }
 
 func TestRestartAppliesReplicaConfig(t *testing.T) {
-	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: gtidOff})
+	// Binary logs that never expire get dbpanel's seven days.
+	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: append([]string{"binlog-expire-logs-seconds=0"}, gtidOff...)})
 	h := inst.Host()
 
 	res := configure(t, h, proto.ConfigureParams{Role: "replica", GTID: true})
@@ -323,5 +372,23 @@ func TestRestartAppliesReplicaConfig(t *testing.T) {
 	}
 	if st := status(t, h); !st.ReadOnly || !st.SuperReadOnly {
 		t.Errorf("after setReadOnly on: read_only=%v super_read_only=%v", st.ReadOnly, st.SuperReadOnly)
+	}
+}
+
+// TestConfigureInstallsClonePluginUnderSuperReadOnly: a target an earlier
+// attempt left super_read_only still gets the clone plugin; read-only is
+// lifted for INSTALL PLUGIN only and is on again afterwards.
+func TestConfigureInstallsClonePluginUnderSuperReadOnly(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: []string{"read-only=ON", "super-read-only=ON"}})
+	h := inst.Host()
+	if st := status(t, h); !st.SuperReadOnly {
+		t.Fatal("super_read_only is off before configure")
+	}
+	res := configure(t, h, proto.ConfigureParams{Role: "replica", EnableClone: true, GTID: true})
+	if !slices.Contains(res.Applied, "plugin clone") {
+		t.Errorf("Applied = %q, want the clone plugin installed", res.Applied)
+	}
+	if st := status(t, h); !st.SuperReadOnly || !st.ReadOnly {
+		t.Errorf("after configure: read_only=%v super_read_only=%v, want both on", st.ReadOnly, st.SuperReadOnly)
 	}
 }

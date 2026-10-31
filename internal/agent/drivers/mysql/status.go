@@ -33,7 +33,8 @@ func Status(ctx context.Context, db *sql.DB) (proto.MySQLStatus, error) {
 	var st proto.MySQLStatus
 	vars, err := nameValues(ctx, db, `SHOW GLOBAL VARIABLES WHERE Variable_name IN
 		('version', 'server_id', 'server_uuid', 'log_bin', 'gtid_mode', 'enforce_gtid_consistency', 'binlog_format',
-		 'read_only', 'super_read_only', 'datadir', 'socket', 'port', 'bind_address')`)
+		 'read_only', 'super_read_only', 'datadir', 'socket', 'port', 'bind_address', 'have_ssl', 'tls_version',
+		 'lower_case_table_names')`)
 	if err != nil {
 		return st, fmt.Errorf("baca variabel MySQL: %w", err)
 	}
@@ -55,16 +56,20 @@ func Status(ctx context.Context, db *sql.DB) (proto.MySQLStatus, error) {
 	st.Socket = vars["socket"]
 	st.Port, _ = strconv.Atoi(vars["port"])
 	st.BindAddress = vars["bind_address"]
+	st.LowerCaseTableNames, _ = strconv.Atoi(vars["lower_case_table_names"])
 
 	if err := db.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&st.GTIDExecuted); err != nil {
 		return st, fmt.Errorf("baca gtid_executed: %w", err)
 	}
 	st.GTIDExecuted = strings.ReplaceAll(st.GTIDExecuted, "\n", "")
 
-	stat, err := nameValues(ctx, db, `SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime', 'Threads_running')`)
+	stat, err := nameValues(ctx, db, `SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime', 'Threads_running', 'Current_tls_cert')`)
 	if err != nil {
 		return st, fmt.Errorf("baca status MySQL: %w", err)
 	}
+	have, ok := vars["have_ssl"]
+	st.TLSAvailable = tlsAvailable(have, ok, vars["tls_version"], stat["Current_tls_cert"])
+	st.CloneState, st.CloneError = cloneStatus(ctx, db)
 	st.UptimeSec, _ = strconv.ParseInt(stat["Uptime"], 10, 64)
 	st.ThreadsRunning, _ = strconv.Atoi(stat["Threads_running"])
 
@@ -79,6 +84,32 @@ func Status(ctx context.Context, db *sql.DB) (proto.MySQLStatus, error) {
 }
 
 func on(v string) bool { return strings.EqualFold(v, "ON") || v == "1" }
+
+// tlsAvailable reports whether the server takes TLS connections: have_ssl
+// YES where the variable exists (8.0), else a TLS version enabled and a
+// certificate loaded (Current_tls_cert, 8.0.16 and later).
+func tlsAvailable(haveSSL string, haveSSLKnown bool, tlsVersion, currentCert string) bool {
+	if haveSSLKnown {
+		return strings.EqualFold(haveSSL, "YES")
+	}
+	return strings.TrimSpace(tlsVersion) != "" && strings.TrimSpace(currentCert) != ""
+}
+
+// cloneStatus is the last CLONE's state in performance_schema.clone_status
+// and its error ("" when none); both "" when the table cannot be read (no
+// clone plugin) or holds no row.
+func cloneStatus(ctx context.Context, db *sql.DB) (state, errText string) {
+	var errNo int
+	var errMsg string
+	if err := db.QueryRowContext(ctx, "SELECT STATE, ERROR_NO, ERROR_MESSAGE FROM performance_schema.clone_status").
+		Scan(&state, &errNo, &errMsg); err != nil {
+		return "", ""
+	}
+	if errNo != 0 {
+		errText = fmt.Sprintf("%d %s", errNo, errMsg)
+	}
+	return state, errText
+}
 
 // nameValues runs a SHOW ... VARIABLES/STATUS query and maps names to values.
 func nameValues(ctx context.Context, db *sql.DB, query string) (map[string]string, error) {

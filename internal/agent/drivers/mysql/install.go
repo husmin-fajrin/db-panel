@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
@@ -58,6 +59,10 @@ const (
 	maxRedirects     = 10
 	maxLogLine       = 4096
 )
+
+// installCancelWait is how long a cancelled installer command gets after
+// SIGTERM before it is killed (and its output pipes closed).
+var installCancelWait = 30 * time.Second
 
 // installSeries maps each series mysql.install offers to the server choice
 // of mysql-apt-config (as of mysql-apt-config 0.8.33).
@@ -470,7 +475,7 @@ func secureRoot(ctx context.Context, j *jobs.Job, h Host, ins installer, creds C
 	if err != nil {
 		return err
 	}
-	file, err := writeDefaultsFile(h, proto.ConnectParams{User: "root", Password: temp}, l.Socket, l.Port)
+	file, err := writeDefaultsFile(h, proto.ConnectParams{User: "root", Password: temp}, l.Socket, l.Port, false)
 	if err != nil {
 		return err
 	}
@@ -614,6 +619,12 @@ func (r realInstaller) ReadFile(p string) ([]byte, error) { return r.sys.ReadFil
 
 func (realInstaller) Run(ctx context.Context, stdin io.Reader, env []string, logLine func(string), name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	// Cancelling must not SIGKILL apt or dpkg mid-transaction (a locked or
+	// half-configured package database a user cannot repair): SIGTERM lets
+	// them stop cleanly, and only one still running installCancelWait later
+	// is killed.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = installCancelWait
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin = stdin
 	out := &lineWriter{emit: logLine}

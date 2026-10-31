@@ -104,6 +104,13 @@ func mainRun(args []string, stderr io.Writer) int {
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
 	RegisterMySQL(reg, cfg, *dir, sys, runner, logger)
+	reg.SetLogger(logger)
+	if err := ApplyPolicy(reg, *dir, logger); err != nil {
+		// A policy the operator wrote but the agent cannot trust: refuse to
+		// run rather than run without it.
+		fmt.Fprintf(stderr, "kebijakan lokal agent: %v\n", err)
+		return 1
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

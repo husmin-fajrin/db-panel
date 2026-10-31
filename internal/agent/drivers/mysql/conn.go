@@ -68,7 +68,7 @@ func OpenDB(ctx context.Context, creds CredentialStore, socket, rootPassword str
 			if logger != nil {
 				logger.Warn("mysql root login over socket failed", "socket", socket, "err", err)
 			}
-			return nil, ErrNotConnected
+			return nil, notConnectedError{err}
 		}
 		return nil, &LoginError{Err: err}
 	}
@@ -82,6 +82,28 @@ type LoginError struct{ Err error }
 
 func (e *LoginError) Error() string { return "login MySQL gagal: " + e.Err.Error() }
 func (e *LoginError) Unwrap() error { return e.Err }
+
+// notConnectedError is ErrNotConnected (its text, errors.Is) that keeps the
+// root login's own error for errors.As.
+type notConnectedError struct{ err error }
+
+func (e notConnectedError) Error() string        { return ErrNotConnected.Error() }
+func (e notConnectedError) Is(target error) bool { return target == ErrNotConnected }
+func (e notConnectedError) Unwrap() error        { return e.err }
+
+// Server errors that refuse a login: ER_ACCESS_DENIED_ERROR and
+// ER_ACCESS_DENIED_NO_PASSWORD_ERROR (auth_socket for another OS user).
+const (
+	errAccessDenied           = 1045
+	errAccessDeniedNoPassword = 1698
+)
+
+// LoginRefused reports whether err is the server refusing a login (1045,
+// 1698): the server answered, so it is up, but the account does not work.
+func LoginRefused(err error) bool {
+	var me *drv.MySQLError
+	return errors.As(err, &me) && (me.Number == errAccessDenied || me.Number == errAccessDeniedNoPassword)
+}
 
 // openWith connects with p (over socket for a local account) and pings. The
 // error is the driver's own, so callers can read its *drv.MySQLError.

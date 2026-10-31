@@ -117,7 +117,8 @@ func validateSnapshot(p *proto.SnapshotParams, method string) error {
 		switch {
 		case !dbNameRe.MatchString(db):
 			return bad("nama database tidak valid: %q", db)
-		case systemDatabases[db]:
+		// Lower-cased: with lower_case_table_names=1, SYS is sys.
+		case systemDatabases[strings.ToLower(db)]:
 			return bad("database sistem %s tidak bisa disalin sendiri", db)
 		case seen[db]:
 			return bad("database %s disebut dua kali", db)
@@ -139,6 +140,23 @@ func refuseRunningReplica(ctx context.Context, db *sql.DB) (*proto.ReplicaStatus
 		return rs, errReplicaRunning
 	}
 	return rs, nil
+}
+
+// refuseOnSource refuses a command that would change or reset this
+// server's data or replication while replicas read its binary log: on a
+// source (a master) such a command is never part of a dbpanel flow, so it
+// can only be a mistake or a compromised panel. The agent checks this
+// itself, whatever the panel asked.
+func refuseOnSource(ctx context.Context, db *sql.DB) error {
+	n, err := binlogDumpThreads(ctx, db)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"%d replika sedang membaca binlog server ini; perintah ini tidak dijalankan di server sumber replikasi", n)}
+	}
+	return nil
 }
 
 // localGTIDExecuted is @@GLOBAL.gtid_executed on one line.

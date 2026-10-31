@@ -31,6 +31,13 @@ func (p *Panel) attachLocal() (detach func()) {
 	runner := jobs.NewRunner(localEmitter(emit), p.log)
 	runner.Register(reg)
 	agent.RegisterMySQL(reg, config.Config{ServerID: id}, p.opts.ConfigDir, sys, runner, p.log)
+	reg.SetLogger(p.log.With("agent", "local"))
+	if err := agent.ApplyPolicy(reg, p.opts.ConfigDir, p.log); err != nil {
+		// The panel keeps running (its UI is needed to fix things), but its
+		// own server takes no command until the policy is readable.
+		p.log.Error("local agent policy unusable; the panel's own server refuses every command", "err", err)
+		reg.Deny(reg.Names()...)
+	}
 	conn := hub.NewLocalConn(reg, emit)
 	p.Hub.Attach(id, conn)
 	return func() { p.Hub.Detach(id, conn) }
