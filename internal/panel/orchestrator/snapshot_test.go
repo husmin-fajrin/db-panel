@@ -187,6 +187,79 @@ func TestCancelDropsDumpAccount(t *testing.T) {
 	}
 }
 
+// wantDumpAccountDropped checks that the one dump account the master was
+// asked to create was dropped again (it may never have been created) and
+// is no longer recorded in the job, and that no dump ran.
+func wantDumpAccountDropped(e *env, m, r *fakeAgent, id string) {
+	e.t.Helper()
+	e.waitFor("dump account dropped", func() bool { return m.count("mysql.dropUser") == 1 })
+	var cu proto.DumpUserParams
+	m.params("mysql.createDumpUser", &cu)
+	var du proto.DropUserParams
+	m.params("mysql.dropUser", &du)
+	if m.count("mysql.createDumpUser") != 1 || cu.FromHost != "10.0.0.2" ||
+		!strings.HasPrefix(cu.User, dumpUserPrefix) || du.User != cu.User || du.FromHost != cu.FromHost {
+		e.t.Fatalf("createDumpUser %+v, dropUser %+v", cu, du)
+	}
+	if n := r.count("mysql.dumpFrom"); n != 0 {
+		e.t.Fatalf("dumpFrom ran %d times", n)
+	}
+	if j, _, _ := e.st.GetJob(id); strings.Contains(j.ParamsJSON, "dump_user") {
+		e.t.Fatalf("params still name the dropped account: %s", j.ParamsJSON)
+	}
+}
+
+// TestFailedCreateDumpUserDropsIt: an account whose creation failed (it may
+// exist halfway on the master) is dropped all the same.
+func TestFailedCreateDumpUserDropsIt(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	m.fail("mysql.createDumpUser", "GRANT gagal")
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := e.waitJob(id, store.JobFailed); j.CurrentStep != 4 || !strings.Contains(j.Error, "akun dump sementara") {
+		t.Fatalf("job = %+v", j)
+	}
+	wantDumpAccountDropped(e, m, r, id)
+}
+
+// TestCancelDuringCreateDumpUserDropsIt: a Cancel while the master is
+// still creating the account (the call is cut off; the agent may finish
+// it) drops the account.
+func TestCancelDuringCreateDumpUserDropsIt(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	release := make(chan struct{})
+	m.on("mysql.createDumpUser", func(json.RawMessage) (any, error) {
+		<-release
+		return nil, context.Canceled
+	})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitFor("createDumpUser in flight", func() bool { return m.count("mysql.createDumpUser") == 1 })
+	if err := e.r.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	released = true
+	e.waitJob(id, store.JobCanceled)
+	wantDumpAccountDropped(e, m, r, id)
+}
+
 // TestStartCreateReplicaRefusals: a target whose MySQL is installed but not
 // connected, and a master still being prepared, are refused up front.
 func TestStartCreateReplicaRefusalsBeforeAnyJob(t *testing.T) {
