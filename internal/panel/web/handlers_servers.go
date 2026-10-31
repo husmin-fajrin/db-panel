@@ -67,6 +67,12 @@ type serverDetailPage struct {
 	CanPrepare bool            // connected, no missing grants, not a replica
 	Connect    connectForm     // the account form after a failed attempt
 	ActiveJob  *store.Job      // the server's unfinished job, if any
+	// PlainHTTP: the page came over plain HTTP, so the MySQL password typed
+	// into the form crosses the network unencrypted (SEC-29).
+	PlainHTTP bool
+	// InventoryCut: the inventory holds as many databases as the panel
+	// keeps; the list may be cut.
+	InventoryCut bool
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +153,8 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 
 // renderServer renders the server page with v's status and messages.
 func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView) {
-	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial, Connect: v.Form}
+	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial, Connect: v.Form,
+		PlainHTTP: r.TLS == nil}
 	p.Flash, p.Notice = v.Flash, v.Notice
 	now := a.Now()
 	tok, found, err := a.Store.ActivePairToken(srv.ID, now)
@@ -175,6 +182,7 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 			p.ActiveJob = &job
 		}
 		p.ShowMySQL = p.Probe == nil || p.Probe.MySQL.Installed
+		p.InventoryCut = len(p.Inventory.Databases) >= inventoryCap
 		p.CanPrepare = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0 && srv.Role != store.RoleReplica
 	}
 	switch {

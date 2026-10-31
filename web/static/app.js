@@ -197,6 +197,15 @@
       },
     }));
 
+    // Persetujuan berbahaya di halaman pekerjaan (restart master, hapus
+    // database, CLONE): tombolnya membuka dialog (x-ref="dialog") yang
+    // menjelaskan akibatnya; formulir persetujuan ada di dalam dialog.
+    window.Alpine.data("confirmApproval", () => ({
+      open() {
+        this.$refs.dialog.showModal();
+      },
+    }));
+
     // Tombol Salin untuk perintah pemasangan (x-ref="perintah").
     window.Alpine.data("copyCommand", () => ({
       tersalin: false,

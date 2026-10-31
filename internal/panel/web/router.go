@@ -121,6 +121,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /servers/{id}/mysql/refresh", authedPost(a.refreshMySQL))
 	mux.Handle("POST /servers/{id}/prepare-master", authedPost(a.prepareMaster))
 	mux.Handle("GET /masters/{id}", authed(a.masterDetail))
+	mux.Handle("POST /masters/{id}/source", authedPost(a.setMasterSource))
 	mux.Handle("GET /masters/{id}/replicas/new", authed(a.newReplicaForm))
 	mux.Handle("POST /masters/{id}/replicas", authedPost(a.createReplica))
 	mux.Handle("GET /replicas/{id}", authed(a.replicaDetail))

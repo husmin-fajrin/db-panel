@@ -38,6 +38,8 @@ type fakeOrch struct {
 	result proto.ConnectResult
 	err    error // returned by every call when set
 	nextID string
+	// superseded answers Superseded per job id.
+	superseded map[string]string
 }
 
 func (f *fakeOrch) record(call string) {
@@ -116,6 +118,11 @@ func (f *fakeOrch) StartRemoveDatabases(_ context.Context, serverID int64, dbs [
 func (f *fakeOrch) Approve(id string) error { f.record("approve " + id); return f.err }
 func (f *fakeOrch) Retry(id string) error   { f.record("retry " + id); return f.err }
 func (f *fakeOrch) Cancel(id string) error  { f.record("cancel " + id); return f.err }
+func (f *fakeOrch) Superseded(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.superseded[id]
+}
 
 // syncBuffer is a log sink safe for concurrent writes.
 type syncBuffer struct {

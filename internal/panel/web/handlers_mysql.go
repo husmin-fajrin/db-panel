@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +27,8 @@ type Orchestrator interface {
 	Approve(jobID string) error
 	Retry(jobID string) error
 	Cancel(jobID string) error
+	// Superseded says why a job may no longer be approved or retried; "".
+	Superseded(jobID string) string
 }
 
 const (
@@ -41,15 +45,35 @@ const (
 	msgPickDatabase      = "Pilih minimal satu database."
 	msgRemoveAll         = "Lepas semua database tidak didukung; hapus replika ini bila tidak diperlukan lagi."
 
+	msgMySQLHostBad      = "Host MySQL tidak valid: isi alamat IP atau nama host saja (tanpa spasi, garis miring, atau @), atau kosongkan untuk socket lokal."
+	msgSourceHostBad     = "Alamat master tidak valid: isi alamat IP atau nama host saja."
+	msgSourcePortBad     = "Port MySQL master harus angka antara 1 dan 65535."
+	msgTargetUnconnected = "MySQL di server tujuan sudah terpasang tetapi belum dihubungkan. Buka halaman server itu dan jalankan Hubungkan MySQL dulu."
+
 	maxMySQLUser     = 32 // MySQL's limit for a user name
 	maxMySQLPassword = 256
 	maxMySQLHost     = 255
+
+	// inventoryCap is the orchestrator's cap on an inventory's databases;
+	// a list that long may be cut.
+	inventoryCap = 5000
 )
+
+// hostRe is a MySQL host the panel passes on: an IP address or a host name,
+// as the agent checks it too (SEC-33).
+var hostRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,255}$`)
+
+// validHost reports whether h is an address or name hostRe admits; one
+// with a colon must be an IPv6 address.
+func validHost(h string) bool {
+	return hostRe.MatchString(h) && (!strings.Contains(h, ":") || net.ParseIP(h) != nil)
+}
 
 // notices are the success messages a redirect names in ?pesan=.
 var notices = map[string]string{
 	"terhubung":  "MySQL berhasil dihubungkan.",
 	"disegarkan": "Data MySQL sudah diperbarui.",
+	"sumber":     "Alamat MySQL master untuk replika disimpan. Alamat ini diperiksa saat membuat replika berikutnya (replika harus bisa menjangkaunya).",
 }
 
 // connectForm is what the MySQL account form shows again after an error.
@@ -104,6 +128,9 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 		return
 	case len(form.User) > maxMySQLUser || len(password) > maxMySQLPassword || len(form.Host) > maxMySQLHost:
 		fail(msgMySQLFieldTooLong)
+		return
+	case form.Host != "" && !validHost(form.Host):
+		fail(msgMySQLHostBad)
 		return
 	}
 	// The host goes as typed: empty makes the agent use the local socket,
@@ -161,6 +188,10 @@ type masterPage struct {
 	Inventory store.Inventory
 	Replicas  []replicaRow
 	Jobs      []jobRow
+	// The source address form after a refused post.
+	SourceHost string
+	SourcePort string
+	SourceOpen bool
 }
 
 // masterFromPath loads the server of {id} and its topology. A server that
@@ -188,6 +219,44 @@ func (a *app) masterDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := masterPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Topology: topo}
+	p.Notice = notices[r.URL.Query().Get("pesan")]
+	a.renderMaster(w, r, http.StatusOK, p)
+}
+
+// setMasterSource changes the address replicas reach the master's MySQL
+// at (multi-homed hosts, NAT, VPN). It is checked from each replica when
+// the next one is created (its preflight's reachability check).
+func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
+	srv, topo, ok := a.masterFromPath(w, r)
+	if !ok {
+		return
+	}
+	host := strings.TrimSpace(r.PostFormValue("source_host"))
+	portText := strings.TrimSpace(r.PostFormValue("source_port"))
+	p := masterPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Topology: topo,
+		SourceHost: host, SourcePort: portText, SourceOpen: true}
+	port, err := strconv.Atoi(portText)
+	switch {
+	case !validHost(host):
+		p.Flash = msgSourceHostBad
+	case err != nil || port < 1 || port > 65535:
+		p.Flash = msgSourcePortBad
+	}
+	if p.Flash != "" {
+		a.renderMaster(w, r, http.StatusBadRequest, p)
+		return
+	}
+	if err := a.Store.SetTopologySource(topo.ID, host, port); err != nil {
+		a.internalError(w, "set topology source", err)
+		return
+	}
+	a.Logger.Info("master source address changed", "master", srv.ID, "host", host, "port", port, "by", a.page(r).Username)
+	http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan=sumber", http.StatusSeeOther)
+}
+
+// renderMaster fills p's inventory, replicas and jobs and renders it.
+func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p masterPage) {
+	srv, topo := p.Server, p.Topology
 	var err error
 	if p.Inventory, err = a.inventory(srv.ID); err != nil {
 		a.internalError(w, "get inventory", err)
@@ -220,13 +289,16 @@ func (a *app) masterDetail(w http.ResponseWriter, r *http.Request) {
 			p.Jobs = append(p.Jobs, jobRow{Job: j, ServerName: names[j.ServerID]})
 		}
 	}
-	a.render.Render(w, "master_detail", p)
+	a.render.renderStatus(w, status, "master_detail", p)
 }
 
 // targetChoice is a server the new replica can be created on.
 type targetChoice struct {
 	store.Server
 	Retry bool // its earlier replica attempt failed; a new one replaces it
+	// NotConnected: its MySQL is installed but not connected; it is shown
+	// disabled, with a link to its page (Hubungkan MySQL).
+	NotConnected bool
 }
 
 // databaseChoice is one database checkbox of the replica form.
@@ -264,16 +336,24 @@ func (a *app) replicaForm(r *http.Request, master store.Server, checked map[stri
 		if s.ID == master.ID || !s.Paired || !a.Hub.IsOnline(s.ID) {
 			continue
 		}
+		notConnected := false
+		if orchestrator.ProbeSaysMySQLInstalled(s) {
+			inv, err := a.inventory(s.ID)
+			if err != nil {
+				return p, err
+			}
+			notConnected = !inv.Connected
+		}
 		switch s.Role {
 		case store.RoleUnassigned:
-			p.Targets = append(p.Targets, targetChoice{Server: s})
+			p.Targets = append(p.Targets, targetChoice{Server: s, NotConnected: notConnected})
 		case store.RoleReplica:
 			rep, err := a.Store.GetReplicaByServer(s.ID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return p, err
 			}
 			if err == nil && rep.State == store.ReplicaFailed {
-				p.Targets = append(p.Targets, targetChoice{Server: s, Retry: true})
+				p.Targets = append(p.Targets, targetChoice{Server: s, Retry: true, NotConnected: notConnected})
 			}
 		}
 	}
@@ -320,8 +400,13 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only a server the form offers (a stale form or a crafted post may
 	// name another one).
-	if !slices.ContainsFunc(p.Targets, func(c targetChoice) bool { return c.ID == p.Target }) {
+	i := slices.IndexFunc(p.Targets, func(c targetChoice) bool { return c.ID == p.Target })
+	if i < 0 {
 		fail(msgReplicaTargetBad)
+		return
+	}
+	if p.Targets[i].NotConnected {
+		fail(msgTargetUnconnected)
 		return
 	}
 	// Only databases the master has; the orchestrator and the agent check

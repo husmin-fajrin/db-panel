@@ -53,6 +53,10 @@
       {{end}}
     </fieldset>
     <p class="text-sm text-base-content/70">Panel menunggu replika menyusul master, menghentikan replikasi sebentar, menyalin database baru dengan dump (master dikunci sesaat saat dump dimulai), lalu memperluas filter replikasi. Database yang sudah diikuti tidak disalin ulang.</p>
+    <div role="alert" class="alert alert-warning flex-col items-start gap-1">
+      <span>Lakukan <strong>di jam sepi</strong>: saat dump dimulai master dikunci sesaat, dan kueri panjang di master bisa membuat penulisan aplikasi tertahan lebih lama.</span>
+      <span>Selama database baru dimuat, replika <strong>bisa ditulis</strong> (hanya-baca dicabut sementara). Pastikan tidak ada aplikasi yang menulis ke replika selama itu; tulisan seperti itu membuat data replika berbeda dari master.</span>
+    </div>
     <div class="card-actions justify-end">
       <button type="submit" class="btn btn-primary">Tambah database</button>
     </div>

@@ -168,6 +168,9 @@
 {{if .Inventory.Connected}}
 <h3 class="font-semibold">Akun admin MySQL terhubung</h3>
 <p class="text-sm text-base-content/70">Versi {{.Inventory.Version}}, diperbarui {{fmtTime .Inventory.UpdatedAt}}.</p>
+{{if .InventoryCut}}
+<p class="text-sm text-warning">Daftar database terlalu panjang; panel hanya menyimpan 5000 database pertama.</p>
+{{end}}
 {{if .Inventory.Databases}}
 <div class="overflow-x-auto">
   <table class="table table-sm">
@@ -211,6 +214,9 @@
 {{end}}
 
 {{define "mysql-connect-form"}}
+{{if .PlainHTTP}}
+<div role="alert" class="alert alert-warning mt-2"><span>Halaman ini dibuka lewat HTTP biasa: kata sandi MySQL yang Anda ketik melintas jaringan tanpa enkripsi. Buka panel hanya dari jaringan manajemen yang terpercaya, atau lewat tunnel SSH (misalnya <code>ssh -L 8080:127.0.0.1:8080 admin@server-panel</code>, lalu buka <code>http://127.0.0.1:8080</code>), sampai panel memakai HTTPS.</span></div>
+{{end}}
 <form method="post" action="/servers/{{.Server.ID}}/mysql/connect" class="flex flex-col gap-2 mt-2">
   <label class="floating-label">
     <span>Pengguna MySQL</span>

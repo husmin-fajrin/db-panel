@@ -111,7 +111,52 @@ type jobPage struct {
 	Changed                         []string // added or removed
 	DropData                        bool     // removed ones are dropped on the replica
 	CanApprove, CanRetry, CanCancel bool
-	StatusJSON                      string
+	// Approval labels the waiting step's buttons; Superseded, when set,
+	// says why the job may no longer be approved or retried.
+	Approval   approval
+	Superseded string
+	StatusJSON string
+}
+
+// approval is what the job page offers for the step that waits.
+type approval struct {
+	Label  string // the approve button
+	Danger bool   // approving destroys or interrupts something: confirm in a dialog first
+	Impact string // the dialog's plain-language summary
+	// Recheck labels a second button that re-checks the step (Retry)
+	// instead of approving it; "" when there is none.
+	Recheck string
+	// ServerID: the reconnect wait links to this server's page.
+	ServerID int64
+}
+
+// approvalFor labels the approval of a job waiting for reason (the
+// orchestrator's jobState.WaitReason) on server.
+func approvalFor(reason string, server store.Server) approval {
+	switch reason {
+	case orchestrator.WaitRestart:
+		return approval{Label: "Restart MySQL di master sekarang", Danger: true,
+			Impact: "MySQL di " + server.Name + " dimulai ulang sekarang. Aplikasi yang memakai database ini terputus " +
+				"beberapa detik dan harus tersambung lagi. Lakukan di jam sepi.\n" +
+				"Bila Anda lebih suka merestart sendiri nanti, tutup dialog ini, restart MySQL di server itu, lalu klik " +
+				"Sudah saya restart — periksa lagi.",
+			Recheck: "Sudah saya restart — periksa lagi"}
+	case orchestrator.WaitWipe:
+		return approval{Label: "Ya, hapus dan salin ulang", Danger: true,
+			Impact: "Database yang disebut di atas DIHAPUS dari " + server.Name + " lalu disalin ulang dari master. " +
+				"Isi yang hanya ada di server itu hilang dan tidak bisa dikembalikan dari panel."}
+	case orchestrator.WaitForeignSource:
+		return approval{Label: "Ya, hapus pengaturan replikasi lama", Danger: true,
+			Impact: server.Name + " berhenti mengikuti server sumbernya yang sekarang; pengaturan replikasi itu dihapus " +
+				"dan diganti replikasi dari master ini."}
+	case orchestrator.WaitClone:
+		return approval{Label: "Ya, CLONE menghapus semua database", Danger: true,
+			Impact: "SEMUA database dan akun MySQL di " + server.Name + " dihapus dan diganti salinan lengkap master. " +
+				"Tidak ada yang tersisa dari isi lama server itu."}
+	case orchestrator.WaitReconnect:
+		return approval{Label: "Sudah saya hubungkan ulang — lanjutkan", ServerID: server.ID}
+	}
+	return approval{Label: "Setujui & lanjutkan"}
 }
 
 func (a *app) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -176,13 +221,25 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 			p.Waiting = &steps[i]
 		}
 	}
+	var state struct {
+		WaitReason string `json:"wait_reason"`
+	}
+	_ = json.Unmarshal([]byte(job.ParamsJSON), &state)
 	switch job.Status {
 	case store.JobWaiting:
 		p.CanApprove, p.CanCancel = true, true
+		p.Approval = approvalFor(state.WaitReason, srv)
 	case store.JobFailed:
 		p.CanRetry = true
 	case store.JobQueued, store.JobRunning:
 		p.CanCancel = true
+	}
+	// A job replaced by a newer one, or whose replica changed since, may not
+	// run again (the orchestrator refuses it too).
+	if p.CanApprove || p.CanRetry {
+		if p.Superseded = a.Orchestrator.Superseded(job.ID); p.Superseded != "" {
+			p.CanApprove, p.CanRetry = false, false
+		}
 	}
 	switch job.Kind {
 	case orchestrator.KindCreateReplica, orchestrator.KindAddDatabases, orchestrator.KindRemoveDatabases:

@@ -20,6 +20,21 @@
           <tr><th>Data diperbarui</th><td>{{fmtTime .Inventory.UpdatedAt}}</td></tr>
         </tbody>
       </table>
+      <details class="mt-2"{{if .SourceOpen}} open{{end}}>
+        <summary class="btn btn-ghost btn-sm">Ubah alamat untuk replika</summary>
+        <form method="post" action="/masters/{{.Server.ID}}/source" class="flex flex-col gap-2 mt-2">
+          <p class="text-sm text-base-content/70">Alamat yang dipakai replika untuk menghubungi MySQL master ini. Ubah bila master punya beberapa alamat jaringan, berada di balik NAT, atau dihubungi lewat VPN. Alamat baru diperiksa dari server replika saat Anda membuat replika berikutnya.</p>
+          <label class="floating-label">
+            <span>Alamat IP atau nama host</span>
+            <input class="input input-sm w-full" type="text" name="source_host" value="{{if .SourceOpen}}{{.SourceHost}}{{else}}{{.Topology.SourceHost}}{{end}}" placeholder="Alamat IP atau nama host" maxlength="255" required autocomplete="off">
+          </label>
+          <label class="floating-label">
+            <span>Port MySQL</span>
+            <input class="input input-sm w-full" type="number" name="source_port" value="{{if .SourceOpen}}{{.SourcePort}}{{else}}{{.Topology.SourcePort}}{{end}}" placeholder="Port MySQL" min="1" max="65535" required>
+          </label>
+          <div><button type="submit" class="btn btn-primary btn-sm">Simpan alamat</button></div>
+        </form>
+      </details>
       {{if not .Inventory.MasterReady}}
       <p class="text-sm">Master belum siap. Buka <a class="link" href="/servers/{{.Server.ID}}">halaman server</a> lalu jalankan <strong>Siapkan sebagai master</strong>.</p>
       {{end}}

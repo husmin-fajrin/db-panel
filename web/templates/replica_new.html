@@ -12,10 +12,13 @@
       <select class="select w-full" name="target" required>
         <option value="" disabled{{if not .Target}} selected{{end}}>Pilih server</option>
         {{range .Targets}}
-        <option value="{{.ID}}"{{if eq .ID $.Target}} selected{{end}}>{{.Name}}{{with .Address}} ({{.}}){{end}}{{if .Retry}} - percobaan sebelumnya gagal{{end}}</option>
+        <option value="{{.ID}}"{{if eq .ID $.Target}} selected{{end}}{{if .NotConnected}} disabled{{end}}>{{.Name}}{{with .Address}} ({{.}}){{end}}{{if .Retry}} - percobaan sebelumnya gagal{{end}}{{if .NotConnected}} - MySQL belum dihubungkan{{end}}</option>
         {{end}}
       </select>
       <p class="label">Hanya server yang sudah dipasangkan, online, dan belum menjadi master atau replika.</p>
+      {{range .Targets}}{{if .NotConnected}}
+      <p class="text-sm">MySQL di <strong>{{.Name}}</strong> sudah terpasang tetapi belum dihubungkan: <a class="link" href="/servers/{{.ID}}">buka halaman server {{.Name}} dan klik Hubungkan MySQL</a> dulu.</p>
+      {{end}}{{end}}
       {{else}}
       <p>Tidak ada server yang bisa dipakai. Server tujuan harus sudah dipasangkan, online, dan belum menjadi master atau replika. <a class="link" href="/servers/new">Tambah server</a></p>
       {{end}}
@@ -44,6 +47,10 @@
       </label>
       <p class="label whitespace-normal">Biasanya panel menyalin data dengan CLONE bila bisa (lebih cepat). Centang ini untuk selalu memakai dump.</p>
     </fieldset>
+
+    <div role="alert" class="alert alert-info flex-col items-start gap-2">
+      <span>Saat salinan dimulai, master <strong>dikunci sesaat</strong> (semua penulisan berhenti sebentar) agar datanya konsisten. Bila di master sedang berjalan kueri panjang (misalnya laporan bulanan), kunci itu menunggu kueri tersebut dan penulisan aplikasi ikut tertahan. Buat replika <strong>di jam sepi</strong>.</span>
+    </div>
 
     <div role="alert" class="alert alert-warning flex-col items-start gap-2">
       <span>Server tujuan harus server replika khusus: seluruh MySQL di server itu dikunci hanya-baca (read_only + super_read_only) dan semua database lamanya dibuang. Aplikasi lain di server itu tidak bisa menulis.</span>
