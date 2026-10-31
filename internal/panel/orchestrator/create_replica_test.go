@@ -69,6 +69,10 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 		len(pre.Databases) != 0 || pre.ConfirmWipe {
 		t.Fatalf("replica preflight params = %+v", pre)
 	}
+	// The master's lower_case_table_names goes to the replica's checks.
+	if pre.PeerLowerCaseTableNames == nil || *pre.PeerLowerCaseTableNames != 0 {
+		t.Fatalf("replica preflight lower_case_table_names = %v", pre.PeerLowerCaseTableNames)
+	}
 	var conf proto.ConfigureParams
 	r.params("mysql.configure", &conf)
 	if conf.Role != "replica" || conf.ServerID == 0 || conf.ServerID == 1 || !conf.EnableClone || !conf.GTID {
