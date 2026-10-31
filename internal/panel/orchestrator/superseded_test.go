@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -137,7 +138,17 @@ func TestRetryReopensBeforeNewJobs(t *testing.T) {
 	r := e.replicaAgent("replica1", "dump")
 	var roFails atomic.Bool
 	roFails.Store(true)
+	// While hold is set, setReadOnly (the retried step's command) waits
+	// for gate, so the retried job cannot fail again before the checks.
+	var hold atomic.Bool
+	gate := make(chan struct{})
+	var openGate sync.Once
+	release := func() { openGate.Do(func() { close(gate) }) }
+	defer release()
 	r.on("mysql.setReadOnly", func(json.RawMessage) (any, error) {
+		if hold.Load() {
+			<-gate
+		}
 		if roFails.Load() {
 			return nil, &commands.ParamError{Msg: "read_only gagal"}
 		}
@@ -166,10 +177,12 @@ func TestRetryReopensBeforeNewJobs(t *testing.T) {
 
 	// Real scheduling: a Start right after Retry returns is refused.
 	e.waitFor("job goroutine gone", gone)
+	hold.Store(true)
 	if err := e.r.Retry(id); err != nil {
 		t.Fatal(err)
 	}
 	wantRefusedNew()
+	release()
 	e.waitFor("retried step failed again", func() bool { return r.count("mysql.setReadOnly") == 2 })
 	e.waitJob(id, store.JobFailed)
 
