@@ -34,10 +34,13 @@ const (
 	e2eReplicaLag     = 10 * time.Second
 )
 
-// TestE2ECreateReplica drives a real panel, two real agents and two real
-// mysqld instances through "Siapkan master", "Buat replika" (dump of one
-// database with a replication filter) and "Tambah database", over the
-// panel's HTTP UI, and checks the result in MySQL itself.
+// TestE2ECreateReplica drives a real panel, three real agents and three
+// real mysqld instances through "Siapkan master", "Buat replika" (dump of
+// one database with a replication filter), "Tambah database", and a second
+// "Buat replika" of every database with CLONE onto a target whose stored
+// admin account is not root (the copy replaces it: the job waits for the
+// user to reconnect), over the panel's HTTP UI, and checks the result in
+// MySQL itself.
 func TestE2ECreateReplica(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end test skipped in -short mode")
@@ -51,8 +54,16 @@ func TestE2ECreateReplica(t *testing.T) {
 	// the agents and the panel have stopped.
 	masterInst := testmysql.Start(t, testmysql.Options{})
 	replicaInst := testmysql.Start(t, testmysql.Options{})
+	cloneInst := testmysql.Start(t, testmysql.Options{})
 	masterDB := openInstance(t, masterInst)
 	replicaDB := openInstance(t, replicaInst)
+	cloneDB := openInstance(t, cloneInst)
+	// The CLONE target's admin account is not root, as on a server whose
+	// MySQL the panel installed (dbpanel_admin): the master has no such
+	// account, so the copy replaces it.
+	const cloneAdminPW = "Adm1n-e2e-pw"
+	execSQL(t, cloneDB, "CREATE USER adm_e2e@localhost IDENTIFIED BY '"+cloneAdminPW+"'",
+		"GRANT ALL PRIVILEGES ON *.* TO adm_e2e@localhost WITH GRANT OPTION")
 	execSQL(t, masterDB,
 		"CREATE DATABASE a", "CREATE TABLE a.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO a.t VALUES (1, 'awal')",
 		"CREATE DATABASE b", "CREATE TABLE b.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO b.t VALUES (1, 'awal')",
@@ -181,6 +192,69 @@ func TestE2ECreateReplica(t *testing.T) {
 	waitRow(t, replicaDB, "b", 3, "sekarang-diikuti")
 	waitRow(t, replicaDB, "a", 3, "tetap")
 
+	// Buat replika of every database on a bare target: CLONE.
+	cloneSrv := startE2EAgent(t, p, "replika-clone", cloneInst, &logs)
+	if loc := ui.postRedirect(serverPath(cloneSrv)+"/mysql/connect",
+		url.Values{"user": {"adm_e2e"}, "password": {cloneAdminPW}, "host": {""}}); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
+		t.Fatalf("connect MySQL on the clone target redirected to %q", loc)
+	}
+	cloneStart := time.Now()
+	cloneID := ui.postJob(fmt.Sprintf("/masters/%d/replicas", masterSrv), url.Values{
+		"target":       {strconv.FormatInt(cloneSrv, 10)},
+		"databases":    {"a", "b"},
+		"confirm_wipe": {"1"},
+	})
+	reconnected := false
+	job = waitJob(t, p, cloneID, e2eCreateTimeout, func(j store.Job) bool {
+		if !strings.Contains(j.ParamsJSON, `"wait_reason":"reconnect"`) || j.CurrentStep != 4 {
+			t.Fatalf("clone job waits at step %d (%s):\n%s", j.CurrentStep, j.ParamsJSON, jobLogText(t, p, cloneID))
+		}
+		// The job page links to the server page, where the user connects
+		// the master's admin account (root here).
+		if body := ui.get("/jobs/" + j.ID); !strings.Contains(body, `href="`+serverPath(cloneSrv)+`"`) ||
+			!strings.Contains(body, "Sudah saya hubungkan ulang") {
+			t.Fatalf("job page lacks the reconnect link or button:\n%s", body)
+		}
+		if loc := ui.postRedirect(serverPath(cloneSrv)+"/mysql/connect",
+			url.Values{"user": {"root"}, "password": {""}, "host": {""}}); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
+			t.Fatalf("reconnect redirected to %q", loc)
+		}
+		ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
+		reconnected = true
+		return true
+	})
+	if job.Status != store.JobSucceeded {
+		t.Fatalf("create_replica (clone) ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, p, cloneID))
+	}
+	if !reconnected {
+		t.Fatal("the clone job never waited for the reconnect")
+	}
+	cloneLog := jobLogText(t, p, cloneID)
+	if !strings.Contains(cloneLog, "Metode salinan awal: clone.") || strings.Count(cloneLog, "Menyalin dengan CLONE") != 1 {
+		t.Fatalf("clone job did not copy exactly once with CLONE:\n%s", cloneLog)
+	}
+	t.Logf("create_replica with CLONE succeeded in %s", time.Since(cloneStart).Round(time.Second))
+	if rep, err := p.Store.GetReplicaByServer(cloneSrv); err != nil || rep.State != store.ReplicaReady || len(rep.Databases) != 0 {
+		t.Fatalf("clone replica = %+v, %v; want ready following all", rep, err)
+	}
+	waitRow(t, cloneDB, "b", 3, "sekarang-diikuti")
+	execSQL(t, masterDB, "INSERT INTO a.t (id, v) VALUES (4, 'setelah-clone')", "CREATE DATABASE c",
+		"CREATE TABLE c.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO c.t VALUES (1, 'baru')")
+	waitRow(t, cloneDB, "a", 4, "setelah-clone")
+	waitRow(t, cloneDB, "c", 1, "baru")
+	// Replication runs over TLS.
+	var sslAllowed string
+	if err := cloneDB.QueryRow("SELECT SSL_ALLOWED FROM performance_schema.replication_connection_configuration").Scan(&sslAllowed); err != nil ||
+		!strings.EqualFold(sslAllowed, "yes") {
+		t.Fatalf("replication SSL_ALLOWED = %q, %v", sslAllowed, err)
+	}
+	// Every temporary dump account was dropped from the master.
+	var dumpAccounts int
+	if err := masterDB.QueryRow("SELECT COUNT(*) FROM mysql.user WHERE user LIKE 'dbpanel\\_dump\\_%'").Scan(&dumpAccounts); err != nil ||
+		dumpAccounts != 0 {
+		t.Fatalf("dump accounts left on the master: %d, %v", dumpAccounts, err)
+	}
+
 	// The replication password is sealed in the store and never written to
 	// a job (log, steps, params, error) or to the panel's or agents' logs.
 	if topo, err = p.Store.GetTopologyByMaster(masterSrv); err != nil {
@@ -201,7 +275,7 @@ func TestE2ECreateReplica(t *testing.T) {
 	if bytes.Contains(topo.ReplPasswordEnc, plain) {
 		t.Fatal("topologies.repl_password_enc contains the plaintext password")
 	}
-	for _, id := range []string{prepareID, createID, addID} {
+	for _, id := range []string{prepareID, createID, addID, cloneID} {
 		j, steps, err := p.Store.GetJob(id)
 		if err != nil {
 			t.Fatal(err)
