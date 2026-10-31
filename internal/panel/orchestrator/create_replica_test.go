@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -79,13 +81,15 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 	}
 	var snap proto.SnapshotParams
 	r.params("mysql.cloneFrom", &snap)
+	// CLONE reads with the replication account (BACKUP_ADMIN), over TLS as
+	// the master offers it.
 	if snap.Host != "10.0.0.1" || snap.Port != 3306 || snap.User != "dbpanel_repl" || snap.Password != replPW ||
-		len(snap.Databases) != 0 || snap.EstimateBytes != 300 {
+		len(snap.Databases) != 0 || snap.EstimateBytes != 300 || !snap.SSL {
 		t.Fatalf("cloneFrom params = %+v", snap)
 	}
 	var src proto.ReplicationSourceParams
 	r.params("mysql.configureReplication", &src)
-	if src.Host != "10.0.0.1" || src.Port != 3306 || src.User != "dbpanel_repl" || src.Password != replPW || src.SSL ||
+	if src.Host != "10.0.0.1" || src.Port != 3306 || src.User != "dbpanel_repl" || src.Password != replPW || !src.SSL ||
 		len(src.Databases) != 0 {
 		t.Fatalf("configureReplication params = %+v", src)
 	}
@@ -110,6 +114,31 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 	}
 	if strings.Contains(log, replPW) {
 		t.Fatalf("job log holds the replication password:\n%s", log)
+	}
+}
+
+// wantDumpAccount checks that the dump read the master with a temporary
+// account (SEC-27): dbpanel_dump_<8 hex> with a fresh 24-character password,
+// created on the master for the replica's address before the dump and
+// dropped after it; never the replication account.
+func wantDumpAccount(t *testing.T, m *fakeAgent, snap proto.SnapshotParams, replicaAddr string) {
+	t.Helper()
+	if !regexp.MustCompile(`^dbpanel_dump_[0-9a-f]{8}$`).MatchString(snap.User) ||
+		!regexp.MustCompile(`^[A-Za-z0-9]{24}$`).MatchString(snap.Password) || snap.Password == replPW {
+		t.Fatalf("dump account = %q / %q, want a temporary one", snap.User, snap.Password)
+	}
+	var cu proto.DumpUserParams
+	m.params("mysql.createDumpUser", &cu)
+	if cu.User != snap.User || cu.Password != snap.Password || cu.FromHost != replicaAddr || cu.RequireSSL != snap.SSL {
+		t.Fatalf("createDumpUser params = %+v, dump with %+v", cu, snap)
+	}
+	var du proto.DropUserParams
+	m.params("mysql.dropUser", &du)
+	if du.User != snap.User || du.FromHost != replicaAddr {
+		t.Fatalf("dropUser params = %+v", du)
+	}
+	if m.count("mysql.createDumpUser") != m.count("mysql.dropUser") {
+		t.Fatalf("dump accounts created %d, dropped %d", m.count("mysql.createDumpUser"), m.count("mysql.dropUser"))
 	}
 }
 
@@ -177,10 +206,10 @@ func TestCreateReplicaSubsetUsesDumpWithFilter(t *testing.T) {
 	}
 	var snap proto.SnapshotParams
 	r.params("mysql.dumpFrom", &snap)
-	if !slices.Equal(snap.Databases, []string{"a"}) || snap.User != "dbpanel_repl" || snap.Password != replPW ||
-		snap.EstimateBytes != 100 || snap.DropExisting {
+	if !slices.Equal(snap.Databases, []string{"a"}) || snap.EstimateBytes != 100 || snap.DropExisting || !snap.SSL {
 		t.Fatalf("dumpFrom params = %+v", snap)
 	}
+	wantDumpAccount(t, m, snap, "10.0.0.2")
 	var src proto.ReplicationSourceParams
 	r.params("mysql.configureReplication", &src)
 	if !slices.Equal(src.Databases, []string{"a"}) {
@@ -339,9 +368,24 @@ func TestFailsWhenAgentDropsDuringSnapshot(t *testing.T) {
 	}
 	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.dumpFrom", "mysql.status",
 		"mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+	// The same dump, each attempt with its own temporary account; the
+	// failed attempt's account was dropped when it failed.
 	dumps := r.allParams("mysql.dumpFrom")
-	if len(dumps) != 2 || dumps[0] != dumps[1] {
-		t.Fatalf("dumpFrom params differ on retry:\n%v", dumps)
+	if len(dumps) != 2 {
+		t.Fatalf("dumpFrom calls: %v", dumps)
+	}
+	var d0, d1 proto.SnapshotParams
+	json.Unmarshal([]byte(dumps[0]), &d0)
+	json.Unmarshal([]byte(dumps[1]), &d1)
+	if d0.User == d1.User || d0.Password == d1.Password {
+		t.Fatalf("retry reused the dump account: %s", dumps)
+	}
+	d0.User, d0.Password, d1.User, d1.Password = "", "", "", ""
+	if !reflect.DeepEqual(d0, d1) {
+		t.Fatalf("dumpFrom params differ on retry: %+v vs %+v", d0, d1)
+	}
+	if c, d := m.count("mysql.createDumpUser"), m.count("mysql.dropUser"); c != 2 || d != 2 {
+		t.Fatalf("dump accounts created %d, dropped %d; want 2 and 2", c, d)
 	}
 	if rep, _ := e.st.GetReplicaByServer(r.id); rep.State != store.ReplicaReady || rep.LastError != "" {
 		t.Fatalf("replica = %+v", rep)
@@ -364,6 +408,7 @@ func TestForceDumpSkipsClone(t *testing.T) {
 	if len(snap.Databases) != 0 {
 		t.Fatalf("dump of all databases sent %v", snap.Databases)
 	}
+	wantDumpAccount(t, m, snap, "10.0.0.2")
 	var conf proto.ConfigureParams
 	r.params("mysql.configure", &conf)
 	if conf.EnableClone {
@@ -568,7 +613,8 @@ func TestConnectWaitsWhenReplicaAdminReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	j, steps := e.waitJob(id, store.JobWaiting)
-	if j.CurrentStep != 5 || !strings.Contains(steps[5].Message, "akun admin replika ikut terganti oleh salinan dari master") {
+	if j.CurrentStep != 5 || !strings.Contains(steps[5].Message, "membawa akun-akun MySQL dari master db-master") ||
+		!strings.Contains(j.ParamsJSON, `"wait_reason":"reconnect"`) {
 		t.Fatalf("job %+v step %+v", j, steps[5])
 	}
 	if n := r.count("mysql.configureReplication"); n != 0 {

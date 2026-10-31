@@ -40,6 +40,7 @@ var agentCommands = []string{
 	"mysql.restart", "mysql.createReplUser", "mysql.setReadOnly", "mysql.cloneFrom", "mysql.dumpFrom",
 	"mysql.install", "mysql.configureReplication", "mysql.setReplicationFilter", "mysql.startReplica",
 	"mysql.stopReplica", "mysql.resetReplica", "mysql.waitSynced", "mysql.startUntil", "mysql.dropDatabases",
+	"mysql.createDumpUser", "mysql.dropUser",
 }
 
 type call struct {
@@ -354,7 +355,7 @@ func (e *env) agent(name, addr string) *fakeAgent {
 func masterStatus() proto.MySQLStatus {
 	return proto.MySQLStatus{Version: "8.4.3", Series: "8.4", ServerID: 1, ServerUUID: masterUUID, LogBin: true,
 		GTIDMode: "ON", EnforceGTID: true, BinlogFormat: "ROW", GTIDExecuted: masterGTID, Port: 3306,
-		BindAddress: "0.0.0.0"}
+		BindAddress: "0.0.0.0", TLSAvailable: true}
 }
 
 var masterDBs = []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "b", Bytes: 200}}
@@ -367,6 +368,8 @@ func (e *env) connectedMaster(name string) *fakeAgent {
 		e.t.Fatal(err)
 	}
 	fa.reply("mysql.status", masterStatus())
+	fa.reply("mysql.createDumpUser", nil)
+	fa.reply("mysql.dropUser", nil)
 	return fa
 }
 

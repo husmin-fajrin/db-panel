@@ -85,7 +85,8 @@ func TestAddDatabasesSequence(t *testing.T) {
 		"Putar ulang sampai titik dump", "Perluas filter", "Verifikasi"}) {
 		t.Fatalf("step names = %v", names)
 	}
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status"})
+	// Catch-up, TLS for the dump, the dump account around the dump, verify.
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status", "mysql.createDumpUser", "mysql.dropUser", "mysql.status"})
 	wantCmds(t, "replica", r.cmds(0), addDatabasesCmds())
 
 	// Step 0 first puts back the filter of the databases followed now.
@@ -103,10 +104,11 @@ func TestAddDatabasesSequence(t *testing.T) {
 	}
 	var snap proto.SnapshotParams
 	r.params("mysql.dumpFrom", &snap)
-	if snap.Host != "10.0.0.1" || snap.Port != 3306 || snap.User != "dbpanel_repl" || snap.Password != replPW ||
+	if snap.Host != "10.0.0.1" || snap.Port != 3306 || !snap.SSL ||
 		!slices.Equal(snap.Databases, []string{"b"}) || snap.DropExisting || snap.EstimateBytes != 200 {
 		t.Fatalf("dumpFrom params = %+v", snap)
 	}
+	wantDumpAccount(t, m, snap, "10.0.0.2")
 	var until proto.StartUntilParams
 	r.params("mysql.startUntil", &until)
 	if until.GTIDSet != dumpGTID || until.TimeoutSec < 1 {

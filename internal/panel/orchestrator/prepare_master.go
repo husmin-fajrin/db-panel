@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"strings"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -77,6 +78,7 @@ func (jr *jobRun) masterPreflight(ctx context.Context, _ bool) (outcome, error) 
 		return outcome{}, errors.New(failedChecks(res.Checks, proto.CheckFail))
 	}
 	jr.st.MasterPort = res.Status.Port
+	jr.st.MasterTLS = res.Status.TLSAvailable
 	jr.save()
 	return done("MySQL %s; pemeriksaan terburuk: %s", res.Status.Version, res.Worst), nil
 }
@@ -89,6 +91,10 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 	}
 	for _, a := range res.Applied {
 		jr.logf("info", "Diterapkan: %s", a)
+		if a == "binlog_format=ROW" {
+			jr.logf("warn", "Format binlog sekarang ROW untuk koneksi baru. Koneksi aplikasi yang sudah terbuka tetap memakai "+
+				"format lama sampai tersambung ulang; restart aplikasi (atau MySQL) di jam sepi sebelum membuat replika.")
+		}
 	}
 	if res.ConfigPath != "" {
 		jr.logf("info", "Pengaturan ditulis ke %s (server_id %d).", res.ConfigPath, res.ServerID)
@@ -99,12 +105,17 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 	}
 	// "%": the replicas' addresses are not known yet when the master is
 	// prepared. The account is guarded by its 24-character random password
-	// and holds only replication, CLONE and read-for-dump privileges.
+	// and holds only REPLICATION SLAVE and BACKUP_ADMIN (dumps read with a
+	// temporary account per dump); it requires TLS when the master has it.
 	if err := jr.call(ctx, jr.job.ServerID, "mysql.createReplUser",
-		proto.ReplUserParams{User: replUser, Password: password, FromHost: "%"}, nil); err != nil {
+		proto.ReplUserParams{User: replUser, Password: password, FromHost: "%", RequireSSL: jr.st.MasterTLS}, nil); err != nil {
 		return outcome{}, err
 	}
-	jr.logf("info", "User replikasi %s siap.", replUser)
+	if jr.st.MasterTLS {
+		jr.logf("info", "User replikasi %s siap (hanya lewat koneksi TLS).", replUser)
+	} else {
+		jr.logf("warn", "User replikasi %s siap; master tidak menawarkan TLS, jadi replikasi berjalan tanpa enkripsi.", replUser)
+	}
 	jr.st.NeedsRestart, jr.st.RestartReasons = res.NeedsRestart, res.RestartReasons
 	jr.save()
 	if res.NeedsRestart {
@@ -165,11 +176,31 @@ func newReplPassword() (string, error) {
 	return string(b), nil
 }
 
+// masterRestart restarts the master when the user approves ("Restart
+// MySQL di master sekarang"). Without the approval (the first pass, or
+// "Sudah saya restart — periksa lagi") it reads the values in effect: when
+// the user restarted MySQL themselves they no longer need a restart and
+// the step ends without restarting the production master again.
 func (jr *jobRun) masterRestart(ctx context.Context, approved bool) (outcome, error) {
 	if !jr.st.NeedsRestart {
 		return skipped("tidak perlu restart"), nil
 	}
 	if !approved {
+		var st proto.MySQLStatus
+		if err := jr.call(ctx, jr.job.ServerID, "mysql.status", nil, &st); err != nil {
+			return outcome{}, err
+		}
+		if pending := pendingRestart(st); len(pending) == 0 {
+			jr.st.NeedsRestart = false
+			jr.save()
+			jr.logf("info", "MySQL di %s sudah memakai pengaturan baru (binary log aktif, menerima koneksi jaringan); tidak perlu restart dari panel.",
+				jr.serverName(jr.job.ServerID))
+			return done("sudah direstart di luar panel"), nil
+		} else if jr.st.WaitReason == WaitRestart {
+			jr.logf("warn", "MySQL belum direstart: %s.", strings.Join(pending, "; "))
+		}
+		jr.st.WaitReason = WaitRestart
+		jr.save()
 		return wait(jr.restartMessage()), nil
 	}
 	var res proto.RestartResult
@@ -182,12 +213,43 @@ func (jr *jobRun) masterRestart(ctx context.Context, approved bool) (outcome, er
 	return done("dimulai ulang dalam %d ms", res.TookMs), nil
 }
 
+// pendingRestart lists what the master still needs a restart for, read
+// from the values in effect: the same reasons mysql.configure gives.
+func pendingRestart(st proto.MySQLStatus) []string {
+	var out []string
+	if !st.LogBin {
+		out = append(out, "binary log masih OFF")
+	}
+	if loopbackOnly(st.BindAddress) {
+		out = append(out, "MySQL masih hanya mendengar di "+st.BindAddress)
+	}
+	return out
+}
+
+// loopbackOnly reports whether every address in bind_address is loopback.
+func loopbackOnly(bind string) bool {
+	if strings.TrimSpace(bind) == "" {
+		return false
+	}
+	for _, a := range strings.Split(bind, ",") {
+		a, _, _ = strings.Cut(strings.TrimSpace(a), "/")
+		if strings.EqualFold(a, "localhost") {
+			continue
+		}
+		if ip := net.ParseIP(a); ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
+
 // restartMessage explains why the master must restart and what it costs.
 func (jr *jobRun) restartMessage() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "MySQL di %s perlu dimulai ulang: %s. ", jr.serverName(jr.job.ServerID),
 		strings.Join(jr.st.RestartReasons, "; "))
-	b.WriteString("Aplikasi yang memakai database ini akan terputus beberapa detik; lakukan di jam sepi.")
+	b.WriteString("Aplikasi yang memakai database ini akan terputus beberapa detik; lakukan di jam sepi. " +
+		"Bila Anda merestart MySQL sendiri nanti, klik Sudah saya restart — periksa lagi.")
 	for _, reason := range jr.st.RestartReasons {
 		if strings.Contains(strings.ToLower(reason), "bind-address") {
 			port := jr.st.MasterPort
@@ -218,7 +280,13 @@ func (jr *jobRun) masterVerify(ctx context.Context, _ bool) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
-	if err := r.d.Store.SetTopologySource(topo.ID, r.sourceHost(srv), st.Port); err != nil {
+	// An address the user set on the master page is kept; the port is the
+	// one MySQL listens on now.
+	host := topo.SourceHost
+	if host == "" {
+		host = r.sourceHost(srv)
+	}
+	if err := r.d.Store.SetTopologySource(topo.ID, host, st.Port); err != nil {
 		return outcome{}, err
 	}
 	if err := r.updateInventory(srv.ID, func(inv *store.Inventory) { inv.MasterReady = true }); err != nil {
@@ -227,7 +295,7 @@ func (jr *jobRun) masterVerify(ctx context.Context, _ bool) (outcome, error) {
 	if err := r.d.Store.SetServerRole(srv.ID, store.RoleMaster); err != nil {
 		return outcome{}, err
 	}
-	jr.logf("info", "Master siap: binary log ON, GTID ON, format ROW; replika menghubungi %s:%d.", r.sourceHost(srv), st.Port)
+	jr.logf("info", "Master siap: binary log ON, GTID ON, format ROW; replika menghubungi %s:%d.", host, st.Port)
 	return done("master siap"), nil
 }
 

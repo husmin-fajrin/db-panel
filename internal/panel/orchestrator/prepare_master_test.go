@@ -2,10 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,11 +101,29 @@ func TestPrepareMasterHappyPath(t *testing.T) {
 	}
 }
 
+// scriptNeedsRestart makes the master's status show a loopback bind and
+// the binary log off until restarted is set; mysql.restart sets it.
+func scriptNeedsRestart(fa *fakeAgent, restarted *atomic.Bool) {
+	scriptPrepare(fa, "log_bin masih OFF; butuh restart",
+		"bind-address hanya localhost (127.0.0.1); replika tidak bisa terhubung sebelum restart")
+	fa.on("mysql.status", func(json.RawMessage) (any, error) {
+		st := masterStatus()
+		if !restarted.Load() {
+			st.LogBin, st.BindAddress = false, "127.0.0.1"
+		}
+		return st, nil
+	})
+	fa.on("mysql.restart", func(json.RawMessage) (any, error) {
+		restarted.Store(true)
+		return proto.RestartResult{TookMs: 3000}, nil
+	})
+}
+
 func TestPrepareMasterWaitsForRestartApproval(t *testing.T) {
 	e := newEnv(t)
 	fa := e.connectedMaster("db-master")
-	scriptPrepare(fa, "log_bin masih OFF; butuh restart",
-		"bind-address hanya localhost (127.0.0.1); replika tidak bisa terhubung sebelum restart")
+	var restarted atomic.Bool
+	scriptNeedsRestart(fa, &restarted)
 
 	id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
 	if err != nil {
@@ -136,12 +156,99 @@ func TestPrepareMasterWaitsForRestartApproval(t *testing.T) {
 	if steps[2].Status != store.StepDone {
 		t.Fatalf("restart step = %+v", steps[2])
 	}
-	wantCmds(t, "master", fa.cmds(0), []string{"mysql.preflight", "mysql.configure", "mysql.createReplUser", "mysql.restart", "mysql.status"})
+	wantCmds(t, "master", fa.cmds(0), []string{"mysql.preflight", "mysql.configure", "mysql.createReplUser", "mysql.status",
+		"mysql.restart", "mysql.status"})
+	if j, _, _ := e.st.GetJob(id); !strings.Contains(j.ParamsJSON, `"wait_reason":"restart"`) {
+		t.Errorf("params do not name the restart wait: %s", j.ParamsJSON)
+	}
 	if inv, _ := e.st.GetInventory(fa.id); !inv.MasterReady {
 		t.Fatal("MasterReady not set")
 	}
 	if err := e.r.Approve(id); err == nil {
 		t.Fatal("Approve of a finished job succeeded")
+	}
+}
+
+// TestPrepareMasterRecheckAfterOwnRestart: "Sudah saya restart — periksa
+// lagi" (Retry on the waiting restart step) reads the values in effect: not
+// restarted yet, it keeps waiting; restarted by the user, it goes on
+// without restarting the master again.
+func TestPrepareMasterRecheckAfterOwnRestart(t *testing.T) {
+	e := newEnv(t)
+	fa := e.connectedMaster("db-master")
+	var restarted atomic.Bool
+	scriptNeedsRestart(fa, &restarted)
+	fa.on("mysql.restart", func(json.RawMessage) (any, error) {
+		t.Error("the panel restarted the master although the user did")
+		return proto.RestartResult{}, nil
+	})
+	id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobWaiting)
+	if _, steps, _ := e.st.GetJob(id); !strings.Contains(steps[2].Message, "Sudah saya restart") {
+		t.Errorf("waiting message does not offer the re-check:\n%s", steps[2].Message)
+	}
+
+	// Not restarted yet: it waits again and says what is still pending.
+	mark := fa.mark()
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	e.waitFor("second status read", func() bool { return fa.count("mysql.status") >= 2 })
+	j, _ := e.waitJob(id, store.JobWaiting)
+	if j.CurrentStep != 2 {
+		t.Fatalf("job = %+v", j)
+	}
+	wantCmds(t, "master after the first re-check", fa.cmds(mark), []string{"mysql.status"})
+	if log := e.jobLog(id); !strings.Contains(log, "MySQL belum direstart: binary log masih OFF") {
+		t.Errorf("job log does not say what is pending:\n%s", log)
+	}
+
+	restarted.Store(true) // the user restarts MySQL at 2 am
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	_, steps := e.waitJob(id, store.JobSucceeded)
+	if steps[2].Status != store.StepDone || !strings.Contains(steps[2].Message, "di luar panel") {
+		t.Fatalf("restart step = %+v", steps[2])
+	}
+	if n := fa.count("mysql.restart"); n != 0 {
+		t.Fatalf("mysql.restart called %d times", n)
+	}
+}
+
+// TestPrepareMasterMixedBinlogFormat: a master with binlog_format MIXED and
+// server_id 0 only warns at the checks; configure sets both, and the log
+// says open connections keep the old format until they reconnect.
+func TestPrepareMasterMixedBinlogFormat(t *testing.T) {
+	e := newEnv(t)
+	fa := e.connectedMaster("db-master")
+	scriptPrepare(fa)
+	st := masterStatus()
+	st.BinlogFormat, st.ServerID = "MIXED", 0
+	fa.reply("mysql.preflight", proto.PreflightResult{Status: st, Worst: proto.CheckWarn, Checks: []proto.Check{
+		{ID: "server_id", Status: proto.CheckWarn, Title: "server_id", Detail: "server_id masih 0"},
+		{ID: "binlog_format", Status: proto.CheckWarn, Title: "Format binlog", Detail: "binlog_format = MIXED; replikasi butuh ROW"},
+	}})
+	fa.reply("mysql.configure", proto.ConfigureResult{Applied: []string{"server_id=4242", "binlog_format=ROW"}, ServerID: 4242})
+	id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	log := e.jobLog(id)
+	for _, want := range []string{"Format binlog [warn]", "Diterapkan: binlog_format=ROW",
+		"Koneksi aplikasi yang sudah terbuka tetap memakai format lama sampai tersambung ulang"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("job log lacks %q:\n%s", want, log)
+		}
+	}
+	var ru proto.ReplUserParams
+	fa.params("mysql.createReplUser", &ru)
+	if !ru.RequireSSL {
+		t.Error("the replication account does not require TLS on a master that offers it")
 	}
 }
 

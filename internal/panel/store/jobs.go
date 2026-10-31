@@ -223,6 +223,19 @@ func (s *Store) ActiveJobForServer(serverID int64) (Job, bool, error) {
 	return j, true, nil
 }
 
+// NewerJobExists reports whether the server has a job created after the
+// job jobID (in insertion order, which created_at's one-second precision
+// cannot give).
+func (s *Store) NewerJobExists(jobID string, serverID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE server_id = ?
+		AND rowid > (SELECT rowid FROM jobs WHERE id = ?)`, serverID, jobID).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("newer job: %w", err)
+	}
+	return n > 0, nil
+}
+
 // ErrJobFinished is returned by UpdateJob for a job that already succeeded,
 // failed or was canceled: a finished job never changes again.
 var ErrJobFinished = errors.New("pekerjaan sudah selesai")

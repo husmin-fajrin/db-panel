@@ -135,7 +135,7 @@ func (jr *jobRun) handleEvents(agentID string, result any) (bool, error) {
 		case proto.EventJobLog:
 			var l proto.JobLog
 			if json.Unmarshal(ev.Payload, &l) == nil {
-				jr.logf(l.Level, "%s", l.Message)
+				jr.logf(logLevel(l.Level), "%s", truncate(l.Message, maxLogLine))
 			}
 		case proto.EventJobDone:
 			var d proto.JobDone
@@ -148,6 +148,15 @@ func (jr *jobRun) handleEvents(agentID string, result any) (bool, error) {
 	return false, nil
 }
 
+// logLevel is an agent job's log level, one of the job log's.
+func logLevel(l string) string {
+	switch l {
+	case "info", "warn", "error":
+		return l
+	}
+	return "info"
+}
+
 // agentJobEnded forgets the finished agent job and turns its outcome into
 // the step's.
 func (jr *jobRun) agentJobEnded(d proto.JobDone, result any) error {
@@ -158,6 +167,9 @@ func (jr *jobRun) agentJobEnded(d proto.JobDone, result any) error {
 			d.Error = "pekerjaan agent gagal tanpa keterangan"
 		}
 		return errors.New(d.Error)
+	}
+	if len(d.Result) > maxAgentResult {
+		return fmt.Errorf("hasil pekerjaan agent terlalu besar (%d byte)", len(d.Result))
 	}
 	if result != nil && len(d.Result) > 0 {
 		if err := json.Unmarshal(d.Result, result); err != nil {

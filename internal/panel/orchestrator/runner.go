@@ -22,10 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -58,7 +60,17 @@ const (
 	callTimeout         = 2 * time.Minute // one ordinary agent command
 	restartTimeout      = 10 * time.Minute
 	cancelTimeout       = 15 * time.Second
-	syncTimeoutSec      = 900 // mysql.waitSynced
+	syncTimeoutSec      = 900 // mysql.waitSynced: one progress window of a verify
+	// defaultCatchUpMax bounds a verify whose replica keeps making progress
+	// (a large copy of a busy master can take hours to catch up).
+	defaultCatchUpMax = 2 * time.Hour
+
+	// Caps on what an agent sends (SEC-34): one job.log line, one step
+	// message, one agent job result, and the databases of an inventory.
+	maxLogLine       = 1 << 10
+	maxStepMessage   = 4 << 10
+	maxAgentResult   = 1 << 20
+	maxInventoryDBs  = 5000
 
 	resumeError = "panel dimulai ulang saat job berjalan"
 )
@@ -87,6 +99,9 @@ type Runner struct {
 	// shorten both.
 	offlineGrace time.Duration
 	pollEvery    time.Duration
+	// catchUpMax bounds a verify while the replica makes progress; tests
+	// shorten it.
+	catchUpMax time.Duration
 
 	base context.Context // parent of every job context; ended by Close
 	stop context.CancelFunc
@@ -114,7 +129,7 @@ func New(d Deps) *Runner {
 	base, stop := context.WithCancel(context.Background())
 	return &Runner{
 		d: d, log: d.Logger, now: d.Now,
-		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery,
+		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery, catchUpMax: defaultCatchUpMax,
 		base: base, stop: stop, live: make(map[string]*liveJob),
 	}
 }
@@ -147,6 +162,10 @@ func (r *Runner) inventoryCall(ctx context.Context, serverID int64, cmd string, 
 	var res proto.ConnectResult
 	if err := r.d.Hub.Call(ctx, serverID, cmd, params, &res); err != nil {
 		return res, err
+	}
+	if len(res.Databases) > maxInventoryDBs {
+		r.log.Warn("inventory truncated", "server_id", serverID, "databases", len(res.Databases), "kept", maxInventoryDBs)
+		res.Databases = res.Databases[:maxInventoryDBs]
 	}
 	err := r.updateInventory(serverID, func(inv *store.Inventory) {
 		inv.Connected = true
@@ -374,8 +393,10 @@ func (r *Runner) execute(lj *liveJob, act action) {
 }
 
 // Approve lets a job waiting for the user continue: the waiting step runs
-// again with the approval.
+// again with the approval. A superseded job (see supersededBy) is refused.
 func (r *Runner) Approve(jobID string) error {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
 	if err != nil {
 		return err
@@ -383,12 +404,18 @@ func (r *Runner) Approve(jobID string) error {
 	if j.Status != store.JobWaiting {
 		return errNotWaiting
 	}
+	if err := r.refuseSuperseded(j); err != nil {
+		return err
+	}
 	return r.launch(jobID, action{kind: actApprove, step: j.CurrentStep})
 }
 
 // Retry runs a failed job again from the step that failed, with the same
-// params; a waiting job re-checks its waiting step.
+// params; a waiting job re-checks its waiting step. A superseded job (see
+// supersededBy) is refused.
 func (r *Runner) Retry(jobID string) error {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
 	if err != nil {
 		return err
@@ -400,11 +427,94 @@ func (r *Runner) Retry(jobID string) error {
 		} else if busy && other.ID != jobID {
 			return errors.New("server ini sudah menjalankan pekerjaan lain")
 		}
+		if err := r.refuseSuperseded(j); err != nil {
+			return err
+		}
 		return r.launch(jobID, action{kind: actRetry, step: j.CurrentStep})
 	case store.JobSucceeded, store.JobCanceled:
 		return store.ErrJobFinished
 	}
 	return errors.New("pekerjaan masih berjalan")
+}
+
+// Superseded is why the job may no longer be approved or retried, in
+// Indonesian; "" when it may. The job page hides those buttons then.
+func (r *Runner) Superseded(jobID string) string {
+	j, _, err := r.d.Store.GetJob(jobID)
+	if err != nil {
+		return ""
+	}
+	reason, err := r.supersededBy(j)
+	if err != nil {
+		r.log.Warn("superseded check", "job", jobID, "err", err)
+		return ""
+	}
+	return reason
+}
+
+func (r *Runner) refuseSuperseded(j store.Job) error {
+	reason, err := r.supersededBy(j)
+	if err != nil {
+		return err
+	}
+	if reason != "" {
+		return errors.New("pekerjaan ini sudah tidak berlaku: " + reason + "; mulai pekerjaan baru bila perlu")
+	}
+	return nil
+}
+
+// supersededBy says why j, an unfinished or failed job, must not run again:
+// its server has a newer job, or what the job set up has changed since (a
+// replica row replaced, re-created elsewhere or ready, a role changed, the
+// replica's databases changed). Running it again would apply its old
+// params over that (SEC-31).
+func (r *Runner) supersededBy(j store.Job) (string, error) {
+	if newer, err := r.d.Store.NewerJobExists(j.ID, j.ServerID); err != nil {
+		return "", err
+	} else if newer {
+		return "server ini sudah punya pekerjaan yang lebih baru", nil
+	}
+	srv, err := r.d.Store.GetServer(j.ServerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "server ini sudah dihapus", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case j.Kind == KindPrepareMaster:
+		if srv.Role == store.RoleReplica {
+			return "server ini sekarang menjadi replika", nil
+		}
+	case j.Kind == KindCreateReplica || changesDatabases(j.Kind):
+		rep, err := r.d.Store.GetReplicaByServer(j.ServerID)
+		if errors.Is(err, store.ErrNotFound) {
+			return "server ini tidak lagi terdaftar sebagai replika", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if rep.TopologyID != j.TopologyID {
+			return "server ini sekarang replika dari master lain", nil
+		}
+		if srv.Role != store.RoleReplica {
+			return "peran server ini sudah berubah", nil
+		}
+		if j.Kind == KindCreateReplica {
+			if rep.State != store.ReplicaFailed && rep.State != store.ReplicaCreating {
+				return "replika di server ini sudah " + replicaStateText(rep.State), nil
+			}
+			break
+		}
+		var st jobState
+		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+			return "", err
+		}
+		if !slices.Equal(rep.Databases, st.Databases) {
+			return "database yang diikuti replika sudah berubah sejak pekerjaan ini dibuat", nil
+		}
+	}
+	return "", nil
 }
 
 // Cancel stops a job that has not finished: the agent job it waits for, if
@@ -519,6 +629,8 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 		}
 	}
 	jr := &jobRun{r: r, lj: lj, job: j, st: st, idx: j.CurrentStep}
+	// A dump account an interrupted step left on the master goes too.
+	jr.dropDumpAccount(ctx)
 	const msg = "dibatalkan oleh pengguna"
 	switch {
 	case j.Kind == KindCreateReplica:
@@ -564,10 +676,29 @@ type jobState struct {
 	Change   []string `json:"change_databases,omitempty"` // added or removed
 	DropData bool     `json:"drop_data,omitempty"`        // remove: drop them on the replica too
 
+	// create_replica, learned: the master offers TLS (replication and the
+	// copy are encrypted) and its lower_case_table_names.
+	MasterTLS  bool `json:"master_tls,omitempty"`
+	MasterLCTN *int `json:"master_lctn,omitempty"`
+	// AdminReplaced: the copy is done but brought the master's accounts;
+	// the snapshot step waits for the user to reconnect the target's MySQL
+	// and then verifies the copy instead of copying again.
+	AdminReplaced bool `json:"admin_replaced,omitempty"`
+
+	// The temporary account the current dump reads the master with
+	// (dropped when the step ends; the password is never stored).
+	DumpUser string `json:"dump_user,omitempty"`
+	DumpHost string `json:"dump_host,omitempty"`
+
 	// prepare_master, learned.
 	MasterPort     int      `json:"master_port,omitempty"`
 	NeedsRestart   bool     `json:"needs_restart,omitempty"`
 	RestartReasons []string `json:"restart_reasons,omitempty"`
+
+	// WaitReason names what the job waits for (the job page labels its
+	// button after it): waitRestart, waitWipe, waitForeignSource,
+	// waitClone or waitReconnect.
+	WaitReason string `json:"wait_reason,omitempty"`
 
 	// The agent job the current step waits for.
 	AgentServerID int64  `json:"agent_server_id,omitempty"`
@@ -599,6 +730,22 @@ type step struct {
 type stepError string
 
 func (e stepError) Error() string { return string(e) }
+
+// catchUpError is a verify that ran out of time while replication itself
+// works: the job fails, but replication keeps running (stopping it would
+// only make the replica fall further behind).
+type catchUpError struct{ msg string }
+
+func (e catchUpError) Error() string { return e.msg }
+
+// Wait reasons (jobState.WaitReason).
+const (
+	WaitRestart       = "restart"        // prepare_master: restart the master
+	WaitWipe          = "wipe"           // create_replica: drop leftover databases (and a foreign source)
+	WaitForeignSource = "foreign_source" // create_replica: reset the target's replication from elsewhere
+	WaitClone         = "clone"          // create_replica: CLONE replaces everything on the target
+	WaitReconnect     = "reconnect"      // create_replica: reconnect the target's MySQL after the copy
+)
 
 // jobRun is one pass of a job's goroutine over its steps.
 type jobRun struct {
@@ -681,9 +828,14 @@ func (jr *jobRun) fail(err error) {
 	jr.logf("error", "%s", msg)
 	switch {
 	case jr.job.Kind == KindCreateReplica:
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(jr.lj.ctx), cancelTimeout)
-		jr.stopReplicaAfter(ctx)
-		cancel()
+		var cu catchUpError
+		if errors.As(err, &cu) {
+			jr.logf("warn", "Replikasi tetap berjalan; replika terus menyusul master. Tekan Ulangi untuk memeriksa lagi.")
+		} else {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(jr.lj.ctx), cancelTimeout)
+			jr.stopReplicaAfter(ctx)
+			cancel()
+		}
 		jr.setReplicaState(store.ReplicaFailed, msg)
 	case changesDatabases(jr.job.Kind):
 		jr.logChangeFailure()
@@ -708,6 +860,7 @@ func (jr *jobRun) setJob(status, errMsg string) bool {
 }
 
 func (jr *jobRun) setStep(status, message string) {
+	message = truncate(message, maxStepMessage)
 	if err := jr.r.d.Store.SetStep(jr.job.ID, jr.idx, status, message, jr.r.now()); err != nil {
 		jr.r.log.Warn("update job step", "job", jr.job.ID, "step", jr.idx, "err", err)
 	}
@@ -780,6 +933,19 @@ func (jr *jobRun) logChecks(checks []proto.Check) {
 		}
 		jr.logf(level, "%s [%s]: %s", c.Title, c.Status, c.Detail)
 	}
+}
+
+// truncate cuts s to at most n bytes on a rune boundary, marking the cut.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const mark = " …(dipotong)"
+	cut := n - len(mark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + mark
 }
 
 // failedChecks describes the checks with status, or "" when there are none.

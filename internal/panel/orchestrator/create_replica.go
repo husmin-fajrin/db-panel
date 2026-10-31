@@ -7,8 +7,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"encoding/json"
 	"fmt"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +57,16 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	if err != nil {
 		return "", fmt.Errorf("server tujuan: %w", err)
 	}
+	// A master still being prepared (for example waiting for its restart)
+	// is not ready to copy from.
+	if j, busy, err := r.d.Store.ActiveJobForServer(p.MasterServerID); err != nil {
+		return "", err
+	} else if busy && j.Kind == KindPrepareMaster {
+		return "", errors.New("master masih menjalankan Siapkan master; selesaikan pekerjaan itu dulu")
+	}
+	if err := r.refuseUnconnectedTarget(target); err != nil {
+		return "", err
+	}
 	inv, err := r.d.Store.GetInventory(p.MasterServerID)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !inv.MasterReady) {
 		return "", errors.New("master belum disiapkan; jalankan Siapkan master dulu")
@@ -97,6 +110,37 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		return "", err
 	}
 	return id, nil
+}
+
+// ErrTargetNotConnected refuses a target whose MySQL is installed but not
+// connected: every step after the checks logs in with the stored account.
+var ErrTargetNotConnected = errors.New("MySQL di server tujuan sudah terpasang tetapi belum dihubungkan; " +
+	"buka halaman server tujuan dan jalankan Hubungkan MySQL dulu")
+
+// refuseUnconnectedTarget refuses srv when its last probe found MySQL
+// installed and its MySQL was never connected. A target without MySQL is
+// fine: the job installs it and stores the account itself.
+func (r *Runner) refuseUnconnectedTarget(srv store.Server) error {
+	if !ProbeSaysMySQLInstalled(srv) {
+		return nil
+	}
+	inv, err := r.d.Store.GetInventory(srv.ID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !inv.Connected) {
+		return ErrTargetNotConnected
+	}
+	return err
+}
+
+// ProbeSaysMySQLInstalled reports whether srv's last probe found MySQL.
+func ProbeSaysMySQLInstalled(srv store.Server) bool {
+	if srv.ProbeJSON == "" {
+		return false
+	}
+	var pr proto.ProbeResult
+	if err := json.Unmarshal([]byte(srv.ProbeJSON), &pr); err != nil {
+		return false
+	}
+	return pr.MySQL.Installed
 }
 
 // selectDatabases checks the selection against the master's databases and
@@ -187,7 +231,13 @@ func (jr *jobRun) replicaCheckMaster(ctx context.Context, _ bool) (outcome, erro
 	}
 	jr.st.MasterUUID, jr.st.MasterMySQLID, jr.st.MasterVersion, jr.st.MasterSeries = st.ServerUUID, st.ServerID, st.Version, series
 	jr.st.PeerDatabases, jr.st.DataBytes = names, bytes
+	jr.st.MasterTLS = st.TLSAvailable
+	lctn := st.LowerCaseTableNames
+	jr.st.MasterLCTN = &lctn
 	jr.save()
+	if !st.TLSAvailable {
+		jr.logf("warn", "Master tidak menawarkan TLS: replikasi dan salinan data berjalan tanpa enkripsi.")
+	}
 	return done("master %s:%d siap (MySQL %s)", topo.SourceHost, topo.SourcePort, st.Version), nil
 }
 
@@ -226,7 +276,7 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 		err := jr.call(ctx, jr.target(), "mysql.preflight", proto.PreflightParams{
 			Role: "replica", PeerHost: topo.SourceHost, PeerPort: topo.SourcePort, PeerVersion: jr.st.MasterVersion,
 			PeerServerUUID: jr.st.MasterUUID, PeerDataBytes: jr.st.DataBytes, PeerDatabases: jr.st.PeerDatabases,
-			Databases: jr.st.Databases, ConfirmWipe: confirm,
+			Databases: jr.st.Databases, ConfirmWipe: confirm, PeerLowerCaseTableNames: jr.st.MasterLCTN,
 		}, &res)
 		return res, err
 	}
@@ -235,23 +285,54 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 		return outcome{}, err
 	}
 	jr.st.WipeList = nil
-	if res.Worst != proto.CheckFail && hasCheck(res.Checks, "leftover", proto.CheckNeedsConfirm) {
-		list, err := jr.leftoverDatabases(ctx)
-		if err != nil {
-			return outcome{}, err
+	if res.Worst != proto.CheckFail {
+		// What the next steps would remove from the target is shown first:
+		// databases an earlier attempt left (dropped before the copy), and
+		// replication from another source (reset in Siapkan replika). The
+		// approval is bound to exactly what was shown.
+		var list []string
+		if hasCheck(res.Checks, "leftover", proto.CheckNeedsConfirm) {
+			if list, err = jr.leftoverDatabases(ctx); err != nil {
+				return outcome{}, err
+			}
 		}
-		h := hashList(list)
-		if !approved || h != jr.st.WipeHash {
-			jr.st.WipeHash = h
+		foreign := foreignSource(res.Status.Replica, topo)
+		if len(list) > 0 || foreign != "" {
+			key := slices.Clone(list)
+			if foreign != "" {
+				key = append(key, "source:"+foreign)
+			}
+			h := hashList(key)
+			if !approved || h != jr.st.WipeHash {
+				jr.st.WipeHash = h
+				var msg []string
+				if len(list) > 0 {
+					jr.st.WaitReason = WaitWipe
+					msg = append(msg, "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: "+
+						strings.Join(list, ", "))
+				} else {
+					jr.st.WaitReason = WaitForeignSource
+				}
+				if foreign != "" {
+					msg = append(msg, fmt.Sprintf("server tujuan sedang diatur sebagai replika dari %s; pengaturan replikasi "+
+						"itu akan dihapus (server tujuan tidak lagi mengikuti %s)", foreign, foreign))
+				}
+				jr.save()
+				return wait(strings.Join(msg, ".\n")), nil
+			}
+			if len(list) > 0 {
+				jr.logf("warn", "Pengguna menyetujui penghapusan database: %s.", strings.Join(list, ", "))
+			}
+			if foreign != "" {
+				jr.logf("warn", "Pengguna menyetujui penghapusan pengaturan replikasi dari %s di server tujuan.", foreign)
+			}
+			jr.st.WipeList = list
 			jr.save()
-			return wait("database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: " +
-				strings.Join(list, ", ")), nil
-		}
-		jr.logf("warn", "Pengguna menyetujui penghapusan database: %s.", strings.Join(list, ", "))
-		jr.st.WipeList = list
-		jr.save()
-		if res, err = preflight(true); err != nil {
-			return outcome{}, err
+			if len(list) > 0 {
+				if res, err = preflight(true); err != nil {
+					return outcome{}, err
+				}
+			}
 		}
 	}
 	jr.logChecks(res.Checks)
@@ -272,6 +353,19 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	jr.save()
 	jr.logf("info", "Metode salinan awal: %s.", method)
 	return done("metode salinan: %s", method), nil
+}
+
+// foreignSource is the target's replication source as host:port when it is
+// configured and is not this topology's master (one an earlier attempt of
+// this job set up is not foreign); "" otherwise.
+func foreignSource(rs *proto.ReplicaStatus, topo store.Topology) string {
+	if rs == nil || rs.SourceHost == "" {
+		return ""
+	}
+	if strings.EqualFold(rs.SourceHost, topo.SourceHost) && rs.SourcePort == topo.SourcePort {
+		return ""
+	}
+	return net.JoinHostPort(rs.SourceHost, strconv.Itoa(rs.SourcePort))
 }
 
 func hasCheck(checks []proto.Check, id, status string) bool {
@@ -396,11 +490,17 @@ func replicaServerID(master uint32) (uint32, error) {
 }
 
 func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, error) {
+	if jr.st.AdminReplaced {
+		// The copy is done; it waits for the user to reconnect.
+		return jr.verifyCopyAfterReconnect(ctx)
+	}
 	name := jr.serverName(jr.target())
 	// A clone target has no user databases (the agent picks clone only
 	// then); the form's ConfirmWipe pre-approves replacing the rest.
 	if jr.st.Method == "clone" && !jr.st.ConfirmWipe && !jr.st.CloneApproved {
 		if !approved {
+			jr.st.WaitReason = WaitClone
+			jr.save()
 			return wait(fmt.Sprintf("CLONE akan menghapus SEMUA database di %s. Lanjutkan?", name)), nil
 		}
 		jr.st.CloneApproved = true
@@ -411,12 +511,17 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 		return outcome{}, err
 	}
 	p := proto.SnapshotParams{Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password,
-		EstimateBytes: jr.st.DataBytes}
+		EstimateBytes: jr.st.DataBytes, SSL: jr.st.MasterTLS}
 	cmd := "mysql.cloneFrom"
 	if jr.st.Method == "dump" {
 		cmd = "mysql.dumpFrom"
-		p.Databases = jr.st.Databases
-		if len(jr.st.WipeList) > 0 {
+		p.User, p.Password, p.Databases = "", "", jr.st.Databases
+	}
+	// An earlier attempt's copy still running (a retry, or a panel
+	// restart) is waited for: nothing may be dropped under it.
+	reattach := jr.earlierAgentJob(ctx, jr.target(), cmd)
+	if cmd == "mysql.dumpFrom" {
+		if len(jr.st.WipeList) > 0 && !reattach {
 			// Every confirmed leftover goes, also those not selected now.
 			var dr proto.DropDatabasesResult
 			if err := jr.call(ctx, jr.target(), "mysql.dropDatabases",
@@ -429,17 +534,83 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 	} else {
 		jr.logf("info", "Menyalin dengan CLONE; semua isi MySQL di %s diganti salinan master.", name)
 	}
+	if reattach {
+		jr.logf("info", "Salinan dari percobaan sebelumnya masih berjalan atau sudah selesai; ditunggu, tidak diulang.")
+	}
 	var res proto.SnapshotResult
-	if err := jr.runAgentJob(ctx, jr.target(), cmd, p, &res); err != nil {
+	if err := jr.copySnapshot(ctx, cmd, p, reattach, &res); err != nil {
 		return outcome{}, err
 	}
 	jr.st.SnapshotGTID = res.GTIDExecuted
 	jr.save()
+	if res.AdminReplaced {
+		jr.st.AdminReplaced = true
+		jr.st.WaitReason = WaitReconnect
+		jr.save()
+		jr.logf("warn", "Salinan selesai (%d byte), tetapi akun admin MySQL replika ikut terganti oleh akun-akun master.", res.Bytes)
+		return wait(jr.reconnectMessage()), nil
+	}
 	if jr.st.Method == "clone" || len(jr.st.Databases) == 0 {
-		jr.logf("warn", "Replika sekarang membawa akun-akun MySQL dari master (ikut tersalin); "+
-			"akun admin replika yang tersimpan bisa jadi tidak berlaku lagi.")
+		jr.logf("warn", "Replika sekarang membawa akun-akun MySQL dari master (ikut tersalin).")
 	}
 	return done("%s selesai (%d byte)", jr.st.Method, res.Bytes), nil
+}
+
+// reconnectMessage asks the user, in plain words, to reconnect the
+// target's MySQL with the master's admin account after the copy brought
+// the master's accounts.
+func (jr *jobRun) reconnectMessage() string {
+	return fmt.Sprintf("Data sudah tersalin, tetapi salinan itu juga membawa akun-akun MySQL dari master %s, sehingga akun "+
+		"admin yang tersimpan untuk %s tidak berlaku lagi.\n"+
+		"1. Buka halaman server %s dan klik Hubungkan MySQL.\n"+
+		"2. Masukkan akun admin MySQL milik master %s (akun yang sama dengan yang dipakai di Hubungkan MySQL di master).\n"+
+		"3. Kembali ke halaman ini dan klik Sudah saya hubungkan ulang. Data tidak disalin ulang.",
+		jr.serverName(jr.master()), jr.serverName(jr.target()), jr.serverName(jr.target()), jr.serverName(jr.master()))
+}
+
+// verifyCopyAfterReconnect continues a snapshot whose copy replaced the
+// target's accounts: once the stored account logs in again, the copy is
+// checked (clone_status for CLONE, the GTID set) and the target made
+// read-only again; the step then ends without copying again.
+func (jr *jobRun) verifyCopyAfterReconnect(ctx context.Context) (outcome, error) {
+	var st proto.MySQLStatus
+	if err := jr.call(ctx, jr.target(), "mysql.status", nil, &st); err != nil {
+		if loginRefused(err) {
+			jr.logf("warn", "Login ke MySQL replika masih ditolak: %v", err)
+			jr.st.WaitReason = WaitReconnect
+			jr.save()
+			return wait(jr.reconnectMessage()), nil
+		}
+		return outcome{}, err
+	}
+	if jr.st.Method == "clone" && (st.CloneState != "Completed" || st.CloneError != "") {
+		return outcome{}, fmt.Errorf("CLONE tidak selesai di server tujuan: status %q %s; ulangi Buat replika", st.CloneState, st.CloneError)
+	}
+	if jr.st.SnapshotGTID == "" {
+		jr.st.SnapshotGTID = st.GTIDExecuted
+	}
+	if st.GTIDExecuted == "" {
+		return outcome{}, errors.New("set GTID server tujuan kosong setelah salinan; ulangi Buat replika")
+	}
+	// The load lifted read-only and may not have put it back under the
+	// replaced account.
+	if err := jr.call(ctx, jr.target(), "mysql.setReadOnly", proto.ReadOnlyParams{On: true}, nil); err != nil {
+		return outcome{}, err
+	}
+	if _, err := jr.r.RefreshInventory(ctx, jr.target()); err != nil {
+		jr.r.log.Warn("refresh target inventory", "job", jr.job.ID, "err", err)
+	}
+	jr.st.AdminReplaced = false
+	jr.save()
+	jr.logf("info", "Akun MySQL replika terhubung lagi; salinan diperiksa (GTID %s).", st.GTIDExecuted)
+	return done("%s selesai; akun MySQL replika terhubung ulang", jr.st.Method), nil
+}
+
+// loginRefused reports whether an agent answered that the stored MySQL
+// account was refused (1045, 1698).
+func loginRefused(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "login MySQL gagal") && (strings.Contains(msg, "1045") || strings.Contains(msg, "1698"))
 }
 
 // replAccount is the topology and its replication password.
@@ -455,17 +626,14 @@ func (jr *jobRun) replAccount() (store.Topology, string, error) {
 	return topo, string(plain), nil
 }
 
-// adminReplacedMessage asks the user to reconnect the replica's MySQL after
-// the snapshot brought the master's accounts along.
-const adminReplacedMessage = "akun admin replika ikut terganti oleh salinan dari master; " +
-	"hubungkan ulang akun MySQL replika (menu Hubungkan MySQL) lalu Lanjutkan"
-
 func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	var st proto.MySQLStatus
 	if err := jr.call(ctx, jr.target(), "mysql.status", nil, &st); err != nil {
-		if msg := err.Error(); strings.Contains(msg, "login MySQL gagal") && strings.Contains(msg, "1045") {
-			jr.logf("warn", "Login ke MySQL replika ditolak: %s", msg)
-			return wait(adminReplacedMessage), nil
+		if loginRefused(err) {
+			jr.logf("warn", "Login ke MySQL replika ditolak: %v", err)
+			jr.st.WaitReason = WaitReconnect
+			jr.save()
+			return wait(jr.reconnectMessage()), nil
 		}
 		return outcome{}, err
 	}
@@ -473,11 +641,11 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
-	// SSL stays off in v1: the panel distributes no certificates yet, so a
-	// replica could not verify the master's anyway.
+	// SOURCE_SSL=1 when the master offers TLS: encrypted, without CA
+	// verification in v1 (the panel distributes no certificates yet).
 	var rs proto.ReplicaStatus
 	if err := jr.call(ctx, jr.target(), "mysql.configureReplication", proto.ReplicationSourceParams{
-		Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password, SSL: false,
+		Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password, SSL: jr.st.MasterTLS,
 		Databases: jr.st.Databases,
 	}, &rs); err != nil {
 		return outcome{}, err
@@ -495,13 +663,8 @@ func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 	if err := jr.call(ctx, jr.target(), "mysql.startReplica", nil, nil); err != nil {
 		return outcome{}, err
 	}
-	w, err := jr.waitMasterGTID(ctx, syncTimeoutSec)
-	if err != nil {
+	if _, err := jr.waitCaughtUp(ctx); err != nil {
 		return outcome{}, err
-	}
-	if !w.Synced {
-		return outcome{}, notSynced(w, fmt.Sprintf("replika belum menyusul master dalam %d menit (IO %s, SQL %s)",
-			syncTimeoutSec/60, w.Status.IORunning, w.Status.SQLRunning))
 	}
 	jr.setReplicaState(store.ReplicaReady, "")
 	if err := jr.r.d.Store.SetServerRole(jr.target(), store.RoleReplica); err != nil {
@@ -522,6 +685,46 @@ func (jr *jobRun) waitMasterGTID(ctx context.Context, timeoutSec int) (proto.Wai
 	err := jr.callWithin(ctx, time.Duration(timeoutSec+60)*time.Second, jr.target(), "mysql.waitSynced",
 		proto.WaitSyncedParams{GTIDSet: ms.GTIDExecuted, TimeoutSec: timeoutSec}, &w)
 	return w, err
+}
+
+// waitCaughtUp waits for the replica to execute the master's GTID set, in
+// windows of syncTimeoutSec: while both replication threads run without an
+// error and the replica's executed set grows from window to window, it
+// logs the progress and keeps waiting, up to catchUpMax in all. A thread
+// error, no progress in a window, or the overall bound fails the step; the
+// last two with a catchUpError, which leaves replication running.
+func (jr *jobRun) waitCaughtUp(ctx context.Context) (proto.WaitSyncedResult, error) {
+	deadline := jr.r.now().Add(jr.r.catchUpMax)
+	prev := ""
+	for {
+		w, err := jr.waitMasterGTID(ctx, syncTimeoutSec)
+		if err != nil {
+			return w, err
+		}
+		if w.Synced {
+			return w, nil
+		}
+		s := w.Status
+		if s.LastIOErrno != 0 || s.LastSQLErrno != 0 || s.SQLRunning != "Yes" ||
+			(s.IORunning != "Yes" && s.IORunning != "Connecting") {
+			return w, notSynced(w, fmt.Sprintf("replikasi tidak berjalan (IO %s, SQL %s)", s.IORunning, s.SQLRunning))
+		}
+		if w.Executed == prev {
+			return w, catchUpError{fmt.Sprintf("replika tidak bertambah maju dalam %d menit (IO %s, SQL %s); "+
+				"replikasi tetap berjalan, periksa beban server tujuan lalu tekan Ulangi", syncTimeoutSec/60, s.IORunning, s.SQLRunning)}
+		}
+		if !jr.r.now().Before(deadline) {
+			return w, catchUpError{fmt.Sprintf("replika masih menyusul master setelah %s; replikasi tetap berjalan, "+
+				"tekan Ulangi untuk menunggu lagi", jr.r.catchUpMax)}
+		}
+		prev = w.Executed
+		msg := "replika masih menyusul master"
+		if s.SecondsBehind != nil {
+			msg += fmt.Sprintf(" (tertinggal %d detik)", *s.SecondsBehind)
+		}
+		jr.logf("info", "%s; sudah dieksekusi: %s", strings.ToUpper(msg[:1])+msg[1:], truncate(w.Executed, 512))
+		jr.setStep(store.StepRunning, msg)
+	}
 }
 
 // notSynced explains a replica that did not reach the set: a replication

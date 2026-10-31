@@ -219,7 +219,7 @@ func (jr *jobRun) addDatabasesSteps() []step {
 		{n[2], jr.addDump},
 		{n[3], jr.addReplayUntil},
 		{n[4], jr.addExpandFilter},
-		{n[5], jr.changeVerify(syncTimeoutSec)},
+		{n[5], jr.changeVerify(0)},
 	}
 }
 
@@ -258,19 +258,25 @@ func (jr *jobRun) addStop(ctx context.Context, _ bool) (outcome, error) {
 }
 
 func (jr *jobRun) addDump(ctx context.Context, _ bool) (outcome, error) {
-	topo, password, err := jr.replAccount()
+	topo, err := jr.r.d.Store.GetTopology(jr.job.TopologyID)
 	if err != nil {
+		return outcome{}, err
+	}
+	var ms proto.MySQLStatus
+	if err := jr.call(ctx, jr.master(), "mysql.status", nil, &ms); err != nil {
 		return outcome{}, err
 	}
 	// DropExisting would put the dump in ON mode, which resets the
 	// replica's GTID history; the new databases were never followed, so
-	// there is nothing of theirs to drop.
-	p := proto.SnapshotParams{Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password,
-		Databases: jr.st.Change, EstimateBytes: jr.st.DataBytes}
+	// there is nothing of theirs to drop. The account is a temporary one
+	// (copySnapshot).
+	p := proto.SnapshotParams{Host: topo.SourceHost, Port: topo.SourcePort, Databases: jr.st.Change,
+		EstimateBytes: jr.st.DataBytes, SSL: ms.TLSAvailable}
 	jr.logf("info", "Menyalin database %s dengan dump; master dikunci sesaat (FLUSH TABLES WITH READ LOCK) saat dump dimulai.",
 		strings.Join(jr.st.Change, ", "))
 	var res proto.SnapshotResult
-	if err := jr.runAgentJob(ctx, jr.target(), "mysql.dumpFrom", p, &res); err != nil {
+	reattach := jr.earlierAgentJob(ctx, jr.target(), "mysql.dumpFrom")
+	if err := jr.copySnapshot(ctx, "mysql.dumpFrom", p, reattach, &res); err != nil {
 		return outcome{}, err
 	}
 	if res.GTIDExecuted == "" {
@@ -350,16 +356,24 @@ func (jr *jobRun) removeDrop(ctx context.Context, _ bool) (outcome, error) {
 }
 
 // changeVerify waits up to timeoutSec for the replica to catch up with the
-// master, then records the databases it follows now.
+// master, then records the databases it follows now. timeoutSec 0 waits
+// as long as the replica makes progress (waitCaughtUp): after a dump the
+// replica may need long to catch up.
 func (jr *jobRun) changeVerify(timeoutSec int) func(context.Context, bool) (outcome, error) {
 	return func(ctx context.Context, _ bool) (outcome, error) {
-		w, err := jr.waitMasterGTID(ctx, timeoutSec)
-		if err != nil {
-			return outcome{}, err
-		}
-		if !w.Synced {
-			return outcome{}, notSynced(w, fmt.Sprintf("replika belum menyusul master dalam %d detik (IO %s, SQL %s)",
-				timeoutSec, w.Status.IORunning, w.Status.SQLRunning))
+		if timeoutSec == 0 {
+			if _, err := jr.waitCaughtUp(ctx); err != nil {
+				return outcome{}, err
+			}
+		} else {
+			w, err := jr.waitMasterGTID(ctx, timeoutSec)
+			if err != nil {
+				return outcome{}, err
+			}
+			if !w.Synced {
+				return outcome{}, notSynced(w, fmt.Sprintf("replika belum menyusul master dalam %d detik (IO %s, SQL %s)",
+					timeoutSec, w.Status.IORunning, w.Status.SQLRunning))
+			}
 		}
 		dbs := jr.changedDatabases()
 		if err := jr.r.d.Store.SetReplicaDatabases(jr.target(), dbs); err != nil {

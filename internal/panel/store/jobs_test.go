@@ -353,3 +353,24 @@ func TestReopenJob(t *testing.T) {
 		t.Fatalf("missing id: err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestNewerJobExists(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db1")
+	other := mustServer(t, s, "db2")
+	now := time.Now()
+	for _, j := range []Job{{ID: "b-first", ServerID: srv.ID}, {ID: "a-other", ServerID: other.ID}, {ID: "0-second", ServerID: srv.ID}} {
+		j.Kind, j.CreatedAt = "x", now // same second: only insertion order tells them apart
+		if err := s.CreateJob(j, []string{"s"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id, want := range map[string]bool{"b-first": true, "0-second": false} {
+		if got, err := s.NewerJobExists(id, srv.ID); err != nil || got != want {
+			t.Errorf("NewerJobExists(%s) = %v, %v; want %v", id, got, err, want)
+		}
+	}
+	if got, err := s.NewerJobExists("a-other", other.ID); err != nil || got {
+		t.Errorf("NewerJobExists(a-other) = %v, %v", got, err)
+	}
+}
