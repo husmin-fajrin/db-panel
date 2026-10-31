@@ -147,3 +147,11 @@ Final fix wave dispatched (opus) at BASE ebf03a2 with final-fix-brief.md (items 
 - Ruling: residual 6 (masterVerify keeps any existing source host, so re-running Siapkan master no longer refreshes a changed master address) parked — the user can edit the address on the master page (I9) — cost if wrong: a stale address after a master IP change until the user edits it.
 - minor (deferred): dumpFrom GTID ON refusal lacks a test; TestLoadIgnoresClientCommands skips without a mysql client; policy loader checks the file but not its directory; wipe dialog omits the foreign-source reset text; weak GTID check after CLONE reconnect; two cosmetic edges.
 - Workspace closed after this entry: ledger copied to docs/superpowers/ledgers/2026-10-30-02-buat-replika-mysql-ledger.md.
+
+## Release fixes (2026-10-31, after Plan 2 close)
+- Residual 1 (Retry race) fixed in 294f64c: Retry reopens the job under startMu; execute no longer reopens; launch failure restores failed+old error. Test TestRetryReopensBeforeNewJobs (gated, no sleeps; b1a88b4).
+- Residual 2 (unrecorded dump account) fixed in 394df53: DumpUser/DumpHost saved before mysql.createDumpUser on create_replica and add_databases; tests TestFailedCreateDumpUserDropsIt, TestCancelDuringCreateDumpUserDropsIt.
+- Scoped review (opus): Approved, 0 Critical/Important, 3 Minor. M1 (test flake) fixed in b1a88b4 and verified -race -count=20.
+- Ruling: M2 (Cancel landing between reopen and launch can leave the job `failed` instead of `canceled`; nothing runs on the agent, job retryable) parked — cost if wrong: a wrong status label in a sub-second window.
+- Ruling: M3 (when the master is offline the deferred drop fails and the log asks the operator to drop an account that was probably never created; the next Retry shows the leftover error instead of the offline one) parked — cost if wrong: one confusing log line; the retry drops the account anyway.
+- Known gap (from implementer): if the createDumpUser call is cut off while the agent is still executing CREATE USER, the DROP may reach the master first and the account be created afterwards; needs agent-side cancellation or a leftover sweep (Plan 3).
