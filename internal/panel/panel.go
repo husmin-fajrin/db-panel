@@ -5,6 +5,7 @@ package panel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -193,8 +194,21 @@ func New(o Options) (*Panel, error) {
 		Logger:          p.log,
 		Now:             func() time.Time { return p.now() },
 		OnAlertsChanged: p.Notifier.Wake,
+		SendWeekly:      p.sendWeekly,
 	})
 	return p, nil
+}
+
+// sendWeekly sends the weekly summary through Telegram. Without Telegram
+// set up there is nowhere to send it, so the occurrence is skipped rather
+// than retried all week.
+func (p *Panel) sendWeekly(ctx context.Context, text string) error {
+	err := p.Notifier.SendWeekly(ctx, text)
+	if errors.Is(err, notify.ErrNotConfigured) {
+		p.log.Info("weekly summary skipped: Telegram is not set up")
+		return nil
+	}
+	return err
 }
 
 // snoozed reports whether the server's alert notifications are muted now.

@@ -40,6 +40,9 @@ type Deps struct {
 	// OnAlertsChanged is called, without the Monitor's lock, after alerts
 	// were opened or closed (the notifier's wake-up); nil means none.
 	OnAlertsChanged func()
+	// SendWeekly delivers the weekly summary text (spec 5.3); nil disables
+	// the weekly summary.
+	SendWeekly func(ctx context.Context, text string) error
 }
 
 // View is what the panel knows of one server's health.
@@ -81,8 +84,12 @@ type Monitor struct {
 	lastCheck map[int64]time.Time // last CheckNow per server
 	lastPrune time.Time
 	failedJob map[int64]string // per server, the job its open job_failed is about
+	// weeklyRetryAt holds back the next try of the weekly summary after a
+	// failed send.
+	weeklyRetryAt time.Time
 
 	onAlertsChanged func() // set once by New
+	sendWeekly      func(ctx context.Context, text string) error
 }
 
 // New returns a Monitor holding the health rows the store kept from the
@@ -106,6 +113,7 @@ func New(d Deps) *Monitor {
 		tickEvery: d.TickEvery, startedAt: d.Now(), ctx: ctx, cancel: cancel,
 		servers: make(map[int64]*serverState), lastCheck: make(map[int64]time.Time),
 		failedJob: make(map[int64]string), onAlertsChanged: d.OnAlertsChanged,
+		sendWeekly: d.SendWeekly,
 	}
 	set, err := LoadSettings(d.Store)
 	if err != nil {
@@ -138,7 +146,8 @@ func (m *Monitor) goBg(fn func(ctx context.Context)) {
 }
 
 // Run re-evaluates the time-based statuses every TickEvery until ctx is
-// done; once a day it prunes status events older than 90 days.
+// done; once a day it prunes status events older than 90 days, and it sends
+// the weekly summary when it is due.
 func (m *Monitor) Run(ctx context.Context) {
 	t := time.NewTicker(m.tickEvery)
 	defer t.Stop()
@@ -148,6 +157,7 @@ func (m *Monitor) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			m.tick()
+			m.scheduleWeekly(ctx)
 		}
 	}
 }

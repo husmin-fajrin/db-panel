@@ -72,6 +72,9 @@ const (
 	SettingWeeklySummary       = "weekly_summary"
 	SettingWeeklySummaryAt     = "weekly_summary_at"
 	SettingAlertRepeatHours    = "alert_repeat_hours"
+	// SettingWeeklyLastSent holds (RFC3339) the weekly summary occurrence
+	// last sent, so a restart never sends one twice.
+	SettingWeeklyLastSent = "weekly_last_sent"
 )
 
 // GetSettings returns the values of the given keys that are set; a key that

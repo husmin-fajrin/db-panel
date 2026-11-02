@@ -3,6 +3,7 @@ package notify
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -563,3 +564,34 @@ func TestWakeSendsWithoutWaiting(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+func TestSendWeekly(t *testing.T) {
+	r := newRig(t)
+	if err := r.n.SendWeekly(context.Background(), "ringkasan"); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("SendWeekly unconfigured = %v, want ErrNotConfigured", err)
+	}
+	r.configure()
+	// Every alert kind switched off, the server snoozed: the summary is no
+	// alert, so it still goes out.
+	if err := r.st.SetSetting(store.SettingTelegramKinds, `{"disk_warn":false,"agent_offline":false}`); err != nil {
+		t.Fatal(err)
+	}
+	r.snoozeMu.Lock()
+	r.snoozed[1] = true
+	r.snoozeMu.Unlock()
+
+	if err := r.n.SendWeekly(context.Background(), "📊 Ringkasan mingguan"); err != nil {
+		t.Fatalf("SendWeekly: %v", err)
+	}
+	msgs := r.api.messages()
+	if len(msgs) != 1 || msgs[0].Text != "📊 Ringkasan mingguan" || msgs[0].ChatID != "-100777" {
+		t.Fatalf("messages = %+v", msgs)
+	}
+
+	// A failure comes back without the token.
+	r.api.srv.Close()
+	err := r.n.SendWeekly(context.Background(), "x")
+	if err == nil || strings.Contains(err.Error(), testToken) || strings.Contains(r.logs.String(), testToken) {
+		t.Fatalf("SendWeekly to a dead API = %v; want an error without the token", err)
+	}
+}
