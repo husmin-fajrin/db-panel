@@ -95,3 +95,9 @@ var (
 func MissingReplicaGrants(grants []string, account string) []string {
 	return missingGrants(grants, account, replicaGrants)
 }
+
+// Health helpers, testable without a server.
+var (
+	SystemStats     = systemStats
+	BinlogOldestAge = binlogOldestAge
+)

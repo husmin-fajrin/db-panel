@@ -11,6 +11,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // ErrNoHost is returned by commands while the agent found no MySQL installation.
@@ -27,11 +28,20 @@ type Driver struct {
 	Jobs   *jobs.Runner
 	Logger *slog.Logger
 	// Sys and Cfg are what mysql.install needs to find the MySQL it
-	// installed (NewRealHost); without Sys it cannot install.
+	// installed (NewRealHost); without Sys it cannot install. Snapshot
+	// reads the host's disk, memory and load through Sys.
 	Sys probe.System
 	Cfg config.Config
 
 	mu sync.RWMutex // guards Host once Register has run
+
+	// Snapshot's connection, kept between readings with the Host and
+	// account it was opened for.
+	monMu    sync.Mutex
+	monDB    *sql.DB
+	monHost  Host
+	monCreds proto.ConnectParams
+
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
 	newHost hostFactory
