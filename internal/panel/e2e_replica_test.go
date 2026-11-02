@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -76,8 +78,8 @@ func TestE2ECreateReplica(t *testing.T) {
 	uiAddr, _ := startPanel(t, p)
 	base := "http://" + uiAddr
 
-	masterSrv := startE2EAgent(t, p, "master-e2e", masterInst, &logs)
-	replicaSrv := startE2EAgent(t, p, "replika-e2e", replicaInst, &logs)
+	masterSrv, masterPins := startE2EAgent(t, p, "master-e2e", masterInst, &logs)
+	replicaSrv, replicaPins := startE2EAgent(t, p, "replika-e2e", replicaInst, &logs)
 
 	ui := newUIClient(t, base)
 	ui.login(readInitialPassword(t, o))
@@ -193,7 +195,7 @@ func TestE2ECreateReplica(t *testing.T) {
 	waitRow(t, replicaDB, "a", 3, "tetap")
 
 	// Buat replika of every database on a bare target: CLONE.
-	cloneSrv := startE2EAgent(t, p, "replika-clone", cloneInst, &logs)
+	cloneSrv, clonePins := startE2EAgent(t, p, "replika-clone", cloneInst, &logs)
 	if loc := ui.postRedirect(serverPath(cloneSrv)+"/mysql/connect",
 		url.Values{"user": {"adm_e2e"}, "password": {cloneAdminPW}, "host": {""}}); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
 		t.Fatalf("connect MySQL on the clone target redirected to %q", loc)
@@ -293,13 +295,23 @@ func TestE2ECreateReplica(t *testing.T) {
 	if strings.Contains(logs.String(), password) {
 		t.Fatal("the panel or agent log contains the replication password")
 	}
+	// The flows ran with the agents' role and source pins and set them.
+	source := fmt.Sprintf("127.0.0.1:%d", masterInst.Port)
+	for _, c := range []struct{ dir, role, source string }{
+		{masterPins, "master", ""}, {replicaPins, "replica", source}, {clonePins, "replica", source},
+	} {
+		if role, src := readPin(t, c.dir, mysql.RoleFile), readPin(t, c.dir, mysql.SourceFile); role != c.role || src != c.source {
+			t.Errorf("pins in %s = %q, %q; want %q, %q", c.dir, role, src, c.role, c.source)
+		}
+	}
 	t.Logf("end-to-end flow took %s", time.Since(start).Round(time.Second))
 }
 
 // startE2EAgent pairs a new server called name with p and runs an agent for
-// it in-process whose MySQL driver manages inst. The agent stops when the
-// test ends, before inst does.
-func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance, logs io.Writer) int64 {
+// it in-process whose MySQL driver manages inst, with its role and source
+// pins in the returned directory. The agent stops when the test ends,
+// before inst does.
+func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance, logs io.Writer) (int64, string) {
 	t.Helper()
 	srv, err := p.Store.CreateServer(name)
 	if err != nil {
@@ -330,7 +342,7 @@ func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance
 	a := agent.New(cfg, reg, logger)
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
-	d := &mysql.Driver{Host: inst.HostWith(creds), Creds: creds, Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg}
+	d := &mysql.Driver{Host: inst.HostWith(creds), Creds: creds, Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg, PinDir: dir}
 	d.Register(reg)
 
 	done := make(chan error, 1)
@@ -350,7 +362,20 @@ func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance
 		}
 		return p.Hub.IsOnline(srv.ID) && got.ProbeJSON != ""
 	})
-	return srv.ID
+	return srv.ID, dir
+}
+
+// readPin is a pin file's content without the newline; "" when absent.
+func readPin(t *testing.T, dir, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // uiClient is a browser for the panel UI: a cookie jar, the Origin header

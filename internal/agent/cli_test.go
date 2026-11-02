@@ -17,6 +17,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -215,5 +216,81 @@ func TestRegisterMySQLWithoutMySQL(t *testing.T) {
 	// The sealing key is its own file: agent.key is the TLS private key.
 	if fi, err := os.Stat(filepath.Join(dir, "secrets.key")); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("secrets.key: %v, %v", fi, err)
+	}
+}
+
+// TestCLISetRoleAndSetSource: "agent set-role" and "agent set-source"
+// write the pins (0644) the driver reads, validate their argument, and
+// set-role unassigned removes both pins.
+func TestCLISetRoleAndSetSource(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		code := Main(args, &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			return ""
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	code, out, errOut := run("set-role", "master", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "peran diperbarui; agent membacanya ulang pada perintah berikutnya") {
+		t.Fatalf("set-role master = %d, %q, %q", code, out, errOut)
+	}
+	if got := read(mysql.RoleFile); got != "master\n" {
+		t.Errorf("role file = %q", got)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, mysql.RoleFile)); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Errorf("role file: %v, %v; want mode 0644", fi, err)
+	}
+	// --dir may come first too.
+	if code, _, errOut := run("set-role", "--dir", dir, "replica"); code != 0 || read(mysql.RoleFile) != "replica\n" {
+		t.Fatalf("set-role --dir DIR replica = %d, %q; role %q", code, errOut, read(mysql.RoleFile))
+	}
+
+	code, out, errOut = run("set-source", "10.0.0.5:3307", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "sumber diperbarui; agent membacanya ulang pada perintah berikutnya") {
+		t.Fatalf("set-source = %d, %q, %q", code, out, errOut)
+	}
+	if got := read(mysql.SourceFile); got != "10.0.0.5:3307\n" {
+		t.Errorf("source file = %q", got)
+	}
+	if code, _, errOut := run("set-source", "[fd00::1]:3306", "--dir", dir); code != 0 || read(mysql.SourceFile) != "[fd00::1]:3306\n" {
+		t.Errorf("set-source IPv6 = %d, %q; source %q", code, errOut, read(mysql.SourceFile))
+	}
+
+	for _, args := range [][]string{
+		{"set-role", "raja", "--dir", dir},
+		{"set-role", "--dir", dir},
+		{"set-role", "master", "replica", "--dir", dir},
+		{"set-source", "10.0.0.5", "--dir", dir},
+		{"set-source", "10.0.0.5:0", "--dir", dir},
+		{"set-source", "10.0.0.5:70000", "--dir", dir},
+		{"set-source", "a'b:3306", "--dir", dir},
+		{"set-source", "fd00::1:3306", "--dir", dir},
+		{"set-source", "--dir", dir},
+	} {
+		if code, _, errOut := run(args...); code != 2 || errOut == "" {
+			t.Errorf("%q = %d, %q; want 2 with a message", args, code, errOut)
+		}
+	}
+	if read(mysql.RoleFile) != "replica\n" || read(mysql.SourceFile) != "[fd00::1]:3306\n" {
+		t.Errorf("pins changed by refused calls: %q, %q", read(mysql.RoleFile), read(mysql.SourceFile))
+	}
+
+	if code, _, errOut := run("set-role", "unassigned", "--dir", dir); code != 0 {
+		t.Fatalf("set-role unassigned = %d, %q", code, errOut)
+	}
+	for _, name := range []string{mysql.RoleFile, mysql.SourceFile} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s after set-role unassigned: %v", name, err)
+		}
 	}
 }

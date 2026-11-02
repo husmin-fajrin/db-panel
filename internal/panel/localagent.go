@@ -23,8 +23,8 @@ import (
 // connection of the panel host's own server, and returns the function that
 // detaches it. The embedded agent offers the same commands as a remote one
 // (probe, mysql.*, job.*, monitor.*) and runs the same health monitor until
-// detached; its MySQL credential and sealing key live in the panel's config
-// directory.
+// detached; its MySQL credential, sealing key and role/source pins live in
+// the panel's config directory.
 func (p *Panel) attachLocal() (detach func()) {
 	reg := commands.NewRegistry()
 	sys := probe.RealSystem()
@@ -34,7 +34,7 @@ func (p *Panel) attachLocal() (detach func()) {
 	runner := jobs.NewRunner(localEmitter(emit), p.log)
 	runner.Register(reg)
 	drv := agent.RegisterMySQL(reg, config.Config{ServerID: id}, p.opts.ConfigDir, sys, runner, p.log)
-	mon := monitor.New(drv, localEmitter(emit), p.log, monitor.Options{})
+	mon := monitor.New(drv, localEmitter(emit), p.log, monitor.Options{Pins: drv.Pins()})
 	mon.Register(reg)
 	reg.SetLogger(p.log.With("agent", "local"))
 	if err := agent.ApplyPolicy(reg, p.opts.ConfigDir, p.log); err != nil {

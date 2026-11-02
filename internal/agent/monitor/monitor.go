@@ -43,6 +43,14 @@ const (
 	maxIntervalSec = 3600
 )
 
+// Pinner pins the role of a server configured before role pins existed,
+// from a reading MySQL answered and the panel's role hint
+// (mysql.Pins.Bootstrap). It writes at most once and decides by itself
+// whether there is anything to do.
+type Pinner interface {
+	Bootstrap(hint string, snap proto.HealthSnapshot) error
+}
+
 // Options configure a Monitor; zero fields take their defaults.
 type Options struct {
 	CheckEvery, SummaryEvery, LagThreshold time.Duration
@@ -50,6 +58,8 @@ type Options struct {
 	// After returns a channel that receives once d has passed; it paces
 	// the loop. Default time.After; tests replace it to step the loop.
 	After func(d time.Duration) <-chan time.Time
+	// Pins, when set, gets every reading MySQL answered (Pinner).
+	Pins Pinner
 }
 
 // Monitor runs the check loop and answers the monitor.* commands. The loop
@@ -58,6 +68,7 @@ type Options struct {
 type Monitor struct {
 	src    Source
 	em     Emitter
+	pins   Pinner
 	logger *slog.Logger
 	now    func() time.Time
 	after  func(d time.Duration) <-chan time.Time
@@ -95,7 +106,7 @@ func New(src Source, em Emitter, logger *slog.Logger, o Options) *Monitor {
 		o.After = time.After
 	}
 	return &Monitor{
-		src: src, em: em, logger: logger, now: o.Now, after: o.After,
+		src: src, em: em, pins: o.Pins, logger: logger, now: o.Now, after: o.After,
 		reconf: make(chan struct{}, 1), opts: o,
 	}
 }
@@ -214,6 +225,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return // stopping: the reading may have been cut short
 	}
+	m.bootstrap(snap)
 	takenAt := m.now()
 	change := changed(m.prev, snap, o.LagThreshold, diskWarnPct, diskCritPct, connWarnPct)
 	if !change && takenAt.Sub(m.lastSent) < o.SummaryEvery {
@@ -243,10 +255,22 @@ func (m *Monitor) forcedCheck(ctx context.Context) (proto.HealthEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return proto.HealthEvent{}, err
 	}
+	m.bootstrap(snap)
 	takenAt := m.now()
 	m.seq++
 	m.prev, m.lastSent = snap, takenAt
 	return proto.HealthEvent{Seq: m.seq, TakenAgoMS: m.now().Sub(takenAt).Milliseconds(), Snapshot: snap}, nil
+}
+
+// bootstrap hands a reading MySQL answered to the pins with the panel's
+// latest role hint. The caller holds checkMu.
+func (m *Monitor) bootstrap(snap proto.HealthSnapshot) {
+	if m.pins == nil || !snap.MySQLOK {
+		return
+	}
+	if err := m.pins.Bootstrap(m.LastRoleHint(), snap); err != nil {
+		m.logger.Warn("role pin not bootstrapped", "err", err)
+	}
 }
 
 // flush sends the backlog oldest first, stopping at the first failure; the

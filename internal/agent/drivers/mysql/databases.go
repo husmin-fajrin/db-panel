@@ -20,6 +20,9 @@ func (d *Driver) registerDatabases(reg *commands.Registry) {
 		if err := validateDropDatabases(p.Databases); err != nil {
 			return nil, err
 		}
+		if err := d.allow("mysql.dropDatabases", p); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err

@@ -295,6 +295,30 @@ izinnya longgar membuat agent menolak berjalan (lihat
 diterimanya (nama, parameter dengan sandi disamarkan, hasil, durasi) di
 journal.
 
+### Peran dan sumber yang dipin
+
+Agent mengingat peran servernya di `/etc/dbpanel/role` (`master` atau
+`replica`) dan master yang diikuti replika di `/etc/dbpanel/source`
+(`host:port`). Keduanya ditulis agent saat "Siapkan master" atau "Buat
+replika" pertama berhasil (agent lama yang dimutakhirkan menuliskannya dari
+keadaan MySQL). Sesudah itu agent sendiri menolak perintah panel yang
+tidak cocok, walau panelnya disusupi: master menolak hapus database,
+salin data dari server lain, dijadikan atau dikonfigurasi sebagai
+replika, dan dikunci read-only; replika menolak buka kunci, dijadikan
+master, akun replikasi, dan master selain sumbernya. Panel hanya bisa melepas peran
+`replica` (setelah replikasinya dihentikan dan direset); peran `master`
+dan sumber hanya diubah di server itu sendiri:
+
+```sh
+sudo dbpanel agent set-role master       # atau replica, atau unassigned (hapus peran dan sumber)
+sudo dbpanel agent set-source 10.0.0.5:3306
+```
+
+Agent membacanya ulang pada perintah berikutnya, tanpa restart. Berkas
+pin harus milik root dan tidak bisa ditulis grup atau pengguna lain;
+selama tidak demikian, perintah yang dijaga ditolak dengan pesan cara
+memperbaikinya.
+
 ### Cadangkan kunci panel
 
 Sandi replikasi disimpan di `panel.db` tersegel dengan

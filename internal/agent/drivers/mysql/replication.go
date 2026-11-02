@@ -72,6 +72,9 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		if err := validateSource(&p); err != nil {
 			return nil, err
 		}
+		if err := d.allow("mysql.configureReplication", p); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
@@ -79,6 +82,12 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		rs, err := ConfigureReplication(ctx, h, p)
 		if err != nil {
 			return nil, err
+		}
+		// The first source this server follows is pinned.
+		if d.pins != nil {
+			if err := d.pins.claimSource(p.Host, p.Port); err != nil {
+				return nil, fmt.Errorf("sumber replikasi sudah diatur, tetapi pin sumber gagal ditulis: %w", err)
+			}
 		}
 		d.log("mysql replication configured", "host", p.Host, "port", p.Port, "user", p.User, "ssl", p.SSL,
 			"databases", p.Databases)
@@ -91,6 +100,9 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 			return nil, &commands.ParamError{Msg: "parameter tidak valid: " + err.Error()}
 		}
 		if err := validateFilter(p.Databases); err != nil {
+			return nil, err
+		}
+		if err := d.allow("mysql.setReplicationFilter", p); err != nil {
 			return nil, err
 		}
 		h, err := d.host()
@@ -106,6 +118,9 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 	})
 
 	reg.Register("mysql.startReplica", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if err := d.allow("mysql.startReplica", nil); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
@@ -133,6 +148,9 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 	})
 
 	reg.Register("mysql.resetReplica", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if err := d.allow("mysql.resetReplica", nil); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
@@ -141,6 +159,31 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 			return nil, err
 		}
 		d.log("mysql replica reset")
+		return nil, nil
+	})
+
+	reg.Register("mysql.releaseRole", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if d.pins == nil {
+			return nil, nil
+		}
+		if err := d.allow("mysql.releaseRole", nil); err != nil {
+			return nil, err
+		}
+		pinned, err := d.pins.pinned()
+		if err != nil || !pinned {
+			return nil, err
+		}
+		h, err := d.host()
+		if err != nil {
+			return nil, err
+		}
+		if err := refuseReplicating(ctx, h); err != nil {
+			return nil, err
+		}
+		if err := d.pins.Release(); err != nil {
+			return nil, err
+		}
+		d.log("pinned role and source released")
 		return nil, nil
 	})
 
@@ -537,6 +580,32 @@ func ResetReplica(ctx context.Context, h Host) error {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("%s: %w", q, err)
 		}
+	}
+	return nil
+}
+
+// refuseReplicating refuses mysql.releaseRole while this server has a
+// replication source configured (mysql.resetReplica removes it) or
+// replicas read its binary log.
+func refuseReplicating(ctx context.Context, h Host) error {
+	db, err := openAdmin(ctx, h)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	rs, err := replicaStatus(ctx, db)
+	if err != nil {
+		return fmt.Errorf("baca status replika: %w", err)
+	}
+	if rs != nil {
+		return &commands.ParamError{Msg: "replikasi masih dikonfigurasi di server ini; hentikan dan reset replikasi dulu sebelum melepas peran"}
+	}
+	n, err := binlogDumpThreads(ctx, db)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return &commands.ParamError{Msg: fmt.Sprintf("%d replika sedang membaca binlog server ini; peran tidak dilepas", n)}
 	}
 	return nil
 }

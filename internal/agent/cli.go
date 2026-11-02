@@ -32,6 +32,9 @@ const usage = `Penggunaan:
       [--agent-addr HOST:PORT] [--dir DIR]               pasangkan agent ke panel
   dbpanel agent pair --panel URL --ca-sha256 HEX --token-stdin [--dir DIR]
                                                          idem, token dari stdin
+  dbpanel agent set-role {master|replica|unassigned} [--dir DIR]
+                                                         ubah peran yang dipin
+  dbpanel agent set-source HOST:PORT [--dir DIR]         ubah sumber replikasi yang dipin
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -59,6 +62,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		switch args[0] {
 		case "pair":
 			return mainPair(args[1:], stdout, stderr)
+		case "set-role":
+			return mainSetRole(args[1:], stdout, stderr)
+		case "set-source":
+			return mainSetSource(args[1:], stdout, stderr)
 		case "version":
 			fmt.Fprintf(stdout, "dbpanel agent %s\n", version.Version)
 			return 0
@@ -105,7 +112,7 @@ func mainRun(args []string, stderr io.Writer) int {
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
 	drv := RegisterMySQL(reg, cfg, *dir, sys, runner, logger)
-	mon := monitor.New(drv, a, logger, monitor.Options{})
+	mon := monitor.New(drv, a, logger, monitor.Options{Pins: drv.Pins()})
 	mon.Register(reg)
 	reg.SetLogger(logger)
 	if err := ApplyPolicy(reg, *dir, logger); err != nil {
@@ -139,9 +146,10 @@ func mainRun(args []string, stderr io.Writer) int {
 // driver has no Host and its commands report that MySQL is missing until
 // mysql.install installs it. The admin account the user connects with is
 // kept sealed in dir/mysql.cred, whether or not MySQL is installed yet. It
-// returns the driver, which the health monitor reads its snapshots from.
+// returns the driver, which the health monitor reads its snapshots from. The
+// role and source pins (mysql.Pins) live in dir too.
 func RegisterMySQL(reg *commands.Registry, cfg config.Config, dir string, sys probe.System, runner *jobs.Runner, logger *slog.Logger) *mysql.Driver {
-	d := &mysql.Driver{Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg}
+	d := &mysql.Driver{Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg, PinDir: dir}
 	// agent.key is the TLS private key, so the sealing key is a separate file.
 	box, err := secrets.LoadOrCreate(filepath.Join(dir, secretsKeyFile))
 	if err != nil {
@@ -160,6 +168,78 @@ func RegisterMySQL(reg *commands.Registry, cfg config.Config, dir string, sys pr
 	}
 	d.Register(reg)
 	return d
+}
+
+// pinsUpdated is what set-role and set-source print once the file is
+// written; the agent stats the pins on every guarded command.
+const pinsUpdated = "diperbarui; agent membacanya ulang pada perintah berikutnya"
+
+// parsePinArgs parses "[--dir DIR] VALUE [--dir DIR]": exactly one value,
+// with the flag before or after it.
+func parsePinArgs(name string, args []string, stderr io.Writer) (dir, value string, ok bool) {
+	fs := newFlagSet(name, stderr)
+	d := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
+	if err := fs.Parse(args); err != nil {
+		return "", "", false
+	}
+	if fs.NArg() == 0 {
+		fs.Usage()
+		return "", "", false
+	}
+	value = fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return "", "", false
+	}
+	if fs.NArg() > 0 {
+		fs.Usage()
+		return "", "", false
+	}
+	return *d, value, true
+}
+
+// loadPinsForCLI opens the pins in dir. Files the agent would not trust
+// are reported and then overwritten: the CLI is how they get repaired.
+func loadPinsForCLI(dir string, stderr io.Writer) *mysql.Pins {
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "Peringatan: pin lama tidak bisa dipakai (%v); ditimpa\n", err)
+	}
+	return p
+}
+
+func mainSetRole(args []string, stdout, stderr io.Writer) int {
+	dir, role, ok := parsePinArgs("agent set-role", args, stderr)
+	if !ok {
+		return 2
+	}
+	if role != "master" && role != "replica" && role != "unassigned" {
+		fmt.Fprintf(stderr, "peran harus master, replica atau unassigned: %q\n", role)
+		return 2
+	}
+	if err := loadPinsForCLI(dir, stderr).SetRole(role); err != nil {
+		fmt.Fprintf(stderr, "gagal mengubah peran: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "peran "+pinsUpdated)
+	return 0
+}
+
+func mainSetSource(args []string, stdout, stderr io.Writer) int {
+	dir, src, ok := parsePinArgs("agent set-source", args, stderr)
+	if !ok {
+		return 2
+	}
+	host, port, err := mysql.ParseSource(src)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if err := loadPinsForCLI(dir, stderr).SetSource(host, port); err != nil {
+		fmt.Fprintf(stderr, "gagal mengubah sumber: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "sumber "+pinsUpdated)
+	return 0
 }
 
 func mainPair(args []string, stdout, stderr io.Writer) int {

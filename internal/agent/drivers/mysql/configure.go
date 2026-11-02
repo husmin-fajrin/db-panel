@@ -45,6 +45,9 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 		if p.Role = strings.TrimSpace(p.Role); p.Role != roleMaster && p.Role != roleReplica {
 			return nil, &commands.ParamError{Msg: "peran harus master atau replica"}
 		}
+		if err := d.allow("mysql.configure", p); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
@@ -52,6 +55,12 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 		res, err := Configure(ctx, h, p)
 		if err != nil {
 			return nil, err
+		}
+		// The first configuration pins the role; a later one never changes it.
+		if d.pins != nil {
+			if err := d.pins.claimRole(p.Role); err != nil {
+				return nil, fmt.Errorf("MySQL sudah dikonfigurasi sebagai %s, tetapi pin peran gagal ditulis: %w", p.Role, err)
+			}
 		}
 		if d.Logger != nil {
 			d.Logger.Info("mysql configured", "role", p.Role, "server_id", res.ServerID, "config", res.ConfigPath,
@@ -80,11 +89,17 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, &commands.ParamError{Msg: "parameter tidak valid: " + err.Error()}
 		}
+		if err := d.allow("mysql.setReadOnly", p); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
 		}
-		if err := SetReadOnly(ctx, h, p.On); err != nil {
+		// A pinned master is meant to be writable while replicas read it
+		// ("Buka kunci master"); elsewhere refuseOnSource stays.
+		checkSource := p.On || d.pins == nil || d.pins.Role() != roleMaster
+		if err := setReadOnly(ctx, h, p.On, checkSource); err != nil {
 			return nil, err
 		}
 		if d.Logger != nil {
@@ -542,7 +557,13 @@ func normBool(v string) string {
 //
 // Turning it off is refused on a server replicas read from: a master is
 // never made read-only by dbpanel, so only a mistake would ask that there.
+// (mysql.setReadOnly lifts that refusal on a server pinned as master.)
 func SetReadOnly(ctx context.Context, h Host, on bool) error {
+	return setReadOnly(ctx, h, on, true)
+}
+
+// setReadOnly is SetReadOnly; checkSource false skips refuseOnSource.
+func setReadOnly(ctx context.Context, h Host, on, checkSource bool) error {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return err
@@ -550,8 +571,10 @@ func SetReadOnly(ctx context.Context, h Host, on bool) error {
 	defer db.Close()
 	stmts := []string{"SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON"}
 	if !on {
-		if err := refuseOnSource(ctx, db); err != nil {
-			return err
+		if checkSource {
+			if err := refuseOnSource(ctx, db); err != nil {
+				return err
+			}
 		}
 		stmts = []string{"SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF"}
 	}

@@ -146,6 +146,12 @@ type rig struct {
 
 func newRig(t *testing.T, snap proto.HealthSnapshot) *rig {
 	t.Helper()
+	return newRigWith(t, snap, nil)
+}
+
+// newRigWith is newRig whose monitor bootstraps pins.
+func newRigWith(t *testing.T, snap proto.HealthSnapshot, pins Pinner) *rig {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &rig{
 		t:     t,
@@ -157,7 +163,8 @@ func newRig(t *testing.T, snap proto.HealthSnapshot) *rig {
 		waits: make(chan wait),
 	}
 	r.m = New(r.src, r.em, slog.New(slog.DiscardHandler), Options{
-		Now: r.clock.Now,
+		Pins: pins,
+		Now:  r.clock.Now,
 		After: func(d time.Duration) <-chan time.Time {
 			w := wait{d: d, ch: make(chan time.Time, 1)}
 			select {
@@ -566,4 +573,50 @@ func TestConfigureDoesNotWaitForSlowCheck(t *testing.T) {
 	}
 	close(gate)
 	r.idle()
+}
+
+// fakePins records the Bootstrap calls the monitor makes.
+type fakePins struct {
+	mu    sync.Mutex
+	hints []string
+}
+
+func (f *fakePins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !snap.MySQLOK {
+		panic("Bootstrap called with a failed reading")
+	}
+	f.hints = append(f.hints, hint)
+	return nil
+}
+
+func (f *fakePins) calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.hints...)
+}
+
+// TestBootstrapsPinsAfterEachReading: every reading MySQL answered is
+// handed to the pins with the panel's latest role hint; failed readings
+// are not.
+func TestBootstrapsPinsAfterEachReading(t *testing.T) {
+	pins := &fakePins{}
+	r := newRigWith(t, base(), pins)
+	if got := pins.calls(); len(got) != 1 || got[0] != "" {
+		t.Fatalf("after the first tick: %q, want one call without a hint", got)
+	}
+	resultEvent(t, r.dispatch("monitor.configure", proto.MonitorConfigureParams{
+		CheckEverySec: 15, SummaryEverySec: 120, RoleHint: "replica"}))
+	r.idle() // the loop pauses again with the new interval
+	r.tick(15 * time.Second)
+	if got := pins.calls(); len(got) != 3 || got[1] != "replica" || got[2] != "replica" {
+		t.Fatalf("after configure and a tick: %q", got)
+	}
+	r.src.set(func(s *proto.HealthSnapshot) { s.MySQLOK, s.MySQLError = false, "mati" })
+	r.tick(15 * time.Second)
+	resultEvent(t, r.dispatch("monitor.snapshot", nil))
+	if got := pins.calls(); len(got) != 3 {
+		t.Fatalf("failed readings were bootstrapped: %q", got)
+	}
 }

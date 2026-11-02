@@ -32,6 +32,10 @@ type Driver struct {
 	// reads the host's disk, memory and load through Sys.
 	Sys probe.System
 	Cfg config.Config
+	// PinDir holds the pinned role and source (pins.go): /etc/dbpanel for
+	// an agent, the panel's config directory for its embedded agent. Empty
+	// means no pins (tests only).
+	PinDir string
 
 	mu sync.RWMutex // guards Host once Register has run
 
@@ -42,6 +46,8 @@ type Driver struct {
 	monHost  Host
 	monCreds proto.ConnectParams
 
+	pins *Pins // nil without PinDir; set by Register
+
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
 	newHost hostFactory
@@ -50,6 +56,14 @@ type Driver struct {
 // Register adds the driver's commands to reg. Each command group lives in
 // its own file and registers itself through a register<Name> method.
 func (d *Driver) Register(reg *commands.Registry) {
+	if d.PinDir != "" && d.pins == nil {
+		p, err := LoadPins(d.PinDir)
+		if err != nil && d.Logger != nil {
+			d.Logger.Error("pin files unusable; guarded mysql commands are refused until they are fixed", "err", err)
+		}
+		p.logger = d.Logger
+		d.pins = p
+	}
 	d.registerStatus(reg)
 	d.registerConnect(reg)
 	d.registerPreflight(reg)
@@ -59,6 +73,19 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerReplication(reg)
 	d.registerInstall(reg)
 	d.registerDatabases(reg)
+}
+
+// Pins is the driver's pinned role and source; nil without PinDir. The
+// health monitor bootstraps the role through it.
+func (d *Driver) Pins() *Pins { return d.pins }
+
+// allow checks cmd against the pins (Pins.Allow); everything is allowed
+// without them.
+func (d *Driver) allow(cmd string, params any) error {
+	if d.pins == nil {
+		return nil
+	}
+	return d.pins.Allow(cmd, params)
 }
 
 func (d *Driver) host() (Host, error) {

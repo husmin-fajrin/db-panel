@@ -45,6 +45,9 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err := validateReplUser(&p); err != nil {
 			return nil, err
 		}
+		if err := d.allow("mysql.createReplUser", p); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
