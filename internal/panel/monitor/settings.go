@@ -14,12 +14,10 @@ import (
 // defaults for keys that are not set.
 type Settings struct {
 	CheckEvery, SummaryEvery time.Duration // sent to agents with monitor.configure
-	// Thresholds.StaleAfter is always 3 × SummaryEvery; ConnPct has no
-	// setting of its own and stays at its default.
+	// Thresholds.StaleAfter is always 3 × SummaryEvery.
 	Thresholds
 	AlertRepeat time.Duration // re-notify an alert still open after this
-	// LaggingAlert is how long a replica lags before it alerts; it has no
-	// setting of its own and stays at its default.
+	// LaggingAlert is how long a replica lags before it alerts.
 	LaggingAlert    time.Duration
 	WeeklySummary   bool
 	WeeklySummaryAt string // "Mon 07:00", panel time
@@ -75,7 +73,7 @@ var settingKeys = []string{
 	store.SettingMonitorCheckEvery, store.SettingMonitorSummaryEvery, store.SettingLagThreshold,
 	store.SettingDisconnectAlert, store.SettingDownAfter, store.SettingDiskWarn, store.SettingDiskCrit,
 	store.SettingAlertRepeatHours, store.SettingWeeklySummary, store.SettingWeeklySummaryAt,
-	store.SettingPanelBaseURL,
+	store.SettingPanelBaseURL, store.SettingConnPct, store.SettingLaggingAlert,
 }
 
 // LoadSettings reads the settings from s. A key that is not set, or holds a
@@ -109,6 +107,10 @@ func LoadSettings(s *store.Store) (Settings, error) {
 	if st.DiskWarn >= st.DiskCrit {
 		st.DiskWarn, st.DiskCrit = defaultDiskWarn, defaultDiskCrit
 	}
+	if v, ok := num(store.SettingConnPct, 1, 100); ok {
+		st.ConnPct = v
+	}
+	secs(store.SettingLaggingAlert, 1, maxDurationSec, &st.LaggingAlert)
 	if h, ok := num(store.SettingAlertRepeatHours, 1, maxRepeatHours); ok {
 		st.AlertRepeat = time.Duration(h) * time.Hour
 	}
@@ -159,6 +161,10 @@ func (st Settings) Validate() error {
 		return errors.New("batas master diduga tumbang harus 1 detik sampai 7 hari")
 	case st.DiskWarn < 1 || st.DiskCrit > 100 || st.DiskWarn >= st.DiskCrit:
 		return errors.New("ambang disk: peringatan harus lebih kecil dari kritis, keduanya 1 sampai 100 persen")
+	case st.ConnPct < 1 || st.ConnPct > 100:
+		return errors.New("ambang koneksi harus 1 sampai 100 persen")
+	case st.LaggingAlert < time.Second || st.LaggingAlert > maxDurationSec*time.Second:
+		return errors.New("batas peringatan ketinggalan harus 1 detik sampai 7 hari")
 	case st.AlertRepeat < time.Hour || st.AlertRepeat > maxRepeatHours*time.Hour || st.AlertRepeat%time.Hour != 0:
 		return errors.New("pengulangan peringatan harus 1 sampai 168 jam")
 	case !validWeekly(st.WeeklySummaryAt):
@@ -167,8 +173,8 @@ func (st Settings) Validate() error {
 	return nil
 }
 
-// SaveSettings validates st and writes every setting it holds; StaleAfter,
-// ConnPct and LaggingAlert are derived or fixed and not stored.
+// SaveSettings validates st and writes every setting it holds; StaleAfter
+// is derived from SummaryEvery and not stored.
 func SaveSettings(s *store.Store, st Settings) error {
 	if err := st.Validate(); err != nil {
 		return err
@@ -190,6 +196,8 @@ func SaveSettings(s *store.Store, st Settings) error {
 		{store.SettingWeeklySummary, weekly},
 		{store.SettingWeeklySummaryAt, st.WeeklySummaryAt},
 		{store.SettingPanelBaseURL, st.PanelBaseURL},
+		{store.SettingConnPct, strconv.Itoa(st.ConnPct)},
+		{store.SettingLaggingAlert, sec(st.LaggingAlert)},
 	}
 	for _, p := range kv {
 		if err := s.SetSetting(p[0], p[1]); err != nil {

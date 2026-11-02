@@ -55,6 +55,8 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 	mod.DownAfter = 45 * time.Second
 	mod.DiskWarn, mod.DiskCrit = 80, 90
 	mod.AlertRepeat = 12 * time.Hour
+	mod.ConnPct = 90
+	mod.LaggingAlert = 10 * time.Minute
 	mod.WeeklySummary = false
 	mod.WeeklySummaryAt = "Fri 17:30"
 	mod.PanelBaseURL = "https://panel.example.com"
@@ -100,6 +102,8 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 		{"summary too long", func(s *Settings) { s.SummaryEvery = 2 * time.Hour }, "10 sampai 3600"},
 		{"disk order", func(s *Settings) { s.DiskWarn, s.DiskCrit = 95, 90 }, "disk"},
 		{"weekly time", func(s *Settings) { s.WeeklySummaryAt = "Senin pagi" }, "Mon 07:00"},
+		{"connections over 100", func(s *Settings) { s.ConnPct = 101 }, "koneksi"},
+		{"lagging alert zero", func(s *Settings) { s.LaggingAlert = 0 }, "ketinggalan"},
 	} {
 		s := want
 		c.mutate(&s)

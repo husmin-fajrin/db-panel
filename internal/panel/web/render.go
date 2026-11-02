@@ -21,12 +21,16 @@ type Page struct {
 	Version  string
 	Flash    string // error message shown above the page content
 	Notice   string // success message shown above the page content
+	// AlertCount is the number of open alerts, on the navbar's Peringatan
+	// link.
+	AlertCount int
 }
 
 // pageNames are the page templates; each file templates/<name>.html defines
 // "title" and "content".
 var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
-	"master_detail", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail"}
+	"master_detail", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail",
+	"alerts", "settings", "audit"}
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {

@@ -94,6 +94,8 @@ var notices = map[string]string{
 	"diperiksa":    "Server sudah diperiksa; status di bawah memakai laporan terbaru.",
 	"senyap":       "Pemberitahuan untuk server ini ditunda (Jangan ganggu).",
 	"senyap-batal": "Jangan ganggu dibatalkan; pemberitahuan untuk server ini aktif lagi.",
+	"pengaturan":   "Pengaturan disimpan.",
+	"tes-terkirim": "Pesan tes terkirim ke Telegram; periksa chat tujuannya.",
 	"dihapus": "Server dihapus dari panel. Agent di server itu masih terpasang dan terus mencoba terhubung; " +
 		"matikan dengan: sudo systemctl disable --now dbpanel-agent",
 }

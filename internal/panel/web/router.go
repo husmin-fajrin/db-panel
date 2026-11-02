@@ -15,6 +15,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	webfs "github.com/husmin-fajrin/db-panel/web"
 )
@@ -66,6 +67,35 @@ type Deps struct {
 	// Monitor holds the servers' health and answers Periksa sekarang and
 	// Jangan ganggu.
 	Monitor MonitorView
+	// Settings loads and saves the monitoring settings (Pengaturan).
+	Settings SettingsStore
+	// Telegram reads the Telegram settings, stores the bot token sealed and
+	// sends the test message.
+	Telegram TelegramAdmin
+}
+
+// SettingsStore is what the settings page uses to read and change the
+// monitoring settings.
+type SettingsStore interface {
+	Load() (monitor.Settings, error)
+	// Save validates and stores the settings.
+	Save(monitor.Settings) error
+	// Reconfigure applies the stored settings to the monitor and the
+	// online agents.
+	Reconfigure()
+}
+
+// TelegramAdmin is what the settings page uses of the Telegram
+// notifications; the panel seals the token with its key, which the UI
+// never sees.
+type TelegramAdmin interface {
+	// LoadConfig returns the saved settings, the bot token opened.
+	LoadConfig() (notify.Config, error)
+	// SaveToken seals and stores the bot token; a malformed one is refused.
+	SaveToken(token string) error
+	// SendTest sends a test message; at most once per 10 s
+	// (notify.ErrTestTooSoon).
+	SendTest(ctx context.Context) error
 }
 
 // MonitorView is what the UI uses of the health monitor; the panel passes
@@ -161,6 +191,12 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /jobs/{id}/approve", authedPost(a.approveJob))
 	mux.Handle("POST /jobs/{id}/retry", authedPost(a.retryJob))
 	mux.Handle("POST /jobs/{id}/cancel", authedPost(a.cancelJob))
+	mux.Handle("GET /alerts", authed(a.alertsPage))
+	mux.Handle("GET /alerts/count", authed(a.alertCount))
+	mux.Handle("GET /settings", authed(a.showSettings))
+	mux.Handle("POST /settings", authedPost(a.saveSettings))
+	mux.Handle("POST /settings/telegram-test", authedPost(a.testTelegram))
+	mux.Handle("GET /audit", authed(a.auditLog))
 	mux.Handle("GET /events", login(d.Events))
 	return SecurityHeaders(mux)
 }
@@ -271,7 +307,16 @@ func (f noDirFS) Open(name string) (fs.File, error) {
 
 // page returns the layout fields for the current request.
 func (a *app) page(r *http.Request) Page {
-	return Page{Username: auth.UsernameFrom(r.Context()), Version: a.Version}
+	p := Page{Username: auth.UsernameFrom(r.Context()), Version: a.Version}
+	if p.Username != "" {
+		// The navbar's alert badge; a page still renders without it.
+		if open, err := a.Store.ListOpenAlerts(); err != nil {
+			a.Logger.Warn("count open alerts", "err", err)
+		} else {
+			p.AlertCount = len(open)
+		}
+	}
+	return p
 }
 
 // internalError logs err and answers 500 without exposing details.

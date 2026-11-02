@@ -18,6 +18,9 @@
     <li><a href="/">Dashboard</a></li>
     <li><a href="/servers">Server</a></li>
     <li><a href="/jobs">Pekerjaan</a></li>
+    <li><a href="/alerts" x-data="alertCount">Peringatan <span class="badge badge-sm badge-error{{if not .AlertCount}} hidden{{end}}" data-alert-count>{{.AlertCount}}</span></a></li>
+    <li><a href="/settings">Pengaturan</a></li>
+    <li><a href="/audit">Audit</a></li>
     <li>
       <form method="post" action="/logout" class="p-0">
         <button type="submit" class="btn btn-ghost btn-sm" title="Masuk sebagai {{.Username}}">Keluar ({{.Username}})</button>

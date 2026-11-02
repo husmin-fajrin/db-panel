@@ -87,6 +87,7 @@ type Panel struct {
 	Notifier *notify.Notifier
 
 	telegram      *notify.Telegram // the Notifier's Bot API client; tests point it elsewhere
+	box           *secrets.Box     // seals the Telegram bot token (panel.key)
 	opts          Options
 	log           *slog.Logger
 	epoch         *sessionEpoch
@@ -164,6 +165,7 @@ func New(o Options) (*Panel, error) {
 		st.Close()
 		return nil, fmt.Errorf("kunci segel panel: %w", err)
 	}
+	p.box = box
 	p.telegram = notify.NewTelegram()
 	p.Notifier = notify.New(notify.Deps{
 		Store:      st,
@@ -212,6 +214,29 @@ func (p *Panel) sendWeekly(ctx context.Context, text string) error {
 	}
 	return err
 }
+
+// settingsAdmin is the settings page's view of the monitoring settings
+// (web.SettingsStore).
+type settingsAdmin struct {
+	st  *store.Store
+	mon *healthmon.Monitor
+}
+
+func (s settingsAdmin) Load() (healthmon.Settings, error) { return healthmon.LoadSettings(s.st) }
+func (s settingsAdmin) Save(set healthmon.Settings) error { return healthmon.SaveSettings(s.st, set) }
+func (s settingsAdmin) Reconfigure()                      { s.mon.Reconfigure() }
+
+// telegramAdmin is the settings page's view of the Telegram notifications
+// (web.TelegramAdmin); it keeps the secrets box out of the web package.
+type telegramAdmin struct {
+	st  *store.Store
+	box *secrets.Box
+	n   *notify.Notifier
+}
+
+func (t telegramAdmin) LoadConfig() (notify.Config, error) { return notify.LoadConfig(t.st, t.box) }
+func (t telegramAdmin) SaveToken(token string) error       { return notify.SaveToken(t.st, t.box, token) }
+func (t telegramAdmin) SendTest(ctx context.Context) error { return t.n.SendTest(ctx) }
 
 // snoozed reports whether the server's alert notifications are muted now.
 func (p *Panel) snoozed(serverID int64) bool {

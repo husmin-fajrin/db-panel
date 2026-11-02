@@ -72,6 +72,8 @@ const (
 	SettingWeeklySummary       = "weekly_summary"
 	SettingWeeklySummaryAt     = "weekly_summary_at"
 	SettingAlertRepeatHours    = "alert_repeat_hours"
+	SettingConnPct             = "conn_pct"
+	SettingLaggingAlert        = "lagging_alert_sec"
 	// SettingWeeklyLastSent holds (RFC3339) the weekly summary occurrence
 	// last sent, so a restart never sends one twice.
 	SettingWeeklyLastSent = "weekly_last_sent"

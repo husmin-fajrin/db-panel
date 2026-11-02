@@ -225,3 +225,74 @@ func TestScrubDetail(t *testing.T) {
 		t.Errorf("ScrubDetail(nil) = %q", got)
 	}
 }
+
+func TestAuditPageFilters(t *testing.T) {
+	e := newEnv(t)
+	c := e.cookie()
+	a := e.pairedOnline(t, "db-satu")
+	b := e.pairedOnline(t, "db-dua")
+	now := time.Now()
+	long := `{"catatan":"` + strings.Repeat("x", 200) + `"}`
+	for _, en := range []store.AuditEntry{
+		{TS: now.Add(-24 * time.Hour), Username: "admin", IP: "10.1.1.1", Action: "server_snooze",
+			TargetKind: "server", TargetID: a.ID, DetailJSON: long, Outcome: "ok"},
+		{TS: now.Add(-48 * time.Hour), Username: "operator", IP: "10.1.1.2", Action: "replica_stop",
+			TargetKind: "replica", TargetID: b.ID, DetailJSON: "{}", Outcome: "replika sedang dipakai pekerjaan lain"},
+		{TS: now.Add(-50 * time.Hour), Username: "admin", IP: "10.1.1.3", Action: "settings_update",
+			TargetKind: "settings", TargetID: 0, DetailJSON: `{"changed":["monitor_check_every"]}`, Outcome: "ok"},
+		{TS: now.Add(-10 * 24 * time.Hour), Username: "admin", IP: "10.1.1.4", Action: "server_delete",
+			TargetKind: "server", TargetID: a.ID, DetailJSON: "{}", Outcome: "ok"},
+	} {
+		if _, err := e.st.AddAudit(en); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := func(rec *httptest.ResponseRecorder) string { return between(rec.Body.String(), "<tbody>", "</tbody>") }
+
+	// Default: the last 7 days, every server.
+	rec := e.do("GET", "/audit", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	got := rows(rec)
+	for _, s := range []string{"Jangan ganggu", "Server db-satu", "10.1.1.1", "Berhasil",
+		"Stop replika", "Replika db-dua", "operator", "replika sedang dipakai pekerjaan lain",
+		"Ubah pengaturan", "monitor_check_every"} {
+		if !strings.Contains(got, s) {
+			t.Errorf("default audit page does not show %q:\n%s", s, got)
+		}
+	}
+	if strings.Contains(got, "10.1.1.4") {
+		t.Errorf("default audit page shows an entry older than 7 days:\n%s", got)
+	}
+	// The detail is cut to 120 characters.
+	if strings.Contains(got, strings.Repeat("x", 120)) || !strings.Contains(got, strings.Repeat("x", 100)) {
+		t.Errorf("long detail not cut to 120 characters:\n%s", got)
+	}
+	wantBody(t, rec, `name="sejak" value="`+now.AddDate(0, 0, -7).Format("2006-01-02")+`"`,
+		`<option value="`+itoa(a.ID)+`">db-satu</option>`)
+
+	// One server.
+	rec = e.do("GET", "/audit?server="+itoa(b.ID), nil, c)
+	wantCode(t, rec, http.StatusOK)
+	got = rows(rec)
+	if !strings.Contains(got, "10.1.1.2") || strings.Contains(got, "10.1.1.1") || strings.Contains(got, "10.1.1.3") {
+		t.Errorf("server filter rows:\n%s", got)
+	}
+	wantBody(t, rec, `<option value="`+itoa(b.ID)+`" selected>db-dua</option>`)
+
+	// From an earlier day.
+	since := now.AddDate(0, 0, -12).Format("2006-01-02")
+	rec = e.do("GET", "/audit?sejak="+since+"&server="+itoa(a.ID), nil, c)
+	wantCode(t, rec, http.StatusOK)
+	got = rows(rec)
+	if !strings.Contains(got, "10.1.1.4") || !strings.Contains(got, "Hapus server") || strings.Contains(got, "10.1.1.2") {
+		t.Errorf("since filter rows:\n%s", got)
+	}
+	wantBody(t, rec, `name="sejak" value="`+since+`"`)
+
+	// Malformed filters.
+	for _, q := range []string{"sejak=kemarin", "server=abc", "server=-1"} {
+		rec := e.do("GET", "/audit?"+q, nil, c)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, "Filter tidak valid")
+	}
+}

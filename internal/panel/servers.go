@@ -166,6 +166,8 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 		Logger:       p.log,
 		Orchestrator: p.Orchestrator,
 		Monitor:      p.Monitor,
+		Settings:     settingsAdmin{st: p.Store, mon: p.Monitor},
+		Telegram:     telegramAdmin{st: p.Store, box: p.box, n: p.Notifier},
 		// The same parameters as GET /agent/install, so the hash in the
 		// pairing command is that of the script the endpoint serves.
 		InstallScriptSHA256: func(token string) (string, error) {

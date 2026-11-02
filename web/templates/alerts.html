@@ -1,0 +1,84 @@
+{{define "title"}}Peringatan{{end}}
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-4">Peringatan</h1>
+
+<section id="aktif" class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Aktif</h2>
+    {{if .Active}}
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Peringatan</th><th>Server</th><th>Sejak</th><th>Telegram</th><th>Jangan ganggu</th></tr></thead>
+        <tbody>
+          {{range .Active}}
+          <tr>
+            <td>
+              <div class="font-semibold">{{.KindLabel}}</div>
+              <div class="text-sm text-base-content/70">{{.Message}}</div>
+            </td>
+            <td>{{if .ServerKnown}}<a class="link" href="/servers/{{.ServerID}}">{{.ServerName}}</a>{{else}}{{.ServerName}}{{end}}</td>
+            <td><div>{{fmtTime .OpenedAt}}</div><div class="text-xs text-base-content/70">{{ago .OpenedAt $.Now}}</div></td>
+            <td><span class="badge {{.TelegramClass}} h-auto whitespace-normal">{{.TelegramLabel}}</span></td>
+            <td>
+              {{if .ServerKnown}}
+              {{if .SnoozeUntil}}
+              <div class="text-sm mb-1">Jangan ganggu sampai {{fmtTime .SnoozeUntil}}</div>
+              <form method="post" action="/servers/{{.ServerID}}/snooze">
+                <input type="hidden" name="hours" value="0">
+                <button type="submit" class="btn btn-ghost btn-xs">Batalkan</button>
+              </form>
+              {{else}}
+              <form method="post" action="/servers/{{.ServerID}}/snooze" class="join">
+                <select name="hours" class="select select-xs join-item w-auto" aria-label="Lama Jangan ganggu untuk {{.ServerName}}">
+                  <option value="1">1 jam</option>
+                  <option value="2">2 jam</option>
+                  <option value="8">8 jam</option>
+                  <option value="24">24 jam</option>
+                </select>
+                <button type="submit" class="btn btn-xs join-item">Jangan ganggu</button>
+              </form>
+              {{end}}
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    <p class="text-xs text-base-content/70">Jangan ganggu menunda pemberitahuan Telegram untuk server itu; peringatan tetap dicatat dan tampil di sini.</p>
+    {{else}}
+    <p class="text-base-content/70">Tidak ada peringatan aktif.</p>
+    {{end}}
+  </div>
+</section>
+
+<section id="riwayat" class="card bg-base-100 shadow">
+  <div class="card-body">
+    <h2 class="card-title">Riwayat 90 hari</h2>
+    {{if .History}}
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Peringatan</th><th>Server</th><th>Mulai</th><th>Pulih</th><th>Lama</th><th>Telegram</th></tr></thead>
+        <tbody>
+          {{range .History}}
+          <tr>
+            <td>
+              <div class="font-semibold">{{.KindLabel}}</div>
+              <div class="text-sm text-base-content/70">{{.Message}}</div>
+            </td>
+            <td>{{.ServerName}}</td>
+            <td>{{fmtTime .OpenedAt}}</td>
+            <td>{{fmtTime .ClosedAt}}</td>
+            <td>{{fmtDuration .DurationSec}}</td>
+            <td><span class="badge {{.TelegramClass}} h-auto whitespace-normal">{{.TelegramLabel}}</span></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="text-base-content/70">Belum ada peringatan yang selesai dalam 90 hari terakhir.</p>
+    {{end}}
+  </div>
+</section>
+{{end}}

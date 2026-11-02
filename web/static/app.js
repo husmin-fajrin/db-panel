@@ -25,10 +25,21 @@
     return Promise.resolve();
   }
 
+  // aliranSSE mengembalikan satu EventSource /events yang dipakai bersama
+  // oleh semua komponen halaman, supaya tiap halaman hanya membuka satu
+  // koneksi SSE (peramban membatasi koneksi per host).
+  let sse = null;
+  function aliranSSE() {
+    if (!sse) {
+      sse = new EventSource("/events");
+    }
+    return sse;
+  }
+
   // onServerStatus memanggil fn(online) setiap ada event server_status untuk
   // server id dari aliran SSE /events.
   function onServerStatus(id, fn) {
-    const es = new EventSource("/events");
+    const es = aliranSSE();
     es.addEventListener("server_status", (e) => {
       const d = JSON.parse(e.data);
       if (d.id === id) {
@@ -78,7 +89,7 @@
           badge.classList.add(info.Class);
           badge.textContent = info.Label;
         };
-        const es = new EventSource("/events");
+        const es = aliranSSE();
         es.addEventListener("job_log", (e) => {
           const d = JSON.parse(e.data);
           if (d.job_id !== id || d.id <= lastLog || !log) {
@@ -234,6 +245,34 @@
       },
     }));
 
+    // Lencana jumlah peringatan aktif di menu (elemen [data-alert-count]
+    // di dalam komponen): setiap event alert_update jumlahnya diambil ulang
+    // dari GET /alerts/count; lencana disembunyikan saat jumlahnya 0.
+    // Jawaban yang datang setelah jawaban permintaan berikutnya dibuang.
+    window.Alpine.data("alertCount", () => ({
+      init() {
+        const badge = this.$el.querySelector("[data-alert-count]");
+        if (!badge) {
+          return;
+        }
+        let nomor = 0;
+        aliranSSE().addEventListener("alert_update", () => {
+          const ini = ++nomor;
+          fetch("/alerts/count", { credentials: "same-origin", headers: { Accept: "application/json" } })
+            // Sesi habis: fetch mengikuti redirect ke /login.
+            .then((r) => (r.ok && !r.redirected ? r.json() : Promise.reject(new Error(String(r.status)))))
+            .then((d) => {
+              if (ini !== nomor || typeof d.count !== "number") {
+                return;
+              }
+              badge.textContent = String(d.count);
+              badge.classList.toggle("hidden", d.count === 0);
+            })
+            .catch(() => {}); // angka lama tetap tampil; event berikutnya mencoba lagi
+        });
+      },
+    }));
+
     // Tombol Salin untuk perintah pemasangan (x-ref="perintah").
     window.Alpine.data("copyCommand", () => ({
       tersalin: false,
@@ -263,7 +302,7 @@
     }
     const terakhir = new Map(); // "<id>|<varian>" -> nomor permintaan terbaru
     let nomor = 0;
-    const es = new EventSource("/events");
+    const es = aliranSSE();
     es.addEventListener("health_update", (e) => {
       const id = String(JSON.parse(e.data).server_id);
       const perVarian = new Map();

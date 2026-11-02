@@ -1,0 +1,135 @@
+{{define "title"}}Pengaturan{{end}}
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-4">Pengaturan</h1>
+<!-- "Kirim tes" posts this form; its button sits in the Telegram card of the main form. -->
+<form id="telegram-test" method="post" action="/settings/telegram-test"></form>
+<form method="post" action="/settings" class="flex flex-col gap-6">
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-4">
+      <h2 class="card-title">Telegram</h2>
+      <fieldset class="fieldset">
+        <label class="label" for="token">Token bot</label>
+        <input type="password" id="token" name="token" autocomplete="off" class="input w-full" placeholder="{{if .TokenSaved}}Kosongkan untuk memakai token yang ada{{else}}123456789:AAH...{{end}}">
+        <p class="label">{{if .TokenSaved}}Token bot tersimpan (terenkripsi) dan tidak ditampilkan lagi. Isi hanya untuk menggantinya.{{else}}Token dari @BotFather. Disimpan terenkripsi dan tidak ditampilkan lagi.{{end}}</p>
+      </fieldset>
+      <fieldset class="fieldset">
+        <label class="label" for="chat_id">Chat id</label>
+        <input type="text" id="chat_id" name="chat_id" value="{{.Form.ChatID}}" class="input w-full" placeholder="mis. -1001234567890">
+        <p class="label">Id grup atau kanal tujuan pesan (grup dan kanal diawali tanda minus), atau @nama kanal.</p>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">Jenis peringatan yang dikirim</legend>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
+          {{range .Kinds}}
+          <label class="label cursor-pointer justify-start gap-2">
+            <input type="checkbox" name="kinds" value="{{.Kind}}"{{if .On}} checked{{end}} class="checkbox checkbox-sm">
+            <span>{{.Label}}</span>
+          </label>
+          {{end}}
+        </div>
+        <p class="label">Peringatan yang tidak dicentang tetap tampil di halaman Peringatan, tetapi tidak dikirim ke Telegram.</p>
+      </fieldset>
+      <div class="flex flex-wrap items-center gap-2">
+        <button type="submit" form="telegram-test" class="btn btn-sm">Kirim tes</button>
+        <span class="text-xs text-base-content/70">Memakai token dan chat id yang sudah disimpan; simpan dulu bila Anda baru mengubahnya. Paling sering sekali per 10 detik.</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-4">
+      <h2 class="card-title">Ambang dan interval</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
+        <fieldset class="fieldset">
+          <label class="label" for="check_every">Interval pemeriksaan (detik)</label>
+          <input type="number" id="check_every" name="check_every" value="{{.Form.CheckEvery}}" min="10" max="3600" class="input w-full" required>
+          <p class="label">10–3600. Seberapa sering agent memeriksa MySQL.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="summary_every">Interval ringkasan (detik)</label>
+          <input type="number" id="summary_every" name="summary_every" value="{{.Form.SummaryEvery}}" min="10" max="3600" class="input w-full" required>
+          <p class="label">10–3600, tidak lebih kecil dari interval pemeriksaan. Laporan rutin bila tidak ada perubahan.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="lag">Ambang ketinggalan (detik)</label>
+          <input type="number" id="lag" name="lag" value="{{.Form.Lag}}" min="10" max="3600" class="input w-full" required>
+          <p class="label">10–3600. Replika di atas ambang ini berstatus Ketinggalan.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="lagging_alert">Batas peringatan ketinggalan (detik)</label>
+          <input type="number" id="lagging_alert" name="lagging_alert" value="{{.Form.LaggingAlert}}" min="60" max="86400" class="input w-full" required>
+          <p class="label">60–86400. Peringatan dibuka bila replika ketinggalan terus selama ini.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="disconnect_alert">Batas terputus (detik)</label>
+          <input type="number" id="disconnect_alert" name="disconnect_alert" value="{{.Form.DisconnectAlert}}" min="60" max="86400" class="input w-full" required>
+          <p class="label">60–86400. Peringatan dibuka bila replika terputus dari master selama ini.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="down_after">Batas diduga tumbang (detik)</label>
+          <input type="number" id="down_after" name="down_after" value="{{.Form.DownAfter}}" min="10" max="600" class="input w-full" required>
+          <p class="label">10–600. Master yang tidak menjawab selama ini diduga tumbang.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="disk_warn">Ambang disk peringatan (%)</label>
+          <input type="number" id="disk_warn" name="disk_warn" value="{{.Form.DiskWarn}}" min="50" max="98" class="input w-full" required>
+          <p class="label">50–98, lebih kecil dari ambang kritis.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="disk_crit">Ambang disk kritis (%)</label>
+          <input type="number" id="disk_crit" name="disk_crit" value="{{.Form.DiskCrit}}" min="51" max="99" class="input w-full" required>
+          <p class="label">51–99.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="conn_pct">Ambang koneksi (% dari max_connections)</label>
+          <input type="number" id="conn_pct" name="conn_pct" value="{{.Form.ConnPct}}" min="50" max="99" class="input w-full" required>
+          <p class="label">50–99. Peringatan bila terlampaui selama 5 menit.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="alert_repeat">Ulangi pemberitahuan (jam)</label>
+          <input type="number" id="alert_repeat" name="alert_repeat" value="{{.Form.AlertRepeat}}" min="1" max="168" class="input w-full" required>
+          <p class="label">1–168. Peringatan yang masih aktif dikirim lagi setiap selang ini.</p>
+        </fieldset>
+      </div>
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-4">
+      <h2 class="card-title">Ringkasan mingguan</h2>
+      <label class="label cursor-pointer justify-start gap-2">
+        <input type="checkbox" name="weekly_summary" value="on"{{if .Form.Weekly}} checked{{end}} class="toggle toggle-sm">
+        <span>Kirim ringkasan mingguan ke Telegram</span>
+      </label>
+      <div class="flex flex-wrap gap-4">
+        <fieldset class="fieldset">
+          <label class="label" for="weekly_day">Hari</label>
+          <select id="weekly_day" name="weekly_day" class="select w-auto">
+            {{range .Days}}<option value="{{.Value}}"{{if eq .Value $.Form.WeeklyDay}} selected{{end}}>{{.Label}}</option>{{end}}
+          </select>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="weekly_time">Jam (waktu panel)</label>
+          <input type="time" id="weekly_time" name="weekly_time" value="{{.Form.WeeklyTime}}" class="input w-auto" required>
+        </fieldset>
+      </div>
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-4">
+      <h2 class="card-title">Alamat dasar panel</h2>
+      <fieldset class="fieldset">
+        <label class="label" for="base_url">Alamat untuk tautan di pesan Telegram</label>
+        <input type="url" id="base_url" name="base_url" value="{{.Form.BaseURL}}" placeholder="{{.PublicURL}}" class="input w-full">
+        <p class="label">Alamat http:// atau https:// yang bisa dibuka dari ponsel penerima pesan. Kosongkan bila pesan tidak perlu memuat tautan ke panel.</p>
+      </fieldset>
+    </div>
+  </section>
+
+  <div class="flex justify-end">
+    <button type="submit" class="btn btn-primary">Simpan pengaturan</button>
+  </div>
+</form>
+{{end}}
