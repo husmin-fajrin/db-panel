@@ -667,7 +667,7 @@ func TestE2EMonitoring(t *testing.T) {
 		return !ok
 	})
 	recovered := e.replicaName + " pulih: replika berhenti"
-	waitForWithin(t, e2eWait, "the recovery message", func() bool {
+	waitForWithin(t, e2eRecoveryWait, "the recovery message", func() bool {
 		return len(containing(e.tg.since(before), recovered)) > 0
 	})
 	t.Logf("(b) started: Sinkron and recovered after %s", time.Since(stepStart).Round(time.Second))
@@ -690,6 +690,24 @@ func TestE2EMonitoring(t *testing.T) {
 		t.Fatalf("replica after stop = %+v, %v; want paused", r, err)
 	}
 	t.Logf("(c) paused through the panel after %s", time.Since(stepStart).Round(time.Second))
+
+	// (c2) Start replika from Dihentikan (defect F2): Sinkron again, and
+	// the whole Stop→Start through the panel opens no alert and sends no
+	// "berhenti" message, although the last report before Start showed
+	// replication stopped.
+	stepStart = time.Now()
+	if loc := ui.postRedirect(repPath+"/start", nil); loc != repPath+"?pesan=dijalankan" {
+		t.Fatalf("start redirected to %q", loc)
+	}
+	waitStatus(t, p, rep, healthmon.StatusSynced)
+	holdFor(t, 12*time.Second, "no replica_stopped alert or stop message after Start replika", func() bool {
+		_, open := openAlert(t, p, healthmon.KindReplicaStopped, rep)
+		return !open && len(containing(e.tg.since(msgsBefore), stopHead)) == 0
+	})
+	if got := e.tg.since(msgsBefore); len(containing(got, e.replicaName)) != 0 {
+		t.Fatalf("Telegram messages after Stop→Start through the panel = %q, want none", got)
+	}
+	t.Logf("(c2) started through the panel, quietly, after %s", time.Since(stepStart).Round(time.Second))
 
 	// (d) super_read_only switched off in MySQL: Kunci terlepas and
 	// replica_unlocked; Kunci kembali closes it.
@@ -715,7 +733,7 @@ func TestE2EMonitoring(t *testing.T) {
 	if err := e.replicaDB.QueryRow("SHOW GLOBAL VARIABLES LIKE 'super_read_only'").Scan(&name, &value); err != nil || value != "ON" {
 		t.Fatalf("super_read_only after relock = %q, %v", value, err)
 	}
-	waitForWithin(t, e2eWait, "the unlock and its recovery on Telegram", func() bool {
+	waitForWithin(t, e2eRecoveryWait, "the unlock and its recovery on Telegram", func() bool {
 		return len(containing(e.tg.since(msgsBefore), "Kunci replika terlepas")) == 1 &&
 			len(containing(e.tg.since(msgsBefore), e.replicaName+" pulih: kunci replika terlepas")) == 1
 	})
@@ -741,17 +759,16 @@ func TestE2EMonitoring(t *testing.T) {
 	waitRow(t, e.replicaDB, "a", 2, "setelah-resync")
 	t.Logf("(e) resynced in %s", time.Since(stepStart).Round(time.Second))
 
-	// Defect F2 (e2eResyncQuietFixed): a successful resync raises a false
-	// replica_stopped alert, and its Telegram message and "pulih", until
-	// the next agent report. This wait lets that alert close (with the fix
-	// it holds at once); the leftover check is that nothing stays open.
+	// Defect F2 (e2eResyncQuietFixed): a successful resync raised a false
+	// replica_stopped alert, and its Telegram message, until the next
+	// agent report. Nothing may be open, and no stop message sent.
 	waitForWithin(t, e2eWait, "no alert open on the resynced replica", func() bool {
 		return len(openKinds(t, p, rep)) == 0
 	})
 	// By now the replica was Sinkron and replicated a row, so a false stop
 	// message, if any, has been sent.
 	falseStops := containing(e.tg.since(resyncMark), stopHead)
-	t.Logf("(e) replica_stopped messages after the resync: %d (defect F2; strict once e2eResyncQuietFixed)", len(falseStops))
+	t.Logf("(e) replica_stopped messages after the resync: %d (defect F2)", len(falseStops))
 	if e2eResyncQuietFixed && len(falseStops) != 0 {
 		t.Errorf("a successful resync sent replica_stopped messages: %q", falseStops)
 	}

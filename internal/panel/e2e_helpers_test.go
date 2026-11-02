@@ -30,18 +30,20 @@ import (
 // and Telegram well within it (spec 5.1: under a minute with the defaults).
 const e2eWait = 30 * time.Second
 
-// Known defects of Plan 3 the end-to-end tests step around until the final
-// fix wave; it flips each constant to true once its fix lands, which turns
-// the pending check into a strict one.
+// e2eRecoveryWait bounds the wait for a "pulih" message: the notifier
+// holds a recovery until the alert stayed closed a minute (flap control).
+const e2eRecoveryWait = e2eWait + time.Minute
+
+// Known defects of Plan 3 the end-to-end tests stepped around until the
+// final fix wave, which fixed both: the checks are strict.
 const (
-	// e2eCloneResyncFixed: defect F1, "Resync ulang" through CLONE fails at
-	// "Salin data" with 1290 (--super-read-only) on a registered replica.
-	e2eCloneResyncFixed = false
-	// e2eResyncQuietFixed: defect F2, a successful resync raises a false
-	// replica_stopped alert and Telegram message (the Monitor judges the
-	// last report, taken mid-job, once the replica is ready again) that the
-	// next report closes with "pulih".
-	e2eResyncQuietFixed = false
+	// e2eCloneResyncFixed: defect F1, "Resync ulang" through CLONE failed
+	// at "Salin data" with 1290 (--super-read-only) on a registered replica.
+	e2eCloneResyncFixed = true
+	// e2eResyncQuietFixed: defect F2, a successful resync raised a false
+	// replica_stopped alert and Telegram message (the Monitor judged the
+	// last report, taken mid-job, once the replica was ready again).
+	e2eResyncQuietFixed = true
 )
 
 // skipWithoutE2E skips the test in -short mode and without mysqld.
@@ -82,10 +84,9 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 		masterName: "master-e2e", replicaName: "replika-e2e",
 		masterDB: openInstance(t, masterInst), replicaDB: openInstance(t, replicaInst),
 	}
-	// Defect F1 (e2eCloneResyncFixed): Resync via CLONE fails with 1290
-	// --super-read-only; fixed in the final fix wave. Until then this
-	// topology follows a subset (a of a and b), so its resync uses the dump
-	// path; TestE2ECreateReplica holds the CLONE resync step, pending.
+	// This topology follows a subset (a of a and b), so its resync uses
+	// the dump path; TestE2ECreateReplica resyncs through CLONE (defect F1,
+	// e2eCloneResyncFixed).
 	execSQL(t, e.masterDB,
 		"CREATE DATABASE a", "CREATE TABLE a.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO a.t VALUES (1, 'awal')",
 		"CREATE DATABASE b", "CREATE TABLE b.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO b.t VALUES (1, 'awal')",
