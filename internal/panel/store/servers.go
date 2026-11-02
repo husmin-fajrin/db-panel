@@ -30,10 +30,11 @@ type Server struct {
 	ProbeJSON    string // JSON proto.ProbeResult, "" if none yet
 	AgentVersion string
 	LastSeenAt   *time.Time
+	SnoozeUntil  *time.Time // alerts for this server are muted until then
 	CreatedAt    time.Time
 }
 
-const serverColumns = `id, name, address, role, paired, cert_serial, probe_json, agent_version, last_seen_at, created_at`
+const serverColumns = `id, name, address, role, paired, cert_serial, probe_json, agent_version, last_seen_at, snooze_until, created_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -42,15 +43,19 @@ func scanServer(r rowScanner) (Server, error) {
 		srv      Server
 		paired   int
 		lastSeen sql.NullString
+		snooze   sql.NullString
 		created  string
 	)
 	if err := r.Scan(&srv.ID, &srv.Name, &srv.Address, &srv.Role, &paired, &srv.CertSerial,
-		&srv.ProbeJSON, &srv.AgentVersion, &lastSeen, &created); err != nil {
+		&srv.ProbeJSON, &srv.AgentVersion, &lastSeen, &snooze, &created); err != nil {
 		return Server{}, err
 	}
 	srv.Paired = paired != 0
 	var err error
 	if srv.LastSeenAt, err = parseNullTime(lastSeen); err != nil {
+		return Server{}, err
+	}
+	if srv.SnoozeUntil, err = parseNullTime(snooze); err != nil {
 		return Server{}, err
 	}
 	if srv.CreatedAt, err = parseTime(created); err != nil {
@@ -191,6 +196,15 @@ func (s *Store) UpdateProbe(id int64, probe proto.ProbeResult, agentVersion stri
 // TouchSeen updates last_seen_at only.
 func (s *Store) TouchSeen(id int64, seen time.Time) error {
 	return s.execOne(`UPDATE servers SET last_seen_at = ? WHERE id = ?`, formatTime(seen), id)
+}
+
+// SetSnooze mutes alerts for the server until the given time; nil clears it.
+func (s *Store) SetSnooze(id int64, until *time.Time) error {
+	var v any
+	if until != nil {
+		v = formatTime(*until)
+	}
+	return s.execOne(`UPDATE servers SET snooze_until = ? WHERE id = ?`, v, id)
 }
 
 // DeleteServer removes a server (and, by cascade, its pair tokens,

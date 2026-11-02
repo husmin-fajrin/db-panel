@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func mustServer(t *testing.T, s *Store, name string) Server {
@@ -198,5 +199,91 @@ func TestSetTopologySource(t *testing.T) {
 	}
 	if err := s.SetTopologySource(999, "h", 1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing id: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestReplicaPausedRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	m := mustServer(t, s, "master")
+	r := mustServer(t, s, "replica")
+	topo, err := s.CreateTopology(m.ID, "repl", nil, "h", 3306)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := s.AddReplica(topo.ID, r.ID, nil)
+	if err != nil || rep.Paused {
+		t.Fatalf("new replica = %+v, %v", rep, err)
+	}
+	if err := s.SetReplicaPaused(r.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetReplicaByServer(r.ID); !got.Paused {
+		t.Fatalf("paused = false after SetReplicaPaused(true)")
+	}
+	if list, _ := s.ListReplicas(topo.ID); len(list) != 1 || !list[0].Paused {
+		t.Fatalf("ListReplicas = %+v", list)
+	}
+	if err := s.SetReplicaPaused(r.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetReplicaByServer(r.ID); got.Paused {
+		t.Fatal("paused = true after SetReplicaPaused(false)")
+	}
+	if err := s.SetReplicaPaused(m.ID, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetReplicaPaused non-replica: %v", err)
+	}
+	if ReplicaResyncing != "resyncing" {
+		t.Fatalf("ReplicaResyncing = %q", ReplicaResyncing)
+	}
+}
+
+func TestSnoozeRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db")
+	if srv.SnoozeUntil != nil {
+		t.Fatalf("new server snooze = %v", srv.SnoozeUntil)
+	}
+	until := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
+	if err := s.SetSnooze(srv.ID, &until); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetServer(srv.ID)
+	if err != nil || got.SnoozeUntil == nil || !got.SnoozeUntil.Equal(until) {
+		t.Fatalf("GetServer = %+v, %v", got, err)
+	}
+	if list, _ := s.ListServers(); len(list) != 1 || list[0].SnoozeUntil == nil {
+		t.Fatalf("ListServers = %+v", list)
+	}
+	if err := s.SetSnooze(srv.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetServer(srv.ID); got.SnoozeUntil != nil {
+		t.Fatalf("snooze after clear = %v", got.SnoozeUntil)
+	}
+	if err := s.SetSnooze(999, nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetSnooze missing: %v", err)
+	}
+}
+
+func TestGetSettings(t *testing.T) {
+	s := openTemp(t)
+	if err := s.SetSetting(SettingLagThreshold, "30"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(SettingDiskWarn, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSettings(SettingLagThreshold, SettingDiskWarn, SettingDiskCrit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[SettingLagThreshold] != "30" {
+		t.Fatalf("GetSettings = %v", got)
+	}
+	if _, ok := got[SettingDiskCrit]; ok {
+		t.Fatal("missing key present in map")
+	}
+	if got, err := s.GetSettings(); err != nil || len(got) != 0 {
+		t.Fatalf("GetSettings() = %v, %v", got, err)
 	}
 }

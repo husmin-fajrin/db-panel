@@ -45,7 +45,29 @@ func TestMigrateSkipsApplied(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 {
-		t.Fatalf("schema_migrations rows = %d, want 3", n)
+	if n != 4 {
+		t.Fatalf("schema_migrations rows = %d, want 4", n)
+	}
+}
+
+// TestMigrate0004Applies: the monitoring tables and columns exist and the
+// schema is at version 4.
+func TestMigrate0004Applies(t *testing.T) {
+	s := openTemp(t)
+	var v int
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 4 {
+		t.Fatalf("schema version = %d, %v; want 4", v, err)
+	}
+	for _, table := range []string{"server_health", "status_events", "alerts", "audit_log"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&n); err != nil || n != 1 {
+			t.Errorf("table %s missing (n=%d, err=%v)", table, n, err)
+		}
+	}
+	for _, col := range [][2]string{{"replicas", "paused"}, {"servers", "snooze_until"}} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, col[0], col[1]).Scan(&n); err != nil || n != 1 {
+			t.Errorf("column %s.%s missing (n=%d, err=%v)", col[0], col[1], n, err)
+		}
 	}
 }

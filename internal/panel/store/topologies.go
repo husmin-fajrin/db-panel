@@ -46,6 +46,8 @@ const (
 	// possibly stopped; unlike ReplicaFailed it is never re-created.
 	ReplicaAttention = "attention"
 	ReplicaFailed    = "failed" // its creation failed
+	// ReplicaResyncing: a job is re-seeding the replica from the master.
+	ReplicaResyncing = "resyncing"
 )
 
 // Replica is a server that follows a topology's master.
@@ -53,20 +55,23 @@ type Replica struct {
 	ID, TopologyID, ServerID int64
 	Databases                []string // empty = all databases
 	State, LastError         string
+	Paused                   bool // replication deliberately stopped by an operator
 	CreatedAt                time.Time
 }
 
-const replicaColumns = `id, topology_id, server_id, databases_json, state, last_error, created_at`
+const replicaColumns = `id, topology_id, server_id, databases_json, state, last_error, paused, created_at`
 
 func scanReplica(r rowScanner) (Replica, error) {
 	var (
 		rep     Replica
 		dbs     string
+		paused  int
 		created string
 	)
-	if err := r.Scan(&rep.ID, &rep.TopologyID, &rep.ServerID, &dbs, &rep.State, &rep.LastError, &created); err != nil {
+	if err := r.Scan(&rep.ID, &rep.TopologyID, &rep.ServerID, &dbs, &rep.State, &rep.LastError, &paused, &created); err != nil {
 		return Replica{}, err
 	}
+	rep.Paused = paused != 0
 	if err := json.Unmarshal([]byte(dbs), &rep.Databases); err != nil {
 		return Replica{}, fmt.Errorf("parse databases: %w", err)
 	}
@@ -276,6 +281,16 @@ func (s *Store) SetReplicaDatabases(serverID int64, databases []string) error {
 // SetReplicaState sets a replica's state and last error.
 func (s *Store) SetReplicaState(serverID int64, state, lastError string) error {
 	return s.execOne(`UPDATE replicas SET state = ?, last_error = ? WHERE server_id = ?`, state, lastError, serverID)
+}
+
+// SetReplicaPaused records whether an operator paused the replica's
+// replication.
+func (s *Store) SetReplicaPaused(serverID int64, paused bool) error {
+	v := 0
+	if paused {
+		v = 1
+	}
+	return s.execOne(`UPDATE replicas SET paused = ? WHERE server_id = ?`, v, serverID)
 }
 
 // ListReplicas returns a topology's replicas ordered by id.
