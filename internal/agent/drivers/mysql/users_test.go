@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -281,6 +282,79 @@ func TestDumpUserLifecycle(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), pw) {
 		t.Errorf("logs leak the dump password:\n%s", logs.String())
+	}
+}
+
+// TestSweepDumpUsersDropsOldOnly: mysql.sweepDumpUsers drops the per-job
+// dump accounts whose password is older than older_than_sec and nothing
+// else: not a fresh dump account, not the replication or admin account,
+// not a name that only matches dbpanel_dump_% with _ as a wildcard.
+func TestSweepDumpUsersDropsOldOnly(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	var logs bytes.Buffer
+	reg := commands.NewRegistry()
+	(&mysql.Driver{Host: inst.Host(), Logger: slog.New(slog.NewTextHandler(&logs, nil))}).Register(reg)
+	sweep := func(p any) proto.Response {
+		t.Helper()
+		return reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.sweepDumpUsers", Params: mustJSON(t, p)})
+	}
+	root := rootDB(t, inst)
+	old := []string{"dbpanel_dump_old1@10.0.0.2", "dbpanel_dump_old2@%", "dbpanel_repl@%", "dbpanel_repl_2@%",
+		"dbpanel_admin@localhost", "dbpanelxdumpxold@%", "dbpanel_dumpxold@%", "simrs_app@%"}
+	for _, a := range append([]string{"dbpanel_dump_new@10.0.0.2"}, old...) {
+		user, host, _ := strings.Cut(a, "@")
+		execAll(t, root, "CREATE USER '"+user+"'@'"+host+"' IDENTIFIED BY 'pw-1'")
+	}
+	for _, a := range old {
+		user, host, _ := strings.Cut(a, "@")
+		execAll(t, root, "UPDATE mysql.user SET password_last_changed = NOW() - INTERVAL 2 DAY WHERE user = '"+user+"' AND host = '"+host+"'")
+	}
+	execAll(t, root, "FLUSH PRIVILEGES")
+
+	r := sweep(proto.SweepDumpUsersParams{OlderThanSec: 86400})
+	if !r.OK {
+		t.Fatalf("sweepDumpUsers: %+v", r.Error)
+	}
+	var res proto.SweepDumpUsersResult
+	if err := json.Unmarshal(r.Result, &res); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"'dbpanel_dump_old1'@'10.0.0.2'", "'dbpanel_dump_old2'@'%'"}
+	if !slices.Equal(res.Dropped, want) {
+		t.Errorf("Dropped = %q, want %q", res.Dropped, want)
+	}
+	for _, a := range []string{"dbpanel_dump_new@10.0.0.2", "dbpanel_repl@%", "dbpanel_repl_2@%", "dbpanel_admin@localhost",
+		"dbpanelxdumpxold@%", "dbpanel_dumpxold@%", "simrs_app@%"} {
+		user, host, _ := strings.Cut(a, "@")
+		if n := count(t, root, "SELECT COUNT(*) FROM mysql.user WHERE user = '"+user+"' AND host = '"+host+"'"); n != 1 {
+			t.Errorf("account %s was dropped", a)
+		}
+	}
+	for _, user := range []string{"dbpanel_dump_old1", "dbpanel_dump_old2"} {
+		if n := count(t, root, "SELECT COUNT(*) FROM mysql.user WHERE user = '"+user+"'"); n != 0 {
+			t.Errorf("account %s still exists", user)
+		}
+		if strings.Count(logs.String(), user) != 1 {
+			t.Errorf("want one log line naming %s:\n%s", user, logs.String())
+		}
+	}
+	for _, user := range []string{"dbpanel_repl", "dbpanel_admin", "dbpanel_dump_new", "dbpanelxdumpxold"} {
+		if strings.Contains(logs.String(), user) {
+			t.Errorf("logs name %s:\n%s", user, logs.String())
+		}
+	}
+
+	// Nothing left to sweep: an empty list, not null.
+	r = sweep(proto.SweepDumpUsersParams{OlderThanSec: 86400})
+	if !r.OK || string(r.Result) != `{"dropped":[]}` {
+		t.Errorf("second sweep = %+v / %s", r.Error, r.Result)
+	}
+
+	for _, p := range []any{"not an object", proto.SweepDumpUsersParams{}, proto.SweepDumpUsersParams{OlderThanSec: 59},
+		proto.SweepDumpUsersParams{OlderThanSec: -1}} {
+		if r := sweep(p); r.OK || r.Error == nil || r.Error.Code != proto.CodeBadParams {
+			t.Errorf("%+v: response = %+v / %+v, want bad_params", p, r, r.Error)
+		}
 	}
 }
 

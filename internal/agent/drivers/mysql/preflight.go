@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -77,7 +78,7 @@ func validatePreflight(p *proto.PreflightParams) error {
 	default:
 		return &commands.ParamError{Msg: "peran harus master atau replica"}
 	}
-	for _, db := range p.Databases {
+	for _, db := range slices.Concat(p.Databases, p.WipeList) {
 		if !dbNameRe.MatchString(db) {
 			return &commands.ParamError{Msg: fmt.Sprintf("nama database tidak valid: %q", db)}
 		}
@@ -284,10 +285,13 @@ func evaluatePreflight(p proto.PreflightParams, f preflightFacts) proto.Prefligh
 		masterChecks(&l, &res, p, f)
 	case roleReplica:
 		cloneOK := replicaChecks(&l, p, f, v)
+		// The target is empty or, on a resync, holds only databases the
+		// user agreed to drop.
+		targetClear := !slices.ContainsFunc(f.Databases, func(d proto.DatabaseInfo) bool { return !wipeListed(p, f, d.Name) })
 		switch {
 		case v.peerErr != nil || !v.sameSeries || v.self:
 			// No copy method for a master this server cannot replicate from.
-		case cloneOK && len(p.Databases) == 0 && len(f.Databases) == 0:
+		case cloneOK && len(p.Databases) == 0 && targetClear:
 			res.Method = "clone"
 		default:
 			res.Method = "dump"
@@ -500,25 +504,37 @@ func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, v pe
 	}
 
 	need := p.PeerDataBytes + p.PeerDataBytes/5 // × 1.2 without overflow
+	// On a resync the replica's current data is dropped first: it counts
+	// as free space.
+	avail, have := f.DiskFree, fmt.Sprintf("ruang kosong di %s %s", f.DiskPath, gigabytes(f.DiskFree))
+	if p.Resync && p.ReclaimBytes > 0 {
+		if avail += p.ReclaimBytes; avail < f.DiskFree {
+			avail = math.MaxUint64
+		}
+		have += fmt.Sprintf(" ditambah data replika lama %s yang akan dibuang", gigabytes(p.ReclaimBytes))
+	}
 	switch {
 	case f.DiskErr != nil:
 		l.add("disk", proto.CheckFail, "Ruang disk", fmt.Sprintf("tidak bisa membaca ruang disk %s: %v", f.DiskPath, f.DiskErr))
-	case f.DiskFree < need:
-		l.add("disk", proto.CheckFail, "Ruang disk", fmt.Sprintf("ruang kosong di %s %s, butuh %s (1.2 × data master %s)",
-			f.DiskPath, gigabytes(f.DiskFree), gigabytes(need), gigabytes(p.PeerDataBytes)))
+	case avail < need:
+		l.add("disk", proto.CheckFail, "Ruang disk", fmt.Sprintf("%s, butuh %s (1.2 × data master %s)",
+			have, gigabytes(need), gigabytes(p.PeerDataBytes)))
 	default:
-		l.add("disk", proto.CheckOK, "Ruang disk", fmt.Sprintf("ruang kosong di %s %s, butuh %s", f.DiskPath, gigabytes(f.DiskFree), gigabytes(need)))
+		l.add("disk", proto.CheckOK, "Ruang disk", fmt.Sprintf("%s, butuh %s", have, gigabytes(need)))
 	}
 
 	onMaster := map[string]bool{}
 	for _, d := range p.PeerDatabases {
 		onMaster[d] = true
 	}
-	var foreign, leftover []string
+	var foreign, leftover, wiped []string
 	for _, d := range f.Databases {
-		if onMaster[d.Name] {
+		switch {
+		case wipeListed(p, f, d.Name):
+			wiped = append(wiped, d.Name) // already confirmed for this resync
+		case onMaster[d.Name]:
 			leftover = append(leftover, d.Name)
-		} else {
+		default:
 			foreign = append(foreign, d.Name)
 		}
 	}
@@ -534,6 +550,8 @@ func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, v pe
 	case v.self:
 		// These are the master's own databases: never offer to drop them.
 		l.add("leftover", proto.CheckFail, leftTitle, "server tujuan sama dengan master; databasenya tidak boleh dibuang")
+	case len(leftover) == 0 && len(wiped) > 0:
+		l.add("leftover", proto.CheckOK, leftTitle, "database replika lama akan dibuang sesuai konfirmasi: "+strings.Join(wiped, ", "))
 	case len(leftover) == 0:
 		l.add("leftover", proto.CheckOK, leftTitle, "tidak ada database bernama sama dengan di master")
 	case p.ConfirmWipe:
@@ -588,6 +606,21 @@ func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, v pe
 		return true
 	}
 	return false
+}
+
+// wipeListed reports whether the target database name is on p.WipeList of
+// a resync, compared as this server's lower_case_table_names compares
+// names: exactly with 0, without case otherwise.
+func wipeListed(p proto.PreflightParams, f preflightFacts, name string) bool {
+	if !p.Resync {
+		return false
+	}
+	return slices.ContainsFunc(p.WipeList, func(w string) bool {
+		if f.Status.LowerCaseTableNames == 0 {
+			return w == name
+		}
+		return strings.EqualFold(w, name)
+	})
 }
 
 // isLocalBind reports whether every address in bind_address (comma-separated

@@ -104,7 +104,28 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		d.log("mysql user dropped", "user", user, "from_host", host)
 		return nil, nil
 	})
+
+	// Not in the pins' refusal table: it only ever drops dbpanel_dump_*
+	// accounts, which a pinned master may drop (refusedByRole).
+	reg.Register("mysql.sweepDumpUsers", func(ctx context.Context, params json.RawMessage) (any, error) {
+		var p proto.SweepDumpUsersParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &commands.ParamError{Msg: "parameter tidak valid: " + err.Error()}
+		}
+		if p.OlderThanSec < minSweepAgeSec {
+			return nil, &commands.ParamError{Msg: fmt.Sprintf("older_than_sec minimal %d detik", minSweepAgeSec)}
+		}
+		h, err := d.host()
+		if err != nil {
+			return nil, err
+		}
+		return SweepDumpUsers(ctx, h, p.OlderThanSec, d.log)
+	})
 }
+
+// minSweepAgeSec is the youngest dump account mysql.sweepDumpUsers may be
+// asked to drop: one a running job has just created is never swept.
+const minSweepAgeSec = 60
 
 // account is an account the agent creates.
 type account struct {
@@ -233,11 +254,68 @@ func DropUser(ctx context.Context, h Host, user, host string) error {
 		return err
 	}
 	defer db.Close()
+	_, err = dropAccount(ctx, db, user, host)
+	return err
+}
+
+// dropAccount drops user@host if it exists and returns its quoted name.
+// The caller has validated user and host: they hold no quote or backslash.
+func dropAccount(ctx context.Context, db *sql.DB, user, host string) (string, error) {
 	name := quoteString(user) + "@" + quoteString(host)
 	if _, err := db.ExecContext(ctx, "DROP USER IF EXISTS "+name); err != nil {
-		return fmt.Errorf("hapus user %s: %w", name, err)
+		return name, fmt.Errorf("hapus user %s: %w", name, err)
 	}
-	return nil
+	return name, nil
+}
+
+// SweepDumpUsers drops the per-job dump accounts (dumpUserPrefix) whose
+// password was set more than olderThanSec seconds ago: what a job that died between
+// mysql.createDumpUser and mysql.dropUser left behind. No other account is
+// read or dropped. logf gets one line per dropped account.
+func SweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, logf func(msg string, args ...any)) (proto.SweepDumpUsersResult, error) {
+	res := proto.SweepDumpUsersResult{Dropped: []string{}}
+	db, err := openAdmin(ctx, h)
+	if err != nil {
+		return res, err
+	}
+	defer db.Close()
+	// _ is a LIKE wildcard: escaped, so only the literal prefix matches.
+	pattern := strings.ReplaceAll(dumpUserPrefix, "_", "!_") + "%"
+	rows, err := db.QueryContext(ctx, `SELECT user, host FROM mysql.user
+		WHERE user LIKE ? ESCAPE '!' AND password_last_changed < NOW() - INTERVAL ? SECOND
+		ORDER BY user, host`, pattern, olderThanSec)
+	if err != nil {
+		return res, fmt.Errorf("baca user dump: %w", err)
+	}
+	type acct struct{ user, host string }
+	var found []acct
+	for rows.Next() {
+		var a acct
+		if err := rows.Scan(&a.user, &a.host); err != nil {
+			rows.Close()
+			return res, fmt.Errorf("baca user dump: %w", err)
+		}
+		found = append(found, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("baca user dump: %w", err)
+	}
+	for _, a := range found {
+		// Names the panel could not have created are left alone rather
+		// than quoted into SQL.
+		if !strings.HasPrefix(a.user, dumpUserPrefix) || validateAccountName(a.user, a.host, "user") != nil {
+			logf("mysql dump user skipped by sweep: unexpected name", "user", a.user, "from_host", a.host)
+			continue
+		}
+		name, err := dropAccount(ctx, db, a.user, a.host)
+		if err != nil {
+			return res, err
+		}
+		logf("mysql stale dump user dropped", "user", a.user, "from_host", a.host)
+		res.Dropped = append(res.Dropped, name)
+	}
+	return res, nil
 }
 
 // quotePassword is s as a string literal. Without NO_BACKSLASH_ESCAPES a

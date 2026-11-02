@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"reflect"
 	"regexp"
@@ -464,6 +465,143 @@ func TestPreflightReplicaMethodDumpWhenSubset(t *testing.T) {
 	if c := wantCheck(t, res, "same_series", proto.CheckFail); !strings.Contains(c.Detail, "8.4") {
 		t.Errorf("same_series detail = %q", c.Detail)
 	}
+}
+
+// TestPreflightResyncTreatsWipeListAsNotLeftover: on a resync the
+// databases the user agreed to drop are neither leftovers to confirm again
+// nor foreign databases, even one the master no longer has.
+func TestPreflightResyncTreatsWipeListAsNotLeftover(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	execAll(t, rootDB(t, inst), "CREATE DATABASE shop", "CREATE DATABASE crm", "CREATE DATABASE lama")
+	p := replicaParams(t, inst)
+	p.PeerDatabases = []string{"crm", "shop", "web"}
+
+	// Without Resync the list changes nothing.
+	p.WipeList = []string{"shop", "crm", "lama"}
+	res := callPreflight(t, inst.Host(), p)
+	wantCheck(t, res, "leftover", proto.CheckNeedsConfirm)
+	wantCheck(t, res, "dedicated", proto.CheckFail)
+
+	p.Resync = true
+	res = callPreflight(t, inst.Host(), p)
+	wantCheck(t, res, "dedicated", proto.CheckOK)
+	c := wantCheck(t, res, "leftover", proto.CheckOK)
+	for _, name := range []string{"crm", "lama", "shop"} {
+		if !strings.Contains(c.Detail, name) {
+			t.Errorf("leftover detail = %q, want it to name %s", c.Detail, name)
+		}
+	}
+	if res.Worst != proto.CheckOK {
+		t.Errorf("Worst = %q, want ok", res.Worst)
+	}
+}
+
+// TestPreflightResyncAllowsCloneOnNonEmptyTarget: CLONE is chosen on a
+// resync when every database is selected and every database on the target
+// is on the wipe list; otherwise dump, as before.
+func TestPreflightResyncAllowsCloneOnNonEmptyTarget(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	execAll(t, rootDB(t, inst), "CREATE DATABASE shop", "CREATE DATABASE crm")
+	p := replicaParams(t, inst)
+	p.PeerDatabases = []string{"crm", "shop"}
+	p.WipeList = []string{"crm", "shop"}
+
+	if res := callPreflight(t, inst.Host(), p); res.Method != "dump" {
+		t.Errorf("not a resync: Method = %q, want dump", res.Method)
+	}
+	p.Resync = true
+	if res := callPreflight(t, inst.Host(), p); res.Method != "clone" {
+		t.Errorf("resync, all databases wiped: Method = %q, want clone", res.Method)
+	}
+	sub := p
+	sub.Databases = []string{"shop"}
+	if res := callPreflight(t, inst.Host(), sub); res.Method != "dump" {
+		t.Errorf("resync, subset: Method = %q, want dump", res.Method)
+	}
+	part := p
+	part.WipeList = []string{"shop"}
+	if res := callPreflight(t, inst.Host(), part); res.Method != "dump" {
+		t.Errorf("resync, crm not on the wipe list: Method = %q, want dump", res.Method)
+	}
+}
+
+// TestPreflightResyncUnknownDatabaseStillLeftover: a database the user did
+// not agree to drop still needs confirming (or is foreign) on a resync.
+func TestPreflightResyncUnknownDatabaseStillLeftover(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	execAll(t, rootDB(t, inst), "CREATE DATABASE shop", "CREATE DATABASE crm", "CREATE DATABASE lain")
+	p := replicaParams(t, inst)
+	p.PeerDatabases = []string{"crm", "shop"}
+	p.Resync = true
+	p.WipeList = []string{"shop"}
+
+	res := callPreflight(t, inst.Host(), p)
+	c := wantCheck(t, res, "leftover", proto.CheckNeedsConfirm)
+	if want := "database bernama sama dengan di master akan dibuang: crm"; c.Detail != want {
+		t.Errorf("leftover detail = %q, want %q", c.Detail, want)
+	}
+	if c := wantCheck(t, res, "dedicated", proto.CheckFail); !strings.Contains(c.Detail, "(lain)") {
+		t.Errorf("dedicated detail = %q", c.Detail)
+	}
+	if res.Method != "dump" {
+		t.Errorf("Method = %q, want dump", res.Method)
+	}
+
+	// Names compare under the server's lower_case_table_names: exact with
+	// 0, without case otherwise.
+	f := mysql.PreflightFacts{
+		Status:    proto.MySQLStatus{Version: "8.0.46", Series: "8.0", DataDir: "/var/lib/mysql"},
+		Databases: []proto.DatabaseInfo{{Name: "shop"}},
+		DiskFree:  100 * gib,
+	}
+	q := proto.PreflightParams{Role: "replica", PeerHost: "10.0.0.1", PeerPort: 3306, PeerVersion: "8.0.46",
+		PeerDatabases: []string{"shop"}, Resync: true, WipeList: []string{"SHOP"}}
+	wantCheck(t, mysql.EvaluatePreflight(q, f), "leftover", proto.CheckNeedsConfirm)
+	f.Status.LowerCaseTableNames = 1
+	res = mysql.EvaluatePreflight(q, f)
+	wantCheck(t, res, "leftover", proto.CheckOK)
+	if res.Method != "clone" {
+		t.Errorf("lower_case_table_names=1: Method = %q, want clone", res.Method)
+	}
+
+	// An invalid name on the list is refused before it reaches SQL.
+	bad := p
+	bad.WipeList = []string{"shop`; DROP"}
+	if r := dispatchPreflight(t, nil, bad); r.OK || r.Error == nil || r.Error.Code != proto.CodeBadParams {
+		t.Errorf("bad wipe list: response = %+v, want bad_params", r)
+	}
+}
+
+// TestPreflightDiskCountsReclaim: on a resync the replica's current data,
+// which is dropped first, counts as free space.
+func TestPreflightDiskCountsReclaim(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	p := replicaParams(t, inst)
+	p.PeerDataBytes = 10 * gib
+	p.ReclaimBytes = 2 * gib
+	h := smallDisk{inst.Host(), 11 * gib} // 11 < 12 <= 11 + 2
+
+	// Not a resync: ReclaimBytes is ignored.
+	if c := wantCheck(t, callPreflight(t, h, p), "disk", proto.CheckFail); strings.Contains(c.Detail, " 2.00 GB") || strings.Contains(c.Detail, "replika") {
+		t.Errorf("disk detail without resync = %q", c.Detail)
+	}
+	p.Resync = true
+	if c := wantCheck(t, callPreflight(t, h, p), "disk", proto.CheckOK); !strings.Contains(c.Detail, "11.00 GB") ||
+		!strings.Contains(c.Detail, " 2.00 GB") || !strings.Contains(c.Detail, "12.00 GB") {
+		t.Errorf("disk detail = %q", c.Detail)
+	}
+	p.ReclaimBytes = gib / 2
+	if c := wantCheck(t, callPreflight(t, h, p), "disk", proto.CheckFail); !strings.Contains(c.Detail, "0.50 GB") ||
+		!strings.Contains(c.Detail, "12.00 GB") {
+		t.Errorf("disk detail = %q", c.Detail)
+	}
+
+	// The sum saturates instead of wrapping around.
+	f := mysql.PreflightFacts{Status: proto.MySQLStatus{Version: "8.0.46", Series: "8.0", DataDir: "/var/lib/mysql"},
+		DiskFree: math.MaxUint64 - 1}
+	q := proto.PreflightParams{Role: "replica", PeerHost: "10.0.0.1", PeerPort: 3306, PeerVersion: "8.0.46",
+		PeerDataBytes: 10 * gib, Resync: true, ReclaimBytes: 10}
+	wantCheck(t, mysql.EvaluatePreflight(q, f), "disk", proto.CheckOK)
 }
 
 func TestPreflightRejectsMariaDBVersion(t *testing.T) {

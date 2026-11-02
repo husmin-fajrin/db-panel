@@ -90,6 +90,15 @@ type PreflightParams struct {
 	// PeerLowerCaseTableNames is the master's lower_case_table_names
 	// (replica); nil when unknown.
 	PeerLowerCaseTableNames *int `json:"peer_lower_case_table_names,omitempty"`
+	// Resync (replica) marks the target as a registered replica of this
+	// master being synced again. The target's databases named in WipeList,
+	// which the user agreed to drop, are then neither leftovers nor foreign,
+	// CLONE may be chosen when every target database is on the list, and
+	// ReclaimBytes (the replica's current data size) counts as free space
+	// in the disk check. All three are ignored without Resync.
+	Resync       bool     `json:"resync"`
+	WipeList     []string `json:"wipe_list"`
+	ReclaimBytes uint64   `json:"reclaim_bytes"`
 }
 
 // Preflight check statuses, from least to most severe: ok, warn,
@@ -164,6 +173,19 @@ type DumpUserParams struct {
 type DropUserParams struct {
 	User     string `json:"user"`
 	FromHost string `json:"from_host"`
+}
+
+// SweepDumpUsersParams are the parameters of mysql.sweepDumpUsers: drop the
+// per-job dump accounts (dbpanel_dump_*) whose password is older than
+// OlderThanSec seconds (at least 60).
+type SweepDumpUsersParams struct {
+	OlderThanSec int64 `json:"older_than_sec"`
+}
+
+// SweepDumpUsersResult is the answer to mysql.sweepDumpUsers: the accounts
+// dropped, as 'user'@'host'.
+type SweepDumpUsersResult struct {
+	Dropped []string `json:"dropped"`
 }
 
 // ReadOnlyParams are the parameters of mysql.setReadOnly.
