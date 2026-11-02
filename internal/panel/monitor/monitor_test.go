@@ -621,6 +621,7 @@ func TestReplicaUsesMasterGTIDFromMasterView(t *testing.T) {
 	r.agent(mID, true, masterSnap(srcUUID+":1-200")).attach()
 	r.agent(other, true, masterSnap(srcUUID+":1-900")).attach()
 	_ = otherTopo
+	r.clk.Add(time.Second) // the replica's report is the newer one
 	r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
 
 	v := r.view(rID)
@@ -632,6 +633,133 @@ func TestReplicaUsesMasterGTIDFromMasterView(t *testing.T) {
 	v = r.view(rID)
 	if v.Status.Code != StatusLagging || !strings.Contains(v.Status.Detail, "100 transaksi") {
 		t.Fatalf("after 61 s: %+v, want Ketinggalan by 100 transactions", v.Status)
+	}
+}
+
+// gapSince is the replica's gap bookkeeping, read under the lock.
+func (r *rig) gapSince(id int64) time.Time {
+	r.m.mu.Lock()
+	defer r.m.mu.Unlock()
+	return r.m.servers[id].gapSince
+}
+
+// TestGapNotTrackedAgainstNewerMaster: agents do not report GTID movement
+// as a change, so a master summary newer than the replica's report says
+// nothing about the replica lagging.
+func TestGapNotTrackedAgainstNewerMaster(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+
+	r.clk.Add(70 * time.Second)
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.GTIDExecuted = srcUUID + ":1-200" })
+	ma.send()
+	for range 3 {
+		r.m.tick()
+		if g := r.gapSince(rID); !g.IsZero() {
+			t.Fatalf("gapSince = %v against a newer master report, want unchanged (zero)", g)
+		}
+		r.clk.Add(61 * time.Second)
+	}
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("replica status %q (%s), want Sinkron", v.Status.Code, v.Status.Detail)
+	}
+	if n := len(r.events(rID, "status")); n != 1 {
+		t.Fatalf("status events = %d, want only the first Sinkron", n)
+	}
+}
+
+// TestBacklogEntryDoesNotTrackGap: a backlog report is compared with no
+// master set; neither its ingestion nor a tick before the next live
+// report starts the gap clock.
+func TestBacklogEntryDoesNotTrackGap(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	r.agent(mID, true, masterSnap(srcUUID+":1-200")).attach()
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-200")).attach()
+
+	r.clk.Add(time.Second)
+	ra.emit(proto.HealthEvent{Seq: 10, Backlog: true, Snapshot: replicaSnap(srcUUID + ":1-100")})
+	if g := r.gapSince(rID); !g.IsZero() {
+		t.Fatalf("gapSince = %v after a backlog entry, want zero", g)
+	}
+	r.m.tick()
+	if g := r.gapSince(rID); !g.IsZero() {
+		t.Fatalf("gapSince = %v after a tick on a backlog snapshot, want zero", g)
+	}
+}
+
+// TestReplicasDisconnectedCountsOnlyLiveReplicas: a master presumed down
+// counts the replicas that lost it, but not one whose agent is gone or
+// whose report is stale.
+func TestReplicasDisconnectedCountsOnlyLiveReplicas(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	live := r.replica("db-live", topo)
+	gone := r.replica("db-gone", topo)
+	stale := r.replica("db-stale", topo)
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	connecting := replicaSnap(srcUUID + ":1-100")
+	connecting.Replica.IORunning = "Connecting"
+	r.agent(live, true, connecting).attach()
+	ga := r.agent(gone, true, connecting).attach()
+	ga.detach()
+	sa := r.agent(stale, true, replicaSnap(srcUUID+":1-100")).attach()
+	sa.emit(proto.HealthEvent{Seq: 100, TakenAgoMS: 400_000, Snapshot: connecting}) // older than StaleAfter (360 s)
+
+	ma.detach()
+	r.clk.Add(31 * time.Second)
+	r.m.tick()
+	v := r.view(mID)
+	if v.Status.Code != StatusDown || !strings.Contains(v.Status.Detail, "dan 1 replika kehilangan koneksi") {
+		t.Fatalf("master = %q (%s), want Diduga tumbang with 1 replica", v.Status.Code, v.Status.Detail)
+	}
+}
+
+// TestStartupGraceForStoredReports: after a panel downtime longer than
+// StaleAfter, the stored reports are not stale until one StaleAfter has
+// passed since startup.
+func TestStartupGraceForStoredReports(t *testing.T) {
+	var rID int64
+	start := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC) // the rig's clock
+	r := newRig(t, func(st *store.Store) {
+		m, _ := st.CreateServer("db-master")
+		topo, err := st.CreateTopology(m.ID, "u", nil, "h", 3306)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep, _ := st.CreateServer("db-replica")
+		rID = rep.ID
+		st.AddReplica(topo.ID, rID, nil)
+		st.SetReplicaState(rID, store.ReplicaReady, "")
+		b, _ := json.Marshal(replicaSnap(srcUUID + ":1-100"))
+		if err := st.SetHealth(store.Health{ServerID: rID, ReceivedAt: start.Add(-2 * time.Hour), SnapshotJSON: string(b),
+			Status: StatusSynced, StatusSince: start.Add(-3 * time.Hour), LockOK: true}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// The agent is connected (the hub decides AgentOnline) but has not
+	// reported yet.
+	r.m.mu.Lock()
+	r.m.servers[rID].online = true
+	r.m.mu.Unlock()
+
+	r.m.tick()
+	r.clk.Add(5 * time.Minute)
+	r.m.tick()
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("within the startup grace: %q (%s), want Sinkron", v.Status.Code, v.Status.Detail)
+	}
+	if n := len(r.events(rID, "")); n != 0 {
+		t.Fatalf("events within the startup grace = %d, want 0", n)
+	}
+	r.clk.Add(61 * time.Second) // 6 min 1 s after startup
+	r.m.tick()
+	if v := r.view(rID); v.Status.Code != StatusAgentOffline || !strings.Contains(v.Status.Detail, "Laporan terakhir") {
+		t.Fatalf("after StaleAfter: %q (%s), want Agent offline for a stale report", v.Status.Code, v.Status.Detail)
 	}
 }
 

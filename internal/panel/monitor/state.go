@@ -38,6 +38,11 @@ type serverState struct {
 	lastSeq      uint64
 	snap         *proto.HealthSnapshot // never modified once stored
 	receivedAt   time.Time
+	snapBacklog  bool // snap came from the agent's backlog
+	// graceUntil: the report was loaded from the store at startup and does
+	// not count as stale before this time (one StaleAfter after startup);
+	// zero once a report arrives.
+	graceUntil time.Time
 
 	// Derived.
 	status   Status
@@ -115,6 +120,7 @@ func (m *Monitor) load() {
 			}
 		}
 		s.receivedAt = h.ReceivedAt
+		s.graceUntil = m.startedAt.Add(m.settings.StaleAfter)
 		if h.Status != "" && s.role != "" {
 			s.status = Status{Code: h.Status, Severity: SeverityOf(h.Status)}
 			s.since = h.StatusSince
@@ -134,7 +140,7 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 	}
 	s.lastSeq = he.Seq
 	snap := he.Snapshot
-	s.snap, s.receivedAt = &snap, at
+	s.snap, s.receivedAt, s.snapBacklog, s.graceUntil = &snap, at, he.Backlog, time.Time{}
 	s.needsUpgrade = false // only a current agent reports
 	s.dirty = true
 	if err := m.resolve(id, s); err != nil {
@@ -221,16 +227,22 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 	switch s.role {
 	case store.RoleMaster:
 		st = DeriveMaster(MasterInput{
-			AgentOnline: online, OfflineSince: offlineSince, ReceivedAt: s.receivedAt,
+			AgentOnline: online, OfflineSince: offlineSince, ReceivedAt: m.staleBase(s, now),
 			NeedsUpgrade: s.needsUpgrade, Snap: s.snap, UnreachableSince: s.unreachableSince,
-			ReplicasDisconnected: m.replicasDisconnected(s.topoID), Now: now,
+			ReplicasDisconnected: m.replicasDisconnected(s.topoID, now), Now: now,
 		}, th)
 	case store.RoleReplica:
 		masterGTID := ""
-		if ms := m.servers[s.masterID]; ms != nil && ms.snap != nil && ms.snap.MySQLOK {
+		ms := m.servers[s.masterID]
+		if ms != nil && ms.snap != nil && ms.snap.MySQLOK {
 			masterGTID = ms.snap.GTIDExecuted
 		}
-		if s.snap != nil && s.snap.MySQLOK && s.snap.Replica != nil {
+		// Agents report GTID movement only with their summaries, so the
+		// gap clock moves only when the replica's report is at least as
+		// new as the master's it is compared with; a backlog report is
+		// never compared.
+		if masterGTID != "" && !s.snapBacklog && !s.receivedAt.Before(ms.receivedAt) &&
+			s.snap != nil && s.snap.MySQLOK && s.snap.Replica != nil {
 			rs := s.snap.Replica
 			if GTIDGap(masterGTID, joinGTIDSets(rs.RetrievedGTID, rs.ExecutedGTID)) > 0 {
 				s.gapSince = firstTime(s.gapSince, now)
@@ -240,16 +252,27 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 		}
 		st = DeriveReplica(ReplicaInput{
 			State: s.repState, Paused: s.repPaused, AgentOnline: online, OfflineSince: offlineSince,
-			ReceivedAt: s.receivedAt, NeedsUpgrade: s.needsUpgrade, Snap: s.snap,
+			ReceivedAt: m.staleBase(s, now), NeedsUpgrade: s.needsUpgrade, Snap: s.snap,
 			MasterGTIDExecuted: masterGTID, GapSince: s.gapSince, DisconnectedSince: s.disconnectedSince, Now: now,
 		}, th)
 	}
 	m.apply(id, s, st, now)
 }
 
-// replicasDisconnected counts the topology's replicas whose last report
-// shows the IO thread not running. The caller holds mu.
-func (m *Monitor) replicasDisconnected(topoID int64) int {
+// staleBase is the report time the staleness check measures from: the
+// report's own, except that a report loaded at startup counts from
+// startup until its grace ends. The caller holds mu.
+func (m *Monitor) staleBase(s *serverState, now time.Time) time.Time {
+	if now.Before(s.graceUntil) && s.receivedAt.Before(m.startedAt) {
+		return m.startedAt
+	}
+	return s.receivedAt
+}
+
+// replicasDisconnected counts the topology's replicas whose agent is
+// online, whose last report is not stale, and which shows the IO thread
+// not running. The caller holds mu.
+func (m *Monitor) replicasDisconnected(topoID int64, now time.Time) int {
 	reps, err := m.st.ListReplicas(topoID)
 	if err != nil {
 		m.log.Warn("monitor: list replicas", "topology_id", topoID, "err", err)
@@ -258,7 +281,10 @@ func (m *Monitor) replicasDisconnected(topoID int64) int {
 	n := 0
 	for _, rep := range reps {
 		rs := m.servers[rep.ServerID]
-		if rs != nil && rs.snap != nil && rs.snap.MySQLOK && rs.snap.Replica != nil && rs.snap.Replica.IORunning != "Yes" {
+		if rs == nil || !rs.online || rs.snap == nil || now.Sub(m.staleBase(rs, now)) > m.settings.StaleAfter {
+			continue
+		}
+		if rs.snap.MySQLOK && rs.snap.Replica != nil && rs.snap.Replica.IORunning != "Yes" {
 			n++
 		}
 	}
