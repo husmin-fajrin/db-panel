@@ -17,6 +17,9 @@ const (
 	TelegramPending = "pending"
 	TelegramSent    = "sent"
 	TelegramFailed  = "failed"
+	// TelegramRecovered: the alert is closed and needs nothing more; its
+	// recovery message went out, or there was nothing to recover from.
+	TelegramRecovered = "recovered_sent"
 )
 
 // Alert is a condition that needs attention, open until ClosedAt is set.
@@ -136,6 +139,19 @@ func (s *Store) SetAlertNotified(id int64, now time.Time, state, errText string)
 	}
 	return s.execOne(`UPDATE alerts SET last_notified_at = ?, telegram_state = ?, telegram_error = ?,
 		notify_count = notify_count + ? WHERE id = ?`, formatTime(now), state, errText, inc, id)
+}
+
+// ListAlertsToNotify returns the alerts the notifier still has work on:
+// open ones, and closed ones not yet TelegramRecovered; oldest first.
+func (s *Store) ListAlertsToNotify() ([]Alert, error) {
+	return s.queryAlerts(`SELECT `+alertColumns+` FROM alerts
+		WHERE closed_at IS NULL OR telegram_state != ? ORDER BY opened_at, id`, TelegramRecovered)
+}
+
+// SetAlertTelegramState sets an alert's Telegram state and error text
+// without recording a delivery: notify_count and last_notified_at stay.
+func (s *Store) SetAlertTelegramState(id int64, state, errText string) error {
+	return s.execOne(`UPDATE alerts SET telegram_state = ?, telegram_error = ? WHERE id = ?`, state, errText, id)
 }
 
 // SetAlertMessage replaces an alert's message.

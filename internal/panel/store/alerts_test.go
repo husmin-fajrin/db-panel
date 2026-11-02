@@ -131,3 +131,48 @@ func TestSetAlertNotifiedAndMessage(t *testing.T) {
 		t.Fatalf("SetAlertMessage missing: %v", err)
 	}
 }
+
+func TestListAlertsToNotifyAndSetTelegramState(t *testing.T) {
+	s := openTemp(t)
+	a := mustServer(t, s, "a")
+	t0 := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	open := func(kind string, at time.Time) int64 {
+		t.Helper()
+		id, err := s.OpenAlert(Alert{Kind: kind, ServerID: a.ID, OpenedAt: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	stillOpen := open("down", t0.Add(time.Minute))
+	closedPending := open("lag", t0)
+	recovered := open("disk", t0.Add(2*time.Minute))
+	for _, id := range []int64{closedPending, recovered} {
+		if err := s.CloseAlert(id, t0.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetAlertTelegramState(recovered, TelegramRecovered, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListAlertsToNotify()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != closedPending || got[1].ID != stillOpen {
+		t.Fatalf("ListAlertsToNotify (oldest first, no recovered_sent) = %+v", got)
+	}
+
+	// SetAlertTelegramState touches neither the count nor the time.
+	if err := s.SetAlertTelegramState(stillOpen, TelegramSent, "x"); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := s.GetOpenAlert("down", a.ID)
+	if g.TelegramState != TelegramSent || g.TelegramError != "x" || g.NotifyCount != 0 || g.LastNotifiedAt != nil {
+		t.Fatalf("after SetAlertTelegramState = %+v", g)
+	}
+	if err := s.SetAlertTelegramState(999, TelegramSent, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetAlertTelegramState missing: %v", err)
+	}
+}

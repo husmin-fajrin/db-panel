@@ -18,6 +18,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
@@ -81,7 +82,10 @@ type Panel struct {
 	// Monitor turns the agents' health reports into statuses and the
 	// timeline.
 	Monitor *healthmon.Monitor
+	// Notifier sends the alerts to Telegram.
+	Notifier *notify.Notifier
 
+	telegram      *notify.Telegram // the Notifier's Bot API client; tests point it elsewhere
 	opts          Options
 	log           *slog.Logger
 	epoch         *sessionEpoch
@@ -172,14 +176,41 @@ func New(o Options) (*Panel, error) {
 		PublicHost:    p.opts.PublicHost,
 	})
 	p.Orchestrator.Resume(context.Background())
+	p.telegram = notify.NewTelegram()
+	p.Notifier = notify.New(notify.Deps{
+		Store:      st,
+		Box:        box,
+		Sender:     p.telegram,
+		Logger:     p.log,
+		Now:        func() time.Time { return p.now() },
+		Snoozed:    p.snoozed,
+		ServerName: p.serverName,
+	})
 	p.Monitor = healthmon.New(healthmon.Deps{
-		Store:   st,
-		Hub:     p.Hub,
-		Publish: func(event string, data any) { p.publish(event, data) },
-		Logger:  p.log,
-		Now:     func() time.Time { return p.now() },
+		Store:           st,
+		Hub:             p.Hub,
+		Publish:         func(event string, data any) { p.publish(event, data) },
+		Logger:          p.log,
+		Now:             func() time.Time { return p.now() },
+		OnAlertsChanged: p.Notifier.Wake,
 	})
 	return p, nil
+}
+
+// snoozed reports whether the server's alert notifications are muted now.
+func (p *Panel) snoozed(serverID int64) bool {
+	v, ok := p.Monitor.View(serverID)
+	return ok && v.SnoozeUntil != nil && p.now().Before(*v.SnoozeUntil)
+}
+
+// serverName names a server in notifications; "server <id>" when it cannot
+// be read.
+func (p *Panel) serverName(serverID int64) string {
+	srv, err := p.Store.GetServer(serverID)
+	if err != nil {
+		return fmt.Sprintf("server %d", serverID)
+	}
+	return srv.Name
 }
 
 func withDefaults(o Options) Options {

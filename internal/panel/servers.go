@@ -79,6 +79,7 @@ func (p *Panel) Run(ctx context.Context) error {
 	detachLocal := p.attachLocal()
 	wg.Go(func() { p.probeLoop(ctx) })
 	wg.Go(func() { p.Monitor.Run(ctx) })
+	wg.Go(func() { p.Notifier.Run(ctx) })
 
 	<-ctx.Done()
 	// Stop the jobs before their agents disconnect, so none fails as
