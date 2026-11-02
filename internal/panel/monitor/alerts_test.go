@@ -257,7 +257,11 @@ func TestDiskHysteresis(t *testing.T) {
 		warn, crit bool
 	}{
 		{86, true, false}, {84, true, false}, {80, true, false}, {79, false, false},
-		{96, true, true}, {91, true, true}, {89, true, false}, {50, false, false},
+		// Critical replaces the warning: one condition, one alert.
+		{86, true, false}, {96, false, true}, {91, false, true},
+		// Critical closes under 90 %; still at or over 85 %: warning again.
+		{89, true, false}, {79, false, false},
+		{96, false, true}, {50, false, false},
 	}
 	for _, s := range steps {
 		usedPct(s.pct)
@@ -265,10 +269,10 @@ func TestDiskHysteresis(t *testing.T) {
 			t.Fatalf("at %d%%: disk_warn open %v, disk_crit open %v; want %v, %v", s.pct, w, c, s.warn, s.crit)
 		}
 	}
-	if n := len(r.alerts(mID, KindDiskWarn)); n != 2 {
-		t.Fatalf("disk_warn alerts = %d, want 2", n)
+	if n := len(r.alerts(mID, KindDiskWarn)); n != 3 {
+		t.Fatalf("disk_warn alerts = %d, want 3", n)
 	}
-	if a := r.alerts(mID, KindDiskCrit); len(a) != 1 || !strings.Contains(a[0].Message, "96%") {
+	if a := r.alerts(mID, KindDiskCrit); len(a) != 2 || !strings.Contains(a[0].Message, "96%") {
 		t.Fatalf("disk_crit alerts = %+v", a)
 	}
 }

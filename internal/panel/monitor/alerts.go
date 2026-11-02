@@ -56,6 +56,9 @@ type ruleCtx struct {
 	// agentOff: the agent counts as offline (disconnected beyond the grace,
 	// or its last report is stale).
 	agentOff bool
+	// diskCrit: disk_crit is open, or opens, after this evaluation; it
+	// replaces disk_warn, so one condition is one alert.
+	diskCrit bool
 	// Condition clocks of the server; zero while the condition is absent.
 	connHighSince time.Time // connections at or over ConnPct
 	syncedSince   time.Time // status Sinkron
@@ -175,8 +178,34 @@ var alertRules = []alertRule{
 		},
 		close: func(_ View, ctx ruleCtx) bool { return !ctx.agentOff },
 	},
-	diskRule(KindDiskWarn, func(s Settings) int { return s.DiskWarn }),
-	diskRule(KindDiskCrit, func(s Settings) int { return s.DiskCrit }),
+	{
+		kind: KindDiskWarn,
+		open: func(v View, ctx ruleCtx) (bool, string) {
+			pct, ok := diskPercent(v.Snap)
+			if !ok || pct < ctx.set.DiskWarn || ctx.diskCrit {
+				return false, ""
+			}
+			return true, diskMessage(pct)
+		},
+		close: func(v View, ctx ruleCtx) bool {
+			pct, ok := diskPercent(v.Snap)
+			return ctx.diskCrit || (ok && pct < ctx.set.DiskWarn-diskCloseMargin)
+		},
+	},
+	{
+		kind: KindDiskCrit,
+		open: func(v View, ctx ruleCtx) (bool, string) {
+			pct, ok := diskPercent(v.Snap)
+			if !ok || pct < ctx.set.DiskCrit {
+				return false, ""
+			}
+			return true, diskMessage(pct)
+		},
+		close: func(v View, ctx ruleCtx) bool {
+			pct, ok := diskPercent(v.Snap)
+			return ok && pct < ctx.set.DiskCrit-diskCloseMargin
+		},
+	},
 	{
 		kind: KindConnectionsHigh,
 		open: func(_ View, ctx ruleCtx) (bool, string) {
@@ -212,21 +241,16 @@ var alertRules = []alertRule{
 	},
 }
 
-func diskRule(kind string, threshold func(Settings) int) alertRule {
-	return alertRule{
-		kind: kind,
-		open: func(v View, ctx ruleCtx) (bool, string) {
-			pct, ok := diskPercent(v.Snap)
-			if !ok || pct < threshold(ctx.set) {
-				return false, ""
-			}
-			return true, fmt.Sprintf("Disk data terpakai %d%%.", pct)
-		},
-		close: func(v View, ctx ruleCtx) bool {
-			pct, ok := diskPercent(v.Snap)
-			return ok && pct < threshold(ctx.set)-diskCloseMargin
-		},
+func diskMessage(pct int) string { return fmt.Sprintf("Disk data terpakai %d%%.", pct) }
+
+// diskCritActive reports whether disk_crit is open after this evaluation:
+// usage at or over DiskCrit, or open and not yet under DiskCrit − 5.
+func diskCritActive(snap *proto.HealthSnapshot, set Settings, open bool) bool {
+	pct, ok := diskPercent(snap)
+	if !ok {
+		return open
 	}
+	return pct >= set.DiskCrit || (open && pct >= set.DiskCrit-diskCloseMargin)
 }
 
 func isReplica(v View) bool { return v.Role == store.RoleReplica }
@@ -349,6 +373,8 @@ func (m *Monitor) evaluate(now time.Time) []alertUpdate {
 			continue // nothing judged yet
 		}
 		ctx := m.ruleCtx(id, s, v, now)
+		_, critOpen := byKey[key{KindDiskCrit, id}]
+		ctx.diskCrit = diskCritActive(v.Snap, m.settings, critOpen)
 		for _, r := range alertRules {
 			a, isOpen := byKey[key{r.kind, id}]
 			switch {
