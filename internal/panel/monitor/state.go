@@ -30,6 +30,11 @@ type serverState struct {
 	repPaused  bool
 	snooze     *time.Time
 	resolvedOK bool // role fields hold a successful resolve
+	// awaitFresh is when the store last changed how this replica is
+	// judged (its state became ready or attention, or paused flipped):
+	// until a report taken at or after it arrives, or freshBound passes,
+	// the status judged before the change stands. Zero when not waiting.
+	awaitFresh time.Time
 
 	// From the agent.
 	online       bool
@@ -105,7 +110,7 @@ func (m *Monitor) load() {
 	for _, srv := range servers {
 		s := m.state(srv.ID)
 		s.snooze = srv.SnoozeUntil
-		if err := m.resolve(srv.ID, s); err != nil {
+		if err := m.resolve(srv.ID, s, time.Time{}); err != nil {
 			m.log.Warn("monitor: resolve role", "server_id", srv.ID, "err", err)
 		}
 	}
@@ -147,7 +152,7 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 	s.snap, s.receivedAt, s.snapBacklog, s.graceUntil = &snap, at, he.Backlog, time.Time{}
 	s.needsUpgrade = false // only a current agent reports
 	s.dirty = true
-	if err := m.resolve(id, s); err != nil {
+	if err := m.resolve(id, s, at); err != nil {
 		m.log.Warn("monitor: resolve role", "server_id", id, "err", err)
 	}
 	m.snapshotEvents(id, s, &snap, at, true)
@@ -180,12 +185,19 @@ func firstTime(cur, at time.Time) time.Time {
 // resolve reads the server's role from the store: a master when a
 // topology names it, a replica when it has a replica row, otherwise not
 // monitored. On error s keeps what it had. The caller holds mu.
-func (m *Monitor) resolve(id int64, s *serverState) error {
+//
+// When a replica already resolved changes how it is judged (its state
+// becomes ready or attention, or its paused flag flips: a job or a
+// control just changed MySQL), the last report predates the change: the
+// status judged before it is kept (awaitFresh) and a fresh report is
+// fetched in the background, unless reportAt, the time of the report
+// being ingested (zero otherwise), is already after the change.
+func (m *Monitor) resolve(id int64, s *serverState, reportAt time.Time) error {
 	topo, err := m.st.GetTopologyByMaster(id)
 	switch {
 	case err == nil:
 		s.role, s.topoID, s.masterID, s.repState, s.repPaused = store.RoleMaster, topo.ID, id, "", false
-		s.resolvedOK = true
+		s.resolvedOK, s.awaitFresh = true, time.Time{}
 		return nil
 	case !errors.Is(err, store.ErrNotFound):
 		return err
@@ -193,7 +205,7 @@ func (m *Monitor) resolve(id int64, s *serverState) error {
 	rep, err := m.st.GetReplicaByServer(id)
 	if errors.Is(err, store.ErrNotFound) {
 		s.role, s.topoID, s.masterID, s.repState, s.repPaused = "", 0, 0, "", false
-		s.resolvedOK = true
+		s.resolvedOK, s.awaitFresh = true, time.Time{}
 		return nil
 	}
 	if err != nil {
@@ -203,10 +215,31 @@ func (m *Monitor) resolve(id int64, s *serverState) error {
 	if err != nil {
 		return err
 	}
+	changed := s.resolvedOK && s.role == store.RoleReplica && (rep.State != s.repState || rep.Paused != s.repPaused)
 	s.role, s.topoID, s.masterID, s.repState, s.repPaused = store.RoleReplica, topo.ID, topo.MasterServerID, rep.State, rep.Paused
 	s.resolvedOK = true
+	switch {
+	case !judgedState(rep.State):
+		s.awaitFresh = time.Time{} // Belum siap whatever the reports say
+	case changed:
+		now := m.now()
+		s.awaitFresh = now
+		if reportAt.IsZero() || reportAt.Before(now) {
+			m.fetchFreshLocked(id)
+		}
+	}
 	return nil
 }
+
+// judgedState reports whether a replica in state is judged by its reports
+// (DeriveReplica); in any other state it is Belum siap.
+func judgedState(state string) bool { return state == replicaReady || state == replicaAttention }
+
+// freshBound is how long a replica's status waits for a report taken
+// after a change in the store before the usual rules (staleness, agent
+// offline) take over: two agent checks and a call's timeout. The caller
+// holds mu.
+func (m *Monitor) freshBound() time.Duration { return 2*m.settings.CheckEvery + configureTimeout }
 
 // derive computes the status of a resolved server at now and records a
 // change; fromReport means a report taken at now is being ingested, so
@@ -225,6 +258,17 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 	var offlineSince time.Time
 	if !online {
 		offlineSince = s.offlineSince
+	}
+	if !s.awaitFresh.IsZero() {
+		switch {
+		case !s.receivedAt.Before(s.awaitFresh) || now.Sub(s.awaitFresh) > m.freshBound():
+			s.awaitFresh = time.Time{}
+		case s.status.Code != "":
+			// The last report predates the change: judging it now would
+			// read the old MySQL state with the new store state (a false
+			// "Berhenti" right after Start replika or a resync).
+			return
+		}
 	}
 	th := m.settings.Thresholds
 	var st Status

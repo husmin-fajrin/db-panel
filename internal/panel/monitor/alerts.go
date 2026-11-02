@@ -472,7 +472,7 @@ func (m *Monitor) JobFailed(serverID int64, jobID, kind, step, errText string) {
 	case errors.Is(err, store.ErrNotFound):
 		s := m.state(serverID)
 		if !s.resolvedOK {
-			if err := m.resolve(serverID, s); err != nil {
+			if err := m.resolve(serverID, s, time.Time{}); err != nil {
 				m.log.Warn("job_failed: resolve role", "server_id", serverID, "err", err)
 			}
 		}

@@ -189,6 +189,8 @@ type fakeAgent struct {
 	calls    []string
 	configs  []proto.MonitorConfigureParams
 	attached bool
+	// gate, when set, holds monitor.snapshot answers until it is closed.
+	gate chan struct{}
 }
 
 func (r *rig) agent(id int64, modern bool, snap proto.HealthSnapshot) *fakeAgent {
@@ -215,7 +217,11 @@ func (r *rig) agent(id int64, modern bool, snap proto.HealthSnapshot) *fakeAgent
 		reg.Register("monitor.snapshot", func(context.Context, json.RawMessage) (any, error) {
 			a.mu.Lock()
 			a.calls = append(a.calls, "monitor.snapshot")
+			gate := a.gate
 			a.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
 			return a.report(), nil
 		})
 	}
@@ -237,6 +243,26 @@ func (a *fakeAgent) attach() *fakeAgent {
 }
 
 func (a *fakeAgent) detach() { a.r.hub.Detach(a.id, a.conn) }
+
+// holdSnapshots makes monitor.snapshot wait until the returned function
+// is called (also at the end of the test, before the Monitor closes).
+func (a *fakeAgent) holdSnapshots() (release func()) {
+	gate := make(chan struct{})
+	a.mu.Lock()
+	a.gate = gate
+	a.mu.Unlock()
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			a.mu.Lock()
+			a.gate = nil
+			a.mu.Unlock()
+			close(gate)
+		})
+	}
+	a.r.t.Cleanup(release)
+	return release
+}
 
 func (a *fakeAgent) setSnap(f func(s *proto.HealthSnapshot)) {
 	a.mu.Lock()

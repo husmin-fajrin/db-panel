@@ -106,6 +106,9 @@ type Deps struct {
 type Alerts interface {
 	JobFailed(serverID int64, jobID, kind, step, errText string)
 	JobEnded(serverID int64, jobID string)
+	// ReplicaChanged: the replica's state or paused flag was just written
+	// (MySQL changed with it), so its last health report is out of date.
+	ReplicaChanged(serverID int64)
 }
 
 // Runner starts, runs and steers orchestrated jobs.
@@ -275,6 +278,14 @@ func (r *Runner) jobFailed(serverID int64, jobID, kind, step, errText string) {
 func (r *Runner) jobEnded(serverID int64, jobID string) {
 	if r.d.Alerts != nil {
 		r.d.Alerts.JobEnded(serverID, jobID)
+	}
+}
+
+// replicaChanged tells Deps.Alerts that the replica's state or paused flag
+// was just written.
+func (r *Runner) replicaChanged(serverID int64) {
+	if r.d.Alerts != nil {
+		r.d.Alerts.ReplicaChanged(serverID)
 	}
 }
 
@@ -642,6 +653,7 @@ func (r *Runner) Resume(ctx context.Context) {
 				!errors.Is(err, store.ErrNotFound) {
 				r.log.Warn("replica state on resume", "job", j.ID, "err", err)
 			}
+			r.replicaChanged(j.ServerID)
 		}
 		r.log.Info("job failed by restart", "job", j.ID, "kind", j.Kind, "step", j.CurrentStep)
 	}

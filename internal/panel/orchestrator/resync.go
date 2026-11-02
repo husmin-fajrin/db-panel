@@ -73,6 +73,7 @@ func (r *Runner) StartResync(ctx context.Context, p ResyncParams) (string, error
 	if err := r.d.Store.SetReplicaState(p.ServerID, store.ReplicaResyncing, ""); err != nil {
 		return "", err
 	}
+	defer r.replicaChanged(p.ServerID)
 	id, err := r.createJob(KindResyncReplica, p.ServerID, topo.ID, st, resyncStepNames())
 	if err != nil {
 		if serr := r.d.Store.SetReplicaState(p.ServerID, rep.State, rep.LastError); serr != nil {

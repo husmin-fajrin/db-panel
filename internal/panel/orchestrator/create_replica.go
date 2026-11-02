@@ -742,6 +742,7 @@ func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 		if err := jr.r.d.Store.SetReplicaPaused(jr.target(), false); err != nil {
 			return outcome{}, err
 		}
+		jr.r.replicaChanged(jr.target())
 	}
 	jr.logf("info", "Replika sinkron dengan master.")
 	return done("sinkron"), nil
@@ -817,6 +818,7 @@ func (jr *jobRun) setReplicaState(state, lastError string) {
 	if err := jr.r.d.Store.SetReplicaState(jr.job.ServerID, state, lastError); err != nil && !errors.Is(err, store.ErrNotFound) {
 		jr.r.log.Warn("replica state", "job", jr.job.ID, "err", err)
 	}
+	jr.r.replicaChanged(jr.job.ServerID)
 }
 
 // stopReplicaAfter stops replication on the target when the job ended at

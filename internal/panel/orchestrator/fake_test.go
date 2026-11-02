@@ -240,6 +240,8 @@ type fakeAlerts struct {
 	mu     sync.Mutex
 	failed []string // "server job kind step"
 	ended  []string // "server job"
+	// changed holds the servers of ReplicaChanged calls, in order.
+	changed []int64
 }
 
 func (a *fakeAlerts) JobFailed(serverID int64, jobID, kind, step, errText string) {
@@ -252,6 +254,25 @@ func (a *fakeAlerts) JobEnded(serverID int64, jobID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ended = append(a.ended, fmt.Sprintf("%d %s", serverID, jobID))
+}
+
+func (a *fakeAlerts) ReplicaChanged(serverID int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.changed = append(a.changed, serverID)
+}
+
+// changes is how often ReplicaChanged was called for serverID.
+func (a *fakeAlerts) changes(serverID int64) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, id := range a.changed {
+		if id == serverID {
+			n++
+		}
+	}
+	return n
 }
 
 func (a *fakeAlerts) lists() (failed, ended []string) {

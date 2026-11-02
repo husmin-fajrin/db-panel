@@ -138,10 +138,53 @@ func (m *Monitor) Close() {
 func (m *Monitor) goBg(fn func(ctx context.Context)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.goBgLocked(fn)
+}
+
+// goBgLocked is goBg with mu held.
+func (m *Monitor) goBgLocked(fn func(ctx context.Context)) {
 	if m.closed {
 		return
 	}
 	m.bg.Go(func() { fn(m.ctx) })
+}
+
+// fetchFreshLocked asks the agent of id for a fresh report in the background
+// and takes it (not rate-limited like CheckNow). The caller holds mu.
+func (m *Monitor) fetchFreshLocked(id int64) {
+	m.goBgLocked(func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, configureTimeout)
+		defer cancel()
+		var he proto.HealthEvent
+		if err := m.hub.Call(ctx, id, "monitor.snapshot", nil, &he); err != nil {
+			if m.ctx.Err() == nil {
+				m.log.Debug("fresh health report after a replica change failed", "server_id", id, "err", err)
+			}
+			return
+		}
+		m.report(id, he)
+	})
+}
+
+// ReplicaChanged tells the Monitor that the orchestrator just changed a
+// replica's state or paused flag (and MySQL with it): the status judged
+// before stays until a report taken after the change arrives, which is
+// fetched now, and the alerts are evaluated against the new store state.
+func (m *Monitor) ReplicaChanged(serverID int64) {
+	now := m.now()
+	m.mu.Lock()
+	s := m.state(serverID)
+	var ups []healthUpdate
+	if err := m.resolve(serverID, s, time.Time{}); err != nil {
+		m.log.Warn("monitor: resolve role", "server_id", serverID, "err", err)
+	} else {
+		m.derive(serverID, s, now, false)
+		ups = m.commit(serverID, s, nil)
+	}
+	alerts := m.evaluate(now)
+	m.mu.Unlock()
+	m.emit(ups)
+	m.emitAlerts(alerts)
 }
 
 // Run re-evaluates the time-based statuses every TickEvery until ctx is
@@ -375,7 +418,7 @@ func (m *Monitor) markNeedsUpgrade(id int64) {
 	s := m.state(id)
 	s.needsUpgrade = true
 	var ups []healthUpdate
-	if m.resolve(id, s) == nil {
+	if m.resolve(id, s, time.Time{}) == nil {
 		m.derive(id, s, now, false)
 		ups = m.commit(id, s, nil)
 	}
@@ -410,7 +453,7 @@ func (m *Monitor) tick() {
 	var ups []healthUpdate
 	for _, srv := range servers {
 		s := m.servers[srv.ID]
-		if err := m.resolve(srv.ID, s); err != nil {
+		if err := m.resolve(srv.ID, s, time.Time{}); err != nil {
 			m.log.Warn("monitor tick: resolve role", "server_id", srv.ID, "err", err)
 			continue
 		}

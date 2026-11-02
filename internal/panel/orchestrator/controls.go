@@ -15,15 +15,24 @@ import (
 // in between is caught by its own checks of the replica's state).
 
 // StopReplica stops replication on a ready replica and records it as
-// paused by the operator.
+// paused by the operator. Paused is written first, so a health report
+// taken between the stop and the write is never judged "Berhenti (di luar
+// panel)"; it is cleared again when the stop fails.
 func (r *Runner) StopReplica(ctx context.Context, serverID int64) error {
 	if err := r.controllableReplica(serverID); err != nil {
 		return err
 	}
-	if err := r.directCall(ctx, serverID, "mysql.stopReplica", nil); err != nil {
+	if err := r.d.Store.SetReplicaPaused(serverID, true); err != nil {
 		return err
 	}
-	return r.d.Store.SetReplicaPaused(serverID, true)
+	defer r.replicaChanged(serverID)
+	if err := r.directCall(ctx, serverID, "mysql.stopReplica", nil); err != nil {
+		if perr := r.d.Store.SetReplicaPaused(serverID, false); perr != nil {
+			r.log.Warn("clear paused after a failed stop", "server_id", serverID, "err", perr)
+		}
+		return err
+	}
+	return nil
 }
 
 // StartReplica starts replication on a ready replica and clears paused.
@@ -34,7 +43,11 @@ func (r *Runner) StartReplica(ctx context.Context, serverID int64) error {
 	if err := r.directCall(ctx, serverID, "mysql.startReplica", nil); err != nil {
 		return err
 	}
-	return r.d.Store.SetReplicaPaused(serverID, false)
+	if err := r.d.Store.SetReplicaPaused(serverID, false); err != nil {
+		return err
+	}
+	r.replicaChanged(serverID)
+	return nil
 }
 
 // Relock makes a ready replica read-only (super_read_only) again.

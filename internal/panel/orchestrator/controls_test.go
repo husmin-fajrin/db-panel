@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -18,17 +19,30 @@ func TestStopStartSetsPaused(t *testing.T) {
 	r := e.followingReplica(topo, "a")
 	ctx := context.Background()
 
+	// Paused is written before STOP REPLICA runs, so no health report
+	// taken in between reads as a stop outside the panel.
+	var pausedAtStop bool
+	r.on("mysql.stopReplica", func(json.RawMessage) (any, error) {
+		pausedAtStop = e.replica(r.id).Paused
+		return nil, nil
+	})
 	if err := e.r.StopReplica(ctx, r.id); err != nil {
 		t.Fatalf("StopReplica: %v", err)
 	}
-	if !e.replica(r.id).Paused {
-		t.Fatal("paused not set after StopReplica")
+	if !e.replica(r.id).Paused || !pausedAtStop {
+		t.Fatalf("paused after StopReplica = %v, when STOP REPLICA ran = %v; want both set", e.replica(r.id).Paused, pausedAtStop)
+	}
+	if n := e.alerts.changes(r.id); n != 1 {
+		t.Fatalf("ReplicaChanged after StopReplica called %d times, want 1", n)
 	}
 	if err := e.r.StartReplica(ctx, r.id); err != nil {
 		t.Fatalf("StartReplica: %v", err)
 	}
 	if e.replica(r.id).Paused {
 		t.Fatal("paused still set after StartReplica")
+	}
+	if n := e.alerts.changes(r.id); n != 2 {
+		t.Fatalf("ReplicaChanged after StartReplica called %d times in all, want 2", n)
 	}
 	wantCmds(t, "replica", r.cmds(0), []string{"mysql.stopReplica", "mysql.startReplica"})
 	wantCmds(t, "master", m.cmds(0), nil)

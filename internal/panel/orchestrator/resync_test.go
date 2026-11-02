@@ -112,6 +112,10 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 	if got := stepStatuses(steps); !slices.Equal(got, want) {
 		t.Fatalf("step statuses = %v (no step may wait)", got)
 	}
+	// The Monitor hears of resyncing, ready and the cleared pause.
+	if n := e.alerts.changes(r.id); n < 3 {
+		t.Fatalf("ReplicaChanged called %d times, want at least 3", n)
+	}
 
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
