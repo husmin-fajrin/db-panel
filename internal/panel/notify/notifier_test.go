@@ -367,6 +367,60 @@ func TestSnoozedSkipsUntilEnd(t *testing.T) {
 	}
 }
 
+// TestSnoozeEndSendsOpenAlertsOnce: when a snooze ends, each alert of the
+// server still open goes out once, as a reminder, even with its repeat not
+// yet due; the repeat clock restarts from that send.
+func TestSnoozeEndSendsOpenAlertsOnce(t *testing.T) {
+	r := newRig(t)
+	r.configure()
+	srv, other := r.server("DB-1"), r.server("DB-2")
+	id := r.open(monitor.KindDiskWarn, srv, "Disk data terpakai 86%.")
+	otherID := r.open(monitor.KindDiskWarn, other, "Disk data terpakai 86%.")
+	r.pass() // both sent at t0
+	r.snooze(srv, true)
+	r.clk.Add(time.Hour)
+	r.pass()
+	if got := r.texts(); len(got) != 2 {
+		t.Fatalf("messages during the snooze = %q", got)
+	}
+
+	r.clk.Add(time.Hour) // t0+2h: the 6 h repeat is far off
+	r.snooze(srv, false)
+	r.pass()
+	got := r.texts()
+	if len(got) != 3 || !strings.Contains(got[2], "Server: DB-1") {
+		t.Fatalf("messages at the snooze end = %q; want DB-1's alert once more", got)
+	}
+	if a := r.alert(id); a.NotifyCount != 2 || !a.LastNotifiedAt.Equal(r.clk.Now()) {
+		t.Fatalf("alert after the reminder = %+v", a)
+	}
+	if a := r.alert(otherID); a.NotifyCount != 1 {
+		t.Fatalf("an unsnoozed server's alert was sent again: %+v", a)
+	}
+	r.pass()
+	if got := r.texts(); len(got) != 3 {
+		t.Fatalf("the reminder went out twice: %q", got)
+	}
+
+	// The repeat counts from the reminder: DB-2's comes due at t0+6h,
+	// DB-1's only at t0+8h.
+	r.clk.Add(4 * time.Hour)
+	r.pass()
+	if got := r.texts(); len(got) != 4 || !strings.Contains(got[3], "Server: DB-2") {
+		t.Fatalf("messages at t0+6h = %q; want only DB-2's repeat", got)
+	}
+	r.clk.Add(2*time.Hour - time.Second)
+	r.pass()
+	if got := r.texts(); len(got) != 4 {
+		t.Fatalf("DB-1 repeated before 6 h after the reminder: %q", got)
+	}
+	r.clk.Add(time.Second)
+	r.pass()
+	if got := r.texts(); len(got) != 5 || !strings.Contains(got[4], "Server: DB-1") {
+		t.Fatalf("messages at t0+8h = %q; want DB-1's repeat", got)
+	}
+}
+
 func TestKindsFilter(t *testing.T) {
 	r := newRig(t)
 	r.configure()

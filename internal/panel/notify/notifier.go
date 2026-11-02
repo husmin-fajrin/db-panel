@@ -140,6 +140,10 @@ type Notifier struct {
 
 	wake   chan struct{}
 	passMu sync.Mutex // one pass at a time, so nothing is sent twice
+	// wasSnoozed holds the servers found snoozed by the last pass that
+	// looked at them; guarded by passMu. Kept in memory only: after a
+	// restart a snooze that ended meanwhile sends no reminder.
+	wasSnoozed map[int64]bool
 
 	testMu   sync.Mutex
 	lastTest time.Time
@@ -150,7 +154,7 @@ func New(d Deps) *Notifier {
 	n := &Notifier{
 		st: d.Store, box: d.Box, sender: d.Sender, log: d.Logger, now: d.Now,
 		retryEvery: d.RetryEvery, repeat: d.Repeat, snoozed: d.Snoozed, serverName: d.ServerName,
-		wake: make(chan struct{}, 1),
+		wake: make(chan struct{}, 1), wasSnoozed: make(map[int64]bool),
 	}
 	if n.log == nil {
 		n.log = slog.Default()
@@ -200,10 +204,12 @@ func (n *Notifier) Wake() {
 //   - an open alert sent longer than Repeat ago;
 //   - one recovery message for a closed alert that had been sent.
 //
-// A snoozed server's alerts wait until the snooze ends; then its alerts
-// still open and never sent, or due for a repeat, go out, and so do the
-// recovery messages of alerts that closed meanwhile. Without a bot token
-// and chat id nothing happens and the alerts stay pending.
+// A snoozed server's alerts wait until the snooze ends (spec 5.3). The
+// first pass after that sends each of its alerts still open once, as a
+// reminder, whether or not a repeat is due, and the repeat clock restarts
+// from that send; the recovery messages of alerts that closed meanwhile go
+// out too. Without a bot token and chat id nothing happens and the alerts
+// stay pending.
 func (n *Notifier) Pass(ctx context.Context) {
 	n.passMu.Lock()
 	defer n.passMu.Unlock()
@@ -226,7 +232,7 @@ func (n *Notifier) Pass(ctx context.Context) {
 	snoozed := make(map[int64]bool)
 	for _, a := range alerts {
 		if ctx.Err() != nil {
-			return
+			return // the snooze ends not yet handled stay in wasSnoozed
 		}
 		s, ok := snoozed[a.ServerID]
 		if !ok {
@@ -236,13 +242,21 @@ func (n *Notifier) Pass(ctx context.Context) {
 		if a.ClosedAt != nil {
 			n.notifyRecovered(ctx, cfg, a, s)
 		} else {
-			n.notify(ctx, cfg, a, s)
+			n.notify(ctx, cfg, a, s, !s && n.wasSnoozed[a.ServerID])
+		}
+	}
+	for id, s := range snoozed {
+		if s {
+			n.wasSnoozed[id] = true
+		} else {
+			delete(n.wasSnoozed, id)
 		}
 	}
 }
 
-// notify handles an open alert.
-func (n *Notifier) notify(ctx context.Context, cfg Config, a store.Alert, snoozed bool) {
+// notify handles an open alert; snoozeEnded sends it even when no repeat
+// is due.
+func (n *Notifier) notify(ctx context.Context, cfg Config, a store.Alert, snoozed, snoozeEnded bool) {
 	if !cfg.enabled(a.Kind) {
 		// A switched-off kind is marked sent without sending, so it never
 		// shows as pending; notify_count stays 0 (nothing was delivered),
@@ -256,7 +270,7 @@ func (n *Notifier) notify(ctx context.Context, cfg Config, a store.Alert, snooze
 	if snoozed {
 		return
 	}
-	if a.TelegramState == store.TelegramSent && a.LastNotifiedAt != nil &&
+	if !snoozeEnded && a.TelegramState == store.TelegramSent && a.LastNotifiedAt != nil &&
 		n.now().Before(a.LastNotifiedAt.Add(cfg.Repeat)) {
 		return
 	}
