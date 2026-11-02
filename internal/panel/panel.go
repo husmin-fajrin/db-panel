@@ -200,13 +200,12 @@ func New(o Options) (*Panel, error) {
 }
 
 // sendWeekly sends the weekly summary through Telegram. Without Telegram
-// set up there is nowhere to send it, so the occurrence is skipped rather
-// than retried all week.
+// set up the Monitor keeps the occurrence pending and tries again later, so
+// setting Telegram up on Tuesday still delivers Monday's summary.
 func (p *Panel) sendWeekly(ctx context.Context, text string) error {
 	err := p.Notifier.SendWeekly(ctx, text)
 	if errors.Is(err, notify.ErrNotConfigured) {
-		p.log.Info("weekly summary skipped: Telegram is not set up")
-		return nil
+		return healthmon.ErrWeeklyNotConfigured
 	}
 	return err
 }

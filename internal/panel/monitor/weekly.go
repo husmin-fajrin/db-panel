@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,9 +10,20 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
-// weeklyRetryEvery is how long a failed weekly send waits before the next
-// try.
-const weeklyRetryEvery = 5 * time.Minute
+const (
+	// weeklyRetryEvery is how long a failed weekly send waits before the
+	// next try.
+	weeklyRetryEvery = 5 * time.Minute
+	// weeklyDeferEvery is how long a summary that cannot be sent yet
+	// (ErrWeeklyNotConfigured) waits before the next try.
+	weeklyDeferEvery = time.Hour
+)
+
+// ErrWeeklyNotConfigured is what Deps.SendWeekly returns when the summary
+// cannot be sent until the operator sets Telegram up. The occurrence stays
+// pending, and is tried again every hour, so setting Telegram up late still
+// delivers it.
+var ErrWeeklyNotConfigured = errors.New("Telegram belum diatur")
 
 // WeeklyRow is one server's line of the weekly summary.
 type WeeklyRow struct {
@@ -26,6 +38,9 @@ type WeeklyRow struct {
 	IncidentTotal time.Duration
 	DiskPct       int // data disk used now; 0 when unknown
 	FailedJobs    int
+	// NotMonitored: a replica with no monitored time in the window (its
+	// SyncedPct then means nothing).
+	NotMonitored bool
 }
 
 // isIncident reports whether a server in status code is down for the
@@ -79,6 +94,8 @@ func Weekly(s *store.Store, views map[int64]View, from, to time.Time) ([]WeeklyR
 				row.SyncedPct = 100 * float64(synced) / float64(monitored)
 			} else if row.FailedJobs == 0 {
 				continue // not monitored in the window: nothing to report
+			} else {
+				row.NotMonitored = true // only its failed jobs are worth a line
 			}
 		}
 		rows = append(rows, row)
@@ -97,7 +114,8 @@ func tally(row *WeeklyRow, evs []store.StatusEvent, current string, from, to tim
 			start = evs[0].TS
 		}
 	}
-	prevIncident := isIncident(code) && start.Equal(from) // a running incident began before the window
+	// An incident running at the start of the window counts as one in it.
+	prevIncident := false
 	segment := func(end time.Time) {
 		if code == "" || !end.After(start) {
 			return
@@ -144,17 +162,26 @@ func FormatWeekly(rows []WeeklyRow, from, to time.Time) string {
 		failed += r.FailedJobs
 		b.WriteString("\n• " + r.ServerName)
 		if r.Role == store.RoleMaster {
-			b.WriteString(" (master): ")
-		} else {
-			fmt.Fprintf(&b, ": sinkron %s · ", percent(r.SyncedPct))
+			b.WriteString(" (master)")
 		}
-		fmt.Fprintf(&b, "%d gangguan", r.Incidents)
-		if r.Incidents > 0 {
-			fmt.Fprintf(&b, " (%s)", weeklyDuration(r.IncidentTotal))
+		parts := make([]string, 0, 3)
+		switch {
+		case r.NotMonitored:
+			parts = append(parts, "belum dipantau minggu ini")
+		case r.Role != store.RoleMaster:
+			parts = append(parts, "sinkron "+percent(r.SyncedPct))
+		}
+		if !r.NotMonitored {
+			incidents := fmt.Sprintf("%d gangguan", r.Incidents)
+			if r.Incidents > 0 {
+				incidents += fmt.Sprintf(" (%s)", weeklyDuration(r.IncidentTotal))
+			}
+			parts = append(parts, incidents)
 		}
 		if r.DiskPct > 0 {
-			fmt.Fprintf(&b, " · disk %d%%", r.DiskPct)
+			parts = append(parts, fmt.Sprintf("disk %d%%", r.DiskPct))
 		}
+		b.WriteString(": " + strings.Join(parts, " · "))
 	}
 	if failed > 0 {
 		fmt.Fprintf(&b, "\nJob gagal: %d", failed)
@@ -213,7 +240,9 @@ func weekdayOf(at string) (time.Weekday, bool) {
 // weekly_last_sent keeps a restart from sending it twice, and an occurrence
 // missed while the panel was down is sent at the next call. The window is
 // the 7 days before the occurrence. A failed send is retried after
-// weeklyRetryEvery. Nothing happens without SendWeekly.
+// weeklyRetryEvery; one that SendWeekly says waits for Telegram
+// (ErrWeeklyNotConfigured) stays pending and is retried every
+// weeklyDeferEvery. Nothing happens without SendWeekly.
 func (m *Monitor) scheduleWeekly(ctx context.Context) {
 	if m.sendWeekly == nil {
 		return
@@ -257,9 +286,15 @@ func (m *Monitor) scheduleWeekly(ctx context.Context) {
 		if ctx.Err() != nil {
 			return // shutting down: the next start sends it
 		}
-		m.log.Warn("weekly summary not sent; will retry", "err", err)
+		retry := weeklyRetryEvery
+		if errors.Is(err, ErrWeeklyNotConfigured) {
+			retry = weeklyDeferEvery
+			m.log.Info("weekly summary waits for Telegram to be set up", "retry_in", retry)
+		} else {
+			m.log.Warn("weekly summary not sent; will retry", "err", err, "retry_in", retry)
+		}
 		m.mu.Lock()
-		m.weeklyRetryAt = now.Add(weeklyRetryEvery)
+		m.weeklyRetryAt = now.Add(retry)
 		m.mu.Unlock()
 		return
 	}

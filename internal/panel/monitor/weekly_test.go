@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -93,8 +94,29 @@ func TestWeeklyLaggingCountsAsSyncedAndNoEventsUsesCurrentStatus(t *testing.T) {
 		t.Fatalf("steady replica = %+v", r)
 	}
 	// Stopped all week with no event in it: one incident, already running.
-	if r := rowOf(t, rows, "DB-4"); r.SyncedPct != 0 || r.IncidentTotal != 7*24*time.Hour {
-		t.Fatalf("stopped replica = %+v", r)
+	r := rowOf(t, rows, "DB-4")
+	if r.SyncedPct != 0 || r.IncidentTotal != 7*24*time.Hour || r.Incidents != 1 {
+		t.Fatalf("stopped replica = %+v, want 0%%, one incident of 7 days", r)
+	}
+	if got := FormatWeekly([]WeeklyRow{r}, weekFrom, weekTo); !strings.Contains(got, "sinkron 0,0% · 1 gangguan (168 jam)") {
+		t.Fatalf("an outage of the whole week must show its duration:\n%s", got)
+	}
+}
+
+func TestWeeklyCountsAnOutageThatBeganBeforeTheWindow(t *testing.T) {
+	st := openStore(t)
+	id := weeklyServer(t, st, "DB-2")
+	// Down since before Monday 07:00, back after 5 hours, later down again.
+	statusAt(t, st, id, weekFrom.Add(5*time.Hour), StatusStopped, StatusSynced)
+	statusAt(t, st, id, weekFrom.Add(24*time.Hour), StatusSynced, StatusUnreachable)
+	statusAt(t, st, id, weekFrom.Add(25*time.Hour), StatusUnreachable, StatusSynced)
+
+	rows, err := Weekly(st, map[int64]View{id: replicaView(id, StatusSynced)}, weekFrom, weekTo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := rowOf(t, rows, "DB-2"); r.Incidents != 2 || r.IncidentTotal != 6*time.Hour {
+		t.Fatalf("row = %+v, want 2 incidents for 6h", r)
 	}
 }
 
@@ -223,6 +245,36 @@ func TestWeeklyCountsFailedJobsInTheWindow(t *testing.T) {
 	}
 }
 
+func TestWeeklyUnmonitoredReplicaWithFailedJob(t *testing.T) {
+	st := openStore(t)
+	id := weeklyServer(t, st, "DB-2")
+	quiet := weeklyServer(t, st, "DB-3")
+	// Both register after the window: no monitored time in it. Only DB-2
+	// has a failed job.
+	statusAt(t, st, id, weekTo.Add(time.Hour), "", StatusSynced)
+	statusAt(t, st, quiet, weekTo.Add(time.Hour), "", StatusSynced)
+	if err := st.CreateJob(store.Job{ID: "j", Kind: "replica_setup", ServerID: id, CreatedAt: weekFrom}, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateJob("j", store.JobFailed, 0, "x", weekFrom.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := Weekly(st, map[int64]View{id: replicaView(id, StatusSynced), quiet: replicaView(quiet, StatusSynced)}, weekFrom, weekTo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want only the one with a failed job", rows)
+	}
+	if r := rows[0]; !r.NotMonitored || r.FailedJobs != 1 || r.SyncedPct != 0 {
+		t.Fatalf("row = %+v", r)
+	}
+	if got := FormatWeekly(rows, weekFrom, weekTo); strings.Contains(got, "sinkron") || !strings.Contains(got, "DB-2: belum dipantau minggu ini") {
+		t.Fatalf("summary = %q", got)
+	}
+}
+
 func TestFormatWeekly(t *testing.T) {
 	rows := []WeeklyRow{
 		{ServerName: "DB-1", Role: store.RoleMaster, DiskPct: 54},
@@ -244,6 +296,12 @@ func TestFormatWeekly(t *testing.T) {
 	}
 	if strings.ContainsAny(got, "*_`[]") {
 		t.Fatalf("summary must be plain text: %q", got)
+	}
+	// A replica with no monitored time shows no percentage.
+	rows = []WeeklyRow{{ServerName: "DB-5", Role: store.RoleReplica, NotMonitored: true, DiskPct: 30, FailedJobs: 1}}
+	want = "📊 Ringkasan mingguan dbpanel (26-10 s.d. 02-11)\n• DB-5: belum dipantau minggu ini · disk 30%\nJob gagal: 1"
+	if got := FormatWeekly(rows, weekFrom, weekTo); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 	// No failed jobs: no last line.
 	rows = []WeeklyRow{{ServerName: "DB-3", Role: store.RoleReplica, SyncedPct: 100, DiskPct: 40}}
@@ -276,12 +334,13 @@ type weeklyRig struct {
 	mu   sync.Mutex
 	sent []string
 	fail error
+	logs *syncBuffer
 	m    *Monitor
 }
 
 func newWeeklyRig(t *testing.T, now time.Time, set func(*Settings)) *weeklyRig {
 	t.Helper()
-	r := &weeklyRig{t: t, st: openStore(t), clk: &fakeClock{t: now}}
+	r := &weeklyRig{t: t, st: openStore(t), clk: &fakeClock{t: now}, logs: &syncBuffer{}}
 	s := DefaultSettings()
 	if set != nil {
 		set(&s)
@@ -298,7 +357,8 @@ func (r *weeklyRig) start() {
 	if r.m != nil {
 		r.m.Close()
 	}
-	r.m = New(Deps{Store: r.st, Now: r.clk.Now, TickEvery: time.Hour, SendWeekly: r.send})
+	r.m = New(Deps{Store: r.st, Now: r.clk.Now, TickEvery: time.Hour, SendWeekly: r.send,
+		Logger: slog.New(slog.NewTextHandler(r.logs, nil))})
 	r.t.Cleanup(r.m.Close)
 }
 
@@ -465,5 +525,51 @@ func TestWeeklyFailedSendIsRetriedLater(t *testing.T) {
 	}
 	if got := r.lastSent(); got != weekTo.Format(time.RFC3339) {
 		t.Fatalf("weekly_last_sent = %q", got)
+	}
+}
+
+func TestWeeklyWaitsForTelegramSetup(t *testing.T) {
+	r := newWeeklyRig(t, weekTo.Add(26*time.Hour), nil) // Tuesday 09:00
+	r.setLastSent(weekFrom)
+	r.fail = ErrWeeklyNotConfigured
+
+	r.schedule()
+	if got := r.lastSent(); got != weekFrom.Format(time.RFC3339) {
+		t.Fatalf("an unsent occurrence was recorded as sent: %q", got)
+	}
+	// Telegram gets set up, but the retry delay has not passed.
+	r.fail = nil
+	r.clk.Add(weeklyDeferEvery - time.Second)
+	r.schedule()
+	if r.count() != 0 {
+		t.Fatalf("retried before the delay: %v", r.sent)
+	}
+	r.clk.Add(time.Second)
+	r.schedule()
+	if r.count() != 1 || !strings.Contains(r.sent[0], "(26-10 s.d. 02-11)") {
+		t.Fatalf("sent = %q, want last week's summary once Telegram is set up", r.sent)
+	}
+	if got := r.lastSent(); got != weekTo.Format(time.RFC3339) {
+		t.Fatalf("weekly_last_sent = %q", got)
+	}
+	for i := 0; i < 3; i++ {
+		r.clk.Add(weeklyDeferEvery)
+		r.schedule()
+	}
+	if r.count() != 1 {
+		t.Fatalf("sent %d times for one occurrence", r.count())
+	}
+}
+
+func TestWeeklyWaitingForTelegramLogsOncePerRetry(t *testing.T) {
+	r := newWeeklyRig(t, weekTo.Add(time.Minute), nil)
+	r.setLastSent(weekFrom)
+	r.fail = ErrWeeklyNotConfigured
+	for i := 0; i < 50; i++ { // 50 ticks inside the delay
+		r.schedule()
+		r.clk.Add(5 * time.Second)
+	}
+	if n := strings.Count(r.logs.String(), "weekly summary waits"); n != 1 {
+		t.Fatalf("%d log lines for 50 ticks, want 1", n)
 	}
 }
