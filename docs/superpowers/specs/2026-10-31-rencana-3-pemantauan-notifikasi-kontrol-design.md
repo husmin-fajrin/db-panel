@@ -53,8 +53,9 @@ tiap langkah.
   (SEC-06, SEC-29 butir 2, SEC-41): Rencana 4 bersama promote. Alasan:
   tidak dirasakan user, memaksa pemasangan ulang, baru genting saat
   promote.
-- Grafik lag yang halus; heartbeat ketelitian sub-detik (opsional di
-  rencana berikutnya bila dibutuhkan).
+- Grafik lag yang halus; tabel heartbeat di master (celah `Seconds_Behind_Source`
+  ditutup dengan pembandingan GTID dua sisi di 5.2; heartbeat bisa jadi
+  fitur opsional per topologi bila kelak butuh angka detik presisi).
 - Kanal notifikasi selain Telegram; lebih dari satu chat tujuan.
 - Perbaikan otomatis apa pun.
 
@@ -198,7 +199,7 @@ menulis kejadian bila status berubah.
 | Dihentikan | `sql_running=No` atau `io_running=No` tanpa error, dan `replicas.paused=1` (dihentikan lewat panel) | kuning |
 | Berhenti (di luar panel) | sama tanpa `paused` | merah |
 | Terputus | `io_running` = `Connecting` atau `No` tanpa error | kuning; merah bila > 3 menit |
-| Ketinggalan | `seconds_behind` >= ambang, atau nil saat kedua thread Yes | kuning |
+| Ketinggalan | `seconds_behind` >= ambang; atau nil saat kedua thread Yes; atau `gtid_executed` master (laporan terakhir masternya) memuat transaksi yang belum ada di `retrieved_gtid` replika selama lebih dari ambang (menutup kelemahan `Seconds_Behind_Source` yang bisa 0 saat thread IO tertinggal; ditampilkan "tertinggal N transaksi") | kuning |
 | Sinkron | sisanya | hijau |
 
 Penanda terpisah dari status: **Kunci terlepas** (`super_read_only=OFF`
