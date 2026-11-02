@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,8 +24,11 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
+	agentmon "github.com/husmin-fajrin/db-panel/internal/agent/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
+	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
 )
 
@@ -309,8 +313,8 @@ func TestE2ECreateReplica(t *testing.T) {
 
 // startE2EAgent pairs a new server called name with p and runs an agent for
 // it in-process whose MySQL driver manages inst, with its role and source
-// pins in the returned directory. The agent stops when the test ends,
-// before inst does.
+// pins in the returned directory and its health monitor running. The agent
+// stops when the test ends, before inst does.
 func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance, logs io.Writer) (int64, string) {
 	t.Helper()
 	srv, err := p.Store.CreateServer(name)
@@ -344,15 +348,29 @@ func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance
 	runner.Register(reg)
 	d := &mysql.Driver{Host: inst.HostWith(creds), Creds: creds, Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg, PinDir: dir}
 	d.Register(reg)
+	// The health monitor, as "dbpanel agent" runs it; the panel sends its
+	// intervals with monitor.configure once the agent is online.
+	mon := agentmon.New(d, a, logger, agentmon.Options{Pins: d.Pins()})
+	mon.Register(reg)
 
 	done := make(chan error, 1)
+	monDone := make(chan struct{})
 	go func() { done <- a.Run(ctx) }()
+	go func() {
+		defer close(monDone)
+		mon.Run(ctx)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
 		case <-done:
 		case <-time.After(30 * time.Second):
 			t.Errorf("agent %s did not stop", name)
+		}
+		select {
+		case <-monDone:
+		case <-time.After(30 * time.Second):
+			t.Errorf("health monitor of agent %s did not stop", name)
 		}
 	})
 	waitForWithin(t, 30*time.Second, "agent "+name+" online", func() bool {
@@ -566,4 +584,203 @@ func schemaExists(t *testing.T, db *sql.DB, name string) bool {
 		t.Fatal(err)
 	}
 	return n > 0
+}
+
+// TestE2EMonitoring drives the health monitor, the alerts, Telegram (a fake
+// Bot API) and the replica controls with real agents and mysqld instances
+// (spec 5.1–5.4, 5.9): a replica stopped outside the panel, started, stopped
+// and unlocked through the panel, relocked, and resynced. Each change must
+// show within e2eWait.
+func TestE2EMonitoring(t *testing.T) {
+	skipWithoutE2E(t)
+	e := startE2ETopology(t)
+	p, ui, rep := e.p, e.ui, e.replicaSrv
+	repPath := fmt.Sprintf("/replicas/%d", rep)
+	waitStatus(t, p, rep, healthmon.StatusSynced)
+	waitStatus(t, p, e.masterSrv, healthmon.StatusHealthy)
+	if kinds := openKinds(t, p, rep); len(kinds) != 0 {
+		t.Fatalf("alerts open on the new replica: %v", kinds)
+	}
+
+	// (a) STOP REPLICA in MySQL itself: Berhenti (di luar panel), an open
+	// replica_stopped, and one Telegram message naming the replica, in
+	// plain words.
+	stepStart := time.Now()
+	before := len(e.tg.messages())
+	execSQL(t, e.replicaDB, "STOP REPLICA")
+	v := waitStatus(t, p, rep, healthmon.StatusStoppedOutside)
+	waitForWithin(t, e2eWait, "an open replica_stopped alert", func() bool {
+		_, ok := openAlert(t, p, healthmon.KindReplicaStopped, rep)
+		return ok
+	})
+	stopHead := "Replika " + e.replicaName + " berhenti"
+	waitForWithin(t, e2eWait, "the Telegram message of the stopped replica", func() bool {
+		return len(containing(e.tg.since(before), stopHead)) > 0
+	})
+	if got := containing(e.tg.since(before), e.replicaName); len(got) != 1 {
+		t.Fatalf("Telegram messages naming %s after STOP REPLICA = %q, want exactly one", e.replicaName, got)
+	}
+	msg := containing(e.tg.since(before), stopHead)[0]
+	if !strings.Contains(msg, "Master: "+e.masterName) {
+		t.Errorf("stop message does not name the master:\n%s", msg)
+	}
+	var raw []string
+	if v.Snap != nil {
+		raw = append(raw, v.Snap.MySQLError)
+		if rs := v.Snap.Replica; rs != nil {
+			raw = append(raw, rs.LastIOError, rs.LastSQLError)
+		}
+	}
+	for _, r := range raw {
+		if r != "" && strings.Contains(msg, r) {
+			t.Fatalf("stop message carries MySQL's raw error %q:\n%s", r, msg)
+		}
+	}
+	t.Logf("(a) stopped outside the panel: status, alert and Telegram after %s", time.Since(stepStart).Round(time.Second))
+
+	// (b) Start replika: Sinkron, replica_stopped closed, one recovery
+	// message.
+	stepStart = time.Now()
+	if loc := ui.postRedirect(repPath+"/start", nil); loc != repPath+"?pesan=dijalankan" {
+		t.Fatalf("start redirected to %q", loc)
+	}
+	waitStatus(t, p, rep, healthmon.StatusSynced)
+	waitForWithin(t, e2eWait, "replica_stopped closed", func() bool {
+		_, ok := openAlert(t, p, healthmon.KindReplicaStopped, rep)
+		return !ok
+	})
+	recovered := e.replicaName + " pulih: replika berhenti"
+	waitForWithin(t, e2eWait, "the recovery message", func() bool {
+		return len(containing(e.tg.since(before), recovered)) > 0
+	})
+	t.Logf("(b) started: Sinkron and recovered after %s", time.Since(stepStart).Round(time.Second))
+
+	// (c) Stop replika through the panel: Dihentikan, no new alert and no
+	// message.
+	stepStart = time.Now()
+	openBefore := strings.Join(openKinds(t, p, rep), ",")
+	msgsBefore := len(e.tg.messages())
+	if loc := ui.postRedirect(repPath+"/stop", nil); loc != repPath+"?pesan=dihentikan" {
+		t.Fatalf("stop redirected to %q", loc)
+	}
+	waitStatus(t, p, rep, healthmon.StatusPaused)
+	// Past the Monitor's next tick (5 s) and the next report (10 s).
+	holdFor(t, 12*time.Second, "no new alert or message while Dihentikan", func() bool {
+		return strings.Join(openKinds(t, p, rep), ",") == openBefore &&
+			len(containing(e.tg.since(msgsBefore), e.replicaName)) == 0
+	})
+	if r, err := p.Store.GetReplicaByServer(rep); err != nil || !r.Paused {
+		t.Fatalf("replica after stop = %+v, %v; want paused", r, err)
+	}
+	t.Logf("(c) paused through the panel after %s", time.Since(stepStart).Round(time.Second))
+
+	// (d) super_read_only switched off in MySQL: Kunci terlepas and
+	// replica_unlocked; Kunci kembali closes it.
+	stepStart = time.Now()
+	execSQL(t, e.replicaDB, "SET GLOBAL super_read_only = OFF")
+	waitForWithin(t, e2eWait, "the lock shown as lost", func() bool {
+		v, ok := p.Monitor.View(rep)
+		return ok && v.Status.LockLost
+	})
+	waitForWithin(t, e2eWait, "an open replica_unlocked alert", func() bool {
+		_, ok := openAlert(t, p, healthmon.KindReplicaUnlocked, rep)
+		return ok
+	})
+	if loc := ui.postRedirect(repPath+"/relock", nil); loc != repPath+"?pesan=dikunci" {
+		t.Fatalf("relock redirected to %q", loc)
+	}
+	waitForWithin(t, e2eWait, "replica_unlocked closed", func() bool {
+		v, ok := p.Monitor.View(rep)
+		_, open := openAlert(t, p, healthmon.KindReplicaUnlocked, rep)
+		return ok && !v.Status.LockLost && !open
+	})
+	var name, value string
+	if err := e.replicaDB.QueryRow("SHOW GLOBAL VARIABLES LIKE 'super_read_only'").Scan(&name, &value); err != nil || value != "ON" {
+		t.Fatalf("super_read_only after relock = %q, %v", value, err)
+	}
+	waitForWithin(t, e2eWait, "the unlock and its recovery on Telegram", func() bool {
+		return len(containing(e.tg.since(msgsBefore), "Kunci replika terlepas")) == 1 &&
+			len(containing(e.tg.since(msgsBefore), e.replicaName+" pulih: kunci replika terlepas")) == 1
+	})
+	t.Logf("(d) unlocked and relocked after %s", time.Since(stepStart).Round(time.Second))
+	// The stop of (a) went out once and recovered once: no repeat, no
+	// second recovery.
+	for _, want := range []string{stopHead, recovered} {
+		if got := containing(e.tg.since(before), want); len(got) != 1 {
+			t.Fatalf("Telegram messages with %q = %q, want exactly one", want, got)
+		}
+	}
+
+	// (e) Resync ulang: the dialog lists the replica's databases from a
+	// fresh inventory; with the typed name and that list the job runs
+	// without stopping, and the replica is ready and following again.
+	stepStart = time.Now()
+	loc := ui.postRedirect(repPath+"/resync/prepare", nil)
+	if loc != repPath+"?buka=resync" {
+		t.Fatalf("resync/prepare redirected to %q", loc)
+	}
+	var wipe []string
+	for _, m := range wipeListRe.FindAllStringSubmatch(ui.get(loc), -1) {
+		wipe = append(wipe, m[1])
+	}
+	if strings.Join(wipe, ",") != "a" {
+		t.Fatalf("resync dialog lists %q for wiping, want [a]", wipe)
+	}
+	resyncID := ui.postJob(repPath+"/resync", url.Values{"confirm_name": {e.replicaName}, "wipe_list[]": wipe})
+	job := waitJob(t, p, resyncID, e2eCreateTimeout, nil) // nil: a waiting step fails the test
+	if job.Kind != "resync_replica" || job.Status != store.JobSucceeded {
+		t.Fatalf("resync job %s ended %s: %s\n%s", job.Kind, job.Status, job.Error, jobLogText(t, p, resyncID))
+	}
+	if r, err := p.Store.GetReplicaByServer(rep); err != nil || r.State != store.ReplicaReady || r.Paused {
+		t.Fatalf("replica after resync = %+v, %v; want ready, not paused", r, err)
+	}
+	waitStatus(t, p, rep, healthmon.StatusSynced)
+	execSQL(t, e.masterDB, "INSERT INTO a.t VALUES (2, 'setelah-resync')")
+	waitRow(t, e.replicaDB, "a", 2, "setelah-resync")
+	t.Logf("(e) resynced in %s", time.Since(stepStart).Round(time.Second))
+
+	waitForWithin(t, e2eWait, "no alert open on the resynced replica", func() bool {
+		return len(openKinds(t, p, rep)) == 0
+	})
+}
+
+// wipeListRe finds the databases the Resync ulang dialog lists for wiping.
+var wipeListRe = regexp.MustCompile(`name="wipe_list\[\]" value="([^"]*)"`)
+
+// TestE2EPinnedRole: the master's agent refuses, on its own, a command that
+// would drop its data although the panel sends it (spec 5.5), and the
+// panel refuses to delete a master that still has a replica (spec 5.4).
+func TestE2EPinnedRole(t *testing.T) {
+	skipWithoutE2E(t)
+	e := startE2ETopology(t)
+	p := e.p
+	if role := readPin(t, e.masterPins, mysql.RoleFile); role != "master" {
+		t.Fatalf("master's role pin = %q", role)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), e2eWait)
+	defer cancel()
+	err := p.Hub.Call(ctx, e.masterSrv, "mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"a"}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "dipin sebagai master") {
+		t.Fatalf("mysql.dropDatabases on the master = %v, want refused as pinned master", err)
+	}
+	if !schemaExists(t, e.masterDB, "a") {
+		t.Fatal("database a is gone from the master")
+	}
+
+	path := serverPath(e.masterSrv) + "/delete"
+	status, body := e.ui.post(path, url.Values{"confirm_name": {e.masterName}})
+	if (status != http.StatusBadRequest && status != http.StatusConflict) ||
+		!strings.Contains(body, "lepas atau hapus semua replikanya dulu") {
+		t.Fatalf("POST %s = %d, want 400/409 with the refusal:\n%s", path, status, body)
+	}
+	if _, err := p.Store.GetServer(e.masterSrv); err != nil {
+		t.Fatalf("master after the refused delete: %v", err)
+	}
+	if _, err := p.Store.GetTopologyByMaster(e.masterSrv); err != nil {
+		t.Fatalf("topology after the refused delete: %v", err)
+	}
+	if role := readPin(t, e.masterPins, mysql.RoleFile); role != "master" {
+		t.Fatalf("master's role pin after the refused delete = %q", role)
+	}
 }

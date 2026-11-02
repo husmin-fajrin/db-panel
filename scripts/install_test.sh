@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Periksa skrip instalasi: sintaks bash (bash -n) untuk scripts/install.sh dan
 # hasil render web/templates/agent-install.sh.tmpl, kecocokan unit systemd
-# yang ditulis skrip dengan scripts/systemd/*.service, pemeriksaan
-# SHA256SUMS binary panel, dan shellcheck bila terpasang. Jalankan dari root
-# repo.
+# yang ditulis skrip dengan scripts/systemd/*.service, tidak ada berkas pin
+# peran/sumber yang dibuat pemasang, pemeriksaan SHA256SUMS binary panel,
+# dan shellcheck bila terpasang. Jalankan dari root repo.
 set -euo pipefail
 
 PANEL_SCRIPT=scripts/install.sh
@@ -94,6 +94,18 @@ for want in KillMode=process NoNewPrivileges=yes PrivateTmp=yes ProtectHome=yes 
 	ProtectKernelModules=yes ProtectControlGroups=yes RestrictSUIDSGID=yes; do
 	if ! grep -qx "$want" "$agent_unit"; then
 		fail "$agent_unit tidak memuat $want"
+	fi
+done
+
+# A fresh install pins no role or source: /etc/dbpanel/role and
+# /etc/dbpanel/source are written only by the agent itself (on the first
+# successful "Siapkan master"/"Buat replika", or from MySQL's state on an
+# upgraded server) and by "dbpanel agent set-role/set-source". Neither
+# installer may create, copy or touch them.
+pin_re='(/etc/dbpanel|\$\{?CONFIG_DIR\}?"?)/(role|source)([^A-Za-z0-9_.-]|$)'
+for f in "$PANEL_SCRIPT" "$rendered"; do
+	if grep -nE "$pin_re" "$f"; then
+		fail "$f menulis berkas pin peran/sumber (/etc/dbpanel/role atau /etc/dbpanel/source)"
 	fi
 done
 

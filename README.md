@@ -306,15 +306,18 @@ tidak cocok, walau panelnya disusupi: master menolak hapus database,
 salin data dari server lain, dijadikan atau dikonfigurasi sebagai
 replika, dan dikunci read-only; replika menolak buka kunci, dijadikan
 master, akun replikasi, dan master selain sumbernya. Panel hanya bisa melepas peran
-`replica` (setelah replikasinya dihentikan dan direset); peran `master`
-dan sumber hanya diubah di server itu sendiri:
+`replica` (setelah replikasinya dihentikan dan direset), lewat **Lepas dan
+hentikan replikasi**, **Hapus server**, atau saat pekerjaan **Buat replika**
+dibatalkan; peran `master` dan sumber hanya diubah di server itu sendiri:
 
 ```sh
 sudo dbpanel agent set-role master       # atau replica, atau unassigned (hapus peran dan sumber)
 sudo dbpanel agent set-source 10.0.0.5:3306
 ```
 
-Agent membacanya ulang pada perintah berikutnya, tanpa restart. Berkas
+Agent membacanya ulang pada perintah berikutnya, tanpa restart. Pemasangan
+agent tidak membuat berkas pin; server yang baru dipasang belum berperan
+apa pun sampai salah satu alur di atas berhasil. Berkas
 pin harus milik root dan tidak bisa ditulis grup atau pengguna lain;
 selama tidak demikian, perintah yang dijaga ditolak dengan pesan cara
 memperbaikinya.
@@ -342,6 +345,196 @@ bisa membuka sandi replikasi.
    `sudo systemctl restart dbpanel-agent`.
 5. Matikan panel lama (`sudo systemctl disable --now dbpanel-panel`) dan
    hapus salinan kuncinya di sana.
+
+## Pemantauan
+
+Begitu sebuah server menjadi master atau replika, agent di server itu
+memeriksa MySQL-nya sendiri dan melapor ke panel. **Dashboard** menampilkan
+jumlah master, replika, dan peringatan aktif, lalu satu kartu per
+topologi: master dengan statusnya dan setiap replika satu baris (status
+berwarna, penanda kunci, tertinggal berapa detik, kapan terakhir dicek).
+Halaman berganti sendiri saat status berubah; tidak perlu dimuat ulang.
+Server yang belum menjadi master atau replika tampil **Belum dipantau**.
+
+Status replika, dalam kata sederhana:
+
+| Status | Artinya |
+|---|---|
+| Sinkron | replikasi berjalan dan mengikuti master |
+| Ketinggalan | replikasi berjalan tetapi tertinggal dari master (bawaan: 60 detik atau lebih) |
+| Terputus | replika tidak tersambung ke master; MySQL mencoba menyambung sendiri (merah setelah 3 menit) |
+| Dihentikan | replikasi dihentikan lewat panel (**Stop replika**) |
+| Berhenti (di luar panel) | replikasi berhenti tanpa lewat panel, misalnya ada yang menjalankan `STOP REPLICA` |
+| Berhenti | replikasi berhenti karena error; panel menyebut nomor error, artinya, dan sarannya |
+| Tidak terjangkau | MySQL di replika tidak menjawab |
+| Agent offline | agent tidak terhubung ke panel, atau laporannya terlambat |
+| Agent perlu dimutakhirkan | agent versi lama yang belum bisa memantau (lihat "Pembaruan agent") |
+| Belum siap | replika sedang dibuat atau disync ulang, atau pembuatannya gagal |
+
+Penanda merah **Kunci terlepas** tampil di samping status apa pun bila
+`super_read_only` di replika mati: aplikasi bisa menulis langsung ke
+replika dan isinya bisa berbeda dari master.
+
+Status master: **Sehat**, **Terkunci** (`super_read_only` menyala, aplikasi
+tidak bisa menulis), **Tidak terjangkau**, **Agent offline**, dan **Diduga
+tumbang** (agent atau MySQL master tidak menjawab lebih dari 30 detik).
+Untuk master yang diduga tumbang, halamannya menampilkan langkah manual
+"Yang bisa dilakukan sekarang"; panel belum bisa memindahkan peran master
+sendiri.
+
+Halaman master dan replika juga menampilkan versi, uptime, koneksi, disk,
+RAM, beban, lag, umur binlog, dan garis waktu kejadian 7 hari (disimpan 90
+hari). Pesan error MySQL apa adanya hanya ada di **Detail teknis** halaman
+replika.
+
+**Beban.** Setiap agent hanya membaca MySQL di servernya sendiri: beberapa
+kueri ringan (`SHOW GLOBAL STATUS`/`VARIABLES`, `SHOW REPLICA STATUS`) tiap
+15 detik lewat satu koneksi yang dipakai ulang, tanpa menyentuh tabel
+aplikasi. Panel tidak pernah tersambung ke MySQL; replika tidak menanyai
+master. Agent hanya mengirim laporan saat ada yang berubah, dan ringkasan
+tiap 2 menit.
+
+**Kecepatan.** Replika yang berhenti terlihat di panel dan dikirim ke
+Telegram dalam waktu kurang dari 30 detik; master yang tumbang dalam
+sekitar 1 menit. Interval, ambang, dan batas waktu itu bisa diubah di
+**Pengaturan > Ambang dan interval** (interval pemeriksaan 10 sampai 3600
+detik). Tombol **Periksa sekarang** di halaman server meminta laporan baru
+saat itu juga (paling sering sekali per 10 detik).
+
+## Notifikasi Telegram
+
+Panel mengirim peringatan ke grup Telegram lewat bot milik Anda sendiri.
+
+1. Di Telegram, buka chat dengan **@BotFather**, kirim `/newbot`, beri nama
+   bot, lalu salin **token bot** yang diberikan (bentuknya
+   `123456789:AAH...`). Perlakukan token seperti sandi.
+2. Buat grup untuk tim IT (atau pakai yang sudah ada), tambahkan bot itu
+   ke grup, lalu kirim pesan `/start` di grup.
+3. Cari **chat id** grup: di browser Anda buka
+   `https://api.telegram.org/bot<token>/getUpdates` (ganti `<token>`), lalu
+   cari `"chat":{"id":-100...`. Id grup diawali tanda minus. Bila hasilnya
+   kosong, kirim `/start` lagi di grup lalu muat ulang.
+4. Di panel buka **Pengaturan > Telegram**, isi **Token bot** dan **Chat
+   id**, lalu klik **Simpan pengaturan**. Token disimpan terenkripsi dengan
+   `panel.key`, tidak ditampilkan lagi, dan tidak pernah ditulis ke log.
+5. Klik **Kirim tes**. Pesan tes harus muncul di grup; bila gagal, panel
+   menyebut alasannya.
+6. Isi **Alamat dasar panel** (mis. `http://192.168.1.10:8080`) agar pesan
+   memuat tautan ke halaman server. Centang hanya jenis peringatan yang
+   ingin dikirim; yang tidak dicentang tetap tampil di halaman
+   **Peringatan**.
+
+Host panel harus bisa menjangkau `https://api.telegram.org` (port 443).
+Bila jaringan memakai proxy, tambahkan `Environment=HTTPS_PROXY=http://proxy:3128`
+ke service lewat `sudo systemctl edit dbpanel-panel`, lalu
+`sudo systemctl restart dbpanel-panel`.
+
+**Isi pesan.** Hanya nama server, status, nomor error, penjelasan awam,
+saran, waktu, dan tautan panel; pesan error MySQL apa adanya tidak pernah
+dikirim (bisa memuat isi baris data). Contoh:
+
+```
+⛔ Replika RS-2 berhenti
+Data ganda (error 1062): ada baris yang sudah ada di replika.
+Saran: Resync ulang.
+Master: RS-1 · Sejak: 02:14 · http://192.168.1.10:8080/replicas/3
+```
+
+Setiap peringatan dikirim sekali saat muncul, diulang tiap 6 jam selama
+masih terbuka (**Ulangi pemberitahuan**), dan ditutup dengan pesan "pulih"
+beserta lama gangguannya. Pengiriman yang gagal dicoba lagi tiap menit;
+statusnya (terkirim, gagal dan alasannya) tampil di halaman **Peringatan**.
+
+**Jangan ganggu.** Saat perawatan terjadwal, pilih lama **Jangan ganggu**
+(1, 2, 8, atau 24 jam) di halaman server, master, replika, atau
+**Peringatan**; klik **Batalkan** (tampil selama Jangan ganggu aktif) untuk
+mengakhirinya lebih awal. Selama
+itu peringatan server tersebut tetap dicatat dan tampil di panel, tetapi
+tidak dikirim ke Telegram. Saat Jangan ganggu berakhir, peringatan yang
+masih terbuka dikirim satu kali.
+
+**Ringkasan mingguan.** Bawaannya setiap Senin 07:00 (waktu panel), satu
+pesan: untuk tiap replika persentase waktu Sinkron atau Ketinggalan selama
+7 hari terakhir, jumlah dan lama gangguan, pemakaian disk tiap server, dan
+jumlah pekerjaan yang gagal. Atur hari dan jamnya, atau matikan, di
+**Pengaturan > Ringkasan mingguan**. Bila Telegram baru diatur setelah
+jadwalnya lewat, ringkasan minggu itu tetap dikirim.
+
+## Kontrol replika
+
+Tombol-tombol ini ada di halaman replika (dan master atau server untuk
+yang disebut). Setiap tombol membuka dialog yang menjelaskan akibatnya,
+hanya tersedia bila server itu tidak sedang menjalankan pekerjaan, dan
+dicatat di **Audit**.
+
+- **Stop replika / Start replika:** menghentikan atau menjalankan lagi
+  replikasi; statusnya menjadi **Dihentikan** (tanpa peringatan) lalu
+  kembali **Sinkron**. Selama berhenti lag membesar; bila lebih lama dari
+  masa simpan binlog master (disebut di dialog), replika harus disync
+  ulang.
+- **Kunci kembali** (saat **Kunci terlepas**): menyalakan lagi
+  `super_read_only`. Bila ada yang sempat menulis ke replika, isinya bisa
+  berbeda dari master; pertimbangkan **Resync ulang**.
+- **Resync ulang:** menyalin ulang data master ke replika ini lalu
+  menyambungkan replikasinya lagi, dengan database yang sama seperti
+  tercatat. Panel membaca ulang daftar database replika saat dialog dibuka
+  dan menyebut persis database yang akan **dibuang**; ketik nama server
+  untuk melanjutkan. Pekerjaan berjalan tanpa berhenti, kecuali bila di
+  replika ditemukan database di luar daftar itu: pekerjaan lalu menunggu
+  persetujuan Anda. CLONE dipakai bila replika mengikuti semua database;
+  centang **Paksa dump** untuk memakai mysqldump. Jalankan di luar jam
+  sibuk.
+- **Lepas replika:** ketik nama server, lalu pilih:
+  - **Lepas, biarkan replikasi berjalan:** panel berhenti mengelola dan
+    memantau server ini; MySQL di sana terus mengikuti master sampai Anda
+    menghentikannya sendiri.
+  - **Lepas dan hentikan replikasi:** replikasi dihentikan dan
+    pengaturannya dihapus, dan agent melepas peran `replica`. MySQL tetap
+    hanya-baca; untuk membukanya jalankan di server itu
+    `mysql -e "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF"`.
+
+  Akun replikasi di master tidak disentuh (dipakai bersama oleh semua
+  replika master itu).
+- **Hapus server** (halaman server): ketik nama server. Panel menolak
+  menghapus master yang masih punya replika ("lepas atau hapus semua
+  replikanya dulu") dan replika yang belum dilepas. Setelah dihapus,
+  matikan agent di server itu dengan
+  `sudo systemctl disable --now dbpanel-agent`.
+- **Buka kunci master** (halaman master, saat **Terkunci**): ketik nama
+  server. Pastikan hanya satu server yang menerima tulisan aplikasi.
+- **Periksa sekarang** dan **Jangan ganggu**: lihat "Pemantauan" dan
+  "Notifikasi Telegram".
+
+## Catatan audit
+
+Menu **Audit** mencatat setiap tindakan yang mengubah sesuatu: login
+berhasil dan gagal, logout, perubahan pengaturan, tes Telegram, Siapkan
+master, Buat replika, tambah dan lepas database, setujui/ulangi/batalkan
+pekerjaan, serta semua tombol di "Kontrol replika". Setiap baris berisi
+waktu, pengguna, IP, tindakan, target, dan hasilnya (berhasil, atau alasan
+ditolak); sandi dan token tidak pernah dicatat. Saring menurut server dan
+tanggal. Catatan tidak bisa diubah atau dihapus, juga dari panel, dan
+tidak dipangkas; ia ikut tersimpan di `panel.db`, jadi ikut dicadangkan
+bersamanya.
+
+## Pembaruan agent
+
+Perbarui panel dulu (jalankan ulang `install.sh`, lihat "Pasang panel").
+Agent tertanam di panel ikut terbarui. Agent di server database yang
+terlalu lama untuk pemantauan ditandai **perlu dimutakhirkan** di kolom
+**Versi agent** daftar **Server**, dan statusnya **Agent perlu
+dimutakhirkan**. Untuk memutakhirkannya:
+
+1. Buka halaman server itu, klik **Pasang ulang agent**.
+2. Jalankan perintah pemasangan yang ditampilkan di server database itu
+   (perintah yang sama juga tampil di daftar server selama tokennya
+   berlaku).
+3. Agent baru terhubung dan pemantauan mulai dalam beberapa detik.
+
+Pemasangan ulang hanya mengganti binary, sertifikat, dan `agent.yaml`.
+Akun MySQL tersegel, kebijakan lokal, serta peran dan sumber yang dipin di
+`/etc/dbpanel` tetap; agent lama yang belum punya berkas peran menuliskannya
+sendiri dari keadaan MySQL (lihat "Peran dan sumber yang dipin").
 
 ## Keamanan
 
@@ -432,11 +625,23 @@ root, `mysqld` berjalan sebagai user `nobody` (ganti dengan
 `DBPANEL_TEST_MYSQL_USER`); direktori dasar bisa diganti dengan
 `DBPANEL_TEST_MYSQL_DIR`.
 
-Test end-to-end (`TestE2ECreateReplica`, perintah `make test-e2e` atau
+Test end-to-end (perintah `make test-e2e` atau
 `go test -timeout 30m -run TestE2E ./internal/panel/`) menjalankan panel,
-dua agent dan dua `mysqld`, lalu lewat UI: hubungkan MySQL, siapkan master,
-buat replika untuk satu database, dan tambah database kedua. Test ini
-dilewati dengan `-short`.
+agent dan `mysqld` sungguhan, lalu lewat UI:
+
+- `TestE2ECreateReplica`: hubungkan MySQL, siapkan master, buat replika
+  untuk satu database, tambah database kedua, dan buat replika kedua
+  dengan CLONE;
+- `TestE2EMonitoring`: `STOP REPLICA` langsung di MySQL replika harus
+  tampil sebagai Berhenti (di luar panel), membuka peringatan, dan
+  mengirim satu pesan ke Telegram palsu (server `httptest`, tidak ada
+  panggilan ke internet) dalam 30 detik; lalu Start, Stop, kunci yang
+  terlepas dan Kunci kembali, dan Resync ulang;
+- `TestE2EPinnedRole`: agent master menolak `mysql.dropDatabases` karena
+  perannya dipin, dan panel menolak menghapus master yang masih punya
+  replika.
+
+Test ini dilewati dengan `-short`.
 
 ## Mengubah tampilan
 
