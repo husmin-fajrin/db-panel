@@ -165,6 +165,7 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 		Version:      p.opts.Version,
 		Logger:       p.log,
 		Orchestrator: p.Orchestrator,
+		Monitor:      p.Monitor,
 		// The same parameters as GET /agent/install, so the hash in the
 		// pairing command is that of the script the endpoint serves.
 		InstallScriptSHA256: func(token string) (string, error) {

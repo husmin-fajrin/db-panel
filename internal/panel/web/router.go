@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	webfs "github.com/husmin-fajrin/db-panel/web"
 )
@@ -61,6 +63,22 @@ type Deps struct {
 	// Orchestrator connects MySQL and runs the prepare-master and
 	// create-replica jobs.
 	Orchestrator Orchestrator
+	// Monitor holds the servers' health and answers Periksa sekarang and
+	// Jangan ganggu.
+	Monitor MonitorView
+}
+
+// MonitorView is what the UI uses of the health monitor; the panel passes
+// its *monitor.Monitor.
+type MonitorView interface {
+	View(serverID int64) (monitor.View, bool)
+	Views() map[int64]monitor.View
+	// CheckNow asks the agent for a fresh report; at most once per 10 s
+	// per server.
+	CheckNow(ctx context.Context, serverID int64) error
+	// Snooze mutes the server's alert notifications until until; nil
+	// clears it.
+	Snooze(serverID int64, until *time.Time) error
 }
 
 // app carries the dependencies into the handlers.
@@ -120,14 +138,22 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /servers/{id}/mysql/connect", authedPost(a.connectMySQL))
 	mux.Handle("POST /servers/{id}/mysql/refresh", authedPost(a.refreshMySQL))
 	mux.Handle("POST /servers/{id}/prepare-master", authedPost(a.prepareMaster))
+	mux.Handle("POST /servers/{id}/check", authedPost(a.checkServer))
+	mux.Handle("POST /servers/{id}/snooze", authedPost(a.snoozeServer))
 	mux.Handle("GET /masters/{id}", authed(a.masterDetail))
 	mux.Handle("POST /masters/{id}/source", authedPost(a.setMasterSource))
+	mux.Handle("POST /masters/{id}/unlock", authedPost(a.unlockMaster))
 	mux.Handle("GET /masters/{id}/replicas/new", authed(a.newReplicaForm))
 	mux.Handle("POST /masters/{id}/replicas", authedPost(a.createReplica))
 	mux.Handle("GET /replicas/{id}", authed(a.replicaDetail))
 	mux.Handle("GET /replicas/{id}/databases", authed(a.replicaDatabases))
 	mux.Handle("POST /replicas/{id}/databases/add", authedPost(a.addReplicaDatabases))
 	mux.Handle("POST /replicas/{id}/databases/remove", authedPost(a.removeReplicaDatabases))
+	mux.Handle("POST /replicas/{id}/stop", authedPost(a.stopReplica))
+	mux.Handle("POST /replicas/{id}/start", authedPost(a.startReplica))
+	mux.Handle("POST /replicas/{id}/relock", authedPost(a.relockReplica))
+	mux.Handle("POST /replicas/{id}/resync", authedPost(a.resyncReplica))
+	mux.Handle("POST /replicas/{id}/detach", authedPost(a.detachReplica))
 	mux.Handle("GET /jobs", authed(a.listJobs))
 	mux.Handle("GET /jobs/{id}", authed(a.jobDetail))
 	mux.Handle("POST /jobs/{id}/approve", authedPost(a.approveJob))

@@ -12,3 +12,6 @@ var PairCommand = pairCommand
 
 // StatusLabel exposes statusLabel to web_test.
 var StatusLabel = statusLabel
+
+// ScrubDetail exposes scrubDetail to web_test.
+var ScrubDetail = scrubDetail

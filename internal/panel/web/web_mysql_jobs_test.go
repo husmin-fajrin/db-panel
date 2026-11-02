@@ -143,9 +143,14 @@ func (f *fakeOrch) DetachReplica(_ context.Context, id int64, stop bool) error {
 	f.record(fmt.Sprintf("detach %d stop=%t", id, stop))
 	return f.err
 }
+
+// DeleteServer deletes the server from the store like the orchestrator.
 func (f *fakeOrch) DeleteServer(_ context.Context, id int64) error {
 	f.record(fmt.Sprintf("delete-server %d", id))
-	return f.err
+	if f.err != nil {
+		return f.err
+	}
+	return f.st.DeleteServer(id)
 }
 
 func (f *fakeOrch) Approve(id string) error { f.record("approve " + id); return f.err }
@@ -680,7 +685,7 @@ func TestReplicaDatabasesPageListsAndPosts(t *testing.T) {
 	rec := e.do("GET", "/replicas/2", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, `href="/replicas/2/databases#tambah"`, `href="/replicas/2/databases#lepas"`, "Tambah database", "Lepas database")
-	wantNoBody(t, rec, "disabled")
+	wantNoBody(t, rec, "disabled>Tambah database", "disabled>Lepas database")
 
 	rec = e.do("GET", "/replicas/2/databases", nil, c)
 	wantCode(t, rec, http.StatusOK)
@@ -766,7 +771,7 @@ func TestReplicaDatabasesPageListsAndPosts(t *testing.T) {
 	e.st.SetReplicaState(2, store.ReplicaAttention, lastErr)
 	rec = e.do("GET", "/replicas/2", nil, c)
 	wantBody(t, rec, "Perlu perhatian", lastErr, `href="/replicas/2/databases#tambah"`)
-	wantNoBody(t, rec, "disabled")
+	wantNoBody(t, rec, "disabled>Tambah database", "disabled>Lepas database")
 	rec = e.do("GET", "/replicas/2/databases", nil, c)
 	wantBody(t, rec, "Perlu perhatian", lastErr, `action="/replicas/2/databases/add"`, `action="/replicas/2/databases/remove"`)
 	wantNoBody(t, rec, "hanya bisa diubah")

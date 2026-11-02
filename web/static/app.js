@@ -206,6 +206,24 @@
       },
     }));
 
+    // Konfirmasi dengan mengetik nama server (Resync ulang, Lepas replika,
+    // Buka kunci master, Hapus server): tombol kirim (:disabled="blocked")
+    // aktif hanya bila isi kolom x-ref="typed" persis sama dengan
+    // data-name di elemen komponen. Panel memeriksanya lagi.
+    window.Alpine.data("confirmName", () => ({
+      name: "",
+      typed: "",
+      init() {
+        this.name = this.$el.dataset.name || "";
+      },
+      input() {
+        this.typed = this.$refs.typed.value;
+      },
+      get blocked() {
+        return this.name === "" || this.typed !== this.name;
+      },
+    }));
+
     // Tombol Salin untuk perintah pemasangan (x-ref="perintah").
     window.Alpine.data("copyCommand", () => ({
       tersalin: false,

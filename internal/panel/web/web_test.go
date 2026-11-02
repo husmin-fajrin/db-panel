@@ -51,43 +51,18 @@ var adminHash = sync.OnceValue(func() string {
 	return string(h)
 })
 
-// fakeListener records the servers reported offline.
-type fakeListener struct {
-	mu      sync.Mutex
-	offline []int64
-}
+// fakeListener ignores the hub's notifications.
+type fakeListener struct{}
 
-func (*fakeListener) OnOnline(int64) {}
-func (l *fakeListener) OnOffline(id int64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.offline = append(l.offline, id)
-}
+func (*fakeListener) OnOnline(int64)             {}
+func (*fakeListener) OnOffline(int64)            {}
 func (*fakeListener) OnEvent(int64, proto.Event) {}
-
-func (l *fakeListener) offlineIDs() []int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]int64(nil), l.offline...)
-}
 
 // fakeConn is a live agent connection that never answers.
 type fakeConn struct{}
 
 func (fakeConn) Call(context.Context, string, any, any) error { return errors.New("tidak dipakai") }
 func (fakeConn) Close() error                                 { return nil }
-
-// closingConn is a fakeConn that reports when it is closed.
-type closingConn struct {
-	fakeConn
-	closed chan struct{}
-	once   sync.Once
-}
-
-func (c *closingConn) Close() error {
-	c.once.Do(func() { close(c.closed) })
-	return nil
-}
 
 type env struct {
 	st       *store.Store
@@ -131,6 +106,8 @@ func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 		Now:                 time.Now,
 		Version:             "v-test",
 		Logger:              slog.New(slog.DiscardHandler),
+		Orchestrator:        &fakeOrch{st: st, nextID: "0123456789abcdef0123456789abcdef"},
+		Monitor:             &fakeMonitor{},
 	}
 	for _, m := range mods {
 		m(&d)
@@ -454,7 +431,8 @@ func TestPostRejectsCrossOrigin(t *testing.T) {
 		t.Errorf("servers after rejected POSTs = %d, want 1", len(list))
 	}
 	// A matching Referer is accepted when Origin is absent.
-	req := httptest.NewRequest("POST", "/servers/1/delete", nil)
+	req := httptest.NewRequest("POST", "/servers/1/delete", strings.NewReader("confirm_name=db-1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Referer", testOrigin+"/servers/1")
 	req.AddCookie(e.cookie())
 	rec := httptest.NewRecorder()
@@ -651,40 +629,21 @@ func TestDeleteServer(t *testing.T) {
 	e := newEnv(t)
 	srv, _ := e.st.CreateServer("db-hapus")
 	c := e.cookie()
-	wantBody(t, e.do("GET", "/servers/1", nil, c), `action="/servers/1/delete"`, "<dialog")
-	rec := e.do("POST", "/servers/1/delete", url.Values{}, c)
+	wantBody(t, e.do("GET", "/servers/1", nil, c), `action="/servers/1/delete"`, "<dialog", `name="confirm_name"`)
+	// The orchestrator deletes it (and drops its agent's connection, see
+	// the orchestrator's tests); the list then says how to remove the agent.
+	rec := e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-hapus"}}, c)
 	wantCode(t, rec, http.StatusSeeOther)
-	if loc := rec.Header().Get("Location"); loc != "/servers" {
+	if loc := rec.Header().Get("Location"); loc != "/servers?pesan=dihapus" {
 		t.Errorf("Location = %q", loc)
 	}
 	if _, err := e.st.GetServer(srv.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("GetServer after delete: %v", err)
 	}
-	rec = e.do("POST", "/servers/1/delete", url.Values{}, c)
+	wantBody(t, e.do("GET", "/servers?pesan=dihapus", nil, c), "sudo systemctl disable --now dbpanel-agent")
+	rec = e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-hapus"}}, c)
 	wantCode(t, rec, http.StatusNotFound)
 	wantBody(t, rec, "Server tidak ditemukan")
-}
-
-func TestDeleteServerDisconnectsAgent(t *testing.T) {
-	e := newEnv(t)
-	srv, _ := e.st.CreateServer("db-terhubung")
-	e.st.MarkPaired(srv.ID, "serial", "10.0.0.8")
-	conn := &closingConn{closed: make(chan struct{})}
-	e.hub.Attach(srv.ID, conn)
-
-	rec := e.do("POST", "/servers/1/delete", url.Values{}, e.cookie())
-	wantCode(t, rec, http.StatusSeeOther)
-	if e.hub.IsOnline(srv.ID) {
-		t.Fatal("deleted server is still online in the hub")
-	}
-	if got := e.l.offlineIDs(); len(got) != 1 || got[0] != srv.ID {
-		t.Fatalf("OnOffline calls = %v, want [%d]", got, srv.ID)
-	}
-	select {
-	case <-conn.closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("agent connection of the deleted server was not closed")
-	}
 }
 
 func TestDeleteLocalServerRefused(t *testing.T) {

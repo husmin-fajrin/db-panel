@@ -73,6 +73,7 @@ type serverDetailPage struct {
 	// InventoryCut: the inventory holds as many databases as the panel
 	// keeps; the list may be cut.
 	InventoryCut bool
+	Controls     serverControls // Periksa sekarang and Jangan ganggu (paired servers)
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +112,7 @@ func (a *app) listServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := serversPage{Page: a.page(r)}
+	p.Notice = notices[r.URL.Query().Get("pesan")]
 	for _, s := range servers {
 		row := serverRow{Server: s, Online: s.Paired && a.Hub.IsOnline(s.ID)}
 		if probe := a.probe(s); probe != nil {
@@ -131,6 +133,7 @@ func (a *app) newServerForm(w http.ResponseWriter, r *http.Request) {
 func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 	name := r.PostFormValue("name")
 	srv, err := a.Store.CreateServer(name)
+	a.audit(r, "server_create", auditServer, srv.ID, map[string]any{"name": name}, outcomeOf(err))
 	if err != nil {
 		// The store returns unwrapped, user-facing errors for validation
 		// (empty or duplicate name) and wrapped ones for database failures.
@@ -184,6 +187,7 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 		p.ShowMySQL = p.Probe == nil || p.Probe.MySQL.Installed
 		p.InventoryCut = len(p.Inventory.Databases) >= inventoryCap
 		p.CanPrepare = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0 && srv.Role != store.RoleReplica
+		p.Controls = a.controls(srv)
 	}
 	switch {
 	case !found || p.Local:
@@ -232,10 +236,14 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if srv.CertSerial == localCertSerial {
+		a.audit(r, "server_token", auditServer, srv.ID, nil, msgLocalToken)
 		http.Error(w, msgLocalToken, http.StatusConflict)
 		return
 	}
-	if _, err := a.Store.CreatePairToken(srv.ID, a.Now(), pairTokenTTL); err != nil {
+	// The token itself never goes into the audit log.
+	_, err := a.Store.CreatePairToken(srv.ID, a.Now(), pairTokenTTL)
+	a.audit(r, "server_token", auditServer, srv.ID, map[string]any{"repair": srv.Paired}, outcomeOf(err))
+	if err != nil {
 		a.internalError(w, "create pair token", err)
 		return
 	}
@@ -245,29 +253,38 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
 }
 
-// deleteServer removes a server and drops its agent's connection. The panel
-// host's own server cannot be deleted.
+// deleteServer removes a server once its name is typed. The panel host's
+// own server cannot be deleted; the orchestrator refuses a master with
+// replicas and a registered replica, and drops the agent's connection.
 func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok {
 		return
 	}
+	detail := map[string]any{"name": srv.Name}
 	if srv.CertSerial == localCertSerial {
+		a.audit(r, "server_delete", auditServer, srv.ID, detail, msgLocalDelete)
 		http.Error(w, msgLocalDelete, http.StatusConflict)
 		return
 	}
-	err := a.Store.DeleteServer(srv.ID)
+	if !typedName(r, srv) {
+		a.audit(r, "server_delete", auditServer, srv.ID, detail, msgNameMismatch)
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msgNameMismatch})
+		return
+	}
+	err := a.Orchestrator.DeleteServer(r.Context(), srv.ID)
+	a.audit(r, "server_delete", auditServer, srv.ID, detail, outcomeOf(err))
 	if errors.Is(err, store.ErrNotFound) {
 		http.Error(w, msgServerNotFound, http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		a.internalError(w, "delete server", err)
+		a.Logger.Warn("delete server refused", "id", srv.ID, "err", err)
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
-	a.Hub.Disconnect(srv.ID)
 	a.Logger.Info("server deleted", "id", srv.ID, "name", srv.Name, "by", a.page(r).Username)
-	http.Redirect(w, r, "/servers", http.StatusSeeOther)
+	http.Redirect(w, r, "/servers?pesan=dihapus", http.StatusSeeOther)
 }
 
 // serverFromPath loads the server named by {id}, answering 404 (or 500) and

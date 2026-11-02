@@ -86,8 +86,12 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Always run bcrypt, even for an unknown user.
+	// Only attempts that reached the password check are audited: those
+	// refused earlier (rate limits, busy) cost an attacker nothing and
+	// would fill the append-only log.
 	if ok := a.CheckPassword(hash, password); !ok || err != nil {
 		a.UserLimiter.Fail(userKey)
+		a.auditAs(r, username, "login_failed", auditSession, 0, nil, msgLoginFailed)
 		a.Logger.Info("login failed", "username", username, "ip", ip)
 		retry(http.StatusOK, msgLoginFailed)
 		return
@@ -96,6 +100,7 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	a.Limiter.Reset(ip)
 	a.UserLimiter.Reset(userKey)
 	auth.SetSessionCookie(w, a.Sessions.Create(user.Username), r.TLS != nil)
+	a.auditAs(r, user.Username, "login", auditSession, 0, nil, auditOK)
 	a.Logger.Info("login", "username", user.Username, "ip", ip)
 	http.Redirect(w, r, safeNext(next), http.StatusSeeOther)
 }
@@ -109,6 +114,9 @@ func usernameKey(username string) string {
 
 func (a *app) logout(w http.ResponseWriter, r *http.Request) {
 	if tok, ok := auth.SessionToken(r); ok {
+		if username, ok := a.Sessions.Get(tok); ok {
+			a.auditAs(r, username, "logout", auditSession, 0, nil, auditOK)
+		}
 		a.Sessions.Delete(tok)
 	}
 	auth.ClearSessionCookie(w, r.TLS != nil)

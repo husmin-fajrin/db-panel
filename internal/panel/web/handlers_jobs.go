@@ -79,6 +79,8 @@ func kindLabel(kind string) string {
 		return "Tambah database"
 	case orchestrator.KindRemoveDatabases:
 		return "Lepas database"
+	case orchestrator.KindResyncReplica:
+		return "Resync ulang"
 	}
 	return kind
 }
@@ -296,25 +298,28 @@ func (a *app) jobFromPath(w http.ResponseWriter, r *http.Request) (store.Job, []
 }
 
 func (a *app) approveJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "approve", a.Orchestrator.Approve)
+	a.jobAction(w, r, "job_approve", a.Orchestrator.Approve)
 }
 
 func (a *app) retryJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "retry", a.Orchestrator.Retry)
+	a.jobAction(w, r, "job_retry", a.Orchestrator.Retry)
 }
 
 func (a *app) cancelJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "cancel", a.Orchestrator.Cancel)
+	a.jobAction(w, r, "job_cancel", a.Orchestrator.Cancel)
 }
 
 // jobAction runs do on the job of {id} and returns to its page; a refusal
-// (the job is not in a state that allows it) is shown there with 409.
+// (the job is not in a state that allows it) is shown there with 409. name
+// is the audit action; the entry's target is the job's server.
 func (a *app) jobAction(w http.ResponseWriter, r *http.Request, name string, do func(jobID string) error) {
 	job, _, ok := a.jobFromPath(w, r)
 	if !ok {
 		return
 	}
-	if err := do(job.ID); err != nil {
+	err := do(job.ID)
+	a.audit(r, name, auditJob, job.ServerID, map[string]any{"job_id": job.ID, "kind": job.Kind}, outcomeOf(err))
+	if err != nil {
 		a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", err)
 		a.renderJob(w, r, http.StatusConflict, err.Error())
 		return

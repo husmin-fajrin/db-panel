@@ -91,6 +91,12 @@
     </div>
   </div>
 </div>
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Pemantauan</h2>
+    {{template "server-controls" .Controls}}
+  </div>
+</div>
 {{with .Probe}}{{if .Disks}}
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
@@ -138,14 +144,19 @@
 {{end}}
 
 <dialog id="modal-hapus" class="modal">
-  <div class="modal-box">
+  <form method="post" action="/servers/{{.Server.ID}}/delete" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
     <h3 class="text-lg font-bold">Hapus server {{.Server.Name}}?</h3>
-    <p class="py-4">Server akan dihapus dari panel, koneksi agent-nya langsung diputus, dan sertifikatnya tidak diterima lagi. Service <code>dbpanel-agent</code> di server itu tetap terpasang dan terus mencoba terhubung sampai dimatikan (<code>sudo systemctl disable --now dbpanel-agent</code>). Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang server ini dan jalankan perintah pemasangan yang baru.</p>
-    <div class="modal-action">
-      <form method="dialog"><button class="btn">Batal</button></form>
-      <form method="post" action="/servers/{{.Server.ID}}/delete"><button type="submit" class="btn btn-error">Ya, hapus</button></form>
+    <p>Server akan dihapus dari panel, koneksi agent-nya langsung diputus, dan sertifikatnya tidak diterima lagi. Panel menolak menghapus master yang masih punya replika dan replika yang belum dilepas. Service <code>dbpanel-agent</code> di server itu tetap terpasang dan terus mencoba terhubung sampai dimatikan (<code>sudo systemctl disable --now dbpanel-agent</code>). Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang server ini dan jalankan perintah pemasangan yang baru.</p>
+    <label class="flex flex-col gap-1">
+      <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
+      <input class="input input-sm w-full" type="text" name="confirm_name" x-ref="typed" @input="input" autocomplete="off" required>
+    </label>
+    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <div class="modal-action flex-row-reverse justify-start">
+      <button type="submit" class="btn btn-error" :disabled="blocked" disabled>Ya, hapus</button>
+      <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
-  </div>
+  </form>
   <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
 </dialog>
 {{end}}

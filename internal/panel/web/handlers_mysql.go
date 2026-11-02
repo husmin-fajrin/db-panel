@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -82,6 +83,19 @@ var notices = map[string]string{
 	"terhubung":  "MySQL berhasil dihubungkan.",
 	"disegarkan": "Data MySQL sudah diperbarui.",
 	"sumber":     "Alamat MySQL master untuk replika disimpan. Alamat ini diperiksa saat membuat replika berikutnya (replika harus bisa menjangkaunya).",
+	"dihentikan": "Replikasi dihentikan. Lag membesar sampai Anda menjalankannya lagi dengan Start replika.",
+	"dijalankan": "Replikasi dijalankan lagi. Status terbaru tampil setelah laporan berikutnya dari agent.",
+	"dikunci":    "Replika dikunci hanya-baca lagi.",
+	"dilepas": "Replika dilepas. MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; " +
+		"panel tidak lagi memantaunya.",
+	"dilepas-henti": "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca; " +
+		"untuk membukanya jalankan di server itu: mysql -e \"SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF\"",
+	"kunci-dibuka": "Kunci hanya-baca master dibuka; aplikasi bisa menulis lagi.",
+	"diperiksa":    "Server sudah diperiksa; status di bawah memakai laporan terbaru.",
+	"senyap":       "Pemberitahuan untuk server ini ditunda (Jangan ganggu).",
+	"senyap-batal": "Jangan ganggu dibatalkan; pemberitahuan untuk server ini aktif lagi.",
+	"dihapus": "Server dihapus dari panel. Agent di server itu masih terpasang dan terus mencoba terhubung; " +
+		"matikan dengan: sudo systemctl disable --now dbpanel-agent",
 }
 
 // connectForm is what the MySQL account form shows again after an error.
@@ -127,7 +141,10 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 		Open: true,
 	}
 	password := r.PostFormValue("password")
+	// The password never goes into the audit log.
+	detail := map[string]any{"mysql_user": form.User, "host": form.Host}
 	fail := func(msg string) {
+		a.audit(r, "mysql_connect", auditServer, srv.ID, detail, msg)
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msg, Form: form})
 	}
 	switch {
@@ -150,6 +167,7 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 		fail(err.Error())
 		return
 	}
+	a.audit(r, "mysql_connect", auditServer, srv.ID, detail, auditOK)
 	a.Logger.Info("mysql connected", "server", srv.ID, "mysql_user", form.User, "by", a.page(r).Username)
 	http.Redirect(w, r, serverURL(srv.ID)+"?pesan=terhubung", http.StatusSeeOther)
 }
@@ -159,7 +177,9 @@ func (a *app) refreshMySQL(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID); err != nil {
+	_, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID)
+	a.audit(r, "mysql_refresh", auditServer, srv.ID, nil, outcomeOf(err))
+	if err != nil {
 		a.Logger.Warn("mysql refresh failed", "server", srv.ID, "err", err)
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
@@ -173,6 +193,7 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := a.Orchestrator.StartPrepareMaster(r.Context(), srv.ID)
+	a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("prepare master refused", "server", srv.ID, "err", err)
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
@@ -200,6 +221,11 @@ type masterPage struct {
 	SourceHost string
 	SourcePort string
 	SourceOpen bool
+	// Health is the monitor's view of the master; nil before its first
+	// report. Locked: it is read-only (Buka kunci master is offered).
+	Health   *monitor.View
+	Locked   bool
+	Controls serverControls
 }
 
 // masterFromPath loads the server of {id} and its topology. A server that
@@ -250,11 +276,15 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 	case err != nil || port < 1 || port > 65535:
 		p.Flash = msgSourcePortBad
 	}
+	detail := map[string]any{"source_host": host, "source_port": portText}
 	if p.Flash != "" {
+		a.audit(r, "master_source", auditMaster, srv.ID, detail, p.Flash)
 		a.renderMaster(w, r, http.StatusBadRequest, p)
 		return
 	}
-	if err := a.Store.SetTopologySource(topo.ID, host, port); err != nil {
+	err = a.Store.SetTopologySource(topo.ID, host, port)
+	a.audit(r, "master_source", auditMaster, srv.ID, detail, outcomeOf(err))
+	if err != nil {
 		a.internalError(w, "set topology source", err)
 		return
 	}
@@ -265,6 +295,12 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 // renderMaster fills p's inventory, replicas and jobs and renders it.
 func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p masterPage) {
 	srv, topo := p.Server, p.Topology
+	p.Online = a.Hub.IsOnline(srv.ID)
+	p.Controls = a.controls(srv)
+	if v, ok := a.Monitor.View(srv.ID); ok {
+		p.Health = &v
+		p.Locked = v.Status.Code == monitor.StatusLocked
+	}
 	var err error
 	if p.Inventory, err = a.inventory(srv.ID); err != nil {
 		a.internalError(w, "get inventory", err)
@@ -398,7 +434,9 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Target, _ = strconv.ParseInt(r.PostFormValue("target"), 10, 64)
 	p.ForceDump = r.PostFormValue("force_dump") != ""
+	detail := map[string]any{"master_server_id": master.ID, "databases": selected, "force_dump": p.ForceDump}
 	fail := func(msg string) {
+		a.audit(r, "create_replica", auditReplica, p.Target, detail, msg)
 		p.Flash = msg
 		a.render.renderStatus(w, http.StatusBadRequest, "replica_new", p)
 	}
@@ -443,6 +481,8 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		fail(err.Error())
 		return
 	}
+	detail["job_id"] = id
+	a.audit(r, "create_replica", auditReplica, p.Target, detail, auditOK)
 	a.Logger.Info("create replica started", "master", master.ID, "target", p.Target, "job", id, "by", a.page(r).Username)
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
@@ -455,6 +495,24 @@ type replicaPage struct {
 	CanChange bool // its databases can be changed now
 	Master    store.Server
 	Jobs      []jobRow
+	// Health is the monitor's view of the replica; nil before its first
+	// report.
+	Health   *monitor.View
+	Controls serverControls
+	// Busy: the server has an unfinished job; the controls wait for it.
+	Busy bool
+	// The controls that make sense now.
+	CanStop, CanStart, CanRelock, CanResync, CanDetach bool
+	// BinlogKeep is how long the master keeps binary logs ("7 hari"); ""
+	// when unknown.
+	BinlogKeep string
+	// MasterBytes is the size of the master's data the replica follows.
+	MasterBytes uint64
+	// WipeList is the replica's databases (its inventory), which a resync
+	// drops; WipeListRead is false while that inventory was never read.
+	WipeList     []string
+	WipeListRead bool
+	OpenResync   bool // show the resync dialog open (after Segarkan daftar)
 }
 
 // replicaFromPath loads the server of {id} and its replica row, answering
@@ -490,8 +548,26 @@ func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p := replicaPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Replica: rep,
-		CanChange: canChangeDatabases(rep)}
+	p := replicaPage{Page: a.page(r), Server: srv, Replica: rep}
+	p.Notice = notices[r.URL.Query().Get("pesan")]
+	// Segarkan daftar in the resync dialog: read the replica's databases
+	// again and show the dialog with them.
+	if r.URL.Query().Get("segarkan") == "1" {
+		p.OpenResync = true
+		if _, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID); err != nil {
+			a.Logger.Warn("refresh replica inventory", "server", srv.ID, "err", err)
+			p.Flash = err.Error()
+		}
+	}
+	a.renderReplica(w, r, http.StatusOK, p)
+}
+
+// renderReplica fills p from p.Server and p.Replica and renders it.
+func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, p replicaPage) {
+	srv, rep := p.Server, p.Replica
+	p.Online = a.Hub.IsOnline(srv.ID)
+	p.CanChange = canChangeDatabases(rep)
+	p.Controls = a.controls(srv)
 	var err error
 	if p.Master, err = a.replicaMaster(rep); err != nil {
 		a.internalError(w, "get master", err)
@@ -505,7 +581,45 @@ func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "list jobs", err)
 		return
 	}
-	a.render.Render(w, "replica_detail", p)
+	if _, p.Busy, err = a.Store.ActiveJobForServer(srv.ID); err != nil {
+		a.internalError(w, "active job", err)
+		return
+	}
+	if v, ok := a.Monitor.View(srv.ID); ok {
+		p.Health = &v
+	}
+	if mv, ok := a.Monitor.View(p.Master.ID); ok && mv.Snap != nil {
+		p.BinlogKeep = binlogKeep(mv.Snap.BinlogExpireSec)
+	}
+	masterInv, err := a.inventory(p.Master.ID)
+	if err != nil {
+		a.internalError(w, "get inventory", err)
+		return
+	}
+	for _, d := range masterInv.Databases {
+		if len(rep.Databases) == 0 || slices.Contains(rep.Databases, d.Name) {
+			p.MasterBytes += d.Bytes
+		}
+	}
+	inv, err := a.inventory(srv.ID)
+	if err != nil {
+		a.internalError(w, "get inventory", err)
+		return
+	}
+	p.WipeListRead = inv.Connected
+	for _, d := range inv.Databases {
+		p.WipeList = append(p.WipeList, d.Name)
+	}
+
+	controllable := !p.Busy && canChangeDatabases(rep) // the orchestrator's rule for stop, start, relock
+	stopped := p.Health != nil &&
+		(p.Health.Status.Code == monitor.StatusStopped || p.Health.Status.Code == monitor.StatusStoppedOutside)
+	p.CanStop = controllable && !rep.Paused && !stopped
+	p.CanStart = controllable && (rep.Paused || stopped)
+	p.CanRelock = controllable && p.Health != nil && p.Health.Status.LockLost
+	p.CanResync = !p.Busy && (canChangeDatabases(rep) || rep.State == store.ReplicaFailed)
+	p.CanDetach = !p.Busy
+	a.render.renderStatus(w, status, "replica_detail", p)
 }
 
 // canChangeDatabases reports whether the replica's databases can be
@@ -592,7 +706,7 @@ func (a *app) replicaDatabases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
-	a.changeReplicaDatabases(w, r, "add", func(p replicaDatabasesPage, selected []string) (string, string) {
+	a.changeReplicaDatabases(w, r, "add_databases", nil, func(p replicaDatabasesPage, selected []string) (string, string) {
 		if p.NoInventory {
 			return "", msgNoMasterInventory
 		}
@@ -615,7 +729,7 @@ func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 	dropData := r.PostFormValue("drop_data") != ""
-	a.changeReplicaDatabases(w, r, "remove", func(p replicaDatabasesPage, selected []string) (string, string) {
+	a.changeReplicaDatabases(w, r, "remove_databases", map[string]any{"drop_data": dropData}, func(p replicaDatabasesPage, selected []string) (string, string) {
 		for _, d := range selected {
 			if !slices.Contains(p.Replica.Databases, d) {
 				return "", "Database " + d + " tidak diikuti replika ini"
@@ -634,8 +748,9 @@ func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 
 // changeReplicaDatabases handles the add and remove posts of the databases
 // page: start checks the selection like the orchestrator does and starts
-// the job, answering its id or the reason it refused.
-func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, action string,
+// the job, answering its id or the reason it refused. action is the audit
+// action; detail (may be nil) goes into its entry.
+func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, action string, detail map[string]any,
 	start func(p replicaDatabasesPage, selected []string) (jobID, refusal string)) {
 	srv, rep, ok := a.subsetReplicaFromPath(w, r)
 	if !ok {
@@ -647,23 +762,32 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 	selected := r.PostForm["databases"]
-	refusal := ""
+	msg := ""
 	id := ""
 	switch {
 	case !p.CanChange:
-		refusal = msgReplicaNotReady
+		msg = msgReplicaNotReady
 	case len(selected) == 0:
-		refusal = msgPickDatabase
+		msg = msgPickDatabase
 	default:
-		id, refusal = start(p, selected)
+		id, msg = start(p, selected)
 	}
-	if refusal != "" {
-		a.Logger.Warn("replica databases "+action+" refused", "server", srv.ID, "err", refusal)
-		p.Flash = refusal
+	verb := strings.TrimSuffix(action, "_databases") // add or remove
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	detail["databases"] = selected
+	if id != "" {
+		detail["job_id"] = id
+	}
+	a.audit(r, action, auditReplica, srv.ID, detail, outcomeMsg(msg))
+	if msg != "" {
+		a.Logger.Warn("replica databases "+verb+" refused", "server", srv.ID, "err", msg)
+		p.Flash = msg
 		a.render.renderStatus(w, http.StatusBadRequest, "replica_databases", p)
 		return
 	}
-	a.Logger.Info("replica databases "+action+" started", "server", srv.ID, "databases", selected, "job", id,
+	a.Logger.Info("replica databases "+verb+" started", "server", srv.ID, "databases", selected, "job", id,
 		"by", a.page(r).Username)
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }

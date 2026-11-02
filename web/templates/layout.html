@@ -60,3 +60,26 @@
 <p class="text-base-content/70">Belum ada pekerjaan.</p>
 {{end}}
 {{end}}
+
+{{define "server-controls"}}
+<div class="flex flex-wrap items-center gap-2">
+  <form method="post" action="/servers/{{.ServerID}}/check"><button type="submit" class="btn btn-sm">Periksa sekarang</button></form>
+  <form method="post" action="/servers/{{.ServerID}}/snooze" class="join">
+    <select name="hours" class="select select-sm join-item w-auto" aria-label="Lama Jangan ganggu">
+      <option value="1">1 jam</option>
+      <option value="2">2 jam</option>
+      <option value="8">8 jam</option>
+      <option value="24">24 jam</option>
+    </select>
+    <button type="submit" class="btn btn-sm join-item">Jangan ganggu</button>
+  </form>
+  {{with .SnoozeUntil}}
+  <span class="text-sm">Jangan ganggu sampai {{fmtTime .}}</span>
+  <form method="post" action="/servers/{{$.ServerID}}/snooze">
+    <input type="hidden" name="hours" value="0">
+    <button type="submit" class="btn btn-ghost btn-sm">Batalkan</button>
+  </form>
+  {{end}}
+</div>
+<p class="text-xs text-base-content/70">Jangan ganggu menunda pemberitahuan Telegram untuk server ini; peringatan tetap dicatat.</p>
+{{end}}

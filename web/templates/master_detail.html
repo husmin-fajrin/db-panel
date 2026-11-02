@@ -62,6 +62,17 @@
 </div>
 
 <div class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Kontrol</h2>
+    {{with .Health}}<p class="text-sm">Pemantauan: <strong>{{or .Status.Code "belum ada laporan"}}</strong></p>{{end}}
+    {{if .Locked}}
+    <div><button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-unlock">Buka kunci master</button></div>
+    {{end}}
+    {{template "server-controls" .Controls}}
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <h2 class="card-title">Replika</h2>
@@ -96,4 +107,24 @@
 </div>
 
 <a href="/servers/{{.Server.ID}}" class="btn btn-ghost">Kembali ke halaman server</a>
+
+{{if .Locked}}
+<dialog id="modal-unlock" class="modal">
+  <form method="post" action="/masters/{{.Server.ID}}/unlock" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
+    <h3 class="text-lg font-bold">Buka kunci master {{.Server.Name}}?</h3>
+    <p>Kunci hanya-baca (read_only dan super_read_only) di MySQL master ini dilepas, sehingga aplikasi bisa menulis lagi.</p>
+    <p>Pastikan hanya satu server yang menerima tulisan: bila server lain sudah dijadikan tempat menulis, membuka kunci ini membuat dua salinan data yang saling berbeda.</p>
+    <label class="flex flex-col gap-1">
+      <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
+      <input class="input input-sm w-full" type="text" name="confirm_name" x-ref="typed" @input="input" autocomplete="off" required>
+    </label>
+    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <div class="modal-action flex-row-reverse justify-start">
+      <button type="submit" class="btn btn-warning" :disabled="blocked" disabled>Ya, buka kunci</button>
+      <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
+    </div>
+  </form>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
 {{end}}

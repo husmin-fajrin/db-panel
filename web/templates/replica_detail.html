@@ -35,6 +35,23 @@
 </div>
 
 <div class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Kontrol</h2>
+    {{with .Health}}<p class="text-sm">Pemantauan: <strong>{{or .Status.Code "belum ada laporan"}}</strong>{{if .Status.LockLost}} · <span class="text-error">Kunci hanya-baca terlepas</span>{{end}}</p>{{end}}
+    {{if .Replica.Paused}}<p class="text-sm">Replikasi dihentikan lewat panel.</p>{{end}}
+    {{if .Busy}}<p class="text-sm text-base-content/70">Server ini masih punya pekerjaan yang belum selesai; tombol kontrol tersedia lagi setelah pekerjaan itu selesai.</p>{{end}}
+    <div class="flex flex-wrap gap-2">
+      {{if .CanStop}}<button type="button" class="btn btn-sm" data-open-modal="modal-stop">Stop replika</button>{{end}}
+      {{if .CanStart}}<button type="button" class="btn btn-sm" data-open-modal="modal-start">Start replika</button>{{end}}
+      {{if .CanRelock}}<button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-relock">Kunci kembali</button>{{end}}
+      {{if .CanResync}}<button type="button" class="btn btn-sm" data-open-modal="modal-resync">Resync ulang</button>{{end}}
+      {{if .CanDetach}}<button type="button" class="btn btn-sm btn-error btn-outline" data-open-modal="modal-detach">Lepas replika</button>{{end}}
+    </div>
+    {{template "server-controls" .Controls}}
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
     <h2 class="card-title">Riwayat pekerjaan</h2>
     {{template "job-table" .Jobs}}
@@ -42,4 +59,107 @@
 </div>
 
 <a href="/servers/{{.Server.ID}}" class="btn btn-ghost">Kembali ke halaman server</a>
+
+{{if .CanStop}}
+<dialog id="modal-stop" class="modal">
+  <div class="modal-box">
+    <h3 class="text-lg font-bold">Stop replika {{.Server.Name}}?</h3>
+    <p class="py-2">Replikasi di server ini dihentikan sampai Anda menjalankannya lagi dengan <strong>Start replika</strong>.</p>
+    <p class="py-2">Lag akan membesar selama replika berhenti.{{with .BinlogKeep}} Master menyimpan binlog {{.}}; lebih dari itu replika harus disync ulang.{{end}}</p>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn">Batal</button></form>
+      <form method="post" action="/replicas/{{.Server.ID}}/stop"><button type="submit" class="btn btn-warning">Ya, stop</button></form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
+
+{{if .CanStart}}
+<dialog id="modal-start" class="modal">
+  <div class="modal-box">
+    <h3 class="text-lg font-bold">Start replika {{.Server.Name}}?</h3>
+    <p class="py-2">Replikasi dijalankan lagi dan replika mengejar ketertinggalannya dari master.</p>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn">Batal</button></form>
+      <form method="post" action="/replicas/{{.Server.ID}}/start"><button type="submit" class="btn btn-primary">Ya, start</button></form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
+
+{{if .CanRelock}}
+<dialog id="modal-relock" class="modal">
+  <div class="modal-box">
+    <h3 class="text-lg font-bold">Kunci kembali {{.Server.Name}}?</h3>
+    <p class="py-2">MySQL di server ini dikunci hanya-baca lagi (super_read_only), sehingga hanya replikasi yang bisa mengubah isinya.</p>
+    <p class="py-2">Bila ada yang sempat menulis ke replika, isinya bisa berbeda dari master; pertimbangkan Resync ulang.</p>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn">Batal</button></form>
+      <form method="post" action="/replicas/{{.Server.ID}}/relock"><button type="submit" class="btn btn-warning">Ya, kunci</button></form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
+
+{{if .CanResync}}
+<dialog id="modal-resync" class="modal"{{if .OpenResync}} open{{end}}>
+  <form method="post" action="/replicas/{{.Server.ID}}/resync" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
+    <h3 class="text-lg font-bold">Resync ulang {{.Server.Name}}?</h3>
+    <p>Panel menyalin ulang data dari master <strong>{{.Master.Name}}</strong> ke replika ini, lalu menyambungkan replikasinya lagi.</p>
+    {{if .WipeList}}
+    <p>Database berikut DIBUANG dari {{.Server.Name}} lalu disalin ulang dari master; isi yang hanya ada di replika hilang:</p>
+    <ul class="list-disc ml-6">
+      {{range .WipeList}}<li>{{.}}<input type="hidden" name="wipe_list[]" value="{{.}}"></li>{{end}}
+    </ul>
+    {{else if .WipeListRead}}
+    <p>Replika ini tidak punya database pengguna; tidak ada yang dibuang.</p>
+    {{else}}
+    <p>Daftar database replika belum pernah dibaca. Klik <strong>Segarkan daftar</strong> agar Anda melihat database yang akan dibuang.</p>
+    {{end}}
+    <p class="text-sm"><a class="link" href="/replicas/{{.Server.ID}}?segarkan=1">Segarkan daftar</a></p>
+    <p>Ukuran data master: <strong>{{fmtBytes .MasterBytes}}</strong>. Jalankan di luar jam sibuk: penyalinan membebani master dan jaringan.</p>
+    <label class="label"><input type="checkbox" name="force_dump" value="1" class="checkbox checkbox-sm"> Paksa dump (jangan pakai CLONE)</label>
+    <label class="flex flex-col gap-1">
+      <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
+      <input class="input input-sm w-full" type="text" name="confirm_name" x-ref="typed" @input="input" autocomplete="off" required>
+    </label>
+    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <div class="modal-action flex-row-reverse justify-start">
+      <button type="submit" class="btn btn-error" :disabled="blocked" disabled>Ya, resync ulang</button>
+      <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
+    </div>
+  </form>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
+
+{{if .CanDetach}}
+<dialog id="modal-detach" class="modal">
+  <form method="post" action="/replicas/{{.Server.ID}}/detach" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
+    <h3 class="text-lg font-bold">Lepas replika {{.Server.Name}}?</h3>
+    <p>Panel berhenti mengelola server ini sebagai replika master <strong>{{.Master.Name}}</strong>. Akun replikasi di master tidak disentuh.</p>
+    <label class="flex gap-2 items-start">
+      <input type="radio" class="radio radio-sm mt-1" name="mode" value="keep" required>
+      <span><strong>Lepas, biarkan replikasi berjalan.</strong> MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; panel tidak lagi memantaunya.</span>
+    </label>
+    <label class="flex gap-2 items-start">
+      <input type="radio" class="radio radio-sm mt-1" name="mode" value="stop">
+      <span><strong>Lepas dan hentikan replikasi.</strong> Replikasi dihentikan dan pengaturannya dihapus. MySQL di server ini tetap terkunci hanya-baca; untuk membukanya jalankan di server itu: <code>mysql -e "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF"</code></span>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
+      <input class="input input-sm w-full" type="text" name="confirm_name" x-ref="typed" @input="input" autocomplete="off" required>
+    </label>
+    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <div class="modal-action flex-row-reverse justify-start">
+      <button type="submit" class="btn btn-error" :disabled="blocked" disabled>Ya, lepas</button>
+      <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
+    </div>
+  </form>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
 {{end}}
