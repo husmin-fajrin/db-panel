@@ -251,6 +251,61 @@
     }));
   });
 
+  // Status pemantauan yang diperbarui langsung: elemen
+  // data-status-for="<id server>" (dashboard, halaman master dan replika)
+  // diisi ulang dengan GET /servers/<id>/status-fragment setiap ada event
+  // health_update untuk server itu; data-status-variant="baris" meminta
+  // bentuk ringkasnya. Server yang tidak ada di halaman diabaikan. Jawaban
+  // yang datang setelah jawaban permintaan berikutnya dibuang.
+  function pasangStatusLangsung() {
+    if (!document.querySelector("[data-status-for]")) {
+      return;
+    }
+    const terakhir = new Map(); // "<id>|<varian>" -> nomor permintaan terbaru
+    let nomor = 0;
+    const es = new EventSource("/events");
+    es.addEventListener("health_update", (e) => {
+      const id = String(JSON.parse(e.data).server_id);
+      const perVarian = new Map();
+      for (const el of document.querySelectorAll("[data-status-for]")) {
+        if (el.dataset.statusFor !== id) {
+          continue;
+        }
+        const varian = el.dataset.statusVariant || "";
+        if (!perVarian.has(varian)) {
+          perVarian.set(varian, []);
+        }
+        perVarian.get(varian).push(el);
+      }
+      for (const [varian, els] of perVarian) {
+        const kunci = `${id}|${varian}`;
+        const ini = ++nomor;
+        terakhir.set(kunci, ini);
+        const url = `/servers/${encodeURIComponent(id)}/status-fragment` +
+          (varian ? `?tampilan=${encodeURIComponent(varian)}` : "");
+        fetch(url, { credentials: "same-origin", headers: { Accept: "text/html" } })
+          // Sesi habis: fetch mengikuti redirect ke /login; halaman login
+          // tidak boleh masuk ke kotak status.
+          .then((r) => (r.ok && !r.redirected ? r.text() : Promise.reject(new Error(String(r.status)))))
+          .then((html) => {
+            if (terakhir.get(kunci) !== ini) {
+              return;
+            }
+            for (const el of els) {
+              el.innerHTML = html;
+            }
+          })
+          .catch(() => {}); // fragmen lama tetap tampil; event berikutnya mencoba lagi
+      }
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", pasangStatusLangsung);
+  } else {
+    pasangStatusLangsung();
+  }
+
   // Tombol dengan data-open-modal="<id dialog>" membuka dialog itu
   // (pengganti atribut onclick, yang diblokir CSP).
   document.addEventListener("click", (e) => {

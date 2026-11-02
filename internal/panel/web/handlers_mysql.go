@@ -203,10 +203,12 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
-// replicaRow is a replica with the name of its server.
+// replicaRow is a replica with the name of its server and its monitoring
+// status.
 type replicaRow struct {
 	store.Replica
 	ServerName string
+	Status     statusView
 }
 
 type masterPage struct {
@@ -221,11 +223,13 @@ type masterPage struct {
 	SourceHost string
 	SourcePort string
 	SourceOpen bool
-	// Health is the monitor's view of the master; nil before its first
-	// report. Locked: it is read-only (Buka kunci master is offered).
-	Health   *monitor.View
+	// Locked: the monitor reports it read-only (Buka kunci master is
+	// offered).
 	Locked   bool
 	Controls serverControls
+	Status   statusView
+	Facts    masterFacts
+	Timeline timelineView
 }
 
 // masterFromPath loads the server of {id} and its topology. A server that
@@ -297,10 +301,9 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 	srv, topo := p.Server, p.Topology
 	p.Online = a.Hub.IsOnline(srv.ID)
 	p.Controls = a.controls(srv)
-	if v, ok := a.Monitor.View(srv.ID); ok {
-		p.Health = &v
-		p.Locked = v.Status.Code == monitor.StatusLocked
-	}
+	v, monitored := a.Monitor.View(srv.ID)
+	p.Locked = monitored && v.Status.Code == monitor.StatusLocked
+	p.Status = newStatusView(srv.ID, srv.Role, v, monitored, a.Now())
 	var err error
 	if p.Inventory, err = a.inventory(srv.ID); err != nil {
 		a.internalError(w, "get inventory", err)
@@ -317,7 +320,13 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 		return
 	}
 	for _, rep := range reps {
-		p.Replicas = append(p.Replicas, replicaRow{Replica: rep, ServerName: names[rep.ServerID]})
+		p.Replicas = append(p.Replicas, replicaRow{Replica: rep, ServerName: names[rep.ServerID],
+			Status: a.statusOf(rep.ServerID, store.RoleReplica)})
+	}
+	p.Facts = newMasterFacts(v, monitored, len(reps))
+	if p.Timeline, err = a.timeline(r, srv.ID); err != nil {
+		a.internalError(w, "timeline", err)
+		return
 	}
 	// The master's own jobs and those creating its replicas.
 	jobs, err := a.Store.ListJobs(jobsListLimit)
@@ -513,6 +522,21 @@ type replicaPage struct {
 	WipeList     []string
 	WipeListRead bool
 	OpenResync   bool // open the resync dialog on load (after prepareResync)
+	Status       statusView
+	Timeline     timelineView
+}
+
+// ButtonClass is the extra class of the control an explanation's Primary
+// names ("resync", "start", "master"): btn-primary for the advised one and
+// btn-outline for the others; "" while no advice is shown.
+func (p replicaPage) ButtonClass(name string) string {
+	switch e := p.Status.Explain; {
+	case e == nil || e.Primary == "":
+		return ""
+	case e.Primary == name:
+		return "btn-primary"
+	}
+	return "btn-outline"
 }
 
 // replicaFromPath loads the server of {id} and its replica row, answering
@@ -579,8 +603,14 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 		a.internalError(w, "active job", err)
 		return
 	}
-	if v, ok := a.Monitor.View(srv.ID); ok {
+	v, monitored := a.Monitor.View(srv.ID)
+	if monitored {
 		p.Health = &v
+	}
+	p.Status = newStatusView(srv.ID, srv.Role, v, monitored, a.Now())
+	if p.Timeline, err = a.timeline(r, srv.ID); err != nil {
+		a.internalError(w, "timeline", err)
+		return
 	}
 	if mv, ok := a.Monitor.View(p.Master.ID); ok && mv.Snap != nil {
 		p.BinlogKeep = binlogKeep(mv.Snap.BinlogExpireSec)

@@ -25,9 +25,23 @@ const localCertSerial = "local"
 
 type dashboardPage struct {
 	Page
-	Total, Online, Unpaired int
-	Replicas, ActiveJobs    int
-	Masters                 []store.Server
+	Total, Online, Unpaired  int
+	Masters, Replicas        int
+	ActiveJobs, ActiveAlerts int
+	Topologies               []topologyCard
+}
+
+// topologyCard is a master and its replicas on the dashboard.
+type topologyCard struct {
+	Master       store.Server
+	MasterStatus statusView
+	Replicas     []serverStatusRow
+}
+
+// serverStatusRow is a server with its monitoring status.
+type serverStatusRow struct {
+	Server store.Server
+	Status statusView
 }
 
 type serverRow struct {
@@ -35,6 +49,13 @@ type serverRow struct {
 	Online       bool
 	MySQLVersion string
 	OS           string
+	Status       statusView
+	Local        bool // the panel host: its agent is embedded in the panel
+	// NeedsUpgrade: the agent is too old for monitoring. UpgradeCommand
+	// reinstalls it; "" when no re-pairing token of this process is active
+	// (the server page creates one).
+	NeedsUpgrade   bool
+	UpgradeCommand string
 }
 
 type serversPage struct {
@@ -88,7 +109,12 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "running jobs", err)
 		return
 	}
-	p := dashboardPage{Page: a.page(r), Total: len(servers), ActiveJobs: len(active)}
+	alerts, err := a.Store.ListOpenAlerts()
+	if err != nil {
+		a.internalError(w, "list open alerts", err)
+		return
+	}
+	p := dashboardPage{Page: a.page(r), Total: len(servers), ActiveJobs: len(active), ActiveAlerts: len(alerts)}
 	for _, s := range servers {
 		switch {
 		case !s.Paired:
@@ -98,12 +124,43 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		switch s.Role {
 		case store.RoleMaster:
-			p.Masters = append(p.Masters, s)
+			p.Masters++
 		case store.RoleReplica:
 			p.Replicas++
 		}
 	}
+	if p.Topologies, err = a.topologyCards(servers); err != nil {
+		a.internalError(w, "topology cards", err)
+		return
+	}
 	a.render.Render(w, "dashboard", p)
+}
+
+// topologyCards is one card per topology, its master with its replicas.
+func (a *app) topologyCards(servers []store.Server) ([]topologyCard, error) {
+	byID := make(map[int64]store.Server, len(servers))
+	for _, s := range servers {
+		byID[s.ID] = s
+	}
+	topos, err := a.Store.ListTopologies()
+	if err != nil {
+		return nil, err
+	}
+	cards := make([]topologyCard, 0, len(topos))
+	for _, t := range topos {
+		master := byID[t.MasterServerID]
+		card := topologyCard{Master: master, MasterStatus: a.statusOf(master.ID, master.Role)}
+		reps, err := a.Store.ListReplicas(t.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, rep := range reps {
+			srv := byID[rep.ServerID]
+			card.Replicas = append(card.Replicas, serverStatusRow{Server: srv, Status: a.statusOf(srv.ID, srv.Role)})
+		}
+		cards = append(cards, card)
+	}
+	return cards, nil
 }
 
 func (a *app) listServers(w http.ResponseWriter, r *http.Request) {
@@ -114,17 +171,42 @@ func (a *app) listServers(w http.ResponseWriter, r *http.Request) {
 	}
 	p := serversPage{Page: a.page(r)}
 	p.Notice = notices[r.URL.Query().Get("pesan")]
+	now := a.Now()
 	for _, s := range servers {
-		row := serverRow{Server: s, Online: s.Paired && a.Hub.IsOnline(s.ID)}
+		row := serverRow{Server: s, Online: s.Paired && a.Hub.IsOnline(s.ID), Local: s.CertSerial == localCertSerial}
 		if probe := a.probe(s); probe != nil {
 			row.OS = probe.OS
 			if probe.MySQL.Installed {
 				row.MySQLVersion = probe.MySQL.Version
 			}
 		}
+		v, ok := a.Monitor.View(s.ID)
+		row.Status = newStatusView(s.ID, s.Role, v, ok, now)
+		row.NeedsUpgrade = ok && v.NeedsUpgrade
+		if row.NeedsUpgrade && !row.Local {
+			var err error
+			if row.UpgradeCommand, err = a.upgradeCommand(s.ID, now); err != nil {
+				a.internalError(w, "upgrade command", err)
+				return
+			}
+		}
 		p.Rows = append(p.Rows, row)
 	}
 	a.render.Render(w, "servers", p)
+}
+
+// upgradeCommand is the pairing command that reinstalls the server's
+// agent, or "" when this panel process holds no active token for it.
+func (a *app) upgradeCommand(id int64, now time.Time) (string, error) {
+	tok, found, err := a.Store.ActivePairToken(id, now)
+	if err != nil || !found || tok.Token == "" {
+		return "", err
+	}
+	sum, err := a.InstallScriptSHA256(tok.Token)
+	if err != nil {
+		return "", err
+	}
+	return pairCommand(a.PublicURL(), tok.Token, sum), nil
 }
 
 func (a *app) newServerForm(w http.ResponseWriter, r *http.Request) {

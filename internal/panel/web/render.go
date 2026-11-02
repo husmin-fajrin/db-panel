@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	webfs "github.com/husmin-fajrin/db-panel/web"
 )
 
@@ -29,8 +30,11 @@ var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {
-	pages  map[string]*template.Template
-	logger *slog.Logger
+	pages map[string]*template.Template
+	// fragments holds the shared partials (status, timeline) rendered on
+	// their own, without the layout.
+	fragments *template.Template
+	logger    *slog.Logger
 }
 
 var templateFuncs = template.FuncMap{
@@ -41,16 +45,30 @@ var templateFuncs = template.FuncMap{
 	"statusLabel": statusLabel,
 	"statusClass": statusClass,
 	"kindLabel":   kindLabel,
+	// Monitoring.
+	"severityClass": severityClass,
+	"fmtDuration":   fmtDuration,
+	"fmtPct":        fmtPct,
+	"ago":           ago,
 }
 
-// NewRenderer parses layout.html together with each page into its own
-// template set.
+// partials are the templates shared by several pages and rendered on their
+// own by the fragment endpoint.
+var partials = []string{"templates/layout.html", "templates/_status.html", "templates/_timeline.html"}
+
+// NewRenderer parses the layout and the shared partials together with each
+// page into its own template set, plus one set of the partials alone for
+// fragments.
 func NewRenderer() (*Renderer, error) {
-	base, err := template.New("").Funcs(templateFuncs).ParseFS(webfs.FS, "templates/layout.html")
+	base, err := template.New("").Funcs(templateFuncs).ParseFS(webfs.FS, partials...)
 	if err != nil {
 		return nil, fmt.Errorf("parse layout: %w", err)
 	}
-	r := &Renderer{pages: make(map[string]*template.Template, len(pageNames)), logger: slog.Default()}
+	frag, err := base.Clone()
+	if err != nil {
+		return nil, err
+	}
+	r := &Renderer{pages: make(map[string]*template.Template, len(pageNames)), fragments: frag, logger: slog.Default()}
 	for _, name := range pageNames {
 		t, err := base.Clone()
 		if err != nil {
@@ -89,6 +107,20 @@ func (r *Renderer) renderStatus(w http.ResponseWriter, status int, name string, 
 	buf.WriteTo(w)
 }
 
+// RenderFragment writes the partial template name alone (no layout) with
+// HTTP 200, for pages that replace part of themselves.
+func (r *Renderer) RenderFragment(w http.ResponseWriter, name string, data any) {
+	var buf bytes.Buffer
+	if err := r.fragments.ExecuteTemplate(&buf, name, data); err != nil {
+		r.logger.Error("render fragment", "fragment", name, "err", err)
+		http.Error(w, msgInternal, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	buf.WriteTo(w)
+}
+
 // fmtTime formats a time (or *time.Time) in the panel host's local zone;
 // zero or nil shows "-".
 func fmtTime(v any) string {
@@ -124,4 +156,57 @@ func fmtBytes(b uint64) string {
 		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
 	}
 	return fmt.Sprintf("%d KB", (b+1023)/1024)
+}
+
+// severityClass is the daisyUI badge class of a monitoring severity.
+func severityClass(s monitor.Severity) string {
+	switch s {
+	case monitor.SevOK:
+		return "badge-success"
+	case monitor.SevWarn:
+		return "badge-warning"
+	case monitor.SevCrit:
+		return "badge-error"
+	}
+	return "badge-ghost"
+}
+
+// fmtDuration words a number of seconds: "2 hari 3 jam", "3 jam 5 menit",
+// "5 menit" or "40 dtk".
+func fmtDuration(sec int64) string {
+	sec = max(sec, 0)
+	const minute, hour, day = 60, 3600, 86400
+	switch {
+	case sec >= day:
+		return fmt.Sprintf("%d hari %d jam", sec/day, sec%day/hour)
+	case sec >= hour:
+		return fmt.Sprintf("%d jam %d menit", sec/hour, sec%hour/minute)
+	case sec >= minute:
+		return fmt.Sprintf("%d menit", sec/minute)
+	}
+	return fmt.Sprintf("%d dtk", sec)
+}
+
+// fmtPct words used out of total as a whole percentage ("71%"); "-" when
+// total is 0.
+func fmtPct(used, total uint64) string {
+	if total == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d%%", (used*100+total/2)/total)
+}
+
+// ago words how long before now t was: "12 dtk lalu", "3 menit lalu",
+// "2 jam lalu", "4 hari lalu".
+func ago(t, now time.Time) string {
+	sec := int64(max(now.Sub(t), 0) / time.Second)
+	switch {
+	case sec >= 86400:
+		return fmt.Sprintf("%d hari lalu", sec/86400)
+	case sec >= 3600:
+		return fmt.Sprintf("%d jam lalu", sec/3600)
+	case sec >= 60:
+		return fmt.Sprintf("%d menit lalu", sec/60)
+	}
+	return fmt.Sprintf("%d dtk lalu", sec)
 }

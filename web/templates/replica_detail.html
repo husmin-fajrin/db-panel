@@ -9,12 +9,26 @@
 
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
+    <h2 class="card-title">Status</h2>
+    <div data-status-for="{{.Server.ID}}">{{template "status-full" .Status}}</div>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
     <h2 class="card-title">Ringkasan</h2>
     <table class="table table-sm">
       <tbody>
         <tr><th>Status</th><td>{{template "status-badge" .Replica.State}}</td></tr>
         <tr><th>Master</th><td><a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></td></tr>
         <tr><th>Database yang diikuti</th><td>{{if .Replica.Databases}}{{range $i, $d := .Replica.Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td></tr>
+        <tr><th>Ketertinggalan</th><td>{{or .Status.Lag "-"}}</td></tr>
+        {{with .Health}}{{with .Snap}}{{with .Replica}}
+        <tr><th>GTID diterima</th><td><code class="break-all">{{or .RetrievedGTID "-"}}</code></td></tr>
+        <tr><th>GTID dieksekusi</th><td><code class="break-all">{{or .ExecutedGTID "-"}}</code></td></tr>
+        {{end}}{{end}}
+        <tr><th>Belum diterima dari master</th><td>{{.Status.GTIDGap}} transaksi</td></tr>
+        {{end}}
         <tr><th>Dibuat</th><td>{{fmtTime .Replica.CreatedAt}}</td></tr>
         {{with .Replica.LastError}}<tr><th>Kesalahan terakhir</th><td class="text-error">{{.}}</td></tr>{{end}}
       </tbody>
@@ -37,21 +51,48 @@
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body gap-3">
     <h2 class="card-title">Kontrol</h2>
-    {{with .Health}}<p class="text-sm">Pemantauan: <strong>{{or .Status.Code "belum ada laporan"}}</strong>{{if .Status.LockLost}} · <span class="text-error">Kunci hanya-baca terlepas</span>{{end}}</p>{{end}}
     {{if .Replica.Paused}}<p class="text-sm">Replikasi dihentikan lewat panel.</p>{{end}}
     {{if .Busy}}<p class="text-sm text-base-content/70">Server ini masih punya pekerjaan yang belum selesai; tombol kontrol tersedia lagi setelah pekerjaan itu selesai.</p>{{end}}
     <div class="flex flex-wrap gap-2">
       {{if .CanStop}}<button type="button" class="btn btn-sm" data-open-modal="modal-stop">Stop replika</button>{{end}}
-      {{if .CanStart}}<button type="button" class="btn btn-sm" data-open-modal="modal-start">Start replika</button>{{end}}
+      {{if .CanStart}}<button type="button" class="btn btn-sm{{with .ButtonClass "start"}} {{.}}{{end}}" data-open-modal="modal-start">Start replika</button>{{end}}
       {{if .CanRelock}}<button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-relock">Kunci kembali</button>{{end}}
       {{if .CanResync}}
-      <form method="post" action="/replicas/{{.Server.ID}}/resync/prepare"><button type="submit" class="btn btn-sm">Resync ulang</button></form>
+      <form method="post" action="/replicas/{{.Server.ID}}/resync/prepare"><button type="submit" class="btn btn-sm{{with .ButtonClass "resync"}} {{.}}{{end}}">Resync ulang</button></form>
       {{end}}
+      {{if eq (.ButtonClass "master") "btn-primary"}}<a class="btn btn-sm btn-primary" href="/masters/{{.Master.ID}}">Buka halaman master</a>{{end}}
       {{if .CanDetach}}<button type="button" class="btn btn-sm btn-error btn-outline" data-open-modal="modal-detach">Lepas replika</button>{{end}}
     </div>
     {{template "server-controls" .Controls}}
   </div>
 </div>
+
+{{with .Health}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <details>
+      <summary class="cursor-pointer font-semibold">Detail teknis</summary>
+      <table class="table table-sm mt-2">
+        <tbody>
+          <tr><th>Kode status</th><td><code>{{or .Status.Code "-"}}</code></td></tr>
+          {{with .Snap}}
+          {{with .MySQLError}}<tr><th>Pesan MySQL</th><td><code class="break-all">{{.}}</code></td></tr>{{end}}
+          {{with .Replica}}
+          <tr><th>Thread IO / SQL</th><td>{{or .IORunning "-"}} / {{or .SQLRunning "-"}}</td></tr>
+          <tr><th>Sumber replikasi</th><td>{{.SourceHost}}:{{.SourcePort}}</td></tr>
+          <tr><th>Error SQL terakhir</th><td>{{if .LastSQLErrno}}{{.LastSQLErrno}}: <code class="break-all">{{.LastSQLError}}</code>{{else}}-{{end}}</td></tr>
+          <tr><th>Error IO terakhir</th><td>{{if .LastIOErrno}}{{.LastIOErrno}}: <code class="break-all">{{.LastIOError}}</code>{{else}}-{{end}}</td></tr>
+          <tr><th>Filter</th><td>{{range $i, $f := .Filters}}{{if $i}}, {{end}}<code>{{$f}}</code>{{else}}tidak ada (semua database){{end}}</td></tr>
+          {{end}}
+          {{end}}
+        </tbody>
+      </table>
+    </details>
+  </div>
+</div>
+{{end}}
+
+{{template "timeline" .Timeline}}
 
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">

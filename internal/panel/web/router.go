@@ -140,6 +140,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /servers/{id}/prepare-master", authedPost(a.prepareMaster))
 	mux.Handle("POST /servers/{id}/check", authedPost(a.checkServer))
 	mux.Handle("POST /servers/{id}/snooze", authedPost(a.snoozeServer))
+	mux.Handle("GET /servers/{id}/status-fragment", authed(a.statusFragment))
 	mux.Handle("GET /masters/{id}", authed(a.masterDetail))
 	mux.Handle("POST /masters/{id}/source", authedPost(a.setMasterSource))
 	mux.Handle("POST /masters/{id}/unlock", authedPost(a.unlockMaster))

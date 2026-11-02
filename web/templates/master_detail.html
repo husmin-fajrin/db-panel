@@ -7,6 +7,43 @@
         :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
 </div>
 
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Status</h2>
+    <div data-status-for="{{.Server.ID}}">{{template "status-full" .Status}}</div>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">Kondisi saat ini</h2>
+    {{with .Facts}}{{with .Snap}}
+    <table class="table table-sm">
+      <tbody>
+        {{if .MySQLOK}}
+        <tr><th>Versi MySQL</th><td>{{.Version}}</td></tr>
+        <tr><th>MySQL berjalan selama</th><td>{{fmtDuration .UptimeSec}}</td></tr>
+        <tr><th>Replika tersambung</th><td>{{.BinlogDumpThreads}} dari {{$.Facts.Registered}} terdaftar</td></tr>
+        <tr><th>Binlog tertua</th><td>{{with .BinlogOldestAgeSec}}{{fmtDuration .}}{{else}}-{{end}}{{with $.Facts.BinlogKeep}} (batas simpan {{.}}){{end}}; total {{fmtBytes .BinlogTotalBytes}}</td></tr>
+        <tr><th>Koneksi</th><td>{{.ThreadsConnected}} / {{.MaxConnections}}</td></tr>
+        {{end}}
+        {{if .DiskTotal}}<tr><th>Disk data</th><td>{{fmtPct $.Facts.DiskUsed .DiskTotal}} terpakai dari {{fmtBytes .DiskTotal}}</td></tr>{{end}}
+        {{if .MemTotal}}<tr><th>RAM</th><td>{{fmtBytes .MemAvailable}} tersedia dari {{fmtBytes .MemTotal}}</td></tr>{{end}}
+        <tr><th>Beban (1 menit)</th><td>{{printf "%.2f" .Load1}}</td></tr>
+      </tbody>
+    </table>
+    {{if and (not .MySQLOK) .MySQLError}}
+    <details class="mt-2">
+      <summary class="btn btn-ghost btn-sm">Detail teknis</summary>
+      <p class="text-sm mt-2">Pesan MySQL: <code class="break-all">{{.MySQLError}}</code></p>
+    </details>
+    {{end}}
+    {{else}}
+    <p class="text-base-content/70">Belum ada laporan pemantauan dari server ini.</p>
+    {{end}}{{end}}
+  </div>
+</div>
+
 <div class="grid gap-6 md:grid-cols-2 mb-6">
   <div class="card bg-base-100 shadow">
     <div class="card-body">
@@ -64,7 +101,6 @@
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body gap-3">
     <h2 class="card-title">Kontrol</h2>
-    {{with .Health}}<p class="text-sm">Pemantauan: <strong>{{or .Status.Code "belum ada laporan"}}</strong></p>{{end}}
     {{if .Locked}}
     <div><button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-unlock">Buka kunci master</button></div>
     {{end}}
@@ -81,12 +117,13 @@
     {{if .Replicas}}
     <div class="overflow-x-auto">
       <table class="table table-sm">
-        <thead><tr><th>Server</th><th>Status</th><th>Database yang diikuti</th></tr></thead>
+        <thead><tr><th>Server</th><th>Status</th><th>Pemantauan</th><th>Database yang diikuti</th></tr></thead>
         <tbody>
           {{range .Replicas}}
           <tr>
             <td><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a></td>
             <td>{{template "status-badge" .State}}</td>
+            <td data-status-for="{{.ServerID}}" data-status-variant="baris">{{template "status-row" .Status}}</td>
             <td>{{if .Databases}}{{range $i, $d := .Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td>
           </tr>
           {{end}}
@@ -98,6 +135,8 @@
     {{end}}
   </div>
 </div>
+
+{{template "timeline" .Timeline}}
 
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">

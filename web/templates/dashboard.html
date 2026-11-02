@@ -18,11 +18,16 @@
 <div class="stats stats-vertical md:stats-horizontal bg-base-100 shadow w-full mt-4">
   <div class="stat">
     <div class="stat-title">Master</div>
-    <div class="stat-value" data-stat="masters">{{len .Masters}}</div>
+    <div class="stat-value" data-stat="masters">{{.Masters}}</div>
   </div>
   <div class="stat">
     <div class="stat-title">Replika</div>
     <div class="stat-value" data-stat="replicas">{{.Replicas}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Peringatan aktif</div>
+    <div class="stat-value {{if .ActiveAlerts}}text-error{{end}}" data-stat="alerts">{{.ActiveAlerts}}</div>
+    <div class="stat-desc"><a class="link" href="/alerts">Lihat peringatan</a></div>
   </div>
   <div class="stat">
     <div class="stat-title">Pekerjaan aktif</div>
@@ -30,15 +35,26 @@
     <div class="stat-desc"><a class="link" href="/jobs">Lihat semua pekerjaan</a></div>
   </div>
 </div>
-{{if .Masters}}
+{{range .Topologies}}
 <div class="card bg-base-100 shadow mt-6">
-  <div class="card-body">
-    <h2 class="card-title">Master replikasi</h2>
+  <div class="card-body gap-3">
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <h2 class="card-title"><a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></h2>
+      <span class="text-sm text-base-content/70">master{{with .Master.Address}} · {{.}}{{end}}</span>
+      <div data-status-for="{{.Master.ID}}" data-status-variant="baris">{{template "status-row" .MasterStatus}}</div>
+    </div>
+    {{if .Replicas}}
     <ul class="list">
-      {{range .Masters}}
-      <li class="list-row"><a class="link" href="/masters/{{.ID}}">{{.Name}}</a><span class="text-base-content/70">{{.Address}}</span></li>
+      {{range .Replicas}}
+      <li class="list-row items-center">
+        <a class="link font-semibold" href="/replicas/{{.Server.ID}}">{{.Server.Name}}</a>
+        <div class="list-col-grow" data-status-for="{{.Server.ID}}" data-status-variant="baris">{{template "status-row" .Status}}</div>
+      </li>
       {{end}}
     </ul>
+    {{else}}
+    <p class="text-sm text-base-content/70">Belum ada replika. <a class="link" href="/masters/{{.Master.ID}}/replicas/new">Buat replika</a></p>
+    {{end}}
   </div>
 </div>
 {{end}}

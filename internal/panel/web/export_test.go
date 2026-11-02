@@ -15,3 +15,21 @@ var StatusLabel = statusLabel
 
 // ScrubDetail exposes scrubDetail to web_test.
 var ScrubDetail = scrubDetail
+
+// HasFragment reports whether the renderer's fragment set defines name.
+func HasFragment(r *Renderer, name string) bool {
+	return r.fragments.Lookup(name) != nil
+}
+
+// HasPageTemplate reports whether page's template set defines name.
+func HasPageTemplate(r *Renderer, page, name string) bool {
+	t, ok := r.pages[page]
+	return ok && t.Lookup(name) != nil
+}
+
+// Monitoring formatters, exposed to web_test.
+var (
+	FmtDuration = fmtDuration
+	FmtPct      = fmtPct
+	Ago         = ago
+)

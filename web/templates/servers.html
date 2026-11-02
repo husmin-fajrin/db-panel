@@ -8,7 +8,7 @@
 <div class="overflow-x-auto bg-base-100 rounded-box shadow">
   <table class="table">
     <thead>
-      <tr><th>Nama</th><th>Alamat</th><th>Status</th><th>Versi MySQL</th><th>OS</th><th>Terakhir terlihat</th></tr>
+      <tr><th>Nama</th><th>Alamat</th><th>Status</th><th>Status pemantauan</th><th>Versi MySQL</th><th>Versi agent</th><th>OS</th><th>Terakhir terlihat</th></tr>
     </thead>
     <tbody>
       {{range .Rows}}
@@ -20,7 +20,22 @@
           {{else if .Online}}<span class="badge badge-success">Online</span>
           {{else}}<span class="badge badge-error">Offline</span>{{end}}
         </td>
+        <td>{{template "status-badge-health" .Status}}</td>
         <td>{{or .MySQLVersion "-"}}</td>
+        <td>
+          {{or .AgentVersion "-"}}
+          {{if .NeedsUpgrade}}
+          <span class="badge badge-warning badge-sm">perlu dimutakhirkan</span>
+          {{if .Local}}
+          <p class="text-xs mt-1">Agent ini tertanam di panel; perbarui panel untuk memutakhirkannya.</p>
+          {{else if .UpgradeCommand}}
+          <p class="text-xs mt-1">Jalankan di server ini untuk memasang ulang agent:</p>
+          <pre class="text-xs bg-base-200 rounded p-2 mt-1 whitespace-pre-wrap break-all"><code>{{.UpgradeCommand}}</code></pre>
+          {{else}}
+          <p class="text-xs mt-1">Buat perintah pemasangan ulang di <a class="link" href="/servers/{{.ID}}">halaman server</a>, lalu jalankan di server ini.</p>
+          {{end}}
+          {{end}}
+        </td>
         <td>{{or .OS "-"}}</td>
         <td>{{fmtTime .LastSeenAt}}</td>
       </tr>

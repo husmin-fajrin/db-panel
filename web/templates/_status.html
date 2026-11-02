@@ -1,0 +1,59 @@
+{{/* Status of one server from the monitor (statusView). Pages wrap it in
+an element with data-status-for="<server id>" (plus
+data-status-variant="baris" for status-row); app.js replaces that
+element's content with GET /servers/<id>/status-fragment on
+health_update. */}}
+
+{{define "status-badge-health"}}<span class="badge {{severityClass .Severity}}">{{.Label}}</span>{{end}}
+
+{{define "status-lock"}}{{if .LockLost}}<span class="badge badge-error">Kunci terlepas</span>{{end}}{{end}}
+
+{{define "status-checked"}}{{if not .Received.IsZero}}<span class="text-xs text-base-content/60">dicek {{ago .Received .Now}}</span>{{end}}{{end}}
+
+{{/* Compact: dashboard rows and the master's replica list. */}}
+{{define "status-row"}}
+<span class="inline-flex flex-wrap items-center gap-2">
+  {{template "status-badge-health" .}}
+  {{template "status-lock" .}}
+  {{with .Lag}}<span class="text-sm">{{.}}</span>{{end}}
+  {{if .ShowDetailInRow}}<span class="text-sm text-base-content/70">{{.Detail}}</span>{{end}}
+  {{template "status-checked" .}}
+</span>
+{{end}}
+
+{{/* Full: the status section of the master and replica pages. */}}
+{{define "status-full"}}
+<div class="flex flex-col gap-3">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="badge badge-lg {{severityClass .Severity}}">{{.Label}}</span>
+    {{template "status-lock" .}}
+    {{with .Lag}}<span>{{.}}</span>{{end}}
+    {{template "status-checked" .}}
+  </div>
+  {{with .Detail}}<p>{{.}}</p>{{end}}
+  {{if .LockLost}}<p class="text-sm text-error">MySQL replika ini tidak lagi terkunci hanya-baca (super_read_only mati), sehingga aplikasi bisa menulis ke sana dan isinya bisa berbeda dari master.</p>{{end}}
+  {{with .Explain}}
+  <div role="alert" class="alert alert-error alert-soft flex flex-col items-start gap-1">
+    <p><strong>Penyebab:</strong> {{.Text}}</p>
+    {{with .Advice}}<p><strong>Saran:</strong> {{.}}</p>{{end}}
+  </div>
+  {{end}}
+  {{if .DownGuide}}{{template "down-guide"}}{{end}}
+</div>
+{{end}}
+
+{{define "down-guide"}}
+<div role="alert" class="alert alert-warning alert-soft flex flex-col items-start gap-2">
+  <h3 class="font-bold">Yang bisa dilakukan sekarang</h3>
+  <ol class="list-decimal ml-6 flex flex-col gap-1">
+    <li>Periksa listrik dan jaringan server master. Bila master hidup lagi, panel melihatnya sendiri dan replika menyambung kembali.</li>
+    <li>Jangan me-restart replika: posisi replikasinya dibutuhkan untuk langkah berikut.</li>
+    <li>Buka halaman tiap replika dan cari replika dengan GTID dieksekusi (Executed_Gtid_Set) paling banyak.</li>
+    <li>Bila master tidak bisa dipulihkan, jadikan replika itu master secara manual. Di MySQL replika itu jalankan: <code class="break-all">STOP REPLICA; RESET REPLICA ALL; SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;</code></li>
+    <li>Arahkan aplikasi ke alamat IP replika itu.</li>
+  </ol>
+  <p class="text-sm">Catatan: panel belum bisa melakukan langkah ini; versi berikutnya akan melakukannya otomatis.</p>
+</div>
+{{end}}
+
+{{define "status-fragment"}}{{if .Row}}{{template "status-row" .}}{{else}}{{template "status-full" .}}{{end}}{{end}}
