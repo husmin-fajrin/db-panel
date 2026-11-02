@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,14 +55,21 @@ func TestNotifierWiredToMonitor(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The panel's clock can be moved ahead: a recovery waits until the
+	// alert stayed closed a minute (flap control).
+	var ahead atomic.Int64
+	p.now = func() time.Time { return time.Now().Add(time.Duration(ahead.Load())) }
+
 	p.Monitor.JobFailed(p.localID, "job-1", "create_replica", "Salin data", "")
 	startPanel(t, p)
 	waitFor(t, "the open alert sent by the first pass", func() bool { return len(sent()) == 1 })
 	if got := sent()[0]; !strings.Contains(got, "Pekerjaan Buat replika gagal") {
 		t.Fatalf("message = %q", got)
 	}
-	// The retry tick is a minute away: only the Monitor's wake-up sends now.
+	// The retry tick is a minute away: the Monitor's wake-up starts a pass,
+	// which holds the recovery and wakes again once it is due.
 	p.Monitor.JobEnded(p.localID, "job-1")
+	ahead.Store(int64(61 * time.Second))
 	waitFor(t, "the recovery message", func() bool { return len(sent()) == 2 })
 	if got := sent()[1]; !strings.Contains(got, "pulih: pekerjaan gagal") {
 		t.Fatalf("recovery message = %q", got)
