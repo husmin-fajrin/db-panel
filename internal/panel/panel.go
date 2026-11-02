@@ -17,6 +17,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
@@ -77,6 +78,9 @@ type Panel struct {
 	Broker      *web.Broker
 	// Orchestrator runs the prepare-master and create-replica jobs.
 	Orchestrator *orchestrator.Runner
+	// Monitor turns the agents' health reports into statuses and the
+	// timeline.
+	Monitor *healthmon.Monitor
 
 	opts          Options
 	log           *slog.Logger
@@ -168,6 +172,13 @@ func New(o Options) (*Panel, error) {
 		PublicHost:    p.opts.PublicHost,
 	})
 	p.Orchestrator.Resume(context.Background())
+	p.Monitor = healthmon.New(healthmon.Deps{
+		Store:   st,
+		Hub:     p.Hub,
+		Publish: func(event string, data any) { p.publish(event, data) },
+		Logger:  p.log,
+		Now:     func() time.Time { return p.now() },
+	})
 	return p, nil
 }
 
@@ -361,10 +372,11 @@ func (e *sessionEpoch) valid(created time.Time) bool {
 	return created.Unix() > e.epoch
 }
 
-// Close stops the orchestrator's jobs and closes the store. Call it after
-// Run has returned.
+// Close stops the orchestrator's jobs and the monitor's background calls
+// and closes the store. Call it after Run has returned.
 func (p *Panel) Close() error {
 	p.Orchestrator.Close()
+	p.Monitor.Close()
 	return p.Store.Close()
 }
 

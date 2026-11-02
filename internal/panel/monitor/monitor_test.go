@@ -1,0 +1,792 @@
+package monitor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
+	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
+)
+
+// The rig serves fake agents (a commands.Registry with scripted monitor.*
+// handlers) to a real hub through hub.NewLocalConn; the hub's listener
+// hands lifecycle changes and events to the Monitor, as the panel's does.
+// The Monitor's clock is fake; its loop never runs, tests call tick.
+
+const srcUUID = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Set(t time.Time) {
+	c.mu.Lock()
+	c.t = t
+	c.mu.Unlock()
+}
+
+func (c *fakeClock) Add(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+type forwarder struct{ m atomic.Pointer[Monitor] }
+
+func (f *forwarder) OnOnline(id int64)  { f.m.Load().OnOnline(id) }
+func (f *forwarder) OnOffline(id int64) { f.m.Load().OnOffline(id) }
+func (f *forwarder) OnEvent(id int64, ev proto.Event) {
+	f.m.Load().HandleEvent(id, ev)
+}
+
+type published struct {
+	Event string
+	Data  any
+}
+
+type rig struct {
+	t    *testing.T
+	st   *store.Store
+	hub  *hub.Hub
+	clk  *fakeClock
+	m    *Monitor
+	logs *syncBuffer
+
+	pubMu sync.Mutex
+	pubs  []published
+}
+
+// newRig starts a Monitor over a fresh store; setup runs on the store
+// before the Monitor is created (settings, health rows).
+func newRig(t *testing.T, setup ...func(st *store.Store)) *rig {
+	t.Helper()
+	r := &rig{t: t, st: openStore(t), clk: &fakeClock{t: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}, logs: &syncBuffer{}}
+	for _, f := range setup {
+		f(r.st)
+	}
+	l := &forwarder{}
+	r.hub = hub.New(l)
+	r.m = New(Deps{Store: r.st, Hub: r.hub, Publish: r.publish,
+		Logger: slog.New(slog.NewTextHandler(r.logs, nil)), Now: r.clk.Now, TickEvery: time.Hour})
+	l.m.Store(r.m)
+	t.Cleanup(r.m.Close)
+	return r
+}
+
+func (r *rig) publish(event string, data any) {
+	r.pubMu.Lock()
+	r.pubs = append(r.pubs, published{event, data})
+	r.pubMu.Unlock()
+}
+
+// healthUpdates are the health_update payloads published for id.
+func (r *rig) healthUpdates(id int64) []map[string]any {
+	r.pubMu.Lock()
+	defer r.pubMu.Unlock()
+	var out []map[string]any
+	for _, p := range r.pubs {
+		if p.Event != "health_update" {
+			continue
+		}
+		b, _ := json.Marshal(p.Data)
+		var m map[string]any
+		json.Unmarshal(b, &m)
+		if int64(m["server_id"].(float64)) == id {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// settle waits for the Monitor's background calls (monitor.configure).
+func (r *rig) settle() { r.m.bg.Wait() }
+
+func (r *rig) server(name string) int64 {
+	r.t.Helper()
+	srv, err := r.st.CreateServer(name)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if err := r.st.MarkPaired(srv.ID, "serial-"+name, "10.0.0.9"); err != nil {
+		r.t.Fatal(err)
+	}
+	return srv.ID
+}
+
+func (r *rig) master(name string) (int64, store.Topology) {
+	r.t.Helper()
+	id := r.server(name)
+	topo, err := r.st.CreateTopology(id, "dbpanel_repl", nil, "10.0.0.1", 3306)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return id, topo
+}
+
+func (r *rig) replica(name string, topo store.Topology) int64 {
+	r.t.Helper()
+	id := r.server(name)
+	if _, err := r.st.AddReplica(topo.ID, id, nil); err != nil {
+		r.t.Fatal(err)
+	}
+	if err := r.st.SetReplicaState(id, store.ReplicaReady, ""); err != nil {
+		r.t.Fatal(err)
+	}
+	return id
+}
+
+func (r *rig) events(id int64, kind string) []store.StatusEvent {
+	r.t.Helper()
+	evs, err := r.st.ListStatusEvents(id, time.Time{}, 1000)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	var out []store.StatusEvent
+	for i := len(evs) - 1; i >= 0; i-- { // oldest first
+		if kind == "" || evs[i].Kind == kind {
+			out = append(out, evs[i])
+		}
+	}
+	return out
+}
+
+func (r *rig) view(id int64) View {
+	r.t.Helper()
+	v, ok := r.m.View(id)
+	if !ok {
+		r.t.Fatalf("no view for server %d", id)
+	}
+	return v
+}
+
+// fakeAgent answers monitor.configure and monitor.snapshot with its
+// current snapshot (modern) or knows no monitor.* command (old).
+type fakeAgent struct {
+	r    *rig
+	id   int64
+	conn hub.Conn
+
+	mu       sync.Mutex
+	seq      uint64
+	snap     proto.HealthSnapshot
+	backlog  []proto.HealthEvent // emitted before answering monitor.configure
+	calls    []string
+	configs  []proto.MonitorConfigureParams
+	attached bool
+}
+
+func (r *rig) agent(id int64, modern bool, snap proto.HealthSnapshot) *fakeAgent {
+	a := &fakeAgent{r: r, id: id, snap: snap}
+	reg := commands.NewRegistry()
+	reg.Register("probe", func(context.Context, json.RawMessage) (any, error) { return proto.ProbeResult{}, nil })
+	if modern {
+		reg.Register("monitor.configure", func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proto.MonitorConfigureParams
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err
+			}
+			a.mu.Lock()
+			a.calls = append(a.calls, "monitor.configure")
+			a.configs = append(a.configs, p)
+			backlog := a.backlog
+			a.backlog = nil
+			a.mu.Unlock()
+			for _, he := range backlog {
+				a.emit(he)
+			}
+			return a.report(), nil
+		})
+		reg.Register("monitor.snapshot", func(context.Context, json.RawMessage) (any, error) {
+			a.mu.Lock()
+			a.calls = append(a.calls, "monitor.snapshot")
+			a.mu.Unlock()
+			return a.report(), nil
+		})
+	}
+	a.conn = hub.NewLocalConn(reg, func(ev proto.Event) { r.hub.OnEvent(id, ev) })
+	return a
+}
+
+func (a *fakeAgent) report() proto.HealthEvent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seq++
+	return proto.HealthEvent{Seq: a.seq, Snapshot: a.snap}
+}
+
+func (a *fakeAgent) attach() *fakeAgent {
+	a.r.hub.Attach(a.id, a.conn)
+	a.r.settle()
+	return a
+}
+
+func (a *fakeAgent) detach() { a.r.hub.Detach(a.id, a.conn) }
+
+func (a *fakeAgent) setSnap(f func(s *proto.HealthSnapshot)) {
+	a.mu.Lock()
+	f(&a.snap)
+	a.mu.Unlock()
+}
+
+// send reports the agent's current snapshot as a live event.
+func (a *fakeAgent) send() {
+	a.emit(a.report())
+}
+
+func (a *fakeAgent) emit(he proto.HealthEvent) {
+	b, err := json.Marshal(he)
+	if err != nil {
+		a.r.t.Fatal(err)
+	}
+	a.r.hub.OnEvent(a.id, proto.Event{Type: proto.EventHealth, Payload: b})
+}
+
+func (a *fakeAgent) count(cmd string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, c := range a.calls {
+		if c == cmd {
+			n++
+		}
+	}
+	return n
+}
+
+func (a *fakeAgent) lastConfig() proto.MonitorConfigureParams {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.configs) == 0 {
+		a.r.t.Fatalf("server %d never got monitor.configure", a.id)
+	}
+	return a.configs[len(a.configs)-1]
+}
+
+func ptr(v int64) *int64 { return &v }
+
+func masterSnap(gtid string) proto.HealthSnapshot {
+	return proto.HealthSnapshot{MySQLOK: true, Version: "8.4.3", UptimeSec: 1000, LogBin: true,
+		GTIDExecuted: gtid, ThreadsConnected: 10, MaxConnections: 100,
+		DiskTotal: 100 << 30, DiskFree: 50 << 30, AgentVersion: "3.0.0"}
+}
+
+func replicaSnap(received string) proto.HealthSnapshot {
+	s := masterSnap(received)
+	s.SuperReadOnly, s.ReadOnly = true, true
+	s.Replica = &proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes", SecondsBehind: ptr(0),
+		RetrievedGTID: received, ExecutedGTID: received}
+	return s
+}
+
+func TestSnapshotStoredAndStatusDerived(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	uID := r.server("db-free")
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ua := r.agent(uID, true, masterSnap("")).attach()
+
+	if p := ma.lastConfig(); p != (proto.MonitorConfigureParams{CheckEverySec: 15, SummaryEverySec: 120,
+		LagThresholdSec: 60, RoleHint: "master"}) {
+		t.Fatalf("master configure params = %+v", p)
+	}
+	if p := ra.lastConfig(); p.RoleHint != "replica" {
+		t.Fatalf("replica RoleHint = %q, want replica", p.RoleHint)
+	}
+	if p := ua.lastConfig(); p.RoleHint != "" {
+		t.Fatalf("unassigned RoleHint = %q, want empty", p.RoleHint)
+	}
+
+	now := r.clk.Now()
+	mv := r.view(mID)
+	if mv.Role != "master" || mv.Status.Code != StatusHealthy || mv.Status.Severity != SevOK || !mv.ReceivedAt.Equal(now) {
+		t.Fatalf("master view = %+v", mv)
+	}
+	rv := r.view(rID)
+	if rv.Role != "replica" || rv.Status.Code != StatusSynced || rv.Snap == nil || rv.Snap.Replica == nil {
+		t.Fatalf("replica view = %+v", rv)
+	}
+	if !rv.Since.Equal(now) {
+		t.Fatalf("replica Since = %v, want %v", rv.Since, now)
+	}
+	uv := r.view(uID)
+	if uv.Role != "" || uv.Status.Code != "" || uv.Snap == nil {
+		t.Fatalf("unassigned view = %+v, want not monitored but with its snapshot", uv)
+	}
+
+	h, err := r.st.GetHealth(rID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap proto.HealthSnapshot
+	if err := json.Unmarshal([]byte(h.SnapshotJSON), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if h.Status != StatusSynced || !h.LockOK || !h.ReceivedAt.Equal(now) || h.AgentVersion != "3.0.0" ||
+		snap.Replica == nil || snap.Replica.ExecutedGTID != srcUUID+":1-100" {
+		t.Fatalf("stored health = %+v", h)
+	}
+	if len(r.Views()) != 3 {
+		t.Fatalf("Views = %d entries, want 3", len(r.Views()))
+	}
+	if _, ok := r.m.View(9999); ok {
+		t.Fatal("View of an unknown server reported ok")
+	}
+}
+
+func (r *rig) Views() map[int64]View { return r.m.Views() }
+
+func TestStatusChangeWritesEventAndPublishes(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	before := len(r.healthUpdates(rID))
+
+	r.clk.Add(20 * time.Second)
+	ra.setSnap(func(s *proto.HealthSnapshot) {
+		rs := *s.Replica
+		rs.SQLRunning, rs.LastSQLErrno, rs.LastSQLError = "No", 1062, "Duplicate entry 'Budi' for key 'PRIMARY'"
+		s.Replica = &rs
+	})
+	ra.send()
+
+	evs := r.events(rID, "status")
+	last := evs[len(evs)-1]
+	if last.FromStatus != StatusSynced || last.ToStatus != StatusStopped || !last.TS.Equal(r.clk.Now()) {
+		t.Fatalf("last status event = %+v, want Sinkron → Berhenti now", last)
+	}
+	if v := r.view(rID); v.Status.Code != StatusStopped || !v.Since.Equal(r.clk.Now()) {
+		t.Fatalf("view = %+v", v)
+	}
+	ups := r.healthUpdates(rID)
+	if len(ups) != before+1 {
+		t.Fatalf("health_update published %d times for the report, want 1", len(ups)-before)
+	}
+	got := ups[len(ups)-1]
+	if got["status"] != StatusStopped || got["severity"] != "crit" || len(got) != 3 {
+		t.Fatalf("health_update = %v, want server_id, status Berhenti, severity crit", got)
+	}
+	if b, _ := json.Marshal(got); strings.Contains(string(b), "Budi") || strings.Contains(string(b), "Duplicate") {
+		t.Fatalf("health_update carries error text: %s", b)
+	}
+
+	// The same report again: no new event.
+	n := len(r.events(rID, ""))
+	ra.send()
+	if len(r.events(rID, "")) != n {
+		t.Fatal("an unchanged report wrote an event")
+	}
+
+	// MySQL's own error text stays out of the timeline.
+	ra.setSnap(func(s *proto.HealthSnapshot) {
+		*s = proto.HealthSnapshot{MySQLError: "Error 1045: Access denied for user 'Budi'@'10.0.0.9'"}
+	})
+	ra.send()
+	evs = r.events(rID, "status")
+	if last := evs[len(evs)-1]; last.ToStatus != StatusUnreachable || strings.Contains(last.Detail, "Budi") {
+		t.Fatalf("unreachable event = %+v, want Tidak terjangkau without the MySQL error", last)
+	}
+}
+
+func TestTimelineEventKinds(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+
+	steps := []struct {
+		kind   string
+		mutate func(s *proto.HealthSnapshot)
+		detail string
+	}{
+		{"lock", func(s *proto.HealthSnapshot) { s.SuperReadOnly = false }, "Kunci terlepas"},
+		{"lock", func(s *proto.HealthSnapshot) { s.SuperReadOnly = true }, "Kunci kembali"},
+		{"restart", func(s *proto.HealthSnapshot) { s.UptimeSec = 5 }, "MySQL dimulai ulang"},
+		{"disk", func(s *proto.HealthSnapshot) { s.DiskFree = 10 << 30 }, "90%"},
+		{"disk", func(s *proto.HealthSnapshot) { s.DiskFree = 4 << 30 }, "96%"},
+		{"disk", func(s *proto.HealthSnapshot) { s.DiskFree = 50 << 30 }, "50%"},
+		{"connections", func(s *proto.HealthSnapshot) { s.ThreadsConnected = 85 }, "85%"},
+		{"connections", func(s *proto.HealthSnapshot) { s.ThreadsConnected = 20 }, "20%"},
+	}
+	for _, s := range steps {
+		r.clk.Add(15 * time.Second)
+		before := len(r.events(rID, s.kind))
+		ra.setSnap(s.mutate)
+		ra.send()
+		evs := r.events(rID, s.kind)
+		if len(evs) != before+1 {
+			t.Fatalf("%s (%s): %d new events, want 1", s.kind, s.detail, len(evs)-before)
+		}
+		if e := evs[len(evs)-1]; !strings.Contains(e.Detail, s.detail) || e.TopologyID != topo.ID {
+			t.Fatalf("%s event = %+v, want detail with %q in topology %d", s.kind, e, s.detail, topo.ID)
+		}
+	}
+	if n := len(r.events(rID, "status")); n != 1 {
+		t.Fatalf("status events = %d, want only the first Sinkron", n)
+	}
+	ra.detach()
+	if evs := r.events(rID, "agent"); len(evs) != 2 || evs[0].Detail != "Agent terhubung" || evs[1].Detail != "Agent terputus" {
+		t.Fatalf("agent events = %+v", evs)
+	}
+}
+
+func TestBacklogUsesPanelClock(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ra.detach()
+
+	// Three hours later the agent reconnects with two changes it kept.
+	r.clk.Add(3 * time.Hour)
+	stopped := replicaSnap(srcUUID + ":1-100")
+	stopped.Replica.SQLRunning, stopped.Replica.LastSQLErrno = "No", 1032
+	synced := replicaSnap(srcUUID + ":1-100")
+	ra.mu.Lock()
+	ra.backlog = []proto.HealthEvent{
+		{Seq: 2, TakenAgoMS: 7_200_000, Backlog: true, Snapshot: stopped},
+		{Seq: 3, TakenAgoMS: 60_000, Backlog: true, Snapshot: synced},
+	}
+	ra.seq = 3
+	ra.mu.Unlock()
+	before := len(r.healthUpdates(rID))
+	ra.attach()
+
+	now := r.clk.Now()
+	evs := r.events(rID, "status")
+	if len(evs) != 3 {
+		t.Fatalf("status events = %+v, want Sinkron, Berhenti, Sinkron", evs)
+	}
+	down, up := evs[1], evs[2]
+	if down.ToStatus != StatusStopped || !down.TS.Equal(now.Add(-2*time.Hour)) {
+		t.Fatalf("stop event = %+v, want Berhenti at panel now − 2 h", down)
+	}
+	if up.ToStatus != StatusSynced || !up.TS.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("recovery event = %+v, want Sinkron at panel now − 1 min", up)
+	}
+	if d := up.TS.Sub(down.TS); d != 119*time.Minute {
+		t.Fatalf("events %v apart, want 119 min", d)
+	}
+	if n := len(r.healthUpdates(rID)) - before; n != 1 {
+		t.Fatalf("health_update published %d times for the batch, want 1", n)
+	}
+	if v := r.view(rID); v.Status.Code != StatusSynced || !v.ReceivedAt.Equal(now) {
+		t.Fatalf("view after the batch = %+v", v)
+	}
+}
+
+func TestBacklogWithoutLiveReportPublishedByTick(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	before := len(r.healthUpdates(rID))
+	stopped := replicaSnap(srcUUID + ":1-100")
+	stopped.Replica.SQLRunning, stopped.Replica.LastSQLErrno = "No", 1032
+	ra.emit(proto.HealthEvent{Seq: 5, TakenAgoMS: 30_000, Backlog: true, Snapshot: stopped})
+	if n := len(r.healthUpdates(rID)) - before; n != 0 {
+		t.Fatalf("backlog entry published %d times, want 0 until the batch ends", n)
+	}
+	r.m.tick()
+	if n := len(r.healthUpdates(rID)) - before; n != 1 {
+		t.Fatalf("after a tick: %d publishes, want 1", n)
+	}
+}
+
+func TestLowerSeqIgnoredUntilReconnect(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ra.send() // seq 2
+	stopped := replicaSnap(srcUUID + ":1-100")
+	stopped.Replica.SQLRunning, stopped.Replica.LastSQLErrno = "No", 1032
+	ra.emit(proto.HealthEvent{Seq: 1, Snapshot: stopped})
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("an older report changed the status to %q", v.Status.Code)
+	}
+	// A restarted agent counts from 1 again.
+	ra.detach()
+	ra.mu.Lock()
+	ra.seq = 0
+	ra.mu.Unlock()
+	ra.attach()
+	ra.emit(proto.HealthEvent{Seq: 2, Snapshot: stopped})
+	if v := r.view(rID); v.Status.Code != StatusStopped {
+		t.Fatalf("after reconnect the report was ignored: %q", v.Status.Code)
+	}
+}
+
+func TestOldAgentNeedsUpgrade(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	r.agent(rID, false, proto.HealthSnapshot{}).attach()
+
+	v := r.view(rID)
+	if !v.NeedsUpgrade || v.Status.Code != StatusNeedsUpgrade || v.Status.Code == StatusSynced {
+		t.Fatalf("old agent view = %+v, want NeedsUpgrade and %q", v, StatusNeedsUpgrade)
+	}
+	events := len(r.events(rID, ""))
+	pubs := len(r.healthUpdates(rID))
+	for range 30 {
+		r.clk.Add(5 * time.Second)
+		r.m.tick()
+	}
+	if v := r.view(rID); v.Status.Code != StatusNeedsUpgrade {
+		t.Fatalf("after ticks status = %q", v.Status.Code)
+	}
+	if n := len(r.events(rID, "")); n != events {
+		t.Fatalf("ticks wrote %d events, want none", n-events)
+	}
+	if n := len(r.healthUpdates(rID)); n != pubs {
+		t.Fatalf("ticks published %d health updates, want none", n-pubs)
+	}
+}
+
+func TestOfflineThenDownAfterThreshold(t *testing.T) {
+	r := newRig(t, func(st *store.Store) {
+		if err := st.SetSetting(store.SettingDownAfter, "60"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	mID, _ := r.master("db-master")
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ma.detach()
+	t0 := r.clk.Now()
+
+	step := func(at time.Duration, want string) {
+		t.Helper()
+		r.clk.Set(t0.Add(at))
+		r.m.tick()
+		if v := r.view(mID); v.Status.Code != want {
+			t.Fatalf("at +%v: status %q (%s), want %q", at, v.Status.Code, v.Status.Detail, want)
+		}
+	}
+	step(10*time.Second, StatusHealthy)
+	step(31*time.Second, StatusAgentOffline)
+	step(45*time.Second, StatusAgentOffline)
+	step(61*time.Second, StatusDown)
+
+	evs := r.events(mID, "status")
+	got := []string{}
+	for _, e := range evs {
+		got = append(got, e.FromStatus+"→"+e.ToStatus)
+	}
+	want := "→Sehat,Sehat→Agent offline,Agent offline→Diduga tumbang"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("status events %v, want %s", got, want)
+	}
+	if !evs[2].TS.Equal(t0.Add(61 * time.Second)) {
+		t.Fatalf("down event at %v", evs[2].TS)
+	}
+	ups := r.healthUpdates(mID)
+	if last := ups[len(ups)-1]; last["status"] != StatusDown {
+		t.Fatalf("last health_update = %v", last)
+	}
+	if h, _ := r.st.GetHealth(mID); h.Status != StatusDown {
+		t.Fatalf("stored status = %q, want %q", h.Status, StatusDown)
+	}
+
+	// Reconnecting brings a fresh report and the status back.
+	ma.attach()
+	if v := r.view(mID); v.Status.Code != StatusHealthy {
+		t.Fatalf("after reconnect: %q", v.Status.Code)
+	}
+}
+
+func TestReplicaUsesMasterGTIDFromMasterView(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	other, otherTopo := r.master("db-other")
+	r.agent(mID, true, masterSnap(srcUUID+":1-200")).attach()
+	r.agent(other, true, masterSnap(srcUUID+":1-900")).attach()
+	_ = otherTopo
+	r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+
+	v := r.view(rID)
+	if v.Status.GTIDGap != 100 || v.Status.Code != StatusSynced {
+		t.Fatalf("replica view = %+v, want a gap of 100 to its own master, not yet lagging", v.Status)
+	}
+	r.clk.Add(61 * time.Second)
+	r.m.tick()
+	v = r.view(rID)
+	if v.Status.Code != StatusLagging || !strings.Contains(v.Status.Detail, "100 transaksi") {
+		t.Fatalf("after 61 s: %+v, want Ketinggalan by 100 transactions", v.Status)
+	}
+}
+
+func TestOversizedPayloadIgnored(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+
+	if r.m.HandleEvent(rID, proto.Event{Type: proto.EventJobLog}) {
+		t.Fatal("HandleEvent took a job event")
+	}
+	snap := replicaSnap(srcUUID + ":1-100")
+	snap.MySQLError = strings.Repeat("x", 70<<10)
+	b, _ := json.Marshal(proto.HealthEvent{Seq: 1, Snapshot: snap})
+	if !r.m.HandleEvent(rID, proto.Event{Type: proto.EventHealth, Payload: b}) {
+		t.Fatal("HandleEvent did not claim the health event")
+	}
+	if v, ok := r.m.View(rID); ok && v.Snap != nil {
+		t.Fatal("oversized report was stored")
+	}
+	if _, err := r.st.GetHealth(rID); err != store.ErrNotFound {
+		t.Fatalf("GetHealth err = %v, want ErrNotFound", err)
+	}
+	if !strings.Contains(r.logs.String(), "level=WARN") || strings.Contains(r.logs.String(), "xxxx") {
+		t.Fatalf("log = %q, want one warning without the payload", r.logs.String())
+	}
+	if len(r.healthUpdates(rID)) != 0 {
+		t.Fatal("oversized report published")
+	}
+}
+
+func TestReconfigureSendsToOnlineAgents(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	offID := r.replica("db-off", topo)
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	off := r.agent(offID, true, replicaSnap(srcUUID+":1-100")).attach()
+	off.detach()
+
+	s, err := LoadSettings(r.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.CheckEvery, s.SummaryEvery, s.Lag = 30*time.Second, 600*time.Second, 120*time.Second
+	if err := SaveSettings(r.st, s); err != nil {
+		t.Fatal(err)
+	}
+	r.m.Reconfigure()
+	r.settle()
+
+	for _, a := range []*fakeAgent{ma, ra} {
+		if n := a.count("monitor.configure"); n != 2 {
+			t.Fatalf("server %d got monitor.configure %d times, want 2", a.id, n)
+		}
+		p := a.lastConfig()
+		if p.CheckEverySec != 30 || p.SummaryEverySec != 600 || p.LagThresholdSec != 120 {
+			t.Fatalf("server %d configure = %+v", a.id, p)
+		}
+	}
+	if ra.lastConfig().RoleHint != "replica" {
+		t.Fatalf("replica RoleHint = %q", ra.lastConfig().RoleHint)
+	}
+	if n := off.count("monitor.configure"); n != 1 {
+		t.Fatalf("offline agent got monitor.configure %d times, want only the first", n)
+	}
+	// The new summary interval moves the staleness limit to 30 min.
+	r.clk.Add(20 * time.Minute)
+	r.m.tick()
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("after 20 min without reports: %q, want still Sinkron", v.Status.Code)
+	}
+}
+
+func TestCheckNowRateLimited(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ctx := context.Background()
+
+	r.clk.Add(time.Minute)
+	ra.setSnap(func(s *proto.HealthSnapshot) { s.UptimeSec = 2000 })
+	if err := r.m.CheckNow(ctx, rID); err != nil {
+		t.Fatal(err)
+	}
+	if v := r.view(rID); !v.ReceivedAt.Equal(r.clk.Now()) || v.Snap.UptimeSec != 2000 {
+		t.Fatalf("view after CheckNow = %+v", v)
+	}
+	r.clk.Add(5 * time.Second)
+	err := r.m.CheckNow(ctx, rID)
+	if err == nil || err.Error() != "tunggu 10 detik sebelum memeriksa lagi" {
+		t.Fatalf("second CheckNow err = %v", err)
+	}
+	if n := ra.count("monitor.snapshot"); n != 1 {
+		t.Fatalf("monitor.snapshot sent %d times, want 1", n)
+	}
+	r.clk.Add(5 * time.Second)
+	if err := r.m.CheckNow(ctx, rID); err != nil {
+		t.Fatalf("CheckNow after 10 s: %v", err)
+	}
+	if n := ra.count("monitor.snapshot"); n != 2 {
+		t.Fatalf("monitor.snapshot sent %d times, want 2", n)
+	}
+}
+
+func TestLoadsHealthOnStartupAndPrunes(t *testing.T) {
+	var rID int64
+	since := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
+	r := newRig(t, func(st *store.Store) {
+		m, _ := st.CreateServer("db-master")
+		topo, err := st.CreateTopology(m.ID, "u", nil, "h", 3306)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep, _ := st.CreateServer("db-replica")
+		rID = rep.ID
+		st.AddReplica(topo.ID, rID, nil)
+		st.SetReplicaState(rID, store.ReplicaReady, "")
+		b, _ := json.Marshal(replicaSnap(srcUUID + ":1-100"))
+		if err := st.SetHealth(store.Health{ServerID: rID, ReceivedAt: since.Add(59 * time.Minute), SnapshotJSON: string(b),
+			Status: StatusSynced, StatusSince: since, LockOK: true, AgentVersion: "3.0.0"}); err != nil {
+			t.Fatal(err)
+		}
+		st.AddStatusEvent(store.StatusEvent{ServerID: rID, TS: since.Add(-91 * 24 * time.Hour), Kind: "status", ToStatus: StatusSynced})
+		st.AddStatusEvent(store.StatusEvent{ServerID: rID, TS: since.Add(-89 * 24 * time.Hour), Kind: "status", ToStatus: StatusSynced})
+	})
+	v := r.view(rID)
+	if v.Role != "replica" || v.Status.Code != StatusSynced || !v.Since.Equal(since) || v.Snap == nil || v.Snap.Replica == nil {
+		t.Fatalf("loaded view = %+v", v)
+	}
+	r.m.tick()
+	if n := len(r.events(rID, "")); n != 1 {
+		t.Fatalf("events after the first tick = %d, want the 89-day-old one only", n)
+	}
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("within the offline grace the status is %q", v.Status.Code)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writes (log output).
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}

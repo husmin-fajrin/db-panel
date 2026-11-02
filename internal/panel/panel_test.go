@@ -1342,3 +1342,44 @@ func TestEmbeddedAgentOffersMySQLAndJobCommands(t *testing.T) {
 		t.Fatalf("panel.key: %v, %v", fi, err)
 	}
 }
+
+// TestEmbeddedAgentReportsHealth: the panel sends monitor.configure to its
+// embedded agent when it attaches and keeps the answer as the local
+// server's health; that server is in no topology, so it is not monitored.
+func TestEmbeddedAgentReportsHealth(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	startPanel(t, p)
+	waitFor(t, "the embedded agent's first health report", func() bool {
+		v, ok := p.Monitor.View(p.localID)
+		return ok && !v.ReceivedAt.IsZero()
+	})
+	v, _ := p.Monitor.View(p.localID)
+	if v.Role != "" || v.Status.Code != "" || v.Snap == nil {
+		t.Fatalf("local view = %+v, want an unmonitored server with the embedded agent's snapshot", v)
+	}
+	if _, err := p.Store.GetHealth(p.localID); err != nil {
+		t.Fatalf("GetHealth: %v", err)
+	}
+	evs, err := p.Store.ListStatusEvents(p.localID, time.Time{}, 10)
+	if err != nil || len(evs) == 0 || evs[0].Kind != "agent" {
+		t.Fatalf("status events = %+v, %v; want the agent connecting", evs, err)
+	}
+}
+
+// TestHealthEventRoutedToMonitor: an agent's health event reaches the
+// Monitor through the panel's listener.
+func TestHealthEventRoutedToMonitor(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	b, err := json.Marshal(proto.HealthEvent{Seq: 1, Snapshot: proto.HealthSnapshot{AgentVersion: "9.9.9"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.onEvent(p.localID, proto.Event{Type: proto.EventHealth, Payload: b})
+	v, ok := p.Monitor.View(p.localID)
+	if !ok || v.Snap == nil || v.Snap.AgentVersion != "9.9.9" {
+		t.Fatalf("view after the event = %+v, %v", v, ok)
+	}
+}

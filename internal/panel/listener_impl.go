@@ -10,9 +10,10 @@ import (
 )
 
 // listenerImpl turns hub lifecycle changes into store updates, browser
-// events and probes, and receives agent events from Hub.OnEvent. OnOnline
-// and OnOffline run under the hub's lifecycle lock, so they only touch the
-// store briefly and hand probes to goroutines.
+// events, probes and monitor updates, and receives agent events from
+// Hub.OnEvent. OnOnline and OnOffline run under the hub's lifecycle lock,
+// so they only touch the store briefly and hand probes and
+// monitor.configure to goroutines.
 type listenerImpl struct{ p *Panel }
 
 func (l *listenerImpl) OnOnline(serverID int64)  { l.p.setOnline(serverID, true) }
@@ -27,6 +28,13 @@ func (p *Panel) setOnline(id int64, online bool) {
 		p.log.Warn("record last seen", "server_id", id, "err", err)
 	}
 	p.publish("server_status", map[string]any{"id": id, "online": online})
+	if p.Monitor != nil {
+		if online {
+			p.Monitor.OnOnline(id)
+		} else {
+			p.Monitor.OnOffline(id)
+		}
+	}
 	if online {
 		p.goProbe(id)
 	}
@@ -37,11 +45,13 @@ func (p *Panel) setOnline(id int64, online bool) {
 const eventLogInterval = 10 * time.Second
 
 // onEvent receives events from remote and embedded agents, all of which
-// reach it through Hub.OnEvent and the hub's listener. Job events go to the
-// orchestrator (which never blocks); every event is logged at debug level,
-// at most one per server per eventLogInterval.
+// reach it through Hub.OnEvent and the hub's listener. Health reports go to
+// the monitor, job events to the orchestrator (neither blocks); every
+// event is logged at debug level, at most one per server per
+// eventLogInterval.
 func (p *Panel) onEvent(id int64, ev proto.Event) {
-	if p.Orchestrator != nil {
+	handled := p.Monitor != nil && p.Monitor.HandleEvent(id, ev)
+	if !handled && p.Orchestrator != nil {
 		p.Orchestrator.HandleEvent(id, ev)
 	}
 	now := p.now()
