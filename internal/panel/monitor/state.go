@@ -53,6 +53,10 @@ type serverState struct {
 	unreachableSince  time.Time
 	disconnectedSince time.Time
 	gapSince          time.Time
+	// Clocks of the alert rules, moved by evaluate.
+	connHighSince time.Time
+	syncedSince   time.Time
+	outSince      time.Time
 
 	// Baselines of the snapshot events; -1 while unknown.
 	lastUptime int64
@@ -346,8 +350,7 @@ func (m *Monitor) snapshotEvents(id int64, s *serverState, snap *proto.HealthSna
 			m.addEvent(id, s, at, kindRestart, "", "", "MySQL dimulai ulang")
 		}
 		s.lastUptime = snap.UptimeSec
-		if snap.MaxConnections > 0 {
-			pct := snap.ThreadsConnected * 100 / snap.MaxConnections
+		if pct, ok := connPercent(snap); ok {
 			lvl := 0
 			if pct >= th.ConnPct {
 				lvl = 1
@@ -358,8 +361,7 @@ func (m *Monitor) snapshotEvents(id int64, s *serverState, snap *proto.HealthSna
 			s.connLevel = lvl
 		}
 	}
-	if snap.DiskTotal > 0 && snap.DiskFree <= snap.DiskTotal {
-		pct := int((snap.DiskTotal - snap.DiskFree) * 100 / snap.DiskTotal)
+	if pct, ok := diskPercent(snap); ok {
 		lvl := 0
 		switch {
 		case pct >= th.DiskCrit:

@@ -37,6 +37,9 @@ type Deps struct {
 	Now     func() time.Time             // nil means time.Now
 	// TickEvery paces the re-evaluation of time-based statuses; 0 means 5 s.
 	TickEvery time.Duration
+	// OnAlertsChanged is called, without the Monitor's lock, after alerts
+	// were opened or closed (the notifier's wake-up); nil means none.
+	OnAlertsChanged func()
 }
 
 // View is what the panel knows of one server's health.
@@ -77,6 +80,9 @@ type Monitor struct {
 	servers   map[int64]*serverState
 	lastCheck map[int64]time.Time // last CheckNow per server
 	lastPrune time.Time
+	failedJob map[int64]string // per server, the job its open job_failed is about
+
+	onAlertsChanged func() // set once by New
 }
 
 // New returns a Monitor holding the health rows the store kept from the
@@ -99,6 +105,7 @@ func New(d Deps) *Monitor {
 		st: d.Store, hub: d.Hub, publish: d.Publish, log: d.Logger, now: d.Now,
 		tickEvery: d.TickEvery, startedAt: d.Now(), ctx: ctx, cancel: cancel,
 		servers: make(map[int64]*serverState), lastCheck: make(map[int64]time.Time),
+		failedJob: make(map[int64]string), onAlertsChanged: d.OnAlertsChanged,
 	}
 	set, err := LoadSettings(d.Store)
 	if err != nil {
@@ -335,15 +342,20 @@ func (m *Monitor) emit(ups []healthUpdate) {
 }
 
 // report takes one health report of serverID, placed at the panel's now
-// minus its age. A backlog report is published with the end of its batch:
-// the next live report or tick.
+// minus its age, and evaluates the alerts. A backlog report is published
+// and evaluated with the end of its batch: the next live report or tick.
 func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	now := m.now()
 	at := now.Add(-time.Duration(max(he.TakenAgoMS, 0)) * time.Millisecond)
 	m.mu.Lock()
 	ups := m.ingest(serverID, he, at)
+	var alerts []alertUpdate
+	if !he.Backlog {
+		alerts = m.evaluate(now)
+	}
 	m.mu.Unlock()
 	m.emit(ups)
+	m.emitAlerts(alerts)
 }
 
 // markNeedsUpgrade flags the agent of id as too old for monitoring until a
@@ -365,7 +377,8 @@ func (m *Monitor) markNeedsUpgrade(id int64) {
 // tick re-derives every server's status at now, so statuses that change
 // with time alone (agent offline, presumed down, stale reports,
 // disconnected for long, lagging by a GTID gap) do; it publishes what
-// changed and the end of backlog batches, and prunes old events daily.
+// changed and the end of backlog batches, evaluates the alerts, and prunes
+// old events daily.
 func (m *Monitor) tick() {
 	now := m.now()
 	servers, err := m.st.ListServers()
@@ -395,12 +408,14 @@ func (m *Monitor) tick() {
 		m.derive(srv.ID, s, now, false)
 		ups = m.commit(srv.ID, s, ups)
 	}
+	alerts := m.evaluate(now)
 	prune := now.Sub(m.lastPrune) >= pruneEvery
 	if prune {
 		m.lastPrune = now
 	}
 	m.mu.Unlock()
 	m.emit(ups)
+	m.emitAlerts(alerts)
 	if prune {
 		if n, err := m.st.PruneStatusEvents(now.Add(-eventRetention)); err != nil {
 			m.log.Warn("prune status events", "err", err)
