@@ -152,6 +152,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /replicas/{id}/stop", authedPost(a.stopReplica))
 	mux.Handle("POST /replicas/{id}/start", authedPost(a.startReplica))
 	mux.Handle("POST /replicas/{id}/relock", authedPost(a.relockReplica))
+	mux.Handle("POST /replicas/{id}/resync/prepare", authedPost(a.prepareResync))
 	mux.Handle("POST /replicas/{id}/resync", authedPost(a.resyncReplica))
 	mux.Handle("POST /replicas/{id}/detach", authedPost(a.detachReplica))
 	mux.Handle("GET /jobs", authed(a.listJobs))

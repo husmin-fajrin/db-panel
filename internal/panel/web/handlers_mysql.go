@@ -512,7 +512,7 @@ type replicaPage struct {
 	// drops; WipeListRead is false while that inventory was never read.
 	WipeList     []string
 	WipeListRead bool
-	OpenResync   bool // show the resync dialog open (after Segarkan daftar)
+	OpenResync   bool // open the resync dialog on load (after prepareResync)
 }
 
 // replicaFromPath loads the server of {id} and its replica row, answering
@@ -550,15 +550,9 @@ func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	p := replicaPage{Page: a.page(r), Server: srv, Replica: rep}
 	p.Notice = notices[r.URL.Query().Get("pesan")]
-	// Segarkan daftar in the resync dialog: read the replica's databases
-	// again and show the dialog with them.
-	if r.URL.Query().Get("segarkan") == "1" {
-		p.OpenResync = true
-		if _, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID); err != nil {
-			a.Logger.Warn("refresh replica inventory", "server", srv.ID, "err", err)
-			p.Flash = err.Error()
-		}
-	}
+	// After Resync ulang read the replica's databases (prepareResync), the
+	// page opens its dialog on them. A GET itself changes nothing.
+	p.OpenResync = r.URL.Query().Get("buka") == "resync"
 	a.renderReplica(w, r, http.StatusOK, p)
 }
 

@@ -3,6 +3,8 @@ package web_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -186,20 +189,37 @@ func TestResyncPassesWipeListAndForceDump(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := e.do("GET", "/replicas/2", nil, c)
-	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Resync ulang", `x-data="confirmName"`, `data-name="db-replika"`, `name="confirm_name"`,
-		`name="wipe_list[]" value="toko"`, `name="wipe_list[]" value="gudang"`, `name="wipe_list[]" value="sisa-lama"`,
-		`name="force_dump"`, "1.8 GB", "luar jam sibuk", `href="/replicas/2?segarkan=1"`, "Segarkan daftar")
+	// A GET never reads the inventory again, whatever its query; the
+	// dialog opens only when asked.
+	for _, q := range []string{"", "?segarkan=1", "?buka=resync", "?segarkan=1&buka=resync"} {
+		wantCode(t, e.do("GET", "/replicas/2"+q, nil, c), http.StatusOK)
+	}
 	wantCalls(t, f)
+	rec := e.do("GET", "/replicas/2", nil, c)
+	wantBody(t, rec, `action="/replicas/2/resync/prepare"`, "Resync ulang", `data-open="false"`)
+	wantNoBody(t, rec, `data-open="true"`)
 
-	// ?segarkan=1 reads the replica's databases again and opens the dialog.
+	// Resync ulang reads the replica's databases first (a POST), then opens
+	// the dialog on the fresh list.
 	f.result.Databases = shopDatabases
-	rec = e.do("GET", "/replicas/2?segarkan=1", nil, c)
+	rec = e.do("POST", "/replicas/2/resync/prepare", noForm, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/replicas/2?buka=resync")
+	rec = e.do("GET", "/replicas/2?buka=resync", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, `id="modal-resync" class="modal" open`)
+	wantBody(t, rec, `id="modal-resync" class="modal" x-data="openDialog" data-open="true"`,
+		`x-data="confirmName"`, `data-name="db-replika"`, `name="confirm_name"`,
+		`name="wipe_list[]" value="toko"`, `name="wipe_list[]" value="gudang"`,
+		`name="force_dump"`, "1.8 GB", "luar jam sibuk")
 	wantNoBody(t, rec, `value="sisa-lama"`)
-	wantCalls(t, f, "refresh 2")
+
+	// A refresh that fails says so and does not open the dialog.
+	f.err = errors.New("agent db-replika tidak terhubung")
+	rec = e.do("POST", "/replicas/2/resync/prepare", noForm, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Daftar database replika tidak bisa disegarkan", "agent db-replika tidak terhubung")
+	wantNoBody(t, rec, `data-open="true"`)
+	f.err = nil
 
 	form := url.Values{"confirm_name": {"db-replika"}, "force_dump": {"1"}, "wipe_list[]": {"toko", "gudang"}}
 	rec = e.do("POST", "/replicas/2/resync", form, c)
@@ -210,12 +230,22 @@ func TestResyncPassesWipeListAndForceDump(t *testing.T) {
 	form.Del("wipe_list[]")
 	wantCode(t, e.do("POST", "/replicas/2/resync", form, c), http.StatusSeeOther)
 
+	// Only databases of the stored inventory, each once: a stale or crafted
+	// list is refused before the orchestrator.
+	for _, list := range [][]string{{"sisa-lama"}, {"toko", "toko"}, {"toko", "tidak-ada"}, {""}} {
+		form["wipe_list[]"] = list
+		rec = e.do("POST", "/replicas/2/resync", form, c)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, "Daftar database tidak sesuai dengan inventaris; segarkan daftar lalu coba lagi")
+	}
+
 	f.err = errors.New("replika sedang diubah; Resync ulang hanya bisa saat replika siap, perlu perhatian, atau gagal")
 	form.Set("wipe_list[]", "toko")
 	rec = e.do("POST", "/replicas/2/resync", form, c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Resync ulang hanya bisa saat replika siap")
-	wantCalls(t, f, "refresh 2", "resync 2 toko,gudang force=true", "resync 2  force=false", "resync 2 toko force=false")
+	wantCalls(t, f, "refresh 2", "refresh 2", "resync 2 toko,gudang force=true", "resync 2  force=false",
+		"resync 2 toko force=false")
 }
 
 func TestDetachModes(t *testing.T) {
@@ -285,14 +315,26 @@ func TestDeleteRefusalMessageShown(t *testing.T) {
 	wantBody(t, rec, "Nama server tidak cocok")
 	wantCalls(t, f)
 
-	f.err = errors.New("server ini masih menjadi master; lepas atau hapus semua replikanya dulu")
+	// The orchestrator's refusals are shown on the server page.
+	for _, refusal := range []error{orchestrator.ErrServerIsMaster, orchestrator.ErrServerIsReplica,
+		orchestrator.ErrLocalServer, fmt.Errorf("server ini %w", orchestrator.ErrBusy)} {
+		f.err = refusal
+		rec = e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-master"}}, c)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, template.HTMLEscapeString(refusal.Error()), "db-master")
+	}
+	// Any other failure is the panel's: a generic 500, its text only in
+	// the log.
+	f.err = fmt.Errorf("delete server: %w", errors.New("database is locked (SQLITE_BUSY)"))
 	rec = e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-master"}}, c)
-	wantCode(t, rec, http.StatusBadRequest)
-	wantBody(t, rec, "server ini masih menjadi master; lepas atau hapus semua replikanya dulu", "db-master")
+	wantCode(t, rec, http.StatusInternalServerError)
+	wantBody(t, rec, "Terjadi kesalahan pada panel")
+	wantNoBody(t, rec, "SQLITE_BUSY")
+
 	if _, err := e.st.GetServer(1); err != nil {
 		t.Fatalf("server gone after a refused delete: %v", err)
 	}
-	wantCalls(t, f, "delete-server 1")
+	wantCalls(t, f, "delete-server 1", "delete-server 1", "delete-server 1", "delete-server 1", "delete-server 1")
 }
 
 func TestSnoozeHours(t *testing.T) {
@@ -362,6 +404,7 @@ var newRoutes = []struct {
 	{"/replicas/2/stop", noForm},
 	{"/replicas/2/start", noForm},
 	{"/replicas/2/relock", noForm},
+	{"/replicas/2/resync/prepare", noForm},
 	{"/replicas/2/resync", url.Values{"confirm_name": {"db-replika"}}},
 	{"/replicas/2/detach", url.Values{"confirm_name": {"db-replika"}, "mode": {"keep"}}},
 	{"/masters/1/unlock", url.Values{"confirm_name": {"db-master"}}},
@@ -408,7 +451,7 @@ func TestControlPagesHaveNoInlineScript(t *testing.T) {
 		Snap: &proto.HealthSnapshot{BinlogExpireSec: 86400}})
 	mon.setView(monitor.View{ServerID: 2, Role: store.RoleReplica, Status: monitor.Status{LockLost: true}})
 	inline := regexp.MustCompile(`(?i)<script(?:\s[^>]*)?>[^<]|\son[a-z]+=|javascript:|\sstyle=`)
-	for _, p := range []string{"/servers/1", "/servers/2", "/masters/1", "/replicas/2", "/replicas/2?segarkan=1"} {
+	for _, p := range []string{"/servers/1", "/servers/2", "/masters/1", "/replicas/2", "/replicas/2?buka=resync"} {
 		rec := e.do("GET", p, nil, c)
 		wantCode(t, rec, http.StatusOK)
 		if m := inline.FindString(rec.Body.String()); m != "" {

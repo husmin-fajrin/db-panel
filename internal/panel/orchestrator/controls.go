@@ -166,6 +166,14 @@ func (r *Runner) DeleteServer(ctx context.Context, serverID int64) error {
 	return nil
 }
 
+// DeleteServer's refusals; their texts are shown to the user as they are.
+// A busy server is refused with an error that wraps ErrBusy.
+var (
+	ErrLocalServer     = errors.New("server panel sendiri tidak bisa dihapus")
+	ErrServerIsMaster  = errors.New("server ini masih menjadi master; lepas atau hapus semua replikanya dulu")
+	ErrServerIsReplica = errors.New("server ini masih terdaftar sebagai replika; lepas replika dulu")
+)
+
 func (r *Runner) deletable(serverID int64) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -178,7 +186,7 @@ func (r *Runner) deletableLocked(serverID int64) error {
 		return err
 	}
 	if r.d.LocalServerID != 0 && serverID == r.d.LocalServerID {
-		return errors.New("server panel sendiri tidak bisa dihapus")
+		return ErrLocalServer
 	}
 	// A master without replicas goes with its topology (ON DELETE CASCADE);
 	// one with replicas would leave them following a master the panel no
@@ -189,13 +197,13 @@ func (r *Runner) deletableLocked(serverID int64) error {
 			return err
 		}
 		if len(reps) > 0 {
-			return errors.New("server ini masih menjadi master; lepas atau hapus semua replikanya dulu")
+			return ErrServerIsMaster
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
 	if _, err := r.d.Store.GetReplicaByServer(serverID); err == nil {
-		return errors.New("server ini masih terdaftar sebagai replika; lepas replika dulu")
+		return ErrServerIsReplica
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}

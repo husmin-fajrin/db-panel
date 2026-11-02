@@ -157,11 +157,11 @@ func TestDeleteServerRefusesMasterAndReplica(t *testing.T) {
 	ctx := context.Background()
 
 	err := e.r.DeleteServer(ctx, m.id)
-	if err == nil || err.Error() != "server ini masih menjadi master; lepas atau hapus semua replikanya dulu" {
+	if !errors.Is(err, ErrServerIsMaster) || err.Error() != "server ini masih menjadi master; lepas atau hapus semua replikanya dulu" {
 		t.Fatalf("DeleteServer(master) = %v", err)
 	}
 	err = e.r.DeleteServer(ctx, r.id)
-	if err == nil || err.Error() != "server ini masih terdaftar sebagai replika; lepas replika dulu" {
+	if !errors.Is(err, ErrServerIsReplica) || err.Error() != "server ini masih terdaftar sebagai replika; lepas replika dulu" {
 		t.Fatalf("DeleteServer(replica) = %v", err)
 	}
 	wantCmds(t, "replica", r.cmds(0), nil)
@@ -199,7 +199,7 @@ func TestDeleteServerRefusesMasterAndReplica(t *testing.T) {
 	// The panel's own server is never deleted.
 	local := e.agent("panel-host", "127.0.0.1")
 	e.r.d.LocalServerID = local.id
-	if err := e.r.DeleteServer(ctx, local.id); err == nil || err.Error() != "server panel sendiri tidak bisa dihapus" {
+	if err := e.r.DeleteServer(ctx, local.id); !errors.Is(err, ErrLocalServer) || err.Error() != "server panel sendiri tidak bisa dihapus" {
 		t.Fatalf("DeleteServer(local) = %v", err)
 	}
 	wantCmds(t, "panel host", local.cmds(0), nil)

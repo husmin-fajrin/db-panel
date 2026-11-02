@@ -51,6 +51,9 @@ func TestEveryPostWritesAudit(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	c := e.cookie()
 	e.pairedOnline(t, "db-calon") // 3: a replica target
+	// Connecting server 2 below stores these as its inventory (the resync's
+	// wipe list is checked against it).
+	f.result.Databases = shopDatabases
 	const jobID = "fedcba9876543210fedcba9876543210"
 	if err := e.st.CreateJob(store.Job{ID: jobID, Kind: orchestrator.KindResyncReplica, ServerID: 2, ParamsJSON: "{}",
 		CreatedAt: time.Now()}, []string{"Tahap"}); err != nil {
@@ -83,6 +86,7 @@ func TestEveryPostWritesAudit(t *testing.T) {
 		{"/replicas/2/stop", noForm, "replica_stop", "replica", 2},
 		{"/replicas/2/start", noForm, "replica_start", "replica", 2},
 		{"/replicas/2/relock", noForm, "replica_relock", "replica", 2},
+		{"/replicas/2/resync/prepare", noForm, "mysql_refresh", "replica", 2},
 		{"/replicas/2/resync", url.Values{"confirm_name": {"db-replika"}, "wipe_list[]": {"toko"}}, "replica_resync", "replica", 2},
 		// Refused (wrong name): audited too.
 		{"/replicas/2/resync", url.Values{"confirm_name": {"salah"}}, "replica_resync", "replica", 2},
@@ -124,14 +128,17 @@ func TestEveryPostWritesAudit(t *testing.T) {
 	if a := byPath(9); !strings.Contains(a.DetailJSON, jobID) {
 		t.Errorf("job_approve detail %q lacks the job id", a.DetailJSON)
 	}
-	if a := byPath(15); a.Outcome != "ok" || !strings.Contains(a.DetailJSON, f.nextID) ||
+	if a := byPath(15); a.Outcome != "ok" || a.DetailJSON != `{"reason":"resync"}` {
+		t.Errorf("resync prepare audit = %+v", a)
+	}
+	if a := byPath(16); a.Outcome != "ok" || !strings.Contains(a.DetailJSON, f.nextID) ||
 		!strings.Contains(a.DetailJSON, `"wipe_list":["toko"]`) {
 		t.Errorf("replica_resync audit = %+v", a)
 	}
-	if a := byPath(16); a.Outcome != "Nama server tidak cocok" {
+	if a := byPath(17); a.Outcome != "Nama server tidak cocok" {
 		t.Errorf("refused replica_resync outcome = %q", a.Outcome)
 	}
-	if a := byPath(20); !strings.Contains(a.DetailJSON, `"hours":24`) {
+	if a := byPath(21); !strings.Contains(a.DetailJSON, `"hours":24`) {
 		t.Errorf("server_snooze detail = %q", a.DetailJSON)
 	}
 }

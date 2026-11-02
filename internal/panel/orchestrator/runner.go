@@ -248,12 +248,16 @@ func (r *Runner) createJob(kind string, serverID, topologyID int64, st jobState,
 	return id, nil
 }
 
+// ErrBusy is wrapped by the refusal of an operation on a server that has an
+// unfinished job ("server ini masih punya pekerjaan yang belum selesai").
+var ErrBusy = errors.New("masih punya pekerjaan yang belum selesai")
+
 // refuseBusy refuses a server with a queued, running or waiting job.
 func (r *Runner) refuseBusy(serverID int64, who string) error {
 	if _, busy, err := r.d.Store.ActiveJobForServer(serverID); err != nil {
 		return err
 	} else if busy {
-		return fmt.Errorf("%s masih punya pekerjaan yang belum selesai", who)
+		return fmt.Errorf("%s %w", who, ErrBusy)
 	}
 	return nil
 }

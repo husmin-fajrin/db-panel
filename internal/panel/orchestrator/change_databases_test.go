@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -373,7 +374,7 @@ func TestChangeDatabasesRefusals(t *testing.T) {
 	if err := e.st.CreateJob(store.Job{ID: "busy", Kind: KindPrepareMaster, ServerID: two.id}, []string{"x"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.r.StartRemoveDatabases(ctx, two.id, []string{"b"}, false); err == nil || !strings.Contains(err.Error(), "masih punya pekerjaan") {
+	if _, err := e.r.StartRemoveDatabases(ctx, two.id, []string{"b"}, false); !errors.Is(err, ErrBusy) || err.Error() != "server ini masih punya pekerjaan yang belum selesai" {
 		t.Errorf("busy replica: %v", err)
 	}
 

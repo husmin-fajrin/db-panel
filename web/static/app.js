@@ -224,6 +224,16 @@
       },
     }));
 
+    // Dialog yang dibuka saat halaman dimuat bila data-open="true" (Resync
+    // ulang: setelah panel membaca ulang daftar database replika).
+    window.Alpine.data("openDialog", () => ({
+      init() {
+        if (this.$el.dataset.open === "true" && typeof this.$el.showModal === "function") {
+          this.$el.showModal();
+        }
+      },
+    }));
+
     // Tombol Salin untuk perintah pemasangan (x-ref="perintah").
     window.Alpine.data("copyCommand", () => ({
       tersalin: false,

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -274,13 +275,18 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 	}
 	err := a.Orchestrator.DeleteServer(r.Context(), srv.ID)
 	a.audit(r, "server_delete", auditServer, srv.ID, detail, outcomeOf(err))
-	if errors.Is(err, store.ErrNotFound) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, msgServerNotFound, http.StatusNotFound)
 		return
-	}
-	if err != nil {
+	case errors.Is(err, orchestrator.ErrServerIsMaster), errors.Is(err, orchestrator.ErrServerIsReplica),
+		errors.Is(err, orchestrator.ErrLocalServer), errors.Is(err, orchestrator.ErrBusy):
+		// The orchestrator's refusals are written for the user.
 		a.Logger.Warn("delete server refused", "id", srv.ID, "err", err)
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		return
+	case err != nil:
+		a.internalError(w, "delete server", err)
 		return
 	}
 	a.Logger.Info("server deleted", "id", srv.ID, "name", srv.Name, "by", a.page(r).Username)

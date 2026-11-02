@@ -44,7 +44,9 @@
       {{if .CanStop}}<button type="button" class="btn btn-sm" data-open-modal="modal-stop">Stop replika</button>{{end}}
       {{if .CanStart}}<button type="button" class="btn btn-sm" data-open-modal="modal-start">Start replika</button>{{end}}
       {{if .CanRelock}}<button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-relock">Kunci kembali</button>{{end}}
-      {{if .CanResync}}<button type="button" class="btn btn-sm" data-open-modal="modal-resync">Resync ulang</button>{{end}}
+      {{if .CanResync}}
+      <form method="post" action="/replicas/{{.Server.ID}}/resync/prepare"><button type="submit" class="btn btn-sm">Resync ulang</button></form>
+      {{end}}
       {{if .CanDetach}}<button type="button" class="btn btn-sm btn-error btn-outline" data-open-modal="modal-detach">Lepas replika</button>{{end}}
     </div>
     {{template "server-controls" .Controls}}
@@ -105,7 +107,7 @@
 {{end}}
 
 {{if .CanResync}}
-<dialog id="modal-resync" class="modal"{{if .OpenResync}} open{{end}}>
+<dialog id="modal-resync" class="modal" x-data="openDialog" data-open="{{.OpenResync}}">
   <form method="post" action="/replicas/{{.Server.ID}}/resync" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
     <h3 class="text-lg font-bold">Resync ulang {{.Server.Name}}?</h3>
     <p>Panel menyalin ulang data dari master <strong>{{.Master.Name}}</strong> ke replika ini, lalu menyambungkan replikasinya lagi.</p>
@@ -117,9 +119,8 @@
     {{else if .WipeListRead}}
     <p>Replika ini tidak punya database pengguna; tidak ada yang dibuang.</p>
     {{else}}
-    <p>Daftar database replika belum pernah dibaca. Klik <strong>Segarkan daftar</strong> agar Anda melihat database yang akan dibuang.</p>
+    <p>Daftar database replika belum pernah dibaca. Tutup dialog ini lalu klik <strong>Resync ulang</strong> lagi agar panel membacanya.</p>
     {{end}}
-    <p class="text-sm"><a class="link" href="/replicas/{{.Server.ID}}?segarkan=1">Segarkan daftar</a></p>
     <p>Ukuran data master: <strong>{{fmtBytes .MasterBytes}}</strong>. Jalankan di luar jam sibuk: penyalinan membebani master dan jaringan.</p>
     <label class="label"><input type="checkbox" name="force_dump" value="1" class="checkbox checkbox-sm"> Paksa dump (jangan pakai CLONE)</label>
     <label class="flex flex-col gap-1">

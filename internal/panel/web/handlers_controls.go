@@ -11,12 +11,15 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 const (
 	msgNameMismatch = "Nama server tidak cocok"
 	msgDetachMode   = "Pilih cara melepas replika."
 	msgSnoozeHours  = "Pilih lama Jangan ganggu: 1, 2, 8, atau 24 jam."
+	msgWipeList     = "Daftar database tidak sesuai dengan inventaris; segarkan daftar lalu coba lagi"
+	msgWipeRefresh  = "Daftar database replika tidak bisa disegarkan, jadi dialog Resync ulang tidak dibuka: "
 )
 
 // snoozeHours are the Jangan ganggu choices; 0 cancels one.
@@ -100,6 +103,42 @@ func (a *app) replicaControl(w http.ResponseWriter, r *http.Request, action, not
 	http.Redirect(w, r, replicaURL(srv.ID)+"?pesan="+notice, http.StatusSeeOther)
 }
 
+// prepareResync reads the replica's databases again (Resync ulang opens
+// its dialog on the fresh list, spec 5.4) and returns to the replica page
+// with the dialog open. A failed read is shown there and opens nothing.
+func (a *app) prepareResync(w http.ResponseWriter, r *http.Request) {
+	srv, rep, ok := a.replicaFromPath(w, r)
+	if !ok {
+		return
+	}
+	_, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID)
+	a.audit(r, "mysql_refresh", auditReplica, srv.ID, map[string]any{"reason": "resync"}, outcomeOf(err))
+	if err != nil {
+		a.Logger.Warn("refresh replica inventory for resync", "server", srv.ID, "err", err)
+		a.replicaError(w, r, srv, rep, msgWipeRefresh+err.Error())
+		return
+	}
+	http.Redirect(w, r, replicaURL(srv.ID)+"?buka=resync", http.StatusSeeOther)
+}
+
+// validWipeList reports whether every name of list is a database of the
+// replica's stored inventory (the list its dialog showed), each at most once.
+func (a *app) validWipeList(serverID int64, list []string) (bool, error) {
+	inv, err := a.inventory(serverID)
+	if err != nil {
+		return false, err
+	}
+	seen := make(map[string]bool, len(list))
+	for _, name := range list {
+		known := slices.ContainsFunc(inv.Databases, func(d proto.DatabaseInfo) bool { return d.Name == name })
+		if !known || seen[name] {
+			return false, nil
+		}
+		seen[name] = true
+	}
+	return true, nil
+}
+
 func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	srv, rep, ok := a.replicaFromPath(w, r)
 	if !ok {
@@ -108,9 +147,18 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	p := orchestrator.ResyncParams{ServerID: srv.ID, ForceDump: r.PostFormValue("force_dump") != "",
 		WipeList: r.PostForm["wipe_list[]"]}
 	detail := map[string]any{"force_dump": p.ForceDump, "wipe_list": p.WipeList}
+	refused := ""
 	if !typedName(r, srv) {
-		a.audit(r, "replica_resync", auditReplica, srv.ID, detail, msgNameMismatch)
-		a.replicaError(w, r, srv, rep, msgNameMismatch)
+		refused = msgNameMismatch
+	} else if ok, err := a.validWipeList(srv.ID, p.WipeList); err != nil {
+		a.internalError(w, "get inventory", err)
+		return
+	} else if !ok {
+		refused = msgWipeList
+	}
+	if refused != "" {
+		a.audit(r, "replica_resync", auditReplica, srv.ID, detail, refused)
+		a.replicaError(w, r, srv, rep, refused)
 		return
 	}
 	id, err := a.Orchestrator.StartResync(r.Context(), p)
