@@ -270,7 +270,12 @@ dan masa simpan binary log yang sudah ada dipertahankan.
 Agent hanya mau membuat, mengubah, atau menghapus akun yang namanya
 diawali `dbpanel_`, dan menolak perintah yang menghapus data, menimpa
 server, atau mengubah replikasi di server yang sedang dibaca replika lain
-(master), apa pun yang diminta panel.
+(master), apa pun yang diminta panel. Di master yang dipin agent tidak
+pernah mengubah akun yang sudah ada (sandi dan haknya tetap). Bila "Siapkan
+master" dijalankan ulang untuk topologi baru sementara `dbpanel_repl` masih
+ada dari persiapan sebelumnya, pekerjaan berhenti dan menyebut perintah
+`DROP USER` yang perlu dijalankan di master (hanya bila tidak ada replika
+lain yang memakainya).
 
 ### Kebijakan lokal agent
 
@@ -299,25 +304,46 @@ journal.
 
 Agent mengingat peran servernya di `/etc/dbpanel/role` (`master` atau
 `replica`) dan master yang diikuti replika di `/etc/dbpanel/source`
-(`host:port`). Keduanya ditulis agent saat "Siapkan master" atau "Buat
-replika" pertama berhasil (agent lama yang dimutakhirkan menuliskannya dari
-keadaan MySQL). Sesudah itu agent sendiri menolak perintah panel yang
-tidak cocok, walau panelnya disusupi: master menolak hapus database,
-salin data dari server lain, dijadikan atau dikonfigurasi sebagai
-replika, dan dikunci read-only; replika menolak buka kunci, dijadikan
-master, akun replikasi, dan master selain sumbernya. Panel hanya bisa melepas peran
-`replica` (setelah replikasinya dihentikan dan direset), lewat **Lepas dan
-hentikan replikasi**, **Hapus server**, atau saat pekerjaan **Buat replika**
-dibatalkan; peran `master` dan sumber hanya diubah di server itu sendiri:
+(`host:port`). Berkas peran ditulis saat "Siapkan master" atau "Buat
+replika" pertama berhasil; berkas sumber saat replikasi atau salinan data
+(dump, CLONE) pertama kali diarahkan ke master. Sesudah itu agent sendiri
+menolak perintah panel yang tidak cocok, walau panelnya disusupi: master
+menolak hapus database, salin data dari server lain, dijadikan atau
+dikonfigurasi sebagai replika, dikunci read-only, membuat akun selain akun
+replikasi `dbpanel_repl` dan akun dump sementara `dbpanel_dump_<8 heksa>`
+dari satu alamat IP, mengubah akun yang sudah ada, mengganti `server_id`,
+dan restart MySQL kecuali sekali sesudah pengaturan yang memang menunggu
+restart; replika menolak buka kunci, dijadikan master, akun replikasi, dan
+master selain sumbernya.
+
+Pin **master** tidak bisa diubah dari panel. Pin **replika** (peran dan
+sumbernya) bisa dilepas panel sendiri, setelah replikasinya dihentikan
+dan direset, lewat **Lepas dan hentikan replikasi**, **Hapus server**, atau
+saat pekerjaan **Buat replika** dibatalkan. Artinya server itu kembali tanpa
+peran dan tanpa sumber, dan sesudahnya panel bisa lagi mengarahkannya ke
+master mana pun atau menimpa datanya: pin replika melindungi dari
+kesalahan, bukan dari panel yang disusupi. Selain itu, peran dan sumber
+hanya diubah di server itu sendiri:
 
 ```sh
 sudo dbpanel agent set-role master       # atau replica, atau unassigned (hapus peran dan sumber)
 sudo dbpanel agent set-source 10.0.0.5:3306
 ```
 
-Agent membacanya ulang pada perintah berikutnya, tanpa restart. Pemasangan
+Agent membacanya ulang pada perintah berikutnya, tanpa restart. Bila alamat
+master untuk replika diubah di halaman master, halaman itu menampilkan
+perintah `set-source` untuk tiap replika. Pemasangan
 agent tidak membuat berkas pin; server yang baru dipasang belum berperan
-apa pun sampai salah satu alur di atas berhasil. Berkas
+apa pun sampai salah satu alur di atas berhasil.
+
+Agent yang dimutakhirkan dari versi lama di server yang sudah
+dikonfigurasi menulis **berkas peran saja**, dan hanya dengan petunjuk
+peran dari panel: master dipin bila panel mencatatnya sebagai master (sudah
+"Siapkan master"), replika bila panel mencatatnya sebagai replika ("Buat
+replika"); server lain tetap tanpa pin. Master yang masih punya baris
+`SHOW REPLICA STATUS` tidak dipin otomatis; pin dengan `set-role master`.
+Pin sumber replika seperti itu baru ditulis pada konfigurasi replikasi,
+dump, atau CLONE berikutnya (misalnya **Resync ulang**). Berkas
 pin harus milik root dan tidak bisa ditulis grup atau pengguna lain;
 selama tidak demikian, perintah yang dijaga ditolak dengan pesan cara
 memperbaikinya.
@@ -394,6 +420,11 @@ aplikasi. Panel tidak pernah tersambung ke MySQL; replika tidak menanyai
 master. Agent hanya mengirim laporan saat ada yang berubah, dan ringkasan
 tiap 2 menit.
 
+Setelah tombol atau pekerjaan panel mengubah replika (Start, Stop, Resync
+ulang, Buat replika), panel langsung meminta laporan baru dari agent dan
+menilai statusnya lagi hanya dari laporan yang diambil sesudah perubahan
+itu, jadi laporan lama tidak memicu peringatan palsu.
+
 **Kecepatan.** Replika yang berhenti terlihat di panel dan dikirim ke
 Telegram dalam waktu kurang dari 30 detik; master yang tumbang dalam
 sekitar 1 menit. Interval, ambang, dan batas waktu itu bisa diubah di
@@ -442,8 +473,27 @@ Master: RS-1 · Sejak: 02:14 · http://192.168.1.10:8080/replicas/3
 
 Setiap peringatan dikirim sekali saat muncul, diulang tiap 6 jam selama
 masih terbuka (**Ulangi pemberitahuan**), dan ditutup dengan pesan "pulih"
-beserta lama gangguannya. Pengiriman yang gagal dicoba lagi tiap menit;
-statusnya (terkirim, gagal dan alasannya) tampil di halaman **Peringatan**.
+beserta lama gangguannya, setelah peringatan itu tertutup paling sedikit 1
+menit. Peringatan yang terbuka lagi kurang dari 5 menit setelah tertutup
+dianggap **berkedip**: sebagai ganti pesan barunya dikirim satu pesan
+"⚠️ RS-2: replika berhenti berkedip N kali dalam 5 menit terakhir",
+paling sering sekali per 5 menit, lalu satu "pulih" setelah tenang.
+Peringatan yang ditutup karena replikanya mulai **Resync ulang** atau dilepas
+dari panel tidak dianggap pulih; pesannya "ℹ️ RS-2: peringatan replika
+berhenti ditutup: Resync ulang dimulai". Pengiriman yang gagal dicoba lagi
+tiap menit; statusnya (terkirim, gagal dan alasannya, misalnya "Telegram
+tidak terjangkau: …" atau "Telegram menolak: …") tampil di halaman
+**Peringatan**.
+
+**Data yang keluar ke Telegram** (untuk penilaian perlindungan data
+pribadi, mis. UU PDP; server Telegram berada di luar jaringan Anda): nama
+server, jenis peringatan dan status, nomor error MySQL dengan penjelasan
+awamnya, waktu kejadian, tautan ke panel (alamat IP atau nama internal
+panel dan id server), serta di ringkasan mingguan persentase waktu
+sinkron, jumlah dan lama gangguan, pemakaian disk, dan jumlah pekerjaan
+yang gagal. Data pasien, isi tabel, dan teks error MySQL tidak pernah
+dikirim. Pakai grup privat, bukan kanal publik (`@nama`): isi kanal publik
+bisa dibaca siapa pun.
 
 **Jangan ganggu.** Saat perawatan terjadwal, pilih lama **Jangan ganggu**
 (1, 2, 8, atau 24 jam) di halaman server, master, replika, atau
@@ -482,8 +532,9 @@ dicatat di **Audit**.
   untuk melanjutkan. Pekerjaan berjalan tanpa berhenti, kecuali bila di
   replika ditemukan database di luar daftar itu: pekerjaan lalu menunggu
   persetujuan Anda. CLONE dipakai bila replika mengikuti semua database;
-  centang **Paksa dump** untuk memakai mysqldump. Jalankan di luar jam
-  sibuk.
+  centang **Paksa dump** untuk memakai mysqldump (juga bila CLONE terus
+  gagal). Selama resync MySQL di replika bisa di-restart bila
+  pengaturannya perlu diubah. Jalankan di luar jam sibuk.
 - **Lepas replika:** ketik nama server, lalu pilih:
   - **Lepas, biarkan replikasi berjalan:** panel berhenti mengelola dan
     memantau server ini; MySQL di sana terus mengikuti master sampai Anda
@@ -516,10 +567,16 @@ berhasil dan gagal, logout, perubahan pengaturan, tes Telegram, Siapkan
 master, Buat replika, tambah dan lepas database, setujui/ulangi/batalkan
 pekerjaan, serta semua tombol di "Kontrol replika". Setiap baris berisi
 waktu, pengguna, IP, tindakan, target, dan hasilnya (berhasil, atau alasan
-ditolak); sandi dan token tidak pernah dicatat. Saring menurut server dan
-tanggal. Catatan tidak bisa diubah atau dihapus, juga dari panel, dan
-tidak dipangkas; ia ikut tersimpan di `panel.db`, jadi ikut dicadangkan
-bersamanya.
+ditolak); sandi dan token tidak pernah dicatat. Perubahan chat id dan
+alamat dasar panel dicatat dengan nilai barunya. Isi rincian tiap baris
+dibatasi (2 KiB); untuk tindakan yang ditolak atau gagal hanya nama isian
+dan panjang nilainya yang dicatat, dan login gagal dengan nama pengguna
+yang tidak ada dicatat sebagai `(tidak dikenal)` dengan hash pendek. Saring
+menurut server dan tanggal. Catatan tidak bisa diubah atau dihapus lewat
+panel dan tidak dipangkas; ia ikut tersimpan di `panel.db`, jadi ikut
+dicadangkan bersamanya. Penjagaannya ada di dalam `panel.db` sendiri, jadi
+catatan ini tahan ubah terhadap aplikasi, bukan terhadap root di host panel
+(yang bisa mengubah berkasnya).
 
 ## Pembaruan agent
 
@@ -537,8 +594,10 @@ dimutakhirkan**. Untuk memutakhirkannya:
 
 Pemasangan ulang hanya mengganti binary, sertifikat, dan `agent.yaml`.
 Akun MySQL tersegel, kebijakan lokal, serta peran dan sumber yang dipin di
-`/etc/dbpanel` tetap; agent lama yang belum punya berkas peran menuliskannya
-sendiri dari keadaan MySQL (lihat "Peran dan sumber yang dipin").
+`/etc/dbpanel` tetap. Agent lama yang belum punya berkas peran hanya
+menulis berkas peran (dengan petunjuk peran dari panel); pin sumber replika
+baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
+"Peran dan sumber yang dipin").
 
 ## Keamanan
 
@@ -575,6 +634,11 @@ sendiri dari keadaan MySQL (lihat "Peran dan sumber yang dipin").
   server seperti itu, nyalakan MySQL lewat systemd atau aaPanel sendiri
   (agent hanya memberi tahu), atau pindahkan `socket` ke luar `/tmp`
   (misalnya `/run/mysqld/mysqld.sock`).
+- Jangan tempatkan master produksi di host panel. Agent tertanam di panel
+  memegang pinnya di direktori konfigurasi panel, jadi pin itu bukan batas
+  terhadap proses panel sendiri: panel yang disusupi bisa mengubahnya.
+  Pin master hanya melindungi master yang agentnya berjalan di server
+  lain.
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
   tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan
   setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum
