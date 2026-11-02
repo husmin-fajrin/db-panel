@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -259,6 +258,22 @@ func TestE2ECreateReplica(t *testing.T) {
 	if err := masterDB.QueryRow("SELECT COUNT(*) FROM mysql.user WHERE user LIKE 'dbpanel\\_dump\\_%'").Scan(&dumpAccounts); err != nil ||
 		dumpAccounts != 0 {
 		t.Fatalf("dump accounts left on the master: %d, %v", dumpAccounts, err)
+	}
+
+	// Resync ulang of the replica that follows every database copies with
+	// CLONE again. Defect F1 (e2eCloneResyncFixed): that CLONE fails with
+	// 1290 (--super-read-only); the step is pending until the fix wave.
+	if !e2eCloneResyncFixed {
+		t.Log("Resync ulang through CLONE skipped: pending the fix of defect F1 (e2eCloneResyncFixed)")
+	} else {
+		resyncStart := time.Now()
+		_, resyncID := resyncThroughUI(t, p, ui, cloneSrv, "replika-clone")
+		if log := jobLogText(t, p, resyncID); !strings.Contains(log, "Metode salinan awal: clone.") {
+			t.Fatalf("resync of an all-databases replica did not copy with CLONE:\n%s", log)
+		}
+		execSQL(t, masterDB, "INSERT INTO a.t (id, v) VALUES (5, 'setelah-resync-clone')")
+		waitRow(t, cloneDB, "a", 5, "setelah-resync-clone")
+		t.Logf("resync_replica with CLONE succeeded in %s", time.Since(resyncStart).Round(time.Second))
 	}
 
 	// The replication password is sealed in the store and never written to
@@ -604,17 +619,19 @@ func TestE2EMonitoring(t *testing.T) {
 
 	// (a) STOP REPLICA in MySQL itself: Berhenti (di luar panel), an open
 	// replica_stopped, and one Telegram message naming the replica, in
-	// plain words.
+	// plain words. The whole chain, up to the message, completes within
+	// e2eWait of the STOP (spec 5.1: under 30 s).
 	stepStart := time.Now()
 	before := len(e.tg.messages())
 	execSQL(t, e.replicaDB, "STOP REPLICA")
-	v := waitStatus(t, p, rep, healthmon.StatusStoppedOutside)
-	waitForWithin(t, e2eWait, "an open replica_stopped alert", func() bool {
+	detectBy := stepStart.Add(e2eWait)
+	v := waitStatusUntil(t, p, rep, healthmon.StatusStoppedOutside, detectBy)
+	waitForWithin(t, time.Until(detectBy), "an open replica_stopped alert", func() bool {
 		_, ok := openAlert(t, p, healthmon.KindReplicaStopped, rep)
 		return ok
 	})
 	stopHead := "Replika " + e.replicaName + " berhenti"
-	waitForWithin(t, e2eWait, "the Telegram message of the stopped replica", func() bool {
+	waitForWithin(t, time.Until(detectBy), "the Telegram message of the stopped replica", func() bool {
 		return len(containing(e.tg.since(before), stopHead)) > 0
 	})
 	if got := containing(e.tg.since(before), e.replicaName); len(got) != 1 {
@@ -715,37 +732,30 @@ func TestE2EMonitoring(t *testing.T) {
 	// fresh inventory; with the typed name and that list the job runs
 	// without stopping, and the replica is ready and following again.
 	stepStart = time.Now()
-	loc := ui.postRedirect(repPath+"/resync/prepare", nil)
-	if loc != repPath+"?buka=resync" {
-		t.Fatalf("resync/prepare redirected to %q", loc)
-	}
-	var wipe []string
-	for _, m := range wipeListRe.FindAllStringSubmatch(ui.get(loc), -1) {
-		wipe = append(wipe, m[1])
-	}
-	if strings.Join(wipe, ",") != "a" {
-		t.Fatalf("resync dialog lists %q for wiping, want [a]", wipe)
-	}
-	resyncID := ui.postJob(repPath+"/resync", url.Values{"confirm_name": {e.replicaName}, "wipe_list[]": wipe})
-	job := waitJob(t, p, resyncID, e2eCreateTimeout, nil) // nil: a waiting step fails the test
-	if job.Kind != "resync_replica" || job.Status != store.JobSucceeded {
-		t.Fatalf("resync job %s ended %s: %s\n%s", job.Kind, job.Status, job.Error, jobLogText(t, p, resyncID))
-	}
-	if r, err := p.Store.GetReplicaByServer(rep); err != nil || r.State != store.ReplicaReady || r.Paused {
-		t.Fatalf("replica after resync = %+v, %v; want ready, not paused", r, err)
+	resyncMark := len(e.tg.messages())
+	if wipe, _ := resyncThroughUI(t, p, ui, rep, e.replicaName); strings.Join(wipe, ",") != "a" {
+		t.Fatalf("resync dialog listed %q for wiping, want [a]", wipe)
 	}
 	waitStatus(t, p, rep, healthmon.StatusSynced)
 	execSQL(t, e.masterDB, "INSERT INTO a.t VALUES (2, 'setelah-resync')")
 	waitRow(t, e.replicaDB, "a", 2, "setelah-resync")
 	t.Logf("(e) resynced in %s", time.Since(stepStart).Round(time.Second))
 
+	// Defect F2 (e2eResyncQuietFixed): a successful resync raises a false
+	// replica_stopped alert, and its Telegram message and "pulih", until
+	// the next agent report. This wait lets that alert close (with the fix
+	// it holds at once); the leftover check is that nothing stays open.
 	waitForWithin(t, e2eWait, "no alert open on the resynced replica", func() bool {
 		return len(openKinds(t, p, rep)) == 0
 	})
+	// By now the replica was Sinkron and replicated a row, so a false stop
+	// message, if any, has been sent.
+	falseStops := containing(e.tg.since(resyncMark), stopHead)
+	t.Logf("(e) replica_stopped messages after the resync: %d (defect F2; strict once e2eResyncQuietFixed)", len(falseStops))
+	if e2eResyncQuietFixed && len(falseStops) != 0 {
+		t.Errorf("a successful resync sent replica_stopped messages: %q", falseStops)
+	}
 }
-
-// wipeListRe finds the databases the Resync ulang dialog lists for wiping.
-var wipeListRe = regexp.MustCompile(`name="wipe_list\[\]" value="([^"]*)"`)
 
 // TestE2EPinnedRole: the master's agent refuses, on its own, a command that
 // would drop its data although the panel sends it (spec 5.5), and the

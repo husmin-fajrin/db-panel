@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,20 @@ import (
 // and Telegram well within it (spec 5.1: under a minute with the defaults).
 const e2eWait = 30 * time.Second
 
+// Known defects of Plan 3 the end-to-end tests step around until the final
+// fix wave; it flips each constant to true once its fix lands, which turns
+// the pending check into a strict one.
+const (
+	// e2eCloneResyncFixed: defect F1, "Resync ulang" through CLONE fails at
+	// "Salin data" with 1290 (--super-read-only) on a registered replica.
+	e2eCloneResyncFixed = false
+	// e2eResyncQuietFixed: defect F2, a successful resync raises a false
+	// replica_stopped alert and Telegram message (the Monitor judges the
+	// last report, taken mid-job, once the replica is ready again) that the
+	// next report closes with "pulih".
+	e2eResyncQuietFixed = false
+)
+
 // skipWithoutE2E skips the test in -short mode and without mysqld.
 func skipWithoutE2E(t *testing.T) {
 	t.Helper()
@@ -41,8 +56,8 @@ func skipWithoutE2E(t *testing.T) {
 }
 
 // e2eTopology is a running panel with a master of databases a and b and
-// one replica following a (copied with a dump) made through the UI, Telegram pointed at a fake Bot API, and
-// short monitoring intervals.
+// one replica following a (copied with a dump) made through the UI,
+// Telegram pointed at a fake Bot API, and short monitoring intervals.
 type e2eTopology struct {
 	p                       *Panel
 	ui                      *uiClient
@@ -55,7 +70,8 @@ type e2eTopology struct {
 
 // startE2ETopology starts two mysqld instances, the panel and two agents,
 // then runs "Siapkan master" and "Buat replika" (database a of a and b,
-// so a dump) over the UI. Each agent reports every 10 s (summary 20 s) once online.
+// so a dump) over the UI. Each agent reports every 10 s (summary 20 s)
+// once online.
 func startE2ETopology(t *testing.T) *e2eTopology {
 	t.Helper()
 	start := time.Now()
@@ -66,6 +82,10 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 		masterName: "master-e2e", replicaName: "replika-e2e",
 		masterDB: openInstance(t, masterInst), replicaDB: openInstance(t, replicaInst),
 	}
+	// Defect F1 (e2eCloneResyncFixed): Resync via CLONE fails with 1290
+	// --super-read-only; fixed in the final fix wave. Until then this
+	// topology follows a subset (a of a and b), so its resync uses the dump
+	// path; TestE2ECreateReplica holds the CLONE resync step, pending.
 	execSQL(t, e.masterDB,
 		"CREATE DATABASE a", "CREATE TABLE a.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO a.t VALUES (1, 'awal')",
 		"CREATE DATABASE b", "CREATE TABLE b.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO b.t VALUES (1, 'awal')",
@@ -208,8 +228,13 @@ func containing(msgs []string, sub string) []string {
 // code and returns its view.
 func waitStatus(t *testing.T, p *Panel, serverID int64, code string) healthmon.View {
 	t.Helper()
+	return waitStatusUntil(t, p, serverID, code, time.Now().Add(e2eWait))
+}
+
+// waitStatusUntil is waitStatus with a deadline shared with other waits.
+func waitStatusUntil(t *testing.T, p *Panel, serverID int64, code string, deadline time.Time) healthmon.View {
+	t.Helper()
 	var last healthmon.View
-	deadline := time.Now().Add(e2eWait)
 	for {
 		v, ok := p.Monitor.View(serverID)
 		if ok && v.Status.Code == code {
@@ -217,12 +242,42 @@ func waitStatus(t *testing.T, p *Panel, serverID int64, code string) healthmon.V
 		}
 		last = v
 		if time.Now().After(deadline) {
-			t.Fatalf("server %d did not reach status %q within %s (last: %q, %q)",
-				serverID, code, e2eWait, last.Status.Code, last.Status.Detail)
+			t.Fatalf("server %d did not reach status %q by %s (last: %q, %q)",
+				serverID, code, deadline.Format("15:04:05.000"), last.Status.Code, last.Status.Detail)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// resyncThroughUI runs "Resync ulang" on the replica on serverID as a user
+// does: it opens the dialog (a fresh inventory), posts the listed databases
+// with the typed name, and requires the resync_replica job to succeed
+// without a waiting step, leaving the replica ready and not paused. It
+// returns the wipe list the dialog showed and the job's id.
+func resyncThroughUI(t *testing.T, p *Panel, ui *uiClient, serverID int64, name string) ([]string, string) {
+	t.Helper()
+	path := "/replicas/" + strconv.FormatInt(serverID, 10)
+	loc := ui.postRedirect(path+"/resync/prepare", nil)
+	if loc != path+"?buka=resync" {
+		t.Fatalf("resync/prepare redirected to %q", loc)
+	}
+	var wipe []string
+	for _, m := range wipeListRe.FindAllStringSubmatch(ui.get(loc), -1) {
+		wipe = append(wipe, m[1])
+	}
+	id := ui.postJob(path+"/resync", url.Values{"confirm_name": {name}, "wipe_list[]": wipe})
+	job := waitJob(t, p, id, e2eCreateTimeout, nil) // nil: a waiting step fails the test
+	if job.Kind != "resync_replica" || job.Status != store.JobSucceeded {
+		t.Fatalf("resync job %s ended %s: %s\n%s", job.Kind, job.Status, job.Error, jobLogText(t, p, id))
+	}
+	if r, err := p.Store.GetReplicaByServer(serverID); err != nil || r.State != store.ReplicaReady || r.Paused {
+		t.Fatalf("replica after resync = %+v, %v; want ready, not paused", r, err)
+	}
+	return wipe, id
+}
+
+// wipeListRe finds the databases the Resync ulang dialog lists for wiping.
+var wipeListRe = regexp.MustCompile(`name="wipe_list\[\]" value="([^"]*)"`)
 
 // openAlert reports whether an alert of kind is open on the server.
 func openAlert(t *testing.T, p *Panel, kind string, serverID int64) (store.Alert, bool) {
