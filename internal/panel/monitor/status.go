@@ -80,6 +80,10 @@ const (
 	replicaAttention = "attention"
 )
 
+// downAgentOffline starts the detail of a master presumed down because its
+// agent is offline (the alternative is MySQL not answering).
+const downAgentOffline = "Diduga tumbang (agent offline)"
+
 // offlineGrace is how long the hub may report an agent offline before the
 // status becomes Agent offline.
 const offlineGrace = 30 * time.Second
@@ -212,7 +216,7 @@ func DeriveMaster(in MasterInput, th Thresholds) Status {
 			since = in.ReceivedAt
 		}
 		if !since.IsZero() && in.Now.Sub(since) >= th.DownAfter {
-			return set(StatusDown, fmt.Sprintf("Diduga tumbang (agent offline): agent tidak terhubung %s%s",
+			return set(StatusDown, fmt.Sprintf("%s: agent tidak terhubung %s%s", downAgentOffline,
 				formatDuration(in.Now.Sub(since)), lost(in.ReplicasDisconnected)))
 		}
 		return set(StatusAgentOffline, detail)

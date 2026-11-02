@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -53,9 +54,6 @@ type ruleCtx struct {
 	// master is the view of a replica's master; nil for a master, or when
 	// the Monitor does not know it.
 	master *View
-	// agentOff: the agent counts as offline (disconnected beyond the grace,
-	// or its last report is stale).
-	agentOff bool
 	// diskCrit: disk_crit is open, or opens, after this evaluation; it
 	// replaces disk_warn, so one condition is one alert.
 	diskCrit bool
@@ -141,11 +139,13 @@ var alertRules = []alertRule{
 	},
 	{
 		kind: KindMasterDown,
-		open: func(v View, ctx ruleCtx) (bool, string) {
+		open: func(v View, _ ruleCtx) (bool, string) {
 			if !isMaster(v) || v.Status.Code != StatusDown {
 				return false, ""
 			}
-			if ctx.agentOff {
+			// From the derived status, like every rule, not from the
+			// connection now: the two differ until the status is re-derived.
+			if strings.HasPrefix(v.Status.Detail, downAgentOffline) {
 				return true, "Master diduga tumbang: agent tidak terhubung ke panel."
 			}
 			return true, "Master diduga tumbang: MySQL tidak menjawab."
@@ -176,7 +176,9 @@ var alertRules = []alertRule{
 			}
 			return true, "Agent tidak terhubung ke panel atau laporannya terlambat."
 		},
-		close: func(_ View, ctx ruleCtx) bool { return !ctx.agentOff },
+		// Opened and closed on the derived status only: a reconnected agent
+		// stays Agent offline until its first report or the next tick.
+		close: func(v View, _ ruleCtx) bool { return v.Status.Code != StatusAgentOffline },
 	},
 	{
 		kind: KindDiskWarn,
@@ -429,7 +431,7 @@ func (m *Monitor) ruleCtx(id int64, s *serverState, v View, now time.Time) ruleC
 		s.outSince = time.Time{}
 	} // otherwise (agent offline, MySQL not answering) unknown: the clock runs on
 
-	ctx := ruleCtx{now: now, set: m.settings, agentOff: agentOff,
+	ctx := ruleCtx{now: now, set: m.settings,
 		connHighSince: s.connHighSince, syncedSince: s.syncedSince, outSince: s.outSince}
 	if v.Role == store.RoleReplica {
 		if ms, ok := m.servers[s.masterID]; ok && s.masterID != id {
@@ -441,15 +443,21 @@ func (m *Monitor) ruleCtx(id int64, s *serverState, v View, now time.Time) ruleC
 }
 
 // JobFailed opens job_failed for the server, or points the open one at
-// this job. The message names the kind of job only: errText may carry
-// MySQL's raw error and stays out of it.
-func (m *Monitor) JobFailed(serverID int64, jobID, kind, errText string) {
-	_ = errText // deliberately unused; see above
+// this job. The message names the kind of job and the step that failed
+// (its title; "" when unknown). errText is not used at all: it may carry
+// MySQL's raw error, which stays out of alerts and of the panel's log (the
+// job keeps it).
+func (m *Monitor) JobFailed(serverID int64, jobID, kind, step, errText string) {
+	_ = errText
 	name, ok := jobKindNames[kind]
 	if !ok {
 		name = kind
 	}
-	msg := fmt.Sprintf("Pekerjaan %s gagal (job %s).", name, jobID)
+	msg := "Pekerjaan " + name + " gagal"
+	if step != "" {
+		msg += " pada tahap " + step
+	}
+	msg += "."
 	now := m.now()
 	var ups []alertUpdate
 	m.mu.Lock()

@@ -552,7 +552,7 @@ func TestStatusAlertsOpenAndClose(t *testing.T) {
 	// keeps its job_failed.
 	step(ra, stoppedBy(1062, "dup"))
 	r.openAlert(rID, KindReplicaStopped)
-	r.m.JobFailed(rID, "job-7", "resync_replica", "boom")
+	r.m.JobFailed(rID, "job-7", "resync_replica", "Salin data", "boom")
 	if err := r.st.SetReplicaState(rID, store.ReplicaResyncing, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -570,10 +570,9 @@ func TestJobFailedAlert(t *testing.T) {
 	var changed atomic.Int32
 	r.m.onAlertsChanged = func() { changed.Add(1) }
 
-	r.m.JobFailed(rID, "job-1", "create_replica", "step import: Error 1062: Duplicate entry 'Budi'")
+	r.m.JobFailed(rID, "job-1", "create_replica", "Salin data", "Error 1062: Duplicate entry 'Budi'")
 	a := r.openAlert(rID, KindJobFailed)
-	if !strings.Contains(a.Message, "Buat replika") || !strings.Contains(a.Message, "gagal") ||
-		strings.Contains(a.Message, "Budi") || strings.Contains(a.Message, "1062") || a.TopologyID != topo.ID {
+	if a.Message != "Pekerjaan Buat replika gagal pada tahap Salin data." || a.TopologyID != topo.ID {
 		t.Fatalf("job_failed = %+v", a)
 	}
 	if ups := r.alertUpdates(rID, KindJobFailed); len(ups) != 1 || ups[0]["open"] != true {
@@ -584,8 +583,8 @@ func TestJobFailedAlert(t *testing.T) {
 	}
 
 	// A second failure keeps one alert, now about the newer job.
-	r.m.JobFailed(rID, "job-2", "add_databases", "boom")
-	if as := r.alerts(rID, KindJobFailed); len(as) != 1 || !strings.Contains(as[0].Message, "Tambah database") {
+	r.m.JobFailed(rID, "job-2", "add_databases", "", "boom")
+	if as := r.alerts(rID, KindJobFailed); len(as) != 1 || as[0].Message != "Pekerjaan Tambah database gagal." {
 		t.Fatalf("after a second failure = %+v", as)
 	}
 	// The older job ending leaves the newer failure open.
@@ -631,5 +630,45 @@ func TestSnoozeKeepsAlertsOpen(t *testing.T) {
 	}
 	if err := r.m.Snooze(9999, &until); err == nil {
 		t.Fatal("Snooze of an unknown server succeeded")
+	}
+}
+
+// TestAgentOfflineAlertStableUntilReport: a reconnected agent whose first
+// report has not arrived still shows Agent offline; other servers'
+// reports must neither close nor reopen its alert.
+func TestAgentOfflineAlertStableUntilReport(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ra.detach()
+	r.clk.Add(31 * time.Second)
+	ma.send()
+	r.m.tick()
+	first := r.openAlert(rID, KindAgentOffline)
+
+	r.m.OnOnline(rID) // connected again, no report yet
+	for range 2 {
+		r.clk.Add(time.Second)
+		ma.send()
+	}
+	as := r.alerts(rID, KindAgentOffline)
+	if len(as) != 1 || as[0].ID != first.ID || as[0].ClosedAt != nil {
+		t.Fatalf("agent_offline alerts after other reports = %+v, want the first still open", as)
+	}
+	if ups := r.alertUpdates(rID, KindAgentOffline); len(ups) != 1 {
+		t.Fatalf("alert_update = %v, want only the opening", ups)
+	}
+	// The tick re-derives the reconnected agent's status: closed once.
+	r.m.tick()
+	as = r.alerts(rID, KindAgentOffline)
+	if len(as) != 1 || as[0].ClosedAt == nil {
+		t.Fatalf("agent_offline alerts after the tick = %+v, want the one closed", as)
+	}
+	ra.send()
+	r.m.tick()
+	if n := len(r.alerts(rID, KindAgentOffline)); n != 1 {
+		t.Fatalf("agent_offline alerts = %d, want 1", n)
 	}
 }
