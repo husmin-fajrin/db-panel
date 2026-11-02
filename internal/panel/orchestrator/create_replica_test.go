@@ -887,3 +887,55 @@ func TestJobFailedReachesAlerts(t *testing.T) {
 		t.Fatalf("JobEnded = %v", ended)
 	}
 }
+
+// TestCancelAfterConnectResetsReplication: a create_replica canceled once
+// replication was configured leaves no replica following the master: the
+// target stops and resets replication before releasing its role.
+func TestCancelAfterConnectResetsReplication(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	r.reply("mysql.resetReplica", nil)
+	verifying, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	r.on("mysql.waitSynced", func(json.RawMessage) (any, error) {
+		once.Do(func() { close(verifying) })
+		<-release
+		return proto.WaitSyncedResult{Synced: true, Executed: masterGTID,
+			Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}}, nil
+	})
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-verifying
+	mark := r.mark()
+	if err := e.r.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	e.waitJob(id, store.JobCanceled)
+	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.stopReplica", "mysql.resetReplica", "mysql.releaseRole"})
+	if _, err := e.st.GetReplicaByServer(r.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("replica row after cancel: %v", err)
+	}
+
+	// A failing reset is only logged; the release is still tried.
+	r.fail("mysql.resetReplica", "RESET REPLICA gagal")
+	verifying, release = make(chan struct{}), make(chan struct{})
+	once = sync.Once{}
+	id, err = e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-verifying
+	mark = r.mark()
+	if err := e.r.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	e.waitJob(id, store.JobCanceled)
+	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.stopReplica", "mysql.resetReplica", "mysql.releaseRole"})
+}

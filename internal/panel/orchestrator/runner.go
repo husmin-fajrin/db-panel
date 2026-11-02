@@ -693,9 +693,16 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 		if err := r.d.Store.RemoveReplica(j.ServerID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			r.log.Warn("remove replica on cancel", "job", j.ID, "err", err)
 		}
-		// The target is unassigned again: its agent should not stay pinned
-		// as a replica (best effort; refused while replication is still
-		// configured there).
+		// The target is unassigned again: it must not keep following the
+		// master, and its agent should not stay pinned as a replica. Once
+		// the connect step ran, replication (stopped above) is reset first,
+		// since the agent refuses releaseRole while it is configured. All
+		// best effort.
+		if j.CurrentStep >= stepConnect {
+			if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.resetReplica", nil, nil); err != nil {
+				r.log.Warn("reset replication on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
+			}
+		}
 		if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.releaseRole", nil, nil); err != nil {
 			r.log.Warn("release role on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
 		}
