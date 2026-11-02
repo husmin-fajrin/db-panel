@@ -32,9 +32,12 @@ type Alert struct {
 	NotifyCount                  int
 	Message                      string
 	TelegramState, TelegramError string
+	// CloseReason says, in words, why a closed alert did not recover (its
+	// server stopped being judged); "" for a recovery or an open alert.
+	CloseReason string
 }
 
-const alertColumns = `id, kind, server_id, topology_id, opened_at, closed_at, last_notified_at, notify_count, message, telegram_state, telegram_error`
+const alertColumns = `id, kind, server_id, topology_id, opened_at, closed_at, last_notified_at, notify_count, message, telegram_state, telegram_error, close_reason`
 
 func scanAlert(r rowScanner) (Alert, error) {
 	var (
@@ -44,7 +47,7 @@ func scanAlert(r rowScanner) (Alert, error) {
 		notified sql.NullString
 	)
 	if err := r.Scan(&a.ID, &a.Kind, &a.ServerID, &a.TopologyID, &opened, &closed, &notified,
-		&a.NotifyCount, &a.Message, &a.TelegramState, &a.TelegramError); err != nil {
+		&a.NotifyCount, &a.Message, &a.TelegramState, &a.TelegramError, &a.CloseReason); err != nil {
 		return Alert{}, err
 	}
 	var err error
@@ -114,7 +117,52 @@ func (s *Store) GetOpenAlert(kind string, serverID int64) (Alert, error) {
 // CloseAlert closes an open alert; ErrNotFound if there is none with this id
 // or it is already closed.
 func (s *Store) CloseAlert(id int64, now time.Time) error {
-	return s.execOne(`UPDATE alerts SET closed_at = ? WHERE id = ? AND closed_at IS NULL`, formatTime(now), id)
+	return s.CloseAlertWithReason(id, now, "")
+}
+
+// CloseAlertWithReason closes an open alert that did not recover, saying
+// why (Alert.CloseReason); "" is a recovery.
+func (s *Store) CloseAlertWithReason(id int64, now time.Time, reason string) error {
+	return s.execOne(`UPDATE alerts SET closed_at = ?, close_reason = ? WHERE id = ? AND closed_at IS NULL`,
+		formatTime(now), reason, id)
+}
+
+// PreviousAlertClosedAt is when the alert of kind for the server before
+// alert id (the newest older one) closed; nil when there is none or it is
+// still open.
+func (s *Store) PreviousAlertClosedAt(kind string, serverID, id int64) (*time.Time, error) {
+	var closed sql.NullString
+	err := s.db.QueryRow(`SELECT closed_at FROM alerts WHERE kind = ? AND server_id = ? AND id < ?
+		ORDER BY id DESC LIMIT 1`, kind, serverID, id).Scan(&closed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("previous alert: %w", err)
+	}
+	return parseNullTime(closed)
+}
+
+// LaterAlertExists reports whether an alert of kind for the server was
+// opened after alert id and before before.
+func (s *Store) LaterAlertExists(kind string, serverID, id int64, before time.Time) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM alerts WHERE kind = ? AND server_id = ? AND id > ? AND opened_at < ?`,
+		kind, serverID, id, formatTime(before)).Scan(&n); err != nil {
+		return false, fmt.Errorf("later alert: %w", err)
+	}
+	return n > 0, nil
+}
+
+// CountAlertsOpenedSince counts the alerts of kind for the server opened
+// at or after since.
+func (s *Store) CountAlertsOpenedSince(kind string, serverID int64, since time.Time) (int, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM alerts WHERE kind = ? AND server_id = ? AND opened_at >= ?`,
+		kind, serverID, formatTime(since)).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count alerts: %w", err)
+	}
+	return n, nil
 }
 
 // ListOpenAlerts returns all open alerts, oldest first.

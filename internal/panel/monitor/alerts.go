@@ -381,7 +381,11 @@ func (m *Monitor) evaluate(now time.Time) []alertUpdate {
 			a, isOpen := byKey[key{r.kind, id}]
 			switch {
 			case isOpen && (!active || r.close(v, ctx)):
-				if err := m.st.CloseAlert(a.ID, now); err != nil {
+				reason := ""
+				if !active {
+					reason = inactiveReason(v, s.repState)
+				}
+				if err := m.st.CloseAlertWithReason(a.ID, now, reason); err != nil {
 					m.log.Warn("close alert", "server_id", id, "kind", r.kind, "err", err)
 					continue
 				}
@@ -408,6 +412,20 @@ func (m *Monitor) evaluate(now time.Time) []alertUpdate {
 		}
 	}
 	return ups
+}
+
+// inactiveReason words why the status alerts of a server that is no
+// longer judged close without recovering (no "pulih" is due).
+func inactiveReason(v View, repState string) string {
+	switch {
+	case v.Role == "":
+		return "replika dilepas dari panel"
+	case repState == store.ReplicaResyncing:
+		return "Resync ulang dimulai"
+	case repState == store.ReplicaCreating:
+		return "replika sedang dibuat ulang"
+	}
+	return "replika belum siap dipantau"
 }
 
 // ruleCtx moves the server's condition clocks to now and returns what the

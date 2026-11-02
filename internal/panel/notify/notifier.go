@@ -20,7 +20,23 @@ const (
 	defaultRetryEvery = 60 * time.Second // spec 5.3: failed sends retried, fixed backoff
 	testEvery         = 10 * time.Second // at most one test message this often
 	testText          = "Tes dari dbpanel: notifikasi berfungsi."
+
+	// Flap control (SEC-46): an alert reopened less than flapWindow after
+	// the previous one of its kind and server closed is flapping. Its open
+	// message is replaced by one "berkedip N kali" message per flapWindow,
+	// and a recovery goes out only once the alert stayed closed
+	// recoveryHold.
+	flapWindow   = 5 * time.Minute
+	recoveryHold = time.Minute
+	// minWait is the shortest pause Run takes before a held message is due.
+	minWait = time.Second
 )
+
+// flapKey is one server's alert kind.
+type flapKey struct {
+	serverID int64
+	kind     string
+}
 
 var (
 	// ErrNotConfigured: no bot token or no chat id is set.
@@ -144,6 +160,12 @@ type Notifier struct {
 	// looked at them; guarded by passMu. Kept in memory only: after a
 	// restart a snooze that ended meanwhile sends no reminder.
 	wasSnoozed map[int64]bool
+	// flapSent is when the last "berkedip" message of a server's alert
+	// kind went out; guarded by passMu, in memory only.
+	flapSent map[flapKey]time.Time
+	// nextDue is when the earliest message the last pass held back is
+	// due (zero when none); guarded by passMu.
+	nextDue time.Time
 
 	testMu   sync.Mutex
 	lastTest time.Time
@@ -154,7 +176,7 @@ func New(d Deps) *Notifier {
 	n := &Notifier{
 		st: d.Store, box: d.Box, sender: d.Sender, log: d.Logger, now: d.Now,
 		retryEvery: d.RetryEvery, repeat: d.Repeat, snoozed: d.Snoozed, serverName: d.ServerName,
-		wake: make(chan struct{}, 1), wasSnoozed: make(map[int64]bool),
+		wake: make(chan struct{}, 1), wasSnoozed: make(map[int64]bool), flapSent: make(map[flapKey]time.Time),
 	}
 	if n.log == nil {
 		n.log = slog.Default()
@@ -174,19 +196,50 @@ func New(d Deps) *Notifier {
 	return n
 }
 
-// Run passes over the alerts at once, then every RetryEvery and after each
-// Wake, until ctx ends.
+// Run passes over the alerts at once, then every RetryEvery, after each
+// Wake, and when a message the last pass held back is due, until ctx ends.
 func (n *Notifier) Run(ctx context.Context) {
 	t := time.NewTicker(n.retryEvery)
 	defer t.Stop()
 	for {
 		n.Pass(ctx)
+		var due <-chan time.Time
+		var timer *time.Timer
+		if d, ok := n.untilDue(); ok {
+			timer = time.NewTimer(d)
+			due = timer.C
+		}
 		select {
 		case <-ctx.Done():
-			return
 		case <-t.C:
 		case <-n.wake:
+		case <-due:
 		}
+		if timer != nil {
+			timer.Stop()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// untilDue is how long until the earliest held message is due (at least
+// minWait); false when nothing is held.
+func (n *Notifier) untilDue() (time.Duration, bool) {
+	n.passMu.Lock()
+	defer n.passMu.Unlock()
+	if n.nextDue.IsZero() {
+		return 0, false
+	}
+	return max(n.nextDue.Sub(n.now()), minWait), true
+}
+
+// holdUntil records that a message is held back until at. The caller holds
+// passMu.
+func (n *Notifier) holdUntil(at time.Time) {
+	if n.nextDue.IsZero() || at.Before(n.nextDue) {
+		n.nextDue = at
 	}
 }
 
@@ -228,6 +281,12 @@ func (n *Notifier) Pass(ctx context.Context) {
 	if err != nil {
 		n.log.Warn("notify: list alerts", "err", err)
 		return
+	}
+	n.nextDue = time.Time{}
+	for k, at := range n.flapSent {
+		if n.now().Sub(at) > 24*time.Hour {
+			delete(n.flapSent, k) // a recovery that never came (the kind switched off)
+		}
 	}
 	snoozed := make(map[int64]bool)
 	for _, a := range alerts {
@@ -274,6 +333,9 @@ func (n *Notifier) notify(ctx context.Context, cfg Config, a store.Alert, snooze
 		n.now().Before(a.LastNotifiedAt.Add(cfg.Repeat)) {
 		return
 	}
+	if a.NotifyCount == 0 && n.flapping(ctx, cfg, a) {
+		return
+	}
 	master := ""
 	if a.Kind == monitor.KindReplicaStopped && a.TopologyID != 0 {
 		if topo, err := n.st.GetTopology(a.TopologyID); err == nil {
@@ -284,9 +346,49 @@ func (n *Notifier) notify(ctx context.Context, cfg Config, a store.Alert, snooze
 	n.deliver(ctx, cfg, a, text, store.TelegramSent)
 }
 
+// flapping handles the first send of an open alert reopened less than
+// flapWindow after the previous one of its kind and server closed: it
+// sends "berkedip N kali" at most once per flapWindow and holds the alert
+// otherwise. It reports whether it handled the alert; false leaves it to
+// the normal message (not flapping, or flapWindow passed without another
+// reopen).
+func (n *Notifier) flapping(ctx context.Context, cfg Config, a store.Alert) bool {
+	prev, err := n.st.PreviousAlertClosedAt(a.Kind, a.ServerID, a.ID)
+	if err != nil {
+		n.log.Warn("notify: previous alert", "alert_id", a.ID, "err", err)
+		return false
+	}
+	if prev == nil || a.OpenedAt.Sub(*prev) >= flapWindow {
+		return false
+	}
+	now := n.now()
+	key := flapKey{a.ServerID, a.Kind}
+	if last, ok := n.flapSent[key]; ok && now.Before(last.Add(flapWindow)) {
+		n.holdUntil(last.Add(flapWindow))
+		return true
+	}
+	count, err := n.st.CountAlertsOpenedSince(a.Kind, a.ServerID, now.Add(-flapWindow))
+	if err != nil {
+		n.log.Warn("notify: count alerts", "alert_id", a.ID, "err", err)
+		return false
+	}
+	if count < 2 {
+		return false // open for a while now: an ordinary alert
+	}
+	if n.deliver(ctx, cfg, a, FormatFlapping(a, n.serverName(a.ServerID), count, cfg.BaseURL), store.TelegramSent) {
+		n.flapSent[key] = now
+	}
+	return true
+}
+
 // notifyRecovered handles a closed alert that is not yet TelegramRecovered.
+// A recovery waits until the alert stayed closed recoveryHold; when the
+// kind reopened meanwhile it is dropped (the reopen is flapping). An
+// alert closed because its server is no longer judged says why instead.
 func (n *Notifier) notifyRecovered(ctx context.Context, cfg Config, a store.Alert, snoozed bool) {
-	if a.NotifyCount == 0 || !cfg.enabled(a.Kind) {
+	key := flapKey{a.ServerID, a.Kind}
+	flapAt, flapped := n.flapSent[key]
+	if !cfg.enabled(a.Kind) || (a.NotifyCount == 0 && !flapped) {
 		// Never delivered (still pending, failed, or a switched-off kind):
 		// there is nothing to recover from.
 		n.setState(a, store.TelegramRecovered)
@@ -295,15 +397,44 @@ func (n *Notifier) notifyRecovered(ctx context.Context, cfg Config, a store.Aler
 	if snoozed {
 		return
 	}
-	n.deliver(ctx, cfg, a, FormatRecovered(a, n.serverName(a.ServerID), *a.ClosedAt), store.TelegramRecovered)
+	name := n.serverName(a.ServerID)
+	if a.CloseReason != "" {
+		if a.NotifyCount == 0 {
+			n.setState(a, store.TelegramRecovered)
+		} else {
+			n.deliver(ctx, cfg, a, FormatClosed(a, name), store.TelegramRecovered)
+		}
+		delete(n.flapSent, key)
+		return
+	}
+	if held := a.ClosedAt.Add(recoveryHold); n.now().Before(held) {
+		n.holdUntil(held)
+		return
+	}
+	later, err := n.st.LaterAlertExists(a.Kind, a.ServerID, a.ID, a.ClosedAt.Add(recoveryHold))
+	if err != nil {
+		n.log.Warn("notify: later alert", "alert_id", a.ID, "err", err)
+		return
+	}
+	if later {
+		n.setState(a, store.TelegramRecovered) // reopened: flapping, not recovered
+		return
+	}
+	if a.NotifyCount == 0 {
+		// The last of a flapping series, held back: the flapping is over.
+		a.OpenedAt = flapAt
+	}
+	if n.deliver(ctx, cfg, a, FormatRecovered(a, name, *a.ClosedAt), store.TelegramRecovered) {
+		delete(n.flapSent, key)
+	}
 }
 
 // deliver sends text and records the attempt: okState on success, failed
-// with the reason otherwise.
-func (n *Notifier) deliver(ctx context.Context, cfg Config, a store.Alert, text, okState string) {
+// with the reason otherwise. It reports whether the message went out.
+func (n *Notifier) deliver(ctx context.Context, cfg Config, a store.Alert, text, okState string) bool {
 	err := n.sender.Send(ctx, cfg.Token, cfg.ChatID, text)
 	if err != nil && ctx.Err() != nil {
-		return // shutting down: not a failure of Telegram's; the next start retries
+		return false // shutting down: not a failure of Telegram's; the next start retries
 	}
 	state, reason := okState, ""
 	if err != nil {
@@ -315,6 +446,7 @@ func (n *Notifier) deliver(ctx context.Context, cfg Config, a store.Alert, text,
 	if err := n.st.SetAlertNotified(a.ID, n.now(), state, reason); err != nil {
 		n.log.Warn("notify: record telegram state", "alert_id", a.ID, "err", err)
 	}
+	return err == nil
 }
 
 func (n *Notifier) setState(a store.Alert, state string) {

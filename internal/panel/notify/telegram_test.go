@@ -102,8 +102,9 @@ func TestSendErrorHidesToken(t *testing.T) {
 	// The API refuses: the error has the status and the API's reason.
 	api.fail(http.StatusBadRequest, "Bad Request: chat not found")
 	err := tg.Send(context.Background(), testToken, "-1", "x")
-	if err == nil || !strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "chat not found") {
-		t.Fatalf("API error = %v", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "Telegram menolak: ") || !strings.Contains(err.Error(), "400") ||
+		!strings.Contains(err.Error(), "chat not found") {
+		t.Fatalf("API error = %v; want it in Indonesian with the status and the reason", err)
 	}
 	if strings.Contains(err.Error(), testToken) || strings.Contains(err.Error(), "AAHsecret") {
 		t.Fatalf("API error leaks the token: %v", err)
@@ -115,8 +116,9 @@ func TestSendErrorHidesToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("Send to a closed server succeeded")
 	}
-	if strings.Contains(err.Error(), "AAHsecret") || !strings.Contains(err.Error(), "/bot***/sendMessage") {
-		t.Fatalf("transport error = %v; want the URL with the token as ***", err)
+	if strings.Contains(err.Error(), "AAHsecret") || !strings.Contains(err.Error(), "/bot***/sendMessage") ||
+		!strings.HasPrefix(err.Error(), "Telegram tidak terjangkau: ") {
+		t.Fatalf("transport error = %v; want it in Indonesian, with the URL and the token as ***", err)
 	}
 
 	// A malformed token never reaches a URL (it could carry a path or query).

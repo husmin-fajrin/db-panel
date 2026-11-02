@@ -45,6 +45,14 @@ func TestAlertsPageShowsOpenWithTelegramState(t *testing.T) {
 	if err := e.st.SetAlertTelegramState(closed, store.TelegramRecovered, ""); err != nil {
 		t.Fatal(err)
 	}
+	// Closed because the replica is being resynced: no recovery.
+	reason := e.openAlert(t, monitor.KindReplicaUnlocked, replica.ID, 48*time.Hour, "Kunci replika terlepas.")
+	if err := e.st.CloseAlertWithReason(reason, time.Now().Add(-47*time.Hour), "Resync ulang dimulai"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetAlertTelegramState(reason, store.TelegramRecovered, ""); err != nil {
+		t.Fatal(err)
+	}
 	// Older than 90 days: not shown.
 	old := e.openAlert(t, monitor.KindJobFailed, replica.ID, 100*24*time.Hour, "Pekerjaan lama gagal.")
 	if err := e.st.CloseAlert(old, time.Now().Add(-99*24*time.Hour)); err != nil {
@@ -73,7 +81,8 @@ func TestAlertsPageShowsOpenWithTelegramState(t *testing.T) {
 	if strings.Contains(active, "Agent offline") {
 		t.Errorf("a closed alert is listed as active:\n%s", active)
 	}
-	for _, s := range []string{"Agent offline", "Agent tidak terhubung.", "Pulih terkirim", "2 jam 0 menit"} {
+	for _, s := range []string{"Agent offline", "Agent tidak terhubung.", "Pulih terkirim", "2 jam 0 menit",
+		"Ditutup: Resync ulang dimulai"} {
 		if !strings.Contains(history, s) {
 			t.Errorf("history does not show %q:\n%s", s, history)
 		}

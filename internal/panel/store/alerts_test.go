@@ -176,3 +176,49 @@ func TestListAlertsToNotifyAndSetTelegramState(t *testing.T) {
 		t.Fatalf("SetAlertTelegramState missing: %v", err)
 	}
 }
+
+// TestAlertCloseReasonAndNeighbours: a close reason is kept; the previous
+// alert's close time, a later alert and the count opened since a time are
+// read per kind and server.
+func TestAlertCloseReasonAndNeighbours(t *testing.T) {
+	s := openTemp(t)
+	a := mustServer(t, s, "a")
+	b := mustServer(t, s, "b")
+	t0 := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+
+	id1, _ := s.OpenAlert(Alert{Kind: "down", ServerID: a.ID, OpenedAt: t0})
+	if prev, err := s.PreviousAlertClosedAt("down", a.ID, id1); err != nil || prev != nil {
+		t.Fatalf("previous of the first = %v, %v", prev, err)
+	}
+	if err := s.CloseAlertWithReason(id1, t0.Add(time.Minute), "Resync ulang dimulai"); err != nil {
+		t.Fatal(err)
+	}
+	s.OpenAlert(Alert{Kind: "down", ServerID: b.ID, OpenedAt: t0.Add(2 * time.Minute)})
+	id2, _ := s.OpenAlert(Alert{Kind: "down", ServerID: a.ID, OpenedAt: t0.Add(3 * time.Minute)})
+	prev, err := s.PreviousAlertClosedAt("down", a.ID, id2)
+	if err != nil || prev == nil || !prev.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("previous closed at = %v, %v", prev, err)
+	}
+	if later, err := s.LaterAlertExists("down", a.ID, id1, t0.Add(time.Hour)); err != nil || !later {
+		t.Fatalf("later after the first = %v, %v", later, err)
+	}
+	if later, _ := s.LaterAlertExists("down", a.ID, id1, t0.Add(3*time.Minute)); later {
+		t.Fatal("later after the first, opened before 10:03")
+	}
+	if later, _ := s.LaterAlertExists("down", a.ID, id2, t0.Add(time.Hour)); later {
+		t.Fatal("later after the newest")
+	}
+	if n, err := s.CountAlertsOpenedSince("down", a.ID, t0.Add(time.Minute)); err != nil || n != 1 {
+		t.Fatalf("count since = %d, %v", n, err)
+	}
+	all, _ := s.ListAlerts(t0, 10)
+	for _, x := range all {
+		want := ""
+		if x.ID == id1 {
+			want = "Resync ulang dimulai"
+		}
+		if x.CloseReason != want {
+			t.Errorf("alert %d close reason = %q, want %q", x.ID, x.CloseReason, want)
+		}
+	}
+}

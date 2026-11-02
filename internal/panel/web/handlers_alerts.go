@@ -63,6 +63,10 @@ func (r alertRow) TelegramLabel() string {
 		// The notifier stores the reason without the bot token.
 		return "Gagal: " + r.TelegramError
 	case store.TelegramRecovered:
+		if r.CloseReason != "" {
+			// Closed without recovering (a resync started, Lepas).
+			return "Ditutup: " + r.CloseReason
+		}
 		return "Pulih terkirim"
 	}
 	return r.TelegramState

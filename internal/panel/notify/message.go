@@ -20,6 +20,7 @@ const (
 	iconCrit      = "⛔"
 	iconWarn      = "⚠️"
 	iconRecovered = "✅"
+	iconClosed    = "ℹ️"
 	sep           = " · "
 )
 
@@ -173,6 +174,25 @@ func clock(t, now time.Time) string {
 func FormatRecovered(a store.Alert, serverName string, closedAt time.Time) string {
 	return fmt.Sprintf("%s %s pulih: %s selesai setelah %s", iconRecovered, serverName, kindName(a.Kind),
 		duration(closedAt.Sub(a.OpenedAt)))
+}
+
+// FormatFlapping replaces the open messages of an alert kind that keeps
+// reopening: "⚠️ <server>: <kind in words> berkedip N kali dalam 5 menit
+// terakhir", then the link when baseURL is set.
+func FormatFlapping(a store.Alert, serverName string, count int, baseURL string) string {
+	text := fmt.Sprintf("%s %s: %s berkedip %d kali dalam %s terakhir", iconWarn, serverName, kindName(a.Kind), count,
+		duration(flapWindow))
+	if link := alertLink(a, baseURL); link != "" {
+		text += "\n" + link
+	}
+	return text
+}
+
+// FormatClosed is the message of an alert closed because its server is no
+// longer judged, which is no recovery: "ℹ️ <server>: peringatan <kind in
+// words> ditutup: <reason>".
+func FormatClosed(a store.Alert, serverName string) string {
+	return fmt.Sprintf("%s %s: peringatan %s ditutup: %s", iconClosed, serverName, kindName(a.Kind), a.CloseReason)
 }
 
 // duration words d in its two largest units: "45 detik", "12 menit",

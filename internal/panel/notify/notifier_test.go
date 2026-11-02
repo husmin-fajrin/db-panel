@@ -238,7 +238,7 @@ func TestSendFailureIsVisibleAndRetried(t *testing.T) {
 	r.api.fail(http.StatusInternalServerError, "Internal Server Error")
 	r.pass()
 	a := r.alert(id)
-	if a.TelegramState != store.TelegramFailed || !strings.Contains(a.TelegramError, "500") ||
+	if a.TelegramState != store.TelegramFailed || !strings.HasPrefix(a.TelegramError, "Telegram menolak: HTTP 500") ||
 		!strings.Contains(a.TelegramError, "Internal Server Error") || a.NotifyCount != 0 {
 		t.Fatalf("alert after a failed send = %+v", a)
 	}
@@ -297,6 +297,15 @@ func TestRecoveredMessageOnce(t *testing.T) {
 	r.clk.Add(2*time.Hour + 5*time.Minute)
 	r.close(id)
 	r.pass()
+	// The recovery waits until the alert stayed closed a minute.
+	if got := r.texts(); len(got) != 1 {
+		t.Fatalf("messages right after the close = %q, want the recovery held", got)
+	}
+	if d, ok := r.n.untilDue(); !ok || d != time.Minute {
+		t.Fatalf("next pass due in %v, %v; want 1 min", d, ok)
+	}
+	r.clk.Add(time.Minute)
+	r.pass()
 	r.pass()
 	got := r.texts()
 	if len(got) != 2 || got[1] != "✅ RS-2 pulih: replika berhenti selesai setelah 2 jam 5 menit" {
@@ -311,6 +320,7 @@ func TestRecoveredMessageOnce(t *testing.T) {
 	id2 := r.open(monitor.KindDiskWarn, srv, "Disk data terpakai 86%.")
 	r.pass()
 	r.close(id2)
+	r.clk.Add(time.Minute)
 	r.api.fail(http.StatusBadGateway, "Bad Gateway")
 	r.pass()
 	if a := r.alert(id2); a.TelegramState != store.TelegramFailed || !strings.Contains(a.TelegramError, "502") {
@@ -510,6 +520,13 @@ func TestSendTestRateLimited(t *testing.T) {
 	if err := r.n.SendTest(context.Background()); err != nil || len(r.texts()) != 2 {
 		t.Fatalf("SendTest after 10 s = %v, messages %q", err, r.texts())
 	}
+	// A failed test says in Indonesian what went wrong, without the token.
+	r.clk.Add(10 * time.Second)
+	r.api.srv.Close()
+	err := r.n.SendTest(context.Background())
+	if err == nil || !strings.HasPrefix(err.Error(), "Telegram tidak terjangkau: ") || strings.Contains(err.Error(), "AAHsecret") {
+		t.Fatalf("SendTest with Telegram unreachable = %v", err)
+	}
 }
 
 func TestSaveTokenRefusesMalformedAndClears(t *testing.T) {
@@ -593,5 +610,91 @@ func TestSendWeekly(t *testing.T) {
 	err := r.n.SendWeekly(context.Background(), "x")
 	if err == nil || strings.Contains(err.Error(), testToken) || strings.Contains(r.logs.String(), testToken) {
 		t.Fatalf("SendWeekly to a dead API = %v; want an error without the token", err)
+	}
+}
+
+// TestFlappingSendsAtMostTwoMessages (SEC-46): an alert that opens and
+// closes 100 times in 2 minutes, with a pass after every change, sends its
+// first open message and one "berkedip" message; once it stayed closed a
+// minute, one recovery.
+func TestFlappingSendsAtMostTwoMessages(t *testing.T) {
+	r := newRig(t)
+	r.configure()
+	srv := r.server("RS-2")
+	for range 100 {
+		id := r.open(monitor.KindReplicaStopped, srv, "Replikasi berhenti karena error 1062.")
+		r.pass()
+		r.clk.Add(600 * time.Millisecond)
+		r.close(id)
+		r.pass()
+		r.clk.Add(600 * time.Millisecond)
+	}
+	got := r.texts()
+	if len(got) != 2 || !strings.HasPrefix(got[0], "⛔ Replika RS-2 berhenti") ||
+		!strings.HasPrefix(got[1], "⚠️ RS-2: replika berhenti berkedip ") || !strings.Contains(got[1], " kali dalam 5 menit terakhir") ||
+		!strings.Contains(got[1], "http://panel.local/replicas/") {
+		t.Fatalf("messages while flapping = %q, want the first alert and one flapping notice", got)
+	}
+	r.clk.Add(time.Minute)
+	r.pass()
+	got = r.texts()
+	if len(got) != 3 || !strings.HasPrefix(got[2], "✅ RS-2 pulih: replika berhenti") {
+		t.Fatalf("messages once it stayed closed = %q, want one recovery", got)
+	}
+	r.pass()
+	if len(r.texts()) != 3 {
+		t.Fatalf("sent again: %q", r.texts())
+	}
+	all, _ := r.st.ListAlertsToNotify()
+	if len(all) != 0 {
+		t.Fatalf("alerts still waiting for the notifier: %d", len(all))
+	}
+
+	// Still flapping after 5 minutes: one more notice, counting the last 5 minutes.
+	r.clk.Add(10 * time.Minute)
+	id := r.open(monitor.KindReplicaStopped, srv, "Replikasi berhenti karena error 1062.")
+	r.pass()
+	if got := r.texts(); len(got) != 4 || !strings.HasPrefix(got[3], "⛔ Replika RS-2 berhenti") {
+		t.Fatalf("messages after a quiet 10 min = %q, want an ordinary alert", got)
+	}
+	r.clk.Add(time.Second)
+	r.close(id)
+	r.pass()
+	r.clk.Add(time.Second)
+	id = r.open(monitor.KindReplicaStopped, srv, "Replikasi berhenti karena error 1062.")
+	r.pass()
+	if got := r.texts(); len(got) != 5 || got[4] != "⚠️ RS-2: replika berhenti berkedip 2 kali dalam 5 menit terakhir\nhttp://panel.local/replicas/"+itoa(srv) {
+		t.Fatalf("messages after a reopen within 5 min = %q, want a flapping notice", got)
+	}
+	// The alert before it reopened within a minute: no recovery for it.
+	r.clk.Add(time.Minute)
+	r.pass()
+	if got := r.texts(); len(got) != 5 {
+		t.Fatalf("messages a minute later = %q, want no recovery of the reopened alert", got)
+	}
+	if a := r.alert(id); a.ClosedAt != nil || a.TelegramState != store.TelegramSent {
+		t.Fatalf("the reopened alert = %+v", a)
+	}
+}
+
+// TestClosedWithReasonIsNoRecovery: an alert closed because its replica is
+// being resynced (or left the panel) says so at once, without "pulih".
+func TestClosedWithReasonIsNoRecovery(t *testing.T) {
+	r := newRig(t)
+	r.configure()
+	srv := r.server("RS-2")
+	id := r.open(monitor.KindReplicaStopped, srv, "Replikasi berhenti karena error 1062.")
+	r.pass()
+	r.clk.Add(time.Minute)
+	if err := r.st.CloseAlertWithReason(id, r.clk.Now(), "Resync ulang dimulai"); err != nil {
+		t.Fatal(err)
+	}
+	r.pass()
+	got := r.texts()
+	if len(got) != 2 || got[1] != "ℹ️ RS-2: peringatan replika berhenti ditutup: Resync ulang dimulai" {
+		t.Fatalf("messages = %q, want the alert then the closing note", got)
+	}
+	if a := r.alert(id); a.TelegramState != store.TelegramRecovered {
+		t.Fatalf("alert after the closing note = %+v", a)
 	}
 }

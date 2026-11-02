@@ -47,9 +47,10 @@ func defaultClient() *http.Client {
 }
 
 // Send posts text to chatID as plain text, without link previews. Its
-// error never holds the token: a failed request names the URL with the
-// token replaced by "***", and a refusal gives the HTTP status and the
-// API's reason.
+// error, shown to the user as it is, never holds the token: an
+// unreachable API reads "Telegram tidak terjangkau: " and the request's
+// error (the URL with the token as "***"), a refusal "Telegram menolak: "
+// with the HTTP status and the API's reason.
 func (t *Telegram) Send(ctx context.Context, token, chatID, text string) error {
 	if !tokenRe.MatchString(token) {
 		return errBadToken
@@ -78,7 +79,7 @@ func (t *Telegram) Send(ctx context.Context, token, chatID, text string) error {
 		if errors.As(err, &ue) {
 			err = fmt.Errorf("%s %q: %v", ue.Op, base+"/bot***/sendMessage", ue.Err)
 		}
-		return errors.New(scrub(err.Error(), token))
+		return errors.New("Telegram tidak terjangkau: " + scrub(err.Error(), token))
 	}
 	defer resp.Body.Close()
 	var reply struct {
@@ -88,7 +89,7 @@ func (t *Telegram) Send(ctx context.Context, token, chatID, text string) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxReplySize))
 	jsonErr := json.Unmarshal(raw, &reply)
 	if resp.StatusCode/100 != 2 || jsonErr != nil || !reply.OK {
-		msg := fmt.Sprintf("Telegram menjawab HTTP %d", resp.StatusCode)
+		msg := fmt.Sprintf("Telegram menolak: HTTP %d", resp.StatusCode)
 		if d := strings.TrimSpace(reply.Description); d != "" {
 			if len(d) > maxDescription {
 				d = strings.ToValidUTF8(d[:maxDescription], "")

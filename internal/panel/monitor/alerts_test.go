@@ -561,6 +561,31 @@ func TestStatusAlertsOpenAndClose(t *testing.T) {
 		t.Fatal("replica_stopped open while the replica resyncs")
 	}
 	r.openAlert(rID, KindJobFailed)
+	// It closed without recovering, and says why (no "pulih" for it);
+	// a recovery has no reason.
+	stops := r.alerts(rID, KindReplicaStopped)
+	if last := stops[len(stops)-1]; last.CloseReason != "Resync ulang dimulai" {
+		t.Fatalf("close reason of replica_stopped at resync = %q", last.CloseReason)
+	}
+	if un := r.alerts(rID, KindReplicaUnlocked); len(un) != 1 || un[0].CloseReason != "" {
+		t.Fatalf("replica_unlocked after relocking = %+v, want closed without a reason", un)
+	}
+
+	// A replica that leaves the panel (Lepas) closes its alerts the same way.
+	if err := r.st.SetReplicaState(rID, store.ReplicaReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	r.m.ReplicaChanged(rID)
+	r.settle()
+	r.openAlert(rID, KindReplicaStopped)
+	if err := r.st.RemoveReplica(rID); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	stops = r.alerts(rID, KindReplicaStopped)
+	if last := stops[len(stops)-1]; last.ClosedAt == nil || last.CloseReason != "replika dilepas dari panel" {
+		t.Fatalf("replica_stopped after Lepas = %+v", last)
+	}
 }
 
 func TestJobFailedAlert(t *testing.T) {
