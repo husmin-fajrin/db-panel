@@ -20,6 +20,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
+	"github.com/husmin-fajrin/db-panel/internal/agent/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
 	"github.com/husmin-fajrin/db-panel/internal/version"
@@ -103,7 +104,9 @@ func mainRun(args []string, stderr io.Writer) int {
 	a := New(cfg, reg, logger)
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
-	RegisterMySQL(reg, cfg, *dir, sys, runner, logger)
+	drv := RegisterMySQL(reg, cfg, *dir, sys, runner, logger)
+	mon := monitor.New(drv, a, logger, monitor.Options{})
+	mon.Register(reg)
 	reg.SetLogger(logger)
 	if err := ApplyPolicy(reg, *dir, logger); err != nil {
 		// A policy the operator wrote but the agent cannot trust: refuse to
@@ -115,7 +118,15 @@ func mainRun(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger.Info("agent starting", "version", version.Version, "panel", cfg.PanelAddr, "server_id", cfg.ServerID)
-	if err := a.Run(ctx); err != nil {
+	monDone := make(chan struct{})
+	go func() {
+		defer close(monDone)
+		mon.Run(ctx)
+	}()
+	err = a.Run(ctx)
+	stop()
+	<-monDone
+	if err != nil {
 		fmt.Fprintf(stderr, "agent berhenti: %v\n", err)
 		return 1
 	}
@@ -127,8 +138,9 @@ func mainRun(args []string, stderr io.Writer) int {
 // agent too, so both offer the same commands. Without a MySQL installation the
 // driver has no Host and its commands report that MySQL is missing until
 // mysql.install installs it. The admin account the user connects with is
-// kept sealed in dir/mysql.cred, whether or not MySQL is installed yet.
-func RegisterMySQL(reg *commands.Registry, cfg config.Config, dir string, sys probe.System, runner *jobs.Runner, logger *slog.Logger) {
+// kept sealed in dir/mysql.cred, whether or not MySQL is installed yet. It
+// returns the driver, which the health monitor reads its snapshots from.
+func RegisterMySQL(reg *commands.Registry, cfg config.Config, dir string, sys probe.System, runner *jobs.Runner, logger *slog.Logger) *mysql.Driver {
 	d := &mysql.Driver{Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg}
 	// agent.key is the TLS private key, so the sealing key is a separate file.
 	box, err := secrets.LoadOrCreate(filepath.Join(dir, secretsKeyFile))
@@ -147,6 +159,7 @@ func RegisterMySQL(reg *commands.Registry, cfg config.Config, dir string, sys pr
 		d.Host = host
 	}
 	d.Register(reg)
+	return d
 }
 
 func mainPair(args []string, stdout, stderr io.Writer) int {

@@ -36,3 +36,31 @@ type HealthSnapshot struct {
 
 	AgentVersion string `json:"agent_version"`
 }
+
+// EventHealth is the event an agent's monitor sends with a HealthEvent
+// payload. The monitor.configure and monitor.snapshot commands answer with
+// a HealthEvent too.
+const EventHealth = "monitor.snapshot"
+
+// HealthEvent is one health report of an agent's monitor.
+type HealthEvent struct {
+	Seq uint64 `json:"seq"` // rises by one per report within one agent process
+	// TakenAgoMS is how long before sending the snapshot was taken, by the
+	// agent's clock; the panel places the report at its own now minus this.
+	TakenAgoMS int64 `json:"taken_ago_ms"`
+	// Backlog marks a report kept while the panel was unreachable and sent
+	// once it was back.
+	Backlog  bool           `json:"backlog"`
+	Snapshot HealthSnapshot `json:"snapshot"`
+}
+
+// MonitorConfigureParams are the parameters of monitor.configure. Each
+// interval is 10..3600 seconds; LagThresholdSec 0 keeps the current one.
+type MonitorConfigureParams struct {
+	CheckEverySec   int `json:"check_every_sec"`
+	SummaryEverySec int `json:"summary_every_sec"`
+	LagThresholdSec int `json:"lag_threshold_sec"`
+	// RoleHint is the role the panel records for the server: "master",
+	// "replica" or "" when it has none.
+	RoleHint string `json:"role_hint,omitempty"`
+}

@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
+	"github.com/husmin-fajrin/db-panel/internal/agent/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -20,8 +22,9 @@ import (
 // attachLocal attaches the agent embedded in the panel process as the
 // connection of the panel host's own server, and returns the function that
 // detaches it. The embedded agent offers the same commands as a remote one
-// (probe, mysql.*, job.*); its MySQL credential and sealing key live in the
-// panel's config directory.
+// (probe, mysql.*, job.*, monitor.*) and runs the same health monitor until
+// detached; its MySQL credential and sealing key live in the panel's config
+// directory.
 func (p *Panel) attachLocal() (detach func()) {
 	reg := commands.NewRegistry()
 	sys := probe.RealSystem()
@@ -30,7 +33,9 @@ func (p *Panel) attachLocal() (detach func()) {
 	emit := func(ev proto.Event) { p.Hub.OnEvent(id, ev) }
 	runner := jobs.NewRunner(localEmitter(emit), p.log)
 	runner.Register(reg)
-	agent.RegisterMySQL(reg, config.Config{ServerID: id}, p.opts.ConfigDir, sys, runner, p.log)
+	drv := agent.RegisterMySQL(reg, config.Config{ServerID: id}, p.opts.ConfigDir, sys, runner, p.log)
+	mon := monitor.New(drv, localEmitter(emit), p.log, monitor.Options{})
+	mon.Register(reg)
 	reg.SetLogger(p.log.With("agent", "local"))
 	if err := agent.ApplyPolicy(reg, p.opts.ConfigDir, p.log); err != nil {
 		// The panel keeps running (its UI is needed to fix things), but its
@@ -40,11 +45,21 @@ func (p *Panel) attachLocal() (detach func()) {
 	}
 	conn := hub.NewLocalConn(reg, emit)
 	p.Hub.Attach(id, conn)
-	return func() { p.Hub.Detach(id, conn) }
+	ctx, cancel := context.WithCancel(context.Background())
+	monDone := make(chan struct{})
+	go func() {
+		defer close(monDone)
+		mon.Run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-monDone
+		p.Hub.Detach(id, conn)
+	}
 }
 
-// localEmitter delivers the embedded agent's job events to the hub; the
-// embedded agent is never offline.
+// localEmitter delivers the embedded agent's job and health events to the
+// hub; the embedded agent is never offline.
 type localEmitter func(ev proto.Event)
 
 func (e localEmitter) Emit(ev proto.Event) error {
