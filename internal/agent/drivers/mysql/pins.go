@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,9 @@ const (
 	// dumpUserPrefix starts the per-job dump accounts (mysql.createDumpUser),
 	// the only accounts a pinned master lets the panel drop.
 	dumpUserPrefix = managedUserPrefix + "dump_"
+	// replUserName is the replication account, the only one
+	// mysql.createReplUser makes on a pinned master.
+	replUserName = managedUserPrefix + "repl"
 	// pinFileMode is the mode the agent writes pins with.
 	pinFileMode = 0o644
 	// maxPinSize bounds what is read from a pin file.
@@ -48,11 +52,20 @@ var (
 	ErrSourcePinned = errors.New("sumber replikasi server ini dipin")
 )
 
+// dumpAccountRe is the name of a per-job dump account the panel makes
+// (dbpanel_dump_ and 8 hex digits): the only one a pinned master creates
+// through mysql.createDumpUser.
+var dumpAccountRe = regexp.MustCompile(`^dbpanel_dump_[0-9a-f]{8}$`)
+
 // roleRefuses is the refusal table of spec 5.5: per pinned role, the
 // commands refused whatever their parameters, plus the parameter-dependent
 // rules in refusedByRole (configure's role, setReadOnly's direction, and on
-// a master every dropUser but a per-job dump account's). An unassigned server refuses nothing extra
-// (refuseOnSource still guards it).
+// a master every dropUser but a per-job dump account's, every
+// createDumpUser but a per-job dump account from one IP address, and every
+// createReplUser but the replication account's). On a master, an existing
+// account is never changed (createAccount) and mysql.restart needs a
+// configure that asked for it (Pins.AllowRestart). An unassigned server
+// refuses nothing extra (refuseOnSource still guards it).
 var roleRefuses = map[string]map[string]bool{
 	roleMaster: {
 		"mysql.dropDatabases":        true,
@@ -121,6 +134,9 @@ type Pins struct {
 	// settled is set once this process has seen or written a role file:
 	// from then on Bootstrap never writes one.
 	settled bool
+	// restartGranted is set by a mysql.configure that needed a restart and
+	// used up by the mysql.restart it allows on a pinned master.
+	restartGranted bool
 }
 
 // fileStamp is what a stat says about a pin file; a change means re-read.
@@ -524,8 +540,65 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 		// The replication account (and any other) stays: dropping it would
 		// cut every replica off.
 		return role == roleMaster && !strings.HasPrefix(u.User, dumpUserPrefix), nil
+	case "mysql.createDumpUser":
+		u, ok := params.(proto.DumpUserParams)
+		if !ok {
+			return false, fmt.Errorf("pins: %s with %T", cmd, params)
+		}
+		// A dump account holds RELOAD: on a master only a per-job one, from
+		// one replica's address (no pattern such as % or _), is made.
+		return role == roleMaster && !(dumpAccountRe.MatchString(u.User) && literalIP(u.FromHost)), nil
+	case "mysql.createReplUser":
+		u, ok := params.(proto.ReplUserParams)
+		if !ok {
+			return false, fmt.Errorf("pins: %s with %T", cmd, params)
+		}
+		return role == roleMaster && u.User != replUserName, nil
 	}
 	return false, nil
+}
+
+// literalIP reports whether host is one IPv4 or IPv6 address, not a name
+// or a pattern.
+func literalIP(host string) bool {
+	return !strings.ContainsAny(host, "%_") && net.ParseIP(host) != nil
+}
+
+// GrantRestart records what the last mysql.configure in this process
+// said: when it needs a restart, one mysql.restart is allowed on a pinned
+// master (AllowRestart).
+func (p *Pins) GrantRestart(needed bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.restartGranted = needed
+}
+
+// AllowRestart checks mysql.restart against the pins: a pinned master is
+// restarted only once after a mysql.configure in this process that needed
+// a restart, never at the panel's will (spec: a master is never restarted
+// without a human's click, which the panel's job asks for). It uses up the
+// grant.
+func (p *Pins) AllowRestart() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.reload(); err != nil {
+		return &commands.ParamError{Msg: fmt.Sprintf("pin peran/sumber agent tidak bisa dipakai, perintah mysql.restart ditolak: %v", err)}
+	}
+	if p.role != roleMaster {
+		return nil
+	}
+	if !p.restartGranted {
+		return &pinError{kind: ErrRolePinned, pe: &commands.ParamError{Msg: "server ini dipin sebagai master; perintah mysql.restart " +
+			"ditolak karena tidak ada pengaturan yang menunggu restart. Bila MySQL memang perlu dimulai ulang, lakukan langsung di server ini."}}
+	}
+	p.restartGranted = false
+	return nil
+}
+
+// RoleIs reports whether role is pinned; false while the files cannot be
+// read.
+func (p *Pins) RoleIs(role string) bool {
+	return p != nil && p.Role() == role
 }
 
 // forget makes the next check read the files again (after a write).

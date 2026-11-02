@@ -2,6 +2,7 @@ package mysql_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	drv "github.com/go-sql-driver/mysql"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
@@ -155,6 +158,120 @@ func TestMasterRefusesDestructiveCommands(t *testing.T) {
 	if got := pinFile(t, dir, mysql.RoleFile); got != "master" {
 		t.Errorf("role pin = %q, want master", got)
 	}
+}
+
+// TestMasterRefusesAccountTakeover (SEC-42): a pinned master makes only a
+// per-job dump account (dbpanel_dump_ and 8 hex digits) from one IP
+// address and only the replication account, and is not restarted without
+// a configure that asked for it; these refusals need no MySQL.
+func TestMasterRefusesAccountTakeover(t *testing.T) {
+	r := newPinRig(t, nil, pinDir(t, "master", ""))
+	for _, c := range []pinCase{
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_repl", FromHost: "10.0.0.2", Password: "rahasia"}},
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "%", Password: "rahasia"}},
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "10.0.0.%", Password: "rahasia"}},
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "replika.lan", Password: "rahasia"}},
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_x", FromHost: "10.0.0.2", Password: "rahasia"}},
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123ABCD", FromHost: "10.0.0.2", Password: "rahasia"}},
+		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_x", Password: "rahasia"}},
+	} {
+		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params), "server ini dipin sebagai master", "perintah "+c.cmd+" ditolak")
+	}
+	wantRefused(t, "restart without a pending configure", r.dispatch("mysql.restart", nil),
+		"server ini dipin sebagai master", "perintah mysql.restart ditolak", "tidak ada pengaturan yang menunggu restart")
+	for _, c := range []pinCase{
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "10.0.0.2", Password: "rahasia"}},
+		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "fd00::2", Password: "rahasia"}},
+		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", Password: "rahasia"}},
+	} {
+		wantPastPins(t, c.cmd, r.dispatch(c.cmd, c.params))
+	}
+	// Elsewhere the restart is not the pins' business.
+	for _, role := range []string{"replica", ""} {
+		wantPastPins(t, "restart on "+role, newPinRig(t, nil, pinDir(t, role, "")).dispatch("mysql.restart", nil))
+	}
+}
+
+// TestPinnedMasterKeepsAccountsAndRestartsOnce (SEC-42, SEC-51a): on a
+// real master pinned by its first configure, a fresh replication account
+// and a per-job dump account are made, but an existing one is never
+// altered; the restart that configure asked for is allowed once; a later
+// configure keeps the server_id.
+func TestPinnedMasterKeepsAccountsAndRestartsOnce(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	dir := pinDir(t, "", "")
+	r := newPinRig(t, inst.Host(), dir)
+	res := decode[proto.ConfigureResult](t, r.dispatch("mysql.configure", proto.ConfigureParams{Role: "master", GTID: true}))
+	if !res.NeedsRestart || pinFile(t, dir, mysql.RoleFile) != "master" {
+		t.Fatalf("configure{master}: NeedsRestart=%v, role pin %q", res.NeedsRestart, pinFile(t, dir, mysql.RoleFile))
+	}
+	db := rootDB(t, inst)
+	grants := func(user, host string) string {
+		t.Helper()
+		var g string
+		if err := db.QueryRow("SHOW GRANTS FOR " + sqlLiteral(user) + "@" + sqlLiteral(host)).Scan(&g); err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+
+	repl := proto.ReplUserParams{User: "dbpanel_repl", FromHost: "%", Password: "rahasia-satu"}
+	if resp := r.dispatch("mysql.createReplUser", repl); !resp.OK {
+		t.Fatalf("fresh createReplUser on a pinned master = %+v", resp.Error)
+	}
+	before := grants("dbpanel_repl", "%")
+	repl.Password = "rahasia-dua"
+	wantRefused(t, "createReplUser for an existing account", r.dispatch("mysql.createReplUser", repl),
+		"sudah ada di master yang dipin")
+	wantRefused(t, "createDumpUser{dbpanel_repl}", r.dispatch("mysql.createDumpUser",
+		proto.DumpUserParams{User: "dbpanel_repl", FromHost: "%", Password: "x"}), "perintah mysql.createDumpUser ditolak")
+	if after := grants("dbpanel_repl", "%"); after != before || !strings.Contains(after, "REPLICATION SLAVE") {
+		t.Errorf("replication account grants changed: %q -> %q", before, after)
+	}
+	// The stored password is still the first one.
+	if err := sqlLogin(t, inst, "dbpanel_repl", "rahasia-satu"); err != nil {
+		t.Errorf("replication account's password changed: %v", err)
+	}
+
+	dump := proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "127.0.0.1", Password: "dump-satu"}
+	if resp := r.dispatch("mysql.createDumpUser", dump); !resp.OK {
+		t.Fatalf("per-job createDumpUser on a pinned master = %+v", resp.Error)
+	}
+	dump.Password = "dump-dua"
+	wantRefused(t, "createDumpUser for an existing account", r.dispatch("mysql.createDumpUser", dump),
+		"sudah ada di master yang dipin")
+	if err := sqlLogin(t, inst, "dbpanel_dump_0123abcd", "dump-satu"); err != nil {
+		t.Errorf("dump account's password changed: %v", err)
+	}
+	db.Close() // before its connections die in the restart below
+
+	decode[proto.RestartResult](t, r.dispatch("mysql.restart", nil))
+	wantRefused(t, "second restart", r.dispatch("mysql.restart", nil), "tidak ada pengaturan yang menunggu restart")
+
+	// Settings in effect now: no restart needed, so none is allowed; the
+	// server_id asked for is ignored.
+	res = decode[proto.ConfigureResult](t, r.dispatch("mysql.configure", proto.ConfigureParams{Role: "master", ServerID: 4242, GTID: true}))
+	if res.NeedsRestart || res.ServerID != inst.ServerID {
+		t.Errorf("configure after restart: NeedsRestart=%v ServerID=%d, want false and %d", res.NeedsRestart, res.ServerID, inst.ServerID)
+	}
+	if got := variable(t, rootDB(t, inst), "server_id"); got != strconv.Itoa(int(inst.ServerID)) {
+		t.Errorf("server_id = %s, want %d", got, inst.ServerID)
+	}
+	wantRefused(t, "restart after a configure that needs none", r.dispatch("mysql.restart", nil),
+		"tidak ada pengaturan yang menunggu restart")
+}
+
+// sqlLogin logs in to inst over TCP as user with password.
+func sqlLogin(t *testing.T, inst *testmysql.Instance, user, password string) error {
+	t.Helper()
+	cfg := drv.NewConfig()
+	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr = user, password, "tcp", "127.0.0.1:"+strconv.Itoa(inst.Port)
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.Ping()
 }
 
 // TestReplicaRefusesUnlockAndCreateReplUser: a replica refuses to be made

@@ -504,7 +504,9 @@ func (jr *jobRun) replicaPrepare(ctx context.Context, _ bool) (outcome, error) {
 		jr.save()
 	}
 	if res.NeedsRestart {
-		// The target serves no application yet, so it restarts unasked.
+		// It restarts unasked: a new replica serves no application yet,
+		// and a resynced one may serve reads but is being rebuilt (the
+		// resync modal says MySQL on the replica may restart).
 		jr.logf("info", "Memulai ulang MySQL di %s: %s.", jr.serverName(jr.target()), strings.Join(res.RestartReasons, "; "))
 		var rr proto.RestartResult
 		if err := jr.callWithin(ctx, restartTimeout, jr.target(), "mysql.restart", nil, &rr); err != nil {
@@ -606,6 +608,14 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 		jr.save()
 		jr.logf("warn", "Salinan selesai (%d byte), tetapi akun admin MySQL replika ikut terganti oleh akun-akun master.", res.Bytes)
 		return wait(jr.reconnectMessage()), nil
+	}
+	if jr.st.Method == "clone" {
+		// The agent lifts the lock for CLONE and the restart applies it
+		// again from the persisted settings; make sure (idempotent) before
+		// replication is connected.
+		if err := jr.call(ctx, jr.target(), "mysql.setReadOnly", proto.ReadOnlyParams{On: true}, nil); err != nil {
+			return outcome{}, err
+		}
 	}
 	if jr.st.Method == "clone" || len(jr.st.Databases) == 0 {
 		jr.logf("warn", "Replika sekarang membawa akun-akun MySQL dari master (ikut tersalin).")

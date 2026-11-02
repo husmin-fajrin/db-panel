@@ -95,7 +95,8 @@ type PreflightParams struct {
 	// which the user agreed to drop, are then neither leftovers nor foreign,
 	// CLONE may be chosen when every target database is on the list, and
 	// ReclaimBytes (the replica's current data size) counts as free space
-	// in the disk check. All three are ignored without Resync.
+	// in the disk check. Without Resync, WipeList and ReclaimBytes change
+	// no check (WipeList's names are still validated).
 	Resync       bool     `json:"resync"`
 	WipeList     []string `json:"wipe_list"`
 	ReclaimBytes uint64   `json:"reclaim_bytes"`

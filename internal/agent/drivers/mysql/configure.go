@@ -52,7 +52,9 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		res, err := Configure(ctx, h, p)
+		// A pinned master keeps its server_id (SEC-51a): the panel never
+		// asks for one, and another would only confuse the replicas.
+		res, err := configure(ctx, h, p, d.pins.RoleIs(roleMaster))
 		if err != nil {
 			return nil, err
 		}
@@ -61,6 +63,7 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 			if err := d.pins.claimRole(p.Role); err != nil {
 				return nil, fmt.Errorf("MySQL sudah dikonfigurasi sebagai %s, tetapi pin peran gagal ditulis: %w", p.Role, err)
 			}
+			d.pins.GrantRestart(res.NeedsRestart)
 		}
 		if d.Logger != nil {
 			d.Logger.Info("mysql configured", "role", p.Role, "server_id", res.ServerID, "config", res.ConfigPath,
@@ -70,6 +73,11 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 	})
 
 	reg.Register("mysql.restart", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if d.pins != nil {
+			if err := d.pins.AllowRestart(); err != nil {
+				return nil, err
+			}
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
@@ -113,6 +121,12 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 // block (validated by mysqld, rolled back otherwise), then makes what can
 // change online take effect now with SET PERSIST.
 func Configure(ctx context.Context, h Host, p proto.ConfigureParams) (proto.ConfigureResult, error) {
+	return configure(ctx, h, p, false)
+}
+
+// configure is Configure; keepServerID ignores a requested server_id other
+// than the current one (as if none was asked for).
+func configure(ctx context.Context, h Host, p proto.ConfigureParams, keepServerID bool) (proto.ConfigureResult, error) {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return proto.ConfigureResult{}, err
@@ -123,6 +137,9 @@ func Configure(ctx context.Context, h Host, p proto.ConfigureParams) (proto.Conf
 		return proto.ConfigureResult{}, err
 	}
 
+	if keepServerID && p.ServerID != 0 && p.ServerID != st.ServerID {
+		p.ServerID = 0
+	}
 	res := proto.ConfigureResult{
 		Applied:        []string{},
 		RestartReasons: restartReasons(p.Role, st),

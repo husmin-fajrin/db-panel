@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -206,6 +208,42 @@ func wantDumpAccountDropped(e *env, m, r *fakeAgent, id string) {
 	}
 	if j, _, _ := e.st.GetJob(id); strings.Contains(j.ParamsJSON, "dump_user") {
 		e.t.Fatalf("params still name the dropped account: %s", j.ParamsJSON)
+	}
+}
+
+// TestDumpAccountHostIsAnIP: a pinned master makes a dump account only for
+// one IP address (SEC-42), so a replica the panel knows by name (the panel
+// host's --public-host) gets the address that name resolves to.
+func TestDumpAccountHostIsAnIP(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	e.r.d.LocalServerID, e.r.d.PublicHost = r.id, "panel.rs.lan"
+	old := lookupIP
+	t.Cleanup(func() { lookupIP = old })
+	lookupIP = func(_ context.Context, _, host string) ([]net.IP, error) {
+		if host != "panel.rs.lan" {
+			return nil, fmt.Errorf("unexpected lookup of %s", host)
+		}
+		return []net.IP{net.ParseIP("fd00::7"), net.ParseIP("10.9.8.7")}, nil
+	}
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	var snap proto.SnapshotParams
+	r.params("mysql.dumpFrom", &snap)
+	wantDumpAccount(t, m, snap, "10.9.8.7")
+
+	for host, want := range map[string]string{"10.0.0.2": "10.0.0.2", "::ffff:10.0.0.3": "10.0.0.3", "fd00::2": "fd00::2"} {
+		if got, err := dumpAccountHost(context.Background(), host); err != nil || got != want {
+			t.Errorf("dumpAccountHost(%q) = %q, %v; want %q", host, got, err, want)
+		}
+	}
+	if _, err := dumpAccountHost(context.Background(), ""); err == nil {
+		t.Error("dumpAccountHost(\"\") succeeded")
 	}
 }
 

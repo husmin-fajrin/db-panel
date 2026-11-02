@@ -21,9 +21,13 @@ import (
 )
 
 // replicaCmds is what a target with MySQL receives for a full run.
+// A CLONE is followed by setReadOnly (the agent lifted the lock for it).
 func replicaCmds(snapshot string) []string {
-	return []string{"probe", "mysql.preflight", "mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", snapshot,
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"}
+	cmds := []string{"probe", "mysql.preflight", "mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", snapshot}
+	if snapshot == "mysql.cloneFrom" {
+		cmds = append(cmds, "mysql.setReadOnly")
+	}
+	return append(cmds, "mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced")
 }
 
 func allDone(install string) []string {
@@ -309,7 +313,7 @@ func TestCreateReplicaInstallsMySQLWhenMissing(t *testing.T) {
 		t.Fatalf("steps = %v", got)
 	}
 	wantCmds(t, "replica", r.cmds(0), []string{"probe", "probe", "mysql.install", "mysql.inventory", "mysql.preflight",
-		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.cloneFrom",
+		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.cloneFrom", "mysql.setReadOnly",
 		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
 	var ins proto.InstallParams
 	r.params("mysql.install", &ins)

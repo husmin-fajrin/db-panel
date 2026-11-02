@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -59,9 +60,9 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	if err != nil {
 		return err
 	}
-	host := jr.r.sourceHost(srv)
-	if host == "" {
-		return errors.New("alamat server tujuan belum diketahui")
+	host, err := dumpAccountHost(ctx, jr.r.sourceHost(srv))
+	if err != nil {
+		return err
 	}
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -84,6 +85,32 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	jr.logf("info", "Akun dump sementara %s@%s dibuat di master; dihapus lagi setelah salinan selesai.", user, host)
 	p.User, p.Password = user, password
 	return jr.runAgentJob(ctx, jr.target(), cmd, p, res)
+}
+
+// lookupIP resolves a host name; tests replace it.
+var lookupIP = net.DefaultResolver.LookupIP
+
+// dumpAccountHost is the host part of a dump account for a replica at
+// host: one IP address, which a pinned master insists on (no name or
+// pattern). A name (the panel host's --public-host) is resolved to the
+// address the panel sees for it, an IPv4 one first.
+func dumpAccountHost(ctx context.Context, host string) (string, error) {
+	if host == "" {
+		return "", errors.New("alamat server tujuan belum diketahui")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), nil
+	}
+	ips, err := lookupIP(ctx, "ip", host)
+	if err != nil || len(ips) == 0 {
+		return "", fmt.Errorf("alamat server tujuan %s tidak bisa diterjemahkan ke alamat IP untuk akun dump: %v", host, err)
+	}
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return ip.String(), nil
+		}
+	}
+	return ips[0].String(), nil
 }
 
 // dumpAccountMaxAge is how old a dbpanel_dump_* account's password on the

@@ -65,6 +65,23 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 		return res, fmt.Errorf("atur clone_valid_donor_list: %w", err)
 	}
 
+	// CLONE first drops this server's user schemas, which super_read_only
+	// refuses (1290) even for the admin account: a resync clones into a
+	// locked replica that holds data. The lock is lifted with SET GLOBAL and
+	// put back only when CLONE fails before its data phase; after it, the
+	// old server is gone and the restart applies the persisted and my.cnf
+	// lock again.
+	restore, err := liftReadOnly(ctx, j.Logf, db)
+	if err != nil {
+		return res, err
+	}
+	dataReplaced := false
+	defer func() {
+		if !dataReplaced {
+			restore()
+		}
+	}()
+
 	// One session runs CLONE: the sql_mode read is the one the password
 	// literal is escaped for, and its id is what KILL QUERY stops.
 	conn, err := db.Conn(ctx)
@@ -108,6 +125,7 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 
 	// The data is replaced: MySQL must come back even if the job is
 	// cancelled now, or a server nothing supervises stays down.
+	dataReplaced = true
 	j.Logf("info", "clone data phase finished (%v); waiting for MySQL to restart, cancellation is ignored until it is up", cloneErr)
 	j.Progress(99, "menunggu MySQL hidup kembali")
 	db.Close() // its sessions died with the old server
@@ -320,5 +338,5 @@ func cloneFailure(ctx context.Context, db *sql.DB, err error, began, password, l
 		msg = fmt.Sprintf("%d %s", errNo, errMsg)
 	}
 	msg = strings.ReplaceAll(strings.ReplaceAll(msg, literal, "'***'"), password, "***")
-	return fmt.Errorf("CLONE gagal: %s", msg)
+	return fmt.Errorf("CLONE gagal: %s. Bila CLONE terus gagal, ulangi dengan pilihan \"Paksa dump\"", msg)
 }

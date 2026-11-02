@@ -52,7 +52,10 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		if err := CreateReplUser(ctx, h, p); err != nil {
+		// A pinned master's existing account is never changed: a new
+		// password or other grants would cut every replica off.
+		a := account{User: p.User, Host: p.FromHost, Password: p.Password, RequireSSL: p.RequireSSL}
+		if err := createAccount(ctx, h, a, replGrants, "replikasi", d.pins.RoleIs(roleMaster)); err != nil {
 			return nil, err
 		}
 		d.log("mysql replication user ready", "user", p.User, "from_host", p.FromHost, "require_ssl", p.RequireSSL)
@@ -71,11 +74,14 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err := a.validate("dump"); err != nil {
 			return nil, err
 		}
+		if err := d.allow("mysql.createDumpUser", proto.DumpUserParams{User: a.User, FromHost: a.Host}); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err
 		}
-		if err := createAccount(ctx, h, a, dumpGrants, "dump"); err != nil {
+		if err := createAccount(ctx, h, a, dumpGrants, "dump", d.pins.RoleIs(roleMaster)); err != nil {
 			return nil, err
 		}
 		d.log("mysql dump user created", "user", a.User, "from_host", a.Host, "require_ssl", a.RequireSSL)
@@ -182,12 +188,21 @@ func validateReplUser(p *proto.ReplUserParams) error {
 // masks it in its own logs, and it never reaches ours or an error.
 func CreateReplUser(ctx context.Context, h Host, p proto.ReplUserParams) error {
 	return createAccount(ctx, h, account{User: p.User, Host: p.FromHost, Password: p.Password, RequireSSL: p.RequireSSL},
-		replGrants, "replikasi")
+		replGrants, "replikasi", false)
+}
+
+// accountExistsOnMaster is the refusal of keepExisting: the panel matches
+// its words ("sudah ada di master yang dipin") to tell it from a failure.
+func accountExistsOnMaster(name string) error {
+	return &pinError{kind: ErrRolePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
+		"akun %s sudah ada di master yang dipin; agent tidak mengubah akun yang sudah ada (sandi dan haknya tetap)", name)}}
 }
 
 // createAccount creates a, or sets the password of the existing account,
-// requires TLS or not, and leaves it holding exactly grants ON *.*.
-func createAccount(ctx context.Context, h Host, a account, grants, what string) error {
+// requires TLS or not, and leaves it holding exactly grants ON *.*. With
+// keepExisting (a pinned master) an existing account is refused instead:
+// it is never altered.
+func createAccount(ctx context.Context, h Host, a account, grants, what string, keepExisting bool) error {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return err
@@ -205,6 +220,9 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string) 
 	n, err := accountExists(ctx, conn, a.User, a.Host)
 	if err != nil {
 		return fmt.Errorf("baca user %s: %w", what, err)
+	}
+	if n && keepExisting {
+		return accountExistsOnMaster(name)
 	}
 	var mode string
 	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {

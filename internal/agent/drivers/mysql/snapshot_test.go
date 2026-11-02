@@ -296,6 +296,54 @@ func TestCloneFailsWithWrongPassword(t *testing.T) {
 	}
 }
 
+// TestCloneIntoLockedReplicaWithData clones into a recipient that holds a
+// user schema under SET PERSIST super_read_only=ON, as a resync does: CLONE
+// drops the schema first, which the lock refuses unless it is lifted. A
+// failed attempt leaves the lock on; a completed one ends with it on.
+func TestCloneIntoLockedReplicaWithData(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	replica := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	mdb := rootDB(t, master)
+	fillMaster(t, mdb)
+	replUser(t, master)
+	want := gtidExecuted(t, mdb)
+	rdb := rootDB(t, replica)
+	execAll(t, rdb, "CREATE DATABASE a", "CREATE TABLE a.old (i INT)",
+		"SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+	locked := func(when string) {
+		t.Helper()
+		var ro, sro bool
+		if err := rootDB(t, replica).QueryRow("SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only").Scan(&ro, &sro); err != nil {
+			t.Fatal(err)
+		}
+		if !ro || !sro {
+			t.Errorf("%s: read_only=%v super_read_only=%v, want both ON", when, ro, sro)
+		}
+	}
+
+	rig := rootRig(replica)
+	p := cloneParams(master)
+	p.Port = closedPort(t)
+	d := rig.run(t, "mysql.cloneFrom", p)
+	if d.OK || !strings.Contains(d.Error, "CLONE gagal") || !strings.Contains(d.Error, "Paksa dump") {
+		t.Errorf("clone from an unreachable donor = %+v", d)
+	}
+	locked("after a failed clone")
+
+	res := snapshotResult(t, rig.run(t, "mysql.cloneFrom", cloneParams(master)))
+	if res.GTIDExecuted != want {
+		t.Errorf("GTIDExecuted = %q, want the master's %q", res.GTIDExecuted, want)
+	}
+	rdb = rootDB(t, replica)
+	if n := count(t, rdb, "SELECT COUNT(*) FROM a.t"); n != 3 {
+		t.Errorf("a.t rows = %d, want 3", n)
+	}
+	if n := count(t, rdb, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'a' AND table_name = 'old'"); n != 0 {
+		t.Errorf("the recipient's old table survived the clone")
+	}
+	locked("after the clone")
+}
+
 // TestCloneCancel cancels a clone, slowed down, while it copies files.
 func TestCloneCancel(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})

@@ -99,7 +99,7 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 	if res.ConfigPath != "" {
 		jr.logf("info", "Pengaturan ditulis ke %s (server_id %d).", res.ConfigPath, res.ServerID)
 	}
-	password, err := jr.ensureTopology()
+	password, created, err := jr.ensureTopology()
 	if err != nil {
 		return outcome{}, err
 	}
@@ -109,7 +109,19 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 	// temporary account per dump); it requires TLS when the master has it.
 	if err := jr.call(ctx, jr.job.ServerID, "mysql.createReplUser",
 		proto.ReplUserParams{User: replUser, Password: password, FromHost: "%", RequireSSL: jr.st.MasterTLS}, nil); err != nil {
-		return outcome{}, err
+		if !strings.Contains(err.Error(), accountExistsOnPinnedMaster) {
+			return outcome{}, err
+		}
+		// A pinned master never changes an existing account (SEC-42).
+		if created {
+			// The password is new, the account older: replicas could not
+			// log in with what the panel stores.
+			return outcome{}, fmt.Errorf("akun replikasi %s sudah ada di master ini dari persiapan sebelumnya, dan master yang "+
+				"dipin tidak mengizinkan panel mengganti sandinya. Bila tidak ada replika lain yang memakainya, hapus akun itu di "+
+				"server ini (DROP USER '%s'@'%%';) lalu klik Ulangi", replUser, replUser)
+		}
+		// Prepared before with the topology's password: it stays.
+		jr.logf("info", "User replikasi %s sudah ada di master; sandinya tidak diubah.", replUser)
 	}
 	if jr.st.MasterTLS {
 		jr.logf("info", "User replikasi %s siap (hanya lewat koneksi TLS).", replUser)
@@ -124,42 +136,47 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 	return done("diterapkan tanpa restart"), nil
 }
 
+// accountExistsOnPinnedMaster is the words of the agent's refusal to
+// change an existing account on a pinned master.
+const accountExistsOnPinnedMaster = "sudah ada di master yang dipin"
+
 // ensureTopology returns the replication password of the master's topology,
-// creating the topology with a new sealed password when it has none.
-func (jr *jobRun) ensureTopology() (string, error) {
+// creating the topology with a new sealed password when it has none
+// (created).
+func (jr *jobRun) ensureTopology() (password string, created bool, err error) {
 	r := jr.r
 	topo, err := r.d.Store.GetTopologyByMaster(jr.job.ServerID)
 	if err == nil {
 		plain, err := r.d.Secrets.Open(topo.ReplPasswordEnc)
 		if err != nil {
-			return "", fmt.Errorf("buka password replikasi tersimpan: %w", err)
+			return "", false, fmt.Errorf("buka password replikasi tersimpan: %w", err)
 		}
-		return string(plain), nil
+		return string(plain), false, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
-		return "", err
+		return "", false, err
 	}
-	password, err := newReplPassword()
+	password, err = newReplPassword()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	enc, err := r.d.Secrets.Seal([]byte(password))
 	if err != nil {
-		return "", fmt.Errorf("segel password replikasi: %w", err)
+		return "", false, fmt.Errorf("segel password replikasi: %w", err)
 	}
 	srv, err := r.d.Store.GetServer(jr.job.ServerID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	port := jr.st.MasterPort
 	if port == 0 {
 		port = 3306
 	}
 	if _, err := r.d.Store.CreateTopology(srv.ID, replUser, enc, r.sourceHost(srv), port); err != nil {
-		return "", err
+		return "", false, err
 	}
 	jr.logf("info", "Topologi dibuat; password replikasi dibuat panel dan disimpan tersegel.")
-	return password, nil
+	return password, true, nil
 }
 
 // newReplPassword is replPasswordLen random characters from replAlphabet.

@@ -101,6 +101,39 @@ func TestPrepareMasterHappyPath(t *testing.T) {
 	}
 }
 
+// TestPrepareMasterKeepsExistingReplAccount: a pinned master refuses to
+// change an existing replication account (SEC-42). Prepared again with the
+// topology's password, the account stays as it is; with a new topology
+// (a new password) the job fails and says how to clear the old account.
+func TestPrepareMasterKeepsExistingReplAccount(t *testing.T) {
+	const exists = "akun 'dbpanel_repl'@'%' sudah ada di master yang dipin; agent tidak mengubah akun yang sudah ada (sandi dan haknya tetap)"
+	e := newEnv(t)
+	fa := e.connectedMaster("db-master")
+	scriptPrepare(fa)
+	fa.fail("mysql.createReplUser", exists)
+
+	id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	for _, want := range []string{"sudah ada di master ini", "DROP USER 'dbpanel_repl'@'%';", "Ulangi"} {
+		if !strings.Contains(j.Error, want) {
+			t.Errorf("job error %q lacks %q", j.Error, want)
+		}
+	}
+
+	// The topology now exists: a run with its password keeps the account.
+	id, err = e.r.StartPrepareMaster(context.Background(), fa.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if log := e.jobLog(id); !strings.Contains(log, "sudah ada di master; sandinya tidak diubah") {
+		t.Errorf("job log lacks the kept-account note:\n%s", log)
+	}
+}
+
 // scriptNeedsRestart makes the master's status show a loopback bind and
 // the binary log off until restarted is set; mysql.restart sets it.
 func scriptNeedsRestart(fa *fakeAgent, restarted *atomic.Bool) {
