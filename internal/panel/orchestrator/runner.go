@@ -77,10 +77,10 @@ const (
 
 	// Caps on what an agent sends (SEC-34): one job.log line, one step
 	// message, one agent job result, and the databases of an inventory.
-	maxLogLine       = 1 << 10
-	maxStepMessage   = 4 << 10
-	maxAgentResult   = 1 << 20
-	maxInventoryDBs  = 5000
+	maxLogLine      = 1 << 10
+	maxStepMessage  = 4 << 10
+	maxAgentResult  = 1 << 20
+	maxInventoryDBs = 5000
 
 	resumeError = "panel dimulai ulang saat job berjalan"
 )
