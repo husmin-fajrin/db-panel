@@ -83,7 +83,6 @@ type Monitor struct {
 	servers   map[int64]*serverState
 	lastCheck map[int64]time.Time // last CheckNow per server
 	lastPrune time.Time
-	failedJob map[int64]string // per server, the job its open job_failed is about
 	// weeklyRetryAt holds back the next try of the weekly summary after a
 	// failed send.
 	weeklyRetryAt time.Time
@@ -112,8 +111,8 @@ func New(d Deps) *Monitor {
 		st: d.Store, hub: d.Hub, publish: d.Publish, log: d.Logger, now: d.Now,
 		tickEvery: d.TickEvery, startedAt: d.Now(), ctx: ctx, cancel: cancel,
 		servers: make(map[int64]*serverState), lastCheck: make(map[int64]time.Time),
-		failedJob: make(map[int64]string), onAlertsChanged: d.OnAlertsChanged,
-		sendWeekly: d.SendWeekly,
+		onAlertsChanged: d.OnAlertsChanged,
+		sendWeekly:      d.SendWeekly,
 	}
 	set, err := LoadSettings(d.Store)
 	if err != nil {

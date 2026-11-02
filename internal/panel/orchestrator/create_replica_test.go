@@ -61,7 +61,8 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 		t.Fatalf("steps = %v", got)
 	}
 	wantCmds(t, "replica", r.cmds(0), replicaCmds("mysql.cloneFrom"))
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status"})
+	// Siapkan replika sweeps leftover dump accounts also before a CLONE.
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status"})
 
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
@@ -835,9 +836,10 @@ func TestCancelCreateReplicaReleasesRole(t *testing.T) {
 	if _, err := e.st.GetReplicaByServer(r.id); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("replica row after cancel: %v", err)
 	}
-	if _, ended := e.alerts.lists(); !slices.Contains(ended, fmt.Sprintf("%d %s", r.id, id)) {
-		t.Fatalf("JobEnded not reported on cancel: %v", ended)
-	}
+	e.waitFor("JobEnded on cancel", func() bool {
+		_, ended := e.alerts.lists()
+		return slices.Contains(ended, fmt.Sprintf("%d %s", r.id, id))
+	})
 
 	// A refused release is only logged.
 	r.fail("mysql.releaseRole", "replikasi masih dikonfigurasi")
@@ -871,6 +873,8 @@ func TestJobFailedReachesAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobFailed)
+	// The Monitor hears it right after the job is stored as failed.
+	e.waitFor("JobFailed", func() bool { f, _ := e.alerts.lists(); return len(f) > 0 })
 	failed, ended := e.alerts.lists()
 	if want := fmt.Sprintf("%d %s create_replica Periksa server tujuan", r.id, id); !slices.Equal(failed, []string{want}) {
 		t.Fatalf("JobFailed = %v, want %q", failed, want)
@@ -883,6 +887,7 @@ func TestJobFailedReachesAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
+	e.waitFor("JobEnded", func() bool { _, ended := e.alerts.lists(); return len(ended) > 0 })
 	if _, ended := e.alerts.lists(); !slices.Equal(ended, []string{fmt.Sprintf("%d %s", r.id, id)}) {
 		t.Fatalf("JobEnded = %v", ended)
 	}

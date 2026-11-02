@@ -3,13 +3,16 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
+	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -78,6 +81,12 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 		<-release
 		return proto.SnapshotResult{Method: "dump", Bytes: 100, GTIDExecuted: masterGTID}, nil
 	})
+	// Where the sweep runs: what the replica had received by then.
+	var sweptAfter []string
+	m.on("mysql.sweepDumpUsers", func(json.RawMessage) (any, error) {
+		sweptAfter = r.cmds(0)
+		return proto.SweepDumpUsersResult{Dropped: []string{"'dbpanel_dump_0badc0de'@'10.0.0.2'"}}, nil
+	})
 
 	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id, WipeList: []string{"x", "a"}})
 	if err != nil {
@@ -127,9 +136,11 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 	if !slices.Equal(dr.Databases, []string{"a", "x"}) {
 		t.Fatalf("dropDatabases = %v", dr.Databases)
 	}
-	// Leftover dump accounts are swept before the dump's own is created.
+	// Leftover dump accounts are swept at the start of Siapkan replika,
+	// before the target is configured and before the dump's own account.
 	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.createDumpUser",
 		"mysql.dropUser", "mysql.status"})
+	wantCmds(t, "replica before the sweep", sweptAfter, []string{"probe", "mysql.preflight"})
 	var sw proto.SweepDumpUsersParams
 	m.params("mysql.sweepDumpUsers", &sw)
 	if sw.OlderThanSec != 86400 {
@@ -143,9 +154,11 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 	if srv, _ := e.st.GetServer(r.id); srv.Role != store.RoleReplica {
 		t.Fatalf("role = %q", srv.Role)
 	}
-	if _, ended := e.alerts.lists(); !slices.Contains(ended, fmt.Sprintf("%d %s", r.id, id)) {
-		t.Fatalf("JobEnded not reported: %v", ended)
-	}
+	// The Monitor hears it right after the job is stored as finished.
+	e.waitFor("JobEnded", func() bool {
+		_, ended := e.alerts.lists()
+		return slices.Contains(ended, fmt.Sprintf("%d %s", r.id, id))
+	})
 }
 
 func TestResyncStopsForUnknownLeftover(t *testing.T) {
@@ -200,7 +213,8 @@ func TestResyncUsesCloneForAllDatabases(t *testing.T) {
 	if r.count("mysql.cloneFrom") != 1 || r.count("mysql.dumpFrom") != 0 || r.count("mysql.dropDatabases") != 0 {
 		t.Fatalf("replica commands = %v", r.cmds(0))
 	}
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status"})
+	// A CLONE resync sweeps leftover dump accounts too.
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status"})
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
 	if !pre.Resync || len(pre.Databases) != 0 || pre.ReclaimBytes != 300 {
@@ -276,4 +290,59 @@ func TestResyncRefusedWhileBusy(t *testing.T) {
 		t.Fatalf("StartResync after cancel: %v", err)
 	}
 	e.waitJob(id, store.JobSucceeded)
+}
+
+// TestJobFailedClosesOnLaterJob wires the real Monitor: a failed resync
+// opens job_failed; a later resync that succeeds closes it, and so does
+// detaching the replica after another failure.
+func TestJobFailedClosesOnLaterJob(t *testing.T) {
+	e := newEnv(t)
+	mon := healthmon.New(healthmon.Deps{Store: e.st, Hub: e.hub, Logger: slog.New(slog.DiscardHandler)})
+	t.Cleanup(mon.Close)
+	e.r.d.Alerts = mon
+	_, topo := e.readyMaster("db-master")
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}}, "a")
+	ctx := context.Background()
+	isOpen := func() bool {
+		_, err := e.st.GetOpenAlert(healthmon.KindJobFailed, r.id)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+	failPreflight := func() {
+		r.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckFail, Method: "dump",
+			Checks: []proto.Check{{ID: "disk", Status: proto.CheckFail, Title: "Ruang disk", Detail: "penuh"}}})
+	}
+
+	failPreflight()
+	a, err := e.r.StartResync(ctx, ResyncParams{ServerID: r.id, WipeList: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(a, store.JobFailed)
+	e.waitFor("job_failed opened by the failed resync", isOpen)
+	// A new resync B (not a retry of A) succeeds: the alert closes.
+	r.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckOK, Method: "dump"})
+	b, err := e.r.StartResync(ctx, ResyncParams{ServerID: r.id, WipeList: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(b, store.JobSucceeded)
+	e.waitFor("job_failed closed by a later resync succeeding", func() bool { return !isOpen() })
+
+	// Detaching a replica whose resync failed closes it too.
+	failPreflight()
+	c, err := e.r.StartResync(ctx, ResyncParams{ServerID: r.id, WipeList: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(c, store.JobFailed)
+	e.waitFor("job_failed opened by the second failed resync", isOpen)
+	if err := e.r.DetachReplica(ctx, r.id, false); err != nil {
+		t.Fatal(err)
+	}
+	if isOpen() {
+		t.Fatal("job_failed still open after the replica was detached")
+	}
 }

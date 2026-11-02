@@ -85,9 +85,9 @@ func TestAddDatabasesSequence(t *testing.T) {
 		"Putar ulang sampai titik dump", "Perluas filter", "Verifikasi"}) {
 		t.Fatalf("step names = %v", names)
 	}
-	// Catch-up, TLS for the dump, the sweep of leftover dump accounts, the
-	// dump account around the dump, verify.
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status", "mysql.sweepDumpUsers", "mysql.createDumpUser",
+	// The sweep of leftover dump accounts first, catch-up, TLS for the
+	// dump, the dump account around the dump, verify.
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.sweepDumpUsers", "mysql.status", "mysql.status", "mysql.createDumpUser",
 		"mysql.dropUser", "mysql.status"})
 	wantCmds(t, "replica", r.cmds(0), addDatabasesCmds())
 
@@ -152,7 +152,7 @@ func TestAddDatabasesFailsIfReplicaLagging(t *testing.T) {
 	if j.CurrentStep != 0 || steps[0].Status != store.StepFailed || !strings.Contains(j.Error, lag) {
 		t.Fatalf("job = %+v, steps %+v", j, steps)
 	}
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status"})
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.sweepDumpUsers", "mysql.status"})
 	wantCmds(t, "replica", r.cmds(0), []string{"mysql.setReplicationFilter", "mysql.waitSynced"})
 	rep := e.replica(r.id)
 	if rep.State != store.ReplicaAttention || !strings.HasPrefix(rep.LastError, "gagal saat Menunggu replika menyusul: ") ||

@@ -121,6 +121,8 @@ func (r *Runner) DetachReplica(ctx context.Context, serverID int64, stop bool) e
 		return err
 	}
 	r.log.Info("replica detached", "server_id", serverID, "stopped", stop)
+	// A failed job of the replica leaves no open job_failed behind.
+	r.jobEnded(serverID, "")
 	return nil
 }
 
@@ -135,8 +137,9 @@ func (r *Runner) detachable(serverID int64) error {
 	return r.refuseBusy(serverID, "server ini")
 }
 
-// DeleteServer removes a server that is neither the master of a topology
-// with replicas nor a registered replica, and has no unfinished job: its agent releases its
+// DeleteServer removes a server that is not the panel's own, neither the
+// master of a topology with replicas nor a registered replica, and has no
+// unfinished job: its agent releases its
 // pinned role first (best effort; the agent may be offline), then the
 // server is deleted and its connection dropped. It answers
 // store.ErrNotFound for an unknown server.
@@ -158,6 +161,8 @@ func (r *Runner) DeleteServer(ctx context.Context, serverID int64) error {
 		return err
 	}
 	r.d.Hub.Disconnect(serverID)
+	// Its alerts went with it (ON DELETE CASCADE); the Monitor hears it too.
+	r.jobEnded(serverID, "")
 	return nil
 }
 
@@ -171,6 +176,9 @@ func (r *Runner) deletable(serverID int64) error {
 func (r *Runner) deletableLocked(serverID int64) error {
 	if _, err := r.d.Store.GetServer(serverID); err != nil {
 		return err
+	}
+	if r.d.LocalServerID != 0 && serverID == r.d.LocalServerID {
+		return errors.New("server panel sendiri tidak bisa dihapus")
 	}
 	// A master without replicas goes with its topology (ON DELETE CASCADE);
 	// one with replicas would leave them following a master the panel no

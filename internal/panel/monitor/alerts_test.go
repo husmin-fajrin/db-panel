@@ -587,17 +587,16 @@ func TestJobFailedAlert(t *testing.T) {
 	if as := r.alerts(rID, KindJobFailed); len(as) != 1 || as[0].Message != "Pekerjaan Tambah database gagal." {
 		t.Fatalf("after a second failure = %+v", as)
 	}
-	// The older job ending leaves the newer failure open.
-	r.m.JobEnded(rID, "job-1")
-	r.openAlert(rID, KindJobFailed)
-	r.m.JobEnded(rID, "job-2")
+	// Any later job ending closes it, whichever job failed: here a new
+	// job (job-3) succeeding after job-2 failed.
+	r.m.JobEnded(rID, "job-3")
 	if r.isOpen(rID, KindJobFailed) {
-		t.Fatal("job_failed open after its job ended")
+		t.Fatal("job_failed open after a later job ended")
 	}
 	if ups := r.alertUpdates(rID, KindJobFailed); len(ups) != 2 || ups[1]["open"] != false {
 		t.Fatalf("alert_update = %v, want open then closed", ups)
 	}
-	r.m.JobEnded(rID, "job-2") // nothing open: no-op
+	r.m.JobEnded(rID, "job-4") // nothing open: no-op
 	if changed.Load() != 2 {
 		t.Fatalf("OnAlertsChanged called %d times, want 2", changed.Load())
 	}

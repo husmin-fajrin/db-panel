@@ -70,7 +70,6 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	if err != nil {
 		return err
 	}
-	jr.sweepDumpAccounts(ctx)
 	// Recorded before it is created: a call cut off (timeout, Cancel, panel
 	// stop) or failing halfway may still leave it on the master, and the
 	// defer, a retry or Cancel then drop it (DROP USER IF EXISTS).
@@ -92,7 +91,9 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 const dumpAccountMaxAge = 24 * time.Hour
 
 // sweepDumpAccounts drops leftover dump accounts on the master
-// (mysql.sweepDumpUsers). Best effort: a failure is only logged.
+// (mysql.sweepDumpUsers). It runs at the start of "Siapkan replika"
+// (create_replica, resync_replica, whatever the copy method) and of
+// add_databases' first step. Best effort: a failure is only logged.
 func (jr *jobRun) sweepDumpAccounts(ctx context.Context) {
 	var res proto.SweepDumpUsersResult
 	if err := jr.call(ctx, jr.master(), "mysql.sweepDumpUsers",

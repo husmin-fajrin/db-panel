@@ -442,8 +442,8 @@ func (m *Monitor) ruleCtx(id int64, s *serverState, v View, now time.Time) ruleC
 	return ctx
 }
 
-// JobFailed opens job_failed for the server, or points the open one at
-// this job. The message names the kind of job and the step that failed
+// JobFailed opens job_failed for the server, or updates the open one's
+// message for this job. The message names the kind of job and the step that failed
 // (its title; "" when unknown). errText is not used at all: it may carry
 // MySQL's raw error, which stays out of alerts and of the panel's log (the
 // job keeps it).
@@ -461,7 +461,6 @@ func (m *Monitor) JobFailed(serverID int64, jobID, kind, step, errText string) {
 	now := m.now()
 	var ups []alertUpdate
 	m.mu.Lock()
-	m.failedJob[serverID] = jobID
 	a, err := m.st.GetOpenAlert(KindJobFailed, serverID)
 	switch {
 	case err == nil:
@@ -490,26 +489,25 @@ func (m *Monitor) JobFailed(serverID int64, jobID, kind, step, errText string) {
 	m.emitAlerts(ups)
 }
 
-// JobEnded closes the server's job_failed when jobID succeeded on a retry
-// or was canceled; a newer failed job keeps it open. After a restart the
-// failed job is not known, and any job ending closes it.
+// JobEnded closes the server's job_failed: any job of the server that
+// ends after the failure, succeeded or canceled, closes it, whichever job
+// failed (a retry that succeeds, a new job that succeeds, a cancel). The
+// panel also calls it when a replica is detached or a server deleted.
+// jobID is only logged.
 func (m *Monitor) JobEnded(serverID int64, jobID string) {
 	now := m.now()
 	var ups []alertUpdate
 	m.mu.Lock()
-	if last, ok := m.failedJob[serverID]; !ok || last == jobID {
-		a, err := m.st.GetOpenAlert(KindJobFailed, serverID)
-		switch {
-		case err == nil:
-			if err := m.st.CloseAlert(a.ID, now); err != nil {
-				m.log.Warn("close alert", "server_id", serverID, "kind", KindJobFailed, "err", err)
-				break
-			}
-			delete(m.failedJob, serverID)
-			ups = append(ups, alertUpdate{a.ID, KindJobFailed, serverID, false})
-		case !errors.Is(err, store.ErrNotFound):
-			m.log.Warn("read open alert", "server_id", serverID, "kind", KindJobFailed, "err", err)
+	a, err := m.st.GetOpenAlert(KindJobFailed, serverID)
+	switch {
+	case err == nil:
+		if err := m.st.CloseAlert(a.ID, now); err != nil {
+			m.log.Warn("close alert", "server_id", serverID, "kind", KindJobFailed, "job", jobID, "err", err)
+			break
 		}
+		ups = append(ups, alertUpdate{a.ID, KindJobFailed, serverID, false})
+	case !errors.Is(err, store.ErrNotFound):
+		m.log.Warn("read open alert", "server_id", serverID, "kind", KindJobFailed, "err", err)
 	}
 	m.mu.Unlock()
 	m.emitAlerts(ups)

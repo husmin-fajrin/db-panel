@@ -476,6 +476,7 @@ func (jr *jobRun) replicaInstall(ctx context.Context, approved bool) (outcome, e
 }
 
 func (jr *jobRun) replicaPrepare(ctx context.Context, _ bool) (outcome, error) {
+	jr.sweepDumpAccounts(ctx)
 	// A resynced replica keeps its server_id (0 asks the agent to keep it):
 	// a new one would only cost a restart.
 	if jr.st.ReplicaServerID == 0 && !jr.st.Resync {

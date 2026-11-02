@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -192,6 +194,22 @@ func TestDeleteServerRefusesMasterAndReplica(t *testing.T) {
 	}
 	if _, err := e.st.GetTopology(topo.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("topology after deleting its master: %v", err)
+	}
+
+	// The panel's own server is never deleted.
+	local := e.agent("panel-host", "127.0.0.1")
+	e.r.d.LocalServerID = local.id
+	if err := e.r.DeleteServer(ctx, local.id); err == nil || err.Error() != "server panel sendiri tidak bisa dihapus" {
+		t.Fatalf("DeleteServer(local) = %v", err)
+	}
+	wantCmds(t, "panel host", local.cmds(0), nil)
+	if _, err := e.st.GetServer(local.id); err != nil {
+		t.Fatalf("local server gone: %v", err)
+	}
+
+	// Detach and delete tell the Monitor (no job_failed left behind).
+	if _, ended := e.alerts.lists(); !slices.Contains(ended, fmt.Sprintf("%d ", r.id)) {
+		t.Fatalf("JobEnded not reported for the detached/deleted replica: %v", ended)
 	}
 
 	// An offline agent does not block the delete.

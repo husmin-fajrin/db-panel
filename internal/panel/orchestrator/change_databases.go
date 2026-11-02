@@ -235,6 +235,7 @@ func (jr *jobRun) removeDatabasesSteps() []step {
 }
 
 func (jr *jobRun) addCatchUp(ctx context.Context, _ bool) (outcome, error) {
+	jr.sweepDumpAccounts(ctx)
 	// The stored list is the filter the replica must have before the
 	// replay in step 3; the agent stops, sets it and starts replication.
 	if err := jr.call(ctx, jr.target(), "mysql.setReplicationFilter",
