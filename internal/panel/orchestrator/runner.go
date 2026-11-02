@@ -121,6 +121,9 @@ type Runner struct {
 	// catchUpMax bounds a verify while the replica makes progress; tests
 	// shorten it.
 	catchUpMax time.Duration
+	// afterReopen, when set (tests), runs in Retry between ReopenJob and
+	// launch.
+	afterReopen func(jobID string)
 
 	base context.Context // parent of every job context; ended by Close
 	stop context.CancelFunc
@@ -334,6 +337,7 @@ var (
 	errClosed     = errors.New("panel sedang berhenti")
 	errNotWaiting = errors.New("pekerjaan tidak sedang menunggu persetujuan")
 	errBusy       = errors.New("pekerjaan sedang diproses; coba lagi sebentar")
+	errCanceling  = errors.New("pekerjaan sedang dibatalkan")
 )
 
 // launch hands act to the job's goroutine, starting one when it has none.
@@ -351,6 +355,9 @@ func (r *Runner) launch(id string, act action) error {
 			return nil
 		}
 		if lj.pending != nil {
+			if lj.pending.kind == actCancel {
+				return errCanceling
+			}
 			return errBusy
 		}
 		// The goroutine is finishing (the store already shows the state
@@ -465,9 +472,14 @@ func (r *Runner) Retry(jobID string) error {
 			if err := r.d.Store.ReopenJob(jobID, r.now()); err != nil {
 				return err
 			}
+			if r.afterReopen != nil {
+				r.afterReopen(jobID)
+			}
 		}
 		if err := r.launch(jobID, action{kind: actRetry, step: j.CurrentStep}); err != nil {
-			if j.Status == store.JobFailed {
+			// A Cancel that came after the reopen is queued and cancels
+			// the reopened job; failing it again would undo that (M2).
+			if j.Status == store.JobFailed && !errors.Is(err, errCanceling) {
 				// No goroutine will run it: fail it again, as it was.
 				if uerr := r.d.Store.UpdateJob(jobID, store.JobFailed, j.CurrentStep, j.Error, r.now()); uerr != nil {
 					r.log.Warn("re-fail unlaunched retry", "job", jobID, "err", uerr)
@@ -911,6 +923,9 @@ func (jr *jobRun) fail(err error) {
 	if errors.As(err, &se) {
 		msg = se.Error()
 	}
+	// The error may be an agent's text: one cap for the step, the log
+	// line, jobs.error, the replica's last error and the alert.
+	msg = truncate(msg, maxLogLine)
 	jr.r.log.Warn("job step failed", "job", jr.job.ID, "kind", jr.job.Kind, "step", jr.idx, "err", err)
 	jr.setStep(store.StepFailed, msg)
 	jr.logf("error", "%s", msg)
@@ -957,9 +972,10 @@ func (jr *jobRun) setStep(status, message string) {
 	jr.r.d.Publish("job_update", map[string]any{"id": jr.job.ID, "step": jr.idx, "step_status": status, "message": message})
 }
 
-// logf appends a line to the job log and publishes it. Never log a password.
+// logf appends a line to the job log and publishes it, cut to maxLogLine
+// (args may hold agent text). Never log a password.
 func (jr *jobRun) logf(level, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
+	msg := truncate(fmt.Sprintf(format, args...), maxLogLine)
 	now := jr.r.now()
 	id, err := jr.r.d.Store.AppendJobLog(jr.job.ID, level, msg, now)
 	if err != nil {

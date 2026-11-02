@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -275,6 +277,41 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 	}
 	p.LogCut = len(p.Log) >= jobLogMaxLines
 	a.render.renderStatus(w, status, "job_detail", p)
+}
+
+// jobLogLine is a job.log line as GET /jobs/{id}/log answers it, the
+// fields of the SSE job_log event.
+type jobLogLine struct {
+	ID      int64     `json:"id"`
+	TS      time.Time `json:"ts"`
+	Level   string    `json:"level"`
+	Message string    `json:"message"`
+}
+
+// jobLog answers the job's log lines with an id above ?after= as a JSON
+// array, oldest first and at most 500: the job page fetches the lines an
+// SSE reconnect missed.
+func (a *app) jobLog(w http.ResponseWriter, r *http.Request) {
+	after, err := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	if err != nil || after < 0 {
+		http.Error(w, "parameter after tidak valid", http.StatusBadRequest)
+		return
+	}
+	job, _, ok := a.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	lines, err := a.Store.JobLog(job.ID, after, 500)
+	if err != nil {
+		a.internalError(w, "job log", err)
+		return
+	}
+	out := make([]jobLogLine, 0, len(lines))
+	for _, l := range lines {
+		out = append(out, jobLogLine{ID: l.ID, TS: l.TS, Level: l.Level, Message: l.Message})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
 }
 
 // jobFromPath loads the job named by {id}, answering 404 (or 500) and

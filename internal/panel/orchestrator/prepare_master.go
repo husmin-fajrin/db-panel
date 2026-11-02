@@ -280,14 +280,16 @@ func (jr *jobRun) masterVerify(ctx context.Context, _ bool) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
-	// An address the user set on the master page is kept; the port is the
-	// one MySQL listens on now.
-	host := topo.SourceHost
-	if host == "" {
-		host = r.sourceHost(srv)
-	}
-	if err := r.d.Store.SetTopologySource(topo.ID, host, st.Port); err != nil {
-		return outcome{}, err
+	// The stored source address (host and port; the user may have set it
+	// on the master page, e.g. behind NAT) is what replicas use: a re-run
+	// keeps it. Only a topology without one takes the server's address
+	// and the port MySQL listens on.
+	host, port := topo.SourceHost, topo.SourcePort
+	if host == "" || port == 0 {
+		host, port = r.sourceHost(srv), st.Port
+		if err := r.d.Store.SetTopologySource(topo.ID, host, port); err != nil {
+			return outcome{}, err
+		}
 	}
 	if err := r.updateInventory(srv.ID, func(inv *store.Inventory) { inv.MasterReady = true }); err != nil {
 		return outcome{}, err
@@ -295,7 +297,8 @@ func (jr *jobRun) masterVerify(ctx context.Context, _ bool) (outcome, error) {
 	if err := r.d.Store.SetServerRole(srv.ID, store.RoleMaster); err != nil {
 		return outcome{}, err
 	}
-	jr.logf("info", "Master siap: binary log ON, GTID ON, format ROW; replika menghubungi %s:%d.", host, st.Port)
+	jr.logf("info", "Master siap: binary log ON, GTID ON, format ROW; replika menghubungi %s:%d "+
+		"(alamat tersimpan; ubah di halaman master bila alamat master berubah).", host, port)
 	return done("master siap"), nil
 }
 

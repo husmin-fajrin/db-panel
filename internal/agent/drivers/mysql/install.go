@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"strings"
 	"syscall"
@@ -618,7 +617,7 @@ type realInstaller struct {
 func (r realInstaller) ReadFile(p string) ([]byte, error) { return r.sys.ReadFile(p) }
 
 func (realInstaller) Run(ctx context.Context, stdin io.Reader, env []string, logLine func(string), name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := command(ctx, name, args...)
 	// Cancelling must not SIGKILL apt or dpkg mid-transaction (a locked or
 	// half-configured package database a user cannot repair): SIGTERM lets
 	// them stop cleanly, and only one still running installCancelWait later

@@ -49,8 +49,10 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 		p.User = jr.st.DumpUser
 		return jr.runAgentJob(ctx, jr.target(), cmd, p, res)
 	}
-	jr.dropDumpAccount(ctx) // one a cut-off attempt left behind
-	if jr.st.DumpUser != "" {
+	// One a cut-off attempt left behind.
+	if err := jr.dropDumpAccount(ctx); errors.Is(err, proto.ErrOffline) {
+		return fmt.Errorf("master %s tidak terhubung; hubungkan lagi agent-nya lalu Ulangi", jr.serverName(jr.master()))
+	} else if err != nil {
 		return errors.New("akun dump sementara dari percobaan sebelumnya belum bisa dihapus dari master")
 	}
 	srv, err := jr.r.d.Store.GetServer(jr.target())
@@ -107,11 +109,12 @@ func (jr *jobRun) sweepDumpAccounts(ctx context.Context) {
 }
 
 // dropDumpAccount drops the temporary dump account the job holds on the
-// master, if any (best effort: a failure is logged and kept for the next
-// attempt or Cancel). It runs whatever ctx's state, with its own bound.
-func (jr *jobRun) dropDumpAccount(ctx context.Context) {
+// master, if any (best effort: a failure is logged, kept for the next
+// attempt or Cancel, and returned). It runs whatever ctx's state, with its
+// own bound.
+func (jr *jobRun) dropDumpAccount(ctx context.Context) error {
 	if jr.st.DumpUser == "" {
-		return
+		return nil
 	}
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelTimeout)
 	defer cancel()
@@ -119,11 +122,20 @@ func (jr *jobRun) dropDumpAccount(ctx context.Context) {
 	if err := jr.r.d.Hub.Call(dctx, jr.st.MasterServerID, "mysql.dropUser",
 		proto.DropUserParams{User: user, FromHost: host}, nil); err != nil {
 		jr.r.log.Warn("drop dump account", "job", jr.job.ID, "user", user, "err", err)
+		if errors.Is(err, proto.ErrOffline) {
+			// Most likely the account was never created: the master was
+			// already unreachable for createDumpUser.
+			jr.logf("warn", "Master %s tidak terhubung, jadi akun dump sementara %s@%s (mungkin belum sempat dibuat) "+
+				"belum bisa dihapus. Dicoba lagi pada percobaan berikutnya; akun dump tertinggal yang lebih tua dari "+
+				"24 jam juga disapu saat replika berikutnya dari master ini disiapkan.", jr.serverName(jr.st.MasterServerID), user, host)
+			return err
+		}
 		jr.logf("warn", "Akun dump sementara %s@%s belum bisa dihapus dari master: %v. Dicoba lagi pada percobaan "+
 			"berikutnya; bila pekerjaan ini ditinggalkan, hapus manual: DROP USER '%s'@'%s';", user, host, err, user, host)
-		return
+		return err
 	}
 	jr.st.DumpUser, jr.st.DumpHost = "", ""
 	jr.save()
 	jr.logf("info", "Akun dump sementara %s@%s dihapus dari master.", user, host)
+	return nil
 }

@@ -135,7 +135,7 @@ func (jr *jobRun) handleEvents(agentID string, result any) (bool, error) {
 		case proto.EventJobLog:
 			var l proto.JobLog
 			if json.Unmarshal(ev.Payload, &l) == nil {
-				jr.logf(logLevel(l.Level), "%s", truncate(l.Message, maxLogLine))
+				jr.logf(logLevel(l.Level), "%s", l.Message) // logf caps it
 			}
 		case proto.EventJobDone:
 			var d proto.JobDone

@@ -3,6 +3,7 @@ package web_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -852,4 +853,75 @@ func TestChangeDatabasesJobLabels(t *testing.T) {
 	wantNoBody(t, rec, "dihapus di replika", "toko")
 	rec = e.do("GET", "/jobs/"+failedJob, nil, c)
 	wantBody(t, rec, "Lepas database", "Kecilkan filter", "Database dilepas", "arsip (datanya dihapus di replika)")
+}
+
+// TestJobLogAfterEndpoint: GET /jobs/{id}/log?after=<id> answers the lines
+// after that id as JSON, at most 500, so the job page can fill the gap an
+// SSE reconnect left. It needs a session and a valid job and after.
+func TestJobLogAfterEndpoint(t *testing.T) {
+	e, _, _ := newMySQLEnv(t)
+	c := e.cookie()
+	e.pairedOnline(t, "db-utama")
+	newTestJob(t, e.st, waitingJob, orchestrator.KindPrepareMaster, "Periksa master")
+	now := time.Now().UTC().Truncate(time.Second)
+	var ids []int64
+	for i, m := range []string{"satu", "dua <b>", "tiga"} {
+		id, err := e.st.AppendJobLog(waitingJob, []string{"info", "warn", "error"}[i], m, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	type line struct {
+		ID      int64     `json:"id"`
+		TS      time.Time `json:"ts"`
+		Level   string    `json:"level"`
+		Message string    `json:"message"`
+	}
+	get := func(after string) []line {
+		t.Helper()
+		rec := e.do("GET", "/jobs/"+waitingJob+"/log?after="+after, nil, c)
+		wantCode(t, rec, http.StatusOK)
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("Content-Type = %q", ct)
+		}
+		var out []line
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out == nil {
+			t.Fatalf("body %q: %v", rec.Body.String(), err)
+		}
+		return out
+	}
+	got := get(fmt.Sprint(ids[0]))
+	want := []line{{ids[1], now, "warn", "dua <b>"}, {ids[2], now, "error", "tiga"}}
+	if len(got) != len(want) {
+		t.Fatalf("lines after %d = %+v", ids[0], got)
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID || !got[i].TS.Equal(want[i].TS) || got[i].Level != want[i].Level || got[i].Message != want[i].Message {
+			t.Fatalf("line %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if got := get(fmt.Sprint(ids[2])); len(got) != 0 {
+		t.Fatalf("lines after the last = %+v", got)
+	}
+	if got := get("0"); len(got) != 3 {
+		t.Fatalf("lines after 0 = %d", len(got))
+	}
+	for range 600 {
+		if _, err := e.st.AppendJobLog(waitingJob, "info", "x", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := get("0"); len(got) != 500 || got[0].ID != ids[0] {
+		t.Fatalf("lines after 0 = %d (first %d), want the oldest 500", len(got), got[0].ID)
+	}
+
+	for _, bad := range []string{"", "abc", "-1"} {
+		wantCode(t, e.do("GET", "/jobs/"+waitingJob+"/log?after="+bad, nil, c), http.StatusBadRequest)
+	}
+	wantCode(t, e.do("GET", "/jobs/cccccccccccccccccccccccccccccccc/log?after=0", nil, c), http.StatusNotFound)
+	if rec := e.do("GET", "/jobs/"+waitingJob+"/log?after=0", nil, nil); rec.Code == http.StatusOK ||
+		strings.Contains(rec.Body.String(), "satu") {
+		t.Fatalf("without a session: %d %q", rec.Code, rec.Body.String())
+	}
 }

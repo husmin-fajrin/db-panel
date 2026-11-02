@@ -1,9 +1,11 @@
 package mysql
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
+	"os/exec"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
@@ -106,3 +108,15 @@ var (
 // successful configure, configureReplication, dumpFrom or cloneFrom.
 func (p *Pins) ClaimRole(role string) error             { return p.claimRole(role) }
 func (p *Pins) ClaimSource(host string, port int) error { return p.claimSource(host, port) }
+
+// SetCommandHook calls seen with every child process command the agent
+// builds; it returns the function that restores the default.
+func SetCommandHook(seen func(*exec.Cmd)) (restore func()) {
+	old := newCommand
+	newCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := old(ctx, name, args...)
+		seen(cmd)
+		return cmd
+	}
+	return func() { newCommand = old }
+}

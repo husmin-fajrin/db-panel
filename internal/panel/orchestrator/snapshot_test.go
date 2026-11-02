@@ -342,3 +342,62 @@ func TestSweepFailureDoesNotFailDump(t *testing.T) {
 		t.Fatalf("master commands = %v", m.cmds(0))
 	}
 }
+
+// TestOfflineMasterLogWording (M3): when the master's agent drops before
+// the dump account is created, the log names the offline master instead of
+// asking the operator to drop an account that was probably never created,
+// and a Retry while it is still offline fails naming the master, not the
+// leftover account. Once it is back, the Retry drops the account and dumps.
+func TestOfflineMasterLogWording(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	var dropped atomic.Bool
+	r.on("mysql.setReadOnly", func(json.RawMessage) (any, error) {
+		if !dropped.Swap(true) {
+			m.detach() // the master's agent goes away during Siapkan replika
+		}
+		return nil, nil
+	})
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != 4 || m.count("mysql.createDumpUser") != 0 {
+		t.Fatalf("job = %+v, createDumpUser %d", j, m.count("mysql.createDumpUser"))
+	}
+	log := e.jobLog(id)
+	if !strings.Contains(log, "Master db-master tidak terhubung") || strings.Contains(log, "hapus manual") ||
+		strings.Contains(log, "DROP USER") || strings.Contains(log, "server tujuan tidak terhubung") {
+		t.Fatalf("job log does not name the offline master, or asks for a manual drop:\n%s", log)
+	}
+
+	e.waitFor("job goroutine gone", func() bool {
+		e.r.mu.Lock()
+		defer e.r.mu.Unlock()
+		return e.r.live[id] == nil
+	})
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := e.waitJob(id, store.JobFailed); !strings.Contains(j.Error, "master db-master tidak terhubung") ||
+		strings.Contains(j.Error, "percobaan sebelumnya") {
+		t.Fatalf("retry while the master is offline: job error %q, want the offline master named", j.Error)
+	}
+
+	m.attach()
+	e.waitFor("job goroutine gone", func() bool {
+		e.r.mu.Lock()
+		defer e.r.mu.Unlock()
+		return e.r.live[id] == nil
+	})
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if m.count("mysql.dropUser") < 2 || m.count("mysql.createDumpUser") != 1 {
+		t.Fatalf("dropUser %d, createDumpUser %d", m.count("mysql.dropUser"), m.count("mysql.createDumpUser"))
+	}
+}

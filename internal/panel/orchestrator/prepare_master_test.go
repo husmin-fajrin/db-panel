@@ -340,3 +340,46 @@ func TestConnectStoresInventory(t *testing.T) {
 		t.Fatalf("mysql_inventory published %d times", e.published("mysql_inventory"))
 	}
 }
+
+// TestMasterVerifyUsesStoredSource (Plan 2 residual 6): running Siapkan
+// master again keeps the source address stored for the topology (set on
+// the master page, e.g. a NAT address and port), host and port, instead of
+// the server's own address or the port MySQL listens on; the log names the
+// stored address and where to change it.
+func TestMasterVerifyUsesStoredSource(t *testing.T) {
+	e := newEnv(t)
+	fa, topo := e.readyMaster("db-master")
+	scriptPrepare(fa)
+	if err := e.st.SetTopologySource(topo.ID, "198.51.100.9", 13306); err != nil {
+		t.Fatal(err)
+	}
+	id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	got, err := e.st.GetTopologyByMaster(fa.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SourceHost != "198.51.100.9" || got.SourcePort != 13306 {
+		t.Fatalf("topology source = %s:%d, want the stored 198.51.100.9:13306", got.SourceHost, got.SourcePort)
+	}
+	log := e.jobLog(id)
+	if !strings.Contains(log, "replika menghubungi 198.51.100.9:13306") || !strings.Contains(log, "halaman master") {
+		t.Fatalf("job log does not name the stored address and the master page:\n%s", log)
+	}
+
+	// A topology without an address yet takes the server's and MySQL's.
+	if err := e.st.SetTopologySource(topo.ID, "", 0); err != nil {
+		t.Fatal(err)
+	}
+	id, err = e.r.StartPrepareMaster(context.Background(), fa.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if got, _ := e.st.GetTopologyByMaster(fa.id); got.SourceHost != "10.0.0.1" || got.SourcePort != 3306 {
+		t.Fatalf("topology source = %s:%d, want 10.0.0.1:3306", got.SourceHost, got.SourcePort)
+	}
+}

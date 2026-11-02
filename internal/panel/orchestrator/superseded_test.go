@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -219,5 +221,75 @@ func TestRetryReopensBeforeNewJobs(t *testing.T) {
 		if j.ServerID == r.id && j.ID != id {
 			t.Fatalf("a second job was created for the server: %+v", j)
 		}
+	}
+}
+
+// TestCancelBetweenReopenAndLaunchIsCanceled (M2): a Cancel landing in
+// Retry between ReopenJob and launch ends the job canceled, with a normal
+// cancel's cleanup (the replica row goes, the target's role is released),
+// and the retried step never runs; also when the job's old goroutine is
+// still finishing, so Retry's launch finds the Cancel queued.
+func TestCancelBetweenReopenAndLaunchIsCanceled(t *testing.T) {
+	for _, finishing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("goroutine finishing %v", finishing), func(t *testing.T) {
+			e := newEnv(t)
+			m, _ := e.readyMaster("db-master")
+			r := e.replicaAgent("replica1", "dump")
+			r.fail("mysql.setReadOnly", "read_only gagal")
+			id, err := e.r.StartCreateReplica(context.Background(),
+				CreateReplicaParams{MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.waitJob(id, store.JobFailed)
+			e.waitFor("job goroutine gone", func() bool {
+				e.r.mu.Lock()
+				defer e.r.mu.Unlock()
+				return e.r.live[id] == nil
+			})
+			var held *liveJob
+			if finishing {
+				ctx, cancel := context.WithCancel(e.r.base)
+				held = &liveJob{id: id, ctx: ctx, cancel: cancel, notify: make(chan struct{}, 1)}
+				e.r.mu.Lock()
+				e.r.live[id] = held
+				e.r.mu.Unlock()
+			}
+			readOnly := r.count("mysql.setReadOnly")
+
+			var cancelErr error
+			e.r.afterReopen = func(string) { cancelErr = e.r.Cancel(id) }
+			retryErr := e.r.Retry(id)
+			e.r.afterReopen = nil
+			if cancelErr != nil {
+				t.Fatalf("Cancel = %v", cancelErr)
+			}
+			t.Logf("Retry = %v", retryErr)
+			if finishing {
+				// The old goroutine finishes and takes the queued action.
+				e.r.mu.Lock()
+				if held.pending == nil {
+					e.r.mu.Unlock()
+					t.Fatal("no action queued on the finishing goroutine")
+				}
+				act := *held.pending
+				held.pending = nil
+				e.r.wg.Add(1)
+				e.r.mu.Unlock()
+				go e.r.loop(held, act)
+			}
+
+			j, _ := e.waitJob(id, store.JobCanceled)
+			if j.Error != "dibatalkan oleh pengguna" {
+				t.Fatalf("job error = %q", j.Error)
+			}
+			if _, err := e.st.GetReplicaByServer(r.id); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("replica row after cancel: %v", err)
+			}
+			e.waitFor("role released", func() bool { return r.count("mysql.releaseRole") > 0 })
+			if n := r.count("mysql.setReadOnly"); n != readOnly {
+				t.Fatalf("the retried step ran: setReadOnly %d -> %d", readOnly, n)
+			}
+		})
 	}
 }

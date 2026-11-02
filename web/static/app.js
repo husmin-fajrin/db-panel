@@ -89,10 +89,10 @@
           badge.classList.add(info.Class);
           badge.textContent = info.Label;
         };
-        const es = aliranSSE();
-        es.addEventListener("job_log", (e) => {
-          const d = JSON.parse(e.data);
-          if (d.job_id !== id || d.id <= lastLog || !log) {
+        // tambahBaris menambahkan satu baris log ({id, ts, level, message})
+        // bila belum tampil.
+        const tambahBaris = (d) => {
+          if (d.id <= lastLog || !log) {
             return;
           }
           lastLog = d.id;
@@ -112,6 +112,45 @@
           log.appendChild(line);
           if (diBawah) {
             log.scrollTop = log.scrollHeight;
+          }
+        };
+        // Setiap kali aliran SSE tersambung (pertama kali dan setelah
+        // putus), baris yang terlewat diambil dari /jobs/{id}/log?after=.
+        // Selama pengambilan, event job_log ditahan supaya urutan tetap.
+        let ditahan = null;
+        const susulkan = () => {
+          if (ditahan || !log) {
+            return;
+          }
+          ditahan = [];
+          const lepas = () => {
+            const antre = ditahan;
+            ditahan = null;
+            antre.forEach(tambahBaris);
+          };
+          const ambil = () =>
+            fetch(`/jobs/${id}/log?after=${lastLog}`, { headers: { Accept: "application/json" } })
+              .then((r) => (r.ok ? r.json() : []))
+              .then((baris) => {
+                baris.forEach(tambahBaris);
+                if (baris.length >= 500) {
+                  return ambil();
+                }
+                return null;
+              });
+          ambil().catch(() => {}).finally(lepas);
+        };
+        const es = aliranSSE();
+        es.addEventListener("open", susulkan);
+        es.addEventListener("job_log", (e) => {
+          const d = JSON.parse(e.data);
+          if (d.job_id !== id) {
+            return;
+          }
+          if (ditahan) {
+            ditahan.push(d);
+          } else {
+            tambahBaris(d);
           }
         });
         es.addEventListener("job_update", (e) => {
