@@ -422,3 +422,69 @@ func TestGTIDGapParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestMasterNeedsUpgradeBeatsUnreachable(t *testing.T) {
+	// A pre-Plan-3 agent never sends snapshots: neutral, never a false crit.
+	in := healthyMaster()
+	in.NeedsUpgrade = true
+	in.Snap = nil
+	in.UnreachableSince = now.Add(-time.Hour)
+	got := DeriveMaster(in, th)
+	if got.Code != StatusNeedsUpgrade || got.Severity != SevNeutral {
+		t.Errorf("got %q/%v, want Agent perlu dimutakhirkan/neutral", got.Code, got.Severity)
+	}
+}
+
+func TestPausedIOOnlyWithoutErrnoIsDihentikan(t *testing.T) {
+	in := healthyReplica()
+	in.Paused = true
+	in.Snap.Replica.IORunning = "No" // SQL thread still Yes, no errno
+	got := DeriveReplica(in, th)
+	if got.Code != StatusPaused || got.Severity != SevWarn {
+		t.Errorf("got %q/%v, want Dihentikan/warn", got.Code, got.Severity)
+	}
+	in.Paused = false // not paused: still Terputus
+	if got := DeriveReplica(in, th); got.Code != StatusDisconnected {
+		t.Errorf("unpaused: got %q, want Terputus", got.Code)
+	}
+}
+
+func TestMissingReplicationConfig(t *testing.T) {
+	in := healthyReplica()
+	in.Snap.Replica = nil
+	got := DeriveReplica(in, th)
+	if got.Code != StatusStoppedOutside || got.Severity != SevCrit {
+		t.Fatalf("got %q/%v, want Berhenti (di luar panel)/crit", got.Code, got.Severity)
+	}
+	if want := "konfigurasi replikasi tidak ditemukan di MySQL"; got.Detail != want {
+		t.Errorf("Detail = %q, want %q", got.Detail, want)
+	}
+}
+
+func TestLockLostOnlyForJudgedReplicas(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(in *ReplicaInput)
+	}{
+		{"creating", func(in *ReplicaInput) { in.State = "creating" }},
+		{"resyncing", func(in *ReplicaInput) { in.State = "resyncing" }},
+		{"agent offline", func(in *ReplicaInput) {
+			in.AgentOnline = false
+			in.OfflineSince = now.Add(-time.Minute)
+		}},
+		{"needs upgrade", func(in *ReplicaInput) { in.NeedsUpgrade = true }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := healthyReplica()
+			in.Snap.SuperReadOnly = false
+			in.Snap.Replica.SecondsBehind = i64(500)
+			in.MasterGTIDExecuted = "aaaa:1-10"
+			c.mutate(&in)
+			got := DeriveReplica(in, th)
+			if got.LockLost || got.LagSec != nil || got.GTIDGap != 0 {
+				t.Errorf("%s: LockLost=%v LagSec=%v GTIDGap=%d, want zero values", got.Code, got.LockLost, got.LagSec, got.GTIDGap)
+			}
+		})
+	}
+}

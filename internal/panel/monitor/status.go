@@ -119,15 +119,6 @@ func DeriveReplica(in ReplicaInput, th Thresholds) Status {
 	var st Status
 	snap := in.Snap
 	usable := snap != nil && snap.MySQLOK
-	if usable {
-		st.LockLost = !snap.SuperReadOnly
-		if rs := snap.Replica; rs != nil {
-			st.LagSec = rs.SecondsBehind
-			// A transaction the replica applied was received once, so the
-			// executed set counts as received too.
-			st.GTIDGap = GTIDGap(in.MasterGTIDExecuted, joinGTIDSets(rs.RetrievedGTID, rs.ExecutedGTID))
-		}
-	}
 	set := func(code, detail string) Status {
 		st.Code, st.Detail, st.Severity = code, detail, SeverityOf(code)
 		return st
@@ -150,10 +141,19 @@ func DeriveReplica(in ReplicaInput, th Thresholds) Status {
 		return set(StatusUnreachable, detail)
 	}
 
+	// Only a replica that is judged (ready/attention, agent up and current,
+	// MySQL answering) carries these; a replica being created or resynced
+	// has no lock to lose yet.
+	st.LockLost = !snap.SuperReadOnly
 	rs := snap.Replica
 	if rs == nil {
-		return set(StatusUnreachable, "Server ini tidak melaporkan status replikasi")
+		// MySQL answered, but no replication source is configured.
+		return set(StatusStoppedOutside, "konfigurasi replikasi tidak ditemukan di MySQL")
 	}
+	st.LagSec = rs.SecondsBehind
+	// A transaction the replica applied was received once, so the executed
+	// set counts as received too.
+	st.GTIDGap = GTIDGap(in.MasterGTIDExecuted, joinGTIDSets(rs.RetrievedGTID, rs.ExecutedGTID))
 	hasErrno := rs.LastSQLErrno != 0 || rs.LastIOErrno != 0
 	if rs.SQLRunning == "No" || (rs.IORunning == "No" && rs.LastIOErrno != 0) {
 		switch {
@@ -164,6 +164,10 @@ func DeriveReplica(in ReplicaInput, th Thresholds) Status {
 		default:
 			return set(StatusStoppedOutside, "Replikasi berhenti tanpa lewat panel")
 		}
+	}
+	if rs.IORunning == "No" && in.Paused {
+		// IO thread stopped through the panel, no error (spec 5.2: Dihentikan).
+		return set(StatusPaused, "Replikasi dihentikan lewat panel")
 	}
 	if rs.IORunning == "Connecting" || rs.IORunning == "No" {
 		detail := "Terputus"
@@ -213,6 +217,9 @@ func DeriveMaster(in MasterInput, th Thresholds) Status {
 		}
 		return set(StatusAgentOffline, detail)
 	}
+	if in.NeedsUpgrade {
+		return set(StatusNeedsUpgrade, "Versi agent perlu dimutakhirkan untuk pemantauan")
+	}
 	if in.Snap == nil || !in.Snap.MySQLOK {
 		if !in.UnreachableSince.IsZero() && in.Now.Sub(in.UnreachableSince) >= th.DownAfter {
 			return set(StatusDown, fmt.Sprintf("Diduga tumbang (MySQL tidak menjawab): MySQL tidak menjawab %s%s",
@@ -223,9 +230,6 @@ func DeriveMaster(in MasterInput, th Thresholds) Status {
 			detail = in.Snap.MySQLError
 		}
 		return set(StatusUnreachable, detail)
-	}
-	if in.NeedsUpgrade {
-		return set(StatusNeedsUpgrade, "Versi agent perlu dimutakhirkan untuk pemantauan")
 	}
 	if in.Snap.SuperReadOnly {
 		return set(StatusLocked, "Master dikunci (super_read_only aktif); aplikasi tidak bisa menulis")
