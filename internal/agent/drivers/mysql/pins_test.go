@@ -355,6 +355,8 @@ func TestBootstrapFromHintAndState(t *testing.T) {
 		{"replica hint, no replication", "replica", masterSnap, ""},
 		{"replica hint, MySQL down", "replica", proto.HealthSnapshot{Replica: replicaSnap.Replica}, ""},
 		{"master hint, no binlog", "master", proto.HealthSnapshot{MySQLOK: true}, ""},
+		// A compromised panel cannot get a logging replica pinned master.
+		{"master hint on a replica", "master", replicaSnap, ""},
 		{"replica", "replica", replicaSnap, "replica"},
 		{"master", "master", masterSnap, "master"},
 	} {

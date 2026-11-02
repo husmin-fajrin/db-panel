@@ -341,8 +341,9 @@ func (p *Pins) pinned() (bool, error) {
 // Bootstrap pins the role of a server configured before pins existed, from
 // a health reading and the panel's role hint (monitor.configure): replica
 // when the hint says replica and MySQL has a replication source, master
-// when the hint says master and the binary log is on. It writes at most
-// once per process, and never once this process has seen a role file.
+// when the hint says master, the binary log is on and no replication
+// source is configured. It writes at most once per process, and never once
+// this process has seen a role file.
 func (p *Pins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
 	if p == nil {
 		return nil
@@ -359,7 +360,9 @@ func (p *Pins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
 	switch {
 	case hint == roleReplica && snap.Replica != nil:
 		role = roleReplica
-	case hint == roleMaster && snap.LogBin:
+	// Replicas often log too (log_replica_updates): a server with a
+	// replication source is never pinned master, whatever the hint says.
+	case hint == roleMaster && snap.LogBin && snap.Replica == nil:
 		role = roleMaster
 	default:
 		return nil
