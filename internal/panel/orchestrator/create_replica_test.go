@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"slices"
@@ -808,5 +809,81 @@ func TestNewAttemptResetsStaleReplication(t *testing.T) {
 	}
 	if log := e.jobLog(second); !strings.Contains(log, "Pengaturan replikasi lama") {
 		t.Fatalf("job log does not mention the reset:\n%s", log)
+	}
+}
+
+// TestCancelCreateReplicaReleasesRole: a canceled create_replica removes
+// the replica row and releases the role the target's agent pinned.
+func TestCancelCreateReplicaReleasesRole(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	r.blockingJob("mysql.dumpFrom")
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitFor("dumpFrom job", func() bool { return r.startedJobs() == 1 })
+	if err := e.r.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobCanceled)
+	if n := r.count("mysql.releaseRole"); n != 1 {
+		t.Fatalf("releaseRole called %d times; commands %v", n, r.cmds(0))
+	}
+	if _, err := e.st.GetReplicaByServer(r.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("replica row after cancel: %v", err)
+	}
+	if _, ended := e.alerts.lists(); !slices.Contains(ended, fmt.Sprintf("%d %s", r.id, id)) {
+		t.Fatalf("JobEnded not reported on cancel: %v", ended)
+	}
+
+	// A refused release is only logged.
+	r.fail("mysql.releaseRole", "replikasi masih dikonfigurasi")
+	r.blockingJob("mysql.dumpFrom")
+	id, err = e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitFor("dumpFrom job", func() bool { return r.startedJobs() == 2 })
+	if err := e.r.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobCanceled)
+	if srv, _ := e.st.GetServer(r.id); srv.Role != store.RoleUnassigned {
+		t.Fatalf("role after cancel = %q", srv.Role)
+	}
+}
+
+// TestJobFailedReachesAlerts: a failed job opens job_failed with the
+// title of the step that failed; its successful retry closes it.
+func TestJobFailedReachesAlerts(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	r.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckFail, Method: "dump",
+		Checks: []proto.Check{{ID: "disk", Status: proto.CheckFail, Title: "Ruang disk", Detail: "penuh"}}})
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	failed, ended := e.alerts.lists()
+	if want := fmt.Sprintf("%d %s create_replica Periksa server tujuan", r.id, id); !slices.Equal(failed, []string{want}) {
+		t.Fatalf("JobFailed = %v, want %q", failed, want)
+	}
+	if len(ended) != 0 {
+		t.Fatalf("JobEnded on a failure: %v", ended)
+	}
+	r.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckOK, Method: "dump"})
+	if err := e.r.Retry(id); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if _, ended := e.alerts.lists(); !slices.Equal(ended, []string{fmt.Sprintf("%d %s", r.id, id)}) {
+		t.Fatalf("JobEnded = %v", ended)
 	}
 }

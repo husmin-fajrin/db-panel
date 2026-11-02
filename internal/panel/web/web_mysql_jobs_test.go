@@ -115,6 +115,39 @@ func (f *fakeOrch) StartRemoveDatabases(_ context.Context, serverID int64, dbs [
 	return f.nextID, nil
 }
 
+func (f *fakeOrch) StartResync(_ context.Context, p orchestrator.ResyncParams) (string, error) {
+	f.record(fmt.Sprintf("resync %d %s force=%t", p.ServerID, strings.Join(p.WipeList, ","), p.ForceDump))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
+func (f *fakeOrch) StopReplica(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("stop-replica %d", id))
+	return f.err
+}
+func (f *fakeOrch) StartReplica(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("start-replica %d", id))
+	return f.err
+}
+func (f *fakeOrch) Relock(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("relock %d", id))
+	return f.err
+}
+func (f *fakeOrch) UnlockMaster(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("unlock-master %d", id))
+	return f.err
+}
+func (f *fakeOrch) DetachReplica(_ context.Context, id int64, stop bool) error {
+	f.record(fmt.Sprintf("detach %d stop=%t", id, stop))
+	return f.err
+}
+func (f *fakeOrch) DeleteServer(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("delete-server %d", id))
+	return f.err
+}
+
 func (f *fakeOrch) Approve(id string) error { f.record("approve " + id); return f.err }
 func (f *fakeOrch) Retry(id string) error   { f.record("retry " + id); return f.err }
 func (f *fakeOrch) Cancel(id string) error  { f.record("cancel " + id); return f.err }

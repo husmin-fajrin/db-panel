@@ -1,6 +1,9 @@
 // Package orchestrator runs the panel's multi-step jobs: "Siapkan master"
-// (prepare_master), "Buat replika" (create_replica), and adding or removing
-// databases on a running replica (add_databases, remove_databases). A job
+// (prepare_master), "Buat replika" (create_replica), "Resync ulang"
+// (resync_replica), and adding or removing databases on a running replica
+// (add_databases, remove_databases). It also runs the direct controls
+// (stop, start, lock, detach, delete), which are single agent commands
+// refused while the server has a job. A job
 // is a list of steps, each of which calls agent commands through the hub;
 // long agent operations (clone, dump, install) are agent jobs whose events
 // reach the job through HandleEvent.
@@ -41,7 +44,14 @@ const (
 	KindCreateReplica   = "create_replica"
 	KindAddDatabases    = "add_databases"
 	KindRemoveDatabases = "remove_databases"
+	KindResyncReplica   = "resync_replica"
 )
+
+// seedsReplica reports whether kind is a job that copies the master's data
+// to a replica and connects it: create_replica and resync_replica.
+func seedsReplica(kind string) bool {
+	return kind == KindCreateReplica || kind == KindResyncReplica
+}
 
 // changesDatabases reports whether kind is a job that changes the databases
 // a ready replica follows.
@@ -87,6 +97,15 @@ type Deps struct {
 	// 127.0.0.1; replicas reach a master there at PublicHost.
 	LocalServerID int64
 	PublicHost    string
+	// Alerts hears how jobs end (the panel's Monitor); nil ignores it.
+	Alerts Alerts
+}
+
+// Alerts is told when a job fails (step is the title of the step that
+// failed) and when one succeeds or is canceled.
+type Alerts interface {
+	JobFailed(serverID int64, jobID, kind, step, errText string)
+	JobEnded(serverID int64, jobID string)
 }
 
 // Runner starts, runs and steers orchestrated jobs.
@@ -223,6 +242,7 @@ func (r *Runner) createJob(kind string, serverID, topologyID int64, st jobState,
 		if uerr := r.d.Store.UpdateJob(id, store.JobFailed, 0, msg, now); uerr != nil {
 			r.log.Warn("fail unstarted job", "job", id, "err", uerr)
 		}
+		r.jobFailed(serverID, id, kind, steps[0], msg)
 		return "", err
 	}
 	return id, nil
@@ -236,6 +256,19 @@ func (r *Runner) refuseBusy(serverID int64, who string) error {
 		return fmt.Errorf("%s masih punya pekerjaan yang belum selesai", who)
 	}
 	return nil
+}
+
+// jobFailed and jobEnded tell Deps.Alerts how a job ended.
+func (r *Runner) jobFailed(serverID int64, jobID, kind, step, errText string) {
+	if r.d.Alerts != nil {
+		r.d.Alerts.JobFailed(serverID, jobID, kind, step, errText)
+	}
+}
+
+func (r *Runner) jobEnded(serverID int64, jobID string) {
+	if r.d.Alerts != nil {
+		r.d.Alerts.JobEnded(serverID, jobID)
+	}
 }
 
 type actionKind int
@@ -494,7 +527,7 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 		if srv.Role == store.RoleReplica {
 			return "server ini sekarang menjadi replika", nil
 		}
-	case j.Kind == KindCreateReplica || changesDatabases(j.Kind):
+	case seedsReplica(j.Kind) || changesDatabases(j.Kind):
 		rep, err := r.d.Store.GetReplicaByServer(j.ServerID)
 		if errors.Is(err, store.ErrNotFound) {
 			return "server ini tidak lagi terdaftar sebagai replika", nil
@@ -508,8 +541,12 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 		if srv.Role != store.RoleReplica {
 			return "peran server ini sudah berubah", nil
 		}
-		if j.Kind == KindCreateReplica {
-			if rep.State != store.ReplicaFailed && rep.State != store.ReplicaCreating {
+		if seedsReplica(j.Kind) {
+			running := store.ReplicaCreating
+			if j.Kind == KindResyncReplica {
+				running = store.ReplicaResyncing
+			}
+			if rep.State != store.ReplicaFailed && rep.State != running {
 				return "replika di server ini sudah " + replicaStateText(rep.State), nil
 			}
 			break
@@ -579,11 +616,12 @@ func (r *Runner) Resume(ctx context.Context) {
 		if _, err := r.d.Store.AppendJobLog(j.ID, "error", resumeError, now); err != nil {
 			r.log.Warn("job log", "job", j.ID, "err", err)
 		}
+		r.jobFailed(j.ServerID, j.ID, j.Kind, r.stepName(j.ID, j.CurrentStep), resumeError)
 		state, lastErr := store.ReplicaFailed, resumeError
 		if changesDatabases(j.Kind) {
 			state, lastErr = store.ReplicaAttention, failedAt(j.Kind, j.CurrentStep, resumeError)
 		}
-		if j.Kind == KindCreateReplica || changesDatabases(j.Kind) {
+		if seedsReplica(j.Kind) || changesDatabases(j.Kind) {
 			if err := r.d.Store.SetReplicaState(j.ServerID, state, lastErr); err != nil &&
 				!errors.Is(err, store.ErrNotFound) {
 				r.log.Warn("replica state on resume", "job", j.ID, "err", err)
@@ -591,6 +629,15 @@ func (r *Runner) Resume(ctx context.Context) {
 		}
 		r.log.Info("job failed by restart", "job", j.ID, "kind", j.Kind, "step", j.CurrentStep)
 	}
+}
+
+// stepName is the title of step idx of the stored job; "" when unknown.
+func (r *Runner) stepName(jobID string, idx int) string {
+	_, steps, err := r.d.Store.GetJob(jobID)
+	if err != nil || idx < 0 || idx >= len(steps) {
+		return ""
+	}
+	return steps[idx].Name
 }
 
 // HandleEvent receives agent job events (job.progress, job.log, job.done)
@@ -646,13 +693,26 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 		if err := r.d.Store.RemoveReplica(j.ServerID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			r.log.Warn("remove replica on cancel", "job", j.ID, "err", err)
 		}
+		// The target is unassigned again: its agent should not stay pinned
+		// as a replica (best effort; refused while replication is still
+		// configured there).
+		if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.releaseRole", nil, nil); err != nil {
+			r.log.Warn("release role on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
+		}
+	case j.Kind == KindResyncReplica:
+		// The server stays a replica of its master, failed: Resync ulang
+		// again, or Lepas replika.
+		jr.stopReplicaAfter(ctx)
+		jr.setReplicaState(store.ReplicaFailed, msg)
 	case changesDatabases(j.Kind):
 		// Replication is left as the canceled step left it; the next
 		// add job restores the filter and starts it.
 		jr.setReplicaState(store.ReplicaAttention, "dibatalkan saat "+stepTitle(j.Kind, j.CurrentStep))
 	}
 	jr.setStep(store.StepFailed, msg)
-	jr.setJob(store.JobCanceled, msg)
+	if jr.setJob(store.JobCanceled, msg) {
+		r.jobEnded(j.ServerID, j.ID)
+	}
 	jr.logf("warn", "Pekerjaan dibatalkan.")
 }
 
@@ -663,6 +723,9 @@ type jobState struct {
 	Databases      []string `json:"databases,omitempty"` // empty = all
 	ForceDump      bool     `json:"force_dump,omitempty"`
 	ConfirmWipe    bool     `json:"confirm_wipe,omitempty"` // the form's; pre-approves the CLONE wait only
+	// Resync: a resync_replica job. Its WipeList starts as the replica's
+	// databases the user agreed to drop when starting it.
+	Resync bool `json:"resync,omitempty"`
 
 	// create_replica, learned.
 	MasterUUID      string   `json:"master_uuid,omitempty"`
@@ -775,6 +838,8 @@ func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun
 		jr.steps = jr.prepareMasterSteps()
 	case KindCreateReplica:
 		jr.steps = jr.createReplicaSteps()
+	case KindResyncReplica:
+		jr.steps = jr.resyncReplicaSteps()
 	case KindAddDatabases:
 		jr.steps = jr.addDatabasesSteps()
 	case KindRemoveDatabases:
@@ -794,6 +859,8 @@ func (jr *jobRun) run(from int, approved bool) {
 	switch {
 	case jr.job.Kind == KindCreateReplica:
 		jr.setReplicaState(store.ReplicaCreating, "")
+	case jr.job.Kind == KindResyncReplica:
+		jr.setReplicaState(store.ReplicaResyncing, "")
 	case changesDatabases(jr.job.Kind):
 		jr.setReplicaState(store.ReplicaChanging, "")
 	}
@@ -820,7 +887,9 @@ func (jr *jobRun) run(from int, approved bool) {
 			return
 		}
 	}
-	jr.setJob(store.JobSucceeded, "")
+	if jr.setJob(store.JobSucceeded, "") {
+		jr.r.jobEnded(jr.job.ServerID, jr.job.ID)
+	}
 	jr.logf("info", "Pekerjaan selesai.")
 }
 
@@ -835,7 +904,7 @@ func (jr *jobRun) fail(err error) {
 	jr.setStep(store.StepFailed, msg)
 	jr.logf("error", "%s", msg)
 	switch {
-	case jr.job.Kind == KindCreateReplica:
+	case seedsReplica(jr.job.Kind):
 		var cu catchUpError
 		if errors.As(err, &cu) {
 			jr.logf("warn", "Replikasi tetap berjalan; replika terus menyusul master. Tekan Ulangi untuk memeriksa lagi.")
@@ -849,7 +918,9 @@ func (jr *jobRun) fail(err error) {
 		jr.logChangeFailure()
 		jr.setReplicaState(store.ReplicaAttention, failedAt(jr.job.Kind, jr.idx, err.Error()))
 	}
-	jr.setJob(store.JobFailed, msg)
+	if jr.setJob(store.JobFailed, msg) {
+		jr.r.jobFailed(jr.job.ServerID, jr.job.ID, jr.job.Kind, jr.steps[jr.idx].title, msg)
+	}
 }
 
 // setJob records the job's status at the current step and reports whether

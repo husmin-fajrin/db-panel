@@ -40,7 +40,7 @@ var agentCommands = []string{
 	"mysql.restart", "mysql.createReplUser", "mysql.setReadOnly", "mysql.cloneFrom", "mysql.dumpFrom",
 	"mysql.install", "mysql.configureReplication", "mysql.setReplicationFilter", "mysql.startReplica",
 	"mysql.stopReplica", "mysql.resetReplica", "mysql.waitSynced", "mysql.startUntil", "mysql.dropDatabases",
-	"mysql.createDumpUser", "mysql.dropUser",
+	"mysql.createDumpUser", "mysql.dropUser", "mysql.sweepDumpUsers", "mysql.releaseRole",
 }
 
 type call struct {
@@ -235,19 +235,45 @@ func (fa *fakeAgent) allParams(cmd string) []string {
 	return out
 }
 
+// fakeAlerts records what the Runner tells the monitor about jobs.
+type fakeAlerts struct {
+	mu     sync.Mutex
+	failed []string // "server job kind step"
+	ended  []string // "server job"
+}
+
+func (a *fakeAlerts) JobFailed(serverID int64, jobID, kind, step, errText string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.failed = append(a.failed, fmt.Sprintf("%d %s %s %s", serverID, jobID, kind, step))
+}
+
+func (a *fakeAlerts) JobEnded(serverID int64, jobID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ended = append(a.ended, fmt.Sprintf("%d %s", serverID, jobID))
+}
+
+func (a *fakeAlerts) lists() (failed, ended []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.failed), slices.Clone(a.ended)
+}
+
 type published struct {
 	Event string
 	Data  any
 }
 
 type env struct {
-	t     *testing.T
-	st    *store.Store
-	hub   *hub.Hub
-	box   *secrets.Box
-	r     *Runner
-	pubMu sync.Mutex
-	pubs  []published
+	t      *testing.T
+	st     *store.Store
+	hub    *hub.Hub
+	box    *secrets.Box
+	r      *Runner
+	alerts *fakeAlerts
+	pubMu  sync.Mutex
+	pubs   []published
 
 	agents []*fakeAgent
 }
@@ -275,8 +301,8 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	l := &testListener{}
-	e := &env{t: t, st: st, hub: hub.New(l), box: box}
-	e.r = New(Deps{Store: st, Hub: e.hub, Secrets: box, Publish: e.publish,
+	e := &env{t: t, st: st, hub: hub.New(l), box: box, alerts: &fakeAlerts{}}
+	e.r = New(Deps{Store: st, Hub: e.hub, Secrets: box, Publish: e.publish, Alerts: e.alerts,
 		Logger: slog.New(slog.DiscardHandler), Now: time.Now, PublicHost: "203.0.113.7"})
 	e.r.offlineGrace = 300 * time.Millisecond
 	e.r.pollEvery = 10 * time.Millisecond
@@ -370,6 +396,7 @@ func (e *env) connectedMaster(name string) *fakeAgent {
 	fa.reply("mysql.status", masterStatus())
 	fa.reply("mysql.createDumpUser", nil)
 	fa.reply("mysql.dropUser", nil)
+	fa.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})
 	return fa
 }
 
@@ -424,6 +451,7 @@ func (e *env) replicaAgent(name, method string) *fakeAgent {
 	fa.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: true, Executed: masterGTID,
 		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
 	fa.reply("mysql.stopReplica", nil)
+	fa.reply("mysql.releaseRole", nil)
 	fa.on("mysql.dropDatabases", func(raw json.RawMessage) (any, error) {
 		var p proto.DropDatabasesParams
 		json.Unmarshal(raw, &p)

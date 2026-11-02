@@ -85,8 +85,10 @@ func TestAddDatabasesSequence(t *testing.T) {
 		"Putar ulang sampai titik dump", "Perluas filter", "Verifikasi"}) {
 		t.Fatalf("step names = %v", names)
 	}
-	// Catch-up, TLS for the dump, the dump account around the dump, verify.
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status", "mysql.createDumpUser", "mysql.dropUser", "mysql.status"})
+	// Catch-up, TLS for the dump, the sweep of leftover dump accounts, the
+	// dump account around the dump, verify.
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.status", "mysql.sweepDumpUsers", "mysql.createDumpUser",
+		"mysql.dropUser", "mysql.status"})
 	wantCmds(t, "replica", r.cmds(0), addDatabasesCmds())
 
 	// Step 0 first puts back the filter of the databases followed now.

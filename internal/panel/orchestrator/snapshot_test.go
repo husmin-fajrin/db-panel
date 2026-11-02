@@ -324,3 +324,21 @@ func TestForeignSourceNamedBeforeReset(t *testing.T) {
 		t.Fatalf("reset %d times; log:\n%s", r.count("mysql.resetReplica"), e.jobLog(id))
 	}
 }
+
+// TestSweepFailureDoesNotFailDump: the sweep of leftover dump accounts is
+// best effort; an agent that cannot sweep still dumps.
+func TestSweepFailureDoesNotFailDump(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	m.fail("mysql.sweepDumpUsers", "perintah tidak dikenal")
+	r := e.replicaAgent("replica1", "dump")
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if m.count("mysql.sweepDumpUsers") != 1 || m.count("mysql.createDumpUser") != 1 {
+		t.Fatalf("master commands = %v", m.cmds(0))
+	}
+}

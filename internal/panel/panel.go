@@ -164,19 +164,6 @@ func New(o Options) (*Panel, error) {
 		st.Close()
 		return nil, fmt.Errorf("kunci segel panel: %w", err)
 	}
-	p.Orchestrator = orchestrator.New(orchestrator.Deps{
-		Store:   st,
-		Hub:     p.Hub,
-		Secrets: box,
-		Publish: func(event string, data any) { p.publish(event, data) },
-		Logger:  p.log,
-		Now:     func() time.Time { return p.now() },
-		// A replica reaches the panel host's own MySQL at the public host,
-		// not at its paired address 127.0.0.1.
-		LocalServerID: p.localID,
-		PublicHost:    p.opts.PublicHost,
-	})
-	p.Orchestrator.Resume(context.Background())
 	p.telegram = notify.NewTelegram()
 	p.Notifier = notify.New(notify.Deps{
 		Store:      st,
@@ -196,6 +183,22 @@ func New(o Options) (*Panel, error) {
 		OnAlertsChanged: p.Notifier.Wake,
 		SendWeekly:      p.sendWeekly,
 	})
+	p.Orchestrator = orchestrator.New(orchestrator.Deps{
+		Store:   st,
+		Hub:     p.Hub,
+		Secrets: box,
+		Publish: func(event string, data any) { p.publish(event, data) },
+		Logger:  p.log,
+		Now:     func() time.Time { return p.now() },
+		// A replica reaches the panel host's own MySQL at the public host,
+		// not at its paired address 127.0.0.1.
+		LocalServerID: p.localID,
+		PublicHost:    p.opts.PublicHost,
+		// A failed job opens job_failed; its successful retry or its
+		// cancel closes it.
+		Alerts: p.Monitor,
+	})
+	p.Orchestrator.Resume(context.Background())
 	return p, nil
 }
 

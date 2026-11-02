@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -69,6 +70,7 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	if err != nil {
 		return err
 	}
+	jr.sweepDumpAccounts(ctx)
 	// Recorded before it is created: a call cut off (timeout, Cancel, panel
 	// stop) or failing halfway may still leave it on the master, and the
 	// defer, a retry or Cancel then drop it (DROP USER IF EXISTS).
@@ -81,6 +83,26 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	jr.logf("info", "Akun dump sementara %s@%s dibuat di master; dihapus lagi setelah salinan selesai.", user, host)
 	p.User, p.Password = user, password
 	return jr.runAgentJob(ctx, jr.target(), cmd, p, res)
+}
+
+// dumpAccountMaxAge is how old a dbpanel_dump_* account's password on the
+// master must be before a new dump sweeps the account (spec 5.6): one that
+// old was left by an attempt whose drop failed and that was abandoned.
+// Dropping an account does not end a session already logged in with it.
+const dumpAccountMaxAge = 24 * time.Hour
+
+// sweepDumpAccounts drops leftover dump accounts on the master
+// (mysql.sweepDumpUsers). Best effort: a failure is only logged.
+func (jr *jobRun) sweepDumpAccounts(ctx context.Context) {
+	var res proto.SweepDumpUsersResult
+	if err := jr.call(ctx, jr.master(), "mysql.sweepDumpUsers",
+		proto.SweepDumpUsersParams{OlderThanSec: int64(dumpAccountMaxAge / time.Second)}, &res); err != nil {
+		jr.r.log.Warn("sweep leftover dump accounts", "job", jr.job.ID, "err", err)
+		return
+	}
+	if len(res.Dropped) > 0 {
+		jr.r.log.Info("leftover dump accounts dropped", "job", jr.job.ID, "accounts", res.Dropped)
+	}
 }
 
 // dropDumpAccount drops the temporary dump account the job holds on the

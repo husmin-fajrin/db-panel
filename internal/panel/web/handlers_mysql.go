@@ -24,6 +24,14 @@ type Orchestrator interface {
 	StartCreateReplica(ctx context.Context, p orchestrator.CreateReplicaParams) (string, error)
 	StartAddDatabases(ctx context.Context, replicaServerID int64, databases []string) (string, error)
 	StartRemoveDatabases(ctx context.Context, replicaServerID int64, databases []string, dropData bool) (string, error)
+	StartResync(ctx context.Context, p orchestrator.ResyncParams) (string, error)
+	// Direct controls: refused while the server has an unfinished job.
+	StopReplica(ctx context.Context, serverID int64) error
+	StartReplica(ctx context.Context, serverID int64) error
+	Relock(ctx context.Context, serverID int64) error
+	UnlockMaster(ctx context.Context, serverID int64) error
+	DetachReplica(ctx context.Context, serverID int64, stop bool) error
+	DeleteServer(ctx context.Context, serverID int64) error
 	Approve(jobID string) error
 	Retry(jobID string) error
 	Cancel(jobID string) error

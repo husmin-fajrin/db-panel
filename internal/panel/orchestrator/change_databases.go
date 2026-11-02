@@ -168,6 +168,8 @@ func replicaStateText(state string) string {
 		return "gagal"
 	case store.ReplicaCreating:
 		return "sedang dibuat"
+	case store.ReplicaResyncing:
+		return "sedang disync ulang"
 	}
 	return state
 }

@@ -36,7 +36,7 @@ func createReplicaStepNames() []string {
 }
 
 // Index of the first step after which the target may have replication
-// configured.
+// configured (create_replica; resync_replica has no install step before it).
 const stepConnect = 5
 
 // StartCreateReplica starts the create_replica job and registers the target
@@ -242,11 +242,15 @@ func (jr *jobRun) replicaCheckMaster(ctx context.Context, _ bool) (outcome, erro
 }
 
 // replicaCheckTarget probes the target; without MySQL the install step
-// installs it and runs the replica checks itself.
+// installs it and runs the replica checks itself. A resync has no install
+// step: its replica must have MySQL.
 func (jr *jobRun) replicaCheckTarget(ctx context.Context, approved bool) (outcome, error) {
 	var pr proto.ProbeResult
 	if err := jr.call(ctx, jr.target(), "probe", nil, &pr); err != nil {
 		return outcome{}, err
+	}
+	if jr.st.Resync && !pr.MySQL.Installed {
+		return outcome{}, fmt.Errorf("MySQL tidak terpasang di %s; Resync ulang tidak memasang MySQL", jr.serverName(jr.target()))
 	}
 	jr.st.NeedsInstall = !pr.MySQL.Installed
 	jr.save()
@@ -262,6 +266,12 @@ func (jr *jobRun) replicaCheckTarget(ctx context.Context, approved bool) (outcom
 // from an earlier attempt) are shown to the user; once the user approved
 // that exact list it is kept for the snapshot step, which drops it before
 // a dump. The form's ConfirmWipe never stands in for this approval.
+//
+// On a resync WipeList starts as the replica's databases the user agreed
+// to drop when starting it; the agent treats those as neither leftovers
+// nor foreign, and counts the replica's current data as free space. The
+// step waits only for leftovers outside that list, and an approved one
+// joins the list.
 func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome, error) {
 	if jr.st.MasterUUID == "" {
 		// Without it the agent cannot refuse the master as its own replica.
@@ -271,12 +281,17 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	if err != nil {
 		return outcome{}, err
 	}
+	var reclaim uint64
+	if jr.st.Resync {
+		reclaim = jr.replicaDataBytes()
+	}
 	preflight := func(confirm bool) (proto.PreflightResult, error) {
 		var res proto.PreflightResult
 		err := jr.call(ctx, jr.target(), "mysql.preflight", proto.PreflightParams{
 			Role: "replica", PeerHost: topo.SourceHost, PeerPort: topo.SourcePort, PeerVersion: jr.st.MasterVersion,
 			PeerServerUUID: jr.st.MasterUUID, PeerDataBytes: jr.st.DataBytes, PeerDatabases: jr.st.PeerDatabases,
 			Databases: jr.st.Databases, ConfirmWipe: confirm, PeerLowerCaseTableNames: jr.st.MasterLCTN,
+			Resync: jr.st.Resync, WipeList: jr.st.WipeList, ReclaimBytes: reclaim,
 		}, &res)
 		return res, err
 	}
@@ -284,7 +299,9 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	if err != nil {
 		return outcome{}, err
 	}
-	jr.st.WipeList = nil
+	if !jr.st.Resync {
+		jr.st.WipeList = nil
+	}
 	if res.Worst != proto.CheckFail {
 		// What the next steps would remove from the target is shown first:
 		// databases an earlier attempt left (dropped before the copy), and
@@ -294,6 +311,9 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 		if hasCheck(res.Checks, "leftover", proto.CheckNeedsConfirm) {
 			if list, err = jr.leftoverDatabases(ctx); err != nil {
 				return outcome{}, err
+			}
+			if jr.st.Resync {
+				list = slices.DeleteFunc(list, func(d string) bool { return slices.Contains(jr.st.WipeList, d) })
 			}
 		}
 		foreign := foreignSource(res.Status.Replica, topo)
@@ -306,11 +326,16 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 			if !approved || h != jr.st.WipeHash {
 				jr.st.WipeHash = h
 				var msg []string
-				if len(list) > 0 {
+				switch {
+				case len(list) > 0 && jr.st.Resync:
+					jr.st.WaitReason = WaitWipe
+					msg = append(msg, "database berikut tidak ada di daftar yang disetujui saat Resync ulang dimulai dan "+
+						"akan ikut dihapus lalu disalin ulang dari master: "+strings.Join(list, ", "))
+				case len(list) > 0:
 					jr.st.WaitReason = WaitWipe
 					msg = append(msg, "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: "+
 						strings.Join(list, ", "))
-				} else {
+				default:
 					jr.st.WaitReason = WaitForeignSource
 				}
 				if foreign != "" {
@@ -325,6 +350,11 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 			}
 			if foreign != "" {
 				jr.logf("warn", "Pengguna menyetujui penghapusan pengaturan replikasi dari %s di server tujuan.", foreign)
+			}
+			if jr.st.Resync {
+				list = slices.Concat(jr.st.WipeList, list)
+				slices.Sort(list)
+				list = slices.Compact(list)
 			}
 			jr.st.WipeList = list
 			jr.save()
@@ -342,6 +372,9 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	if left := failedChecks(res.Checks, proto.CheckNeedsConfirm); left != "" {
 		return outcome{}, errors.New("masih perlu konfirmasi: " + left)
 	}
+	if jr.st.Resync && len(jr.st.WipeList) > 0 {
+		jr.logf("info", "Database replika lama yang dibuang sebelum salinan: %s.", strings.Join(jr.st.WipeList, ", "))
+	}
 	method := res.Method
 	if jr.st.ForceDump {
 		method = "dump"
@@ -353,6 +386,23 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	jr.save()
 	jr.logf("info", "Metode salinan awal: %s.", method)
 	return done("metode salinan: %s", method), nil
+}
+
+// replicaDataBytes is the size of the target's databases in its stored
+// inventory; 0 without one.
+func (jr *jobRun) replicaDataBytes() uint64 {
+	inv, err := jr.r.d.Store.GetInventory(jr.target())
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			jr.r.log.Warn("read replica inventory", "job", jr.job.ID, "err", err)
+		}
+		return 0
+	}
+	var n uint64
+	for _, d := range inv.Databases {
+		n += d.Bytes
+	}
+	return n
 }
 
 // foreignSource is the target's replication source as host:port when it is
@@ -426,7 +476,9 @@ func (jr *jobRun) replicaInstall(ctx context.Context, approved bool) (outcome, e
 }
 
 func (jr *jobRun) replicaPrepare(ctx context.Context, _ bool) (outcome, error) {
-	if jr.st.ReplicaServerID == 0 {
+	// A resynced replica keeps its server_id (0 asks the agent to keep it):
+	// a new one would only cost a restart.
+	if jr.st.ReplicaServerID == 0 && !jr.st.Resync {
 		id, err := replicaServerID(jr.st.MasterMySQLID)
 		if err != nil {
 			return outcome{}, err
@@ -445,6 +497,10 @@ func (jr *jobRun) replicaPrepare(ctx context.Context, _ bool) (outcome, error) {
 	}
 	if res.ServerID != 0 && res.ServerID == jr.st.MasterMySQLID {
 		return outcome{}, fmt.Errorf("server_id replika (%d) sama dengan master", res.ServerID)
+	}
+	if jr.st.ReplicaServerID == 0 {
+		jr.st.ReplicaServerID = res.ServerID
+		jr.save()
 	}
 	if res.NeedsRestart {
 		// The target serves no application yet, so it restarts unasked.
@@ -670,6 +726,12 @@ func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 	if err := jr.r.d.Store.SetServerRole(jr.target(), store.RoleReplica); err != nil {
 		return outcome{}, err
 	}
+	if jr.st.Resync {
+		// Replication runs again: a stop from before the resync is over.
+		if err := jr.r.d.Store.SetReplicaPaused(jr.target(), false); err != nil {
+			return outcome{}, err
+		}
+	}
 	jr.logf("info", "Replika sinkron dengan master.")
 	return done("sinkron"), nil
 }
@@ -750,7 +812,11 @@ func (jr *jobRun) setReplicaState(state, lastError string) {
 // or after the step that starts it, so a broken source does not keep
 // retrying (best effort).
 func (jr *jobRun) stopReplicaAfter(ctx context.Context) {
-	if jr.idx < stepConnect {
+	connect := stepConnect
+	if jr.job.Kind == KindResyncReplica {
+		connect-- // no install step
+	}
+	if jr.idx < connect {
 		return
 	}
 	if err := jr.r.d.Hub.Call(ctx, jr.job.ServerID, "mysql.stopReplica", nil, nil); err != nil {
