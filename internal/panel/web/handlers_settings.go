@@ -23,7 +23,8 @@ import (
 const auditSettings = "settings"
 
 // auditTelegramBot names a newly saved bot token among the changed keys of
-// settings_update, so the entry says that it changed without the value.
+// settings_update, so the entry says that it changed without the value
+// (the new chat id and panel base URL are recorded with their values).
 const auditTelegramBot = "telegram_bot"
 
 const (
@@ -189,10 +190,14 @@ type settingsPage struct {
 	PublicURL  string
 	Kinds      []kindOption
 	Days       []weekDay
+	// PlainHTTP: the page came over plain HTTP, so a bot token typed here
+	// crosses the network unencrypted (SEC-47).
+	PlainHTTP bool
 }
 
 func (a *app) renderSettings(w http.ResponseWriter, r *http.Request, status int, f settingsForm, tokenSaved bool, flash string) {
-	p := settingsPage{Page: a.page(r), Form: f, TokenSaved: tokenSaved, PublicURL: a.PublicURL(), Days: weekDays}
+	p := settingsPage{Page: a.page(r), Form: f, TokenSaved: tokenSaved, PublicURL: a.PublicURL(), Days: weekDays,
+		PlainHTTP: r.TLS == nil}
 	p.Flash = flash
 	p.Notice = notices[r.URL.Query().Get("pesan")]
 	for _, k := range monitor.AllKinds() {
@@ -245,11 +250,9 @@ func (a *app) renderStoredSettings(w http.ResponseWriter, r *http.Request, statu
 	if flash == "" {
 		flash = problem
 	}
+	// An empty base URL stays empty (messages then carry no links); the
+	// public URL is only the field's placeholder, so clearing it sticks.
 	f := formFromSettings(set, chatID, kinds)
-	if f.BaseURL == "" {
-		// Links use the public URL until another address is saved.
-		f.BaseURL = a.PublicURL()
-	}
 	a.renderSettings(w, r, status, f, saved, flash)
 }
 
@@ -313,7 +316,16 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if token != "" {
 		changed = append(changed, auditTelegramBot)
 	}
-	a.audit(r, "settings_update", auditSettings, 0, map[string]any{"changed": changed}, auditOK)
+	// The new values of the keys that redirect messages or their links are
+	// recorded (SEC-47); the token never is.
+	detail := map[string]any{"changed": changed}
+	if f.ChatID != prevChat {
+		detail[store.SettingTelegramChatID] = f.ChatID
+	}
+	if prev.PanelBaseURL != set.PanelBaseURL {
+		detail[store.SettingPanelBaseURL] = set.PanelBaseURL
+	}
+	a.audit(r, "settings_update", auditSettings, 0, detail, auditOK)
 	a.Logger.Info("settings saved", "changed", changed, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, "/settings?pesan=pengaturan", http.StatusSeeOther)
 }

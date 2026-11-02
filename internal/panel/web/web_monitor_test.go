@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -205,10 +206,14 @@ func TestReplicaPageTechnicalDetailsHoldRawError(t *testing.T) {
 	if h1 := between(body, "<h1", "</h1>"); strings.Contains(h1, "Duplicate") {
 		t.Errorf("raw error in the title: %s", h1)
 	}
-	// Facts: GTID received against executed and the gap.
+	// Facts: GTID received against executed and the gap; a gap never
+	// computed (no master GTID set to compare with) is not "0 transaksi".
+	rec = e.do("GET", "/replicas/2", nil, e.cookie())
+	wantBody(t, rec, "Belum diterima dari master</th><td>belum dihitung")
+	wantNoBody(t, rec, "0 transaksi")
 	mon.setView(func() monitor.View {
 		v := stoppedOn1062(2)
-		v.Status.GTIDGap = 3
+		v.Status.GTIDGap, v.Status.GTIDGapKnown = 3, true
 		return v
 	}())
 	rec = e.do("GET", "/replicas/2", nil, e.cookie())
@@ -247,7 +252,8 @@ func TestMasterPageDownShowsManualGuidance(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	status := between(rec.Body.String(), `data-status-for="1"`, `<h2 class="card-title">Kontrol`)
 	for _, s := range []string{"Diduga tumbang", "badge-error", down, "Yang bisa dilakukan sekarang",
-		"STOP REPLICA; RESET REPLICA ALL; SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;",
+		"STOP REPLICA; RESET REPLICA ALL; SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF;",
+		"tetap terbuka walau MySQL di-restart",
 		"Executed_Gtid_Set", "panel belum bisa"} {
 		if !strings.Contains(status, s) {
 			t.Errorf("status section lacks %q:\n%s", s, status)
@@ -503,4 +509,33 @@ func TestMonitorFormatters(t *testing.T) {
 			t.Errorf("ago(%v) = %q, want %q", d, got, want)
 		}
 	}
+}
+
+// TestMasterPageSetSourceGuidance (spec 5.5): after the address for
+// replicas changes, the master page lists, per replica, the set-source
+// command to run on it; later it keeps listing the replicas whose last
+// report follows another address.
+func TestMasterPageSetSourceGuidance(t *testing.T) {
+	e, mon, _ := monitorEnv(t)
+	c := e.cookie()
+	following := func(host string, port int) {
+		snap := masterSnap()
+		snap.Replica = &proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes", SourceHost: host, SourcePort: port}
+		mon.setView(monitor.View{ServerID: 2, Role: store.RoleReplica, ReceivedAt: monNow, Snap: snap,
+			Status: monitor.Status{Code: monitor.StatusSynced, Severity: monitor.SevOK}})
+	}
+	wantNoBody(t, e.do("GET", "/masters/1", nil, c), "data-set-source", "dbpanel agent set-source")
+	following("10.0.0.1", 3306)
+	wantNoBody(t, e.do("GET", "/masters/1", nil, c), "data-set-source", "dbpanel agent set-source")
+
+	rec := e.do("POST", "/masters/1/source", url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3307"}}, c)
+	wantLocation(t, rec, "/masters/1?pesan=sumber")
+	rec = e.do("GET", "/masters/1?pesan=sumber", nil, c)
+	wantBody(t, rec, "data-set-source", `href="/replicas/2">db-replika</a>`, "sudo dbpanel agent set-source 192.168.5.9:3307",
+		"Resync ulang")
+	// Until the replica follows the new address, the block stays.
+	rec = e.do("GET", "/masters/1", nil, c)
+	wantBody(t, rec, "data-set-source", "(sekarang mengikuti 10.0.0.1:3306)", "sudo dbpanel agent set-source 192.168.5.9:3307")
+	following("192.168.5.9", 3307)
+	wantNoBody(t, e.do("GET", "/masters/1", nil, c), "data-set-source", "dbpanel agent set-source")
 }

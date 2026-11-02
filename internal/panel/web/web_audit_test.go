@@ -3,6 +3,7 @@ package web_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -181,7 +182,9 @@ func TestAuditLoginFailed(t *testing.T) {
 	got := auditEntries(t, e.st)
 	want := []struct{ action, user, outcome string }{
 		{"login_failed", "admin", "Nama pengguna atau kata sandi salah"},
-		{"login_failed", "maling", "Nama pengguna atau kata sandi salah"},
+		// No such account: what was typed (maybe a password) is not kept
+		// (SEC-44), only a short hash of it.
+		{"login_failed", "(tidak dikenal) 52488226", "Nama pengguna atau kata sandi salah"},
 		{"login", "admin", "ok"},
 		{"logout", "admin", "ok"},
 	}
@@ -198,6 +201,44 @@ func TestAuditLoginFailed(t *testing.T) {
 		if strings.Contains(a.DetailJSON, testPassword) || strings.Contains(a.DetailJSON, "salah") {
 			t.Errorf("entry %d detail %q carries a password", i, a.DetailJSON)
 		}
+		if strings.Contains(a.DetailJSON+a.Username, "maling") {
+			t.Errorf("entry %d keeps the unknown username: %+v", i, a)
+		}
+	}
+}
+
+// TestAuditRejectedInputIsBounded (SEC-44): a wipe list as large as a form
+// may be (64 KiB) refused by validation leaves a detail of at most 2 KiB
+// without the names.
+func TestAuditRejectedInputIsBounded(t *testing.T) {
+	e, _, _ := controlEnv(t)
+	c := e.cookie()
+	form := url.Values{"confirm_name": {"db-replika"}}
+	for i := 0; ; i++ {
+		name := fmt.Sprintf("sisa_%05d_%s", i, strings.Repeat("q", 40))
+		if len(form.Encode())+len(name)+20 > 63<<10 {
+			break
+		}
+		form.Add("wipe_list[]", name)
+	}
+	rec := e.do("POST", "/replicas/2/resync", form, c)
+	if rec.Code == http.StatusSeeOther {
+		t.Fatalf("resync with an unknown wipe list accepted")
+	}
+	var entry *store.AuditEntry
+	for _, a := range auditEntries(t, e.st) {
+		if a.Action == "replica_resync" {
+			entry = &a
+		}
+	}
+	if entry == nil {
+		t.Fatal("no replica_resync entry")
+	}
+	if len(entry.DetailJSON) > 2048 || strings.Contains(entry.DetailJSON, "sisa_") {
+		t.Fatalf("detail of a refused resync = %d bytes: %.300s", len(entry.DetailJSON), entry.DetailJSON)
+	}
+	if !strings.Contains(entry.DetailJSON, `"wipe_list_count":`) {
+		t.Errorf("detail %s does not count the wipe list", entry.DetailJSON)
 	}
 }
 
@@ -216,13 +257,45 @@ func TestScrubDetail(t *testing.T) {
 		"struct":       inner{Name: "n", MySQLPassword: "x"},
 		"big":          int64(1) << 60,
 	}
-	got := web.ScrubDetail(detail)
+	got := web.ScrubDetail(detail, false)
 	want := `{"big":1152921504606846976,"list":[{"ok":1}],"nested":{"db":"toko"},"struct":{"Name":"n"},"user":"admin"}`
 	if got != want {
 		t.Errorf("ScrubDetail = %s\nwant          %s", got, want)
 	}
-	if got := web.ScrubDetail(nil); got != "{}" {
+	if got := web.ScrubDetail(nil, false); got != "{}" {
 		t.Errorf("ScrubDetail(nil) = %q", got)
+	}
+
+	// SEC-44: strings and lists are cut, the whole is at most 2 KiB.
+	long := strings.Repeat("é", 300)
+	many := make([]string, 100)
+	for i := range many {
+		many[i] = fmt.Sprintf("db%d", i)
+	}
+	got = web.ScrubDetail(map[string]any{"name": long, "wipe_list": many}, false)
+	var back struct {
+		Name     string   `json:"name"`
+		WipeList []string `json:"wipe_list"`
+	}
+	if err := json.Unmarshal([]byte(got), &back); err != nil {
+		t.Fatalf("cut detail %s: %v", got, err)
+	}
+	if back.Name != strings.Repeat("é", 128)+"…(dipotong)" || len(back.WipeList) != 65 ||
+		back.WipeList[63] != "db63" || back.WipeList[64] != "…(36 lagi)" {
+		t.Errorf("cut detail = %s", got)
+	}
+	huge := map[string]any{}
+	for i := range 64 {
+		huge[fmt.Sprintf("k%02d", i)] = strings.Repeat("x", 128)
+	}
+	if got := web.ScrubDetail(huge, false); len(got) > 2048 || !strings.Contains(got, `"dipotong":true`) {
+		t.Errorf("detail over 2 KiB = %d bytes: %.200s", len(got), got)
+	}
+	// A refused or failed action keeps names and lengths only.
+	got = web.ScrubDetail(map[string]any{"confirm_name": "rahasia", "wipe_list": []string{"a", "b", "c"},
+		"force_dump": true, "password": "x"}, true)
+	if want := `{"confirm_name_len":7,"force_dump":true,"wipe_list_count":3}`; got != want {
+		t.Errorf("refused detail = %s, want %s", got, want)
 	}
 }
 

@@ -82,14 +82,16 @@ func validHost(h string) bool {
 var notices = map[string]string{
 	"terhubung":  "MySQL berhasil dihubungkan.",
 	"disegarkan": "Data MySQL sudah diperbarui.",
-	"sumber":     "Alamat MySQL master untuk replika disimpan. Alamat ini diperiksa saat membuat replika berikutnya (replika harus bisa menjangkaunya).",
+	"sumber": "Alamat MySQL master untuk replika disimpan. Alamat ini diperiksa saat membuat replika berikutnya (replika harus bisa menjangkaunya). " +
+		"Replika yang sudah ada perlu diarahkan ke alamat ini di servernya sendiri: lihat perintahnya di bawah.",
 	"dihentikan": "Replikasi dihentikan. Lag membesar sampai Anda menjalankannya lagi dengan Start replika.",
 	"dijalankan": "Replikasi dijalankan lagi. Status terbaru tampil setelah laporan berikutnya dari agent.",
 	"dikunci":    "Replika dikunci hanya-baca lagi.",
 	"dilepas": "Replika dilepas. MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; " +
 		"panel tidak lagi memantaunya.",
 	"dilepas-henti": "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca; " +
-		"untuk membukanya jalankan di server itu: mysql -e \"SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF\"",
+		"untuk membukanya jalankan di server itu: mysql -e \"SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF\" " +
+		"(SET PERSIST: tetap terbuka walau MySQL di-restart).",
 	"kunci-dibuka": "Kunci hanya-baca master dibuka; aplikasi bisa menulis lagi.",
 	"diperiksa":    "Server sudah diperiksa; status di bawah memakai laporan terbaru.",
 	"senyap":       "Pemberitahuan untuk server ini ditunda (Jangan ganggu).",
@@ -225,6 +227,15 @@ type masterPage struct {
 	SourceHost string
 	SourcePort string
 	SourceOpen bool
+	// SourceSaved: the address for replicas was just changed.
+	SourceSaved bool
+	// SetSource lists the replicas whose agents must be pointed at the
+	// address for replicas (spec 5.5): every replica right after the
+	// address was saved, otherwise those whose last report shows another
+	// source.
+	SetSource []setSourceRow
+	// Source is the address for replicas as host:port.
+	Source string
 	// Locked: the monitor reports it read-only (Buka kunci master is
 	// offered).
 	Locked   bool
@@ -232,6 +243,15 @@ type masterPage struct {
 	Status   statusView
 	Facts    masterFacts
 	Timeline timelineView
+}
+
+// setSourceRow is a replica whose agent's pinned source must be changed
+// on that server (dbpanel agent set-source).
+type setSourceRow struct {
+	ServerID   int64
+	ServerName string
+	// Following is the source its last report shows; "" when unknown.
+	Following string
 }
 
 // masterFromPath loads the server of {id} and its topology. A server that
@@ -260,6 +280,7 @@ func (a *app) masterDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	p := masterPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Topology: topo}
 	p.Notice = notices[r.URL.Query().Get("pesan")]
+	p.SourceSaved = r.URL.Query().Get("pesan") == "sumber"
 	a.renderMaster(w, r, http.StatusOK, p)
 }
 
@@ -321,9 +342,18 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 		a.internalError(w, "list servers", err)
 		return
 	}
+	p.Source = net.JoinHostPort(topo.SourceHost, strconv.Itoa(topo.SourcePort))
 	for _, rep := range reps {
 		p.Replicas = append(p.Replicas, replicaRow{Replica: rep, ServerName: names[rep.ServerID],
 			Status: a.statusOf(rep.ServerID, store.RoleReplica)})
+		following := ""
+		if rv, ok := a.Monitor.View(rep.ServerID); ok && rv.Snap != nil && rv.Snap.MySQLOK && rv.Snap.Replica != nil &&
+			rv.Snap.Replica.SourceHost != "" {
+			following = net.JoinHostPort(rv.Snap.Replica.SourceHost, strconv.Itoa(rv.Snap.Replica.SourcePort))
+		}
+		if p.SourceSaved || (following != "" && !strings.EqualFold(following, p.Source)) {
+			p.SetSource = append(p.SetSource, setSourceRow{ServerID: rep.ServerID, ServerName: names[rep.ServerID], Following: following})
+		}
 	}
 	p.Facts = newMasterFacts(v, monitored, len(reps))
 	if p.Timeline, err = a.timeline(r, srv.ID); err != nil {

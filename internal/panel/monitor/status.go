@@ -61,6 +61,10 @@ type Status struct {
 	LagSec   *int64
 	// GTIDGap: transactions of the master that the replica has not received.
 	GTIDGap int
+	// GTIDGapKnown: GTIDGap was computed (a judged replica whose MySQL
+	// answered, against a known master GTID set); a zero GTIDGap means
+	// nothing missing only then.
+	GTIDGapKnown bool
 }
 
 type Thresholds struct {
@@ -158,6 +162,7 @@ func DeriveReplica(in ReplicaInput, th Thresholds) Status {
 	// A transaction the replica applied was received once, so the executed
 	// set counts as received too.
 	st.GTIDGap = GTIDGap(in.MasterGTIDExecuted, joinGTIDSets(rs.RetrievedGTID, rs.ExecutedGTID))
+	st.GTIDGapKnown = in.MasterGTIDExecuted != ""
 	hasErrno := rs.LastSQLErrno != 0 || rs.LastIOErrno != 0
 	if rs.SQLRunning == "No" || (rs.IORunning == "No" && rs.LastIOErrno != 0) {
 		switch {

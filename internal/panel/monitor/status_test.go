@@ -173,6 +173,24 @@ func TestDisconnectedTurnsCritAfter3Min(t *testing.T) {
 	}
 }
 
+// TestGTIDGapKnownOnlyWhenComputed: without the master's GTID set, or
+// for a replica not judged, the gap is unknown (not zero transactions).
+func TestGTIDGapKnownOnlyWhenComputed(t *testing.T) {
+	if got := DeriveReplica(healthyReplica(), th); got.GTIDGapKnown {
+		t.Errorf("gap known without the master's GTID set: %+v", got)
+	}
+	in := healthyReplica()
+	in.MasterGTIDExecuted = "aaaa:1-5"
+	in.Snap.Replica.RetrievedGTID = "aaaa:1-5"
+	if got := DeriveReplica(in, th); !got.GTIDGapKnown || got.GTIDGap != 0 {
+		t.Errorf("gap against the master = %d known %v, want 0 known", got.GTIDGap, got.GTIDGapKnown)
+	}
+	in.State = "resyncing"
+	if got := DeriveReplica(in, th); got.GTIDGapKnown {
+		t.Errorf("gap known for a replica being resynced: %+v", got)
+	}
+}
+
 func TestLaggingByGTIDGap(t *testing.T) {
 	const master = "aaaa:1-110"
 	mk := func(gapSince time.Time) ReplicaInput {
@@ -187,8 +205,8 @@ func TestLaggingByGTIDGap(t *testing.T) {
 		if got.Code != StatusLagging || got.Severity != SevWarn {
 			t.Fatalf("got %q/%v, want Ketinggalan", got.Code, got.Severity)
 		}
-		if got.GTIDGap != 12 {
-			t.Errorf("GTIDGap = %d, want 12", got.GTIDGap)
+		if got.GTIDGap != 12 || !got.GTIDGapKnown {
+			t.Errorf("GTIDGap = %d (known %v), want 12", got.GTIDGap, got.GTIDGapKnown)
 		}
 		if want := "Tertinggal 12 transaksi selama 3 menit"; got.Detail != want {
 			t.Errorf("Detail = %q, want %q", got.Detail, want)

@@ -44,6 +44,19 @@
   </div>
 </div>
 
+{{if .SetSource}}
+<div role="alert" class="alert alert-warning alert-soft flex flex-col items-start gap-2 mb-6" data-set-source>
+  <h3 class="font-bold">Arahkan agent replika ke alamat master {{.Source}}</h3>
+  <p class="text-sm">Agent di tiap replika hanya menerima master yang alamatnya ia ingat, dan menolak alamat lain dari panel (Resync ulang dan salin data akan gagal). Jalankan perintah ini di server replika masing-masing:</p>
+  <ul class="flex flex-col gap-1 text-sm">
+    {{range .SetSource}}
+    <li><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a>{{with .Following}} (sekarang mengikuti {{.}}){{end}}: <code class="break-all">sudo dbpanel agent set-source {{$.Source}}</code></li>
+    {{end}}
+  </ul>
+  <p class="text-sm">Replikasi yang sedang berjalan tetap memakai alamat lama sampai replika itu disinkronkan ulang dengan <strong>Resync ulang</strong>.</p>
+</div>
+{{end}}
+
 <div class="grid gap-6 md:grid-cols-2 mb-6">
   <div class="card bg-base-100 shadow">
     <div class="card-body">

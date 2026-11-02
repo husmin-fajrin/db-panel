@@ -210,7 +210,7 @@ func TestResyncPassesWipeListAndForceDump(t *testing.T) {
 	wantBody(t, rec, `id="modal-resync" class="modal" x-data="openDialog" data-open="true"`,
 		`x-data="confirmName"`, `data-name="db-replika"`, `name="confirm_name"`,
 		`name="wipe_list[]" value="toko"`, `name="wipe_list[]" value="gudang"`,
-		`name="force_dump"`, "1.8 GB", "luar jam sibuk")
+		`name="force_dump"`, "1.8 GB", "luar jam sibuk", "MySQL di replika bisa dimulai ulang (restart)")
 	wantNoBody(t, rec, `value="sisa-lama"`)
 
 	// A refresh that fails says so and does not open the dialog.
@@ -254,7 +254,10 @@ func TestDetachModes(t *testing.T) {
 	rec := e.do("GET", "/replicas/2", nil, c)
 	wantBody(t, rec, `action="/replicas/2/detach"`, `name="mode" value="keep"`, `name="mode" value="stop"`,
 		"Lepas, biarkan replikasi berjalan", "Lepas dan hentikan replikasi",
-		"MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; panel tidak lagi memantaunya.")
+		"MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; panel tidak lagi memantaunya.",
+		// dbpanel locked with SET PERSIST: a SET GLOBAL unlock would not survive a restart.
+		`mysql -e "SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF"`, "tetap terbuka walau MySQL di-restart")
+	wantNoBody(t, rec, "SET GLOBAL super_read_only")
 
 	// Wrong name or no mode: nothing is called.
 	for _, form := range []url.Values{
@@ -274,7 +277,8 @@ func TestDetachModes(t *testing.T) {
 	rec = e.do("POST", "/replicas/2/detach", url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/servers/2?pesan=dilepas-henti")
-	wantBody(t, e.do("GET", "/servers/2?pesan=dilepas-henti", nil, c), "SET GLOBAL super_read_only=OFF")
+	wantBody(t, e.do("GET", "/servers/2?pesan=dilepas-henti", nil, c),
+		"SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF", "tetap terbuka walau MySQL di-restart")
 
 	f.err = errors.New("server ini masih punya pekerjaan yang belum selesai")
 	rec = e.do("POST", "/replicas/2/detach", url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, c)

@@ -153,8 +153,11 @@ func TestSettingsPageShowsDefaults(t *testing.T) {
 		`name="disk_warn" value="85"`, `name="disk_crit" value="95"`, `name="conn_pct" value="80"`,
 		`name="alert_repeat" value="6"`, `name="lagging_alert" value="300"`,
 		`name="weekly_time" value="07:00"`, `<option value="Mon" selected>Senin</option>`,
-		// No stored base URL: the public URL is the placeholder and the value.
-		`name="base_url" value="`+testPublicURL+`" placeholder="`+testPublicURL+`"`,
+		// No stored base URL: the public URL is only the placeholder, so
+		// an empty field saves as empty (no links).
+		`name="base_url" value="" placeholder="`+testPublicURL+`"`,
+		// Served over plain HTTP: the token field warns (SEC-47).
+		"token bot yang Anda ketik melintas jaringan tanpa enkripsi",
 		"Replika berhenti", "Master diduga tumbang", "Pekerjaan gagal")
 	for _, k := range monitor.AllKinds() {
 		wantBody(t, rec, `name="kinds" value="`+k+`" checked`)
@@ -275,8 +278,14 @@ func TestSettingsValidatesRanges(t *testing.T) {
 	if v, _ := e.st.GetSetting(store.SettingTelegramChatID); v != "" {
 		t.Errorf("chat id stored from a refused form: %q", v)
 	}
-	// An empty base URL is allowed (messages then carry no links).
+	// An empty base URL is allowed (messages then carry no links), and
+	// stays empty: clearing a saved address persists.
+	wantCode(t, e.do("POST", "/settings", validSettings(), c), http.StatusSeeOther)
 	wantCode(t, e.do("POST", "/settings", with(validSettings(), "base_url", ""), c), http.StatusSeeOther)
+	if got, _ := monitor.LoadSettings(e.st); got.PanelBaseURL != "" {
+		t.Errorf("base URL after clearing = %q", got.PanelBaseURL)
+	}
+	wantBody(t, e.do("GET", "/settings", nil, c), `name="base_url" value=""`)
 }
 
 // attrEscape escapes s the way html/template writes it in an attribute.
@@ -413,10 +422,15 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 	}
 	a := entries[0]
 	wantNoSecretInDetail(t, a)
-	for _, s := range []string{botToken, "rahasiaBot", chatID, "1234567890"} {
+	for _, s := range []string{botToken, "rahasiaBot"} {
 		if strings.Contains(a.DetailJSON, s) || strings.Contains(a.Outcome, s) {
 			t.Errorf("audit row carries %q: %+v", s, a)
 		}
+	}
+	// The new chat id is recorded with its value (SEC-47): a redirection
+	// of the alerts can be reconstructed.
+	if !strings.Contains(a.DetailJSON, `"telegram_chat_id":"`+chatID+`"`) {
+		t.Errorf("detail %s does not record the new chat id", a.DetailJSON)
 	}
 	if a.Outcome != "ok" || a.Username != "admin" || a.IP != testRemoteIP {
 		t.Errorf("audit row = %+v", a)
@@ -431,5 +445,21 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 		if strings.Contains(a.DetailJSON, `"`+k+`"`) {
 			t.Errorf("detail %s lists unchanged key %s", a.DetailJSON, k)
 		}
+	}
+
+	// A new panel base URL is recorded with its value too.
+	form.Set("base_url", "https://phish.example.net")
+	form.Del("token")
+	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+	all := auditEntries(t, e.st)
+	last := all[len(all)-1]
+	for _, x := range all {
+		if x.ID > last.ID {
+			last = x
+		}
+	}
+	if last.Action != "settings_update" || !strings.Contains(last.DetailJSON, `"panel_base_url":"https://phish.example.net"`) ||
+		strings.Contains(last.DetailJSON, "telegram_chat_id\":") {
+		t.Errorf("settings_update after a base URL change = %s", last.DetailJSON)
 	}
 }

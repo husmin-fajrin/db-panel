@@ -49,7 +49,7 @@ health_update. */}}
     <li>Periksa listrik dan jaringan server master. Bila master hidup lagi, panel melihatnya sendiri dan replika menyambung kembali.</li>
     <li>Jangan me-restart replika: posisi replikasinya dibutuhkan untuk langkah berikut.</li>
     <li>Buka halaman tiap replika dan cari replika dengan GTID dieksekusi (Executed_Gtid_Set) paling banyak.</li>
-    <li>Bila master tidak bisa dipulihkan, jadikan replika itu master secara manual. Di MySQL replika itu jalankan: <code class="break-all">STOP REPLICA; RESET REPLICA ALL; SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;</code></li>
+    <li>Bila master tidak bisa dipulihkan, jadikan replika itu master secara manual. Di MySQL replika itu jalankan: <code class="break-all">STOP REPLICA; RESET REPLICA ALL; SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF;</code> (SET PERSIST: tetap terbuka walau MySQL di-restart).</li>
     <li>Arahkan aplikasi ke alamat IP replika itu.</li>
   </ol>
   <p class="text-sm">Catatan: panel belum bisa melakukan langkah ini; versi berikutnya akan melakukannya otomatis.</p>

@@ -491,7 +491,11 @@ dicatat di **Audit**.
   - **Lepas dan hentikan replikasi:** replikasi dihentikan dan
     pengaturannya dihapus, dan agent melepas peran `replica`. MySQL tetap
     hanya-baca; untuk membukanya jalankan di server itu
-    `mysql -e "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF"`.
+    `mysql -e "SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF"`.
+    `SET PERSIST` (bukan `SET GLOBAL`) membuat perubahan itu bertahan saat
+    MySQL di-restart: dbpanel mengunci dengan `SET PERSIST` dan baris
+    `read_only`/`super_read_only` di blok my.cnf-nya, dan nilai yang
+    di-PERSIST menang atas my.cnf.
 
   Akun replikasi di master tidak disentuh (dipakai bersama oleh semua
   replika master itu).

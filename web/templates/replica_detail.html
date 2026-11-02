@@ -27,7 +27,7 @@
         <tr><th>GTID diterima</th><td><code class="break-all">{{or .RetrievedGTID "-"}}</code></td></tr>
         <tr><th>GTID dieksekusi</th><td><code class="break-all">{{or .ExecutedGTID "-"}}</code></td></tr>
         {{end}}{{end}}
-        <tr><th>Belum diterima dari master</th><td>{{.Status.GTIDGap}} transaksi</td></tr>
+        <tr><th>Belum diterima dari master</th><td>{{if .Status.GTIDGapKnown}}{{.Status.GTIDGap}} transaksi{{else}}belum dihitung{{end}}</td></tr>
         {{end}}
         <tr><th>Dibuat</th><td>{{fmtTime .Replica.CreatedAt}}</td></tr>
         {{with .Replica.LastError}}<tr><th>Kesalahan terakhir</th><td class="text-error">{{.}}</td></tr>{{end}}
@@ -163,6 +163,7 @@
     <p>Daftar database replika belum pernah dibaca. Tutup dialog ini lalu klik <strong>Resync ulang</strong> lagi agar panel membacanya.</p>
     {{end}}
     <p>Ukuran data master: <strong>{{fmtBytes .MasterBytes}}</strong>. Jalankan di luar jam sibuk: penyalinan membebani master dan jaringan.</p>
+    <p>Selama resync, data di replika ini belum lengkap untuk dibaca, dan MySQL di replika bisa dimulai ulang (restart) bila pengaturannya perlu diubah.</p>
     <label class="label"><input type="checkbox" name="force_dump" value="1" class="checkbox checkbox-sm"> Paksa dump (jangan pakai CLONE)</label>
     <label class="flex flex-col gap-1">
       <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
@@ -189,7 +190,7 @@
     </label>
     <label class="flex gap-2 items-start">
       <input type="radio" class="radio radio-sm mt-1" name="mode" value="stop">
-      <span><strong>Lepas dan hentikan replikasi.</strong> Replikasi dihentikan dan pengaturannya dihapus. MySQL di server ini tetap terkunci hanya-baca; untuk membukanya jalankan di server itu: <code>mysql -e "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF"</code></span>
+      <span><strong>Lepas dan hentikan replikasi.</strong> Replikasi dihentikan dan pengaturannya dihapus. MySQL di server ini tetap terkunci hanya-baca; untuk membukanya jalankan di server itu: <code>mysql -e "SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF"</code> (tetap terbuka walau MySQL di-restart).</span>
     </label>
     <label class="flex flex-col gap-1">
       <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
