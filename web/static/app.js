@@ -89,6 +89,10 @@
           badge.classList.add(info.Class);
           badge.textContent = info.Label;
         };
+        // jumlah: baris log di halaman; batas: jobLogMaxLines panel
+        // (data-log-max).
+        let jumlah = log ? log.querySelectorAll(".whitespace-pre-wrap").length : 0;
+        const batas = log ? Number(log.dataset.logMax) || 5000 : 0;
         // tambahBaris menambahkan satu baris log ({id, ts, level, message})
         // bila belum tampil.
         const tambahBaris = (d) => {
@@ -96,6 +100,7 @@
             return;
           }
           lastLog = d.id;
+          jumlah++;
           const kosong = log.querySelector("[data-job-log-empty]");
           if (kosong) {
             kosong.remove();
@@ -117,9 +122,21 @@
         // Setiap kali aliran SSE tersambung (pertama kali dan setelah
         // putus), baris yang terlewat diambil dari /jobs/{id}/log?after=.
         // Selama pengambilan, event job_log ditahan supaya urutan tetap.
+        // Batas halaman dihormati: log yang sudah dipotong panel
+        // (data-log-cut) tidak disusulkan, dan penyusulan berhenti begitu
+        // halaman memuat `batas` baris; lalu pemberitahuan "Log terlalu
+        // panjang" ditampilkan dan sambungan berikutnya tidak menyusul lagi.
+        // Baris baru tetap datang langsung lewat job_log, seperti di panel.
+        const potong = () => {
+          log.dataset.logCut = "true";
+          const notice = el.querySelector("[data-log-cut-notice]");
+          if (notice) {
+            notice.hidden = false;
+          }
+        };
         let ditahan = null;
         const susulkan = () => {
-          if (ditahan || !log) {
+          if (ditahan || !log || log.dataset.logCut === "true") {
             return;
           }
           ditahan = [];
@@ -128,16 +145,26 @@
             ditahan = null;
             antre.forEach(tambahBaris);
           };
-          const ambil = () =>
-            fetch(`/jobs/${id}/log?after=${lastLog}`, { headers: { Accept: "application/json" } })
+          const ambil = () => {
+            if (jumlah >= batas) {
+              potong();
+              return Promise.resolve(null);
+            }
+            return fetch(`/jobs/${id}/log?after=${lastLog}`, { headers: { Accept: "application/json" } })
               .then((r) => (r.ok ? r.json() : []))
               .then((baris) => {
-                baris.forEach(tambahBaris);
+                const muat = baris.slice(0, Math.max(0, batas - jumlah));
+                muat.forEach(tambahBaris);
+                if (muat.length < baris.length) {
+                  potong();
+                  return null;
+                }
                 if (baris.length >= 500) {
                   return ambil();
                 }
                 return null;
               });
+          };
           ambil().catch(() => {}).finally(lepas);
         };
         const es = aliranSSE();

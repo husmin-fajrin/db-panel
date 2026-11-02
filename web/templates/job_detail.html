@@ -81,8 +81,8 @@
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
     <h2 class="card-title">Log</h2>
-    {{if .LogCut}}<p class="text-sm text-base-content/70">Log terlalu panjang; hanya baris-baris awal yang ditampilkan.</p>{{end}}
-    <div class="bg-base-200 rounded-box p-3 font-mono text-xs overflow-x-auto max-h-96 overflow-y-auto" data-job-log>
+    <p class="text-sm text-base-content/70" data-log-cut-notice{{if not .LogCut}} hidden{{end}}>Log terlalu panjang; hanya baris-baris awal yang ditampilkan.</p>
+    <div class="bg-base-200 rounded-box p-3 font-mono text-xs overflow-x-auto max-h-96 overflow-y-auto" data-job-log data-log-max="{{.LogMax}}"{{if .LogCut}} data-log-cut="true"{{end}}>
       {{range .Log}}<div class="whitespace-pre-wrap{{if eq .Level "error"}} text-error{{else if eq .Level "warn"}} text-warning{{end}}">{{fmtTime .TS}} [{{.Level}}] {{.Message}}</div>
       {{else}}<div class="text-base-content/60" data-job-log-empty>Belum ada log.</div>
       {{end}}

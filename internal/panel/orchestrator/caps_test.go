@@ -138,10 +138,30 @@ func TestJobLogCappedOnEveryPath(t *testing.T) {
 		{"replica last error", rep.LastError, maxLogLine},
 		{"failed step message", steps[j.CurrentStep].Message, maxLogLine},
 		{"agent progress step message", published("job_update", "message", "PROGRESS"), maxStepMessage},
+		{"change job's replica last error", changeJobLastError(t, long("CHANGEERR")), maxLogLine},
 	} {
 		if len(c.got) > c.max || !utf8.ValidString(c.got) || !strings.HasSuffix(c.got, "…(dipotong)") {
 			t.Errorf("%s: kept %d bytes (max %d, valid UTF-8 %v), ends %q", c.path, len(c.got), c.max,
 				utf8.ValidString(c.got), c.got[max(0, len(c.got)-16):])
 		}
 	}
+}
+
+// changeJobLastError fails an add_databases job with the agent error
+// errText and returns the replica's last error ("gagal saat …").
+func changeJobLastError(t *testing.T, errText string) string {
+	e := newEnv(t)
+	_, topo := e.readyMaster("db-master")
+	r := e.followingReplica(topo, "a")
+	r.job("mysql.dumpFrom", func(*jobs.Job, json.RawMessage) (any, error) { return nil, errors.New(errText) })
+	id, err := e.r.StartAddDatabases(context.Background(), r.id, []string{"b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	rep := e.replica(r.id)
+	if rep.State != store.ReplicaAttention || !strings.HasPrefix(rep.LastError, "gagal saat ") {
+		t.Fatalf("replica after the failed change job = %+v", rep)
+	}
+	return rep.LastError
 }

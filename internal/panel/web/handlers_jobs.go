@@ -107,6 +107,7 @@ type jobPage struct {
 	Log       []store.JobLogLine
 	LastLogID int64
 	LogCut    bool // more than jobLogMaxLines lines
+	LogMax    int  // jobLogMaxLines: app.js replays missed lines up to it
 	// create_replica, add_databases and remove_databases.
 	Master *store.Server
 	// create_replica only.
@@ -276,6 +277,7 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 		p.LastLogID = lines[len(lines)-1].ID
 	}
 	p.LogCut = len(p.Log) >= jobLogMaxLines
+	p.LogMax = jobLogMaxLines
 	a.render.renderStatus(w, status, "job_detail", p)
 }
 

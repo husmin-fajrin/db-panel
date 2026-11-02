@@ -942,7 +942,7 @@ func (jr *jobRun) fail(err error) {
 		jr.setReplicaState(store.ReplicaFailed, msg)
 	case changesDatabases(jr.job.Kind):
 		jr.logChangeFailure()
-		jr.setReplicaState(store.ReplicaAttention, failedAt(jr.job.Kind, jr.idx, err.Error()))
+		jr.setReplicaState(store.ReplicaAttention, truncate(failedAt(jr.job.Kind, jr.idx, err.Error()), maxLogLine))
 	}
 	if jr.setJob(store.JobFailed, msg) {
 		jr.r.jobFailed(jr.job.ServerID, jr.job.ID, jr.job.Kind, jr.steps[jr.idx].title, msg)

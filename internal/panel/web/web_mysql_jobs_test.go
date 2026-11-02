@@ -925,3 +925,34 @@ func TestJobLogAfterEndpoint(t *testing.T) {
 		t.Fatalf("without a session: %d %q", rec.Code, rec.Body.String())
 	}
 }
+
+// TestJobLogCutMarkedForReplay: a job page whose log was cut at
+// jobLogMaxLines marks its log data-log-cut="true" (app.js then does not
+// replay missed lines past the cap) and shows the notice; an uncut page
+// carries the cap for app.js and keeps the notice hidden.
+func TestJobLogCutMarkedForReplay(t *testing.T) {
+	e, _, _ := newMySQLEnv(t)
+	c := e.cookie()
+	e.pairedOnline(t, "db-utama")
+	newTestJob(t, e.st, waitingJob, orchestrator.KindPrepareMaster, "Periksa master")
+	now := time.Now()
+	add := func(n int) {
+		for range n {
+			if _, err := e.st.AppendJobLog(waitingJob, "info", "baris", now); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	add(3)
+	rec := e.do("GET", "/jobs/"+waitingJob, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `data-job-log data-log-max="5000">`, `data-log-cut-notice hidden>`)
+	wantNoBody(t, rec, `data-log-cut="true"`)
+
+	add(5000)
+	rec = e.do("GET", "/jobs/"+waitingJob, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `data-job-log data-log-max="5000" data-log-cut="true">`,
+		`data-log-cut-notice>Log terlalu panjang`)
+	wantNoBody(t, rec, `data-log-cut-notice hidden`)
+}

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -236,20 +235,6 @@ func (h *host) DiskFree(path string) (free, total uint64, err error) {
 
 // stderrTail bounds how much of a command's stderr ends up in its error.
 const stderrTail = 4096
-
-// newCommand builds the commands of command; tests wrap it to see them.
-var newCommand = exec.CommandContext
-
-// command is every child process the agent starts (Exec, the installer).
-// Pdeathsig: the child gets SIGTERM when the agent dies, so a mysqldump |
-// mysql pipeline or an apt run does not outlive an agent restart (systemd
-// KillMode=process leaves children running) and a Retry cannot start a
-// second load beside it.
-func command(ctx context.Context, name string, args ...string) *exec.Cmd {
-	cmd := newCommand(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
-	return cmd
-}
 
 func (h *host) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
 	cmd := command(ctx, name, args...)
