@@ -42,9 +42,9 @@ const (
 // here; DeriveReplica raises it to SevCrit after Thresholds.DisconnectAlert.
 func SeverityOf(code string) Severity {
 	switch code {
-	case StatusAgentOffline, StatusUnreachable, StatusStopped, StatusStoppedOutside, StatusDown:
+	case StatusAgentOffline, StatusUnreachable, StatusStopped, StatusStoppedOutside, StatusDown, StatusLocked:
 		return SevCrit
-	case StatusPaused, StatusDisconnected, StatusLagging, StatusLocked:
+	case StatusPaused, StatusDisconnected, StatusLagging:
 		return SevWarn
 	case StatusSynced, StatusHealthy:
 		return SevOK

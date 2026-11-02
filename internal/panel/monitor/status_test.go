@@ -367,8 +367,8 @@ func TestMasterLocked(t *testing.T) {
 	in := healthyMaster()
 	in.Snap.SuperReadOnly = true
 	got := DeriveMaster(in, th)
-	if got.Code != StatusLocked || got.Severity != SevWarn {
-		t.Errorf("got %q/%v, want Terkunci/warn", got.Code, got.Severity)
+	if got.Code != StatusLocked || got.Severity != SevCrit {
+		t.Errorf("got %q/%v, want Terkunci/crit", got.Code, got.Severity)
 	}
 }
 
@@ -377,7 +377,7 @@ func TestSeverityOf(t *testing.T) {
 		StatusNotReady: SevNeutral, StatusNeedsUpgrade: SevNeutral,
 		StatusAgentOffline: SevCrit, StatusUnreachable: SevCrit, StatusStopped: SevCrit,
 		StatusStoppedOutside: SevCrit, StatusDown: SevCrit,
-		StatusPaused: SevWarn, StatusDisconnected: SevWarn, StatusLagging: SevWarn, StatusLocked: SevWarn,
+		StatusPaused: SevWarn, StatusDisconnected: SevWarn, StatusLagging: SevWarn, StatusLocked: SevCrit,
 		StatusSynced: SevOK, StatusHealthy: SevOK,
 		"tidak dikenal": SevNeutral,
 	}
