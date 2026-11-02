@@ -32,6 +32,9 @@ const (
 
 const (
 	roleUnassigned = "unassigned"
+	// dumpUserPrefix starts the per-job dump accounts (mysql.createDumpUser),
+	// the only accounts a pinned master lets the panel drop.
+	dumpUserPrefix = managedUserPrefix + "dump_"
 	// pinFileMode is the mode the agent writes pins with.
 	pinFileMode = 0o644
 	// maxPinSize bounds what is read from a pin file.
@@ -47,7 +50,8 @@ var (
 
 // roleRefuses is the refusal table of spec 5.5: per pinned role, the
 // commands refused whatever their parameters, plus the parameter-dependent
-// rules in refusedByRole. An unassigned server refuses nothing extra
+// rules in refusedByRole (configure's role, setReadOnly's direction, and on
+// a master every dropUser but a per-job dump account's). An unassigned server refuses nothing extra
 // (refuseOnSource still guards it).
 var roleRefuses = map[string]map[string]bool{
 	roleMaster: {
@@ -58,6 +62,7 @@ var roleRefuses = map[string]map[string]bool{
 		"mysql.setReplicationFilter": true,
 		"mysql.resetReplica":         true,
 		"mysql.startReplica":         true,
+		"mysql.startUntil":           true,
 		// A master is released only through the local CLI.
 		"mysql.releaseRole": true,
 	},
@@ -80,6 +85,14 @@ func roleRefusal(role, cmd string) error {
 	return &pinError{kind: ErrRolePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
 		"server ini dipin sebagai %s; perintah %s ditolak. Untuk mengubah peran jalankan di server ini: sudo dbpanel agent set-role <peran>",
 		role, cmd)}}
+}
+
+// sourceClaimRefusal is a claim of asked while pinned is the source: two
+// first-time commands with different sources raced.
+func sourceClaimRefusal(pinned, asked string) error {
+	return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
+		"server ini sudah dipin mengikuti sumber %s; sumber %s tidak dipin. Untuk mengubah sumber jalankan di server ini: sudo dbpanel agent set-source <host:port>",
+		pinned, asked)}}
 }
 
 func sourceRefusal(pinned, asked, cmd string) error {
@@ -379,7 +392,8 @@ func (p *Pins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
 }
 
 // claimRole pins role after a successful mysql.configure when no role is
-// pinned; an existing pin is never changed.
+// pinned. An existing pin is never changed: claiming it again is a no-op,
+// claiming another role an ErrRolePinned error.
 func (p *Pins) claimRole(role string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -387,8 +401,12 @@ func (p *Pins) claimRole(role string) error {
 		return err
 	}
 	p.settled = true
-	if p.role != roleUnassigned {
+	switch p.role {
+	case role:
 		return nil
+	case roleUnassigned:
+	default:
+		return roleRefusal(p.role, "mysql.configure")
 	}
 	defer p.forget()
 	if err := writePin(p.path(RoleFile), role); err != nil {
@@ -401,18 +419,22 @@ func (p *Pins) claimRole(role string) error {
 }
 
 // claimSource pins host:port after a successful configureReplication,
-// dumpFrom or cloneFrom when no source is pinned; an existing pin is never
-// changed.
+// dumpFrom or cloneFrom when no source is pinned. An existing pin is never
+// changed: claiming it again is a no-op, claiming another source an
+// ErrSourcePinned error.
 func (p *Pins) claimSource(host string, port int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.reload(); err != nil {
 		return err
 	}
-	if p.hasSrc {
-		return nil
-	}
 	src := net.JoinHostPort(host, strconv.Itoa(port))
+	if p.hasSrc {
+		if p.sameSource(host, port) {
+			return nil
+		}
+		return sourceClaimRefusal(net.JoinHostPort(p.srcHost, strconv.Itoa(p.srcPort)), src)
+	}
 	defer p.forget()
 	if err := writePin(p.path(SourceFile), src); err != nil {
 		return err
@@ -440,28 +462,43 @@ func (p *Pins) Allow(cmd string, params any) error {
 	if refused {
 		return roleRefusal(p.role, cmd)
 	}
-	if !p.hasSrc {
-		return nil
+	host, port, names, err := sourceOf(cmd, params)
+	if err != nil || !names || !p.hasSrc || p.sameSource(host, port) {
+		return err
 	}
-	var host string
-	var port int
-	switch v := params.(type) {
-	case proto.ReplicationSourceParams:
-		host, port = v.Host, v.Port
-	case proto.SnapshotParams:
-		host, port = v.Host, v.Port
-	default:
-		return nil
+	return sourceRefusal(net.JoinHostPort(p.srcHost, strconv.Itoa(p.srcPort)), net.JoinHostPort(host, strconv.Itoa(port)), cmd)
+}
+
+// sameSource reports whether host:port is the pinned source. The caller
+// holds mu.
+func (p *Pins) sameSource(host string, port int) bool {
+	return strings.EqualFold(host, p.srcHost) && port == p.srcPort
+}
+
+// sourceOf is the source a command names: names is false for a command
+// that names none, and parameters of another type than the command's are
+// an error.
+func sourceOf(cmd string, params any) (host string, port int, names bool, err error) {
+	switch cmd {
+	case "mysql.configureReplication":
+		v, ok := params.(proto.ReplicationSourceParams)
+		if !ok {
+			return "", 0, false, fmt.Errorf("pins: %s with %T", cmd, params)
+		}
+		return v.Host, v.Port, true, nil
+	case "mysql.dumpFrom", "mysql.cloneFrom":
+		v, ok := params.(proto.SnapshotParams)
+		if !ok {
+			return "", 0, false, fmt.Errorf("pins: %s with %T", cmd, params)
+		}
+		return v.Host, v.Port, true, nil
 	}
-	if !strings.EqualFold(host, p.srcHost) || port != p.srcPort {
-		return sourceRefusal(net.JoinHostPort(p.srcHost, strconv.Itoa(p.srcPort)), net.JoinHostPort(host, strconv.Itoa(port)), cmd)
-	}
-	return nil
+	return "", 0, false, nil
 }
 
 // refusedByRole applies the table to cmd: the fixed rows of roleRefuses
-// and the rules that depend on mysql.configure's role and
-// mysql.setReadOnly's direction.
+// and the rules that depend on mysql.configure's role,
+// mysql.setReadOnly's direction and mysql.dropUser's account.
 func refusedByRole(role, cmd string, params any) (bool, error) {
 	if roleRefuses[role][cmd] {
 		return true, nil
@@ -479,6 +516,14 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 			return false, fmt.Errorf("pins: %s with %T", cmd, params)
 		}
 		return (role == roleMaster && r.On) || (role == roleReplica && !r.On), nil
+	case "mysql.dropUser":
+		u, ok := params.(proto.DropUserParams)
+		if !ok {
+			return false, fmt.Errorf("pins: %s with %T", cmd, params)
+		}
+		// The replication account (and any other) stays: dropping it would
+		// cut every replica off.
+		return role == roleMaster && !strings.HasPrefix(u.User, dumpUserPrefix), nil
 	}
 	return false, nil
 }

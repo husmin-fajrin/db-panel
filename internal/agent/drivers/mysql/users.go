@@ -91,6 +91,9 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err := validateAccountName(user, host, "user"); err != nil {
 			return nil, err
 		}
+		if err := d.allow("mysql.dropUser", proto.DropUserParams{User: user, FromHost: host}); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err

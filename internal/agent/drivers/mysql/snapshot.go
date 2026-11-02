@@ -79,11 +79,9 @@ func (d *Driver) registerSnapshotJob(reg *commands.Registry, cmd, method string,
 			}
 			// A copy before any source pin (create_replica copies before
 			// it configures replication) pins the master it came from.
-			// configureReplication pins it too and fails if it cannot, so
-			// a failure here is only logged.
 			if d.pins != nil {
-				if err := d.pins.claimSource(p.Host, p.Port); err != nil && d.Logger != nil {
-					d.Logger.Warn("source pin not written after the copy", "source", source, "err", err)
+				if err := d.pins.claimSource(p.Host, p.Port); err != nil {
+					return nil, fmt.Errorf("data sudah disalin dari %s, tetapi pin sumber gagal: %w", source, err)
 				}
 			}
 			return res, nil

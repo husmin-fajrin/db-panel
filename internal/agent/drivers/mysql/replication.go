@@ -213,6 +213,9 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		if strings.TrimSpace(p.GTIDSet) == "" {
 			return nil, &commands.ParamError{Msg: "set GTID tujuan wajib diisi"}
 		}
+		if err := d.allow("mysql.startUntil", p); err != nil {
+			return nil, err
+		}
 		h, err := d.host()
 		if err != nil {
 			return nil, err

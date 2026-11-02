@@ -101,3 +101,8 @@ var (
 	SystemStats     = systemStats
 	BinlogOldestAge = binlogOldestAge
 )
+
+// ClaimRole and ClaimSource are the claims the handlers make after a
+// successful configure, configureReplication, dumpFrom or cloneFrom.
+func (p *Pins) ClaimRole(role string) error             { return p.claimRole(role) }
+func (p *Pins) ClaimSource(host string, port int) error { return p.claimSource(host, port) }

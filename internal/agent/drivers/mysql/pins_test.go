@@ -120,6 +120,9 @@ var masterRefused = []pinCase{
 	{"mysql.setReplicationFilter", proto.ReplicationFilterParams{Databases: []string{"toko"}}},
 	{"mysql.resetReplica", nil},
 	{"mysql.startReplica", nil},
+	{"mysql.startUntil", proto.StartUntilParams{GTIDSet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5", TimeoutSec: 10}},
+	{"mysql.dropUser", proto.DropUserParams{User: "dbpanel_repl", FromHost: "%"}},
+	{"mysql.dropUser", proto.DropUserParams{User: "dbpanel_admin", FromHost: "localhost"}},
 	{"mysql.configure", proto.ConfigureParams{Role: "replica"}},
 	{"mysql.setReadOnly", proto.ReadOnlyParams{On: true}},
 	{"mysql.releaseRole", nil},
@@ -144,7 +147,9 @@ func TestMasterRefusesDestructiveCommands(t *testing.T) {
 			"server ini dipin sebagai master", "perintah "+c.cmd+" ditolak", "sudo dbpanel agent set-role <peran>")
 	}
 	for _, c := range append(replicaRefused, pinCase{"mysql.configure", proto.ConfigureParams{Role: "master"}},
-		pinCase{"mysql.stopReplica", nil}) {
+		pinCase{"mysql.stopReplica", nil},
+		// The per-job dump accounts stay droppable on a master.
+		pinCase{"mysql.dropUser", proto.DropUserParams{User: "dbpanel_dump_7", FromHost: "10.0.0.2"}}) {
 		wantPastPins(t, c.cmd, r.dispatch(c.cmd, c.params))
 	}
 	if got := pinFile(t, dir, mysql.RoleFile); got != "master" {
@@ -490,5 +495,60 @@ func TestPinsReloadAfterCLIWrite(t *testing.T) {
 	}
 	if err := cli.SetSource("a b", 3306); err == nil {
 		t.Error("SetSource accepted a host with a space")
+	}
+}
+
+// TestClaimsFailOnMismatch: a claim never changes a pin and reports a
+// different one as an error (two first-time commands racing with different
+// values); claiming the pinned value again is a no-op.
+func TestClaimsFailOnMismatch(t *testing.T) {
+	dir := pinDir(t, "replica", "10.0.0.1:3306")
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ClaimSource("10.0.0.2", 3306); !errors.Is(err, mysql.ErrSourcePinned) {
+		t.Errorf("claimSource of another host = %v, want ErrSourcePinned", err)
+	}
+	if err := p.ClaimSource("10.0.0.1", 3307); !errors.Is(err, mysql.ErrSourcePinned) {
+		t.Errorf("claimSource of another port = %v, want ErrSourcePinned", err)
+	}
+	if err := p.ClaimSource("10.0.0.1", 3306); err != nil {
+		t.Errorf("claimSource of the pinned source = %v", err)
+	}
+	if err := p.ClaimRole("master"); !errors.Is(err, mysql.ErrRolePinned) {
+		t.Errorf("claimRole master on a replica = %v, want ErrRolePinned", err)
+	}
+	if err := p.ClaimRole("replica"); err != nil {
+		t.Errorf("claimRole of the pinned role = %v", err)
+	}
+	if role, src := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "replica" || src != "10.0.0.1:3306" {
+		t.Errorf("pins after claims = %q, %q", role, src)
+	}
+}
+
+// TestAllowFailsClosedOnUnexpectedParams: a parameter type Allow does not
+// expect for a command it checks is an error, never an allowance, with or
+// without a source pin.
+func TestAllowFailsClosedOnUnexpectedParams(t *testing.T) {
+	for _, dir := range []string{pinDir(t, "replica", "10.0.0.1:3306"), pinDir(t, "", "")} {
+		p, err := mysql.LoadPins(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap, src := validSnapshot, validSource
+		for _, c := range []pinCase{
+			{"mysql.dumpFrom", &snap},
+			{"mysql.cloneFrom", validSource},
+			{"mysql.configureReplication", &src},
+			{"mysql.configureReplication", validSnapshot},
+			{"mysql.dropUser", &proto.DropUserParams{User: "dbpanel_dump_1"}},
+			{"mysql.setReadOnly", &proto.ReadOnlyParams{On: true}},
+			{"mysql.configure", nil},
+		} {
+			if err := p.Allow(c.cmd, c.params); err == nil {
+				t.Errorf("%s: Allow(%s, %T) = nil, want an error", dir, c.cmd, c.params)
+			}
+		}
 	}
 }
