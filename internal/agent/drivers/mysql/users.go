@@ -193,15 +193,18 @@ func CreateReplUser(ctx context.Context, h Host, p proto.ReplUserParams) error {
 
 // accountExistsOnMaster is the refusal of keepExisting: the panel matches
 // its words ("sudah ada di master yang dipin") to tell it from a failure.
-func accountExistsOnMaster(name string) error {
+// names are the existing rows of the account (user@host).
+func accountExistsOnMaster(names []string) error {
 	return &pinError{kind: ErrRolePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
-		"akun %s sudah ada di master yang dipin; agent tidak mengubah akun yang sudah ada (sandi dan haknya tetap)", name)}}
+		"akun %s sudah ada di master yang dipin; agent tidak mengubah akun yang sudah ada (sandi dan haknya tetap)",
+		strings.Join(names, ", "))}}
 }
 
 // createAccount creates a, or sets the password of the existing account,
 // requires TLS or not, and leaves it holding exactly grants ON *.*. With
-// keepExisting (a pinned master) an existing account is refused instead:
-// it is never altered.
+// keepExisting (a pinned master) the account is refused instead when a
+// row of a.User exists at any host: an existing one is never altered, and
+// no second row (which could shadow the first for some clients) is added.
 func createAccount(ctx context.Context, h Host, a account, grants, what string, keepExisting bool) error {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
@@ -221,8 +224,18 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 	if err != nil {
 		return fmt.Errorf("baca user %s: %w", what, err)
 	}
-	if n && keepExisting {
-		return accountExistsOnMaster(name)
+	if keepExisting {
+		hosts, err := accountHosts(ctx, conn, a.User)
+		if err != nil {
+			return fmt.Errorf("baca user %s: %w", what, err)
+		}
+		if len(hosts) > 0 {
+			names := make([]string, len(hosts))
+			for i, host := range hosts {
+				names[i] = quoteString(a.User) + "@" + quoteString(host)
+			}
+			return accountExistsOnMaster(names)
+		}
 	}
 	var mode string
 	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {
@@ -262,6 +275,24 @@ func accountExists(ctx context.Context, conn *sql.Conn, user, host string) (bool
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// accountHosts lists the hosts of user's rows in mysql.user.
+func accountHosts(ctx context.Context, conn *sql.Conn, user string) ([]string, error) {
+	rows, err := conn.QueryContext(ctx, "SELECT host FROM mysql.user WHERE user = ? ORDER BY host", user)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hosts []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, h)
+	}
+	return hosts, rows.Err()
 }
 
 // DropUser drops user@host if it exists. The name is validated (and starts

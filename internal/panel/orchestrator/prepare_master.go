@@ -118,7 +118,7 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 			// log in with what the panel stores.
 			return outcome{}, fmt.Errorf("akun replikasi %s sudah ada di master ini dari persiapan sebelumnya, dan master yang "+
 				"dipin tidak mengizinkan panel mengganti sandinya. Bila tidak ada replika lain yang memakainya, hapus akun itu di "+
-				"server ini (DROP USER '%s'@'%%';) lalu klik Ulangi", replUser, replUser)
+				"server ini (DROP USER '%s'@'%%';) lalu klik Ulangi. Pesan agent: %v", replUser, replUser, err)
 		}
 		// Prepared before with the topology's password: it stays.
 		jr.logf("info", "User replikasi %s sudah ada di master; sandinya tidak diubah.", replUser)

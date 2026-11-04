@@ -174,6 +174,11 @@ func TestMasterRefusesAccountTakeover(t *testing.T) {
 		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_x", FromHost: "10.0.0.2", Password: "rahasia"}},
 		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123ABCD", FromHost: "10.0.0.2", Password: "rahasia"}},
 		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_x", Password: "rahasia"}},
+		// A more specific host row would shadow dbpanel_repl@'%' for the
+		// replicas it matches (1045 on reconnect) and hand out BACKUP_ADMIN.
+		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "10.0.0.%", Password: "rahasia"}},
+		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "10.0.0.5", Password: "rahasia"}},
+		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "localhost", Password: "rahasia"}},
 	} {
 		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params), "server ini dipin sebagai master", "perintah "+c.cmd+" ditolak")
 	}
@@ -183,6 +188,7 @@ func TestMasterRefusesAccountTakeover(t *testing.T) {
 		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "10.0.0.2", Password: "rahasia"}},
 		{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "fd00::2", Password: "rahasia"}},
 		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", Password: "rahasia"}},
+		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "%", Password: "rahasia"}},
 	} {
 		wantPastPins(t, c.cmd, r.dispatch(c.cmd, c.params))
 	}
@@ -231,6 +237,22 @@ func TestPinnedMasterKeepsAccountsAndRestartsOnce(t *testing.T) {
 	// The stored password is still the first one.
 	if err := sqlLogin(t, inst, "dbpanel_repl", "rahasia-satu"); err != nil {
 		t.Errorf("replication account's password changed: %v", err)
+	}
+
+	// A replication account at any other host also blocks a new one at
+	// '%': the account is created once, as dbpanel_repl@'%', and never
+	// again from the panel.
+	for _, q := range []string{"DROP USER 'dbpanel_repl'@'%'", "CREATE USER 'dbpanel_repl'@'10.9.9.9' IDENTIFIED BY 'lain'"} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repl.Password = "rahasia-tiga"
+	wantRefused(t, "createReplUser while dbpanel_repl exists at another host", r.dispatch("mysql.createReplUser", repl),
+		"sudah ada di master yang dipin", "10.9.9.9")
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM mysql.user WHERE user = 'dbpanel_repl' AND host = '%'").Scan(&n); err != nil || n != 0 {
+		t.Errorf("dbpanel_repl@'%%' after the refusal: count %d, err %v; want none", n, err)
 	}
 
 	dump := proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "127.0.0.1", Password: "dump-satu"}

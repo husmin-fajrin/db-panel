@@ -553,7 +553,11 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("pins: %s with %T", cmd, params)
 		}
-		return role == roleMaster && u.User != replUserName, nil
+		// Only dbpanel_repl@'%' (what preparing the master sends): a row at
+		// a more specific host would shadow it for the replicas it matches
+		// and hand its own password REPLICATION SLAVE and BACKUP_ADMIN.
+		// createAccount refuses it once any dbpanel_repl row exists.
+		return role == roleMaster && !(u.User == replUserName && u.FromHost == "%"), nil
 	}
 	return false, nil
 }
