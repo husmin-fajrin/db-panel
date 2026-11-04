@@ -178,3 +178,92 @@ func TestFreshReportBoundFallsBack(t *testing.T) {
 	}
 	r.openAlert(rID, KindReplicaStopped)
 }
+
+// pausedThenStarted brings a replica to Dihentikan and then clears paused
+// while the agent's fresh report is held back: the hold is active.
+func pausedThenStarted(r *rig) (rID int64, ra *fakeAgent) {
+	r.t.Helper()
+	mID, topo := r.master("db-master")
+	rID = r.replica("db-replica", topo)
+	r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ra = r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	if err := r.st.SetReplicaPaused(rID, true); err != nil {
+		r.t.Fatal(err)
+	}
+	ra.setSnap(stoppedNoError)
+	r.m.ReplicaChanged(rID)
+	r.settle()
+	if v := r.view(rID); v.Status.Code != StatusPaused {
+		r.t.Fatalf("status after Stop %q, want Dihentikan", v.Status.Code)
+	}
+	ra.holdSnapshots()
+	r.clk.Add(time.Second)
+	if err := r.st.SetReplicaPaused(rID, false); err != nil {
+		r.t.Fatal(err)
+	}
+	r.m.ReplicaChanged(rID)
+	return rID, ra
+}
+
+// TestHoldDoesNotHideAgentOffline (M2): an agent that disconnects while a
+// replica's status is held shows Agent offline after the usual grace, not
+// the held status.
+func TestHoldDoesNotHideAgentOffline(t *testing.T) {
+	r := newRig(t)
+	rID, ra := pausedThenStarted(r)
+	ra.detach()
+	r.clk.Add(offlineGrace + time.Second)
+	r.m.tick()
+	if v := r.view(rID); v.Status.Code != StatusAgentOffline {
+		t.Fatalf("status with the agent gone %ds during the hold %q, want Agent offline",
+			int((offlineGrace+time.Second)/time.Second), v.Status.Code)
+	}
+}
+
+// TestHoldBound (M2): the hold lasts max(60 s, 2 × CheckEvery), at most
+// 10 minutes, whatever the check interval.
+func TestHoldBound(t *testing.T) {
+	r := newRig(t)
+	for _, c := range []struct{ every, want time.Duration }{
+		{10 * time.Second, time.Minute},
+		{15 * time.Second, time.Minute},
+		{45 * time.Second, 90 * time.Second},
+		{5 * time.Minute, 10 * time.Minute},
+		{3600 * time.Second, 10 * time.Minute},
+	} {
+		r.m.mu.Lock()
+		r.m.settings.CheckEvery = c.every
+		got := r.m.freshBound()
+		r.m.mu.Unlock()
+		if got != c.want {
+			t.Errorf("freshBound at CheckEvery %s = %s, want %s", c.every, got, c.want)
+		}
+	}
+}
+
+// TestHoldExpiresAtCap (M2): at the longest check interval the held status
+// gives way after 10 minutes, not two hours.
+func TestHoldExpiresAtCap(t *testing.T) {
+	r := newRig(t, func(st *store.Store) {
+		s, err := LoadSettings(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Reports stay current for hours: only the hold's bound is tested.
+		s.CheckEvery, s.SummaryEvery = 3600*time.Second, 3600*time.Second
+		if err := SaveSettings(st, s); err != nil {
+			t.Fatal(err)
+		}
+	})
+	rID, _ := pausedThenStarted(r)
+	r.clk.Add(10 * time.Minute)
+	r.m.tick()
+	if v := r.view(rID); v.Status.Code != StatusPaused {
+		t.Fatalf("status at the cap %q, want Dihentikan kept", v.Status.Code)
+	}
+	r.clk.Add(time.Second)
+	r.m.tick()
+	if v := r.view(rID); v.Status.Code != StatusStoppedOutside {
+		t.Fatalf("status past the cap %q, want Berhenti (di luar panel)", v.Status.Code)
+	}
+}

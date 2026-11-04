@@ -33,7 +33,9 @@ type serverState struct {
 	// awaitFresh is when the store last changed how this replica is
 	// judged (its state became ready or attention, or paused flipped):
 	// until a report taken at or after it arrives, or freshBound passes,
-	// the status judged before the change stands. Zero when not waiting.
+	// the status judged before the change stands, except that Agent
+	// offline, Tidak terjangkau and Agent perlu dimutakhirkan are judged
+	// as usual (heldThrough). Zero when not waiting.
 	awaitFresh time.Time
 
 	// From the agent.
@@ -236,10 +238,25 @@ func (m *Monitor) resolve(id int64, s *serverState, reportAt time.Time) error {
 func judgedState(state string) bool { return state == replicaReady || state == replicaAttention }
 
 // freshBound is how long a replica's status waits for a report taken
-// after a change in the store before the usual rules (staleness, agent
-// offline) take over: two agent checks and a call's timeout. The caller
+// after a change in the store before the usual rules take over: two agent
+// checks, at least minFreshBound and at most maxFreshBound (so a long
+// check interval does not keep a stale status for hours). The caller
 // holds mu.
-func (m *Monitor) freshBound() time.Duration { return 2*m.settings.CheckEvery + configureTimeout }
+func (m *Monitor) freshBound() time.Duration {
+	return min(max(minFreshBound, 2*m.settings.CheckEvery), maxFreshBound)
+}
+
+const (
+	minFreshBound = time.Minute
+	maxFreshBound = 10 * time.Minute
+)
+
+// heldThrough reports whether a status with code replaces a held one: the
+// agent's own condition (offline, too old, MySQL not answering) is judged
+// as usual while a replica waits for a fresh report.
+func heldThrough(code string) bool {
+	return code == StatusAgentOffline || code == StatusUnreachable || code == StatusNeedsUpgrade
+}
 
 // derive computes the status of a resolved server at now and records a
 // change; fromReport means a report taken at now is being ingested, so
@@ -259,6 +276,7 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 	if !online {
 		offlineSince = s.offlineSince
 	}
+	held := false
 	if !s.awaitFresh.IsZero() {
 		switch {
 		case !s.receivedAt.Before(s.awaitFresh) || now.Sub(s.awaitFresh) > m.freshBound():
@@ -266,8 +284,9 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 		case s.status.Code != "":
 			// The last report predates the change: judging it now would
 			// read the old MySQL state with the new store state (a false
-			// "Berhenti" right after Start replika or a resync).
-			return
+			// "Berhenti" right after Start replika or a resync). Only the
+			// agent's own condition is judged (heldThrough).
+			held = true
 		}
 	}
 	th := m.settings.Thresholds
@@ -289,7 +308,7 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 		// gap clock moves only when the replica's report is at least as
 		// new as the master's it is compared with; a backlog report is
 		// never compared.
-		if masterGTID != "" && !s.snapBacklog && !s.receivedAt.Before(ms.receivedAt) &&
+		if !held && masterGTID != "" && !s.snapBacklog && !s.receivedAt.Before(ms.receivedAt) &&
 			s.snap != nil && s.snap.MySQLOK && s.snap.Replica != nil {
 			rs := s.snap.Replica
 			if GTIDGap(masterGTID, joinGTIDSets(rs.RetrievedGTID, rs.ExecutedGTID)) > 0 {
@@ -303,6 +322,9 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 			ReceivedAt: m.staleBase(s, now), NeedsUpgrade: s.needsUpgrade, Snap: s.snap,
 			MasterGTIDExecuted: masterGTID, GapSince: s.gapSince, DisconnectedSince: s.disconnectedSince, Now: now,
 		}, th)
+	}
+	if held && !heldThrough(st.Code) {
+		return
 	}
 	m.apply(id, s, st, now)
 }
