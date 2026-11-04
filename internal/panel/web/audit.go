@@ -39,13 +39,20 @@ const (
 	auditCutMark   = "…(dipotong)"
 )
 
+// auditFullKeys are detail keys whose string value is never cut: where
+// alerts and their links go (SEC-47) must be readable whole. Their own
+// validation bounds them (a base URL at maxBaseURL, a chat id at 32
+// characters), well inside maxAuditDetail.
+var auditFullKeys = map[string]bool{store.SettingPanelBaseURL: true, store.SettingTelegramChatID: true}
+
 // unknownUser stands for a login_failed username that names no account: a
 // password typed in the username field must not be kept for ever.
 const unknownUser = "(tidak dikenal)"
 
 // audit records an action of the logged-in user in the audit log (SEC-17).
 // detail is stored as JSON without any field whose name mentions a
-// password, token or secret, each string cut to 128 runes, each list to 64
+// password, token or secret, each string cut to 128 runes (except the
+// values of auditFullKeys), each list to 64
 // items, and at most 2 KiB in all; outcome is auditOK or the reason it
 // failed. The values of an action that did not succeed (input refused, or
 // an action that failed) are never stored: only the field names with the
@@ -123,7 +130,8 @@ func scrubDetail(detail any, lengthsOnly bool) string {
 }
 
 // limit cuts every string to maxAuditString runes and every list to
-// maxAuditList items, marking each cut.
+// maxAuditList items, marking each cut; a string under one of
+// auditFullKeys stays whole.
 func limit(v any) any {
 	switch x := v.(type) {
 	case string:
@@ -132,6 +140,9 @@ func limit(v any) any {
 		}
 	case map[string]any:
 		for k, val := range x {
+			if _, ok := val.(string); ok && auditFullKeys[k] {
+				continue
+			}
 			x[k] = limit(val)
 		}
 	case []any:

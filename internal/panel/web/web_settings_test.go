@@ -462,4 +462,25 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 		strings.Contains(last.DetailJSON, "telegram_chat_id\":") {
 		t.Errorf("settings_update after a base URL change = %s", last.DetailJSON)
 	}
+
+	// The longest base URL accepted is recorded whole (M3): the tail of
+	// a long host is where the links really go.
+	const maxBaseURL = 200 // the longest base URL the settings accept
+	label := strings.Repeat("a", 40)
+	long := "https://panel-rs1.internal.lan." + strings.Repeat(label+".", 3) + strings.Repeat("b", 32) + ".evil.example/"
+	if len(long) != maxBaseURL {
+		t.Fatalf("test URL is %d bytes, want %d", len(long), maxBaseURL)
+	}
+	form.Set("base_url", long)
+	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+	all = auditEntries(t, e.st)
+	last = all[0]
+	for _, x := range all {
+		if x.ID > last.ID {
+			last = x
+		}
+	}
+	if !strings.Contains(last.DetailJSON, `"panel_base_url":"`+long+`"`) || strings.Contains(last.DetailJSON, "dipotong") {
+		t.Errorf("settings_update after a %d-byte base URL = %s", len(long), last.DetailJSON)
+	}
 }
