@@ -451,7 +451,9 @@ Panel mengirim peringatan ke grup Telegram lewat bot milik Anda sendiri.
 5. Klik **Kirim tes**. Pesan tes harus muncul di grup; bila gagal, panel
    menyebut alasannya.
 6. Isi **Alamat dasar panel** (mis. `http://192.168.1.10:8080`) agar pesan
-   memuat tautan ke halaman server. Centang hanya jenis peringatan yang
+   memuat tautan ke halaman server. Bila kolom ini kosong, pesan tidak
+   memuat tautan; alamat abu-abu di kolom hanya saran (alamat publik
+   panel) dan tidak dipakai sebelum diketik. Centang hanya jenis peringatan yang
    ingin dikirim; yang tidak dicentang tetap tampil di halaman
    **Peringatan**.
 
@@ -568,7 +570,7 @@ master, Buat replika, tambah dan lepas database, setujui/ulangi/batalkan
 pekerjaan, serta semua tombol di "Kontrol replika". Setiap baris berisi
 waktu, pengguna, IP, tindakan, target, dan hasilnya (berhasil, atau alasan
 ditolak); sandi dan token tidak pernah dicatat. Perubahan chat id dan
-alamat dasar panel dicatat dengan nilai barunya. Isi rincian tiap baris
+alamat dasar panel dicatat dengan nilai barunya, utuh. Isi rincian tiap baris
 dibatasi (2 KiB); untuk tindakan yang ditolak atau gagal hanya nama isian
 dan panjang nilainya yang dicatat, dan login gagal dengan nama pengguna
 yang tidak ada dicatat sebagai `(tidak dikenal)` dengan hash pendek. Saring

@@ -21,7 +21,10 @@ type Settings struct {
 	LaggingAlert    time.Duration
 	WeeklySummary   bool
 	WeeklySummaryAt string // "Mon 07:00", panel time
-	PanelBaseURL    string // links in notifications; "" means the panel's public URL
+	// PanelBaseURL starts the links in notifications; "" means messages
+	// carry no link (the settings page only suggests the panel's public
+	// URL as the field's placeholder).
+	PanelBaseURL string
 }
 
 // Defaults (plan 3, Global Constraints).
