@@ -1,80 +1,37 @@
 package panel
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/husmin-fajrin/db-panel/internal/agent"
-	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
-	"github.com/husmin-fajrin/db-panel/internal/agent/config"
-	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
-	"github.com/husmin-fajrin/db-panel/internal/agent/monitor"
-	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
-	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
-	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// attachLocal attaches the agent embedded in the panel process as the
-// connection of the panel host's own server, and returns the function that
-// detaches it. The embedded agent offers the same commands as a remote one
-// (probe, mysql.*, job.*, monitor.*) and runs the same health monitor until
-// detached; its MySQL credential, sealing key and role/source pins live in
-// the panel's config directory.
-func (p *Panel) attachLocal() (detach func()) {
-	reg := commands.NewRegistry()
-	sys := probe.RealSystem()
-	probe.Register(reg, sys, p.opts.Version)
-	id := p.localID
-	emit := func(ev proto.Event) { p.Hub.OnEvent(id, ev) }
-	runner := jobs.NewRunner(localEmitter(emit), p.log)
-	runner.Register(reg)
-	drv := agent.RegisterMySQL(reg, config.Config{ServerID: id}, p.opts.ConfigDir, sys, runner, p.log)
-	mon := monitor.New(drv, localEmitter(emit), p.log, monitor.Options{Pins: drv.Pins()})
-	mon.Register(reg)
-	reg.SetLogger(p.log.With("agent", "local"))
-	if err := agent.ApplyPolicy(reg, p.opts.ConfigDir, p.log); err != nil {
-		// The panel keeps running (its UI is needed to fix things), but its
-		// own server takes no command until the policy is readable.
-		p.log.Error("local agent policy unusable; the panel's own server refuses every command", "err", err)
-		reg.Deny(reg.Names()...)
-	}
-	conn := hub.NewLocalConn(reg, emit)
-	p.Hub.Attach(id, conn)
-	ctx, cancel := context.WithCancel(context.Background())
-	monDone := make(chan struct{})
-	go func() {
-		defer close(monDone)
-		mon.Run(ctx)
-	}()
-	return func() {
-		cancel()
-		<-monDone
-		p.Hub.Detach(id, conn)
-	}
-}
-
-// localEmitter delivers the embedded agent's job and health events to the
-// hub; the embedded agent is never offline.
-type localEmitter func(ev proto.Event)
-
-func (e localEmitter) Emit(ev proto.Event) error {
-	e(ev)
-	return nil
-}
+// The panel host's own server is served by a separate agent process (the
+// dbpanel-agent unit, as root), which pairs like any agent with a token the
+// panel leaves for it in ConfigDir.
+const (
+	localPairTokenFile = "local-pair-token"
+	localPairTokenTTL  = 15 * time.Minute
+	// legacyLocalSerial marks a local server paired by the agent that
+	// earlier versions embedded in the panel process.
+	legacyLocalSerial = "local"
+)
 
 // ensureLocalServer returns the id of the panel host's own server. When the
 // local_server_id setting is missing or names a deleted server, it adopts a
 // server named after the hostname, or <hostname>-panel, that is unpaired or
-// already paired as "local" (left behind if a previous start stopped before
-// saving the setting); a name held by a really paired remote server is
-// skipped. Without such a row it creates one under the first free name. It
-// then marks the server paired as "local" and saves the setting, so every
-// step is safe to repeat.
+// paired as "local" (left behind if a previous start stopped before saving
+// the setting); a name held by a really paired remote server is skipped.
+// Without such a row it creates one under the first free name. A local
+// server not paired by a real agent (new, adopted, or paired as "local" by
+// the embedded agent of earlier versions) is reset to unpaired at the
+// public host, and the setting saved, so every step is safe to repeat.
 func (p *Panel) ensureLocalServer() (int64, error) {
 	v, err := p.Store.GetSetting(settingLocalServerID)
 	if err != nil {
@@ -86,7 +43,14 @@ func (p *Panel) ensureLocalServer() (int64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("setelan %s tidak valid: %q", settingLocalServerID, v)
 		}
-		if _, err := p.Store.GetServer(id); err == nil {
+		srv, err := p.Store.GetServer(id)
+		if err == nil {
+			if srv.CertSerial == legacyLocalSerial {
+				if err := p.Store.MarkUnpaired(id, p.opts.PublicHost); err != nil {
+					return 0, err
+				}
+				p.log.Info("local server needs its own agent paired now", "id", id)
+			}
 			return id, nil
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return 0, err
@@ -98,7 +62,7 @@ func (p *Panel) ensureLocalServer() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := p.Store.MarkPaired(id, "local", "127.0.0.1"); err != nil {
+	if err := p.Store.MarkUnpaired(id, p.opts.PublicHost); err != nil {
 		return 0, err
 	}
 	if err := p.Store.SetSetting(settingLocalServerID, strconv.FormatInt(id, 10)); err != nil {
@@ -138,7 +102,7 @@ func (p *Panel) adoptOrCreateLocal() (id int64, name string, adopted bool, err e
 			}
 			return created.ID, name, false, nil
 		}
-		if !srv.Paired || srv.CertSerial == "local" {
+		if !srv.Paired || srv.CertSerial == legacyLocalSerial {
 			return srv.ID, name, true, nil
 		}
 	}
@@ -152,4 +116,51 @@ func localServerName() string {
 		return "panel"
 	}
 	return strings.TrimSpace(name)
+}
+
+// syncLocalPairToken leaves ConfigDir/local-pair-token for the panel host's
+// agent while the local server is not paired: a new 15-minute token and the
+// SPKI pin of the panel's HTTPS certificate, "<token>\n<pin>\n", owner
+// only (install.sh hands it to the agent). Once the server is paired the
+// file is deleted.
+func (p *Panel) syncLocalPairToken() error {
+	srv, err := p.Store.GetServer(p.localID)
+	if err != nil {
+		return err
+	}
+	if srv.Paired && srv.CertSerial != "" && srv.CertSerial != legacyLocalSerial {
+		return p.removeLocalPairToken()
+	}
+	tok, err := p.Store.CreatePairToken(srv.ID, p.now(), localPairTokenTTL)
+	if err != nil {
+		return fmt.Errorf("token server lokal: %w", err)
+	}
+	if err := writeFileAtomic(p.localPairTokenPath(), []byte(tok.Token+"\n"+p.certs.pin()+"\n")); err != nil {
+		return fmt.Errorf("tulis %s: %w", localPairTokenFile, err)
+	}
+	p.log.Info("pairing token for the local agent written", "path", p.localPairTokenPath(), "expires", tok.ExpiresAt)
+	return nil
+}
+
+// removeLocalPairToken deletes ConfigDir/local-pair-token, if any.
+func (p *Panel) removeLocalPairToken() error {
+	if err := os.Remove(p.localPairTokenPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("hapus %s: %w", localPairTokenFile, err)
+	}
+	return nil
+}
+
+func (p *Panel) localPairTokenPath() string {
+	return filepath.Join(p.opts.ConfigDir, localPairTokenFile)
+}
+
+// onPaired runs after an agent paired: the local server's token file is
+// used up.
+func (p *Panel) onPaired(serverID int64) {
+	if serverID != p.localID {
+		return
+	}
+	if err := p.removeLocalPairToken(); err != nil {
+		p.log.Warn("local agent paired, but its token file stays", "err", err)
+	}
 }

@@ -28,11 +28,15 @@ import (
 )
 
 const usage = `Penggunaan:
-  dbpanel agent [--dir DIR]                              jalankan agent
+  dbpanel agent [--dir DIR] [--panel URL]                jalankan agent; di host panel, berpasangan
+                                                         dulu lewat DIR/local-pair-token bila belum
   DBPANEL_TOKEN=TOKEN dbpanel agent pair --panel URL --ca-sha256 HEX
       [--agent-addr HOST:PORT] [--dir DIR]               pasangkan agent ke panel
   dbpanel agent pair --panel URL --ca-sha256 HEX --token-stdin [--dir DIR]
                                                          idem, token dari stdin
+  dbpanel agent pair --panel URL --token-file PATH [--dir DIR]
+                                                         idem, token dan pin dari berkas (dihapus
+                                                         setelah berhasil)
   dbpanel agent set-role {master|replica|unassigned} [--dir DIR]
                                                          ubah peran yang dipin
   dbpanel agent set-source HOST:PORT [--dir DIR]         ubah sumber replikasi yang dipin
@@ -92,12 +96,24 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 func mainRun(args []string, stderr io.Writer) int {
 	fs := newFlagSet("agent", stderr)
 	dir := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
+	panelURL := fs.String("panel", localPanelURL, "alamat panel untuk berpasangan lewat "+LocalPairTokenFile)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 0 {
 		fs.Usage()
 		return 2
+	}
+	// The panel host: install.sh left the panel's token for its own server.
+	if needsLocalPair(*dir) {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		cfg, err := pairFromFile(ctx, *panelURL, filepath.Join(*dir, LocalPairTokenFile), *dir, "")
+		stop()
+		if err != nil {
+			fmt.Fprintf(stderr, "pemasangan gagal: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stderr, "Agent terpasang sebagai server #%d (panel %s)\n", cfg.ServerID, cfg.PanelAddr)
 	}
 	cfg, err := config.Load(*dir)
 	if errors.Is(err, config.ErrNotPaired) {
@@ -146,10 +162,9 @@ func mainRun(args []string, stderr io.Writer) int {
 	return 0
 }
 
-// RegisterMySQL adds the mysql.* commands. The panel uses it for its embedded
-// agent too, so both offer the same commands. Without a MySQL installation the
-// driver has no Host and its commands report that MySQL is missing until
-// mysql.install installs it. The admin account the user connects with is
+// RegisterMySQL adds the mysql.* commands (tests use it for in-process
+// agents too). Without a MySQL installation the driver has no Host and its
+// commands report that MySQL is missing until mysql.install installs it. The admin account the user connects with is
 // kept sealed in dir/mysql.cred, whether or not MySQL is installed yet. It
 // returns the driver, which the health monitor reads its snapshots from. The
 // role and source pins (mysql.Pins) live in dir too.
@@ -252,6 +267,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	panelURL := fs.String("panel", "", "alamat panel, mis. https://192.168.1.10:8080")
 	tokenFlag := fs.String("token", "", "token pemasangan (usang: terlihat di daftar proses; pakai "+tokenEnv+")")
 	tokenStdin := fs.Bool("token-stdin", false, "baca token pemasangan dari baris pertama stdin")
+	tokenFile := fs.String("token-file", "", "baca token dan pin sertifikat panel dari berkas ini (baris 1 dan 2); dihapus setelah berhasil")
 	caPin := fs.String("ca-sha256", "", "sha256 sertifikat CA panel (64 digit heksadesimal, dari perintah pairing di panel)")
 	skipPin := fs.Bool("insecure-skip-ca-pin", false, "terima CA apa pun dari jawaban pairing (tidak aman)")
 	agentAddr := fs.String("agent-addr", "", "HOST:PORT listener agent di panel (menimpa jawaban pairing)")
@@ -260,6 +276,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	webPinFlag := *webPin
 	if *webPin == "" {
 		*webPin = strings.TrimSpace(getenv(webPinEnv))
 	}
@@ -271,6 +288,9 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--panel wajib diisi")
 		fs.Usage()
 		return 2
+	}
+	if *tokenFile != "" {
+		return mainPairTokenFile(*panelURL, *tokenFile, *tokenFlag != "" || *tokenStdin || webPinFlag != "", *agentAddr, *dir, stdout, stderr)
 	}
 	// The pairing answer may come over plain HTTP or an unverified TLS link; without a pin an on-path
 	// attacker could hand the agent its own CA and impersonate the panel.
@@ -300,7 +320,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	// The panel keeps its CA in the same default directory; pairing here
 	// would mix the agent's files into the panel's config.
 	if _, err := os.Stat(filepath.Join(*dir, "ca.key")); err == nil {
-		fmt.Fprintln(stderr, "Direktori ini milik panel (ada ca.key). Jangan pasang agent di host panel; panel sudah punya agent tertanam.")
+		fmt.Fprintln(stderr, panelDirMessage)
 		return 1
 	}
 
@@ -313,6 +333,39 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Agent terpasang sebagai server #%d (panel %s). Jalankan: dbpanel agent --dir %s\n",
 		cfg.ServerID, cfg.PanelAddr, *dir)
+	return 0
+}
+
+// panelDirMessage refuses pairing into a directory holding the panel's CA.
+const panelDirMessage = "Direktori ini milik panel (ada ca.key). Pasang agent di direktorinya sendiri (" +
+	config.DefaultDir + "); di host panel, install.sh sudah memasangkannya."
+
+// mainPairTokenFile is "agent pair --token-file": the token and the panel's
+// web pin come from the file (the panel host's local-pair-token), which is
+// deleted once the agent is paired. The pin authenticates the panel, so no
+// --ca-sha256 is needed.
+func mainPairTokenFile(panelURL, path string, otherSource bool, agentAddr, dir string, stdout, stderr io.Writer) int {
+	if otherSource {
+		fmt.Fprintln(stderr, "--token-file tidak bisa digabung dengan --token, --token-stdin atau --web-pin")
+		return 2
+	}
+	if _, _, err := readTokenFile(path); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.key")); err == nil {
+		fmt.Fprintln(stderr, panelDirMessage)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cfg, err := pairFromFile(ctx, panelURL, path, dir, agentAddr)
+	if err != nil {
+		fmt.Fprintf(stderr, "pemasangan gagal: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Agent terpasang sebagai server #%d (panel %s). Jalankan: dbpanel agent --dir %s\n",
+		cfg.ServerID, cfg.PanelAddr, dir)
 	return 0
 }
 

@@ -1,6 +1,7 @@
 // Package panel assembles the dbpanel web panel: the store, the private CA,
-// the agent hub with the panel host's own embedded agent, the UI HTTP server
-// and the mTLS agent listener.
+// the agent hub, the UI HTTP server and the mTLS agent listener. The panel
+// host's own server is served by a separate agent process, paired through
+// the local-pair-token file.
 package panel
 
 import (
@@ -29,8 +30,10 @@ import (
 
 // Defaults for Options.
 const (
-	DefaultDataDir   = "/var/lib/dbpanel"
-	DefaultConfigDir = "/etc/dbpanel"
+	// The panel's own directories, under the agent's /etc/dbpanel and
+	// /var/lib/dbpanel: the panel runs as user dbpanel (see install.sh).
+	DefaultDataDir   = "/var/lib/dbpanel/panel"
+	DefaultConfigDir = "/etc/dbpanel/panel"
 	DefaultHTTPAddr  = ":8080"
 	DefaultAgentAddr = ":8443"
 )
@@ -66,7 +69,7 @@ const (
 // Options configure a Panel. Zero fields take the defaults above.
 type Options struct {
 	DataDir   string // panel.db, bin/
-	ConfigDir string // ca.crt, ca.key, panel.key, admin-initial-password; the embedded agent's secrets.key, mysql.cred
+	ConfigDir string // ca.*, mysql-ca.*, web*, panel.key, admin-initial-password, local-pair-token
 	HTTPAddr  string // UI listener
 	AgentAddr string // mTLS agent listener
 	// PublicHost is the IP or host agents and the pairing command use to
@@ -135,16 +138,17 @@ type Panel struct {
 // returns a Panel ready to Run. Close releases it.
 func New(o Options) (*Panel, error) {
 	o = withDefaults(o)
-	// The data directory holds panel.db (password and token hashes): owner
-	// only, also when it already existed with a looser mode.
-	if err := os.MkdirAll(o.DataDir, 0o700); err != nil {
-		return nil, fmt.Errorf("buat direktori data: %w", err)
-	}
-	if err := os.Chmod(o.DataDir, 0o700); err != nil {
-		return nil, fmt.Errorf("atur izin direktori data: %w", err)
-	}
-	if err := os.MkdirAll(o.ConfigDir, 0o700); err != nil {
-		return nil, fmt.Errorf("buat direktori konfigurasi: %w", err)
+	// Both directories are the panel's own (panel.db with password and
+	// token hashes; the CA keys): owner only, also when they already
+	// existed with a looser mode. Their parents are not touched (install.sh
+	// keeps /etc/dbpanel and /var/lib/dbpanel root's, mode 0711).
+	for _, d := range []struct{ path, what string }{{o.DataDir, "data"}, {o.ConfigDir, "konfigurasi"}} {
+		if err := os.MkdirAll(d.path, 0o700); err != nil {
+			return nil, fmt.Errorf("buat direktori %s: %w", d.what, err)
+		}
+		if err := os.Chmod(d.path, 0o700); err != nil {
+			return nil, fmt.Errorf("atur izin direktori %s: %w", d.what, err)
+		}
 	}
 	st, err := store.Open(filepath.Join(o.DataDir, dbFile))
 	if err != nil {
@@ -210,8 +214,7 @@ func New(o Options) (*Panel, error) {
 		Publish: func(event string, data any) { p.publish(event, data) },
 		Logger:  p.log,
 		Now:     func() time.Time { return p.now() },
-		// A replica reaches the panel host's own MySQL at the public host,
-		// not at its paired address 127.0.0.1.
+		// A replica reaches the panel host's own MySQL at the public host.
 		LocalServerID: p.localID,
 		PublicHost:    p.opts.PublicHost,
 		// A failed job opens job_failed; its successful retry or its
@@ -312,8 +315,10 @@ func (p *Panel) init() error {
 	if err := p.bootstrapAdmin(); err != nil {
 		return err
 	}
-	p.localID, err = p.ensureLocalServer()
-	return err
+	if p.localID, err = p.ensureLocalServer(); err != nil {
+		return err
+	}
+	return p.syncLocalPairToken()
 }
 
 // resolvePublicHost fills opts.PublicHost: an explicit value is saved as the

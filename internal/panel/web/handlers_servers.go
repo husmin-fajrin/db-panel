@@ -16,12 +16,13 @@ const (
 	pairTokenTTL      = 24 * time.Hour
 	msgServerNotFound = "Server tidak ditemukan"
 	msgLocalDelete    = "Server ini adalah host panel dan tidak bisa dihapus"
-	msgLocalToken     = "Server ini adalah host panel; agent-nya tertanam di panel dan tidak perlu dipasang"
+	msgLocalToken     = "Server ini adalah host panel; agent-nya dipasangkan oleh install.sh panel"
 )
 
-// localCertSerial marks the panel host's own server, whose agent is embedded
-// in the panel process.
-const localCertSerial = "local"
+// isLocal reports whether srv is the panel host's own server.
+func (a *app) isLocal(srv store.Server) bool {
+	return a.LocalServerID != 0 && srv.ID == a.LocalServerID
+}
 
 type dashboardPage struct {
 	Page
@@ -50,7 +51,7 @@ type serverRow struct {
 	MySQLVersion string
 	OS           string
 	Status       statusView
-	Local        bool // the panel host: its agent is embedded in the panel
+	Local        bool // the panel host: its agent is installed with the panel
 	// NeedsUpgrade: the agent is too old for monitoring. UpgradeCommand
 	// reinstalls it; "" when no re-pairing token of this process is active
 	// (the server page creates one).
@@ -178,7 +179,7 @@ func (a *app) listServers(w http.ResponseWriter, r *http.Request) {
 	p.Notice = notices[r.URL.Query().Get("pesan")]
 	now := a.Now()
 	for _, s := range servers {
-		row := serverRow{Server: s, Online: s.Paired && a.Hub.IsOnline(s.ID), Local: s.CertSerial == localCertSerial}
+		row := serverRow{Server: s, Online: s.Paired && a.Hub.IsOnline(s.ID), Local: a.isLocal(s)}
 		if probe := a.probe(s); probe != nil {
 			row.OS = probe.OS
 			if probe.MySQL.Installed {
@@ -244,11 +245,13 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 
 // renderServer renders the server page with v's status and messages.
 func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView) {
-	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial, Connect: v.Form}
+	p := serverDetailPage{Page: a.page(r), Server: srv, Local: a.isLocal(srv), Connect: v.Form}
 	p.Flash, p.Notice = v.Flash, v.Notice
 	now := a.Now()
 	tok, found, err := a.Store.ActivePairToken(srv.ID, now)
-	if err == nil && !found && !srv.Paired {
+	// The panel host's agent pairs with the token the panel wrote for it;
+	// a new one here would replace that token.
+	if err == nil && !found && !srv.Paired && !p.Local {
 		tok, err = a.Store.CreatePairToken(srv.ID, now, pairTokenTTL)
 		found = err == nil
 	}
@@ -351,7 +354,7 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if srv.CertSerial == localCertSerial {
+	if a.isLocal(srv) {
 		a.audit(r, "server_token", auditServer, srv.ID, nil, msgLocalToken)
 		http.Error(w, msgLocalToken, http.StatusConflict)
 		return
@@ -379,7 +382,7 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := map[string]any{"name": srv.Name}
-	if srv.CertSerial == localCertSerial {
+	if a.isLocal(srv) {
 		a.audit(r, "server_delete", auditServer, srv.ID, detail, msgLocalDelete)
 		http.Error(w, msgLocalDelete, http.StatusConflict)
 		return

@@ -1,6 +1,6 @@
 // Package hub keeps the panel's registry of live agent connections and routes
 // commands to them. A connection is either a WebSocket from a remote agent
-// (WSConn) or the in-process agent of the panel host (NewLocalConn).
+// (WSConn) or an in-process command registry (NewLocalConn, used by tests).
 package hub
 
 import (

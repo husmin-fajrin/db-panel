@@ -14,7 +14,8 @@ import (
 // DefaultDir holds the agent's configuration, key and certificates.
 const DefaultDir = "/etc/dbpanel"
 
-const fileName = "agent.yaml"
+// FileName is the agent configuration in the agent directory.
+const FileName = "agent.yaml"
 
 // ErrNotPaired is returned by Load when the agent has no configuration yet.
 var ErrNotPaired = errors.New("agent belum dipasangkan (jalankan: dbpanel agent pair)")
@@ -33,19 +34,19 @@ type Config struct {
 // Load reads dir/agent.yaml, filling empty file paths with their defaults in
 // dir. It returns ErrNotPaired when the file does not exist.
 func Load(dir string) (Config, error) {
-	b, err := os.ReadFile(filepath.Join(dir, fileName))
+	b, err := os.ReadFile(filepath.Join(dir, FileName))
 	if errors.Is(err, os.ErrNotExist) {
 		return Config{}, ErrNotPaired
 	}
 	if err != nil {
-		return Config{}, fmt.Errorf("baca %s: %w", fileName, err)
+		return Config{}, fmt.Errorf("baca %s: %w", FileName, err)
 	}
 	var c Config
 	if err := yaml.Unmarshal(b, &c); err != nil {
-		return Config{}, fmt.Errorf("%s tidak valid: %w", fileName, err)
+		return Config{}, fmt.Errorf("%s tidak valid: %w", FileName, err)
 	}
 	if c.PanelAddr == "" || c.ServerID <= 0 {
-		return Config{}, fmt.Errorf("%s tidak lengkap: panel_addr dan server_id wajib diisi", fileName)
+		return Config{}, fmt.Errorf("%s tidak lengkap: panel_addr dan server_id wajib diisi", FileName)
 	}
 	if c.CertFile == "" {
 		c.CertFile = filepath.Join(dir, "agent.crt")
@@ -64,9 +65,9 @@ func Load(dir string) (Config, error) {
 func Save(dir string, c Config) error {
 	b, err := yaml.Marshal(c)
 	if err != nil {
-		return fmt.Errorf("encode %s: %w", fileName, err)
+		return fmt.Errorf("encode %s: %w", FileName, err)
 	}
-	return WriteFile(dir, fileName, b)
+	return WriteFile(dir, FileName, b)
 }
 
 // WriteFile atomically replaces dir/name with data, mode 0600, creating dir

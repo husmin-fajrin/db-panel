@@ -81,6 +81,9 @@ type Deps struct {
 	CertInfo func() CertInfo
 	// Certs changes the panel's HTTPS certificate; nil refuses (tests).
 	Certs CertAdmin
+	// LocalServerID is the panel host's own server (0: none): it cannot be
+	// deleted, and its agent is paired by install.sh, not from the UI.
+	LocalServerID int64
 }
 
 // SettingsStore is what the settings page uses to read and change the

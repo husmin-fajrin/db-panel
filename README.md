@@ -20,8 +20,15 @@ curl -fsSL https://raw.githubusercontent.com/husmin-fajrin/db-panel/main/scripts
 Skrip mengunduh `SHA256SUMS` dan binary dari GitHub Releases, memeriksa
 binary dengan `SHA256SUMS` (berhenti dengan "Checksum binary panel tidak
 cocok" bila berbeda), memasangnya ke `/usr/local/bin/dbpanel`, membuat
-`/etc/dbpanel/` dan `/var/lib/dbpanel/` (keduanya 0700), memasang service
-`dbpanel-panel`, lalu mencetak alamat panel, pengguna dan sandi awal.
+pengguna sistem `dbpanel` (tanpa shell login) dan direktori panel
+`/etc/dbpanel/panel/` serta `/var/lib/dbpanel/panel/` (0700, milik
+`dbpanel`), memasang dan menyalakan service `dbpanel-panel` (berjalan sebagai
+`dbpanel`, bukan root) lalu service `dbpanel-agent` untuk host panel sendiri,
+dan mencetak alamat panel, pengguna dan sandi awal. Agent host panel adalah
+agent biasa yang terpisah dari panel: saat start, panel menulis token
+pemasangan untuk servernya sendiri (berlaku 15 menit), skrip menyerahkannya
+ke agent, dan agent berpasangan sendiri lewat `https://127.0.0.1:8080`
+(lihat "Keamanan" untuk tata letak berkas).
 Rilis tertentu: tambahkan `DBPANEL_VERSION=v0.1.0` sebelum `bash`
 (`... | sudo DBPANEL_VERSION=v0.1.0 bash`).
 
@@ -50,9 +57,8 @@ sudo DBPANEL_BIN=dist/dbpanel_linux_amd64 DBPANEL_BIN_DIR=dist bash scripts/inst
 ```
 
 Berkas `dbpanel_linux_amd64`/`dbpanel_linux_arm64` disalin ke
-`/var/lib/dbpanel/bin/` (nama lain diabaikan). Skrip aman
-dijalankan ulang untuk memperbarui panel: binary diganti dan service dimulai
-ulang.
+`/var/lib/dbpanel/panel/bin/` (nama lain diabaikan). Skrip aman
+dijalankan ulang, juga untuk memperbarui panel (lihat "Pembaruan").
 
 **HTTPS sejak pasang.** Panel langsung memakai HTTPS di port 8080, tanpa
 langkah tambahan: ia membuat sertifikat keamanannya sendiri saat start
@@ -73,19 +79,21 @@ browser membuka panel tanpa peringatan.
 Buka `https://<ip-panel>:8080` dan masuk sebagai `admin` (peringatan
 browser? lihat "HTTPS sejak pasang" di atas). Sandi awal
 dicetak di akhir instalasi dan tersimpan di
-`/etc/dbpanel/admin-initial-password` (hanya bisa dibaca root):
+`/etc/dbpanel/panel/admin-initial-password` (hanya bisa dibaca root dan
+pengguna `dbpanel`):
 
 ```sh
-sudo cat /etc/dbpanel/admin-initial-password
+sudo cat /etc/dbpanel/panel/admin-initial-password
 ```
 
 Hapus berkas itu setelah login pertama (`sudo rm
-/etc/dbpanel/admin-initial-password`).
+/etc/dbpanel/panel/admin-initial-password`).
 
-Lupa sandi? Buat sandi baru (dicetak ke layar):
+Lupa sandi? Buat sandi baru (dicetak ke layar), sebagai pengguna panel
+supaya berkas database tetap miliknya:
 
 ```sh
-sudo dbpanel panel reset-password
+sudo -u dbpanel dbpanel panel reset-password
 ```
 
 `reset-password` juga mengakhiri semua sesi yang sedang login (dalam
@@ -162,8 +170,12 @@ ulang agent**. Panel membuat token baru dan menampilkan perintah pemasangan;
 jalankan perintah itu di server tersebut. Agent lama tetap bekerja sampai
 agent baru berhasil dipasangkan; saat itu koneksi agent lama langsung
 diputus dan sertifikatnya tidak diterima lagi. Ini juga cara mencabut
-sertifikat agent yang kuncinya diduga bocor. Server panel sendiri tidak perlu (dan tidak bisa) dipasangi
-agent: agent-nya tertanam di panel.
+sertifikat agent yang kuncinya diduga bocor. Server panel sendiri tidak perlu
+dipasangi agent dari halaman server: `install.sh` memasang dan
+memasangkan agent-nya (service `dbpanel-agent`), dan server itu tidak bisa
+dihapus. Agent itu tidak bisa dipasangkan ulang dari halaman server
+(panel hanya menulis token untuknya selama servernya belum berpasangan),
+jadi cadangkan juga `/etc/dbpanel` di host panel.
 
 **Hapus server:** koneksi agent-nya langsung diputus dan sertifikatnya
 ditolak. Service `dbpanel-agent` di server itu tetap terpasang; matikan
@@ -332,7 +344,7 @@ dan masa simpan binary log yang sudah ada dipertahankan.
 ### Sertifikat MySQL
 
 Panel punya penerbit sertifikat sendiri untuk MySQL (CA MySQL,
-`/etc/dbpanel/mysql-ca.crt` dan `mysql-ca.key`, dibuat saat panel pertama
+`/etc/dbpanel/panel/mysql-ca.crt` dan `mysql-ca.key`, dibuat saat panel pertama
 start, masa 10 tahun), terpisah dari CA agent. Tiap server mendapat
 sertifikat sendiri (masa 2 tahun) yang hanya memuat nama yang panel
 ketahui sendiri: alamat server di panel dan, untuk master, alamat untuk
@@ -474,8 +486,8 @@ memperbaikinya.
 ### Cadangkan kunci panel
 
 Sandi replikasi disimpan di `panel.db` tersegel dengan
-`/etc/dbpanel/panel.key`. **Cadangkan `/etc/dbpanel/panel.key` bersama
-`/var/lib/dbpanel/panel.db`** di tempat aman di luar host panel. Tanpa
+`/etc/dbpanel/panel/panel.key`. **Cadangkan `/etc/dbpanel/panel/panel.key`
+bersama `/var/lib/dbpanel/panel/panel.db`** di tempat aman di luar host panel. Tanpa
 kunci itu sandi replikasi tidak bisa dibuka lagi: menyiapkan master ulang
 membuat sandi baru, dan setiap replika harus dibuat ulang. Simpan kunci
 terpisah dari cadangan database biasa; siapa pun yang memegang keduanya
@@ -484,10 +496,10 @@ bisa membuka sandi replikasi.
 ### Memindahkan panel ke server lain
 
 1. Hentikan panel: `sudo systemctl stop dbpanel-panel`.
-2. Salin seluruh `/etc/dbpanel` (termasuk `ca.crt`, `ca.key`, `panel.key`)
-   dan `/var/lib/dbpanel` ke server baru dengan izin yang sama (direktori
-   0700, milik root).
-3. Pasang panel di server baru (`install.sh`), jalankan dengan
+2. Salin `/etc/dbpanel/panel` (termasuk `ca.crt`, `ca.key`, `panel.key`)
+   dan `/var/lib/dbpanel/panel` ke tempat yang sama di server baru.
+3. Pasang panel di server baru (`install.sh`; ia memberikan kedua
+   direktori itu ke pengguna `dbpanel`), jalankan dengan
    `--public-host <alamat baru>` bila perlu.
 4. Di setiap server database, ubah `panel_addr` di
    `/etc/dbpanel/agent.yaml` ke `<alamat baru>:8443`, lalu
@@ -517,7 +529,7 @@ Status replika, dalam kata sederhana:
 | Berhenti | replikasi berhenti karena error; panel menyebut nomor error, artinya, dan sarannya |
 | Tidak terjangkau | MySQL di replika tidak menjawab |
 | Agent offline | agent tidak terhubung ke panel, atau laporannya terlambat |
-| Agent perlu dimutakhirkan | agent versi lama yang belum bisa memantau (lihat "Pembaruan agent") |
+| Agent perlu dimutakhirkan | agent versi lama yang belum bisa memantau (lihat "Pembaruan") |
 | Belum siap | replika sedang dibuat atau disync ulang, atau pembuatannya gagal |
 
 Penanda merah **Kunci terlepas** tampil di samping status apa pun bila
@@ -710,11 +722,33 @@ dicadangkan bersamanya. Penjagaannya ada di dalam `panel.db` sendiri, jadi
 catatan ini tahan ubah terhadap aplikasi, bukan terhadap root di host panel
 (yang bisa mengubah berkasnya).
 
-## Pembaruan agent
+## Pembaruan
 
-Perbarui panel dulu (jalankan ulang `install.sh`, lihat "Pasang panel").
-Agent tertanam di panel ikut terbarui. Agent di server database yang
-terlalu lama untuk pemantauan ditandai **perlu dimutakhirkan** di kolom
+Perbarui **panel dulu, lalu agent**. Jalankan ulang `install.sh` di host
+panel (perintah yang sama dengan "Pasang panel"). Skrip:
+
+1. memasang binary baru;
+2. menghentikan `dbpanel-panel`;
+3. membuat pengguna `dbpanel` bila belum ada;
+4. bila panel sebelumnya berjalan sebagai root dengan berkas langsung di
+   `/etc/dbpanel` dan `/var/lib/dbpanel`, memindahkan `panel.db`, `bin/`,
+   `ca.*`, `mysql-ca.*`, `web*`, `panel.key` dan `admin-initial-password`
+   ke subfolder `panel/` (isi tidak berubah, jadi sertifikat, pin, dan
+   sandi tetap), lalu memberikan subfolder itu ke `dbpanel`; berkas agent
+   di `/etc/dbpanel` (akun MySQL tersegel, kebijakan lokal, pin `role` dan
+   `source`) tidak disentuh;
+5. menulis unit systemd baru dan menyalakan panel sebagai `dbpanel`;
+6. menunggu (paling lama 60 detik) token yang ditulis panel untuk servernya
+   sendiri, memindahkannya ke `/etc/dbpanel/local-pair-token` (0600 root),
+   lalu menyalakan `dbpanel-agent`, yang berpasangan dengan token itu lalu
+   berjalan. Agent tertanam versi lama digantikan agent ini; server host
+   panel tetap baris yang sama (riwayat dan pemantauannya tetap).
+
+Tiap langkah memeriksa keadaannya dulu, jadi skrip aman dijalankan ulang,
+juga bila terputus di tengah jalan. Selama itu panel mati beberapa detik;
+agent di server lain tersambung kembali sendiri.
+
+Agent di server database yang terlalu lama untuk pemantauan ditandai **perlu dimutakhirkan** di kolom
 **Versi agent** daftar **Server**, dan statusnya **Agent perlu
 dimutakhirkan**. Untuk memutakhirkannya:
 
@@ -743,7 +777,7 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   rusak saat start, panel menulis peringatan ke log dan memakai (atau
   membuat ulang) sertifikatnya sendiri.
 - **Sertifikat keamanan panel** yang dipasang pengguna (`dbpanel-panel.crt`)
-  adalah sertifikat penerbit (CA web, `/etc/dbpanel/web-ca.crt`) yang
+  adalah sertifikat penerbit (CA web, `/etc/dbpanel/panel/web-ca.crt`) yang
   dibatasi hanya untuk alamat panel: nama dan IP panel serta subnet kartu
   jaringannya saat dibuat (name constraints). Sekalipun kuncinya bocor,
   sertifikat itu tidak bisa dipakai untuk menyamar sebagai situs lain.
@@ -781,14 +815,34 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   dbpanel agent pair --panel https://<ip-panel>:8080 --ca-sha256 <sidik jari
   CA>`, atau `--token-stdin` (lihat "Alamat panel untuk agent").
   Sidik jari CA ada di skrip pemasang (`CA_SHA256=...`), atau hitung di host
-  panel dengan `openssl x509 -in /etc/dbpanel/ca.crt -outform DER | sha256sum`.
+  panel dengan `openssl x509 -in /etc/dbpanel/panel/ca.crt -outform DER | sha256sum`.
   `--ca-sha256` wajib; `--insecure-skip-ca-pin` mematikan pemeriksaan itu
   (tidak aman, hanya untuk jaringan yang sepenuhnya tepercaya).
-- Service `dbpanel-panel` dan `dbpanel-agent` berjalan sebagai root
-  (panel menjalankan agent tertanam untuk host-nya sendiri) dengan
-  hardening systemd: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`,
-  `ProtectKernel*`, dan `ProtectSystem=strict` untuk panel (hanya
-  `/var/lib/dbpanel` dan `/etc/dbpanel` yang bisa ditulis). Unit agent
+- **Panel bukan root.** Service `dbpanel-panel` berjalan sebagai pengguna
+  sistem `dbpanel` (tanpa shell login) dan menolak berjalan sebagai root
+  (`dbpanel panel` meminta `--allow-root`, hanya untuk pengujian). Panel
+  tidak menjalankan perintah apa pun di host-nya; MySQL host panel diurus
+  service `dbpanel-agent` (root) seperti di server lain, berpasangan dengan
+  sertifikatnya sendiri.
+- **Tata letak berkas di host panel:**
+  - `/etc/dbpanel/panel/` (0700 `dbpanel`): `ca.crt`/`ca.key` (CA agent),
+    `mysql-ca.*`, `web*` (HTTPS), `panel.key`, `admin-initial-password`,
+    dan sementara `local-pair-token` (0600: token server lokal dan pin
+    HTTPS, ditulis tiap start selama agent lokal belum berpasangan,
+    dihapus begitu berpasangan);
+  - `/var/lib/dbpanel/panel/` (0700 `dbpanel`): `panel.db`, `bin/`;
+  - `/etc/dbpanel/` (0711 root): berkas agent host panel, sama seperti di
+    server lain (`agent.yaml`, `agent.key`, `mysql.cred`, `role`, ...);
+    `/var/lib/dbpanel/` 0711 root.
+  Panel tidak bisa membaca berkas agent, dan agent tidak memakai berkas
+  panel.
+- Hardening systemd: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`,
+  `ProtectKernel*`, dan untuk panel `ProtectSystem=strict` (hanya
+  `/var/lib/dbpanel/panel` dan `/etc/dbpanel/panel` yang bisa ditulis,
+  tanpa kapabilitas apa pun: port 8080 dan 8443 tidak memerlukannya). Di
+  host panel, `dbpanel-agent` dinyalakan setelah panel (drop-in
+  `dbpanel-agent.service.d/panel.conf`). Service `dbpanel-agent` berjalan
+  sebagai root. Unit agent
   tidak memakai `ProtectSystem`: agent harus menulis `/etc/dbpanel` (akun
   MySQL tersegel), file konfigurasi MySQL di `/etc`, dan memasang paket
   MySQL ke `/usr`. Unit agent memakai `KillMode=process`, supaya mysqld
@@ -800,11 +854,11 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   server seperti itu, nyalakan MySQL lewat systemd atau aaPanel sendiri
   (agent hanya memberi tahu), atau pindahkan `socket` ke luar `/tmp`
   (misalnya `/run/mysqld/mysqld.sock`).
-- Jangan tempatkan master produksi di host panel. Agent tertanam di panel
-  memegang pinnya di direktori konfigurasi panel, jadi pin itu bukan batas
-  terhadap proses panel sendiri: panel yang disusupi bisa mengubahnya.
-  Pin master hanya melindungi master yang agentnya berjalan di server
-  lain.
+- Master di host panel: pin peran dan sumbernya ada di `/etc/dbpanel`
+  milik root, di luar jangkauan proses panel (pengguna `dbpanel`), sama
+  seperti di server lain. Panel yang disusupi tetap bisa meminta apa pun
+  yang diizinkan agent, jadi master produksi tetap lebih baik di server
+  terpisah.
 - Akun dump sementara (`dbpanel_dump_*`) di MySQL 8.0.31 ke atas mendapat
   `SELECT, FLUSH_TABLES, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT`, tanpa
   `RELOAD`. `FLUSH_TABLES` (hak dinamis sejak 8.0.31) cukup untuk `FLUSH
@@ -860,7 +914,7 @@ make release VERSION=0.1.0   # -> dist/dbpanel_linux_{amd64,arm64} dan dist/SHA2
 sudo DBPANEL_BIN=dist/dbpanel_linux_amd64 DBPANEL_BIN_DIR=dist bash scripts/install.sh
 ```
 
-`DBPANEL_BIN_DIR=dist` menyalin kedua binary ke `/var/lib/dbpanel/bin/`
+`DBPANEL_BIN_DIR=dist` menyalin kedua binary ke `/var/lib/dbpanel/panel/bin/`
 agar panel dapat melayani agent berarsitektur lain tanpa internet.
 
 ## Menjalankan test

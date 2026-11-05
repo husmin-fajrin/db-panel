@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +36,7 @@ func TestPairRefusesPanelConfigDir(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
-	want := "Direktori ini milik panel (ada ca.key). Jangan pasang agent di host panel; panel sudah punya agent tertanam."
+	want := "Direktori ini milik panel (ada ca.key)."
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -337,5 +338,96 @@ func TestCLIPairWebPin(t *testing.T) {
 	wrong := map[string]string{"DBPANEL_TOKEN": "ENVTK-AAAAA-BBBBB", "DBPANEL_WEB_PIN": "sha256//" + strings.Repeat("A", 43) + "="}
 	if code, stderr, sent := run(wrong); code != 1 || sent || !strings.Contains(stderr, "tidak cocok dengan pin") {
 		t.Fatalf("wrong pin: code %d sent %v stderr %q", code, sent, stderr)
+	}
+}
+
+// writeTokenFile writes a local-pair-token file ("<token>\n<pin>\n").
+func writeTokenFile(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, "local-pair-token")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCLIPairTokenFile: "pair --token-file" takes the token and the web pin
+// from the file the panel wrote, needs no --ca-sha256 (the pin authenticates
+// the panel), keeps the file when pairing fails and refuses a file without
+// a valid pin or a second token source.
+func TestCLIPairTokenFile(t *testing.T) {
+	ch := make(chan string, 4)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req proto.PairRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		ch <- req.Token
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(ts.Close)
+	pin := pinOf(t, ts)
+	run := func(content string, args ...string) (int, string, string) {
+		dir := t.TempDir()
+		path := writeTokenFile(t, dir, content)
+		var out, errb bytes.Buffer
+		code := Main(append([]string{"pair", "--panel", ts.URL, "--token-file", path, "--dir", dir}, args...), &out, &errb)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("token file gone after a failed pairing: %v", err)
+		}
+		select {
+		case tok := <-ch:
+			return code, errb.String(), tok
+		default:
+			return code, errb.String(), ""
+		}
+	}
+	if code, stderr, tok := run("FILET-AAAAA-BBBBB\n" + pin + "\n"); code != 1 || tok != "FILET-AAAAA-BBBBB" ||
+		!strings.Contains(stderr, "token ditolak oleh panel") || strings.Contains(stderr, "Peringatan") {
+		t.Fatalf("token file: code %d token %q stderr %q", code, tok, stderr)
+	}
+	wrong := "sha256//" + strings.Repeat("A", 43) + "="
+	if code, stderr, tok := run("FILET-AAAAA-BBBBB\n" + wrong + "\n"); code != 1 || tok != "" ||
+		!strings.Contains(stderr, "tidak cocok dengan pin") {
+		t.Fatalf("wrong pin: code %d token %q stderr %q", code, tok, stderr)
+	}
+	for _, bad := range []string{"", "FILET-AAAAA-BBBBB\n", "FILET-AAAAA-BBBBB\nbukan-pin\n", "\n" + pin + "\n"} {
+		if code, stderr, tok := run(bad); code != 2 || tok != "" {
+			t.Errorf("file %q: code %d token %q stderr %q", bad, code, tok, stderr)
+		}
+	}
+	if code, stderr, tok := run("FILET-AAAAA-BBBBB\n"+pin+"\n", "--token-stdin"); code != 2 || tok != "" {
+		t.Errorf("--token-file with --token-stdin: code %d token %q stderr %q", code, tok, stderr)
+	}
+	if code, stderr, _ := run("FILET-AAAAA-BBBBB\n"+pin+"\n", "--token-file", "/tidak/ada"); code != 2 ||
+		!strings.Contains(stderr, "/tidak/ada") {
+		t.Errorf("missing file: code %d stderr %q", code, stderr)
+	}
+}
+
+// TestRunPairsWithLocalTokenFirst: "dbpanel agent" on the panel host, with
+// install.sh's local-pair-token and no agent.yaml yet, pairs first (here the
+// panel refuses, so it stops) instead of reporting that it is not paired.
+func TestRunPairsWithLocalTokenFirst(t *testing.T) {
+	ch := make(chan string, 1)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req proto.PairRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		ch <- req.Token
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(ts.Close)
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "LOCAL-AAAAA-BBBBB\n"+pinOf(t, ts)+"\n")
+	var errb bytes.Buffer
+	code := Main([]string{"--dir", dir, "--panel", ts.URL}, io.Discard, &errb)
+	if code != 1 || !strings.Contains(errb.String(), "token ditolak oleh panel") {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+	select {
+	case tok := <-ch:
+		if tok != "LOCAL-AAAAA-BBBBB" {
+			t.Fatalf("token sent = %q", tok)
+		}
+	default:
+		t.Fatal("no pairing request")
 	}
 }

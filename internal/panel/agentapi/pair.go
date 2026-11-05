@@ -20,9 +20,6 @@ import (
 // maxPairBody caps the pairing request body.
 const maxPairBody = 64 << 10
 
-// localCertSerial marks the panel host's own server.
-const localCertSerial = "local"
-
 // Deps are the panel services the agent endpoints use.
 type Deps struct {
 	Store *store.Store
@@ -37,6 +34,12 @@ type Deps struct {
 	// panel's HTTPS certificate, put into the install script; nil renders
 	// it empty.
 	WebPin func() string
+	// LocalServerID is the panel host's own server; its agent pairs from
+	// 127.0.0.1, and the server's address is PublicHost instead.
+	LocalServerID int64
+	PublicHost    string
+	// OnPaired, if set, is called with the server id after each pairing.
+	OnPaired func(serverID int64)
 	// OnAttach, if set, is called with each connection right after it is
 	// attached to the hub (used by tests to reach the connection).
 	OnAttach func(serverID int64, c *hub.WSConn)
@@ -58,7 +61,8 @@ func (d Deps) logger() *slog.Logger {
 
 // PairHandler serves POST /agent/pair: it consumes the one-time token, signs
 // the agent's CSR and marks the server paired with the new certificate's
-// serial and the caller's IP.
+// serial and the caller's IP (the public host for the panel host's own
+// server).
 func PairHandler(d Deps) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := d.logger()
@@ -103,31 +107,17 @@ func PairHandler(d Deps) http.Handler {
 			writeError(w, http.StatusInternalServerError, "kesalahan internal")
 			return
 		}
-		// The panel host's own server runs the embedded agent; a token left
-		// over from before it was adopted must not hand it to another host.
-		srv, err := d.Store.GetServer(pt.ServerID)
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusForbidden, "token ditolak")
-			return
-		}
-		if err != nil {
-			log.Error("pairing: get server", "server_id", pt.ServerID, "err", err)
-			writeError(w, http.StatusInternalServerError, "kesalahan internal")
-			return
-		}
-		if srv.CertSerial == localCertSerial {
-			log.Warn("pairing rejected: token for the panel host's own server", "server_id", pt.ServerID,
-				"remote", ip, "hostname", req.Hostname)
-			writeError(w, http.StatusForbidden, "token ditolak")
-			return
-		}
 		certPEM, serial, err := d.CA.IssueAgentCert([]byte(req.CSRPEM), pt.ServerID)
 		if err != nil {
 			log.Error("pairing: issue agent certificate", "server_id", pt.ServerID, "err", err)
 			writeError(w, http.StatusInternalServerError, "kesalahan internal")
 			return
 		}
-		if err := d.Store.MarkPaired(pt.ServerID, serial, ip); err != nil {
+		address := ip
+		if d.LocalServerID != 0 && pt.ServerID == d.LocalServerID && d.PublicHost != "" {
+			address = d.PublicHost
+		}
+		if err := d.Store.MarkPaired(pt.ServerID, serial, address); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusForbidden, "token ditolak")
 				return
@@ -142,6 +132,9 @@ func PairHandler(d Deps) http.Handler {
 		if d.Hub.IsOnline(pt.ServerID) {
 			d.Hub.Disconnect(pt.ServerID)
 			log.Info("previous agent connection closed after re-pairing", "server_id", pt.ServerID)
+		}
+		if d.OnPaired != nil {
+			d.OnPaired(pt.ServerID)
 		}
 		log.Info("agent paired", "server_id", pt.ServerID, "remote", ip, "hostname", req.Hostname,
 			"arch", req.Arch, "agent_version", req.AgentVersion, "cert_serial", serial)

@@ -85,7 +85,7 @@ type testEnv struct {
 	stopPanel func() error
 }
 
-func newEnv(t *testing.T) *testEnv {
+func newEnv(t *testing.T, mods ...func(*agentapi.Deps)) *testEnv {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
@@ -118,6 +118,9 @@ func newEnv(t *testing.T) *testEnv {
 		Now:          time.Now,
 		Logger:       slog.New(slog.NewTextHandler(e.logs, nil)),
 		OnAttach:     func(_ int64, c *hub.WSConn) { e.attached <- c },
+	}
+	for _, m := range mods {
+		m(&deps)
 	}
 
 	tlsCfg, err := authority.AgentListenerTLS()
@@ -353,30 +356,52 @@ func TestPairRejectsUsedToken(t *testing.T) {
 	}
 }
 
-// TestPairRefusesLocalServer: the panel host's own server (cert serial
-// "local") must never be taken over by an agent pairing with a token.
-func TestPairRefusesLocalServer(t *testing.T) {
-	e := newEnv(t)
-	srv, err := e.st.CreateServer("host-panel")
+// TestPairLocalServerRecordsPublicHost: the panel host's own agent pairs
+// from 127.0.0.1 like any agent, but its server keeps the panel's public
+// host as address (replicas reach its MySQL there), and the panel hears
+// about the pairing (to delete its token file). Other servers keep the
+// caller's IP.
+func TestPairLocalServerRecordsPublicHost(t *testing.T) {
+	var paired []int64
+	e := newEnv(t, func(d *agentapi.Deps) {
+		d.LocalServerID = 1
+		d.PublicHost = "192.0.2.7"
+		d.OnPaired = func(id int64) { paired = append(paired, id) }
+	})
+	local, err := e.st.CreateServer("host-panel")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.MarkPaired(srv.ID, "local", "127.0.0.1"); err != nil {
-		t.Fatal(err)
-	}
-	_, token := e.newToken(t, srv.ID)
-
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
-	defer cancel()
-	if _, err := agent.Pair(ctx, e.pairURL, token, t.TempDir(), nil, agent.PairOptions{}); err == nil || !strings.Contains(err.Error(), "token ditolak") {
-		t.Fatalf("pairing the local server: err = %v, want token ditolak", err)
-	}
-	got, err := e.st.GetServer(srv.ID)
+	remote, err := e.st.CreateServer("db-2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CertSerial != "local" || got.Address != "127.0.0.1" {
-		t.Fatalf("local server after refused pairing = %+v", got)
+	if local.ID != 1 {
+		t.Fatalf("local server id = %d, want 1", local.ID)
+	}
+	for _, srv := range []store.Server{local, remote} {
+		_, token := e.newToken(t, srv.ID)
+		ctx, cancel := context.WithTimeout(context.Background(), wait)
+		_, err := agent.Pair(ctx, e.pairURL, token, t.TempDir(), nil, agent.PairOptions{})
+		cancel()
+		if err != nil {
+			t.Fatalf("pair %s: %v", srv.Name, err)
+		}
+	}
+	for _, c := range []struct {
+		id   int64
+		addr string
+	}{{local.ID, "192.0.2.7"}, {remote.ID, "127.0.0.1"}} {
+		got, err := e.st.GetServer(c.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Paired || got.CertSerial == "" || got.CertSerial == "local" || got.Address != c.addr {
+			t.Errorf("server %d after pairing = %+v, want paired at %s", c.id, got, c.addr)
+		}
+	}
+	if len(paired) != 2 || paired[0] != local.ID || paired[1] != remote.ID {
+		t.Fatalf("OnPaired calls = %v, want [%d %d]", paired, local.ID, remote.ID)
 	}
 }
 

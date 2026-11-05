@@ -7,12 +7,12 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// localConn runs commands on the agent embedded in the panel process.
+// localConn runs commands on an in-process registry (tests' fake agents).
 type localConn struct {
 	reg *commands.Registry
 	// onEvent is kept for symmetry with WSConn (the panel passes a func
-	// calling Hub.OnEvent); the embedded agent's job runner emits through
-	// the same func.
+	// calling Hub.OnEvent); an in-process job runner emits through the
+	// same func.
 	onEvent func(proto.Event)
 }
 

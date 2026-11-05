@@ -535,3 +535,26 @@ func TestUpdateProbeTooLarge(t *testing.T) {
 		t.Fatalf("server after refused probe = %+v, want the previous probe", got)
 	}
 }
+
+// TestMarkUnpaired: the server waits for an agent again at the given
+// address; its certificate serial no longer matches any agent.
+func TestMarkUnpaired(t *testing.T) {
+	s := openTemp(t)
+	srv, _ := s.CreateServer("host-panel")
+	if err := s.MarkPaired(srv.ID, "local", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkUnpaired(srv.ID, "192.0.2.7"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetServer(srv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Paired || got.CertSerial != "" || got.Address != "192.0.2.7" {
+		t.Fatalf("server = %+v, want unpaired at 192.0.2.7", got)
+	}
+	if err := s.MarkUnpaired(999, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing server: %v", err)
+	}
+}

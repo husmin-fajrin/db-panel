@@ -20,7 +20,8 @@ import (
 
 const usage = `Penggunaan:
   dbpanel panel [--data-dir DIR] [--config-dir DIR] [--http ADDR] [--agent-listen ADDR] [--public-host HOST]
-      jalankan panel web
+      [--allow-root]
+      jalankan panel web (sebagai pengguna dbpanel; root ditolak tanpa --allow-root)
   dbpanel panel reset-password [--username NAMA] [--data-dir DIR] [--config-dir DIR]
       buat kata sandi baru untuk pengguna dan cetak ke layar
 `
@@ -44,6 +45,14 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 	return mainRun(args, stderr)
 }
+
+// geteuid is replaced by tests.
+var geteuid = os.Geteuid
+
+// rootRefusal is the message of "dbpanel panel" run as root.
+const rootRefusal = `panel tidak dijalankan sebagai root. Pasang atau perbarui dengan install.sh: panel berjalan
+sebagai pengguna dbpanel lewat service dbpanel-panel (sudo systemctl start dbpanel-panel).
+Untuk menjalankannya sebagai root juga, tambahkan --allow-root.`
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -72,8 +81,14 @@ func mainRun(args []string, stderr io.Writer) int {
 	fs.StringVar(&o.HTTPAddr, "http", DefaultHTTPAddr, "alamat UI web")
 	fs.StringVar(&o.AgentAddr, "agent-listen", DefaultAgentAddr, "alamat listener agent (mTLS)")
 	fs.StringVar(&o.PublicHost, "public-host", "", "IP/host panel yang dipakai agent (default: IP non-loopback pertama)")
+	allowRoot := fs.Bool("allow-root", false, "izinkan berjalan sebagai root (tidak disarankan)")
 	if !parse(fs, args) {
 		return 2
+	}
+	// Files a root panel creates would be unreadable for the dbpanel user.
+	if geteuid() == 0 && !*allowRoot {
+		fmt.Fprintln(stderr, rootRefusal)
+		return 1
 	}
 	o.Logger = slog.New(slog.NewTextHandler(stderr, nil))
 	o.Version = version.Version

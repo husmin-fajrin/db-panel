@@ -28,10 +28,9 @@ const (
 	shutdownTimeout = 5 * time.Second
 )
 
-// Run serves the UI and the agent listener, attaches the embedded agent and
-// keeps server info fresh until ctx is done. It returns once both servers
-// and every background probe have stopped; the error is nil after a clean
-// shutdown. If either server fails, Run stops the other and returns the
+// Run serves the UI and the agent listener and keeps server info fresh
+// until ctx is done. It returns once both servers and every background
+// probe have stopped; the error is nil after a clean shutdown. If either server fails, Run stops the other and returns the
 // failure.
 func (p *Panel) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -77,7 +76,6 @@ func (p *Panel) Run(ctx context.Context) error {
 	wg.Go(func() { fail(agentapi.ServeAgents(ctx, agentLn, tlsCfg, agentHandler(deps))) })
 	p.log.Info("panel listening", "ui", p.UIAddr(), "agents", p.AgentListenAddr(), "public_url", p.PublicURL())
 
-	detachLocal := p.attachLocal()
 	wg.Go(func() { p.probeLoop(ctx) })
 	wg.Go(func() { p.Monitor.Run(ctx) })
 	wg.Go(func() { p.Notifier.Run(ctx) })
@@ -88,7 +86,6 @@ func (p *Panel) Run(ctx context.Context) error {
 	// Stop the jobs before their agents disconnect, so none fails as
 	// "agent terputus"; Resume fails them at the next start.
 	p.Orchestrator.Close()
-	detachLocal()
 	wg.Wait()
 	p.stopBackground()
 	return errors.Join(errs...)
@@ -105,6 +102,11 @@ func (p *Panel) agentDeps() agentapi.Deps {
 		Now:          p.now,
 		Logger:       p.log,
 		WebPin:       p.certs.pin,
+		// The panel host's agent pairs from 127.0.0.1; its server keeps
+		// the public host as address.
+		LocalServerID: p.localID,
+		PublicHost:    p.opts.PublicHost,
+		OnPaired:      p.onPaired,
 	}
 }
 
@@ -209,6 +211,7 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 		Telegram:       telegramAdmin{st: p.Store, box: p.box, n: p.Notifier},
 		CertInfo:       p.certInfo,
 		Certs:          p.certs,
+		LocalServerID:  p.localID,
 		// The same parameters as GET /agent/install, so the hash in the
 		// pairing command is that of the script the endpoint serves.
 		InstallScriptSHA256: func(token string) (string, error) {

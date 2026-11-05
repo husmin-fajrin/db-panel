@@ -655,9 +655,11 @@ func TestDeleteServer(t *testing.T) {
 }
 
 func TestDeleteLocalServerRefused(t *testing.T) {
-	e := newEnv(t)
+	// The panel host's server is known by its id; its agent pairs like
+	// any other, with a real certificate serial.
+	e := newEnv(t, func(d *web.Deps) { d.LocalServerID = 1 })
 	srv, _ := e.st.CreateServer("host-panel")
-	e.st.MarkPaired(srv.ID, "local", "127.0.0.1")
+	e.st.MarkPaired(srv.ID, "abc", "192.0.2.7")
 	c := e.cookie()
 
 	rec := e.do("GET", "/servers/1", nil, c)
@@ -674,6 +676,16 @@ func TestDeleteLocalServerRefused(t *testing.T) {
 		t.Fatalf("local server gone after refused delete: %v", err)
 	}
 	wantCode(t, e.do("POST", "/servers/1/token", url.Values{}, c), http.StatusConflict)
+
+	// Unpaired, its page creates no token: the panel's local-pair-token
+	// would be replaced.
+	if err := e.st.MarkUnpaired(srv.ID, "192.0.2.7"); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, e.do("GET", "/servers/1", nil, c), http.StatusOK)
+	if _, found, err := e.st.ActivePairToken(srv.ID, time.Now()); err != nil || found {
+		t.Fatalf("token for the local server: %v, %v", found, err)
+	}
 }
 
 func TestRepairPairedServer(t *testing.T) {

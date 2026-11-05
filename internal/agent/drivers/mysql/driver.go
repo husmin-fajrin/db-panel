@@ -32,9 +32,8 @@ type Driver struct {
 	// reads the host's disk, memory and load through Sys.
 	Sys probe.System
 	Cfg config.Config
-	// PinDir holds the pinned role and source (pins.go): /etc/dbpanel for
-	// an agent, the panel's config directory for its embedded agent. Empty
-	// means no pins (tests only).
+	// PinDir holds the pinned role and source (pins.go): the agent
+	// directory, /etc/dbpanel. Empty means no pins (tests only).
 	PinDir string
 
 	mu sync.RWMutex // guards Host once Register has run

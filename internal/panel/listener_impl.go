@@ -44,8 +44,7 @@ func (p *Panel) setOnline(id int64, online bool) {
 // server, so an agent flooding events cannot flood the journal.
 const eventLogInterval = 10 * time.Second
 
-// onEvent receives events from remote and embedded agents, all of which
-// reach it through Hub.OnEvent and the hub's listener. Health reports go to
+// onEvent receives events from the agents, all of which reach it through Hub.OnEvent and the hub's listener. Health reports go to
 // the monitor, job events to the orchestrator (neither blocks); every
 // event is logged at debug level, at most one per server per
 // eventLogInterval.

@@ -8,7 +8,6 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -106,8 +105,21 @@ func TestNewCreatesAdminAndLocalServer(t *testing.T) {
 		t.Fatalf("got %d servers, want 1", len(servers))
 	}
 	srv := servers[0]
-	if !srv.Paired || srv.CertSerial != "local" || srv.Address != "127.0.0.1" {
-		t.Fatalf("local server = %+v, want paired with serial local at 127.0.0.1", srv)
+	if srv.Paired || srv.CertSerial != "" || srv.Address != o.PublicHost {
+		t.Fatalf("local server = %+v, want unpaired at the public host %s", srv, o.PublicHost)
+	}
+	// Its agent is a separate process that pairs with the token file.
+	tok, pin := readLocalPairToken(t, o)
+	if pt, found, err := p.Store.ActivePairToken(srv.ID, time.Now()); err != nil || !found || pt.Token != tok {
+		t.Fatalf("active token = %+v, %v, %v; want the one in local-pair-token", pt, found, err)
+	} else if ttl := time.Until(pt.ExpiresAt); ttl > 15*time.Minute || ttl < 14*time.Minute {
+		t.Fatalf("local token expires in %v, want 15 minutes", ttl)
+	}
+	if pin != p.certInfo().Pin {
+		t.Fatalf("pin in local-pair-token = %q, want the web certificate's %q", pin, p.certInfo().Pin)
+	}
+	if fi, err := os.Stat(filepath.Join(o.ConfigDir, "panel.key")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("panel.key: %v, %v", fi, err)
 	}
 	id, err := p.Store.GetSetting("local_server_id")
 	if err != nil {
@@ -200,6 +212,7 @@ func TestRunServesLoginAndProbesLocal(t *testing.T) {
 	p := newPanel(t, o)
 	localID := p.localID
 	uiAddr, stop := startPanel(t, p)
+	startLocalAgent(t, p)
 
 	if got, want := p.PublicURL(), "https://127.0.0.1:"+portOf(t, uiAddr); got != want {
 		t.Fatalf("PublicURL = %q, want %q", got, want)
@@ -663,8 +676,8 @@ func TestNewAdoptsExistingHostnameServer(t *testing.T) {
 	if len(servers) != 1 {
 		t.Fatalf("got %d servers, want 1: %+v", len(servers), servers)
 	}
-	if srv := servers[0]; srv.ID != orphan.ID || !srv.Paired || srv.CertSerial != "local" {
-		t.Fatalf("server = %+v, want row %d paired with serial local", srv, orphan.ID)
+	if srv := servers[0]; srv.ID != orphan.ID || srv.Paired || srv.CertSerial != "" || srv.Address != o.PublicHost {
+		t.Fatalf("server = %+v, want row %d unpaired at the public host", srv, orphan.ID)
 	}
 	if v, err := p.Store.GetSetting("local_server_id"); err != nil || v != strconv.FormatInt(orphan.ID, 10) {
 		t.Fatalf("local_server_id = %q, %v; want %d", v, err, orphan.ID)
@@ -710,8 +723,8 @@ func TestNewKeepsPairedRemoteWithHostname(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if local.ID == remote.ID || local.Name != host+"-panel" || !local.Paired || local.CertSerial != "local" {
-			t.Fatalf("local server = %+v, want a separate row %q paired as local", local, host+"-panel")
+		if local.ID == remote.ID || local.Name != host+"-panel" || local.Paired || local.CertSerial != "" {
+			t.Fatalf("local server = %+v, want a separate unpaired row %q", local, host+"-panel")
 		}
 		servers, err := p.Store.ListServers()
 		if err != nil {
@@ -765,6 +778,7 @@ func TestProbeLoopReprobesOnlineServers(t *testing.T) {
 		broker(event, data)
 	}
 	startPanel(t, p)
+	startLocalAgent(t, p)
 
 	online := fmt.Sprintf("server_status %d true", p.localID)
 	probed := fmt.Sprintf("server_probe %d <nil>", p.localID)
@@ -1319,59 +1333,6 @@ func TestSlowBodyCut(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no SSE event after the read timeout")
-	}
-}
-
-// TestEmbeddedAgentOffersMySQLAndJobCommands: the panel host's own agent
-// answers mysql.* and job.* like a remote agent, and the panel keeps its
-// sealing key for replication passwords in the config directory.
-func TestEmbeddedAgentOffersMySQLAndJobCommands(t *testing.T) {
-	t.Parallel()
-	o := testOptions(t)
-	p := newPanel(t, o)
-	startPanel(t, p)
-	waitFor(t, "the embedded agent", func() bool { return p.Hub.IsOnline(p.localID) })
-
-	for _, c := range []struct {
-		cmd    string
-		params any
-	}{
-		{"job.status", proto.JobIDParams{JobID: "nope"}},
-		{"mysql.inventory", nil},
-	} {
-		err := p.Hub.Call(context.Background(), p.localID, c.cmd, c.params, nil)
-		var pe *proto.Error
-		if !errors.As(err, &pe) || pe.Code == proto.CodeUnknownCommand {
-			t.Errorf("%s: err = %v, want the command's own refusal", c.cmd, err)
-		}
-	}
-	if fi, err := os.Stat(filepath.Join(o.ConfigDir, "panel.key")); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("panel.key: %v, %v", fi, err)
-	}
-}
-
-// TestEmbeddedAgentReportsHealth: the panel sends monitor.configure to its
-// embedded agent when it attaches and keeps the answer as the local
-// server's health; that server is in no topology, so it is not monitored.
-func TestEmbeddedAgentReportsHealth(t *testing.T) {
-	t.Parallel()
-	o := testOptions(t)
-	p := newPanel(t, o)
-	startPanel(t, p)
-	waitFor(t, "the embedded agent's first health report", func() bool {
-		v, ok := p.Monitor.View(p.localID)
-		return ok && !v.ReceivedAt.IsZero()
-	})
-	v, _ := p.Monitor.View(p.localID)
-	if v.Role != "" || v.Status.Code != "" || v.Snap == nil {
-		t.Fatalf("local view = %+v, want an unmonitored server with the embedded agent's snapshot", v)
-	}
-	if _, err := p.Store.GetHealth(p.localID); err != nil {
-		t.Fatalf("GetHealth: %v", err)
-	}
-	evs, err := p.Store.ListStatusEvents(p.localID, time.Time{}, 10)
-	if err != nil || len(evs) == 0 || evs[0].Kind != "agent" {
-		t.Fatalf("status events = %+v, %v; want the agent connecting", evs, err)
 	}
 }
 

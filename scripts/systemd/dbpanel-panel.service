@@ -7,14 +7,15 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/dbpanel panel
 Restart=always
 RestartSec=3
-# Root: the panel runs this host's embedded agent. Hardening that still
-# allows it; the panel writes only its data and config directories.
-User=root
+# The panel needs no privilege: it writes only its own directories. This
+# host's agent is the separate dbpanel-agent service.
+User=dbpanel
+UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/dbpanel /etc/dbpanel
+ReadWritePaths=/var/lib/dbpanel/panel /etc/dbpanel/panel
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

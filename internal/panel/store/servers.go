@@ -143,6 +143,18 @@ func (s *Store) execOne(query string, args ...any) error {
 	return nil
 }
 
+// MarkUnpaired makes the server wait for an agent to pair again, at
+// address: no agent certificate matches it any more.
+func (s *Store) MarkUnpaired(id int64, address string) error {
+	if err := s.execOne(`UPDATE servers SET paired = 0, cert_serial = '', address = ? WHERE id = ?`, address, id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return err
+		}
+		return fmt.Errorf("mark unpaired: %w", err)
+	}
+	return nil
+}
+
 // MarkPaired records a completed pairing and deletes the server's unused
 // pairing tokens, so none of them can later pair over this certificate.
 func (s *Store) MarkPaired(id int64, certSerial string, address string) error {
