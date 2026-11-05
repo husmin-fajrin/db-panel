@@ -173,9 +173,10 @@ diputus dan sertifikatnya tidak diterima lagi. Ini juga cara mencabut
 sertifikat agent yang kuncinya diduga bocor. Server panel sendiri tidak perlu
 dipasangi agent dari halaman server: `install.sh` memasang dan
 memasangkan agent-nya (service `dbpanel-agent`), dan server itu tidak bisa
-dihapus. Agent itu tidak bisa dipasangkan ulang dari halaman server
-(panel hanya menulis token untuknya selama servernya belum berpasangan),
-jadi cadangkan juga `/etc/dbpanel` di host panel.
+dihapus. Bila isi `/etc/dbpanel` di host panel hilang, jalankan ulang
+`install.sh`: tanpa `/etc/dbpanel/agent.yaml` skrip melepas agent lama
+(`dbpanel panel reset-local-agent`) dan agent host panel berpasangan lagi
+sebagai server yang sama (riwayat dan pemantauannya tetap).
 
 **Hapus server:** koneksi agent-nya langsung diputus dan sertifikatnya
 ditolak. Service `dbpanel-agent` di server itu tetap terpasang; matikan
@@ -498,9 +499,14 @@ bisa membuka sandi replikasi.
 1. Hentikan panel: `sudo systemctl stop dbpanel-panel`.
 2. Salin `/etc/dbpanel/panel` (termasuk `ca.crt`, `ca.key`, `panel.key`)
    dan `/var/lib/dbpanel/panel` ke tempat yang sama di server baru.
-3. Pasang panel di server baru (`install.sh`; ia memberikan kedua
-   direktori itu ke pengguna `dbpanel`), jalankan dengan
-   `--public-host <alamat baru>` bila perlu.
+3. Pasang panel di server baru (`install.sh`). Salin dulu ke tata letak
+   lama (`/etc/dbpanel/*`, `/var/lib/dbpanel/*`) agar skrip memindahkan
+   dan memberikannya ke pengguna `dbpanel`, atau langsung ke subfolder
+   `panel/` lalu `sudo chown -R dbpanel: /etc/dbpanel/panel
+   /var/lib/dbpanel/panel` sebelum menjalankan skrip. Server baru belum
+   punya `/etc/dbpanel/agent.yaml`, jadi skrip melepas agent host panel
+   lama dan agent server baru berpasangan sebagai server host panel yang
+   sama. Jalankan panel dengan `--public-host <alamat baru>` bila perlu.
 4. Di setiap server database, ubah `panel_addr` di
    `/etc/dbpanel/agent.yaml` ke `<alamat baru>:8443`, lalu
    `sudo systemctl restart dbpanel-agent`.
@@ -737,9 +743,13 @@ panel (perintah yang sama dengan "Pasang panel"). Skrip:
    sandi tetap), lalu memberikan subfolder itu ke `dbpanel`; berkas agent
    di `/etc/dbpanel` (akun MySQL tersegel, kebijakan lokal, pin `role` dan
    `source`) tidak disentuh;
-5. menulis unit systemd baru dan menyalakan panel sebagai `dbpanel`;
+5. menulis unit systemd baru; bila `/etc/dbpanel/agent.yaml` belum ada,
+   melepas agent server host panel di database (`dbpanel panel
+   reset-local-agent`, sebagai `dbpanel`) supaya panel menulis token baru;
+   lalu menyalakan panel sebagai `dbpanel`;
 6. menunggu (paling lama 60 detik) token yang ditulis panel untuk servernya
-   sendiri, memindahkannya ke `/etc/dbpanel/local-pair-token` (0600 root),
+   sendiri, menyalinnya (dibaca sebagai `dbpanel`) ke
+   `/etc/dbpanel/local-pair-token` (0600 root),
    lalu menyalakan `dbpanel-agent`, yang berpasangan dengan token itu lalu
    berjalan. Agent tertanam versi lama digantikan agent ini; server host
    panel tetap baris yang sama (riwayat dan pemantauannya tetap).
@@ -835,7 +845,10 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
     server lain (`agent.yaml`, `agent.key`, `mysql.cred`, `role`, ...);
     `/var/lib/dbpanel/` 0711 root.
   Panel tidak bisa membaca berkas agent, dan agent tidak memakai berkas
-  panel.
+  panel. `install.sh` (root) tidak pernah mengikuti tautan di direktori
+  milik `dbpanel`: token dibaca sebagai `dbpanel`, `bin/` dibangun di
+  direktori milik root lalu dipasang dengan rename, dan `chown` hanya
+  mengenai berkas panel lama milik root yang dipindahkan.
 - Hardening systemd: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`,
   `ProtectKernel*`, dan untuk panel `ProtectSystem=strict` (hanya
   `/var/lib/dbpanel/panel` dan `/etc/dbpanel/panel` yang bisa ditulis,

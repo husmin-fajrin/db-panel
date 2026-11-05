@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,6 +25,9 @@ const usage = `Penggunaan:
       jalankan panel web (sebagai pengguna dbpanel; root ditolak tanpa --allow-root)
   dbpanel panel reset-password [--username NAMA] [--data-dir DIR] [--config-dir DIR]
       buat kata sandi baru untuk pengguna dan cetak ke layar
+  dbpanel panel reset-local-agent [--data-dir DIR]
+      lepaskan agent host panel (sebagai pengguna dbpanel, panel berhenti);
+      start panel berikutnya menulis token baru untuknya
 `
 
 // Main runs the "dbpanel panel" command; args start with "panel". It returns
@@ -38,6 +42,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		switch args[0] {
 		case "reset-password":
 			return mainResetPassword(args[1:], stdout, stderr)
+		case "reset-local-agent":
+			return mainResetLocalAgent(args[1:], stdout, stderr)
 		case "help", "-h", "--help":
 			fmt.Fprint(stdout, usage)
 			return 0
@@ -109,6 +115,60 @@ func mainRun(args []string, stderr io.Writer) int {
 	}
 	o.Logger.Info("panel stopped")
 	return 0
+}
+
+// localAgentRootRefusal is the message of "reset-local-agent" run as root:
+// the database files it may create must stay the panel user's.
+const localAgentRootRefusal = `jalankan sebagai pengguna panel: sudo -u dbpanel dbpanel panel reset-local-agent`
+
+func mainResetLocalAgent(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("panel reset-local-agent", stderr)
+	dataDir := fs.String("data-dir", DefaultDataDir, "direktori data (panel.db)")
+	if !parse(fs, args) {
+		return 2
+	}
+	if geteuid() == 0 {
+		fmt.Fprintln(stderr, localAgentRootRefusal)
+		return 1
+	}
+	id, err := resetLocalAgent(*dataDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "kesalahan: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Agent server lokal #%d dilepas; start panel berikutnya menulis token baru untuknya.\n", id)
+	return 0
+}
+
+// resetLocalAgent marks the panel host's own server unpaired (same row and
+// id, address kept): its agent's certificate is refused from now on, and
+// the next start writes local-pair-token again.
+func resetLocalAgent(dataDir string) (int64, error) {
+	path := filepath.Join(dataDir, dbFile)
+	if _, err := os.Stat(path); err != nil {
+		return 0, fmt.Errorf("basis data panel tidak ditemukan di %s: %w", path, err)
+	}
+	st, err := store.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer st.Close()
+	v, err := st.GetSetting(settingLocalServerID)
+	if err != nil {
+		return 0, err
+	}
+	id, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("server lokal belum ada (setelan %s: %q)", settingLocalServerID, v)
+	}
+	srv, err := st.GetServer(id)
+	if err != nil {
+		return 0, fmt.Errorf("server lokal #%d: %w", id, err)
+	}
+	if !srv.Paired && srv.CertSerial == "" {
+		return id, nil // nothing to release
+	}
+	return id, st.MarkUnpaired(id, srv.Address)
 }
 
 func mainResetPassword(args []string, stdout, stderr io.Writer) int {

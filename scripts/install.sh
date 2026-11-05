@@ -103,24 +103,57 @@ install_binary() {
 	mv -f "$BIN.new" "$BIN"
 }
 
-# copy_agent_binaries SRC copies SRC/dbpanel_linux_{amd64,arm64} to the
-# directory the panel serves agent binaries from, each one atomically.
+# as_panel CMD... runs CMD as the panel user. The panel's directories are
+# the panel user's: root never reads, chowns or chmods through a path in
+# them (a compromised panel could put a symlink there), it reads with the
+# panel's rights instead.
+as_panel() {
+	runuser -u "$PANEL_USER" -- "$@"
+}
+
+# copy_agent_binaries SRC puts SRC/dbpanel_linux_{amd64,arm64} in the
+# directory the panel serves agent binaries from. The new bin/ is built in a
+# root-owned directory (keeping the binaries already served, read as the
+# panel user) and renamed into place; a bin/ that is not a plain directory
+# stops the script.
 copy_agent_binaries() {
-	local src=$1 dir=$PANEL_DATA_DIR/bin f name copied=()
+	local src=$1 dir=$PANEL_DATA_DIR/bin stage old f name copied=()
 	[ -d "$src" ] || die "DBPANEL_BIN_DIR bukan direktori: $src"
-	mkdir -p "$dir"
-	chmod 0750 "$dir"
-	chown "$PANEL_USER:" "$dir"
+	if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+		die "$dir bukan direktori biasa (tautan atau berkas); periksa host panel"
+	fi
+	rm -rf "$DATA_DIR"/.panel-bin-* # left by an interrupted run
+	stage=$(mktemp -d "$DATA_DIR/.panel-bin-XXXXXX")
+	chmod 0755 "$stage"
+	if [ -d "$dir" ]; then
+		for name in dbpanel_linux_amd64 dbpanel_linux_arm64; do
+			if as_panel cat -- "$dir/$name" >"$stage/$name" 2>/dev/null; then
+				chmod 0644 "$stage/$name"
+			else
+				rm -f "$stage/$name"
+			fi
+		done
+	fi
 	for f in "$src"/dbpanel_linux_*; do
 		name=${f##*/}
 		if [[ ! -f $f || ! $name =~ ^dbpanel_linux_(amd64|arm64)$ ]]; then
 			continue
 		fi
-		install -m 0644 "$f" "$dir/$name.new"
-		mv -f "$dir/$name.new" "$dir/$name"
+		install -m 0644 "$f" "$stage/$name"
 		copied+=("$name")
 	done
-	[ "${#copied[@]}" -gt 0 ] || die "Tidak ada dbpanel_linux_amd64 atau dbpanel_linux_arm64 di $src"
+	if [ "${#copied[@]}" -eq 0 ]; then
+		rm -rf "$stage"
+		die "Tidak ada dbpanel_linux_amd64 atau dbpanel_linux_arm64 di $src"
+	fi
+	# mv -T renames, never moves into: a directory or link put at $dir in
+	# between makes it fail.
+	if [ -e "$dir" ] || [ -L "$dir" ]; then
+		old=$(mktemp -u "$DATA_DIR/.panel-bin-old-XXXXXX")
+		mv -T "$dir" "$old" || die "Gagal mengganti $dir"
+	fi
+	mv -T "$stage" "$dir" || die "Gagal memasang $dir"
+	[ -z "${old:-}" ] || rm -rf "$old"
 	echo "Binary agent disalin ke $dir: ${copied[*]}"
 }
 
@@ -157,37 +190,61 @@ ensure_user() {
 }
 
 # prepare_dirs creates the directories: the shared parents root's and only
-# traversable (0711), the panel's subfolders 0700.
+# traversable (0711), the panel's subfolders 0700 and the panel user's. The
+# subfolders' entries sit in the root-owned parents, so the panel user
+# cannot swap them for links; they are checked anyway, and chown -h never
+# follows one.
 prepare_dirs() {
+	local d
 	mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$PANEL_CONFIG_DIR" "$PANEL_DATA_DIR"
-	chown root:root "$CONFIG_DIR" "$DATA_DIR"
+	for d in "$CONFIG_DIR" "$DATA_DIR" "$PANEL_CONFIG_DIR" "$PANEL_DATA_DIR"; do
+		[ -d "$d" ] && [ ! -L "$d" ] || die "$d bukan direktori biasa (tautan atau berkas); periksa host ini"
+	done
+	chown -h root:root "$CONFIG_DIR" "$DATA_DIR"
 	chmod 0711 "$CONFIG_DIR" "$DATA_DIR"
+	chown -h "$PANEL_USER:" "$PANEL_CONFIG_DIR" "$PANEL_DATA_DIR"
 	chmod 0700 "$PANEL_CONFIG_DIR" "$PANEL_DATA_DIR"
 }
 
-# move_old FROM TO NAME... moves each FROM/NAME to TO/NAME, unless it is
-# gone already or TO/NAME exists (a later step, or the agent, owns it then).
+# move_old FROM TO NAME... moves each FROM/NAME to TO/NAME and gives it to
+# the panel user, unless it is gone already or TO/NAME exists (a later step,
+# or the agent, owns it then). The files come from a panel that ran as root,
+# in root's directories, so they are chowned there, before the move (an
+# interrupted run leaves no moved file unchowned); nothing the panel user
+# made is ever chowned. mv -T renames, never moves into a directory.
 move_old() {
 	local from=$1 to=$2 name
 	shift 2
 	for name in "$@"; do
 		[ -e "$from/$name" ] || continue
-		if [ -e "$to/$name" ]; then
+		if [ -e "$to/$name" ] || [ -L "$to/$name" ]; then
 			# The agent of this host writes its own ca.crt in /etc/dbpanel.
 			[ "$name" = ca.crt ] || echo "Peringatan: $from/$name dibiarkan; $to/$name sudah ada" >&2
 			continue
 		fi
-		mv "$from/$name" "$to/$name"
+		chown -R -h "$PANEL_USER:" "$from/$name"
+		mv -T "$from/$name" "$to/$name"
 		echo "Dipindah: $from/$name -> $to/$name"
 	done
 }
 
 # migrate_layout moves the files of a panel that ran as root into its
-# subfolders and gives the subfolders to the panel user.
+# subfolders, owned by the panel user.
 migrate_layout() {
 	move_old "$DATA_DIR" "$PANEL_DATA_DIR" "${OLD_DATA_FILES[@]}"
 	move_old "$CONFIG_DIR" "$PANEL_CONFIG_DIR" "${OLD_CONFIG_FILES[@]}"
-	chown -R "$PANEL_USER:" "$PANEL_CONFIG_DIR" "$PANEL_DATA_DIR"
+}
+
+# release_local_agent: without /etc/dbpanel/agent.yaml this host's agent has
+# to pair (again), but a panel whose database has its server paired (the
+# agent's files were lost, or the panel was moved here) writes no token.
+# With the panel stopped, release the server as the panel user; the start
+# then writes a new token. For a server that was never paired it changes
+# nothing.
+release_local_agent() {
+	[ ! -e "$CONFIG_DIR/agent.yaml" ] && [ -e "$PANEL_DATA_DIR/panel.db" ] || return 0
+	as_panel "$BIN" panel reset-local-agent --data-dir "$PANEL_DATA_DIR" ||
+		echo "Peringatan: server lokal tidak bisa dilepas; agent host ini mungkin tidak berpasangan" >&2
 }
 
 # write_units writes the panel unit, the agent unit and, on this host, the
@@ -290,10 +347,16 @@ hand_local_token() {
 	done
 	[ -s "$PANEL_TOKEN_FILE" ] ||
 		die "Panel tidak menulis token untuk agent host ini dalam ${TOKEN_WAIT} detik. Periksa: journalctl -u dbpanel-panel"
-	mv -f "$PANEL_TOKEN_FILE" "$AGENT_TOKEN_FILE.new"
-	chown root:root "$AGENT_TOKEN_FILE.new"
-	chmod 0600 "$AGENT_TOKEN_FILE.new"
-	mv -f "$AGENT_TOKEN_FILE.new" "$AGENT_TOKEN_FILE"
+	# Read as the panel user (the file is in its directory and may be a
+	# link), into a new root-owned 0600 file in root's directory.
+	local tmp
+	tmp=$(mktemp "$CONFIG_DIR/.local-pair-token.XXXXXX")
+	if ! as_panel head -c 4096 -- "$PANEL_TOKEN_FILE" >"$tmp"; then
+		rm -f "$tmp"
+		die "Gagal membaca $PANEL_TOKEN_FILE"
+	fi
+	rm -f "$PANEL_TOKEN_FILE"
+	mv -f "$tmp" "$AGENT_TOKEN_FILE"
 }
 
 main() {
@@ -344,6 +407,7 @@ main() {
 	fi
 	write_units
 
+	release_local_agent
 	# A token left from an interrupted run is stale: the panel writes a new
 	# one at its start, and only that one is waited for.
 	rm -f "$PANEL_TOKEN_FILE"

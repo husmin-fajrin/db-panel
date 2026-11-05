@@ -267,7 +267,7 @@ fi
 # by a function that runs the panel as $PANEL_USER (nobody here: the test
 # creates no user) and the agent as root, as the units do.
 live_bin="$tmp/dbpanel"
-run_install() { # ROOT UI_PORT AGENT_PORT [interrupt]
+run_install() { # ROOT UI_PORT AGENT_PORT [svc:SERVICE|fn:FUNCTION: stop right before it]
 	(
 		ROOT=$1
 		# shellcheck source=/dev/null
@@ -316,16 +316,19 @@ run_install() { # ROOT UI_PORT AGENT_PORT [interrupt]
 			*) return 1 ;;
 			esac
 		}
-		if [ "${4:-}" = interrupt ]; then
-			# Cut short right before the agent starts (after the panel ran
-			# and the token was handed over).
+		case ${4:-} in
+		svc:*)
+			# Cut short right before the given service starts.
+			stop_at=${4#svc:}
 			eval "$(declare -f start_service | sed '1s/start_service/real_start_service/')"
 			# shellcheck disable=SC2329 # called by main
 			start_service() {
-				[ "$1" = dbpanel-agent ] && exit 3
+				[ "$1" = "$stop_at" ] && exit 3
 				real_start_service "$@"
 			}
-		fi
+			;;
+		fn:*) eval "${4#fn:}() { exit 3; }" ;;
+		esac
 		main
 	) >"$1/install.out" 2>&1
 }
@@ -353,6 +356,17 @@ live_checks() {
 		[ "$(stat -c '%U %a' "$root/$d")" = "root 711" ] || fail "$name: $d bukan root 0711"
 	done
 	[ "$(stat -c '%U %a' "$root/etc/dbpanel/panel")" = "nobody 700" ] || fail "$name: etc/dbpanel/panel bukan 0700 pengguna panel"
+}
+kill_root_svc() { # ROOT SERVICE
+	local f="$1/run/$2.pid" pid
+	[ -f "$f" ] || return 0
+	pid=$(cat "$f")
+	kill "$pid" 2>/dev/null || true
+	for _ in {1..100}; do
+		kill -0 "$pid" 2>/dev/null || break
+		sleep 0.1
+	done
+	rm -f "$f"
 }
 new_root() { # NAME: a root with what the host has before install.sh
 	local r="$tmp/live-$1"
@@ -409,20 +423,25 @@ else
 	done
 	role_sum=$(sha256sum <"$r/etc/dbpanel/role")
 
-	# interrupted_after_move: the files are moved, the panel ran, the token
-	# was handed over, and the run stops before the agent starts.
-	if run_install "$r" "$ui" "$ag" interrupt; then
-		fail "interrupted_after_move: install.sh tidak terputus"
+	# upgrade_from_root, stopped after the move and before anything opens
+	# panel.db (releasing the local agent, starting the panel): every file
+	# is in its subfolder, the panel user's, with the same content.
+	if run_install "$r" "$ui" "$ag" fn:release_local_agent; then
+		fail "upgrade_from_root: install.sh tidak berhenti sebelum panel"
 	fi
 	for f in "${!before[@]}"; do
 		new=${f/etc\/dbpanel\//etc/dbpanel/panel/}
 		new=${new/var\/lib\/dbpanel\//var/lib/dbpanel/panel/}
 		[ -e "$r/$new" ] || fail "upgrade_from_root: $new tidak ada setelah pindah"
 		[ "$(stat -c %U "$r/$new" 2>/dev/null)" = nobody ] || fail "upgrade_from_root: $new bukan milik pengguna panel"
-		if [ "$f" != var/lib/dbpanel/panel.db ] && [ "$(sha256sum <"$r/$new")" != "${before[$f]}" ]; then
-			fail "upgrade_from_root: isi $new berubah"
-		fi
+		[ "$(sha256sum <"$r/$new")" = "${before[$f]}" ] || fail "upgrade_from_root: isi $new berubah"
 	done
+
+	# interrupted_after_move: run again, now cut short after the panel ran
+	# and the token was handed over, right before the agent starts.
+	if run_install "$r" "$ui" "$ag" svc:dbpanel-agent; then
+		fail "interrupted_after_move: install.sh tidak terputus"
+	fi
 	[ -s "$r/etc/dbpanel/local-pair-token" ] || fail "interrupted_after_move: token belum diserahkan ke agent"
 	[ "$(stat -c '%U %a' "$r/etc/dbpanel/local-pair-token" 2>/dev/null)" = "root 600" ] ||
 		fail "interrupted_after_move: token agent bukan root 0600"
@@ -433,7 +452,75 @@ else
 		live_checks "$r" "$ui" upgrade_from_root
 		[ "$(sha256sum <"$r/etc/dbpanel/role")" = "$role_sum" ] || fail "upgrade_from_root: pin /etc/dbpanel/role berubah"
 	fi
+
+	# lost_agent_yaml: this host's agent lost its files (or the panel moved
+	# here) while the panel's database has the server paired: install.sh
+	# releases it and the agent pairs again, as the same server.
+	kill_root_svc "$r" dbpanel-agent
+	rm -f "$r/etc/dbpanel/agent.yaml" "$r/etc/dbpanel/agent.crt" "$r/etc/dbpanel/agent.key"
+	: >"$r/panel.log"
+	if ! run_install "$r" "$ui" "$ag"; then
+		fail "lost_agent_yaml: install.sh gagal: $(cat "$r/install.out")"
+	else
+		live_checks "$r" "$ui" lost_agent_yaml
+		[ "$(sha256sum <"$r/etc/dbpanel/role")" = "$role_sum" ] || fail "lost_agent_yaml: pin /etc/dbpanel/role berubah"
+	fi
 	kill_root "$r"
+
+	# Root never follows a link the panel user put in its directories.
+	r=$(new_root links)
+	victim="$tmp/live-links-victim"
+	mkdir -p "$victim" "$r/etc/dbpanel" "$r/var/lib/dbpanel"
+	chmod 0700 "$victim"
+	printf 'rahasia\n' >"$victim/secret"
+	chmod 0640 "$victim/secret"
+	victim_state=$(stat -c '%U %G %a' "$victim" "$victim/secret")
+	mkdir -p "$tmp/rel1" "$tmp/rel2"
+	cp "$release/dbpanel_linux_amd64" "$tmp/rel1/"
+	cp "$release/dbpanel_linux_arm64" "$tmp/rel2/"
+	links_case() { # STEP
+		(
+			ROOT=$r
+			# shellcheck source=/dev/null
+			source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
+			PANEL_USER=nobody
+			TOKEN_WAIT=1
+			prepare_dirs
+			case $1 in
+			bins) copy_agent_binaries "$tmp/rel1" && copy_agent_binaries "$tmp/rel2" ;;
+			bin-link)
+				rm -rf "$PANEL_DATA_DIR/bin"
+				ln -s "$victim" "$PANEL_DATA_DIR/bin"
+				copy_agent_binaries "$tmp/rel1"
+				;;
+			token-link)
+				ln -sfn "$victim/secret" "$PANEL_TOKEN_FILE"
+				hand_local_token
+				;;
+			esac
+		) >"$r/$1.out" 2>&1
+	}
+	# Both architectures stay served; bin/ is root's, its files readable.
+	if ! links_case bins; then
+		fail "copy_agent_binaries: $(cat "$r/bins.out")"
+	else
+		for a in amd64 arm64; do
+			cmp -s "$release/dbpanel_linux_$a" "$r/var/lib/dbpanel/panel/bin/dbpanel_linux_$a" ||
+				fail "copy_agent_binaries: dbpanel_linux_$a hilang atau berbeda"
+		done
+		[ "$(stat -c '%U %a' "$r/var/lib/dbpanel/panel/bin")" = "root 755" ] || fail "copy_agent_binaries: bin/ bukan root 0755"
+	fi
+	if links_case bin-link || [[ $(cat "$r/bin-link.out") != *"bukan direktori biasa"* ]]; then
+		fail "copy_agent_binaries mengikuti bin/ yang berupa tautan: $(cat "$r/bin-link.out")"
+	fi
+	if links_case token-link; then
+		fail "hand_local_token menerima token yang berupa tautan: $(cat "$r/token-link.out")"
+	fi
+	if grep -rqs rahasia "$r/etc/dbpanel"; then
+		fail "hand_local_token menyalin isi berkas lain"
+	fi
+	[ "$(stat -c '%U %G %a' "$victim" "$victim/secret")" = "$victim_state" ] ||
+		fail "pemilik atau izin berkas di luar direktori panel berubah"
 fi
 
 if command -v shellcheck >/dev/null 2>&1; then

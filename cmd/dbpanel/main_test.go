@@ -72,7 +72,9 @@ func TestPanelRefusesRootWithoutFlag(t *testing.T) {
 	}
 	dir := t.TempDir()
 	var errb bytes.Buffer
-	code := run([]string{"panel", "--data-dir", dir + "/data", "--config-dir", dir + "/etc"}, io.Discard, &errb)
+	// Unusable addresses: a run that got past the check binds nothing.
+	code := run([]string{"panel", "--data-dir", dir + "/data", "--config-dir", dir + "/etc", "--http", "bad", "--agent-listen", "bad"},
+		io.Discard, &errb)
 	if code != 1 || !strings.Contains(errb.String(), "install.sh") {
 		t.Fatalf("got %d %q", code, errb.String())
 	}
