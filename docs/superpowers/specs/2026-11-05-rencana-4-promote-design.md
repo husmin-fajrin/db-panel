@@ -52,7 +52,8 @@ tidak tahu.
 6. Prasyarat keamanan: agent memverifikasi sendiri pergantian peran
    (5.1), token konfirmasi per perintah destruktif (5.7), panel non-root
    dengan agent terpisah (5.8), sertifikat MySQL dari CA panel dengan
-   verifikasi (5.9), dump tanpa akun ber-RELOAD (5.10), `releaseRole`
+   verifikasi (5.9), dump tanpa akun ber-RELOAD pada seri MySQL yang
+   menyediakan hak `FLUSH_TABLES` (5.10), `releaseRole`
    mempertahankan pin sumber (5.10).
 7. HTTPS panel otomatis sejak pasang, tanpa langkah tim (5.11).
 8. Penguatan audit murah: status pin dan peringatan "Master tidak
@@ -130,7 +131,7 @@ peran dirancang menolak panel:
 - **A. Agent membuktikan sendiri dari keadaan MySQL.** Terencana: agent
   replika mengecek master dari sisinya: master harus terkunci baca-saja
   dan replika sudah menjalankan semua GTID master. Darurat: master tidak
-  menjawab dari replika selama 30 detik, dicek tiga kali. Panel yang
+  menjawab dari replika pada tiga percobaan dalam sekitar 30 detik. Panel yang
   dibobol tidak bisa memalsukan keduanya tanpa juga menguasai master.
   Biaya: jika master masih menjawab dari replika, promote darurat
   ditolak dan user diarahkan ke jalur terencana; itu benar secara data.
@@ -150,7 +151,8 @@ diberi tahu semua kondisi. C disimpan sebagai "mode ketat" Rencana 5.
 **HTTPS di jaringan lokal tanpa domain:**
 
 - CA panel sendiri, terpisah dari CA agent, dengan batasan nama (name
-  constraints) agar hanya sah untuk alamat panel. Tim memasang satu
+  constraints) agar hanya sah untuk subnet jaringan panel dan nama
+  panel, bukan untuk situs di internet. Tim memasang satu
   berkas sekali per komputer bila ingin peringatan hilang; tanpa itu
   lalu lintas tetap terenkripsi. Dipilih sebagai jalur utama.
 - Sertifikat sendiri (CA internal kantor, Active Directory, domain
@@ -188,40 +190,62 @@ topologi; semua pemeriksaan hanya membaca `@@global.super_read_only`,
 khusus), tidak pernah disimpan agent.
 
 **`mysql.lockForPromote{candidate host:port, repl cred, timeout}`** di
-master (pin `master`). Satu-satunya cara panel mengunci master. Agent
-menerima hanya bila `candidate` saat ini punya binlog dump thread dari
-host itu (benar-benar replika server ini), atau pernah punya dalam 7
-hari terakhir menurut catatan agent (`/var/lib/dbpanel/replicas-seen`,
-ditulis monitor dari host thread `Binlog Dump` di processlist). Cocok
-berarti alamat IP hasil resolusi `candidate` sama dengan host thread
-itu; `report_host`/`report_port` tidak dipakai karena hanya berlaku
-setelah restart. Lalu `SET GLOBAL super_read_only=ON` (bukan PERSIST),
-dan agent menjalankan penjaga: pada tenggat (`timeout`, dikirim panel;
+master (pin `master`). Satu-satunya cara panel mengunci master (pin
+`master` menolak `setReadOnly{on}` seperti sekarang). Agent menerima
+hanya bila `candidate` **saat ini** punya thread `Binlog Dump` dari host
+itu: alamat IP hasil resolusi `candidate` sama dengan host thread itu
+(`report_host`/`report_port` tidak dipakai karena hanya berlaku setelah
+restart). Replika yang tidak sedang tersambung tidak bisa dijadikan
+kandidat, sehingga panel yang dibobol tidak bisa mengunci master atas
+nama replika yang sudah mati. Monitor juga mencatat tiap host replika
+yang pernah tersambung di `/var/lib/dbpanel/replicas-seen` (tanpa batas
+waktu, dipangkas setelah 1 tahun); catatan ini dipakai `quarantine`.
+Lalu `SET GLOBAL super_read_only=ON` dan berkas kunci
+`/etc/dbpanel/promote-lock` (kandidat, tenggat); selama berkas itu ada,
+pin `master` menolak `setReadOnly{off}` (tombol "Buka kunci master"
+yang ada), dan saat MySQL restart agent memasang kunci lagi sebelum
+memeriksa apa pun, sehingga tidak ada celah tulis. Agent menjalankan
+penjaga: pada tenggat (`timeout`, dikirim panel;
 job promote memakai 30 menit, yaitu tenggat kejar 10 menit + tenggat
 terapan relay log 10 menit + cadangan; maksimum 60) agent memeriksa
 `candidate` dengan akun replikasi:
 bila `super_read_only=OFF` di sana dan `gtid_executed`-nya memuat UUID
 server ini, agent mengkarantina dirinya sendiri (seperti
 `mysql.quarantine`); bila `candidate` terjangkau dan masih replika
-(`super_read_only=ON` di sana), agent membuka kunci sendiri dan melapor;
-bila `candidate` tidak terjangkau, agent tetap terkunci (default aman,
-peringatan `master_locked` yang ada menyala). `mysql.unlockPromote`
-membatalkan sebelum tenggat, hanya bila `candidate` masih replika. Kunci ini hilang
-bila MySQL restart; penjaga agent mengulangi pemeriksaan saat MySQL
-kembali.
+(`super_read_only=ON` di sana), agent memberi tenggang 60 detik, memeriksa
+sekali lagi, dan bila masih replika membuka kunci sendiri, menghapus
+berkas kunci, dan melapor (tenggang ini menutup jendela antara
+verifikasi ulang `promote` dan pembukaan tulisnya); bila `candidate`
+tidak terjangkau, agent tetap terkunci dan mengulang pemeriksaan tiap
+menit (default aman: membuka kunci saat kandidat mungkin sudah menjadi
+master berarti dua master). `mysql.unlockPromote` membatalkan sebelum
+tenggat, hanya bila `candidate` masih replika. Jalan keluar bila
+kandidat hilang untuk waktu lama: perintah lokal root `sudo dbpanel
+agent unlock-master` di server master, yang menghapus berkas kunci dan
+membuka kunci; panel menampilkan perintah itu pada peringatan
+`master_locked`. Pasangannya, `sudo dbpanel agent lock-master`, mengunci
+dari luar panel (dipakai pada kasus M3 di 5.2 butir 3).
 
 **`mysql.promote{old source host:port, repl cred, mode}`** di replika
 (pin `replica`, sumber = `old source`). Agent memverifikasi:
 
 - `planned`: master terjangkau, `super_read_only=ON` di master, dan
   `GTID_SUBTRACT(master.gtid_executed, own.gtid_executed)` kosong.
+- Prasyarat kedua mode: akun `dbpanel_repl@'%'` ada di replika ini.
+  Replika sebagian tidak memilikinya (bagian 3), maka pin `replica`
+  kini menerima `mysql.createReplUser` dengan aturan ketat yang sama
+  seperti master (hanya `dbpanel_repl@'%'`, sekali, tidak ada baris lain
+  dengan nama itu); job promote menjalankannya sebelum `lockForPromote`
+  agar penjaga master bisa memeriksa kandidat.
 - `emergency`: master tidak menjawab dari replika ini: tiga percobaan
   sambung TCP dan membaca salam MySQL, masing-masing tenggat 5 detik,
-  berjarak 10 detik; semuanya gagal; dan IO thread replika tidak sedang
-  tersambung. Bila master ternyata menjawab dan terkunci, agent
-  melanjutkan sebagai `planned`. Bila master menjawab dan bisa ditulis,
-  agent menolak dengan pesan "master masih menjawab dari replika ini;
-  gunakan promote terencana".
+  berjarak 10 detik (sekitar 30 detik); semuanya gagal; dan IO thread
+  replika tidak sedang tersambung. Bila master ternyata menjawab dan
+  terkunci, agent melanjutkan sebagai `planned`. Bila master menjawab
+  dan bisa ditulis, agent menolak dengan pesan "master masih menjawab
+  dari replika ini; gunakan promote terencana, atau kunci master dari
+  servernya dengan `sudo dbpanel agent lock-master` bila agent-nya tidak
+  bisa dipulihkan".
 
 Lalu, pada kedua mode: `STOP REPLICA IO_THREAD`, tunggu relay log yang
 sudah diterima diterapkan (`WAIT_FOR_EXECUTED_GTID_SET(retrieved)`,
@@ -235,14 +259,23 @@ super_read_only=OFF`; bila akun
 pin peran `master`, pin sumber dihapus,
 catatan `/etc/dbpanel/promoted` berisi waktu, mode, sumber lama, dan
 `gtid_executed` saat promote (dipakai layar dan audit). Hasil memuat
-`gtid_executed` akhir dan `server_uuid`.
+`gtid_executed` akhir dan `server_uuid`. Titik tanpa balik adalah `RESET
+REPLICA ALL`: kegagalan sebelum itu (verifikasi, menunggu relay log)
+membuat agent menjalankan `START REPLICA` lagi dan melapor gagal tanpa
+perubahan; kegagalan sesudahnya tidak dibalik, dan `promote` bisa
+dipanggil ulang: agent memeriksa keadaan (replikasi sudah dihapus,
+tulis sudah terbuka, pin) dan melanjutkan langkah yang belum, sehingga
+"Coba lagi" di job aman.
 
 **`mysql.quarantine{new master host:port, repl cred}`** di master lama
 (pin `master`, terkunci oleh `lockForPromote` atau tidak). Agent
 memverifikasi `new master` terjangkau, `super_read_only=OFF`, dan
 `gtid_executed`-nya memuat UUID server ini; bila server ini tidak
-terkunci oleh `lockForPromote`, `new master` juga harus host yang
-tercatat sebagai replika dalam 7 hari terakhir. Lalu `SET PERSIST
+terkunci oleh `lockForPromote`, `new master` juga harus host yang pernah
+tercatat sebagai replika di `replicas-seen` (tanpa batas waktu), supaya
+master lama yang kembali berbulan-bulan kemudian tetap bisa
+dikarantina, sementara server asing tidak bisa dipakai panel yang
+dibobol untuk mengunci master sehat. Lalu `SET PERSIST
 super_read_only=ON; SET PERSIST read_only=ON`, pin peran `quarantined`,
 pin sumber = `new master`. Bila MySQL master lama sedang mati, agent
 menulis pin saja (verifikasi master baru tetap dilakukan) dan menerapkan
@@ -269,14 +302,17 @@ sumber ke `new master` (verifikasi yang sama tanpa syarat superset) dan
 menolak dengan kode `needs_rebuild` dan daftar selisih GTID, sehingga
 "Resync ulang" dari master baru diterima pin.
 
-**Peran `quarantined` menolak**: semua yang ditolak `master`, ditambah
-`setReadOnly{off}`, `createReplUser`, `lockForPromote`, `promote`.
-Menerima: `status`, `inventory`, pemantauan, `leftover`, `salvage*`,
-`connections`, dan jalur bangun ulang (`dropDatabases`, `dumpFrom`,
-`cloneFrom`, `configure{replica}`, `configureReplication`,
-`setReplicationFilter`, `resetReplica`, `startReplica`) **hanya ke
-sumber yang dipin** (master baru). Bangun ulang yang berhasil mengubah
-pin menjadi `replica`. `releaseRole` pada `quarantined` → `unassigned`
+**Peran `quarantined`** memakai tabel penolakan `replica` (bukan
+`master`), ditambah menolak `setReadOnly{off}` (sudah ada di tabel
+replika), `lockForPromote`, `promote`, dan `repoint`; `createReplUser`
+mengikuti aturan ketat yang sama seperti di atas. Jalur bangun ulang
+(`dropDatabases`, `dumpFrom`, `cloneFrom`, `configure{replica}`,
+`configureReplication`, `setReplicationFilter`, `resetReplica`,
+`startReplica`) diterima **hanya ke sumber yang dipin** (master baru);
+`dumpFrom`/`cloneFrom` membuka `super_read_only` sebentar saat memuat
+seperti yang sudah dilakukan pada replika (`liftReadOnly`), bukan lewat
+`setReadOnly{off}`. Bangun ulang yang berhasil mengubah pin menjadi
+`replica`. `releaseRole` pada `quarantined` → `unassigned`
 dengan syarat yang sama seperti replika (tanpa konfigurasi replikasi,
 tanpa dump thread), pin sumber dipertahankan.
 
@@ -341,8 +377,12 @@ Darurat, dengan master tidak menjawab:
    replika hidup (sambung TCP + salam MySQL ke sumber yang dipin, 5
    detik). Hasil "master tidak menjawab dari replika A, B" atau
    peringatan "master menjawab dari replika A; masalahnya mungkin di
-   jaringan panel, bukan master. Promote darurat akan ditolak agent;
-   gunakan terencana bila master memang perlu diganti".
+   jaringan panel atau agent master, bukan MySQL-nya. Promote darurat
+   akan ditolak agent. Pulihkan agent master (`systemctl restart
+   dbpanel-agent` di server master) lalu jalankan promote terencana;
+   bila agent tidak bisa dipulihkan tetapi server bisa diakses, kunci
+   master dengan `sudo dbpanel agent lock-master`, lalu promote darurat
+   akan berjalan sebagai terencana".
 4. Bila agent master lama masih tersambung tetapi MySQL mati: panel
    meminta `mysql.binlogTail`, agent membaca GTID terakhir dari berkas
    binlog terakhir di disk dengan `mysqlbinlog` (tanpa MySQL hidup),
@@ -381,14 +421,15 @@ di tabel `promotions` (5.13) sejak mulai.
    peringatan (5.14).
 7. Selesai → `cutover_pending` menyala, layar pengalihan (5.5), Telegram.
 
-Kegagalan di langkah 3 setelah `STOP REPLICA` tetapi sebelum pin
-berubah: agent mengembalikan replika ke keadaan semula (`START
-REPLICA`) dan job gagal; master dibuka kuncinya oleh langkah pembatalan.
-Kegagalan setelah pin berubah: job tidak membatalkan (tidak ada jalan
-mundur yang aman dari dua master); job berhenti dengan status "selesai
+Kegagalan di langkah 3 sebelum titik tanpa balik (5.1): agent sudah
+mengembalikan replika ke keadaan semula; job membatalkan kunci dengan
+`mysql.unlockPromote` (kandidat masih replika, jadi diterima) dan gagal;
+master tidak berubah. Kegagalan sesudah titik tanpa balik: job tidak
+membatalkan (tidak ada jalan mundur yang aman dari dua master) dan
+tidak membuka kunci master; job berhenti dengan status "selesai
 sebagian" dan daftar langkah yang belum, masing-masing dengan tombol
-"Coba lagi" (karantina, arahkan replika). Dashboard menampilkan banner
-sampai semua selesai.
+"Coba lagi" (promote yang bisa dilanjutkan, karantina, arahkan
+replika). Dashboard menampilkan banner sampai semua selesai.
 
 **`promote_emergency`**, langkah: promote replika terpilih
 (`mysql.promote{emergency}`), tukar data panel, arahkan replika lain,
@@ -454,8 +495,13 @@ sejak HH:MM, promote darurat/terencana ke <master baru>)" dengan:
   meminta ketik nama server. Berkas salvage tidak dihapus oleh bangun
   ulang.
 - **"Hapus server"**: yang ada; pada `quarantined` memanggil
-  `releaseRole` seperti replika.
-- Daftar berkas salvage dengan ukuran, sisa hari, tombol unduh.
+  `releaseRole` seperti replika, dan seperti bangun ulang tidak tersedia
+  selama `cutover_pending` (melepas pin `quarantined` menghilangkan
+  penjagaan baca-saja saat start).
+- Daftar berkas salvage dengan ukuran, sisa hari, tombol unduh, dan
+  tombol hapus (`mysql.salvageDelete{name}`, `POST
+  /servers/{id}/salvage/{name}/delete`, dengan token 5.7 karena berkas
+  itu satu-satunya salinan data tertinggal).
 
 Telegram mengirim "Master lama <nama> kembali dan dikarantina" saat
 karantina masuk, dan hasil "Periksa" saat dijalankan.
@@ -520,8 +566,9 @@ token satu permintaan.
 
 Wajib token: promote (keduanya), bangun ulang master lama, unduh
 salvage, resync ulang, lepas replika, hapus server, lepas database
-(`remove_databases`), buka kunci master, dan `prepare-master` bila
-master sudah punya topologi. "Sudah saya alihkan", stop/start,
+(`remove_databases`), buka kunci master, hapus berkas salvage,
+"Perketat sambungan replikasi", "Pasang sertifikat MySQL", dan
+`prepare-master` bila master sudah punya topologi. "Sudah saya alihkan", stop/start,
 kunci kembali, snooze, dan periksa tidak butuh token.
 
 Token tidak dikirim ke agent: agent tidak bisa membedakannya dari token
@@ -559,9 +606,12 @@ yang dibuat panel yang dibobol (4.B). Pagar agent adalah 5.1.
   `ErrLocalServer` (server panel tidak bisa dihapus) tetap.
 - Upgrade dari instalasi root: `install.sh` menghentikan panel, membuat
   user, memindahkan berkas ke tata letak baru, mengubah pemilik, menulis
-  unit baru, memasang agent lokal dari pin dan kredensial yang sudah ada
-  (`/etc/dbpanel/role`, `source`, `mysql.cred`, `secrets.key` tetap di
-  tempatnya), lalu memulai keduanya. Dijalankan ulang aman (idempoten).
+  unit baru, memulai panel, menunggu panel menulis `local-pair-token`
+  (panel menulisnya saat start setiap kali baris server lokalnya belum
+  punya agent berpasangan), memindahkannya, lalu memulai agent lokal
+  yang memakai pin dan kredensial yang sudah ada (`/etc/dbpanel/role`,
+  `source`, `mysql.cred`, `secrets.key` tetap di tempatnya). Dijalankan
+  ulang aman (idempoten).
   README bagian "Pembaruan" menjelaskan: perbarui panel dulu, lalu
   agent.
 - Agent lokal berjalan sebelum panel siap menerima: `Restart=always`
@@ -597,8 +647,10 @@ yang dibuat panel yang dibobol (4.B). Pagar agent adalah 5.1.
   dan `clone_ssl_ca`. Akun replikasi tetap `REQUIRE SSL`.
 - Replika yang sudah berjalan sebelum Rencana 4: tombol "Perketat
   sambungan replikasi" di halaman master menjalankan `mysql_tls` di
-  master lalu `CHANGE REPLICATION SOURCE` ulang di tiap replika (STOP/
-  START singkat), dengan token 5.7. Panel menampilkan peringatan
+  master dan di tiap replika (tiap server mendapat sertifikatnya sendiri
+  dan berkas `mysql-ca.crt`, yang dibutuhkan `SOURCE_SSL_CA` dan berguna
+  saat replika itu kelak dipromote), lalu `CHANGE REPLICATION SOURCE`
+  ulang di tiap replika (STOP/START singkat), dengan token 5.7. Panel menampilkan peringatan
   "Sambungan replikasi belum diverifikasi" (bukan alert Telegram) pada
   topologi lama sampai dijalankan.
 - Perpanjangan: agent meminta sertifikat baru 30 hari sebelum
@@ -641,8 +693,10 @@ yang dibuat panel yang dibobol (4.B). Pagar agent adalah 5.1.
   panel": unduh `dbpanel-panel.crt`, langkah untuk Windows, macOS,
   Firefox, Android, iOS dengan tangkapan layar, kalimat Group Policy
   untuk admin domain) dan `GET /sertifikat/dbpanel-panel.crt`; semua
-  jalur lain `301` ke `https://` alamat yang sama. Alamat lama di
-  bookmark dan di `install.sh` tetap berfungsi.
+  jalur lain `301` ke `https://` alamat yang sama. Bookmark lama tetap
+  sampai ke panel; perintah pasang agent yang ditampilkan sebelum
+  pembaruan tidak lagi berlaku (token pasangannya pun kedaluwarsa) dan
+  panel menampilkan perintah baru.
 - Cookie sesi `Secure` selalu; HSTS 1 tahun hanya pada HTTPS; CSP yang
   ada tetap. `panel_base_url` bawaan menjadi `https://`; pengaturan lama
   `http://` ditampilkan dengan peringatan dan tautan "ubah ke https".
@@ -658,14 +712,19 @@ yang dibuat panel yang dibobol (4.B). Pagar agent adalah 5.1.
 - Jalur agent di port web (`/agent/install`, `/agent/bin/*`, `POST
   /agent/pair`) ikut HTTPS, tidak dikecualikan: token pasangan dan
   sertifikat yang dikirim balik tidak boleh lewat HTTP polos. Perintah
-  pasang yang ditampilkan panel menjadi `curl -fsSL --pinnedpubkey
+  pasang yang ditampilkan panel menjadi `curl -fsSL -k --pinnedpubkey
   sha256//<hash SPKI web.crt> https://<panel>:<port>/agent/install | sudo
-  bash -s -- <token> <hash>`; skrip pasang dan `dbpanel agent pair`
-  memakai pin yang sama untuk mengunduh binary dan memasang, lalu agent
-  menyimpan CA agent dari balasan pasangan seperti sekarang. Pin
-  mengikat ke kunci `web.crt`, yang panel pertahankan saat menerbitkan
-  ulang (kunci tidak diganti kecuali user meminta). Agent yang sudah
-  berpasangan tidak menyentuh port web lagi; jalur mTLS 8443 tetap
+  bash -s -- <token> <hash>` (`-k` mematikan pemeriksaan rantai karena
+  CA web tidak dikenal mesin itu; pin kuncilah yang menjadi
+  pengamannya); skrip pasang dan `dbpanel agent pair` memakai pin yang
+  sama untuk mengunduh binary dan memasang, lalu agent menyimpan CA
+  agent dari balasan pasangan seperti sekarang. Pin mengikat ke kunci
+  sertifikat yang sedang dilayani: panel mempertahankan kunci `web.crt`
+  saat menerbitkan ulang, dan perintah pasang selalu dibuat dari kunci
+  yang aktif saat ditampilkan; mengganti ke sertifikat sendiri atau
+  kembali ke sertifikat panel membuat perintah yang ditampilkan sebelumnya
+  tidak berlaku, dan halaman server menampilkan yang baru. Agent yang
+  sudah berpasangan tidak menyentuh port web lagi; jalur mTLS 8443 tetap
   terpisah dan tidak berubah.
 
 ### 5.12 Penguatan audit murah
@@ -848,11 +907,19 @@ pengalihan.
 
 ## 8. Risiko residual yang disadari
 
-- Panel yang dibobol tetap bisa, dengan menyebut replika asli sebagai
-  kandidat, mengunci master selama tenggat `lockForPromote` (maksimum 60
-  menit) dan memicu promote terencana yang tidak diinginkan: data utuh,
-  aplikasi kehilangan tulisan sampai dialihkan; semua tercatat audit dan
-  Telegram. Mode ketat (4.C) di Rencana 5 menutupnya.
+- Panel yang dibobol tetap bisa, dengan menyebut replika yang sedang
+  tersambung sebagai kandidat, mengunci master dan memicu promote
+  terencana yang tidak diinginkan: data utuh, aplikasi kehilangan
+  tulisan sampai dialihkan; semua tercatat audit dan Telegram. Bila
+  kandidat lalu dibuat tidak terjangkau, kunci bertahan sampai operator
+  menjalankan `dbpanel agent unlock-master` di server master (pilihan
+  sadar: membuka otomatis berisiko dua master). Mode ketat (4.C) di
+  Rencana 5 menutupnya.
+- Pin `replica` kini menerima `createReplUser` ketat, sehingga panel
+  yang dibobol bisa membuat akun replikasi di replika sebagian; replika
+  lengkap sudah memilikinya sejak dump, jadi paparan tidak bertambah
+  jenisnya (akun itu bisa membaca binlog dan menjadi donor CLONE
+  replika, bukan master).
 - `repoint` memverifikasi master baru hanya lewat keadaan MySQL-nya;
   server palsu dengan `gtid_purged` yang disetel bisa lolos bila
   penyerang menguasai panel **dan** punya server MySQL di jaringan
@@ -905,3 +972,20 @@ dibangun, jawabannya sudah dimasukkan ke bagian terkait:
     tidaknya sertifikat panel di master baru (5.1).
 12. (Pemeriksaan konsistensi) `quarantine` saat MySQL master lama mati
     menulis pin dulu dan menerapkan kunci saat MySQL kembali (5.1).
+13. (Pemeriksaan konsistensi) Kandidat `lockForPromote` harus sedang
+    tersambung; kunci dicatat di berkas dan dipasang lagi saat MySQL
+    restart; selama berkas ada, "Buka kunci master" ditolak; kandidat
+    yang hilang membuat master tetap terkunci sampai `dbpanel agent
+    unlock-master`; penjaga memberi tenggang 60 detik sebelum membuka
+    (5.1, 8).
+14. (Pemeriksaan konsistensi) Titik tanpa balik promote adalah `RESET
+    REPLICA ALL`; promote bisa dilanjutkan dengan "Coba lagi" (5.1,
+    5.3).
+15. (Pemeriksaan konsistensi) Pin `replica` menerima `createReplUser`
+    ketat agar replika sebagian bisa menjadi kandidat (5.1, 8).
+16. (Pemeriksaan konsistensi) `replicas-seen` tanpa batas waktu untuk
+    `quarantine`; "Perketat" memasang sertifikat di semua server
+    topologi; perintah pasang agent memakai `-k` + pin dan dibuat dari
+    kunci aktif; upgrade memulai panel dulu lalu agent lokal; hapus
+    berkas salvage dan hapus master lama diatur (5.1, 5.4, 5.8, 5.9,
+    5.11); CLI lokal `lock-master`/`unlock-master` (5.1).
