@@ -111,6 +111,16 @@ as_panel() {
 	runuser -u "$PANEL_USER" -- "$@"
 }
 
+# panel_read MAX FILE prints at most MAX bytes of FILE, read as the panel
+# user. Only a regular file is read, and within 60 s, so a FIFO or device
+# put there cannot hang the script or fill the disk.
+panel_read() {
+	as_panel timeout 60 sh -c '[ -f "$2" ] && exec head -c "$1" -- "$2"' sh "$1" "$2"
+}
+
+# MAX_AGENT_BINARY bounds a served agent binary kept from the previous bin/.
+MAX_AGENT_BINARY=$((64 * 1024 * 1024))
+
 # copy_agent_binaries SRC puts SRC/dbpanel_linux_{amd64,arm64} in the
 # directory the panel serves agent binaries from. The new bin/ is built in a
 # root-owned directory (keeping the binaries already served, read as the
@@ -127,7 +137,9 @@ copy_agent_binaries() {
 	chmod 0755 "$stage"
 	if [ -d "$dir" ]; then
 		for name in dbpanel_linux_amd64 dbpanel_linux_arm64; do
-			if as_panel cat -- "$dir/$name" >"$stage/$name" 2>/dev/null; then
+			# One byte over the limit tells a binary that is too big.
+			if panel_read $((MAX_AGENT_BINARY + 1)) "$dir/$name" >"$stage/$name" 2>/dev/null &&
+				[ -s "$stage/$name" ] && [ "$(stat -c %s "$stage/$name")" -le "$MAX_AGENT_BINARY" ]; then
 				chmod 0644 "$stage/$name"
 			else
 				rm -f "$stage/$name"
@@ -351,7 +363,7 @@ hand_local_token() {
 	# link), into a new root-owned 0600 file in root's directory.
 	local tmp
 	tmp=$(mktemp "$CONFIG_DIR/.local-pair-token.XXXXXX")
-	if ! as_panel head -c 4096 -- "$PANEL_TOKEN_FILE" >"$tmp"; then
+	if ! panel_read 4096 "$PANEL_TOKEN_FILE" >"$tmp"; then
 		rm -f "$tmp"
 		die "Gagal membaca $PANEL_TOKEN_FILE"
 	fi
@@ -433,15 +445,24 @@ main() {
 		echo "Peringatan: agent host ini belum berpasangan dengan panel. Periksa: journalctl -u dbpanel-agent" >&2
 	fi
 
-	local ip
+	print_summary
+}
+
+# print_summary prints the panel's address, user and initial password. The
+# password file is in the panel's directory, so it is read as the panel user.
+print_summary() {
+	local ip pw=""
 	ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+	if [ -s "$PASSWORD_FILE" ]; then
+		pw=$(panel_read 4096 "$PASSWORD_FILE") || pw=""
+	fi
 	echo
 	echo "Panel terpasang."
 	echo "Alamat : https://${ip:-<ip-server>}:8080"
 	echo "Browser memperingatkan? Buka http://${ip:-<ip-server>}:8080/sertifikat dan pasang sertifikat keamanan panel."
 	echo "Pengguna: admin"
-	if [ -s "$PASSWORD_FILE" ]; then
-		echo "Sandi   : $(cat "$PASSWORD_FILE")"
+	if [ -n "$pw" ]; then
+		echo "Sandi   : $pw"
 		echo
 		echo "Sandi awal juga tersimpan di $PASSWORD_FILE."
 		echo "Peringatan: hapus file ini setelah login pertama: sudo rm $PASSWORD_FILE"

@@ -497,6 +497,20 @@ else
 				ln -sfn "$victim/secret" "$PANEL_TOKEN_FILE"
 				hand_local_token
 				;;
+			password-link)
+				ln -sfn "$victim/secret" "$PASSWORD_FILE"
+				print_summary
+				;;
+			bin-special)
+				# A bin/ the panel user owns (as after the move from the
+				# old layout) holding a FIFO and a link to /dev/zero.
+				rm -rf "$PANEL_DATA_DIR/bin"
+				mkdir "$PANEL_DATA_DIR/bin"
+				mkfifo "$PANEL_DATA_DIR/bin/dbpanel_linux_amd64"
+				ln -s /dev/zero "$PANEL_DATA_DIR/bin/dbpanel_linux_arm64"
+				chown -R -h "$PANEL_USER:" "$PANEL_DATA_DIR/bin"
+				copy_agent_binaries "$tmp/rel1"
+				;;
 			esac
 		) >"$r/$1.out" 2>&1
 	}
@@ -518,6 +532,33 @@ else
 	fi
 	if grep -rqs rahasia "$r/etc/dbpanel"; then
 		fail "hand_local_token menyalin isi berkas lain"
+	fi
+	# The summary reads the initial password as the panel user: a link to a
+	# file only root can read prints nothing of it.
+	if ! links_case password-link; then
+		fail "print_summary gagal: $(cat "$r/password-link.out")"
+	elif grep -q rahasia "$r/password-link.out"; then
+		fail "print_summary mencetak isi berkas lain lewat tautan sandi awal"
+	fi
+	# Only regular files are kept from the old bin/, within bounds: a FIFO
+	# or /dev/zero neither hangs the script nor fills the disk.
+	links_case bin-special &
+	special=$!
+	for _ in {1..1200}; do
+		kill -0 "$special" 2>/dev/null || break
+		sleep 0.1
+	done
+	if kill -0 "$special" 2>/dev/null; then
+		pkill -P "$special" 2>/dev/null || true
+		kill "$special" 2>/dev/null || true
+		fail "copy_agent_binaries macet pada FIFO di bin/"
+	elif ! wait "$special"; then
+		fail "copy_agent_binaries dengan FIFO atau /dev/zero di bin/: $(cat "$r/bin-special.out")"
+	else
+		cmp -s "$release/dbpanel_linux_amd64" "$r/var/lib/dbpanel/panel/bin/dbpanel_linux_amd64" ||
+			fail "copy_agent_binaries: dbpanel_linux_amd64 tidak terpasang setelah FIFO"
+		[ ! -e "$r/var/lib/dbpanel/panel/bin/dbpanel_linux_arm64" ] ||
+			fail "copy_agent_binaries menyimpan /dev/zero sebagai dbpanel_linux_arm64"
 	fi
 	[ "$(stat -c '%U %G %a' "$victim" "$victim/secret")" = "$victim_state" ] ||
 		fail "pemilik atau izin berkas di luar direktori panel berubah"
