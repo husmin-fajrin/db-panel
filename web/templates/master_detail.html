@@ -121,6 +121,17 @@
   </div>
 </div>
 
+{{if .Tighten}}
+<div role="alert" class="alert alert-warning alert-soft flex flex-col items-start gap-2 mb-6" data-tighten>
+  <h3 class="font-bold">Perketat sambungan replikasi</h3>
+  <p class="text-sm">{{if .NoCert}}MySQL master ini belum memakai sertifikat dari panel{{else}}Sebagian replika belum memeriksa sertifikat MySQL master{{end}}, jadi replika belum bisa memastikan bahwa yang dihubunginya benar-benar master ini.</p>
+  <p class="text-sm">Panel memasang sertifikat MySQL di master dan di tiap replika, lalu menyambungkan ulang replikasi tiap replika dengan pemeriksaan sertifikat. Replikasi tiap replika berhenti beberapa detik; MySQL tidak dimulai ulang. Replika yang sedang tidak terjangkau dilewati; jalankan lagi nanti.</p>
+  <form method="post" action="/masters/{{.Server.ID}}/tighten-tls">
+    <button type="submit" class="btn btn-warning btn-sm" data-confirm-action="tighten_tls" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="Perketat sambungan replikasi master {{.Server.Name}} dan replikanya.">Perketat sambungan replikasi</button>
+  </form>
+</div>
+{{end}}
+
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
     <div class="flex flex-wrap items-center justify-between gap-2">
@@ -134,7 +145,7 @@
         <tbody>
           {{range .Replicas}}
           <tr>
-            <td><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a></td>
+            <td><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a>{{if .Unverified}}<div class="text-xs text-warning">Sambungan replikasi belum diverifikasi</div>{{end}}</td>
             <td>{{template "status-badge" .State}}</td>
             <td data-status-for="{{.ServerID}}" data-status-variant="baris">{{template "status-row" .Status}}</td>
             <td>{{if .Databases}}{{range $i, $d := .Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td>

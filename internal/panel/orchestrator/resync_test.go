@@ -66,7 +66,8 @@ func (e *env) resyncReplica(topo store.Topology, onTarget []proto.DatabaseInfo, 
 }
 
 func resyncSteps() []string {
-	return []string{"Periksa master", "Periksa server tujuan", "Siapkan replika", "Salin data", "Sambungkan replikasi", "Verifikasi"}
+	return []string{"Periksa master", "Periksa server tujuan", "Siapkan replika", "Salin data", "Pasang sertifikat MySQL",
+		"Sambungkan replikasi", "Verifikasi"}
 }
 
 func TestResyncHappyPathOneConfirmation(t *testing.T) {
@@ -108,7 +109,7 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 	if !slices.Equal(names, resyncSteps()) {
 		t.Fatalf("steps = %v", names)
 	}
-	want := slices.Repeat([]string{store.StepDone}, 6)
+	want := slices.Repeat([]string{store.StepDone}, 7)
 	if got := stepStatuses(steps); !slices.Equal(got, want) {
 		t.Fatalf("step statuses = %v (no step may wait)", got)
 	}
@@ -134,7 +135,8 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 	}
 	wantCmds(t, "replica", r.cmds(0), []string{"probe", "mysql.preflight", "mysql.configure", "mysql.setReadOnly",
 		"mysql.status", "mysql.resetReplica", "mysql.dropDatabases", "mysql.dumpFrom",
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+		"mysql.tlsRequest", "mysql.tlsInstall", "mysql.status", "mysql.configureReplication", "mysql.startReplica",
+		"mysql.startReplica", "mysql.waitSynced"})
 	var dr proto.DropDatabasesParams
 	r.params("mysql.dropDatabases", &dr)
 	if !slices.Equal(dr.Databases, []string{"a", "x"}) {
@@ -211,7 +213,7 @@ func TestResyncUsesCloneForAllDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, steps := e.waitJob(id, store.JobSucceeded)
-	if got := stepStatuses(steps); !slices.Equal(got, slices.Repeat([]string{store.StepDone}, 6)) {
+	if got := stepStatuses(steps); !slices.Equal(got, slices.Repeat([]string{store.StepDone}, 7)) {
 		t.Fatalf("step statuses = %v", got)
 	}
 	if r.count("mysql.cloneFrom") != 1 || r.count("mysql.dumpFrom") != 0 || r.count("mysql.dropDatabases") != 0 {

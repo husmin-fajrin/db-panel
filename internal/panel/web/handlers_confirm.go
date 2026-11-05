@@ -164,6 +164,9 @@ func (a *app) confirmRefused(w http.ResponseWriter, r *http.Request, action, tar
 		}
 		p.Flash = msgConfirmInvalid
 		a.render.renderStatus(w, http.StatusForbidden, "replica_databases", p)
+	case action == ActTightenTLS:
+		// The button is on the master page.
+		a.showError(w, r, srv, http.StatusForbidden, msgConfirmInvalid)
 	case targetKind == auditServer:
 		a.renderServer(w, r, srv, serverView{Status: http.StatusForbidden, Flash: msgConfirmInvalid})
 	default:

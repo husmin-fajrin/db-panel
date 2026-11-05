@@ -2,7 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -15,6 +21,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
+	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -41,6 +48,7 @@ var agentCommands = []string{
 	"mysql.install", "mysql.configureReplication", "mysql.setReplicationFilter", "mysql.startReplica",
 	"mysql.stopReplica", "mysql.resetReplica", "mysql.waitSynced", "mysql.startUntil", "mysql.dropDatabases",
 	"mysql.createDumpUser", "mysql.dropUser", "mysql.sweepDumpUsers", "mysql.releaseRole",
+	"mysql.tlsRequest", "mysql.tlsInstall", "mysql.tlsTrust",
 }
 
 type call struct {
@@ -287,14 +295,16 @@ type published struct {
 }
 
 type env struct {
-	t      *testing.T
-	st     *store.Store
-	hub    *hub.Hub
-	box    *secrets.Box
-	r      *Runner
-	alerts *fakeAlerts
-	pubMu  sync.Mutex
-	pubs   []published
+	t   *testing.T
+	st  *store.Store
+	hub *hub.Hub
+	box *secrets.Box
+	r   *Runner
+	// mysqlCA signs the MySQL server certificates (Deps.MySQLCA).
+	mysqlCA *ca.MySQLCA
+	alerts  *fakeAlerts
+	pubMu   sync.Mutex
+	pubs    []published
 
 	agents []*fakeAgent
 }
@@ -321,10 +331,14 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mysqlCA, err := ca.LoadOrCreateMySQLCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	l := &testListener{}
-	e := &env{t: t, st: st, hub: hub.New(l), box: box, alerts: &fakeAlerts{}}
+	e := &env{t: t, st: st, hub: hub.New(l), box: box, alerts: &fakeAlerts{}, mysqlCA: mysqlCA}
 	e.r = New(Deps{Store: st, Hub: e.hub, Secrets: box, Publish: e.publish, Alerts: e.alerts,
-		Logger: slog.New(slog.DiscardHandler), Now: time.Now, PublicHost: "203.0.113.7"})
+		Logger: slog.New(slog.DiscardHandler), Now: time.Now, PublicHost: "203.0.113.7", MySQLCA: mysqlCA})
 	e.r.offlineGrace = 300 * time.Millisecond
 	e.r.pollEvery = 10 * time.Millisecond
 	l.r.Store(e.r)
@@ -395,8 +409,56 @@ func (e *env) agent(name, addr string) *fakeAgent {
 	}
 	fa := newFakeAgent(e.t, e, srv.ID, name)
 	e.agents = append(e.agents, fa)
+	fa.scriptTLS()
 	fa.attach()
 	return fa
+}
+
+// fakeCAPath is where the fake agents keep the MySQL CA.
+const fakeCAPath = "/var/lib/mysql/dbpanel-tls/mysql-ca.crt"
+
+// scriptTLS scripts the MySQL certificate commands as an agent answers
+// them: a CSR for a new P-256 key, an install that reads the certificate
+// it was given, and the CA file's path.
+func (fa *fakeAgent) scriptTLS() {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		fa.t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: fa.name}}, key)
+	if err != nil {
+		fa.t.Fatal(err)
+	}
+	fa.reply("mysql.tlsRequest", proto.TLSRequestResult{Hostname: fa.name,
+		CSRPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))})
+	fa.on("mysql.tlsInstall", func(raw json.RawMessage) (any, error) {
+		var p proto.TLSInstallParams
+		json.Unmarshal(raw, &p)
+		block, _ := pem.Decode([]byte(p.CertPEM))
+		if block == nil {
+			return nil, &commands.ParamError{Msg: "bukan PEM"}
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		return proto.TLSInstallResult{Serial: fmt.Sprintf("%032x", cert.SerialNumber), NotAfter: cert.NotAfter, Reloaded: true}, nil
+	})
+	fa.reply("mysql.tlsTrust", proto.TLSTrustResult{CAPath: fakeCAPath})
+}
+
+// parseCertPEM parses a PEM certificate.
+func parseCertPEM(t *testing.T, s string) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode([]byte(s))
+	if block == nil {
+		t.Fatalf("not PEM: %q", s)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
 }
 
 func masterStatus() proto.MySQLStatus {

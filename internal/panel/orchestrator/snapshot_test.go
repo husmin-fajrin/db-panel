@@ -78,7 +78,8 @@ func TestCloneAdminReplacedWaitsInSnapshot(t *testing.T) {
 	}
 	// Verify the copy, read-only again, the inventory, then step 5 on.
 	wantCmds(t, "replica after reconnect", r.cmds(mark), []string{"mysql.status", "mysql.setReadOnly", "mysql.inventory",
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+		"mysql.tlsRequest", "mysql.tlsInstall", "mysql.status", "mysql.configureReplication", "mysql.startReplica",
+		"mysql.startReplica", "mysql.waitSynced"})
 	if rep, _ := e.st.GetReplicaByServer(r.id); rep.State != store.ReplicaReady {
 		t.Fatalf("replica = %+v", rep)
 	}

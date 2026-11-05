@@ -274,6 +274,12 @@ dan masa simpan binary log yang sudah ada dipertahankan.
   jaringan, di balik NAT, atau dihubungi lewat VPN, ubah lewat **Ubah
   alamat untuk replika**. Alamat itu diperiksa dari server replika saat
   replika berikutnya dibuat.
+- **Sertifikat MySQL:** tahap **Pasang sertifikat MySQL** memberi MySQL
+  master sertifikat dari panel (lihat "Sertifikat MySQL" di bawah), tanpa
+  restart. Sertifikat itu memuat alamat server di panel dan alamat untuk
+  replika; bila alamat untuk replika diubah ke nama atau IP lain, klik
+  **Perbarui sertifikat MySQL** di halaman server master agar alamat baru
+  ikut tercantum.
 
 ### Buat replika
 
@@ -304,9 +310,64 @@ dan masa simpan binary log yang sudah ada dipertahankan.
   master.
 - **TLS:** bila master menawarkan TLS (MySQL 8 membuat sertifikatnya
   sendiri), replikasi, CLONE dan dump berjalan terenkripsi dan akun
-  replikasi hanya bisa masuk lewat TLS. Sertifikat master belum
-  diverifikasi (belum ada CA untuk itu), jadi ini melindungi dari
-  penyadapan, belum dari penyamaran master oleh penyerang aktif di jaringan.
+  replikasi hanya bisa masuk lewat TLS.
+- **Sertifikat MySQL dan verifikasi:** setelah data tersalin, tahap
+  **Pasang sertifikat MySQL** memberi replika sertifikatnya sendiri dan
+  berkas CA MySQL panel (`<datadir>/dbpanel-tls/mysql-ca.crt`). Bila master
+  punya sertifikat dari panel (selalu, untuk master yang disiapkan dengan
+  versi ini), replika memverifikasinya: replikasi memakai
+  `SOURCE_SSL_CA` dan `SOURCE_SSL_VERIFY_SERVER_CERT=1` (sertifikat harus
+  diterbitkan CA MySQL panel dan memuat alamat master), dan dump memakai
+  `--ssl-mode=VERIFY_IDENTITY`. Jadi penyerang di jaringan tidak bisa
+  menyamar sebagai master. **CLONE hanya memeriksa rantai sertifikat**
+  (`clone_ssl_ca`: sertifikat donor harus diterbitkan CA MySQL panel),
+  tidak memeriksa nama host, karena MySQL tidak menyediakan pemeriksaan
+  nama untuk CLONE; sertifikat dari CA itu hanya dimiliki server yang
+  dikelola panel. Bila master belum punya sertifikat dari panel (topologi
+  lama), replikasi tetap terenkripsi tanpa verifikasi, log pekerjaan
+  menulis "Sambungan replikasi belum diverifikasi: master belum punya
+  sertifikat panel", dan halaman master menampilkan peringatan itu sampai
+  **Perketat sambungan replikasi** dijalankan.
+
+### Sertifikat MySQL
+
+Panel punya penerbit sertifikat sendiri untuk MySQL (CA MySQL,
+`/etc/dbpanel/mysql-ca.crt` dan `mysql-ca.key`, dibuat saat panel pertama
+start, masa 10 tahun), terpisah dari CA agent. Tiap server mendapat
+sertifikat sendiri (masa 2 tahun) yang hanya memuat nama yang panel
+ketahui sendiri: alamat server di panel dan, untuk master, alamat untuk
+replika. Agent membuat kuncinya di server itu
+(`<datadir>/dbpanel-tls/server.key`, folder 0700 dan berkas 0600 milik
+user `mysql`); kunci tidak pernah meninggalkan server. MySQL memuat
+sertifikat baru tanpa restart (`ALTER INSTANCE RELOAD TLS`, butuh hak
+`CONNECTION_ADMIN`), lalu agent mencoba sambungan baru yang memeriksa
+sertifikat itu; bila gagal, berkas lama dikembalikan dan pekerjaan gagal.
+
+- **Siapkan master**, **Buat replika**, dan **Resync ulang** memasang
+  sertifikat di server yang disiapkan (tahap **Pasang sertifikat MySQL**).
+- **Pasang sertifikat MySQL** di halaman server (dengan konfirmasi kata
+  sandi) memasang atau memperbarui sertifikat server yang sudah ada.
+  Halaman server menampilkan nomor seri dan masa berlakunya.
+- **Perketat sambungan replikasi** di halaman master (dengan konfirmasi
+  kata sandi) untuk topologi yang dibuat sebelum versi ini, atau bila ada
+  replika yang belum memverifikasi master: panel memasang sertifikat di
+  master, lalu untuk tiap replika memasang sertifikatnya dan menyambungkan
+  ulang replikasinya dengan verifikasi (replikasi berhenti beberapa detik;
+  replika yang dihentikan lewat **Stop replika** tetap berhenti). Replika
+  yang sedang tidak terjangkau atau punya pekerjaan lain dilewati
+  ("replika tidak terjangkau; ulangi nanti") tanpa menggagalkan
+  pekerjaan; jalankan lagi nanti. Kotak ini tampil selama master belum
+  punya sertifikat atau ada replika dengan peringatan **Sambungan
+  replikasi belum diverifikasi**.
+- **Perpanjangan otomatis:** panel memeriksa setiap hari (pertama kali 10
+  menit setelah start) dan menjalankan **Pasang sertifikat MySQL** sendiri
+  untuk sertifikat yang habis dalam 30 hari, bila agent-nya terhubung dan
+  server itu tidak sedang menjalankan pekerjaan lain. Bila sertifikat
+  tinggal kurang dari 14 hari, peringatan **Sertifikat MySQL hampir
+  kedaluwarsa** ("Sertifikat MySQL <nama> kedaluwarsa dalam N hari",
+  tingkat peringatan, ikut dikirim ke Telegram) terbuka sampai
+  sertifikatnya diperpanjang. Sertifikat keamanan panel (web)
+  memperbarui dirinya sendiri; lihat "Keamanan".
 
 ### Akun yang dibuat panel di master
 
@@ -819,9 +880,10 @@ Test end-to-end (perintah `make test-e2e` atau
 `go test -timeout 30m -run TestE2E ./internal/panel/`) menjalankan panel,
 agent dan `mysqld` sungguhan, lalu lewat UI:
 
-- `TestE2ECreateReplica`: hubungkan MySQL, siapkan master, buat replika
-  untuk satu database, tambah database kedua, dan buat replika kedua
-  dengan CLONE;
+- `TestE2ECreateReplica`: hubungkan MySQL, siapkan master (dengan
+  sertifikat MySQL), buat replika untuk satu database, tambah database
+  kedua, dan buat replika kedua dengan CLONE; replikasi kedua replika
+  harus memverifikasi sertifikat master;
 - `TestE2EMonitoring`: `STOP REPLICA` langsung di MySQL replika harus
   tampil sebagai Berhenti (di luar panel), membuka peringatan, dan
   mengirim satu pesan ke Telegram palsu (server `httptest`, tidak ada

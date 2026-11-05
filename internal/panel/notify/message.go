@@ -53,6 +53,7 @@ var kindNames = map[string]string{
 	monitor.KindConnectionsHigh:     "koneksi MySQL tinggi",
 	monitor.KindBinlogDeadline:      "batas umur binlog master",
 	monitor.KindJobFailed:           "pekerjaan gagal",
+	monitor.KindTLSExpiring:         "sertifikat MySQL hampir kedaluwarsa",
 }
 
 // masterKinds and replicaKinds link to the master's or the replica's page;

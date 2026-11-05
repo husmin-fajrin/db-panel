@@ -83,6 +83,10 @@ func kindLabel(kind string) string {
 		return "Lepas database"
 	case orchestrator.KindResyncReplica:
 		return "Resync ulang"
+	case orchestrator.KindMySQLTLS:
+		return "Pasang sertifikat MySQL"
+	case orchestrator.KindTightenTLS:
+		return "Perketat sambungan replikasi"
 	}
 	return kind
 }

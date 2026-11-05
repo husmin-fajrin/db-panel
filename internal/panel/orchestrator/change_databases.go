@@ -275,6 +275,13 @@ func (jr *jobRun) addDump(ctx context.Context, _ bool) (outcome, error) {
 	// (copySnapshot).
 	p := proto.SnapshotParams{Host: topo.SourceHost, Port: topo.SourcePort, Databases: jr.st.Change,
 		EstimateBytes: jr.st.DataBytes, SSL: ms.TLSAvailable}
+	// The dump verifies the master's certificate when it has the panel's.
+	if jr.st.TLSVerify, err = jr.r.masterHasCert(jr.master()); err != nil {
+		return outcome{}, err
+	}
+	if err := jr.verifySnapshot(ctx, &p); err != nil {
+		return outcome{}, err
+	}
 	jr.logf("info", "Menyalin database %s dengan dump; master dikunci sesaat (FLUSH TABLES WITH READ LOCK) saat dump dimulai.",
 		strings.Join(jr.st.Change, ", "))
 	var res proto.SnapshotResult

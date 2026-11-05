@@ -82,6 +82,23 @@ func (p *Panel) probeLoop(ctx context.Context) {
 	}
 }
 
+// renewMySQLCerts starts mysql_tls for the MySQL certificates that expire
+// within 30 days: tlsRenewFirst after the start, then daily, until ctx is
+// done. A server it skips (offline, busy) is tried the next day.
+func (p *Panel) renewMySQLCerts(ctx context.Context) {
+	t := time.NewTimer(p.tlsRenewFirst)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.Orchestrator.RenewMySQLTLS(ctx)
+			t.Reset(tlsRenewEvery)
+		}
+	}
+}
+
 // goProbe probes id in the background while Run is serving; outside Run it
 // does nothing.
 func (p *Panel) goProbe(id int64) {

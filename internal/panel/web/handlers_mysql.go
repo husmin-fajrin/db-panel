@@ -26,6 +26,11 @@ type Orchestrator interface {
 	StartAddDatabases(ctx context.Context, replicaServerID int64, databases []string) (string, error)
 	StartRemoveDatabases(ctx context.Context, replicaServerID int64, databases []string, dropData bool) (string, error)
 	StartResync(ctx context.Context, p orchestrator.ResyncParams) (string, error)
+	// StartMySQLTLS installs a new MySQL certificate on the server;
+	// StartTightenTLS gives a master and its replicas certificates and
+	// makes replication verify the master's.
+	StartMySQLTLS(ctx context.Context, serverID int64) (string, error)
+	StartTightenTLS(ctx context.Context, masterServerID int64) (string, error)
 	// Direct controls: refused while the server has an unfinished job.
 	StopReplica(ctx context.Context, serverID int64) error
 	StartReplica(ctx context.Context, serverID int64) error
@@ -229,6 +234,47 @@ type replicaRow struct {
 	store.Replica
 	ServerName string
 	Status     statusView
+	// Unverified: a ready replica whose replication does not verify the
+	// master's certificate ("Sambungan replikasi belum diverifikasi").
+	Unverified bool
+}
+
+// installMySQLTLS starts the mysql_tls job on {id} ("Pasang sertifikat
+// MySQL"), with the password confirmed.
+func (a *app) installMySQLTLS(w http.ResponseWriter, r *http.Request) {
+	srv, ok := a.serverFromPath(w, r)
+	if !ok || !a.requireConfirm(w, r, ActMySQLTLS, auditServer, srv.ID) {
+		return
+	}
+	id, err := a.Orchestrator.StartMySQLTLS(r.Context(), srv.ID)
+	a.audit(r, "mysql_tls", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
+	if err != nil {
+		a.Logger.Warn("mysql certificate refused", "server", srv.ID, "err", err)
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		return
+	}
+	a.Logger.Info("mysql certificate job started", "server", srv.ID, "job", id, "by", a.page(r).Username)
+	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
+}
+
+// tightenTLS starts the tighten_tls job on the master {id} ("Perketat
+// sambungan replikasi"), with the password confirmed.
+func (a *app) tightenTLS(w http.ResponseWriter, r *http.Request) {
+	srv, topo, ok := a.masterFromPath(w, r)
+	if !ok || !a.requireConfirm(w, r, ActTightenTLS, auditServer, srv.ID) {
+		return
+	}
+	id, err := a.Orchestrator.StartTightenTLS(r.Context(), srv.ID)
+	a.audit(r, "tighten_tls", auditMaster, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
+	if err != nil {
+		a.Logger.Warn("tighten replication refused", "master", srv.ID, "err", err)
+		p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
+		p.Flash = err.Error()
+		a.renderMaster(w, r, http.StatusBadRequest, p)
+		return
+	}
+	a.Logger.Info("tighten replication started", "master", srv.ID, "job", id, "by", a.page(r).Username)
+	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
 type masterPage struct {
@@ -259,6 +305,11 @@ type masterPage struct {
 	Status   statusView
 	Facts    masterFacts
 	Timeline timelineView
+	// NoCert: the master has no MySQL certificate from the panel. The
+	// "Perketat sambungan replikasi" box shows when it has none or a
+	// replica is Unverified (Tighten).
+	NoCert  bool
+	Tighten bool
 }
 
 // setSourceRow is a replica whose agent's pinned source must be changed
@@ -359,9 +410,20 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 		return
 	}
 	p.Source = net.JoinHostPort(topo.SourceHost, strconv.Itoa(topo.SourcePort))
+	if _, err := a.Store.GetServerTLS(srv.ID); errors.Is(err, store.ErrNotFound) {
+		p.NoCert = true
+	} else if err != nil {
+		a.internalError(w, "get server tls", err)
+		return
+	}
+	p.Tighten = p.NoCert
 	for _, rep := range reps {
-		p.Replicas = append(p.Replicas, replicaRow{Replica: rep, ServerName: names[rep.ServerID],
-			Status: a.statusOf(rep.ServerID, store.RoleReplica)})
+		row := replicaRow{Replica: rep, ServerName: names[rep.ServerID], Status: a.statusOf(rep.ServerID, store.RoleReplica)}
+		// A replica being created, resynced or failed is set when its
+		// replication is connected.
+		row.Unverified = !rep.TLSVerified && (rep.State == store.ReplicaReady || rep.State == store.ReplicaAttention)
+		p.Tighten = p.Tighten || row.Unverified
+		p.Replicas = append(p.Replicas, row)
 		following := ""
 		if rv, ok := a.Monitor.View(rep.ServerID); ok && rv.Snap != nil && rv.Snap.MySQLOK && rv.Snap.Replica != nil &&
 			rv.Snap.Replica.SourceHost != "" {

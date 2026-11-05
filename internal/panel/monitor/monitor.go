@@ -429,8 +429,8 @@ func (m *Monitor) markNeedsUpgrade(id int64) {
 // tick re-derives every server's status at now, so statuses that change
 // with time alone (agent offline, presumed down, stale reports,
 // disconnected for long, lagging by a GTID gap) do; it publishes what
-// changed and the end of backlog batches, evaluates the alerts, and prunes
-// old events daily.
+// changed and the end of backlog batches, evaluates the alerts (with
+// tls_expiring), and prunes old events daily.
 func (m *Monitor) tick() {
 	now := m.now()
 	servers, err := m.st.ListServers()
@@ -461,6 +461,7 @@ func (m *Monitor) tick() {
 		ups = m.commit(srv.ID, s, ups)
 	}
 	alerts := m.evaluate(now)
+	alerts = append(alerts, m.checkTLSExpiry(now)...)
 	prune := now.Sub(m.lastPrune) >= pruneEvery
 	if prune {
 		m.lastPrune = now

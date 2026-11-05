@@ -96,6 +96,11 @@ type serverDetailPage struct {
 	// keeps; the list may be cut.
 	InventoryCut bool
 	Controls     serverControls // Periksa sekarang and Jangan ganggu (paired servers)
+	// MySQLCert is the MySQL certificate the panel installed; nil when
+	// none. CanInstallCert offers "Pasang sertifikat MySQL" (connected, no
+	// missing grants).
+	MySQLCert      *store.ServerTLS
+	CanInstallCert bool
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -278,6 +283,15 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 			p.PrepareAgain = err == nil
 		}
 		p.Controls = a.controls(srv)
+		p.CanInstallCert = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0
+		cert, err := a.Store.GetServerTLS(srv.ID)
+		switch {
+		case err == nil:
+			p.MySQLCert = &cert
+		case !errors.Is(err, store.ErrNotFound):
+			a.internalError(w, "get server tls", err)
+			return
+		}
 	}
 	switch {
 	case !found || p.Local:

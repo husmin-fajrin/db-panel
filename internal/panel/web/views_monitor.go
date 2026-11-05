@@ -249,6 +249,8 @@ var auditActions = map[string]string{
 	"mysql_connect":    "Hubungkan MySQL",
 	"mysql_refresh":    "Segarkan data MySQL",
 	"prepare_master":   "Siapkan sebagai master",
+	"mysql_tls":        "Pasang sertifikat MySQL",
+	"tighten_tls":      "Perketat sambungan replikasi",
 	"master_source":    "Ubah alamat untuk replika",
 	"master_unlock":    "Buka kunci master",
 	"create_replica":   "Buat replika",

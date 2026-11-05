@@ -30,6 +30,8 @@ var auditActionLabels = map[string]string{
 	"mysql_connect":     "Hubungkan MySQL",
 	"mysql_refresh":     "Segarkan data MySQL",
 	"prepare_master":    "Siapkan master",
+	"mysql_tls":         "Pasang sertifikat MySQL",
+	"tighten_tls":       "Perketat sambungan replikasi",
 	"master_source":     "Ubah alamat MySQL master",
 	"master_unlock":     "Buka kunci master",
 	"create_replica":    "Buat replika",

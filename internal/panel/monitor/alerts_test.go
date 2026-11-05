@@ -84,7 +84,7 @@ func running(s *proto.HealthSnapshot) {
 
 func TestAllKinds(t *testing.T) {
 	want := "replica_stopped replica_disconnected replica_lagging replica_unlocked master_locked master_down " +
-		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed"
+		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring"
 	if got := strings.Join(AllKinds(), " "); got != want {
 		t.Fatalf("AllKinds = %s", got)
 	}
@@ -694,5 +694,67 @@ func TestAgentOfflineAlertStableUntilReport(t *testing.T) {
 	r.m.tick()
 	if n := len(r.alerts(rID, KindAgentOffline)); n != 1 {
 		t.Fatalf("agent_offline alerts = %d, want 1", n)
+	}
+}
+
+func TestTLSExpiringAlert(t *testing.T) {
+	r := newRig(t)
+	id := r.server("db-utama")
+	other := r.server("db-lain")
+	now := r.clk.Now()
+	notAfter := now.Add(14*24*time.Hour + time.Hour)
+	set := func(serverID int64, na time.Time) {
+		t.Helper()
+		if err := r.st.SetServerTLS(store.ServerTLS{ServerID: serverID, CertSerial: "01", NotAfter: na, InstalledAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set(id, notAfter)
+	set(other, now.AddDate(1, 0, 0))
+
+	// 14 days and an hour left: nothing yet.
+	r.m.CheckTLSExpiry(now)
+	if r.isOpen(id, KindTLSExpiring) {
+		t.Fatal("tls_expiring open 14 days before the expiry")
+	}
+	// 13 days left: open, as a warning naming the server and the days.
+	r.clk.Set(notAfter.Add(-13*24*time.Hour - time.Minute))
+	r.m.CheckTLSExpiry(r.clk.Now())
+	a := r.openAlert(id, KindTLSExpiring)
+	if a.Message != "Sertifikat MySQL db-utama kedaluwarsa dalam 13 hari." {
+		t.Fatalf("message = %q", a.Message)
+	}
+	if r.isOpen(other, KindTLSExpiring) {
+		t.Fatal("tls_expiring open for a certificate valid for a year")
+	}
+	if ups := r.alertUpdates(id, KindTLSExpiring); len(ups) != 1 || ups[0]["open"] != true {
+		t.Fatalf("alert_update = %v", ups)
+	}
+	// A day later the same alert says 12 days.
+	r.clk.Add(24 * time.Hour)
+	r.m.CheckTLSExpiry(r.clk.Now())
+	if as := r.alerts(id, KindTLSExpiring); len(as) != 1 || as[0].Message != "Sertifikat MySQL db-utama kedaluwarsa dalam 12 hari." {
+		t.Fatalf("after a day = %+v", as)
+	}
+	// Renewed (SetServerTLS with the new certificate): closed.
+	set(id, r.clk.Now().AddDate(2, 0, 0))
+	r.m.CheckTLSExpiry(r.clk.Now())
+	if r.isOpen(id, KindTLSExpiring) {
+		t.Fatal("tls_expiring still open after the renewal")
+	}
+	if ups := r.alertUpdates(id, KindTLSExpiring); len(ups) != 2 || ups[1]["open"] != false {
+		t.Fatalf("alert_update = %v, want open then closed", ups)
+	}
+	// The tick checks too.
+	set(other, r.clk.Now().Add(2*24*time.Hour))
+	r.m.tick()
+	if a := r.openAlert(other, KindTLSExpiring); a.Message != "Sertifikat MySQL db-lain kedaluwarsa dalam 2 hari." {
+		t.Fatalf("message = %q", a.Message)
+	}
+	// Expired.
+	r.clk.Add(3 * 24 * time.Hour)
+	r.m.CheckTLSExpiry(r.clk.Now())
+	if a := r.openAlert(other, KindTLSExpiring); a.Message != "Sertifikat MySQL db-lain sudah kedaluwarsa." {
+		t.Fatalf("message = %q", a.Message)
 	}
 }

@@ -209,6 +209,18 @@
   </form>
   {{end}}
 </div>
+<div class="divider my-1"></div>
+<h3 class="font-semibold">Sertifikat MySQL</h3>
+{{with .MySQLCert}}
+<p class="text-sm">Sertifikat MySQL dari panel terpasang: nomor seri <code class="break-all">{{.CertSerial}}</code>, berlaku sampai {{.NotAfter.Format "2006-01-02"}}. Panel memperbaruinya sendiri 30 hari sebelum habis masa berlakunya.</p>
+{{else}}
+<p class="text-sm text-base-content/70">Belum ada sertifikat MySQL dari panel. Dengan sertifikat ini replika bisa memastikan bahwa MySQL yang dihubunginya benar-benar server ini.</p>
+{{end}}
+{{if .CanInstallCert}}
+<form method="post" action="/servers/{{.Server.ID}}/mysql-tls">
+  <button type="submit" class="btn btn-sm" data-confirm-action="mysql_tls" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="Pasang sertifikat MySQL baru di {{.Server.Name}}. MySQL tidak dimulai ulang.">{{if .MySQLCert}}Perbarui sertifikat MySQL{{else}}Pasang sertifikat MySQL{{end}}</button>
+</form>
+{{end}}
 <details class="mt-2"{{if .Connect.Open}} open{{end}}>
   <summary class="btn btn-ghost btn-sm">Hubungkan ulang</summary>
   {{template "mysql-connect-form" .}}

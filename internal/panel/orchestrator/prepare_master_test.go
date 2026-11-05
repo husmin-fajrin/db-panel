@@ -40,10 +40,11 @@ func TestPrepareMasterHappyPath(t *testing.T) {
 	if j.Kind != KindPrepareMaster || j.ServerID != fa.id {
 		t.Fatalf("job = %+v", j)
 	}
-	if got, want := stepStatuses(steps), []string{store.StepDone, store.StepDone, store.StepSkipped, store.StepDone}; !slices.Equal(got, want) {
+	if got, want := stepStatuses(steps), []string{store.StepDone, store.StepDone, store.StepDone, store.StepSkipped, store.StepDone}; !slices.Equal(got, want) {
 		t.Fatalf("steps = %v, want %v", got, want)
 	}
-	wantCmds(t, "master", fa.cmds(0), []string{"mysql.preflight", "mysql.configure", "mysql.createReplUser", "mysql.status"})
+	wantCmds(t, "master", fa.cmds(0), []string{"mysql.preflight", "mysql.configure", "mysql.createReplUser", "mysql.tlsRequest",
+		"mysql.tlsInstall", "mysql.status"})
 
 	var pre proto.PreflightParams
 	fa.params("mysql.preflight", &pre)
@@ -163,10 +164,10 @@ func TestPrepareMasterWaitsForRestartApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	j, steps := e.waitJob(id, store.JobWaiting)
-	if j.CurrentStep != 2 || steps[2].Status != store.StepWaiting {
+	if j.CurrentStep != 3 || steps[3].Status != store.StepWaiting {
 		t.Fatalf("job %+v steps %+v", j, steps)
 	}
-	msg := steps[2].Message
+	msg := steps[3].Message
 	for _, want := range []string{"log_bin masih OFF", "bind-address hanya localhost",
 		"Aplikasi yang memakai database ini akan terputus beberapa detik; lakukan di jam sepi.",
 		"MySQL akan menerima koneksi dari semua alamat jaringan; pastikan firewall membatasi port 3306."} {
@@ -186,11 +187,11 @@ func TestPrepareMasterWaitsForRestartApproval(t *testing.T) {
 		t.Fatalf("Approve: %v", err)
 	}
 	_, steps = e.waitJob(id, store.JobSucceeded)
-	if steps[2].Status != store.StepDone {
-		t.Fatalf("restart step = %+v", steps[2])
+	if steps[3].Status != store.StepDone {
+		t.Fatalf("restart step = %+v", steps[3])
 	}
-	wantCmds(t, "master", fa.cmds(0), []string{"mysql.preflight", "mysql.configure", "mysql.createReplUser", "mysql.status",
-		"mysql.restart", "mysql.status"})
+	wantCmds(t, "master", fa.cmds(0), []string{"mysql.preflight", "mysql.configure", "mysql.createReplUser", "mysql.tlsRequest",
+		"mysql.tlsInstall", "mysql.status", "mysql.restart", "mysql.status"})
 	if j, _, _ := e.st.GetJob(id); !strings.Contains(j.ParamsJSON, `"wait_reason":"restart"`) {
 		t.Errorf("params do not name the restart wait: %s", j.ParamsJSON)
 	}
@@ -220,8 +221,8 @@ func TestPrepareMasterRecheckAfterOwnRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobWaiting)
-	if _, steps, _ := e.st.GetJob(id); !strings.Contains(steps[2].Message, "Sudah saya restart") {
-		t.Errorf("waiting message does not offer the re-check:\n%s", steps[2].Message)
+	if _, steps, _ := e.st.GetJob(id); !strings.Contains(steps[3].Message, "Sudah saya restart") {
+		t.Errorf("waiting message does not offer the re-check:\n%s", steps[3].Message)
 	}
 
 	// Not restarted yet: it waits again and says what is still pending.
@@ -231,7 +232,7 @@ func TestPrepareMasterRecheckAfterOwnRestart(t *testing.T) {
 	}
 	e.waitFor("second status read", func() bool { return fa.count("mysql.status") >= 2 })
 	j, _ := e.waitJob(id, store.JobWaiting)
-	if j.CurrentStep != 2 {
+	if j.CurrentStep != 3 {
 		t.Fatalf("job = %+v", j)
 	}
 	wantCmds(t, "master after the first re-check", fa.cmds(mark), []string{"mysql.status"})
@@ -244,8 +245,8 @@ func TestPrepareMasterRecheckAfterOwnRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, steps := e.waitJob(id, store.JobSucceeded)
-	if steps[2].Status != store.StepDone || !strings.Contains(steps[2].Message, "di luar panel") {
-		t.Fatalf("restart step = %+v", steps[2])
+	if steps[3].Status != store.StepDone || !strings.Contains(steps[3].Message, "di luar panel") {
+		t.Fatalf("restart step = %+v", steps[3])
 	}
 	if n := fa.count("mysql.restart"); n != 0 {
 		t.Fatalf("mysql.restart called %d times", n)

@@ -125,6 +125,13 @@ func TestE2ECreateReplica(t *testing.T) {
 	if topo.SourceHost != "127.0.0.1" || topo.SourcePort != masterInst.Port {
 		t.Fatalf("topology source = %s:%d, want 127.0.0.1:%d", topo.SourceHost, topo.SourcePort, masterInst.Port)
 	}
+	// Siapkan master installed the panel's MySQL certificate, without a
+	// restart: MySQL serves it now.
+	masterCert, err := p.Store.GetServerTLS(masterSrv)
+	if err != nil {
+		t.Fatalf("master server_tls after Siapkan master: %v", err)
+	}
+	wantServedCert(t, masterDB, masterCert)
 
 	// Buat replika: the form offers the replica server and both databases.
 	form := ui.get(fmt.Sprintf("/masters/%d/replicas/new", masterSrv))
@@ -156,6 +163,17 @@ func TestE2ECreateReplica(t *testing.T) {
 	}
 	if rep.State != store.ReplicaReady || strings.Join(rep.Databases, ",") != "a" {
 		t.Fatalf("replica = %+v, want ready following [a]", rep)
+	}
+	// The master has the panel's certificate, so the dump and replication
+	// verified it; the replica got its own.
+	if !rep.TLSVerified {
+		t.Fatalf("replica tls_verified = false; job log:\n%s", jobLogText(t, p, createID))
+	}
+	wantVerifiedReplication(t, replicaDB)
+	if replicaCert, err := p.Store.GetServerTLS(replicaSrv); err != nil {
+		t.Fatalf("replica server_tls: %v", err)
+	} else {
+		wantServedCert(t, replicaDB, replicaCert)
 	}
 
 	// The snapshot carried a, not b; replication follows a only.
@@ -248,11 +266,10 @@ func TestE2ECreateReplica(t *testing.T) {
 		"CREATE TABLE c.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO c.t VALUES (1, 'baru')")
 	waitRow(t, cloneDB, "a", 4, "setelah-clone")
 	waitRow(t, cloneDB, "c", 1, "baru")
-	// Replication runs over TLS.
-	var sslAllowed string
-	if err := cloneDB.QueryRow("SELECT SSL_ALLOWED FROM performance_schema.replication_connection_configuration").Scan(&sslAllowed); err != nil ||
-		!strings.EqualFold(sslAllowed, "yes") {
-		t.Fatalf("replication SSL_ALLOWED = %q, %v", sslAllowed, err)
+	// Replication runs over TLS and verifies the master's certificate.
+	wantVerifiedReplication(t, cloneDB)
+	if rep, err := p.Store.GetReplicaByServer(cloneSrv); err != nil || !rep.TLSVerified {
+		t.Fatalf("clone replica tls_verified: %+v, %v", rep, err)
 	}
 	// Every temporary dump account was dropped from the master.
 	var dumpAccounts int
@@ -814,5 +831,37 @@ func TestE2EPinnedRole(t *testing.T) {
 	}
 	if role := readPin(t, e.masterPins, mysql.RoleFile); role != "master" {
 		t.Fatalf("master's role pin after the refused delete = %q", role)
+	}
+}
+
+// wantServedCert checks that the MySQL behind db serves the certificate
+// rec records (its serial number, as the panel's CA prints it).
+func wantServedCert(t *testing.T, db *sql.DB, rec store.ServerTLS) {
+	t.Helper()
+	var name, notAfter string
+	if err := db.QueryRow("SHOW GLOBAL STATUS LIKE 'Ssl_server_not_after'").Scan(&name, &notAfter); err != nil {
+		t.Fatal(err)
+	}
+	// "Nov  4 14:47:06 2028 GMT"
+	served, err := time.Parse("Jan _2 15:04:05 2006 MST", notAfter)
+	if err != nil {
+		t.Fatalf("Ssl_server_not_after %q: %v", notAfter, err)
+	}
+	if !served.Equal(rec.NotAfter) || len(rec.CertSerial) != 32 {
+		t.Fatalf("MySQL serves a certificate valid until %s; server_tls = %+v", served, rec)
+	}
+}
+
+// wantVerifiedReplication checks that the replica behind db connects to
+// its source over TLS and verifies the source's certificate.
+func wantVerifiedReplication(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var allowed, ca, verify string
+	if err := db.QueryRow("SELECT SSL_ALLOWED, SSL_CA_FILE, SSL_VERIFY_SERVER_CERTIFICATE "+
+		"FROM performance_schema.replication_connection_configuration").Scan(&allowed, &ca, &verify); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(allowed, "yes") || !strings.EqualFold(verify, "yes") || !strings.HasSuffix(ca, "/dbpanel-tls/mysql-ca.crt") {
+		t.Fatalf("replication SSL_ALLOWED %q, SSL_CA_FILE %q, SSL_VERIFY_SERVER_CERTIFICATE %q", allowed, ca, verify)
 	}
 }

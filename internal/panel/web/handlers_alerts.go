@@ -30,6 +30,7 @@ var alertKindLabels = map[string]string{
 	monitor.KindConnectionsHigh:     "Koneksi MySQL tinggi",
 	monitor.KindBinlogDeadline:      "Batas umur binlog master",
 	monitor.KindJobFailed:           "Pekerjaan gagal",
+	monitor.KindTLSExpiring:         "Sertifikat MySQL hampir kedaluwarsa",
 }
 
 func alertKindLabel(kind string) string {

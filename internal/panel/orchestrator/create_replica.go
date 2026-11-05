@@ -32,12 +32,12 @@ type CreateReplicaParams struct {
 
 func createReplicaStepNames() []string {
 	return []string{"Periksa master", "Periksa server tujuan", "Pasang MySQL", "Siapkan replika",
-		"Salin data", "Sambungkan replikasi", "Verifikasi"}
+		"Salin data", stepInstallCert, "Sambungkan replikasi", "Verifikasi"}
 }
 
 // Index of the first step after which the target may have replication
 // configured (create_replica; resync_replica has no install step before it).
-const stepConnect = 5
+const stepConnect = 6
 
 // StartCreateReplica starts the create_replica job and registers the target
 // as a replica in state creating. It refuses a master that is not ready,
@@ -174,8 +174,11 @@ func (jr *jobRun) createReplicaSteps() []step {
 		{n[2], jr.replicaInstall},
 		{n[3], jr.replicaPrepare},
 		{n[4], jr.replicaSnapshot},
-		{n[5], jr.replicaConnect},
-		{n[6], jr.replicaVerify},
+		// After the copy: CLONE replaces the target's data directory, and a
+		// copy that brought the master's accounts is reconnected first.
+		{n[5], jr.replicaCert},
+		{n[6], jr.replicaConnect},
+		{n[7], jr.replicaVerify},
 	}
 }
 
@@ -232,10 +235,13 @@ func (jr *jobRun) replicaCheckMaster(ctx context.Context, _ bool) (outcome, erro
 	jr.st.MasterUUID, jr.st.MasterMySQLID, jr.st.MasterVersion, jr.st.MasterSeries = st.ServerUUID, st.ServerID, st.Version, series
 	jr.st.PeerDatabases, jr.st.DataBytes = names, bytes
 	jr.st.MasterTLS = st.TLSAvailable
+	if jr.st.TLSVerify, err = jr.r.masterHasCert(jr.master()); err != nil {
+		return outcome{}, err
+	}
 	lctn := st.LowerCaseTableNames
 	jr.st.MasterLCTN = &lctn
 	jr.save()
-	if !st.TLSAvailable {
+	if !st.TLSAvailable && !jr.st.TLSVerify {
 		jr.logf("warn", "Master tidak menawarkan TLS: replikasi dan salinan data berjalan tanpa enkripsi.")
 	}
 	return done("master %s:%d siap (MySQL %s)", topo.SourceHost, topo.SourcePort, st.Version), nil
@@ -571,6 +577,9 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 	}
 	p := proto.SnapshotParams{Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password,
 		EstimateBytes: jr.st.DataBytes, SSL: jr.st.MasterTLS}
+	if err := jr.verifySnapshot(ctx, &p); err != nil {
+		return outcome{}, err
+	}
 	cmd := "mysql.cloneFrom"
 	if jr.st.Method == "dump" {
 		cmd = "mysql.dumpFrom"
@@ -693,6 +702,21 @@ func (jr *jobRun) replAccount() (store.Topology, string, error) {
 	return topo, string(plain), nil
 }
 
+// replicaCert gives the target its own certificate (and the CA file). A
+// copy that brought the master's accounts may have replaced the stored
+// admin account: the step then waits for the user to reconnect it, like
+// replicaConnect.
+func (jr *jobRun) replicaCert(ctx context.Context, approved bool) (outcome, error) {
+	out, err := jr.installCert(jr.target())(ctx, approved)
+	if err != nil && loginRefused(err) {
+		jr.logf("warn", "Login ke MySQL replika ditolak: %v", err)
+		jr.st.WaitReason = WaitReconnect
+		jr.save()
+		return wait(jr.reconnectMessage()), nil
+	}
+	return out, err
+}
+
 func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	var st proto.MySQLStatus
 	if err := jr.call(ctx, jr.target(), "mysql.status", nil, &st); err != nil {
@@ -708,14 +732,31 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
-	// SOURCE_SSL=1 when the master offers TLS: encrypted, without CA
-	// verification in v1 (the panel distributes no certificates yet).
-	var rs proto.ReplicaStatus
-	if err := jr.call(ctx, jr.target(), "mysql.configureReplication", proto.ReplicationSourceParams{
+	// SOURCE_SSL=1 when the master offers TLS. When the master has the
+	// panel's certificate the replica also verifies it against the CA
+	// file and the master's address; otherwise the link is encrypted
+	// but not verified (a topology from before, until Perketat).
+	src := proto.ReplicationSourceParams{
 		Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password, SSL: jr.st.MasterTLS,
 		Databases: jr.st.Databases,
-	}, &rs); err != nil {
+	}
+	if jr.st.TLSVerify {
+		if src.SSLCA, err = jr.trustCA(ctx, jr.target()); err != nil {
+			return outcome{}, err
+		}
+		src.SSL, src.VerifyServerCert = true, true
+	}
+	var rs proto.ReplicaStatus
+	if err := jr.call(ctx, jr.target(), "mysql.configureReplication", src, &rs); err != nil {
 		return outcome{}, err
+	}
+	if err := jr.r.d.Store.SetReplicaTLSVerified(jr.target(), jr.st.TLSVerify); err != nil {
+		return outcome{}, err
+	}
+	if jr.st.TLSVerify {
+		jr.logf("info", "Replikasi memverifikasi sertifikat master %s.", topo.SourceHost)
+	} else {
+		jr.logf("warn", "%s. Jalankan Perketat sambungan replikasi di halaman master.", msgUnverified)
 	}
 	if err := jr.call(ctx, jr.target(), "mysql.startReplica", nil, &rs); err != nil {
 		return outcome{}, err

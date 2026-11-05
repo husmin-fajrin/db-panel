@@ -56,6 +56,11 @@ const (
 
 	defaultProbeInterval = 60 * time.Second
 	probeTimeout         = 30 * time.Second
+
+	// The MySQL certificates are checked for renewal this long after the
+	// start (agents have reconnected by then), then every day.
+	defaultTLSRenewFirst = 10 * time.Minute
+	tlsRenewEvery        = 24 * time.Hour
 )
 
 // Options configure a Panel. Zero fields take the defaults above.
@@ -74,8 +79,11 @@ type Options struct {
 
 // Panel is an assembled panel, ready to Run.
 type Panel struct {
-	Store       *store.Store
-	CA          *ca.CA
+	Store *store.Store
+	CA    *ca.CA
+	// MySQLCA signs the MySQL server certificates (mysql-ca.crt/key in
+	// ConfigDir), separate from the agent CA.
+	MySQLCA     *ca.MySQLCA
 	Hub         *hub.Hub
 	Sessions    *auth.Sessions
 	Limiter     *auth.RateLimiter // login attempts per IP
@@ -101,6 +109,7 @@ type Panel struct {
 	now           func() time.Time
 	localID       int64
 	probeInterval time.Duration
+	tlsRenewFirst time.Duration                // first renewal check after Run starts; tests shorten it
 	readTimeout   time.Duration                // UI server ReadTimeout; tests shorten it
 	publish       func(event string, data any) // Broker.Publish; tests wrap it
 
@@ -159,6 +168,7 @@ func New(o Options) (*Panel, error) {
 		log:           o.Logger,
 		now:           time.Now,
 		probeInterval: defaultProbeInterval,
+		tlsRenewFirst: defaultTLSRenewFirst,
 		readTimeout:   readTimeout,
 	}
 	p.ConfirmLimiter = auth.NewRateLimiter(confirmMaxAttempts, confirmWindow, func() time.Time { return p.now() })
@@ -206,7 +216,8 @@ func New(o Options) (*Panel, error) {
 		PublicHost:    p.opts.PublicHost,
 		// A failed job opens job_failed; its successful retry or its
 		// cancel closes it.
-		Alerts: p.Monitor,
+		Alerts:  p.Monitor,
+		MySQLCA: p.MySQLCA,
 	})
 	p.Orchestrator.Resume(context.Background())
 	return p, nil
@@ -288,6 +299,9 @@ func (p *Panel) init() error {
 	var err error
 	if p.CA, err = ca.LoadOrCreate(p.opts.ConfigDir); err != nil {
 		return err
+	}
+	if p.MySQLCA, err = ca.LoadOrCreateMySQLCA(p.opts.ConfigDir); err != nil {
+		return fmt.Errorf("CA MySQL: %w", err)
 	}
 	if err := p.resolvePublicHost(); err != nil {
 		return err

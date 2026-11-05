@@ -66,7 +66,7 @@ func TestVerifyNoProgressKeepsReplication(t *testing.T) {
 	e := newEnv(t)
 	r, id := startSubsetReplicaWith(t, e, func(r *fakeAgent) { catchingUp(r, false, 0) })
 	j, _ := e.waitJob(id, store.JobFailed)
-	if j.CurrentStep != 6 || !strings.Contains(j.Error, "tidak bertambah maju") {
+	if j.CurrentStep != 7 || !strings.Contains(j.Error, "tidak bertambah maju") {
 		t.Fatalf("job = %+v", j)
 	}
 	if n := r.count("mysql.stopReplica"); n != 0 {

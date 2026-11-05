@@ -20,12 +20,12 @@ const (
 )
 
 func prepareMasterStepNames() []string {
-	return []string{"Periksa master", "Terapkan pengaturan", "Mulai ulang MySQL", "Verifikasi"}
+	return []string{"Periksa master", "Terapkan pengaturan", stepInstallCert, "Mulai ulang MySQL", "Verifikasi"}
 }
 
 // StartPrepareMaster starts the prepare_master job: check the server, make
-// it a master (binary log, GTID, clone plugin, replication account) and
-// verify. It refuses a server whose MySQL is not connected or whose admin
+// it a master (binary log, GTID, clone plugin, replication account), give
+// its MySQL the panel's certificate (no restart needed) and verify. It refuses a server whose MySQL is not connected or whose admin
 // account lacks grants.
 func (r *Runner) StartPrepareMaster(ctx context.Context, serverID int64) (string, error) {
 	r.startMu.Lock()
@@ -59,8 +59,9 @@ func (jr *jobRun) prepareMasterSteps() []step {
 	return []step{
 		{names[0], jr.masterPreflight},
 		{names[1], jr.masterConfigure},
-		{names[2], jr.masterRestart},
-		{names[3], jr.masterVerify},
+		{names[2], jr.installCert(jr.job.ServerID)},
+		{names[3], jr.masterRestart},
+		{names[4], jr.masterVerify},
 	}
 }
 

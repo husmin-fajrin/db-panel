@@ -1,7 +1,8 @@
 // Package orchestrator runs the panel's multi-step jobs: "Siapkan master"
 // (prepare_master), "Buat replika" (create_replica), "Resync ulang"
-// (resync_replica), and adding or removing databases on a running replica
-// (add_databases, remove_databases). It also runs the direct controls
+// (resync_replica), adding or removing databases on a running replica
+// (add_databases, remove_databases), and the MySQL certificates
+// (mysql_tls, tighten_tls; see tls.go). It also runs the direct controls
 // (stop, start, lock, detach, delete), which are single agent commands
 // refused while the server has a job. A job
 // is a list of steps, each of which calls agent commands through the hub;
@@ -45,6 +46,8 @@ const (
 	KindAddDatabases    = "add_databases"
 	KindRemoveDatabases = "remove_databases"
 	KindResyncReplica   = "resync_replica"
+	KindMySQLTLS        = "mysql_tls"   // "Pasang sertifikat MySQL"
+	KindTightenTLS      = "tighten_tls" // "Perketat sambungan replikasi"
 )
 
 // seedsReplica reports whether kind is a job that copies the master's data
@@ -99,6 +102,8 @@ type Deps struct {
 	PublicHost    string
 	// Alerts hears how jobs end (the panel's Monitor); nil ignores it.
 	Alerts Alerts
+	// MySQLCA signs the MySQL servers' certificates (tls.go).
+	MySQLCA MySQLCA
 }
 
 // Alerts is told when a job fails (step is the title of the step that
@@ -743,6 +748,13 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 		// Replication is left as the canceled step left it; the next
 		// add job restores the filter and starts it.
 		jr.setReplicaState(store.ReplicaAttention, "dibatalkan saat "+stepTitle(j.Kind, j.CurrentStep))
+	case j.Kind == KindTightenTLS:
+		// A redirect cut off may have left the replica stopped.
+		if id, repoint, ok := st.tightenReplicaAt(j.CurrentStep); ok && repoint {
+			if rep, err := r.d.Store.GetReplicaByServer(id); err == nil {
+				jr.restartReplica(ctx, id, rep)
+			}
+		}
 	}
 	jr.setStep(store.StepFailed, msg)
 	if jr.setJob(store.JobCanceled, msg) {
@@ -805,6 +817,18 @@ type jobState struct {
 	// button after it): waitRestart, waitWipe, waitForeignSource,
 	// waitClone or waitReconnect.
 	WaitReason string `json:"wait_reason,omitempty"`
+
+	// TLSVerify: the master has the panel's certificate (server_tls), so
+	// the copy and replication verify it (create_replica, resync_replica).
+	TLSVerify bool `json:"tls_verify,omitempty"`
+	// The certificate being made: the agent's CSR, then the certificate
+	// the panel signed for it (public data; the key stays on the server).
+	TLSCSR  string `json:"tls_csr,omitempty"`
+	TLSCert string `json:"tls_cert,omitempty"`
+	// tighten_tls: the topology's replicas, in step order, and those whose
+	// steps were skipped, with the reason.
+	TightenReplicas []int64          `json:"tighten_replicas,omitempty"`
+	TightenSkipped  map[int64]string `json:"tighten_skipped,omitempty"`
 
 	// The agent job the current step waits for.
 	AgentServerID int64  `json:"agent_server_id,omitempty"`
@@ -879,6 +903,10 @@ func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun
 		jr.steps = jr.addDatabasesSteps()
 	case KindRemoveDatabases:
 		jr.steps = jr.removeDatabasesSteps()
+	case KindMySQLTLS:
+		jr.steps = jr.mysqlTLSSteps()
+	case KindTightenTLS:
+		jr.steps = jr.tightenTLSSteps(rows)
 	default:
 		return nil, fmt.Errorf("jenis pekerjaan tidak dikenal: %q", j.Kind)
 	}

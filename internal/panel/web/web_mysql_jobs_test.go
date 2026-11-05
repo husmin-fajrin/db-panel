@@ -154,6 +154,22 @@ func (f *fakeOrch) DeleteServer(_ context.Context, id int64) error {
 	return f.st.DeleteServer(id)
 }
 
+func (f *fakeOrch) StartMySQLTLS(_ context.Context, serverID int64) (string, error) {
+	f.record(fmt.Sprintf("mysql-tls %d", serverID))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
+func (f *fakeOrch) StartTightenTLS(_ context.Context, masterServerID int64) (string, error) {
+	f.record(fmt.Sprintf("tighten-tls %d", masterServerID))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
 func (f *fakeOrch) Approve(id string) error { f.record("approve " + id); return f.err }
 func (f *fakeOrch) Retry(id string) error   { f.record("retry " + id); return f.err }
 func (f *fakeOrch) Cancel(id string) error  { f.record("cancel " + id); return f.err }
@@ -959,4 +975,109 @@ func TestJobLogCutMarkedForReplay(t *testing.T) {
 	wantBody(t, rec, `data-job-log data-log-max="5000" data-log-cut="true">`,
 		`data-log-cut-notice>Log terlalu panjang`)
 	wantNoBody(t, rec, `data-log-cut-notice hidden`)
+}
+
+func TestMySQLTLSButtonNeedsToken(t *testing.T) {
+	e, f, _ := newMySQLEnv(t)
+	c := e.cookie()
+	srv := e.pairedOnline(t, "db-utama")
+	if err := e.st.SetInventory(store.Inventory{ServerID: srv.ID, Connected: true, Version: "8.0.39",
+		Databases: shopDatabases, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Sertifikat MySQL", "Belum ada sertifikat MySQL dari panel", `action="/servers/1/mysql-tls"`,
+		`data-confirm-action="mysql_tls" data-confirm-kind="server" data-confirm-id="1"`, "Pasang sertifikat MySQL")
+
+	// Without a token: refused, nothing started.
+	rec = e.do("POST", "/servers/1/mysql-tls", url.Values{}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantCalls(t, f)
+	// A token for another action does not do.
+	rec = e.do("POST", "/servers/1/mysql-tls", withToken(t, e, url.Values{}, web.ActTightenTLS, "server", 1), c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantCalls(t, f)
+
+	rec = e.do("POST", "/servers/1/mysql-tls", withToken(t, e, url.Values{}, web.ActMySQLTLS, "server", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/jobs/"+f.nextID)
+	wantCalls(t, f, "mysql-tls 1")
+
+	f.err = errors.New("server ini masih punya pekerjaan yang belum selesai")
+	rec = e.do("POST", "/servers/1/mysql-tls", withToken(t, e, url.Values{}, web.ActMySQLTLS, "server", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "server ini masih punya pekerjaan yang belum selesai")
+
+	// Installed: the page shows the serial number and the expiry.
+	notAfter := time.Date(2028, 11, 4, 9, 0, 0, 0, time.UTC)
+	if err := e.st.SetServerTLS(store.ServerTLS{ServerID: srv.ID, CertSerial: "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+		NotAfter: notAfter, InstalledAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, "0a1b2c3d4e5f60718293a4b5c6d7e8f9", "2028-11-04", "Perbarui sertifikat MySQL")
+	wantNoBody(t, rec, "Belum ada sertifikat MySQL dari panel")
+}
+
+func TestTightenTLSBoxShownByCondition(t *testing.T) {
+	e, f, _ := newMySQLEnv(t)
+	c := e.cookie()
+	master := e.pairedOnline(t, "db-master")
+	topo := e.makeMaster(t, master, shopDatabases...)
+	replica := e.pairedOnline(t, "db-replika")
+	if _, err := e.st.AddReplica(topo.ID, replica.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(replica.ID, store.ReplicaReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	const box = "Perketat sambungan replikasi"
+	const warn = "Sambungan replikasi belum diverifikasi"
+
+	// The master has no certificate from the panel, the replica is not
+	// verified: the box and the replica's warning.
+	rec := e.do("GET", "/masters/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, box, `action="/masters/1/tighten-tls"`,
+		`data-confirm-action="tighten_tls" data-confirm-kind="server" data-confirm-id="1"`, warn)
+
+	// The master has one, the replica still not verified: still shown.
+	if err := e.st.SetServerTLS(store.ServerTLS{ServerID: master.ID, CertSerial: "01", NotAfter: time.Now().AddDate(2, 0, 0),
+		InstalledAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	wantBody(t, e.do("GET", "/masters/1", nil, c), box, warn)
+
+	// Everything verified: neither.
+	if err := e.st.SetReplicaTLSVerified(replica.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	wantNoBody(t, e.do("GET", "/masters/1", nil, c), box, warn, `action="/masters/1/tighten-tls"`)
+
+	// A master without replicas and without a certificate: the box (its
+	// own certificate is still missing), no replica warning.
+	other := e.pairedOnline(t, "db-sendiri")
+	e.makeMaster(t, other)
+	rec = e.do("GET", fmt.Sprintf("/masters/%d", other.ID), nil, c)
+	wantBody(t, rec, box)
+	wantNoBody(t, rec, warn)
+
+	// The post needs the password confirmation.
+	rec = e.do("POST", "/masters/1/tighten-tls", url.Values{}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantCalls(t, f)
+	rec = e.do("POST", "/masters/1/tighten-tls", withToken(t, e, url.Values{}, web.ActMySQLTLS, "server", 1), c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantCalls(t, f)
+	rec = e.do("POST", "/masters/1/tighten-tls", withToken(t, e, url.Values{}, web.ActTightenTLS, "server", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/jobs/"+f.nextID)
+	wantCalls(t, f, "tighten-tls 1")
+
+	f.err = errors.New("replika db-replika masih punya pekerjaan yang belum selesai")
+	rec = e.do("POST", "/masters/1/tighten-tls", withToken(t, e, url.Values{}, web.ActTightenTLS, "server", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "replika db-replika masih punya pekerjaan yang belum selesai")
 }

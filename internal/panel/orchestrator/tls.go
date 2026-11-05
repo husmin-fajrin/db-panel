@@ -1,0 +1,480 @@
+package orchestrator
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
+)
+
+// MySQL server certificates from the panel's MySQL CA (spec 5.9). The
+// agent makes the key and a CSR (mysql.tlsRequest), the panel signs it for
+// the names it knows itself (the server's address and, for a master, the
+// address replicas use), and the agent installs it and has MySQL load it
+// without a restart (mysql.tlsInstall); server_tls records it.
+//
+// The mysql_tls job ("Pasang sertifikat MySQL" on the server page, and the
+// daily renewal) runs those three steps; "Siapkan master", "Buat replika"
+// and "Resync ulang" run them as one step. A replica verifies its master's
+// certificate (replication, dump, CLONE) when the master has one
+// (server_tls). tighten_tls ("Perketat sambungan replikasi") gives a
+// topology made before that its certificates and points every replica at
+// its master again with verification.
+
+// MySQLCA signs the MySQL server certificates; the panel passes its
+// *ca.MySQLCA.
+type MySQLCA interface {
+	IssueMySQLCert(csrPEM []byte, serverID int64, hosts []string) (certPEM []byte, serial string, notAfter time.Time, err error)
+	CAPEM() []byte
+}
+
+const (
+	// tlsRenewBefore: a certificate expiring sooner is renewed by the
+	// daily check.
+	tlsRenewBefore = 30 * 24 * time.Hour
+
+	stepInstallCert = "Pasang sertifikat MySQL"
+
+	msgReplicaUnreachable = "replika tidak terjangkau; ulangi nanti"
+	msgUnverified         = "Sambungan replikasi belum diverifikasi: master belum punya sertifikat panel"
+)
+
+func mysqlTLSStepNames() []string {
+	return []string{"Minta kunci dan permintaan sertifikat", "Terbitkan sertifikat", "Pasang sertifikat di MySQL"}
+}
+
+// StartMySQLTLS starts the mysql_tls job: a new key and certificate for the
+// server's MySQL. It refuses a server whose MySQL is not connected, whose
+// admin account lacks grants (ALTER INSTANCE RELOAD TLS needs
+// CONNECTION_ADMIN), or that has an unfinished job.
+func (r *Runner) StartMySQLTLS(ctx context.Context, serverID int64) (string, error) {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	srv, err := r.d.Store.GetServer(serverID)
+	if err != nil {
+		return "", err
+	}
+	if srv.Address == "" {
+		return "", errors.New("server ini belum terhubung ke panel")
+	}
+	inv, err := r.d.Store.GetInventory(serverID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !inv.Connected) {
+		return "", errors.New("MySQL di server ini belum dihubungkan; jalankan Hubungkan MySQL dulu")
+	}
+	if err != nil {
+		return "", err
+	}
+	if len(inv.MissingGrants) > 0 {
+		return "", fmt.Errorf("akun MySQL admin kurang hak; jalankan GRANT berikut di server ini lalu Segarkan: %s",
+			strings.Join(inv.MissingGrants, "; "))
+	}
+	if err := r.refuseBusy(serverID, "server ini"); err != nil {
+		return "", err
+	}
+	return r.createJob(KindMySQLTLS, serverID, 0, jobState{}, mysqlTLSStepNames())
+}
+
+// RenewMySQLTLS is the daily check: it starts mysql_tls for every server
+// whose certificate expires within tlsRenewBefore, whose agent is online
+// and that has no unfinished job, and returns the jobs it started. A
+// server it skips is tried again the next day.
+func (r *Runner) RenewMySQLTLS(ctx context.Context) []string {
+	recs, err := r.d.Store.ListServerTLSExpiring(r.now().Add(tlsRenewBefore))
+	if err != nil {
+		r.log.Warn("list expiring mysql certificates", "err", err)
+		return nil
+	}
+	var ids []string
+	for _, rec := range recs {
+		if ctx.Err() != nil {
+			break
+		}
+		if !r.d.Hub.IsOnline(rec.ServerID) {
+			r.log.Info("mysql certificate renewal postponed: agent offline", "server_id", rec.ServerID, "not_after", rec.NotAfter)
+			continue
+		}
+		if _, busy, err := r.d.Store.ActiveJobForServer(rec.ServerID); err != nil || busy {
+			r.log.Info("mysql certificate renewal postponed: server busy", "server_id", rec.ServerID, "err", err)
+			continue
+		}
+		id, err := r.StartMySQLTLS(ctx, rec.ServerID)
+		if err != nil {
+			r.log.Warn("mysql certificate renewal refused", "server_id", rec.ServerID, "err", err)
+			continue
+		}
+		r.log.Info("mysql certificate renewal started", "server_id", rec.ServerID, "job", id, "not_after", rec.NotAfter)
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// mysqlTLSSteps are the steps of mysql_tls for the job's server.
+func (jr *jobRun) mysqlTLSSteps() []step {
+	return jr.tlsSteps(jr.job.ServerID)
+}
+
+// tlsSteps request, issue and install serverID's certificate.
+func (jr *jobRun) tlsSteps(serverID int64) []step {
+	n := mysqlTLSStepNames()
+	return []step{
+		{n[0], func(ctx context.Context, _ bool) (outcome, error) { return jr.tlsRequest(ctx, serverID) }},
+		{n[1], func(context.Context, bool) (outcome, error) { return jr.tlsIssue(serverID) }},
+		{n[2], func(ctx context.Context, _ bool) (outcome, error) { return jr.tlsInstall(ctx, serverID) }},
+	}
+}
+
+// installCert is one step that runs tlsSteps for serverID: "Pasang
+// sertifikat MySQL" in Siapkan master and Buat replika, and the
+// certificate steps of tighten_tls.
+func (jr *jobRun) installCert(serverID int64) func(ctx context.Context, approved bool) (outcome, error) {
+	return func(ctx context.Context, approved bool) (outcome, error) {
+		var out outcome
+		for _, s := range jr.tlsSteps(serverID) {
+			o, err := s.fn(ctx, approved)
+			if err != nil {
+				return outcome{}, err
+			}
+			out = o
+		}
+		return out, nil
+	}
+}
+
+func (jr *jobRun) tlsRequest(ctx context.Context, serverID int64) (outcome, error) {
+	if jr.r.d.MySQLCA == nil {
+		return outcome{}, errors.New("penerbit sertifikat MySQL panel tidak tersedia")
+	}
+	var res proto.TLSRequestResult
+	if err := jr.call(ctx, serverID, "mysql.tlsRequest", nil, &res); err != nil {
+		return outcome{}, err
+	}
+	jr.st.TLSCSR, jr.st.TLSCert = res.CSRPEM, ""
+	jr.save()
+	return done("kunci baru dibuat di %s", jr.serverName(serverID)), nil
+}
+
+func (jr *jobRun) tlsIssue(serverID int64) (outcome, error) {
+	if jr.r.d.MySQLCA == nil {
+		return outcome{}, errors.New("penerbit sertifikat MySQL panel tidak tersedia")
+	}
+	if jr.st.TLSCSR == "" {
+		return outcome{}, errors.New("permintaan sertifikat belum ada; mulai lagi dari tahap pertama")
+	}
+	hosts, err := jr.r.certHosts(serverID)
+	if err != nil {
+		return outcome{}, err
+	}
+	certPEM, serial, notAfter, err := jr.r.d.MySQLCA.IssueMySQLCert([]byte(jr.st.TLSCSR), serverID, hosts)
+	if err != nil {
+		return outcome{}, err
+	}
+	jr.st.TLSCert = string(certPEM)
+	jr.save()
+	jr.logf("info", "Sertifikat MySQL %s untuk %s diterbitkan (nomor seri %s, berlaku sampai %s).",
+		jr.serverName(serverID), strings.Join(hosts, ", "), serial, notAfter.Format(time.DateOnly))
+	return done("berlaku sampai %s", notAfter.Format(time.DateOnly)), nil
+}
+
+func (jr *jobRun) tlsInstall(ctx context.Context, serverID int64) (outcome, error) {
+	if jr.st.TLSCert == "" {
+		return outcome{}, errors.New("sertifikat belum diterbitkan; mulai lagi dari tahap pertama")
+	}
+	srv, err := jr.r.d.Store.GetServer(serverID)
+	if err != nil {
+		return outcome{}, err
+	}
+	var res proto.TLSInstallResult
+	if err := jr.call(ctx, serverID, "mysql.tlsInstall", proto.TLSInstallParams{
+		CertPEM: jr.st.TLSCert, CAPEM: string(jr.r.d.MySQLCA.CAPEM()), VerifyHost: srv.Address,
+	}, &res); err != nil {
+		return outcome{}, err
+	}
+	if err := jr.r.d.Store.SetServerTLS(store.ServerTLS{ServerID: serverID, CertSerial: res.Serial, NotAfter: res.NotAfter,
+		InstalledAt: jr.r.now()}); err != nil {
+		return outcome{}, err
+	}
+	jr.st.TLSCSR, jr.st.TLSCert = "", ""
+	jr.save()
+	jr.logf("info", "Sertifikat MySQL terpasang di %s dan langsung dipakai, tanpa restart MySQL.", srv.Name)
+	return done("terpasang; berlaku sampai %s", res.NotAfter.Format(time.DateOnly)), nil
+}
+
+// certHosts are the names a server's certificate holds: its address and,
+// for a master, the address replicas reach it at. Nothing an agent reports
+// goes in.
+func (r *Runner) certHosts(serverID int64) ([]string, error) {
+	srv, err := r.d.Store.GetServer(serverID)
+	if err != nil {
+		return nil, err
+	}
+	if srv.Address == "" {
+		return nil, errors.New("alamat server belum diketahui")
+	}
+	hosts := []string{srv.Address}
+	topo, err := r.d.Store.GetTopologyByMaster(serverID)
+	switch {
+	case err == nil:
+		if h := topo.SourceHost; h != "" && !slices.ContainsFunc(hosts, func(x string) bool { return strings.EqualFold(x, h) }) {
+			hosts = append(hosts, h)
+		}
+	case !errors.Is(err, store.ErrNotFound):
+		return nil, err
+	}
+	return hosts, nil
+}
+
+// masterHasCert reports whether the master has a certificate from the
+// panel (server_tls): replicas then verify it.
+func (r *Runner) masterHasCert(masterID int64) (bool, error) {
+	_, err := r.d.Store.GetServerTLS(masterID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// trustCA stores the panel's MySQL CA on serverID (mysql.tlsTrust, which
+// may run any number of times) and returns the file's path there, for
+// SSLCA.
+func (jr *jobRun) trustCA(ctx context.Context, serverID int64) (string, error) {
+	if jr.r.d.MySQLCA == nil {
+		return "", errors.New("penerbit sertifikat MySQL panel tidak tersedia")
+	}
+	var res proto.TLSTrustResult
+	if err := jr.call(ctx, serverID, "mysql.tlsTrust", proto.TLSTrustParams{CAPEM: string(jr.r.d.MySQLCA.CAPEM())}, &res); err != nil {
+		return "", err
+	}
+	if res.CAPath == "" {
+		return "", errors.New("agent tidak menyebut letak berkas CA MySQL")
+	}
+	return res.CAPath, nil
+}
+
+// verifySnapshot makes p, a copy from the master to the job's target,
+// verify the master's certificate when the job does (TLSVerify).
+func (jr *jobRun) verifySnapshot(ctx context.Context, p *proto.SnapshotParams) error {
+	if !jr.st.TLSVerify {
+		return nil
+	}
+	path, err := jr.trustCA(ctx, jr.target())
+	if err != nil {
+		return err
+	}
+	p.SSL, p.SSLCA, p.VerifyIdentity = true, path, true
+	return nil
+}
+
+func tightenStepNames(replicaNames []string) []string {
+	out := []string{"Pasang sertifikat di master"}
+	for _, n := range replicaNames {
+		out = append(out, "Pasang sertifikat di "+n, "Arahkan ulang "+n+" dengan verifikasi")
+	}
+	return out
+}
+
+// StartTightenTLS starts the tighten_tls job on the master's topology: the
+// master's certificate, then each replica's certificate and its
+// replication pointed at the master again with verification. It refuses a
+// server that is not a master and a topology whose master or a replica has
+// an unfinished job.
+func (r *Runner) StartTightenTLS(ctx context.Context, masterServerID int64) (string, error) {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	srv, err := r.d.Store.GetServer(masterServerID)
+	if err != nil {
+		return "", err
+	}
+	topo, err := r.d.Store.GetTopologyByMaster(srv.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", errors.New("server ini bukan master; jalankan Siapkan master dulu")
+	}
+	if err != nil {
+		return "", err
+	}
+	reps, err := r.d.Store.ListReplicas(topo.ID)
+	if err != nil {
+		return "", err
+	}
+	if err := r.refuseBusy(srv.ID, "master ini"); err != nil {
+		return "", err
+	}
+	var ids []int64
+	var names []string
+	for _, rep := range reps {
+		rs, err := r.d.Store.GetServer(rep.ServerID)
+		if err != nil {
+			return "", err
+		}
+		if err := r.refuseBusy(rep.ServerID, "replika "+rs.Name); err != nil {
+			return "", err
+		}
+		ids = append(ids, rep.ServerID)
+		names = append(names, rs.Name)
+	}
+	return r.createJob(KindTightenTLS, srv.ID, topo.ID, jobState{TightenReplicas: ids}, tightenStepNames(names))
+}
+
+// tightenTLSSteps are the steps of tighten_tls; the titles come from the
+// stored steps (they name the replicas as they were named then).
+func (jr *jobRun) tightenTLSSteps(rows []store.JobStep) []step {
+	title := func(i int) string {
+		if i < len(rows) {
+			return rows[i].Name
+		}
+		return ""
+	}
+	steps := []step{{title(0), jr.installCert(jr.job.ServerID)}}
+	for i, id := range jr.st.TightenReplicas {
+		steps = append(steps,
+			step{title(1 + 2*i), jr.tightenReplicaCert(id)},
+			step{title(2 + 2*i), jr.tightenRepoint(id)})
+	}
+	return steps
+}
+
+// tightenSkip is why the replica's tighten steps are skipped, "" when they
+// run: its agent is offline, it is no longer this topology's replica, it
+// is not ready, or it has a job of its own.
+func (jr *jobRun) tightenSkip(serverID int64) (string, error) {
+	if reason, ok := jr.st.TightenSkipped[serverID]; ok {
+		return reason, nil
+	}
+	if !jr.r.d.Hub.IsOnline(serverID) {
+		return msgReplicaUnreachable, nil
+	}
+	rep, err := jr.r.d.Store.GetReplicaByServer(serverID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "server ini tidak lagi menjadi replika", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if rep.TopologyID != jr.job.TopologyID {
+		return "server ini sekarang replika dari master lain", nil
+	}
+	if rep.State != store.ReplicaReady && rep.State != store.ReplicaAttention {
+		return "replika " + replicaStateText(rep.State) + "; ulangi nanti", nil
+	}
+	if _, busy, err := jr.r.d.Store.ActiveJobForServer(serverID); err != nil {
+		return "", err
+	} else if busy {
+		return "replika sedang menjalankan pekerjaan lain; ulangi nanti", nil
+	}
+	return "", nil
+}
+
+// skipReplica records that the replica's steps are skipped, so its
+// redirect step is skipped for the same reason.
+func (jr *jobRun) skipReplica(serverID int64, reason string) outcome {
+	if jr.st.TightenSkipped == nil {
+		jr.st.TightenSkipped = map[int64]string{}
+	}
+	jr.st.TightenSkipped[serverID] = reason
+	jr.save()
+	jr.logf("warn", "%s dilewati: %s.", jr.serverName(serverID), reason)
+	return skipped(reason)
+}
+
+func (jr *jobRun) tightenReplicaCert(serverID int64) func(ctx context.Context, approved bool) (outcome, error) {
+	install := jr.installCert(serverID)
+	return func(ctx context.Context, approved bool) (outcome, error) {
+		// A retry looks again: the replica may be back.
+		delete(jr.st.TightenSkipped, serverID)
+		reason, err := jr.tightenSkip(serverID)
+		if err != nil {
+			return outcome{}, err
+		}
+		if reason != "" {
+			return jr.skipReplica(serverID, reason), nil
+		}
+		return install(ctx, approved)
+	}
+}
+
+// tightenRepoint points the replica at its master again, now verifying
+// the master's certificate: STOP REPLICA, the CA file, CHANGE REPLICATION
+// SOURCE with SOURCE_SSL_VERIFY_SERVER_CERT, START REPLICA (not for a
+// replica an operator stopped), and tls_verified.
+func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, approved bool) (outcome, error) {
+	return func(ctx context.Context, _ bool) (outcome, error) {
+		reason, err := jr.tightenSkip(serverID)
+		if err != nil {
+			return outcome{}, err
+		}
+		if reason != "" {
+			if _, ok := jr.st.TightenSkipped[serverID]; ok {
+				return skipped(reason), nil
+			}
+			return jr.skipReplica(serverID, reason), nil
+		}
+		rep, err := jr.r.d.Store.GetReplicaByServer(serverID)
+		if err != nil {
+			return outcome{}, err
+		}
+		topo, password, err := jr.replAccount()
+		if err != nil {
+			return outcome{}, err
+		}
+		name := jr.serverName(serverID)
+		if err := jr.call(ctx, serverID, "mysql.stopReplica", nil, nil); err != nil {
+			return outcome{}, err
+		}
+		path, err := jr.trustCA(ctx, serverID)
+		if err == nil {
+			err = jr.call(ctx, serverID, "mysql.configureReplication", proto.ReplicationSourceParams{
+				Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password, SSL: true,
+				SSLCA: path, VerifyServerCert: true, Databases: rep.Databases,
+			}, nil)
+		}
+		if err != nil {
+			// Replication goes on as it was configured before.
+			jr.restartReplica(ctx, serverID, rep)
+			return outcome{}, err
+		}
+		if !rep.Paused {
+			if err := jr.call(ctx, serverID, "mysql.startReplica", nil, nil); err != nil {
+				return outcome{}, err
+			}
+		}
+		if err := jr.r.d.Store.SetReplicaTLSVerified(serverID, true); err != nil {
+			return outcome{}, err
+		}
+		jr.logf("info", "Replikasi %s sekarang memverifikasi sertifikat master %s.", name, topo.SourceHost)
+		if rep.Paused {
+			return done("terverifikasi; replikasi tetap dihentikan seperti sebelumnya"), nil
+		}
+		return done("terverifikasi"), nil
+	}
+}
+
+// restartReplica starts the replica's replication again after a redirect
+// that stopped it did not finish (best effort; a replica an operator
+// stopped stays stopped).
+func (jr *jobRun) restartReplica(ctx context.Context, serverID int64, rep store.Replica) {
+	if rep.Paused {
+		return
+	}
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelTimeout)
+	defer cancel()
+	if err := jr.r.d.Hub.Call(sctx, serverID, "mysql.startReplica", nil, nil); err != nil {
+		jr.r.log.Warn("start replica after unfinished redirect", "job", jr.job.ID, "server_id", serverID, "err", err)
+	}
+}
+
+// tightenReplicaAt is the replica whose steps tighten_tls step idx belongs
+// to, and whether idx is its redirect step.
+func (st jobState) tightenReplicaAt(idx int) (serverID int64, repoint, ok bool) {
+	if idx < 1 {
+		return 0, false, false
+	}
+	i := (idx - 1) / 2
+	if i >= len(st.TightenReplicas) {
+		return 0, false, false
+	}
+	return st.TightenReplicas[i], idx%2 == 0, true
+}

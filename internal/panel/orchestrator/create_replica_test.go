@@ -27,11 +27,12 @@ func replicaCmds(snapshot string) []string {
 	if snapshot == "mysql.cloneFrom" {
 		cmds = append(cmds, "mysql.setReadOnly")
 	}
-	return append(cmds, "mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced")
+	return append(cmds, "mysql.tlsRequest", "mysql.tlsInstall", "mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced")
 }
 
 func allDone(install string) []string {
-	return []string{store.StepDone, store.StepDone, install, store.StepDone, store.StepDone, store.StepDone, store.StepDone}
+	return []string{store.StepDone, store.StepDone, install, store.StepDone, store.StepDone, store.StepDone, store.StepDone,
+		store.StepDone}
 }
 
 func TestCreateReplicaHappyPathClone(t *testing.T) {
@@ -198,7 +199,8 @@ func TestCreateReplicaSubsetUsesDumpWithFilter(t *testing.T) {
 	wantCmds(t, "replica", r.cmds(0), []string{"probe", "mysql.preflight", "mysql.inventory",
 		"probe", "mysql.preflight", "mysql.inventory", "mysql.preflight",
 		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.dropDatabases", "mysql.dumpFrom",
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+		"mysql.tlsRequest", "mysql.tlsInstall", "mysql.status", "mysql.configureReplication", "mysql.startReplica",
+		"mysql.startReplica", "mysql.waitSynced"})
 	var drop proto.DropDatabasesParams
 	r.params("mysql.dropDatabases", &drop)
 	if !slices.Equal(drop.Databases, []string{"a", "b"}) {
@@ -314,7 +316,8 @@ func TestCreateReplicaInstallsMySQLWhenMissing(t *testing.T) {
 	}
 	wantCmds(t, "replica", r.cmds(0), []string{"probe", "probe", "mysql.install", "mysql.inventory", "mysql.preflight",
 		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.cloneFrom", "mysql.setReadOnly",
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+		"mysql.tlsRequest", "mysql.tlsInstall", "mysql.status", "mysql.configureReplication", "mysql.startReplica",
+		"mysql.startReplica", "mysql.waitSynced"})
 	var ins proto.InstallParams
 	r.params("mysql.install", &ins)
 	if ins.Series != "8.4" || ins.ExactVersion != "8.4.3" {
@@ -376,8 +379,8 @@ func TestFailsWhenAgentDropsDuringSnapshot(t *testing.T) {
 	if got := stepStatuses(steps); !slices.Equal(got, allDone(store.StepSkipped)) {
 		t.Fatalf("steps = %v", got)
 	}
-	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.dumpFrom", "mysql.status",
-		"mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.dumpFrom", "mysql.tlsRequest", "mysql.tlsInstall",
+		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
 	// The same dump, each attempt with its own temporary account; the
 	// failed attempt's account was dropped when it failed.
 	dumps := r.allParams("mysql.dumpFrom")
@@ -599,23 +602,32 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 }
 
 // TestConnectWaitsWhenReplicaAdminReplaced: after a CLONE the stored replica
-// admin account may no longer log in; the job waits for a reconnect and a
-// retry re-checks.
+// admin account may no longer log in; the job waits for a reconnect at the
+// first step that logs in (the replica's certificate), and a retry
+// re-checks.
 func TestConnectWaitsWhenReplicaAdminReplaced(t *testing.T) {
 	e := newEnv(t)
 	m, _ := e.readyMaster("db-master")
 	r := e.replicaAgent("replica1", "clone")
 	// The stored admin account works until the CLONE brings the master's accounts.
-	var cloned atomic.Bool
+	var cloned, reconnected atomic.Bool
 	r.job("mysql.cloneFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
 		cloned.Store(true)
 		return proto.SnapshotResult{Method: "clone", GTIDExecuted: masterGTID}, nil
 	})
+	const refused = "login MySQL gagal: 1045 Access denied for user 'adm'@'localhost' (using password: YES)"
 	r.on("mysql.status", func(json.RawMessage) (any, error) {
-		if cloned.Load() {
-			return nil, &commands.ParamError{Msg: "login MySQL gagal: 1045 Access denied for user 'adm'@'localhost' (using password: YES)"}
+		if cloned.Load() && !reconnected.Load() {
+			return nil, &commands.ParamError{Msg: refused}
 		}
 		return proto.MySQLStatus{Version: "8.4.3", ServerUUID: targetUUID}, nil
+	})
+	install := r.script["mysql.tlsInstall"]
+	r.on("mysql.tlsInstall", func(raw json.RawMessage) (any, error) {
+		if cloned.Load() && !reconnected.Load() {
+			return nil, &commands.ParamError{Msg: refused}
+		}
+		return install(raw)
 	})
 	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
 		MasterServerID: m.id, TargetServerID: r.id, ConfirmWipe: true})
@@ -630,11 +642,17 @@ func TestConnectWaitsWhenReplicaAdminReplaced(t *testing.T) {
 	if n := r.count("mysql.configureReplication"); n != 0 {
 		t.Fatal("replication configured without a working admin account")
 	}
-	r.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", ServerUUID: targetUUID})
+	if _, err := e.st.GetServerTLS(r.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("server_tls recorded for a refused install: %v", err)
+	}
+	reconnected.Store(true)
 	if err := e.r.Retry(id); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
+	if _, err := e.st.GetServerTLS(r.id); err != nil {
+		t.Fatalf("server_tls after the reconnect: %v", err)
+	}
 }
 
 // TestHandleEventIgnoresUnknownJobs: events for no live job do nothing.
@@ -662,7 +680,7 @@ func TestRetryFromVerifyRestartsReplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	j, _ := e.waitJob(id, store.JobFailed)
-	if j.CurrentStep != 6 || !strings.Contains(j.Error, "1146") {
+	if j.CurrentStep != 7 || !strings.Contains(j.Error, "1146") {
 		t.Fatalf("job = %+v", j)
 	}
 	if n := r.count("mysql.stopReplica"); n != 1 {
@@ -789,8 +807,8 @@ func TestNewAttemptResetsStaleReplication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if j, _ := e.waitJob(first, store.JobFailed); j.CurrentStep != 5 {
-		t.Fatalf("first attempt failed at step %d, want 5", j.CurrentStep)
+	if j, _ := e.waitJob(first, store.JobFailed); j.CurrentStep != 6 {
+		t.Fatalf("first attempt failed at step %d, want 6", j.CurrentStep)
 	}
 	if n := r.count("mysql.resetReplica"); n != 0 {
 		t.Fatalf("a target without a source got %d resetReplica", n)
@@ -806,7 +824,8 @@ func TestNewAttemptResetsStaleReplication(t *testing.T) {
 	e.waitJob(second, store.JobSucceeded)
 	wantCmds(t, "replica, second attempt", r.cmds(mark), []string{"probe", "mysql.preflight",
 		"mysql.configure", "mysql.restart", "mysql.setReadOnly", "mysql.status", "mysql.resetReplica", "mysql.dumpFrom",
-		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
+		"mysql.tlsRequest", "mysql.tlsInstall", "mysql.status", "mysql.configureReplication", "mysql.startReplica",
+		"mysql.startReplica", "mysql.waitSynced"})
 	var snap proto.SnapshotParams
 	r.params("mysql.dumpFrom", &snap)
 	if snap.DropExisting || !slices.Equal(snap.Databases, []string{"b"}) {

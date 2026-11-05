@@ -27,13 +27,14 @@ const (
 	KindConnectionsHigh     = "connections_high"
 	KindBinlogDeadline      = "binlog_deadline"
 	KindJobFailed           = "job_failed"
+	KindTLSExpiring         = "tls_expiring" // a MySQL certificate from the panel expires soon
 )
 
 // AllKinds returns every alert kind, in the order of spec 5.3.
 func AllKinds() []string {
 	return []string{KindReplicaStopped, KindReplicaDisconnected, KindReplicaLagging, KindReplicaUnlocked,
 		KindMasterLocked, KindMasterDown, KindMySQLUnreachable, KindAgentOffline, KindDiskWarn, KindDiskCrit,
-		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed}
+		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed, KindTLSExpiring}
 }
 
 // Fixed delays and hysteresis of the rules (plan 3, Global Constraints);
@@ -45,6 +46,7 @@ const (
 	diskCloseMargin       = 5                // disk alerts close under their threshold − 5
 	lagRecoveredFor       = time.Minute      // Sinkron this long closes replica_lagging
 	binlogDeadlinePct     = 80               // of the master's binlog_expire_logs_seconds
+	tlsExpiringWithin     = 14 * 24 * time.Hour
 )
 
 // ruleCtx is what a rule sees besides the server's view.
@@ -72,7 +74,8 @@ type alertRule struct {
 }
 
 // alertRules are the status rules, in AllKinds order; job_failed is
-// opened and closed by the orchestrator, not by a rule.
+// opened and closed by the orchestrator, and tls_expiring by
+// CheckTLSExpiry, not by a rule.
 var alertRules = []alertRule{
 	{
 		kind: KindReplicaStopped,
@@ -313,6 +316,8 @@ var jobKindNames = map[string]string{
 	"add_databases":    "Tambah database",
 	"remove_databases": "Lepas database",
 	"resync_replica":   "Resync ulang",
+	"mysql_tls":        "Pasang sertifikat MySQL",
+	"tighten_tls":      "Perketat sambungan replikasi",
 }
 
 // alertUpdate is one alert_update to publish once the lock is released.
@@ -547,4 +552,86 @@ func (m *Monitor) Snooze(serverID int64, until *time.Time) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// CheckTLSExpiry opens tls_expiring for every server whose MySQL
+// certificate from the panel (server_tls) expires within 14 days, keeps
+// its message's day count current, and closes it once the certificate was
+// renewed past that (or the record is gone). The tick runs it.
+func (m *Monitor) CheckTLSExpiry(now time.Time) {
+	m.mu.Lock()
+	ups := m.checkTLSExpiry(now)
+	m.mu.Unlock()
+	m.emitAlerts(ups)
+}
+
+// checkTLSExpiry is CheckTLSExpiry with mu held.
+func (m *Monitor) checkTLSExpiry(now time.Time) []alertUpdate {
+	expiring, err := m.st.ListServerTLSExpiring(now.Add(tlsExpiringWithin))
+	if err != nil {
+		m.log.Warn("tls_expiring: list certificates", "err", err)
+		return nil
+	}
+	open, err := m.st.ListOpenAlerts()
+	if err != nil {
+		m.log.Warn("tls_expiring: list open alerts", "err", err)
+		return nil
+	}
+	isOpen := map[int64]store.Alert{}
+	for _, a := range open {
+		if a.Kind == KindTLSExpiring {
+			isOpen[a.ServerID] = a
+		}
+	}
+	var ups []alertUpdate
+	soon := map[int64]bool{}
+	for _, rec := range expiring {
+		srv, err := m.st.GetServer(rec.ServerID)
+		if err != nil {
+			continue // deleted: its alert closes below
+		}
+		soon[rec.ServerID] = true
+		msg := tlsExpiringMessage(srv.Name, rec.NotAfter.Sub(now))
+		if a, ok := isOpen[rec.ServerID]; ok {
+			if a.Message != msg {
+				if err := m.st.SetAlertMessage(a.ID, msg); err != nil {
+					m.log.Warn("update alert message", "server_id", rec.ServerID, "kind", KindTLSExpiring, "err", err)
+				}
+			}
+			continue
+		}
+		var topoID int64
+		if s, ok := m.servers[rec.ServerID]; ok {
+			topoID = s.topoID
+		}
+		id, err := m.st.OpenAlert(store.Alert{Kind: KindTLSExpiring, ServerID: rec.ServerID, TopologyID: topoID, OpenedAt: now, Message: msg})
+		if err != nil {
+			m.log.Warn("open alert", "server_id", rec.ServerID, "kind", KindTLSExpiring, "err", err)
+			continue
+		}
+		ups = append(ups, alertUpdate{id, KindTLSExpiring, rec.ServerID, true})
+	}
+	for serverID, a := range isOpen {
+		if soon[serverID] {
+			continue
+		}
+		if err := m.st.CloseAlert(a.ID, now); err != nil {
+			m.log.Warn("close alert", "server_id", serverID, "kind", KindTLSExpiring, "err", err)
+			continue
+		}
+		ups = append(ups, alertUpdate{a.ID, KindTLSExpiring, serverID, false})
+	}
+	return ups
+}
+
+// tlsExpiringMessage words a certificate that expires in left.
+func tlsExpiringMessage(server string, left time.Duration) string {
+	if left <= 0 {
+		return "Sertifikat MySQL " + server + " sudah kedaluwarsa."
+	}
+	days := int(left / (24 * time.Hour))
+	if days == 0 {
+		return "Sertifikat MySQL " + server + " kedaluwarsa kurang dari sehari lagi."
+	}
+	return fmt.Sprintf("Sertifikat MySQL %s kedaluwarsa dalam %d hari.", server, days)
 }
