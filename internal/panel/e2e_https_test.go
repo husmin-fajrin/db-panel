@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"html"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -162,6 +164,15 @@ func TestE2EHTTPS(t *testing.T) {
 	if log := string(mustRead(t, filepath.Join(root, "systemctl.log"))); !strings.Contains(log, "enable --now dbpanel-agent") {
 		t.Fatalf("systemctl calls:\n%s", log)
 	}
+	if os.Geteuid() == 0 {
+		// The script ran as nobody; the agent runs as root, as installed.
+		filepath.WalkDir(filepath.Join(root, "agent"), func(path string, _ fs.DirEntry, err error) error {
+			if err == nil {
+				err = os.Lchown(path, 0, 0)
+			}
+			return err
+		})
+	}
 
 	// The installed binary runs as the agent (what the unit starts) and
 	// comes online.
@@ -192,23 +203,35 @@ var pairCommandRe = regexp.MustCompile(`<code x-ref="perintah">([^<]*)</code>`)
 // installStubs are the fakes for what the install script needs root for.
 // ROOT is the test's directory; the script's fixed paths move under it.
 var installStubs = map[string]string{
-	// sudo bash FILE: run FILE with its paths moved under ROOT.
+	// sudo bash FILE: run FILE with its paths moved under ROOT. The script
+	// keeps every absolute path in three assignments at its top; only those
+	// are rewritten, and the script is refused (an allowlist) when any other
+	// system path is left outside comments and the unit text. As root, the
+	// script then runs as nobody (setpriv), so a path this misses fails
+	// with EACCES instead of writing to the host.
 	"sudo": `#!/bin/bash
 set -eu
+[ -n "${ROOT:-}" ] && [ -d "$ROOT" ] || { echo "sudo stub: no ROOT" >&2; exit 96; }
 touch "$ROOT/sudo.ran"
 [ "$#" -eq 2 ] && [ "$1" = bash ] || { echo "sudo stub: unexpected $*" >&2; exit 97; }
 cp "$2" "$ROOT/served-install.sh"
 sed -e "s|^BIN=/usr/local/bin/dbpanel\$|BIN=$ROOT/bin/dbpanel|" \
-    -e "s|/etc/systemd/system/dbpanel-agent.service|$ROOT/dbpanel-agent.service|" \
-    -e "s|--agent-addr \"\\\$AGENT_ADDR\"; then|--agent-addr \"\\\$AGENT_ADDR\" --dir \"$ROOT/agent\"; then|" \
+    -e "s|^UNIT_DIR=/etc/systemd/system\$|UNIT_DIR=$ROOT|" \
+    -e "s|^CONFIG_DIR=/etc/dbpanel\$|CONFIG_DIR=$ROOT/agent|" \
     "$2" >"$ROOT/install.sh"
-# Every rewrite applied: the script writes nothing outside ROOT (the unit
-# text still names /usr/local/bin/dbpanel, as the real unit does).
-grep -q "^BIN=$ROOT/bin/dbpanel\$" "$ROOT/install.sh"
-grep -q -- "--dir \"$ROOT/agent\"; then" "$ROOT/install.sh"
-if grep -q -e '^BIN=/usr/' -e '>/etc/' "$ROOT/install.sh"; then
-	echo "sudo stub: a root path is left in the script" >&2
+for v in "BIN=$ROOT/bin/dbpanel" "UNIT_DIR=$ROOT" "CONFIG_DIR=$ROOT/agent"; do
+	grep -qxF "$v" "$ROOT/install.sh" || { echo "sudo stub: $v not set" >&2; exit 98; }
+done
+# Allowlist: past the three assignments, comments and the unit text (which
+# names /usr/local/bin/dbpanel, as the real unit does), no system path.
+if awk '/<<.UNIT.$/ { unit = 1; next } unit && /^UNIT$/ { unit = 0; next } !unit' "$ROOT/install.sh" |
+	grep -v -e '^[[:space:]]*#' -e '^BIN=' -e '^UNIT_DIR=' -e '^CONFIG_DIR=' |
+	grep -n -e '/etc/' -e '/usr/' -e '/var/' -e '/opt/' -e '/etc"' -e '/etc$' >&2; then
+	echo "sudo stub: a system path is left in the script" >&2
 	exit 98
+fi
+if [ "$EUID" -eq 0 ]; then
+	exec setpriv --reuid=65534 --regid=65534 --clear-groups bash "$ROOT/install.sh"
 fi
 exec bash "$ROOT/install.sh"
 `,
@@ -224,9 +247,17 @@ esac
 }
 
 // writeInstallStubs writes installStubs into a directory under root and
-// returns it, with root/bin made for the installed binary.
+// returns it, with root/bin made for the installed binary. As root, the
+// script runs as nobody (the sudo stub), so root and root/bin are given to
+// nobody and the directories above root made traversable; without setpriv
+// the test is skipped rather than run with root's powers.
 func writeInstallStubs(t *testing.T, root string) string {
 	t.Helper()
+	if os.Geteuid() == 0 {
+		if _, err := exec.LookPath("setpriv"); err != nil {
+			t.Skip("berjalan sebagai root tanpa setpriv: skrip pasang agent tidak dijalankan dengan hak root")
+		}
+	}
 	dir := filepath.Join(root, "stubs")
 	for _, d := range []string{dir, filepath.Join(root, "bin")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -236,6 +267,24 @@ func writeInstallStubs(t *testing.T, root string) string {
 	for name, body := range installStubs {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
+		}
+	}
+	if os.Geteuid() == 0 {
+		for _, d := range []string{root, filepath.Join(root, "bin")} {
+			if err := os.Chown(d, 65534, 65534); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for d := filepath.Dir(root); d != filepath.Dir(d); d = filepath.Dir(d) {
+			fi, err := os.Stat(d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm()&0o001 == 0 {
+				if err := os.Chmod(d, fi.Mode().Perm()|0o011); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 	return dir
@@ -276,4 +325,44 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestInstallStubAllowlist: the fake sudo refuses a served script that
+// writes any system path other than through its three path variables
+// (I10), whatever form the path takes.
+func TestInstallStubAllowlist(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	stubs := writeInstallStubs(t, root)
+	head := "#!/usr/bin/env bash\nBIN=/usr/local/bin/dbpanel\nUNIT_DIR=/etc/systemd/system\nCONFIG_DIR=/etc/dbpanel\n" +
+		"cat >\"$UNIT_DIR\"/x.service <<'UNIT'\nExecStart=/usr/local/bin/dbpanel agent\nUNIT\n"
+	for _, line := range []string{
+		"install -m0600 x /etc/dbpanel/kunci",
+		"mkdir -p /etc/dbpanel",
+		"echo x | tee /etc/hosts",
+		"cp a /usr/local/bin",
+		"echo x >>/etc/profile",
+		`echo x > "/etc/profile"`,
+		"rm -rf /var/lib/x",
+		"cp x /opt/y",
+		`touch /etc`,
+	} {
+		script := filepath.Join(t.TempDir(), "s.sh")
+		if err := os.WriteFile(script, []byte(head+line+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(filepath.Join(stubs, "sudo"), "bash", script)
+		cmd.Env = append(os.Environ(), "ROOT="+root)
+		out, err := cmd.CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 98 || !strings.Contains(string(out), "a system path is left") {
+			t.Errorf("%q: %v\n%s", line, err, out)
+		}
+	}
+	// Without ROOT the stub does nothing.
+	cmd := exec.Command(filepath.Join(stubs, "sudo"), "bash", "/dev/null")
+	cmd.Env = append(os.Environ(), "ROOT=")
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "no ROOT") {
+		t.Errorf("sudo stub without ROOT: %v\n%s", err, out)
+	}
 }

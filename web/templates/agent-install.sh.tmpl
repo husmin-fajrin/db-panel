@@ -17,7 +17,11 @@
 # ulang.
 set -euo pipefail
 
+# Every absolute path the script writes is one of these three (tests point
+# them elsewhere and refuse any other system path in the script).
 BIN=/usr/local/bin/dbpanel
+UNIT_DIR=/etc/systemd/system
+CONFIG_DIR=/etc/dbpanel
 # Nilai dari panel, dalam kutip tunggal: shell tidak mengekspansi isinya.
 PANEL_URL={{shq .PanelURL}}
 AGENT_ADDR={{shq .AgentAddr}}
@@ -94,7 +98,7 @@ main() {
 
 	download_agent
 
-	cat >/etc/systemd/system/dbpanel-agent.service <<'UNIT'
+	cat >"$UNIT_DIR"/dbpanel-agent.service <<'UNIT'
 [Unit]
 Description=dbpanel agent
 After=network-online.target
@@ -127,7 +131,7 @@ WantedBy=multi-user.target
 UNIT
 
 	echo "Memasangkan agent ke panel..."
-	if ! DBPANEL_TOKEN="$TOKEN" DBPANEL_WEB_PIN="$WEB_PIN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"; then
+	if ! DBPANEL_TOKEN="$TOKEN" DBPANEL_WEB_PIN="$WEB_PIN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR" --dir "$CONFIG_DIR"; then
 		die "Pairing gagal. Periksa token dan alamat panel, lalu ulangi."
 	fi
 
