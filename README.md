@@ -3,8 +3,8 @@
 dbpanel adalah panel web untuk mengelola replikasi MySQL antar-server di
 jaringan lokal, ditujukan bagi tim IT rumah sakit yang ingin pemasangan
 semudah aaPanel: satu perintah untuk panel, satu perintah untuk tiap server
-database. Satu binary `dbpanel` menjalankan dua peran: **panel** (UI web,
-port 8080) dan **agent** (berjalan di tiap server database, terhubung ke
+database. Satu binary `dbpanel` menjalankan dua peran: **panel** (UI web
+lewat HTTPS, port 8080) dan **agent** (berjalan di tiap server database, terhubung ke
 panel lewat mTLS di port 8443). Server database tidak perlu akses internet;
 agent diunduh langsung dari panel.
 
@@ -250,8 +250,9 @@ memegang semuanya):
   PERSIST_RO_VARIABLES_ADMIN` dan `CONNECTION_ADMIN` (dipakai `ALTER
   INSTANCE RELOAD TLS` saat panel memasang sertifikat MySQL).
 - `BACKUP_ADMIN` dan, di MySQL 8.0.31 ke atas, `FLUSH_TABLES`, keduanya
-  `WITH GRANT OPTION`, karena agent memberikannya ke akun replikasi dan akun
-  dump sementara.
+  `WITH GRANT OPTION`, karena agent memberikannya ke akun yang dibuatnya:
+  `BACKUP_ADMIN` ke akun replikasi (untuk CLONE), `FLUSH_TABLES` ke akun
+  dump sementara (lihat "Akun yang dibuat panel di master").
 
 Kata sandi MySQL yang Anda ketik melintas jaringan lewat HTTPS
 (terenkripsi).
@@ -494,11 +495,22 @@ membuat sandi baru, dan setiap replika harus dibuat ulang. Simpan kunci
 terpisah dari cadangan database biasa; siapa pun yang memegang keduanya
 bisa membuka sandi replikasi.
 
+Cadangkan juga isi `/etc/dbpanel/panel/` lainnya (paling tidak
+`mysql-ca.crt`/`mysql-ca.key` dan `web-ca.crt`/`web-ca.key`). Tanpa CA
+MySQL yang sama, panel membuat CA baru: sertifikat MySQL yang diterbitkan
+sesudahnya (juga perpanjangan otomatis) tidak dikenali replika yang sudah
+ada, karena mereka memverifikasi master dengan CA lama. Tanpa CA web yang
+sama, setiap komputer harus memasang ulang sertifikat keamanan panel.
+
 ### Memindahkan panel ke server lain
 
 1. Hentikan panel: `sudo systemctl stop dbpanel-panel`.
-2. Salin `/etc/dbpanel/panel` (termasuk `ca.crt`, `ca.key`, `panel.key`)
-   dan `/var/lib/dbpanel/panel` ke tempat yang sama di server baru.
+2. Salin `/etc/dbpanel/panel` (termasuk `ca.crt`, `ca.key`, `panel.key`,
+   `mysql-ca.*` dan `web-ca.*`) dan `/var/lib/dbpanel/panel` ke tempat yang
+   sama di server baru. Panel di server baru menerbitkan ulang sertifikat
+   HTTPS-nya untuk alamat baru; bila alamat itu di
+   luar batas CA web, panel membuat CA web baru dan komputer pengguna perlu
+   memasang ulang sertifikat keamanan panel (lihat "Keamanan").
 3. Pasang panel di server baru (`install.sh`). Salin dulu ke tata letak
    lama (`/etc/dbpanel/*`, `/var/lib/dbpanel/*`) agar skrip memindahkan
    dan memberikannya ke pengguna `dbpanel`, atau langsung ke subfolder
@@ -661,8 +673,9 @@ hanya tersedia bila server itu tidak sedang menjalankan pekerjaan, dan
 dicatat di **Audit**.
 
 Tombol yang merusak atau sulit dibatalkan (Resync ulang, Lepas replika,
-Hapus server, Lepas database, Buka kunci master, dan Siapkan sebagai master
-untuk server yang sudah menjadi master) meminta kata sandi panel Anda lagi,
+Hapus server, Lepas database, Buka kunci master, Siapkan sebagai master
+untuk server yang sudah menjadi master, Pasang sertifikat MySQL, dan
+Perketat sambungan replikasi) meminta kata sandi panel Anda lagi,
 dan nama server bila disebut di bawah. Konfirmasi itu berlaku 2 menit untuk
 satu tindakan saja; salah kata sandi dicatat di **Audit**, dan setelah 5
 percobaan dalam semenit panel menolak sampai menit itu lewat.
@@ -768,6 +781,16 @@ dimutakhirkan**. Untuk memutakhirkannya:
    berlaku).
 3. Agent baru terhubung dan pemantauan mulai dalam beberapa detik.
 
+**Setelah memperbarui panel ke versi dengan HTTPS dan sertifikat MySQL,
+pasang ulang agent di setiap server database** dengan langkah di atas
+(tidak perlu di host panel: `install.sh` sudah memasang agent-nya). Agent
+lama tetap terhubung dan dipantau, tetapi tidak mengenal perintah
+sertifikat MySQL: **Siapkan master**, **Buat replika**, **Resync ulang**,
+**Pasang sertifikat MySQL**, dan **Perketat sambungan replikasi** gagal di
+tahap sertifikat dengan "perintah tidak dikenal: mysql.tlsRequest" sampai
+agent server itu diperbarui. Perintah pemasangan baru memakai HTTPS
+berpin; perintah lama berisi `http://` tidak berlaku lagi.
+
 Pemasangan ulang hanya mengganti binary, sertifikat, dan `agent.yaml`.
 Akun MySQL tersegel, kebijakan lokal, serta peran dan sumber yang dipin di
 `/etc/dbpanel` tetap. Agent lama yang belum punya berkas peran hanya
@@ -811,9 +834,12 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   mengembalikan sertifikat buatan panel. Pin di perintah pemasangan agent
   mengikuti sertifikat yang sedang dipakai.
 - Panel hanya menjawab permintaan yang header `Host`-nya alamat panel:
-  `--public-host`, `localhost`, alamat loopback, atau IP salah satu kartu
-  jaringan host panel. Nama lain (mis. alias DNS buatan sendiri) mendapat
-  HTTP 421; pakai nama itu sebagai `--public-host` bila memang diperlukan.
+  `--public-host`, `localhost`, alamat loopback, IP salah satu kartu
+  jaringan host panel, atau nama yang dimuat sertifikat HTTPS yang sedang
+  dipakai (nama host mesin, **Nama dan alamat tambahan**, nama di
+  sertifikat sendiri). Nama lain (mis. alias DNS yang belum ditambahkan)
+  mendapat HTTP 421; tambahkan di **Pengaturan > Sertifikat keamanan panel
+  > Lanjutan > Nama dan alamat tambahan**.
 - `--public-host` hanya menerima alamat IPv4/IPv6 atau nama host (huruf,
   angka, titik, strip), karena nilainya masuk ke skrip pemasang agent yang
   berjalan sebagai root.
@@ -950,10 +976,24 @@ Test end-to-end (perintah `make test-e2e` atau
 `go test -timeout 30m -run TestE2E ./internal/panel/`) menjalankan panel,
 agent dan `mysqld` sungguhan, lalu lewat UI:
 
+- `TestE2EHTTPS`: sertifikat HTTPS yang dibuat panel sendiri, halaman
+  `/sertifikat` dan unduhannya lewat HTTP biasa, pengalihan 301 ke
+  `https://`, cookie sesi `Secure`, lalu perintah pasang agent persis
+  seperti yang tampil di halaman server dijalankan dengan `bash` (curl
+  berpin, `sha256sum`, skrip pemasang, binary hasil build pohon ini,
+  `dbpanel agent pair` dengan pin) sampai agentnya online. Yang butuh root
+  diganti tiruan di `PATH` (`sudo` menjalankan skrip dengan jalur
+  `/usr/local/bin`, unit systemd, dan direktori agent dipindah ke direktori
+  sementara; `systemctl`, `id`, `sleep`); perintah yang sama dengan pin
+  lain harus ditolak `curl`;
 - `TestE2ECreateReplica`: hubungkan MySQL, siapkan master (dengan
   sertifikat MySQL), buat replika untuk satu database, tambah database
   kedua, dan buat replika kedua dengan CLONE; replikasi kedua replika
-  harus memverifikasi sertifikat master;
+  harus memverifikasi sertifikat master. Master juga sempat diberi
+  sertifikat dari CA MySQL panel yang hanya memuat nama host lain:
+  replikasi harus gagal (error 2026), dan sertifikat yang memuat
+  `127.0.0.1` harus bisa tersambung lagi, jadi yang diperiksa memang nama,
+  bukan hanya rantai sertifikat;
 - `TestE2EMonitoring`: `STOP REPLICA` langsung di MySQL replika harus
   tampil sebagai Berhenti (di luar panel), membuka peringatan, dan
   mengirim satu pesan ke Telegram palsu (server `httptest`, tidak ada
@@ -964,6 +1004,19 @@ agent dan `mysqld` sungguhan, lalu lewat UI:
   replika.
 
 Test ini dilewati dengan `-short`.
+
+Pemeriksaan di browser sungguhan (Chromium lewat Playwright) untuk dialog
+konfirmasi kata sandi tidak ikut `go test` biasa:
+
+```sh
+go test -tags e2e_browser -timeout 10m -run TestE2EBrowserConfirm ./internal/panel/
+```
+
+Test itu menyiapkan master dan replika seperti di atas, lalu
+`scripts/e2e_browser_confirm.js` login, klik **Resync ulang**, memberi
+kata sandi salah (pesan galat tampil, tidak ada yang dikirim), lalu yang
+benar: formulir harus terkirim dengan `confirm_token`. Butuh Node.js
+dengan paket `playwright` dan Chromium-nya (test dilewati bila tidak ada).
 
 ## Mengubah tampilan
 

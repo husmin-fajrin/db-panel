@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
+	"github.com/husmin-fajrin/db-panel/internal/pki"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
 )
@@ -195,6 +197,12 @@ func TestE2ECreateReplica(t *testing.T) {
 	if value != "ON" {
 		t.Fatalf("super_read_only on the replica = %s, want ON", value)
 	}
+	// The replica checks the master's certificate name, not only its chain:
+	// one from the same CA that names another host fails, the panel's
+	// connects again.
+	wantVerifyChecksName(t, p, masterSrv, masterDB, replicaDB)
+	execSQL(t, masterDB, "INSERT INTO a.t VALUES (20, 'nama-cocok')")
+	waitRow(t, replicaDB, "a", 20, "nama-cocok")
 
 	// Tambah database b.
 	addStart := time.Now()
@@ -850,6 +858,91 @@ func wantServedCert(t *testing.T, db *sql.DB, rec store.ServerTLS) {
 	if !served.Equal(rec.NotAfter) || len(rec.CertSerial) != 32 {
 		t.Fatalf("MySQL serves a certificate valid until %s; server_tls = %+v", served, rec)
 	}
+}
+
+// wantVerifyChecksName proves that the replica behind replicaDB checks the
+// master's certificate name, not only its chain. The MySQL behind masterDB
+// serves, in turn, two certificates of the panel's MySQL CA that differ
+// only in their names: one naming only db-lain.example must make the
+// replica's IO thread fail with an SSL connection error (2026), one naming
+// 127.0.0.1 (the address the replica connects to) must let it connect.
+// The master's own certificate is served again at the end.
+func wantVerifyChecksName(t *testing.T, p *Panel, masterSrv int64, masterDB, replicaDB *sql.DB) {
+	t.Helper()
+	var origCert, origKey string
+	if err := masterDB.QueryRow("SELECT @@GLOBAL.ssl_cert, @@GLOBAL.ssl_key").Scan(&origCert, &origKey); err != nil {
+		t.Fatal(err)
+	}
+	// Next to the master's own files, owned by the MySQL user.
+	dir := filepath.Dir(origCert)
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	issue := func(name, host string) (cert, key string) {
+		t.Helper()
+		keyPEM, csrPEM, err := pki.NewAgentKeyAndCSR("e2e")
+		if err != nil {
+			t.Fatal(err)
+		}
+		certPEM, _, _, err := p.MySQLCA.IssueMySQLCert(csrPEM, masterSrv, []string{host})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, key = filepath.Join(dir, name+".crt"), filepath.Join(dir, name+".key")
+		for path, data := range map[string][]byte{cert: certPEM, key: keyPEM} {
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(path, int(st.Uid), int(st.Gid)); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Remove(path) })
+		}
+		return cert, key
+	}
+	serve := func(cert, key string) {
+		t.Helper()
+		if _, err := masterDB.Exec("SET GLOBAL ssl_cert = ?, GLOBAL ssl_key = ?", cert, key); err != nil {
+			t.Fatal(err)
+		}
+		execSQL(t, masterDB, "ALTER INSTANCE RELOAD TLS")
+		execSQL(t, replicaDB, "STOP REPLICA", "START REPLICA")
+	}
+	ioState := func() (state string, errNo int, errMsg string) {
+		t.Helper()
+		if err := replicaDB.QueryRow("SELECT SERVICE_STATE, LAST_ERROR_NUMBER, LAST_ERROR_MESSAGE "+
+			"FROM performance_schema.replication_connection_status").Scan(&state, &errNo, &errMsg); err != nil {
+			t.Fatal(err)
+		}
+		return state, errNo, errMsg
+	}
+	var state, msg string
+	var errNo int
+	waitConnected := func(what string) {
+		t.Helper()
+		waitForWithin(t, e2eWait, "the replica's IO thread to connect "+what, func() bool {
+			state, errNo, msg = ioState()
+			return state == "ON" && errNo == 0
+		})
+	}
+
+	serve(issue("e2e-nama-lain", "db-lain.example"))
+	waitForWithin(t, e2eWait, "the replica's IO thread to refuse a certificate naming another host", func() bool {
+		state, errNo, msg = ioState()
+		return errNo != 0
+	})
+	if errNo != 2026 || state == "ON" || !strings.Contains(msg, "certificate verify failed") {
+		t.Fatalf("IO thread with a certificate naming another host: %s, error %d %q; want 2026, certificate verify failed", state, errNo, msg)
+	}
+	t.Logf("certificate naming another host refused: %d %s", errNo, msg)
+
+	serve(issue("e2e-nama-cocok", "127.0.0.1"))
+	waitConnected("with a certificate of the same CA naming 127.0.0.1")
+	serve(origCert, origKey)
+	waitConnected("with the master's own certificate")
+	wantVerifiedReplication(t, replicaDB)
 }
 
 // wantVerifiedReplication checks that the replica behind db connects to
