@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strings"
 
 	drv "github.com/go-sql-driver/mysql"
@@ -17,9 +18,11 @@ import (
 )
 
 // Privileges the admin account needs to set up replication, as reported by
-// SHOW GRANTS. The panel creates the replication user, so the account must
-// hold every privilege it hands out (REPLICATION SLAVE, BACKUP_ADMIN) with
-// the right to grant it.
+// SHOW GRANTS. The panel creates the replication and dump users, so the
+// account must hold every privilege it hands out (REPLICATION SLAVE,
+// BACKUP_ADMIN, FLUSH_TABLES) with the right to grant it.
+// CONNECTION_ADMIN is what ALTER INSTANCE RELOAD TLS (mysql.tlsInstall)
+// needs.
 var (
 	staticGrants = []string{
 		"CREATE USER", "RELOAD", "PROCESS", "SELECT", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT",
@@ -27,12 +30,15 @@ var (
 	}
 	dynamicGrants = []string{
 		"SYSTEM_VARIABLES_ADMIN", "REPLICATION_SLAVE_ADMIN", "BACKUP_ADMIN", "CLONE_ADMIN", "PERSIST_RO_VARIABLES_ADMIN",
+		"CONNECTION_ADMIN",
 	}
 	// superCovers are the dynamic privileges SUPER implies; SUPER does not
-	// stand in for the others (BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_...).
+	// stand in for the others (BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_...,
+	// CONNECTION_ADMIN, which ALTER INSTANCE RELOAD TLS checks by name).
 	superCovers = map[string]bool{"SYSTEM_VARIABLES_ADMIN": true, "REPLICATION_SLAVE_ADMIN": true}
-	// grantableDynamic is the dynamic privilege handed to the replication user.
-	grantableDynamic = "BACKUP_ADMIN"
+	// grantableDynamic are the dynamic privileges handed to the replication
+	// user (BACKUP_ADMIN) and the dump users (FLUSH_TABLES).
+	grantableDynamic = map[string]bool{"BACKUP_ADMIN": true, "FLUSH_TABLES": true}
 )
 
 const grantOption = "GRANT OPTION"
@@ -45,8 +51,18 @@ var replicaDataGrants = []string{
 }
 
 // grantSet is a set of required global privileges. GRANT OPTION is always
-// required too (on the static privileges and on BACKUP_ADMIN).
+// required too (on the static privileges and on grantableDynamic).
 type grantSet struct{ static, dynamic []string }
+
+// requiredGrants is s for a server running version: from the release that
+// has FLUSH_TABLES (flushTablesMinVersion) the admin account also needs it,
+// grantable, as the dump accounts get it (dumpGrantsFor).
+func requiredGrants(s grantSet, version string) grantSet {
+	if dumpGrantsFor(version) != dumpGrants {
+		return s
+	}
+	return grantSet{static: s.static, dynamic: append(append([]string{}, s.dynamic...), "FLUSH_TABLES")}
+}
 
 var (
 	masterGrants  = grantSet{static: staticGrants, dynamic: dynamicGrants}
@@ -78,8 +94,9 @@ func union(a, b []string) []string {
 // RequiredGrants lists the global privileges checked by mysql.connect and
 // by the master preflight: the static ones, the dynamic ones, and GRANT
 // OPTION (on the static privileges and on BACKUP_ADMIN: MySQL 8 keeps it
-// per privilege line). ALL PRIVILEGES ON *.* WITH GRANT OPTION covers
-// everything.
+// per privilege line). From 8.0.31 FLUSH_TABLES, with GRANT OPTION, is
+// required too (requiredGrants). ALL PRIVILEGES ON *.* WITH GRANT OPTION
+// covers everything.
 func RequiredGrants() []string { return masterGrants.list() }
 
 // RequiredReplicaGrants lists the global privileges the replica preflight
@@ -213,7 +230,7 @@ func inventory(ctx context.Context, db *sql.DB) (proto.ConnectResult, error) {
 	if err != nil {
 		return res, err
 	}
-	res.MissingGrants = missingGrants(grants, res.Account, masterGrants)
+	res.MissingGrants = missingGrants(grants, res.Account, requiredGrants(masterGrants, res.Status.Version))
 	return res, nil
 }
 
@@ -329,7 +346,7 @@ func missingGrants(grants []string, account string, req grantSet) []string {
 		switch {
 		case !has(p) && !(superCovers[p] && held["SUPER"]):
 			dynamic = append(dynamic, p)
-		case p == grantableDynamic && !allGO && !grantable[p]:
+		case grantableDynamic[p] && !allGO && !grantable[p]:
 			dynamic = append(dynamic, p) // held, but cannot pass it on
 		}
 	}
@@ -341,10 +358,8 @@ func missingGrants(grants []string, account string, req grantSet) []string {
 	}
 	if len(dynamic) > 0 {
 		stmt := "GRANT " + strings.Join(dynamic, ", ") + to
-		for _, p := range dynamic {
-			if p == grantableDynamic {
-				stmt += " WITH GRANT OPTION" // applies to every privilege in the statement
-			}
+		if slices.ContainsFunc(dynamic, func(p string) bool { return grantableDynamic[p] }) {
+			stmt += " WITH GRANT OPTION" // applies to every privilege in the statement
 		}
 		out = append(out, stmt)
 	}

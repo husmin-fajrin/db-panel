@@ -264,6 +264,41 @@ func TestCloneFromReplicatesData(t *testing.T) {
 	}
 }
 
+// TestCloneVerifiesDonorCert: with VerifyIdentity, CLONE checks the
+// donor's certificate against clone_ssl_ca. MySQL 8.0's CLONE connects with
+// at most SSL_MODE_VERIFY_CA, so the chain is checked but not the name.
+func TestCloneVerifiesDonorCert(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	autoMaster := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	replica := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	m := testMySQLCA(t)
+	installCert(t, master, m)
+	replUser(t, master)
+	replUser(t, autoMaster)
+	fillMaster(t, rootDB(t, master))
+	trust := decode[proto.TLSTrustResult](t, dispatch(t, replica.Host(), "mysql.tlsTrust", proto.TLSTrustParams{CAPEM: string(m.CAPEM())}))
+	rig := rootRig(replica)
+
+	p := cloneParams(autoMaster)
+	p.SSL, p.SSLCA, p.VerifyIdentity = true, trust.CAPath, true
+	d := rig.run(t, "mysql.cloneFrom", p)
+	if d.OK || !strings.Contains(d.Error, "CLONE gagal") || !strings.Contains(d.Error, "certificate verify failed") {
+		t.Errorf("clone from a donor with MySQL's own certificate = %+v", d)
+	}
+
+	p = cloneParams(master)
+	p.SSL, p.SSLCA, p.VerifyIdentity = true, trust.CAPath, true
+	snapshotResult(t, rig.run(t, "mysql.cloneFrom", p))
+	if n := count(t, rootDB(t, replica), "SELECT COUNT(*) FROM a.t"); n != 3 {
+		t.Errorf("a.t rows = %d", n)
+	}
+	// CLONE leaves the recipient's dbpanel-tls alone: replication still
+	// finds the CA file afterwards.
+	if !exists(trust.CAPath) {
+		t.Error("CLONE removed the recipient's mysql-ca.crt")
+	}
+}
+
 func TestCloneFailsWithWrongPassword(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
 	replica := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
@@ -621,6 +656,7 @@ func TestSnapshotRejectsBadParams(t *testing.T) {
 			with(func(p *proto.SnapshotParams) { p.Password = "" }),
 			with(func(p *proto.SnapshotParams) { p.Password = "a\nb" }),
 			with(func(p *proto.SnapshotParams) { p.Databases = []string{"a"} }),
+			with(func(p *proto.SnapshotParams) { p.SSL, p.VerifyIdentity = true, true }),
 		},
 		"mysql.dumpFrom": {
 			with(func(p *proto.SnapshotParams) { p.Host = "a b" }),
@@ -630,6 +666,10 @@ func TestSnapshotRejectsBadParams(t *testing.T) {
 			with(func(p *proto.SnapshotParams) { p.Databases = []string{"--all-databases"} }),
 			with(func(p *proto.SnapshotParams) { p.Databases = []string{"mysql"} }),
 			with(func(p *proto.SnapshotParams) { p.Databases = []string{"a", "a"} }),
+			with(func(p *proto.SnapshotParams) { p.SSL, p.VerifyIdentity = true, true }),
+			with(func(p *proto.SnapshotParams) { p.SSL, p.VerifyIdentity, p.SSLCA = true, true, "ca.crt" }),
+			with(func(p *proto.SnapshotParams) { p.SSL, p.VerifyIdentity, p.SSLCA = true, true, "/tmp/a\"b.crt" }),
+			with(func(p *proto.SnapshotParams) { p.VerifyIdentity, p.SSLCA = true, "/tmp/ca.crt" }),
 		},
 	}
 	for cmd, ps := range cases {
@@ -680,6 +720,78 @@ func TestDumpArgs(t *testing.T) {
 	}
 	if got := mysql.LoadArgs("/tmp/local.cnf"); !reflect.DeepEqual(got, []string{"--defaults-file=/tmp/local.cnf", "--binary-mode", "--init-command=SET sql_log_bin=0"}) {
 		t.Errorf("LoadArgs = %q", got)
+	}
+}
+
+// TestDumpVerifyIdentityArgs: a verified dump checks the master's
+// certificate against the CA file and the master's name, on the command
+// line and in the option file both runs read.
+func TestDumpVerifyIdentityArgs(t *testing.T) {
+	p := proto.SnapshotParams{Host: "db1.example", Port: 3306, User: "dumper", Password: "x", Databases: []string{"a"},
+		SSL: true, SSLCA: "/var/lib/mysql/dbpanel-tls/mysql-ca.crt", VerifyIdentity: true}
+	tlsArgs := []string{"--ssl-mode=VERIFY_IDENTITY", "--ssl-ca=/var/lib/mysql/dbpanel-tls/mysql-ca.crt"}
+	plain := mysql.DumpArgs("/tmp/src.cnf", p.Databases, "ON")
+	want := append(append([]string{plain[0]}, tlsArgs...), plain[1:]...)
+	if got := mysql.SourceDumpArgs("/tmp/src.cnf", p, "ON"); !reflect.DeepEqual(got, want) {
+		t.Errorf("verified dump:\n got %q\nwant %q", got, want)
+	}
+	probe := mysql.ProbeArgs("/tmp/src.cnf", p.Databases)
+	want = append(append([]string{probe[0], probe[1]}, tlsArgs...), probe[2:]...)
+	if got := mysql.SourceProbeArgs("/tmp/src.cnf", p); !reflect.DeepEqual(got, want) {
+		t.Errorf("verified trial run:\n got %q\nwant %q", got, want)
+	}
+	if got, want := mysql.SourceTLSOptions(p), "ssl-mode=VERIFY_IDENTITY\nssl-ca=\"/var/lib/mysql/dbpanel-tls/mysql-ca.crt\"\n"; got != want {
+		t.Errorf("option file TLS lines = %q, want %q", got, want)
+	}
+
+	// Without verification: SSL only requires encryption, as before.
+	p.VerifyIdentity, p.SSLCA = false, ""
+	if got := mysql.SourceDumpArgs("/tmp/src.cnf", p, "ON"); !reflect.DeepEqual(got, plain) {
+		t.Errorf("unverified dump = %q", got)
+	}
+	if got := mysql.SourceTLSOptions(p); got != "ssl-mode=REQUIRED\n" {
+		t.Errorf("unverified option file TLS lines = %q", got)
+	}
+	p.SSL = false
+	if got := mysql.SourceTLSOptions(p); got != "" {
+		t.Errorf("plaintext option file TLS lines = %q", got)
+	}
+}
+
+// TestDumpVerifiesMasterCert dumps from a master serving a certificate from
+// the panel's MySQL CA, and refuses one serving MySQL's own certificate
+// before any local data changes.
+func TestDumpVerifiesMasterCert(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	autoMaster := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	m := testMySQLCA(t)
+	installCert(t, master, m)
+	for _, inst := range []*testmysql.Instance{master, autoMaster} {
+		db := rootDB(t, inst)
+		fillMaster(t, db)
+		dumpUser(t, db)
+	}
+	trust := decode[proto.TLSTrustResult](t, dispatch(t, replica.Host(), "mysql.tlsTrust", proto.TLSTrustParams{CAPEM: string(m.CAPEM())}))
+	rig := rootRig(replica)
+	rdb := rootDB(t, replica)
+	execAll(t, rdb, "CREATE DATABASE keepme")
+
+	p := dumpParams(autoMaster, "a")
+	p.SSL, p.SSLCA, p.VerifyIdentity = true, trust.CAPath, true
+	d := rig.run(t, "mysql.dumpFrom", p)
+	if d.OK || !strings.Contains(d.Error, "uji dump dari master gagal") || !strings.Contains(d.Error, "certificate verify failed") {
+		t.Errorf("dump from a master with MySQL's own certificate = %+v", d)
+	}
+	if got := databases(t, rdb); !reflect.DeepEqual(got, []string{"keepme"}) {
+		t.Errorf("databases after the refused dump = %q", got)
+	}
+
+	p = dumpParams(master, "a")
+	p.SSL, p.SSLCA, p.VerifyIdentity = true, trust.CAPath, true
+	snapshotResult(t, rig.run(t, "mysql.dumpFrom", p))
+	if n := count(t, rdb, "SELECT COUNT(*) FROM a.t"); n != 3 {
+		t.Errorf("a.t rows = %d", n)
 	}
 }
 

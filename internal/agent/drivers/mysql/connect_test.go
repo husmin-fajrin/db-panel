@@ -207,7 +207,7 @@ func TestConnectReportsMissingGrants(t *testing.T) {
 	}
 	want := []string{
 		"GRANT CREATE USER, RELOAD, PROCESS, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO 'limited'@'%'",
-		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO 'limited'@'%' WITH GRANT OPTION",
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN, CONNECTION_ADMIN, FLUSH_TABLES ON *.* TO 'limited'@'%' WITH GRANT OPTION",
 		"GRANT USAGE ON *.* TO 'limited'@'%' WITH GRANT OPTION",
 	}
 	if !reflect.DeepEqual(res.MissingGrants, want) {
@@ -274,5 +274,44 @@ func TestConnectRejectsBadHost(t *testing.T) {
 		if r.OK || r.Error.Message != mysql.ErrNoHost.Error() {
 			t.Errorf("host %q: response = %+v / %+v, want it past validation", host, r, r.Error)
 		}
+	}
+}
+
+// TestPreflightRequiresConnectionAdmin: ALTER INSTANCE RELOAD TLS needs
+// CONNECTION_ADMIN, and the dump accounts get FLUSH_TABLES from the admin
+// account, so both are required (FLUSH_TABLES with GRANT OPTION). An
+// account holding everything else is told exactly what to grant.
+func TestPreflightRequiresConnectionAdmin(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	root := rootDB(t, inst)
+	execAll(t, root, "CREATE USER adm@'%' IDENTIFIED BY 'pw-1'",
+		"GRANT CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO adm@'%' WITH GRANT OPTION",
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO adm@'%' WITH GRANT OPTION",
+		"GRANT FLUSH_TABLES ON *.* TO adm@'%'")
+	params := proto.ConnectParams{User: "adm", Password: "pw-1", Host: "127.0.0.1", Port: inst.Port}
+	want := []string{"GRANT CONNECTION_ADMIN, FLUSH_TABLES ON *.* TO 'adm'@'%' WITH GRANT OPTION"}
+
+	e := newConnectEnv(t, inst)
+	if got := result(t, e.call(t, "mysql.connect", params)).MissingGrants; !reflect.DeepEqual(got, want) {
+		t.Errorf("connect MissingGrants = %q, want %q", got, want)
+	}
+	h := inst.HostWith(&memCreds{params})
+	c := wantCheck(t, callPreflight(t, h, proto.PreflightParams{Role: "master"}), "grants", proto.CheckFail)
+	if !reflect.DeepEqual(c.FixSQL, want) {
+		t.Errorf("preflight FixSQL = %q, want %q", c.FixSQL, want)
+	}
+
+	execAll(t, root, want...)
+	if got := result(t, e.call(t, "mysql.inventory", nil)).MissingGrants; len(got) != 0 {
+		t.Errorf("MissingGrants after the remedy = %q", got)
+	}
+	// The account can now reload TLS.
+	as, err := sql.Open("mysql", mysql.DSN(params, inst.Socket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer as.Close()
+	if _, err := as.Exec("ALTER INSTANCE RELOAD TLS"); err != nil {
+		t.Errorf("ALTER INSTANCE RELOAD TLS as the remedied account: %v", err)
 	}
 }

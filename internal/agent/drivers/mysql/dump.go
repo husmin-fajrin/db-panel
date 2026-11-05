@@ -97,18 +97,19 @@ func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		}
 	}
 
-	srcFile, err := writeDefaultsFile(h, proto.ConnectParams{User: p.User, Password: p.Password, Host: p.Host, Port: p.Port}, "", 0, p.SSL)
+	srcTLS := sourceTLS(p)
+	srcFile, err := writeDefaultsFile(h, proto.ConnectParams{User: p.User, Password: p.Password, Host: p.Host, Port: p.Port}, "", 0, srcTLS)
 	if err != nil {
 		return res, err
 	}
 	defer os.Remove(srcFile)
-	localFile, err := writeDefaultsFile(h, local, l.Socket, l.Port, false)
+	localFile, err := writeDefaultsFile(h, local, l.Socket, l.Port, clientTLS{})
 	if err != nil {
 		return res, err
 	}
 	defer os.Remove(localFile)
-	args := dumpArgs(srcFile, p.Databases, gtidMode)
-	if err := checkClients(ctx, h, loadBin, localFile, dumpBin, srcFile, p.Databases); err != nil {
+	args := dumpArgs(srcFile, p.Databases, gtidMode, srcTLS)
+	if err := checkClients(ctx, h, loadBin, localFile, dumpBin, probeArgs(srcFile, p.Databases, srcTLS)); err != nil {
 		return res, err
 	}
 
@@ -186,14 +187,14 @@ func storedLoginRefused(ctx context.Context, h Host) bool {
 // checkClients proves both sides before anything local is changed: the
 // local mysql logs in with the load's own arguments (so the init command's
 // sql_log_bin privilege is checked too), and a trial run of the dump
-// (probeArgs) succeeds on the master, which covers its login, privileges
-// and database names.
-func checkClients(ctx context.Context, h Host, loadBin, localFile, dumpBin, srcFile string, databases []string) error {
+// (probe, probeArgs) succeeds on the master, which covers its certificate,
+// login, privileges and database names.
+func checkClients(ctx context.Context, h Host, loadBin, localFile, dumpBin string, probe []string) error {
 	if err := h.Exec(ctx, nil, io.Discard, loadBin, append(loadArgs(localFile), "-N", "-e", "SELECT 1")...); err != nil {
 		return fmt.Errorf("login MySQL lokal dengan akun tersimpan gagal: %v", err)
 	}
-	if err := h.Exec(ctx, nil, io.Discard, dumpBin, probeArgs(srcFile, databases)...); err != nil {
-		return fmt.Errorf("uji dump dari master gagal (login, hak akses, atau nama database); data di server ini belum diubah: %v", err)
+	if err := h.Exec(ctx, nil, io.Discard, dumpBin, probe...); err != nil {
+		return fmt.Errorf("uji dump dari master gagal (sertifikat, login, hak akses, atau nama database); data di server ini belum diubah: %v", err)
 	}
 	return nil
 }
@@ -202,8 +203,8 @@ func checkClients(ctx context.Context, h Host, loadBin, localFile, dumpBin, srcF
 // takes no lock on the master: with --set-gtid-purged other than OFF,
 // mysqldump runs FLUSH TABLES (binary-logged) and FLUSH TABLES WITH READ
 // LOCK even with --no-data.
-func probeArgs(defaultsFile string, databases []string) []string {
-	args := dumpArgs(defaultsFile, databases, "OFF")
+func probeArgs(defaultsFile string, databases []string, tls clientTLS) []string {
+	args := dumpArgs(defaultsFile, databases, "OFF", tls)
 	return append([]string{args[0], "--no-data"}, args[1:]...)
 }
 
@@ -228,17 +229,18 @@ func dumpGTIDMode(executed string, configuredReplica bool, p proto.SnapshotParam
 // dumpArgs are mysqldump's arguments: every database (and the mysql schema,
 // as CLONE copies it) when databases is empty, else those databases.
 // --defaults-file must come first; it is the only option file read, so no
-// ~/.my.cnf can change the account.
-func dumpArgs(defaultsFile string, databases []string, gtidPurged string) []string {
-	args := []string{
-		"--defaults-file=" + defaultsFile,
+// ~/.my.cnf can change the account. tls's options follow it (they repeat
+// the option file's).
+func dumpArgs(defaultsFile string, databases []string, gtidPurged string, tls clientTLS) []string {
+	args := append([]string{"--defaults-file=" + defaultsFile}, tls.args()...)
+	args = append(args,
 		"--single-transaction",
-		"--set-gtid-purged=" + gtidPurged,
+		"--set-gtid-purged="+gtidPurged,
 		"--triggers", "--routines", "--events",
 		"--skip-lock-tables",
 		"--column-statistics=0",
 		"--no-tablespaces",
-	}
+	)
 	if len(databases) == 0 {
 		// The mysql schema comes along; DumpFrom flushes privileges at the
 		// end of the load (flushTrailer).
@@ -338,17 +340,49 @@ func clientDefaults(p proto.ConnectParams, socket string, port int) (string, err
 	return b.String(), nil
 }
 
-// writeDefaultsFile writes clientDefaults(p, socket, port) to a new 0600
-// file and returns its path; the caller removes it. requireTLS makes the
-// client refuse a connection without TLS.
-func writeDefaultsFile(h Host, p proto.ConnectParams, socket string, port int, requireTLS bool) (string, error) {
+// clientTLS is how a MySQL client program connects: require refuses a
+// connection without TLS; verify (VERIFY_IDENTITY) also checks that the
+// server's certificate chains to the CA file ca and names the host.
+type clientTLS struct {
+	require, verify bool
+	ca              string
+}
+
+// sourceTLS is how the dump connects to p's master. ca is validated
+// (validateVerify) and absolute.
+func sourceTLS(p proto.SnapshotParams) clientTLS {
+	return clientTLS{require: p.SSL || p.VerifyIdentity, verify: p.VerifyIdentity, ca: p.SSLCA}
+}
+
+// args are t's command-line options; only verification has any, as the
+// option file carries the rest.
+func (t clientTLS) args() []string {
+	if !t.verify {
+		return nil
+	}
+	return []string{"--ssl-mode=VERIFY_IDENTITY", "--ssl-ca=" + t.ca}
+}
+
+// options are t's option-file lines; the CA path is quoted like
+// clientDefaults' values (validateVerify admits no quote or backslash).
+func (t clientTLS) options() string {
+	switch {
+	case t.verify:
+		return "ssl-mode=VERIFY_IDENTITY\nssl-ca=\"" + t.ca + "\"\n"
+	case t.require:
+		return "ssl-mode=REQUIRED\n"
+	}
+	return ""
+}
+
+// writeDefaultsFile writes clientDefaults(p, socket, port) and tls's
+// options to a new 0600 file and returns its path; the caller removes it.
+func writeDefaultsFile(h Host, p proto.ConnectParams, socket string, port int, tls clientTLS) (string, error) {
 	content, err := clientDefaults(p, socket, port)
 	if err != nil {
 		return "", err
 	}
-	if requireTLS {
-		content += "ssl-mode=REQUIRED\n"
-	}
+	content += tls.options()
 	f, err := h.TempFile("dbpanel-*.cnf", 0o600)
 	if err != nil {
 		return "", fmt.Errorf("buat file kredensial sementara: %w", err)

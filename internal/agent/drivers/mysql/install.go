@@ -474,7 +474,7 @@ func secureRoot(ctx context.Context, j *jobs.Job, h Host, ins installer, creds C
 	if err != nil {
 		return err
 	}
-	file, err := writeDefaultsFile(h, proto.ConnectParams{User: "root", Password: temp}, l.Socket, l.Port, false)
+	file, err := writeDefaultsFile(h, proto.ConnectParams{User: "root", Password: temp}, l.Socket, l.Port, clientTLS{})
 	if err != nil {
 		return err
 	}

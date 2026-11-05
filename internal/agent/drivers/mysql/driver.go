@@ -48,6 +48,8 @@ type Driver struct {
 
 	pins *Pins // nil without PinDir; set by Register
 
+	tlsMu sync.Mutex // one mysql.tls* command at a time
+
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
 	newHost hostFactory
@@ -73,6 +75,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerReplication(reg)
 	d.registerInstall(reg)
 	d.registerDatabases(reg)
+	d.registerTLS(reg)
 }
 
 // Pins is the driver's pinned role and source; nil without PinDir. The

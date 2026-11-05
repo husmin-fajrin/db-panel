@@ -122,6 +122,9 @@ func validateSnapshot(p *proto.SnapshotParams, method string) error {
 	case method == methodClone && len(p.Databases) > 0:
 		return bad("CLONE menyalin seluruh server; untuk sebagian database pakai dump")
 	}
+	if err := validateVerify(p.VerifyIdentity, p.SSL, &p.SSLCA); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, db := range p.Databases {
 		switch {

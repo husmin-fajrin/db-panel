@@ -128,15 +128,22 @@ func TestSourceStatement(t *testing.T) {
 	quote := func(s string) string { return mysql.QuoteLiteral(s, false) }
 	want := `CHANGE REPLICATION SOURCE TO SOURCE_HOST = '10.0.0.5', SOURCE_PORT = 3307, SOURCE_USER = 'dbpanel_repl', ` +
 		`SOURCE_PASSWORD = 'p''w\\x"', SOURCE_AUTO_POSITION = 1, GET_SOURCE_PUBLIC_KEY = 1, ` +
-		`SOURCE_CONNECT_RETRY = 10, SOURCE_RETRY_COUNT = 86400, SOURCE_SSL = 0`
+		`SOURCE_CONNECT_RETRY = 10, SOURCE_RETRY_COUNT = 86400, SOURCE_SSL = 0, SOURCE_SSL_CA = '', SOURCE_SSL_VERIFY_SERVER_CERT = 0`
 	if got := mysql.SourceStatement(p, quote); got != want {
 		t.Errorf("statement =\n%s\nwant\n%s", got, want)
 	}
 	p.SSL = true
 	// Over TLS the master's RSA key is not requested.
-	if got := mysql.SourceStatement(p, quote); !strings.HasSuffix(got, ", SOURCE_SSL = 1") ||
+	if got := mysql.SourceStatement(p, quote); !strings.HasSuffix(got, ", SOURCE_SSL = 1, SOURCE_SSL_CA = '', SOURCE_SSL_VERIFY_SERVER_CERT = 0") ||
 		!strings.Contains(got, "GET_SOURCE_PUBLIC_KEY = 0") {
 		t.Errorf("SSL statement = %s", got)
+	}
+	// Verified: the CA file and the host name check; a re-point without
+	// verification clears both (above).
+	p.SSLCA, p.VerifyServerCert = "/var/lib/mysql/dbpanel-tls/mysql-ca.crt", true
+	if got := mysql.SourceStatement(p, quote); !strings.HasSuffix(got,
+		", SOURCE_SSL = 1, SOURCE_SSL_CA = '/var/lib/mysql/dbpanel-tls/mysql-ca.crt', SOURCE_SSL_VERIFY_SERVER_CERT = 1") {
+		t.Errorf("verified statement = %s", got)
 	}
 	noBackslash := func(s string) string { return mysql.QuoteLiteral(s, true) }
 	if got := mysql.SourceStatement(p, noBackslash); !strings.Contains(got, `SOURCE_PASSWORD = 'p''w\x"'`) {
@@ -147,20 +154,30 @@ func TestSourceStatement(t *testing.T) {
 func TestReplicationRejectsBadParams(t *testing.T) {
 	good := proto.ReplicationSourceParams{Host: "db1.example", Port: 3306, User: "repl", Password: "Rahasia-123"}
 	for name, mod := range map[string]func(p *proto.ReplicationSourceParams){
-		"host quote":    func(p *proto.ReplicationSourceParams) { p.Host = "db'1" },
-		"host space":    func(p *proto.ReplicationSourceParams) { p.Host = "db 1" },
-		"host colon":    func(p *proto.ReplicationSourceParams) { p.Host = "db1:3306" },
-		"port zero":     func(p *proto.ReplicationSourceParams) { p.Port = 0 },
-		"port high":     func(p *proto.ReplicationSourceParams) { p.Port = 65536 },
-		"user":          func(p *proto.ReplicationSourceParams) { p.User = "re'pl" },
-		"no password":   func(p *proto.ReplicationSourceParams) { p.Password = "" },
-		"control char":  func(p *proto.ReplicationSourceParams) { p.Password = "a\nb" },
-		"long password": func(p *proto.ReplicationSourceParams) { p.Password = strings.Repeat("é", 33) },
-		"db name":       func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a%"} },
-		"db quote":      func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a'"} },
-		"system db":     func(p *proto.ReplicationSourceParams) { p.Databases = []string{"mysql"} },
-		"duplicate db":  func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a", "a"} },
-		"empty db name": func(p *proto.ReplicationSourceParams) { p.Databases = []string{""} },
+		"host quote":        func(p *proto.ReplicationSourceParams) { p.Host = "db'1" },
+		"host space":        func(p *proto.ReplicationSourceParams) { p.Host = "db 1" },
+		"host colon":        func(p *proto.ReplicationSourceParams) { p.Host = "db1:3306" },
+		"port zero":         func(p *proto.ReplicationSourceParams) { p.Port = 0 },
+		"port high":         func(p *proto.ReplicationSourceParams) { p.Port = 65536 },
+		"user":              func(p *proto.ReplicationSourceParams) { p.User = "re'pl" },
+		"no password":       func(p *proto.ReplicationSourceParams) { p.Password = "" },
+		"control char":      func(p *proto.ReplicationSourceParams) { p.Password = "a\nb" },
+		"long password":     func(p *proto.ReplicationSourceParams) { p.Password = strings.Repeat("é", 33) },
+		"db name":           func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a%"} },
+		"db quote":          func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a'"} },
+		"system db":         func(p *proto.ReplicationSourceParams) { p.Databases = []string{"mysql"} },
+		"duplicate db":      func(p *proto.ReplicationSourceParams) { p.Databases = []string{"a", "a"} },
+		"empty db name":     func(p *proto.ReplicationSourceParams) { p.Databases = []string{""} },
+		"verify without CA": func(p *proto.ReplicationSourceParams) { p.SSL, p.VerifyServerCert = true, true },
+		"verify without SSL": func(p *proto.ReplicationSourceParams) {
+			p.SSLCA, p.VerifyServerCert = "/var/lib/mysql/dbpanel-tls/mysql-ca.crt", true
+		},
+		"relative CA": func(p *proto.ReplicationSourceParams) {
+			p.SSL, p.SSLCA, p.VerifyServerCert = true, "mysql-ca.crt", true
+		},
+		"CA quote": func(p *proto.ReplicationSourceParams) {
+			p.SSL, p.SSLCA, p.VerifyServerCert = true, "/tmp/a'b.crt", true
+		},
 	} {
 		p := good
 		mod(&p)
@@ -578,5 +595,46 @@ func TestDestructiveCommandsRefusedOnSource(t *testing.T) {
 	// Making a source read-only is not destructive and still allowed.
 	if r := dispatch(t, h, "mysql.setReadOnly", proto.ReadOnlyParams{On: true}); !r.OK {
 		t.Errorf("setReadOnly on = %+v", r)
+	}
+}
+
+// TestReplicationVerifiesSourceCert: a replica that verifies its source
+// connects to a master serving a certificate from the panel's MySQL CA for
+// the address it uses, and refuses one serving MySQL's own certificate.
+func TestReplicationVerifiesSourceCert(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	autoMaster := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	m := testMySQLCA(t)
+	installCert(t, master, m)
+	replUser(t, master)
+	replUser(t, autoMaster)
+	trust := decode[proto.TLSTrustResult](t, dispatch(t, replica.Host(), "mysql.tlsTrust", proto.TLSTrustParams{CAPEM: string(m.CAPEM())}))
+
+	p := sourceParams(master)
+	p.SSL, p.SSLCA, p.VerifyServerCert = true, trust.CAPath, true
+	decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.configureReplication", p))
+	rs := decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.startReplica", nil))
+	execAll(t, rootDB(t, master), "CREATE DATABASE verified")
+	res := synced(t, master, replica)
+	if rs.LastIOErrno != 0 || res.Status.IORunning != "Yes" {
+		t.Errorf("verified replication: %+v, %+v", rs, res.Status)
+	}
+	var ca, verify string
+	if err := rootDB(t, replica).QueryRow(`SELECT SSL_CA_FILE, SSL_VERIFY_SERVER_CERTIFICATE
+		FROM performance_schema.replication_connection_configuration WHERE CHANNEL_NAME = ''`).Scan(&ca, &verify); err != nil {
+		t.Fatal(err)
+	}
+	if ca != trust.CAPath || verify != "YES" {
+		t.Errorf("replica's source settings: CA %q, verify %s", ca, verify)
+	}
+	dispatch(t, replica.Host(), "mysql.stopReplica", nil)
+
+	p = sourceParams(autoMaster)
+	p.SSL, p.SSLCA, p.VerifyServerCert = true, trust.CAPath, true
+	decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.configureReplication", p))
+	r := dispatch(t, replica.Host(), "mysql.startReplica", nil)
+	if r.OK || !strings.Contains(strings.ToLower(r.Error.Message), "certificate") {
+		t.Errorf("start against a master with MySQL's own certificate = %+v", r)
 	}
 }

@@ -225,6 +225,21 @@ tersegel di `/etc/dbpanel/mysql.cred` di server itu; panel tidak
 menyimpannya dan tidak menampilkannya lagi. Bila akun kurang hak, panel
 menampilkan perintah `GRANT` yang perlu dijalankan.
 
+Hak global (`ON *.*`) yang diperiksa untuk akun admin (`root` sudah
+memegang semuanya):
+
+- `CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER,
+  EVENT, REPLICATION CLIENT, REPLICATION SLAVE` dengan `WITH GRANT OPTION`;
+  server replika juga `DROP, CREATE, INSERT, UPDATE, DELETE, ALTER, INDEX,
+  CREATE VIEW, CREATE ROUTINE, ALTER ROUTINE, REFERENCES, CREATE TEMPORARY
+  TABLES` (untuk memuat dump).
+- `SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, CLONE_ADMIN,
+  PERSIST_RO_VARIABLES_ADMIN` dan `CONNECTION_ADMIN` (dipakai `ALTER
+  INSTANCE RELOAD TLS` saat panel memasang sertifikat MySQL).
+- `BACKUP_ADMIN` dan, di MySQL 8.0.31 ke atas, `FLUSH_TABLES`, keduanya
+  `WITH GRANT OPTION`, karena agent memberikannya ke akun replikasi dan akun
+  dump sementara.
+
 Kata sandi MySQL yang Anda ketik melintas jaringan lewat HTTPS
 (terenkripsi).
 
@@ -736,7 +751,8 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   LOGS AND GTIDS`), yang dibuka `RELOAD`. MySQL 8.0.26–8.0.30 tidak punya
   `FLUSH_TABLES`, jadi akun dump di sana tetap memakai `RELOAD`. Akun admin
   yang dipakai agent harus memegang `FLUSH_TABLES ... WITH GRANT OPTION`
-  untuk memberikannya (root sudah); bila belum, akun dump tetap mendapat
+  untuk memberikannya (root sudah; pemeriksaan "Hubungkan MySQL" dan
+  preflight memintanya); bila belum, akun dump tetap mendapat
   `RELOAD` dan log pekerjaan di panel (juga journal agent) mencatat
   peringatan dengan perintah
   `GRANT FLUSH_TABLES ON *.* TO '<admin>'@'<host>' WITH GRANT OPTION`.

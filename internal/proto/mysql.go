@@ -1,5 +1,7 @@
 package proto
 
+import "time"
+
 // DatabaseInfo describes one MySQL database found on a server.
 type DatabaseInfo struct {
 	Name    string   `json:"name"`
@@ -219,6 +221,12 @@ type SnapshotParams struct {
 	EstimateBytes uint64   `json:"estimate_bytes"` // expected size, for progress
 	DropExisting  bool     `json:"drop_existing"`  // dump: drop the local copies of Databases before loading
 	SSL           bool     `json:"ssl"`            // the master offers TLS: the copy must be encrypted
+	// VerifyIdentity: the master's certificate must chain to the CA file
+	// SSLCA (a path on this server, normally <datadir>/dbpanel-tls/mysql-ca.crt)
+	// and name Host. It implies SSL. CLONE checks the chain only (see
+	// mysql.cloneFrom).
+	SSLCA          string `json:"ssl_ca,omitempty"`
+	VerifyIdentity bool   `json:"verify_identity,omitempty"`
 }
 
 // SnapshotResult is the job.done result of mysql.cloneFrom and mysql.dumpFrom.
@@ -250,6 +258,11 @@ type ReplicationSourceParams struct {
 	Password  string   `json:"password"`
 	SSL       bool     `json:"ssl"`       // connect to the master over SSL
 	Databases []string `json:"databases"` // filter; empty = every database
+	// VerifyServerCert: the master's certificate must chain to the CA file
+	// SSLCA (a path on this server, normally <datadir>/dbpanel-tls/mysql-ca.crt)
+	// and name Host. It needs SSL and SSLCA.
+	SSLCA            string `json:"ssl_ca,omitempty"`
+	VerifyServerCert bool   `json:"verify_server_cert,omitempty"`
 }
 
 // ReplicationFilterParams are the parameters of mysql.setReplicationFilter.
@@ -298,4 +311,41 @@ type InstallParams struct {
 type InstallResult struct {
 	Version string `json:"version"` // @@version of the installed server
 	Source  string `json:"source"`  // "distro" | "mysql-repo"
+}
+
+// TLSRequestResult is the answer to mysql.tlsRequest: a CSR for the new
+// key the agent keeps in <datadir>/dbpanel-tls/server.key.new. Only the
+// public key counts; the panel sets the subject and the names.
+type TLSRequestResult struct {
+	CSRPEM   string `json:"csr_pem"`
+	Hostname string `json:"hostname"`
+}
+
+// TLSInstallParams are the parameters of mysql.tlsInstall: the server
+// certificate the panel signed for the requested key, its CA, and the name
+// a fresh connection checks the certificate against (the server's address
+// in the panel).
+type TLSInstallParams struct {
+	CertPEM    string `json:"cert_pem"`
+	CAPEM      string `json:"ca_pem"`
+	VerifyHost string `json:"verify_host"`
+}
+
+// TLSInstallResult is the answer to mysql.tlsInstall.
+type TLSInstallResult struct {
+	Serial   string    `json:"serial"` // 32 lowercase hex digits, as the panel's CA prints it
+	NotAfter time.Time `json:"not_after"`
+	Reloaded bool      `json:"reloaded"` // MySQL serves the certificate now (ALTER INSTANCE RELOAD TLS)
+}
+
+// TLSTrustParams are the parameters of mysql.tlsTrust: the CA a replica
+// verifies its source's certificate with.
+type TLSTrustParams struct {
+	CAPEM string `json:"ca_pem"`
+}
+
+// TLSTrustResult is the answer to mysql.tlsTrust: where the CA file is,
+// for SSLCA.
+type TLSTrustResult struct {
+	CAPath string `json:"ca_path"`
 }

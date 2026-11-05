@@ -380,10 +380,10 @@ func TestCreateDumpUserNoReloadOnSupportedSeries(t *testing.T) {
 	}
 }
 
-// TestCreateDumpUserAdminWithoutFlushTables: an admin account holding only
-// what mysql.connect asks for cannot grant FLUSH_TABLES; the dump account
-// then keeps RELOAD and the log names the remedy, after which the account
-// gets FLUSH_TABLES.
+// TestCreateDumpUserAdminWithoutFlushTables: while the admin account cannot
+// grant FLUSH_TABLES (connected before mysql.connect asked for it), the
+// dump account keeps RELOAD and the log names the remedy, after which the
+// account gets FLUSH_TABLES.
 func TestCreateDumpUserAdminWithoutFlushTables(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	root := rootDB(t, inst)

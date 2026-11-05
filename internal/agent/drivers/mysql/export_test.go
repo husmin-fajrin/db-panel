@@ -10,6 +10,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // Internals the external tests (package mysql_test) exercise directly.
@@ -38,13 +39,32 @@ const FlushTablesMinVersion = flushTablesMinVersion
 // Snapshot helpers, testable without a server.
 var (
 	DumpGrantsFor  = dumpGrantsFor
-	DumpArgs       = dumpArgs
-	ProbeArgs      = probeArgs
 	LoadArgs       = loadArgs
 	DumpGTIDMode   = dumpGTIDMode
 	ClientDefaults = clientDefaults
 	FindClientTool = findClientTool
 )
+
+// DumpArgs and ProbeArgs are the dump's arguments without TLS options;
+// SourceDumpArgs and SourceProbeArgs add p's.
+func DumpArgs(defaultsFile string, databases []string, gtidPurged string) []string {
+	return dumpArgs(defaultsFile, databases, gtidPurged, clientTLS{})
+}
+
+func ProbeArgs(defaultsFile string, databases []string) []string {
+	return probeArgs(defaultsFile, databases, clientTLS{})
+}
+
+func SourceDumpArgs(defaultsFile string, p proto.SnapshotParams, gtidPurged string) []string {
+	return dumpArgs(defaultsFile, p.Databases, gtidPurged, sourceTLS(p))
+}
+
+func SourceProbeArgs(defaultsFile string, p proto.SnapshotParams) []string {
+	return probeArgs(defaultsFile, p.Databases, sourceTLS(p))
+}
+
+// SourceTLSOptions are the TLS lines of the master's option file for p.
+func SourceTLSOptions(p proto.SnapshotParams) string { return sourceTLS(p).options() }
 
 // CaptureDumpGTID writes chunks through the dump's counting writer and
 // parses the GTID header from what it kept.

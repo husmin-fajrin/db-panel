@@ -90,7 +90,7 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 			}
 		}
 		d.log("mysql replication configured", "host", p.Host, "port", p.Port, "user", p.User, "ssl", p.SSL,
-			"databases", p.Databases)
+			"verify_server_cert", p.VerifyServerCert, "databases", p.Databases)
 		return rs, nil
 	})
 
@@ -260,6 +260,9 @@ func validateSource(p *proto.ReplicationSourceParams) error {
 	case utf8.RuneCountInString(p.Password) > maxSourcePasswordLen:
 		return bad("password user replikasi paling panjang %d karakter (batas SOURCE_PASSWORD MySQL)", maxSourcePasswordLen)
 	}
+	if err := validateVerify(p.VerifyServerCert, p.SSL, &p.SSLCA); err != nil {
+		return err
+	}
 	return validateFilter(p.Databases)
 }
 
@@ -326,7 +329,11 @@ func filterStatement(dbs []string, quote func(string) string) string {
 // auto-positioning. MySQL takes no placeholder in CHANGE REPLICATION
 // SOURCE TO, so the validated values are literals made by quote (for the
 // session's sql_mode). SOURCE_SSL is always set, so re-pointing a replica
-// from an SSL master to one without SSL does not keep the old setting.
+// from an SSL master to one without SSL does not keep the old setting; for
+// the same reason SOURCE_SSL_CA and SOURCE_SSL_VERIFY_SERVER_CERT are
+// always set: to the CA file and 1 with VerifyServerCert (the master's
+// certificate must chain to that CA and name SOURCE_HOST), cleared and 0
+// without.
 //
 // Over TLS the password travels encrypted and the source's RSA key is not
 // requested (GET_SOURCE_PUBLIC_KEY = 0), so an impostor cannot hand one in;
@@ -341,7 +348,14 @@ func sourceStatement(p proto.ReplicationSourceParams, quote func(string) string)
 		", SOURCE_USER = " + quote(p.User) +
 		", SOURCE_PASSWORD = " + quote(p.Password) +
 		", SOURCE_AUTO_POSITION = 1, GET_SOURCE_PUBLIC_KEY = " + pubKey + ", SOURCE_CONNECT_RETRY = 10, SOURCE_RETRY_COUNT = 86400" +
-		", SOURCE_SSL = " + ssl
+		", SOURCE_SSL = " + ssl + sourceVerifyOptions(p, quote)
+}
+
+func sourceVerifyOptions(p proto.ReplicationSourceParams, quote func(string) string) string {
+	if p.VerifyServerCert {
+		return ", SOURCE_SSL_CA = " + quote(p.SSLCA) + ", SOURCE_SSL_VERIFY_SERVER_CERT = 1"
+	}
+	return ", SOURCE_SSL_CA = '', SOURCE_SSL_VERIFY_SERVER_CERT = 0"
 }
 
 // sessionQuoter returns quotePassword for conn's sql_mode, so the literals

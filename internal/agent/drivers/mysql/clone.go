@@ -64,6 +64,12 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	if _, err := db.ExecContext(ctx, "SET GLOBAL clone_valid_donor_list = "+quoteString(donor)); err != nil {
 		return res, fmt.Errorf("atur clone_valid_donor_list: %w", err)
 	}
+	// clone_ssl_ca is set on every clone, so a CA left by an earlier
+	// verified attempt does not apply to an unverified one. The path is
+	// validated (validateVerify) and absolute.
+	if _, err := db.ExecContext(ctx, "SET GLOBAL clone_ssl_ca = "+quoteString(cloneCA(p))); err != nil {
+		return res, fmt.Errorf("atur clone_ssl_ca: %w", err)
+	}
 
 	// CLONE first drops this server's user schemas, which super_read_only
 	// refuses (1290) even for the admin account: a resync clones into a
@@ -101,7 +107,7 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	password := quotePassword(p.Password, strings.Contains(mode, "NO_BACKSLASH_ESCAPES"))
 	stmt := "CLONE INSTANCE FROM " + quoteString(p.User) + "@" + quoteString(p.Host) + ":" + strconv.Itoa(p.Port) +
 		" IDENTIFIED BY " + password
-	if p.SSL {
+	if p.SSL || p.VerifyIdentity {
 		// The donor offers TLS: never fall back to a plaintext copy.
 		stmt += " REQUIRE SSL"
 	}
@@ -173,6 +179,18 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	}
 	j.Logf("info", "clone completed: %d bytes, gtid_executed %s", res.Bytes, res.GTIDExecuted)
 	return res, nil
+}
+
+// cloneCA is clone_ssl_ca for p: the CA file with VerifyIdentity, else
+// none. MySQL 8.0's CLONE connects with at most SSL_MODE_REQUIRED, which
+// with a CA file checks the donor's certificate chain (VERIFY_CA) but not
+// its name; clone_ssl_cert and clone_ssl_key stay unset, as the donor
+// account authenticates with its password.
+func cloneCA(p proto.SnapshotParams) string {
+	if p.VerifyIdentity {
+		return p.SSLCA
+	}
+	return ""
 }
 
 // waitClone reports the clone's progress until the statement returns, and

@@ -141,6 +141,7 @@ func gatherPreflight(ctx context.Context, h Host, db *sql.DB, p proto.PreflightP
 
 	// An account without enough privileges reads a partial status; the
 	// grants check reports that before any check could trust it.
+	version := f.Status.Version
 	st, statusErr := Status(ctx, db)
 	if statusErr != nil && !isPrivilegeError(statusErr) {
 		return f, statusErr
@@ -157,7 +158,7 @@ func gatherPreflight(ctx context.Context, h Host, db *sql.DB, p proto.PreflightP
 	if err != nil {
 		return f, err
 	}
-	if f.MissingGrants = missingGrants(grants, f.Account, required); len(f.MissingGrants) > 0 {
+	if f.MissingGrants = missingGrants(grants, f.Account, requiredGrants(required, version)); len(f.MissingGrants) > 0 {
 		return f, nil
 	}
 	if statusErr != nil {
