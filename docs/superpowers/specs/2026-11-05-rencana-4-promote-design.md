@@ -198,16 +198,18 @@ itu: alamat IP hasil resolusi `candidate` sama dengan host thread itu
 restart). Replika yang tidak sedang tersambung tidak bisa dijadikan
 kandidat, sehingga panel yang dibobol tidak bisa mengunci master atas
 nama replika yang sudah mati. Monitor juga mencatat tiap host replika
-yang pernah tersambung di `/var/lib/dbpanel/replicas-seen` (tanpa batas
-waktu, dipangkas setelah 1 tahun); catatan ini dipakai `quarantine`.
+yang pernah tersambung di `/var/lib/dbpanel/replicas-seen` (dipangkas
+setelah 1 tahun); catatan ini dipakai `quarantine`.
 Lalu `SET PERSIST super_read_only=ON` (PERSIST, agar restart MySQL
 tidak membuka tulis walau sedetik) dan berkas kunci
 `/etc/dbpanel/promote-lock` (kandidat, tenggat); selama berkas itu ada,
 pin `master` menolak `setReadOnly{off}` (tombol "Buka kunci master"
 yang ada; "Kunci kembali" di 5.7 adalah tombol replika dan tidak
-tersentuh). Membuka kunci berarti `RESET PERSIST super_read_only` lalu
-`SET GLOBAL super_read_only=OFF`, oleh penjaga, `unlockPromote`, atau
-CLI. Agent menjalankan
+tersentuh). Membuka kunci berarti `RESET PERSIST super_read_only; SET
+GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF` (MySQL menyalakan
+`read_only` bersama `super_read_only` tetapi tidak mematikannya), oleh
+penjaga, `unlockPromote`, atau CLI; master kembali persis seperti
+sebelum kunci. Agent menjalankan
 penjaga: pada tenggat (`timeout`, dikirim panel;
 job promote memakai 30 menit, yaitu tenggat kejar 10 menit + tenggat
 terapan relay log 10 menit + cadangan; maksimum 60) agent memeriksa
@@ -217,8 +219,10 @@ server ini, agent mengkarantina dirinya sendiri (seperti
 `mysql.quarantine`); bila `candidate` terjangkau dan masih replika
 (`super_read_only=ON` di sana), agent memberi tenggang 60 detik, memeriksa
 sekali lagi, dan bila masih replika membuka kunci sendiri, menghapus
-berkas kunci, dan melapor (tenggang ini menutup jendela antara
-verifikasi ulang `promote` dan pembukaan tulisnya); bila `candidate`
+berkas kunci, dan melapor; agar tenggang ini benar-benar menutup
+jendela, verifikasi ulang di `promote` juga membaca tenggat kunci dari
+master (hasil `lockForPromote` memuatnya, panel meneruskannya) dan
+menolak melanjutkan bila tenggat kurang dari 2 menit lagi; bila `candidate`
 tidak terjangkau, agent tetap terkunci dan mengulang pemeriksaan tiap
 menit (default aman: membuka kunci saat kandidat mungkin sudah menjadi
 master berarti dua master). `mysql.unlockPromote` membatalkan sebelum
@@ -278,7 +282,11 @@ tulis belum terbuka, promote diulang dari verifikasi awal. Dengan itu
 "Coba lagi" tidak pernah menghasilkan dua master.
 
 **`mysql.quarantine{new master host:port, repl cred}`** di master lama
-(pin `master`, terkunci oleh `lockForPromote` atau tidak). Agent
+(pin `master`, terkunci oleh `lockForPromote` atau tidak; pada pin
+`quarantined` perintah ini idempoten: agent hanya memastikan kunci
+terpasang dan menjawab berhasil, sehingga kiriman ulang dari panel
+setelah penjaga mengkarantina sendiri atau balasan hilang tetap menutup
+langkah job). Agent
 memverifikasi `new master` terjangkau, `super_read_only=OFF`, dan
 `gtid_executed`-nya memuat UUID server ini; bila server ini tidak
 terkunci oleh `lockForPromote`, `new master` juga harus host yang pernah
@@ -1002,8 +1010,11 @@ dibangun, jawabannya sudah dimasukkan ke bagian terkait:
     tersambung; kunci dicatat di berkas dan dipasang lagi saat MySQL
     restart; selama berkas ada, "Buka kunci master" ditolak; kandidat
     yang hilang membuat master tetap terkunci sampai `dbpanel agent
-    unlock-master`; penjaga memberi tenggang 60 detik sebelum membuka;
-    kunci memakai PERSIST agar restart tidak membuka tulis (5.1, 8).
+    unlock-master`; penjaga memberi tenggang 60 detik sebelum membuka
+    dan `promote` menolak melanjutkan bila tenggat kunci < 2 menit;
+    kunci memakai PERSIST agar restart tidak membuka tulis; membuka
+    kunci juga mematikan `read_only`; `quarantine` idempoten pada pin
+    `quarantined` (5.1, 8).
 14. (Pemeriksaan konsistensi) Titik tanpa balik promote adalah membuka
     tulis, yang dilakukan sebelum `RESET REPLICA ALL`, sehingga penjaga
     master hanya bisa mengkarantina sesudahnya; "Coba lagi" melanjutkan
