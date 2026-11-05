@@ -56,22 +56,25 @@ type Replica struct {
 	Databases                []string // empty = all databases
 	State, LastError         string
 	Paused                   bool // replication deliberately stopped by an operator
+	TLSVerified              bool // the link to the master was verified over TLS
 	CreatedAt                time.Time
 }
 
-const replicaColumns = `id, topology_id, server_id, databases_json, state, last_error, paused, created_at`
+const replicaColumns = `id, topology_id, server_id, databases_json, state, last_error, paused, tls_verified, created_at`
 
 func scanReplica(r rowScanner) (Replica, error) {
 	var (
 		rep     Replica
 		dbs     string
 		paused  int
+		tlsOK   int
 		created string
 	)
-	if err := r.Scan(&rep.ID, &rep.TopologyID, &rep.ServerID, &dbs, &rep.State, &rep.LastError, &paused, &created); err != nil {
+	if err := r.Scan(&rep.ID, &rep.TopologyID, &rep.ServerID, &dbs, &rep.State, &rep.LastError, &paused, &tlsOK, &created); err != nil {
 		return Replica{}, err
 	}
 	rep.Paused = paused != 0
+	rep.TLSVerified = tlsOK != 0
 	if err := json.Unmarshal([]byte(dbs), &rep.Databases); err != nil {
 		return Replica{}, fmt.Errorf("parse databases: %w", err)
 	}
