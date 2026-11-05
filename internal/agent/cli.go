@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -41,6 +42,10 @@ const usage = `Penggunaan:
 // tokenEnv carries the pairing token. Unlike argv (/proc/<pid>/cmdline),
 // a process's environment is readable only by its owner and root.
 const tokenEnv = "DBPANEL_TOKEN"
+
+// webPinEnv carries the SPKI pin of the panel's HTTPS certificate from the
+// install script to "agent pair".
+const webPinEnv = "DBPANEL_WEB_PIN"
 
 // Files in the agent directory for MySQL credentials: the key that seals
 // them and the sealed admin account.
@@ -244,14 +249,22 @@ func mainSetSource(args []string, stdout, stderr io.Writer) int {
 
 func mainPair(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("agent pair", stderr)
-	panelURL := fs.String("panel", "", "alamat panel, mis. http://192.168.1.10:8080")
+	panelURL := fs.String("panel", "", "alamat panel, mis. https://192.168.1.10:8080")
 	tokenFlag := fs.String("token", "", "token pemasangan (usang: terlihat di daftar proses; pakai "+tokenEnv+")")
 	tokenStdin := fs.Bool("token-stdin", false, "baca token pemasangan dari baris pertama stdin")
 	caPin := fs.String("ca-sha256", "", "sha256 sertifikat CA panel (64 digit heksadesimal, dari perintah pairing di panel)")
 	skipPin := fs.Bool("insecure-skip-ca-pin", false, "terima CA apa pun dari jawaban pairing (tidak aman)")
 	agentAddr := fs.String("agent-addr", "", "HOST:PORT listener agent di panel (menimpa jawaban pairing)")
+	webPin := fs.String("web-pin", "", "pin kunci sertifikat HTTPS panel (sha256//..., dari perintah pasang; atau "+webPinEnv+")")
 	dir := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *webPin == "" {
+		*webPin = strings.TrimSpace(getenv(webPinEnv))
+	}
+	if *webPin != "" && !validSPKIPin(*webPin) {
+		fmt.Fprintln(stderr, "--web-pin harus berbentuk sha256//<base64 dari 32 byte>")
 		return 2
 	}
 	if *panelURL == "" || fs.NArg() > 0 {
@@ -259,7 +272,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	// The pairing answer travels over plain HTTP; without a pin an on-path
+	// The pairing answer may come over plain HTTP or an unverified TLS link; without a pin an on-path
 	// attacker could hand the agent its own CA and impersonate the panel.
 	switch {
 	case *caPin != "" && !validSHA256Hex(*caPin):
@@ -293,7 +306,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cfg, err := Pair(ctx, *panelURL, token, *dir, nil, PairOptions{CASHA256: *caPin, AgentAddr: *agentAddr})
+	cfg, err := Pair(ctx, *panelURL, token, *dir, nil, PairOptions{CASHA256: *caPin, AgentAddr: *agentAddr, WebPin: *webPin})
 	if err != nil {
 		fmt.Fprintf(stderr, "pemasangan gagal: %v\n", err)
 		return 1
@@ -301,6 +314,17 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Agent terpasang sebagai server #%d (panel %s). Jalankan: dbpanel agent --dir %s\n",
 		cfg.ServerID, cfg.PanelAddr, *dir)
 	return 0
+}
+
+// validSPKIPin reports whether s is an SPKI pin in curl --pinnedpubkey form:
+// "sha256//" and the standard base64 of a sha256.
+func validSPKIPin(s string) bool {
+	b64, ok := strings.CutPrefix(s, "sha256//")
+	if !ok {
+		return false
+	}
+	b, err := base64.StdEncoding.DecodeString(b64)
+	return err == nil && len(b) == 32
 }
 
 // validSHA256Hex reports whether s is a sha256 in hex (either case).

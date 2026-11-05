@@ -6,7 +6,11 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -29,10 +33,17 @@ const (
 	pairResponseSize = 1 << 20
 )
 
-// PairOptions pin what the pairing answer, which travels over plain HTTP,
-// may not choose by itself. Both come from the install script, whose hash
-// the operator checked against the panel UI.
+// PairOptions pin the panel and what its pairing answer may not choose by
+// itself. All come from the install script, whose hash the operator checked
+// against the panel UI.
 type PairOptions struct {
+	// WebPin is the SPKI pin ("sha256//<base64>", curl --pinnedpubkey form)
+	// of the panel's HTTPS certificate. When set, the panel URL must be
+	// https and the panel is trusted by its key alone: its certificate
+	// chain is not checked (the panel's own web CA is unknown to this
+	// machine), and a key other than the pinned one ends the handshake
+	// before the request, with the token, is sent.
+	WebPin string
 	// CASHA256 is the sha256 (hex) of the panel CA certificate's DER. When
 	// set, a pairing answer carrying any other CA is refused before
 	// anything is written.
@@ -45,6 +56,11 @@ type PairOptions struct {
 // errRedirect is Pair's error when the panel answers the pairing request
 // with a redirect.
 var errRedirect = errors.New("panel mengalihkan permintaan pairing; ditolak")
+
+// ErrWebPinMismatch is Pair's error when the panel's HTTPS certificate key
+// is not the pinned one.
+var ErrWebPinMismatch = errors.New("kunci sertifikat panel tidak cocok dengan pin dari perintah pasang; " +
+	"kemungkinan ada yang menyusup di jaringan")
 
 // ErrCAMismatch is Pair's error when the panel's CA is not the pinned one.
 var ErrCAMismatch = errors.New("CA panel tidak cocok dengan yang diharapkan")
@@ -63,6 +79,13 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 	noRedirect := *client
 	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirect }
 	client = &noRedirect
+	https := strings.HasPrefix(strings.ToLower(panelURL), "https://")
+	if opts.WebPin != "" {
+		if !https {
+			return config.Config{}, errors.New("pin sertifikat panel hanya berlaku untuk alamat panel https://")
+		}
+		client.Transport = pinnedTransport(opts.WebPin)
+	}
 	hostname, err := os.Hostname()
 	if err != nil {
 		return config.Config{}, fmt.Errorf("baca hostname: %w", err)
@@ -91,6 +114,13 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 	resp, err := client.Do(req)
 	if errors.Is(err, errRedirect) {
 		return config.Config{}, errRedirect
+	}
+	if errors.Is(err, ErrWebPinMismatch) {
+		return config.Config{}, ErrWebPinMismatch
+	}
+	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok && https {
+		return config.Config{}, errors.New("sertifikat panel tidak dikenal mesin ini; jalankan pairing dengan " +
+			"--web-pin (atau " + webPinEnv + ") dari perintah pasang di panel")
 	}
 	if err != nil {
 		return config.Config{}, fmt.Errorf("hubungi panel: %w", err)
@@ -169,4 +199,28 @@ func Pair(ctx context.Context, panelURL, token, dir string, client *http.Client,
 		return config.Config{}, err
 	}
 	return cfg, nil
+}
+
+// pinnedTransport trusts an HTTPS server by the SPKI pin of its leaf
+// certificate only. InsecureSkipVerify turns off the chain and host name
+// checks (the panel's web CA is not installed here); VerifyPeerCertificate
+// then runs inside the handshake, so a mismatch fails it before any request
+// byte is written.
+func pinnedTransport(pin string) *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return ErrWebPinMismatch
+			}
+			got, err := pki.SPKIPin(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rawCerts[0]}))
+			if err != nil || subtle.ConstantTimeCompare([]byte(got), []byte(pin)) != 1 {
+				return ErrWebPinMismatch
+			}
+			return nil
+		},
+	}
+	return tr
 }

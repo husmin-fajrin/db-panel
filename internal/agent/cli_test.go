@@ -294,3 +294,48 @@ func TestCLISetRoleAndSetSource(t *testing.T) {
 		}
 	}
 }
+
+// TestCLIPairWebPin: the HTTPS pin comes from DBPANEL_WEB_PIN (as the
+// install script passes it) or --web-pin; a malformed one is a usage error
+// and a wrong one stops before the token is sent.
+func TestCLIPairWebPin(t *testing.T) {
+	ch := make(chan string, 4)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req proto.PairRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		ch <- req.Token
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(ts.Close)
+	pin := pinOf(t, ts)
+	oldEnv := getenv
+	t.Cleanup(func() { getenv = oldEnv })
+	run := func(env map[string]string, args ...string) (int, string, bool) {
+		getenv = func(k string) string { return env[k] }
+		var out, errb bytes.Buffer
+		code := Main(append([]string{"pair", "--panel", ts.URL, "--ca-sha256", testCAPin, "--dir", t.TempDir()}, args...), &out, &errb)
+		select {
+		case <-ch:
+			return code, errb.String(), true
+		default:
+			return code, errb.String(), false
+		}
+	}
+	tok := map[string]string{"DBPANEL_TOKEN": "ENVTK-AAAAA-BBBBB"}
+	withPin := map[string]string{"DBPANEL_TOKEN": "ENVTK-AAAAA-BBBBB", "DBPANEL_WEB_PIN": pin}
+	if code, stderr, sent := run(withPin); code != 1 || !sent || !strings.Contains(stderr, "token ditolak oleh panel") {
+		t.Fatalf("pin from env: code %d sent %v stderr %q", code, sent, stderr)
+	}
+	if code, stderr, sent := run(tok, "--web-pin", pin); code != 1 || !sent {
+		t.Fatalf("pin from flag: code %d sent %v stderr %q", code, sent, stderr)
+	}
+	for _, bad := range []string{"abc", "sha256//pendek", strings.Repeat("A", 44)} {
+		if code, stderr, sent := run(tok, "--web-pin", bad); code != 2 || sent {
+			t.Errorf("--web-pin %q: code %d sent %v stderr %q", bad, code, sent, stderr)
+		}
+	}
+	wrong := map[string]string{"DBPANEL_TOKEN": "ENVTK-AAAAA-BBBBB", "DBPANEL_WEB_PIN": "sha256//" + strings.Repeat("A", 43) + "="}
+	if code, stderr, sent := run(wrong); code != 1 || sent || !strings.Contains(stderr, "tidak cocok dengan pin") {
+		t.Fatalf("wrong pin: code %d sent %v stderr %q", code, sent, stderr)
+	}
+}
