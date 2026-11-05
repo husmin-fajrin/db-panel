@@ -28,13 +28,17 @@ const (
 	KindBinlogDeadline      = "binlog_deadline"
 	KindJobFailed           = "job_failed"
 	KindTLSExpiring         = "tls_expiring" // a MySQL certificate from the panel expires soon
+	// KindWebTLSExpiring: the panel's own HTTPS certificate in use expires
+	// soon (spec 5.14, "sertifikat MySQL/web"); a kind of its own, on the
+	// panel's host, since a host has one open alert per kind.
+	KindWebTLSExpiring = "web_tls_expiring"
 )
 
 // AllKinds returns every alert kind, in the order of spec 5.3.
 func AllKinds() []string {
 	return []string{KindReplicaStopped, KindReplicaDisconnected, KindReplicaLagging, KindReplicaUnlocked,
 		KindMasterLocked, KindMasterDown, KindMySQLUnreachable, KindAgentOffline, KindDiskWarn, KindDiskCrit,
-		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed, KindTLSExpiring}
+		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed, KindTLSExpiring, KindWebTLSExpiring}
 }
 
 // Fixed delays and hysteresis of the rules (plan 3, Global Constraints);
@@ -578,12 +582,16 @@ func (m *Monitor) checkTLSExpiry(now time.Time) []alertUpdate {
 		return nil
 	}
 	isOpen := map[int64]store.Alert{}
+	var webOpen *store.Alert
 	for _, a := range open {
-		if a.Kind == KindTLSExpiring {
+		switch a.Kind {
+		case KindTLSExpiring:
 			isOpen[a.ServerID] = a
+		case KindWebTLSExpiring:
+			webOpen = &a
 		}
 	}
-	var ups []alertUpdate
+	ups := m.checkWebCertExpiry(now, webOpen)
 	soon := map[int64]bool{}
 	for _, rec := range expiring {
 		srv, err := m.st.GetServer(rec.ServerID)
@@ -622,6 +630,57 @@ func (m *Monitor) checkTLSExpiry(now time.Time) []alertUpdate {
 		ups = append(ups, alertUpdate{a.ID, KindTLSExpiring, serverID, false})
 	}
 	return ups
+}
+
+// webCertMessagePrefix starts the message of web_tls_expiring.
+const webCertMessagePrefix = "Sertifikat keamanan panel"
+
+// checkWebCertExpiry opens web_tls_expiring for the panel's HTTPS certificate
+// in use when it expires within 14 days (in practice an uploaded one; the
+// panel renews its own 30 days before), keeps its day count, and closes it
+// once the certificate in use is good for longer. open is its open alert.
+func (m *Monitor) checkWebCertExpiry(now time.Time, open *store.Alert) []alertUpdate {
+	if m.webCert == nil {
+		return nil
+	}
+	serverID, notAfter, ok := m.webCert()
+	soon := ok && serverID != 0 && notAfter.Before(now.Add(tlsExpiringWithin))
+	switch {
+	case soon && open != nil:
+		if msg := webCertExpiringMessage(notAfter.Sub(now)); open.Message != msg {
+			if err := m.st.SetAlertMessage(open.ID, msg); err != nil {
+				m.log.Warn("update alert message", "server_id", open.ServerID, "kind", KindWebTLSExpiring, "err", err)
+			}
+		}
+	case soon:
+		id, err := m.st.OpenAlert(store.Alert{Kind: KindWebTLSExpiring, ServerID: serverID, OpenedAt: now,
+			Message: webCertExpiringMessage(notAfter.Sub(now))})
+		if err != nil {
+			m.log.Warn("open alert", "server_id", serverID, "kind", KindWebTLSExpiring, "err", err)
+			return nil
+		}
+		return []alertUpdate{{id, KindWebTLSExpiring, serverID, true}}
+	case open != nil && ok:
+		if err := m.st.CloseAlert(open.ID, now); err != nil {
+			m.log.Warn("close alert", "server_id", open.ServerID, "kind", KindWebTLSExpiring, "err", err)
+			return nil
+		}
+		return []alertUpdate{{open.ID, KindWebTLSExpiring, open.ServerID, false}}
+	}
+	return nil
+}
+
+// webCertExpiringMessage words the panel's HTTPS certificate expiring in
+// left.
+func webCertExpiringMessage(left time.Duration) string {
+	if left <= 0 {
+		return webCertMessagePrefix + " sudah kedaluwarsa."
+	}
+	days := int(left / (24 * time.Hour))
+	if days == 0 {
+		return webCertMessagePrefix + " kedaluwarsa kurang dari sehari lagi."
+	}
+	return fmt.Sprintf("%s kedaluwarsa dalam %d hari.", webCertMessagePrefix, days)
 }
 
 // tlsExpiringMessage words a certificate that expires in left.

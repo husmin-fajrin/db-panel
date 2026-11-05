@@ -31,6 +31,7 @@ var alertKindLabels = map[string]string{
 	monitor.KindBinlogDeadline:      "Batas umur binlog master",
 	monitor.KindJobFailed:           "Pekerjaan gagal",
 	monitor.KindTLSExpiring:         "Sertifikat MySQL hampir kedaluwarsa",
+	monitor.KindWebTLSExpiring:      "Sertifikat HTTPS panel hampir kedaluwarsa",
 }
 
 func alertKindLabel(kind string) string {

@@ -252,6 +252,77 @@ func TestHandlerRefusesMissingOrForeignToken(t *testing.T) {
 		wantBody(t, rec, msgConfirmInvalid, p.page)
 	}
 	wantCalls(t, f, "resync 2  force=false")
+
+	// Every refusal is in the audit log (SEC-60), never the token.
+	entries, err := e.st.ListAudit(0, time.Time{}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := 0
+	for _, en := range entries {
+		if en.Action != "confirm_rejected" {
+			continue
+		}
+		rejected++
+		if en.Outcome != "token_invalid" || en.Username != "admin" || !strings.Contains(en.DetailJSON, `"action":`) {
+			t.Errorf("confirm_rejected = %+v", en)
+		}
+		if strings.Contains(en.DetailJSON, used) || strings.Contains(en.DetailJSON, otherTok) {
+			t.Errorf("confirm_rejected holds a token: %+v", en)
+		}
+	}
+	if want := len(cases) + 4; rejected != want {
+		t.Errorf("confirm_rejected entries = %d, want %d", rejected, want)
+	}
+}
+
+// TestConfirmLimiterCountsWrongPasswords: only wrong passwords count, a
+// right one resets the count, and the budget is shared with the login's
+// per-username limiter both ways (SEC-60).
+func TestConfirmLimiterCountsWrongPasswords(t *testing.T) {
+	e := newEnv(t, func(d *web.Deps) { d.ConfirmLimiter = nil })
+	c := e.cookie()
+	for i := 0; i < 8; i++ {
+		if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusOK {
+			t.Fatalf("right password %d: status %d", i, code)
+		}
+	}
+	for round := 0; round < 2; round++ {
+		for i := 0; i < 4; i++ {
+			if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, "salah", c); code != http.StatusUnauthorized {
+				t.Fatalf("wrong password: status %d", code)
+			}
+		}
+		if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusOK {
+			t.Fatalf("round %d: right password after 4 wrong: status %d, want 200 (count reset)", round, code)
+		}
+	}
+
+	// Wrong confirmations hold off the login of that user.
+	e = newEnv(t, func(d *web.Deps) {
+		d.UserLimiter = auth.NewRateLimiter(3, 15*time.Minute, time.Now)
+	})
+	c = e.cookie()
+	for i := 0; i < 3; i++ {
+		e.postConfirm(web.ActDeleteServer, "server", 1, "salah", c)
+	}
+	if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusTooManyRequests {
+		t.Fatalf("confirm after the shared budget is used: status %d, want 429", code)
+	}
+	rec := e.do("POST", "/login", url.Values{"username": {"admin"}, "password": {testPassword}}, nil)
+	wantCode(t, rec, http.StatusTooManyRequests)
+
+	// Wrong logins hold off confirmations.
+	e = newEnv(t, func(d *web.Deps) {
+		d.UserLimiter = auth.NewRateLimiter(3, 15*time.Minute, time.Now)
+	})
+	c = e.cookie()
+	for i := 0; i < 3; i++ {
+		e.do("POST", "/login", url.Values{"username": {"admin"}, "password": {"salah"}}, nil)
+	}
+	if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusTooManyRequests {
+		t.Fatalf("confirm after 3 wrong logins: status %d, want 429", code)
+	}
 }
 
 func TestUnlockMasterNeedsToken(t *testing.T) {

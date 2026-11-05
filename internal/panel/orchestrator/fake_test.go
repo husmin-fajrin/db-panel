@@ -70,6 +70,7 @@ type fakeAgent struct {
 	mu       sync.Mutex
 	calls    []call
 	script   map[string]handler
+	unknown  map[string]bool // commands answered as an older agent does
 	attached bool
 	started  []string // agent job ids, oldest first
 }
@@ -106,8 +107,38 @@ func newFakeAgent(t *testing.T, e *env, id int64, name string) *fakeAgent {
 		json.Unmarshal(params, &p)
 		return map[string]bool{"canceled": fa.jobs.Cancel(p.JobID)}, nil
 	})
-	fa.conn = hub.NewLocalConn(fa.reg, func(ev proto.Event) { e.hub.OnEvent(id, ev) })
+	fa.conn = fakeConn{Conn: hub.NewLocalConn(fa.reg, func(ev proto.Event) { e.hub.OnEvent(id, ev) }), fa: fa}
 	return fa
+}
+
+// fakeConn answers the commands of fa.unknown with unknown_command, as an
+// agent from before they existed does.
+type fakeConn struct {
+	hub.Conn
+	fa *fakeAgent
+}
+
+func (c fakeConn) Call(ctx context.Context, cmd string, params, result any) error {
+	c.fa.mu.Lock()
+	unknown := c.fa.unknown[cmd]
+	c.fa.mu.Unlock()
+	if unknown {
+		c.fa.record(cmd, nil)
+		return &proto.Error{Code: proto.CodeUnknownCommand, Message: "perintah tidak dikenal: " + cmd}
+	}
+	return c.Conn.Call(ctx, cmd, params, result)
+}
+
+// oldAgent makes fa an agent that does not know cmds.
+func (fa *fakeAgent) oldAgent(cmds ...string) {
+	fa.mu.Lock()
+	defer fa.mu.Unlock()
+	if fa.unknown == nil {
+		fa.unknown = map[string]bool{}
+	}
+	for _, c := range cmds {
+		fa.unknown[c] = true
+	}
 }
 
 func (fa *fakeAgent) record(cmd string, params json.RawMessage) {
@@ -250,6 +281,8 @@ type fakeAlerts struct {
 	ended  []string // "server job"
 	// changed holds the servers of ReplicaChanged calls, in order.
 	changed []int64
+	// upgrade holds the servers of AgentNeedsUpgrade calls.
+	upgrade []int64
 }
 
 func (a *fakeAlerts) JobFailed(serverID int64, jobID, kind, step, errText string) {
@@ -262,6 +295,18 @@ func (a *fakeAlerts) JobEnded(serverID int64, jobID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ended = append(a.ended, fmt.Sprintf("%d %s", serverID, jobID))
+}
+
+func (a *fakeAlerts) AgentNeedsUpgrade(serverID int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.upgrade = append(a.upgrade, serverID)
+}
+
+func (a *fakeAlerts) needsUpgrade() []int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.upgrade)
 }
 
 func (a *fakeAlerts) ReplicaChanged(serverID int64) {

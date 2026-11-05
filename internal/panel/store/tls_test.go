@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -13,7 +14,8 @@ func TestServerTLSRoundTripAndExpiring(t *testing.T) {
 		t.Fatalf("before set: %v, want ErrNotFound", err)
 	}
 	inst := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	ta := ServerTLS{ServerID: a.ID, CertSerial: "01", NotAfter: inst.Add(24 * time.Hour), InstalledAt: inst}
+	ta := ServerTLS{ServerID: a.ID, CertSerial: "01", NotAfter: inst.Add(24 * time.Hour), InstalledAt: inst,
+		Hosts: []string{"10.0.0.1", "db.example.test"}}
 	tb := ServerTLS{ServerID: b.ID, CertSerial: "02", NotAfter: inst.Add(90 * 24 * time.Hour), InstalledAt: inst}
 	for _, x := range []ServerTLS{ta, tb} {
 		if err := s.SetServerTLS(x); err != nil {
@@ -21,12 +23,15 @@ func TestServerTLSRoundTripAndExpiring(t *testing.T) {
 		}
 	}
 	got, err := s.GetServerTLS(a.ID)
-	if err != nil || got != ta {
+	if err != nil || !reflect.DeepEqual(got, ta) {
 		t.Fatalf("get = %+v, %v; want %+v", got, err, ta)
 	}
 	ta.CertSerial = "03"
 	if err := s.SetServerTLS(ta); err != nil {
 		t.Fatal(err)
+	}
+	if got, _ := s.GetServerTLS(b.ID); got.Hosts != nil {
+		t.Fatalf("hosts of a record without them = %q, want nil", got.Hosts)
 	}
 	if got, _ := s.GetServerTLS(a.ID); got.CertSerial != "03" {
 		t.Fatalf("upsert serial = %q, want 03", got.CertSerial)

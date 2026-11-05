@@ -206,6 +206,11 @@ func New(o Options) (*Panel, error) {
 		Now:             func() time.Time { return p.now() },
 		OnAlertsChanged: p.Notifier.Wake,
 		SendWeekly:      p.sendWeekly,
+		// The panel's HTTPS certificate in use expiring opens tls_expiring
+		// on the panel's own host (spec 5.14).
+		WebCert: func() (int64, time.Time, bool) {
+			return p.localID, p.certs.active().cert.Leaf.NotAfter, true
+		},
 	})
 	p.Orchestrator = orchestrator.New(orchestrator.Deps{
 		Store:   st,

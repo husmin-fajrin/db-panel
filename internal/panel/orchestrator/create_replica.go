@@ -251,6 +251,11 @@ func (jr *jobRun) replicaCheckMaster(ctx context.Context, _ bool) (outcome, erro
 	if jr.st.TLSVerify, err = jr.r.masterHasCert(jr.master()); err != nil {
 		return outcome{}, err
 	}
+	if jr.st.TLSVerify {
+		if err := jr.checkMasterCertHost(topo.SourceHost); err != nil {
+			return outcome{}, err
+		}
+	}
 	lctn := st.LowerCaseTableNames
 	jr.st.MasterLCTN = &lctn
 	jr.save()
@@ -720,7 +725,14 @@ func (jr *jobRun) replAccount() (store.Topology, string, error) {
 // admin account: the step then waits for the user to reconnect it, like
 // replicaConnect.
 func (jr *jobRun) replicaCert(ctx context.Context, approved bool) (outcome, error) {
-	out, err := jr.installCert(jr.target())(ctx, approved)
+	install := jr.installCert(jr.target())
+	if !jr.st.TLSVerify {
+		// The master has no certificate either: the replica may go on
+		// without one (an agent too old for it is skipped, see
+		// installCertOrSkip). With one, trustCA still needs the agent.
+		install = jr.installCertOrSkip(jr.target(), install)
+	}
+	out, err := install(ctx, approved)
 	if err != nil && loginRefused(err) {
 		jr.logf("warn", "Login ke MySQL replika ditolak: %v", err)
 		jr.st.WaitReason = WaitReconnect

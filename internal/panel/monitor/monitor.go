@@ -43,6 +43,10 @@ type Deps struct {
 	// SendWeekly delivers the weekly summary text (spec 5.3); nil disables
 	// the weekly summary.
 	SendWeekly func(ctx context.Context, text string) error
+	// WebCert reports the panel's HTTPS certificate in use: the server its
+	// tls_expiring alert belongs to (the panel's own host) and its expiry;
+	// ok false skips the check. nil means none.
+	WebCert func() (serverID int64, notAfter time.Time, ok bool)
 }
 
 // View is what the panel knows of one server's health.
@@ -89,6 +93,7 @@ type Monitor struct {
 
 	onAlertsChanged func() // set once by New
 	sendWeekly      func(ctx context.Context, text string) error
+	webCert         func() (int64, time.Time, bool)
 }
 
 // New returns a Monitor holding the health rows the store kept from the
@@ -113,6 +118,7 @@ func New(d Deps) *Monitor {
 		servers: make(map[int64]*serverState), lastCheck: make(map[int64]time.Time),
 		onAlertsChanged: d.OnAlertsChanged,
 		sendWeekly:      d.SendWeekly,
+		webCert:         d.WebCert,
 	}
 	set, err := LoadSettings(d.Store)
 	if err != nil {
@@ -409,6 +415,10 @@ func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	m.emit(ups)
 	m.emitAlerts(alerts)
 }
+
+// AgentNeedsUpgrade flags the agent of id as needing an update: a job found
+// it does not know a command this panel sends (the orchestrator's Alerts).
+func (m *Monitor) AgentNeedsUpgrade(id int64) { m.markNeedsUpgrade(id) }
 
 // markNeedsUpgrade flags the agent of id as too old for monitoring until a
 // report from it arrives.

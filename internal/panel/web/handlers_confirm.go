@@ -27,14 +27,23 @@ const (
 	ActPrepareMasterAgain = "prepare_master_again"
 	ActMySQLTLS           = "mysql_tls"
 	ActTightenTLS         = "tighten_tls"
+	// The panel's HTTPS certificate (target kind settings, id 0): a session
+	// alone must not swap the key the panel serves or widen its web CA.
+	ActCertUpload = "cert_upload"
+	ActCertRevert = "cert_revert"
+	ActCertNames  = "cert_names"
 )
 
 // confirmActions are the actions POST /confirm issues tokens for.
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,
-	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS}
+	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActCertUpload, ActCertRevert, ActCertNames}
+
+// settingsActions are the actions bound to the settings (target id 0)
+// rather than to a server.
+var settingsActions = []string{ActCertUpload, ActCertRevert, ActCertNames}
 
 // confirmKinds are the target kinds a token can be bound to.
-var confirmKinds = []string{auditServer, auditMaster, auditReplica}
+var confirmKinds = []string{auditServer, auditMaster, auditReplica, auditSettings}
 
 const (
 	// confirmTTL is how long a token can be used.
@@ -55,6 +64,9 @@ const (
 	// outcomeRateLimited is the audit outcome of a confirmation refused by
 	// the limiter.
 	outcomeRateLimited = "rate_limited"
+	// outcomeConfirmRejected is the audit outcome of a destructive post
+	// whose token was missing, wrong, used or expired.
+	outcomeConfirmRejected = "token_invalid"
 )
 
 // confirmHash is the stored form of a token: its SHA-256 in hex.
@@ -68,16 +80,24 @@ func confirmHash(token string) string {
 // unknown action or target, 401 for a wrong password, 429 when the
 // user's attempts are used up. The password and the token are never
 // audited or logged.
+//
+// Only wrong passwords count against the user (ConfirmLimiter, reset by a
+// right one), and they share the login's per-username budget
+// (UserLimiter): a stolen session cannot guess the password here faster
+// than at the login page, and failures here also hold off logins.
 func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	username := auth.UsernameFrom(r.Context())
 	action, kind := r.PostFormValue("action"), r.PostFormValue("target_kind")
 	id, err := strconv.ParseInt(r.PostFormValue("target_id"), 10, 64)
-	if err != nil || id <= 0 || !slices.Contains(confirmActions, action) || !slices.Contains(confirmKinds, kind) {
+	settings := slices.Contains(settingsActions, action)
+	if err != nil || !slices.Contains(confirmActions, action) || !slices.Contains(confirmKinds, kind) ||
+		settings != (kind == auditSettings) || (settings && id != 0) || (!settings && id <= 0) {
 		writeJSONError(w, http.StatusBadRequest, msgConfirmBadInput)
 		return
 	}
 	detail := map[string]any{"action": action, "target_kind": kind, "target_id": id}
-	if !a.ConfirmLimiter.Allow(username) {
+	userKey := usernameKey(username)
+	if a.ConfirmLimiter.Blocked(username) || a.UserLimiter.Blocked(userKey) {
 		a.audit(r, "confirm_failed", kind, id, detail, outcomeRateLimited)
 		a.Logger.Warn("confirmation rate limited", "username", username)
 		writeJSONError(w, http.StatusTooManyRequests, msgConfirmBlocked)
@@ -89,11 +109,15 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil || !a.CheckPassword(user.PasswordHash, r.PostFormValue("password")) {
+		a.ConfirmLimiter.Fail(username)
+		a.UserLimiter.Fail(userKey)
 		a.audit(r, "confirm_failed", kind, id, detail, msgConfirmPassword)
 		a.Logger.Info("confirmation refused: wrong password", "username", username, "action", action)
 		writeJSONError(w, http.StatusUnauthorized, msgConfirmPassword)
 		return
 	}
+	a.ConfirmLimiter.Reset(username)
+	a.UserLimiter.Reset(userKey)
 	raw := make([]byte, confirmTokenBytes)
 	rand.Read(raw) // never fails (crypto/rand)
 	token := base64.RawURLEncoding.EncodeToString(raw)
@@ -138,6 +162,8 @@ func (a *app) requireConfirm(w http.ResponseWriter, r *http.Request, action, tar
 	}
 	a.Logger.Warn("confirmation refused", "action", action, "target_kind", targetKind, "target_id", targetID,
 		"by", auth.UsernameFrom(r.Context()))
+	a.audit(r, "confirm_rejected", targetKind, targetID,
+		map[string]any{"action": action, "target_kind": targetKind, "target_id": targetID}, outcomeConfirmRejected)
 	a.confirmRefused(w, r, action, targetKind, targetID)
 	return false
 }
@@ -145,6 +171,10 @@ func (a *app) requireConfirm(w http.ResponseWriter, r *http.Request, action, tar
 // confirmRefused shows msgConfirmInvalid with 403 on the page the
 // action's button is on.
 func (a *app) confirmRefused(w http.ResponseWriter, r *http.Request, action, targetKind string, targetID int64) {
+	if targetKind == auditSettings {
+		a.renderStoredSettings(w, r, http.StatusForbidden, msgConfirmInvalid)
+		return
+	}
 	srv, err := a.Store.GetServer(targetID)
 	if err != nil {
 		http.Error(w, msgConfirmInvalid, http.StatusForbidden)

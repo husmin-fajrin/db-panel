@@ -452,3 +452,213 @@ func TestTightenRepointMarksReplicaPaused(t *testing.T) {
 		t.Fatal("replica left paused after a failed redirect")
 	}
 }
+
+const msgOldAgent = "versi lama dan belum mengenal sertifikat MySQL. Klik Pasang ulang agent di halaman server itu, " +
+	"jalankan perintahnya, lalu Ulangi."
+
+// TestOldAgentTLS: an agent from before the MySQL certificates answers
+// unknown_command (I4). Siapkan master and a replica's own certificate
+// (its master has none) skip the step with a warning; the mysql_tls job,
+// and a replica whose master has a certificate (it must verify it), fail
+// with the message saying what to do. Each marks the agent as needing an
+// update.
+func TestOldAgentTLS(t *testing.T) {
+	t.Run("prepare master skips", func(t *testing.T) {
+		e := newEnv(t)
+		fa := e.connectedMaster("db-master")
+		scriptPrepare(fa)
+		fa.oldAgent("mysql.tlsRequest", "mysql.tlsInstall", "mysql.tlsTrust")
+		id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, steps := e.waitJob(id, store.JobSucceeded)
+		if steps[2].Status != store.StepSkipped {
+			t.Fatalf("certificate step = %+v, want skipped", steps[2])
+		}
+		if log := e.jobLog(id); !strings.Contains(log, "Agent di db-master "+msgOldAgent) {
+			t.Fatalf("job log:\n%s", log)
+		}
+		if _, err := e.st.GetServerTLS(fa.id); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("server_tls: %v", err)
+		}
+		if got := e.alerts.needsUpgrade(); !slices.Equal(got, []int64{fa.id}) {
+			t.Fatalf("AgentNeedsUpgrade = %v", got)
+		}
+	})
+	t.Run("mysql_tls fails clearly", func(t *testing.T) {
+		e := newEnv(t)
+		m, _ := e.readyMaster("db-master")
+		m.oldAgent("mysql.tlsRequest")
+		id, err := e.r.StartMySQLTLS(context.Background(), m.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, _ := e.waitJob(id, store.JobFailed)
+		if j.Error != "Agent di db-master "+msgOldAgent {
+			t.Fatalf("job error = %q", j.Error)
+		}
+	})
+	for _, verified := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replica, master certificate %v", verified), func(t *testing.T) {
+			e := newEnv(t)
+			m, _ := e.readyMaster("db-master")
+			r := e.replicaAgent("replica1", "dump")
+			r.oldAgent("mysql.tlsRequest", "mysql.tlsInstall", "mysql.tlsTrust")
+			if verified {
+				if err := e.st.SetServerTLS(store.ServerTLS{ServerID: m.id, CertSerial: "01",
+					NotAfter: time.Now().AddDate(2, 0, 0), InstalledAt: time.Now()}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+				MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}, ConfirmWipe: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !verified {
+				_, steps := e.waitJob(id, store.JobSucceeded)
+				if steps[5].Status != store.StepSkipped {
+					t.Fatalf("certificate step = %+v, want skipped", steps[5])
+				}
+				if rep := e.replica(r.id); rep.TLSVerified {
+					t.Fatal("tls_verified without certificates")
+				}
+				return
+			}
+			j, _ := e.waitJob(id, store.JobFailed)
+			if j.Error != "Agent di replica1 "+msgOldAgent {
+				t.Fatalf("job error = %q", j.Error)
+			}
+			if got := e.alerts.needsUpgrade(); !slices.Contains(got, r.id) {
+				t.Fatalf("AgentNeedsUpgrade = %v", got)
+			}
+		})
+	}
+}
+
+// TestTightenStartFailureReverts: START REPLICA fails on the verified
+// source (I5); the replica is pointed at its master again without
+// verification, started and unmarked, and the step fails saying so.
+func TestTightenStartFailureReverts(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	r := e.followingReplica(topo, "a")
+	starts := 0
+	r.on("mysql.startReplica", func(json.RawMessage) (any, error) {
+		starts++
+		if starts == 1 {
+			return nil, errors.New("replika gagal tersambung: Last_IO_Errno 2026 (SSL certificate validation failure)")
+		}
+		return nil, nil
+	})
+	id, err := e.r.StartTightenTLS(context.Background(), m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if !strings.Contains(j.Error, "verifikasi gagal: replika gagal tersambung") ||
+		!strings.HasSuffix(j.Error, "; replikasi dikembalikan tanpa verifikasi") {
+		t.Fatalf("job error = %q", j.Error)
+	}
+	wantCmds(t, "replica", r.cmds(0), []string{"mysql.tlsRequest", "mysql.tlsInstall", "mysql.stopReplica",
+		"mysql.tlsTrust", "mysql.configureReplication", "mysql.startReplica", "mysql.stopReplica",
+		"mysql.configureReplication", "mysql.startReplica"})
+	srcs := r.allParams("mysql.configureReplication")
+	var last proto.ReplicationSourceParams
+	if err := json.Unmarshal([]byte(srcs[len(srcs)-1]), &last); err != nil {
+		t.Fatal(err)
+	}
+	if last.VerifyServerCert || last.SSLCA != "" || !last.SSL || last.Host != "10.0.0.1" || !slices.Equal(last.Databases, []string{"a"}) {
+		t.Fatalf("reverted source = %+v", last)
+	}
+	if rep := e.replica(r.id); rep.Paused || rep.TLSVerified {
+		t.Fatalf("replica after the revert = %+v", rep)
+	}
+}
+
+// TestResumeTightenRestartsReplica: a panel restart between STOP and START
+// of a redirect (I6). With the agent online replication is started again;
+// offline, the paused mark is cleared so replica_stopped can fire.
+func TestResumeTightenRestartsReplica(t *testing.T) {
+	for _, online := range []bool{true, false} {
+		t.Run(fmt.Sprintf("online %v", online), func(t *testing.T) {
+			e := newEnv(t)
+			m, topo := e.readyMaster("db-master")
+			r := e.followingReplica(topo, "a")
+			r.reply("mysql.startReplica", nil)
+			if !online {
+				r.detach()
+			}
+			const id = "dddddddddddddddddddddddddddddddd"
+			b, _ := json.Marshal(jobState{TightenReplicas: []int64{r.id}, TightenPaused: r.id})
+			if err := e.st.CreateJob(store.Job{ID: id, Kind: KindTightenTLS, ServerID: m.id, TopologyID: topo.ID,
+				ParamsJSON: string(b)}, tightenStepNames([]string{"replica1"})); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.st.UpdateJob(id, store.JobRunning, 2, "", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.st.SetReplicaPaused(r.id, true); err != nil {
+				t.Fatal(err)
+			}
+			mark := r.mark()
+			e.r.Resume(context.Background())
+			e.waitJob(id, store.JobFailed)
+			if rep := e.replica(r.id); rep.Paused {
+				t.Fatal("replica still marked paused after the restart")
+			}
+			want := []string(nil)
+			if online {
+				want = []string{"mysql.startReplica"}
+			}
+			wantCmds(t, "replica", r.cmds(mark), want)
+			j, _, err := e.st.GetJob(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var st jobState
+			json.Unmarshal([]byte(j.ParamsJSON), &st)
+			if st.TightenPaused != 0 {
+				t.Fatalf("tighten_paused = %d after resume", st.TightenPaused)
+			}
+		})
+	}
+}
+
+// TestReplicaRefusesMasterAddressOutsideCert: after the master's address
+// for replicas changed, its certificate (whose names server_tls records)
+// does not hold it; Buat replika refuses at its first step instead of
+// failing at the copy (I8). A renewal records the new name and the job
+// goes on.
+func TestReplicaRefusesMasterAddressOutsideCert(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	id, err := e.r.StartMySQLTLS(context.Background(), m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	rec, err := e.st.GetServerTLS(m.id)
+	if err != nil || !slices.Equal(rec.Hosts, []string{"10.0.0.1"}) {
+		t.Fatalf("server_tls = %+v, %v; want hosts [10.0.0.1]", rec, err)
+	}
+	if err := e.st.SetTopologySource(topo.ID, "db-baru.example.test", 3306); err != nil {
+		t.Fatal(err)
+	}
+	r := e.replicaAgent("replica1", "dump")
+	id, err = e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}, ConfirmWipe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != 0 || !strings.Contains(j.Error, "Alamat master berubah ke db-baru.example.test") ||
+		!strings.Contains(j.Error, "Perbarui sertifikat MySQL") {
+		t.Fatalf("job = step %d %q (%v)", j.CurrentStep, j.Error, stepStatuses(steps))
+	}
+	if !CertNamesHost([]string{"10.0.0.1", "DB.example.test"}, "db.example.TEST") || CertNamesHost([]string{"10.0.0.1"}, "10.0.0.2") ||
+		!CertNamesHost([]string{"::1"}, "0:0::1") {
+		t.Fatal("CertNamesHost")
+	}
+}

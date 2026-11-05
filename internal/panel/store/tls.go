@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -14,17 +15,23 @@ type ServerTLS struct {
 	CertSerial  string
 	NotAfter    time.Time
 	InstalledAt time.Time
+	// Hosts are the names the certificate holds; nil when unknown (a
+	// certificate installed before they were recorded).
+	Hosts []string
 }
 
-const serverTLSColumns = `server_id, cert_serial, not_after, installed_at`
+const serverTLSColumns = `server_id, cert_serial, not_after, installed_at, hosts`
 
 func scanServerTLS(r rowScanner) (ServerTLS, error) {
 	var (
-		t              ServerTLS
-		notAfter, inst string
+		t                     ServerTLS
+		notAfter, inst, hosts string
 	)
-	if err := r.Scan(&t.ServerID, &t.CertSerial, &notAfter, &inst); err != nil {
+	if err := r.Scan(&t.ServerID, &t.CertSerial, &notAfter, &inst, &hosts); err != nil {
 		return ServerTLS{}, err
+	}
+	if hosts != "" {
+		t.Hosts = strings.Split(hosts, ",")
 	}
 	var err error
 	if t.NotAfter, err = parseTime(notAfter); err != nil {
@@ -38,11 +45,11 @@ func scanServerTLS(r rowScanner) (ServerTLS, error) {
 
 // SetServerTLS inserts or replaces the server's certificate record.
 func (s *Store) SetServerTLS(t ServerTLS) error {
-	_, err := s.db.Exec(`INSERT INTO server_tls (server_id, cert_serial, not_after, installed_at)
-		VALUES (?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO server_tls (server_id, cert_serial, not_after, installed_at, hosts)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(server_id) DO UPDATE SET cert_serial = excluded.cert_serial,
-			not_after = excluded.not_after, installed_at = excluded.installed_at`,
-		t.ServerID, t.CertSerial, formatTime(t.NotAfter), formatTime(t.InstalledAt))
+			not_after = excluded.not_after, installed_at = excluded.installed_at, hosts = excluded.hosts`,
+		t.ServerID, t.CertSerial, formatTime(t.NotAfter), formatTime(t.InstalledAt), strings.Join(t.Hosts, ","))
 	if err != nil {
 		return fmt.Errorf("set server tls: %w", err)
 	}

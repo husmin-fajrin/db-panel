@@ -32,7 +32,8 @@
 <main class="flex-1 w-full max-w-5xl mx-auto p-4 md:p-6">
 {{with .Flash}}<div role="alert" class="alert alert-error mb-4"><span>{{.}}</span></div>{{end}}
 {{with .Notice}}<div role="status" class="alert alert-success mb-4"><span>{{.}}</span></div>{{end}}
-{{if .CertNotice}}<div role="alert" class="alert alert-warning mb-4"><span>Sertifikat keamanan panel diperbarui; komputer yang pernah memasangnya perlu memasang ulang. <a class="link" href="/sertifikat">Cara memasang</a></span><form method="post" action="/settings/cert-notice-close"><button type="submit" class="btn btn-sm">Tutup</button></form></div>{{end}}
+{{if .CertNotice}}<div role="alert" class="alert alert-warning mb-4"><span>Sertifikat keamanan panel diperbarui; komputer yang pernah memasangnya perlu memasang ulang. <a class="link" href="/sertifikat">Cara memasang</a>{{with .CertIPURL}}. Bila browser menolak membuka panel lewat nama tanpa pilihan lanjut, buka <a class="link" href="{{.}}">{{.}}</a>{{end}}</span><form method="post" action="/settings/cert-notice-close"><button type="submit" class="btn btn-sm">Tutup</button></form></div>{{end}}
+{{if .CertFallback}}<div role="alert" class="alert alert-error mb-4"><span>Sertifikat HTTPS yang dipasang admin kedaluwarsa atau rusak, jadi panel memakai sertifikatnya sendiri. Browser yang hanya memercayai sertifikat kantor akan memperingatkan. Unggah sertifikat baru atau pilih Kembali ke sertifikat panel di <a class="link" href="/settings">Pengaturan</a>.</span></div>{{end}}
 {{template "content" .}}
 </main>
 {{if .Username}}{{template "confirm-modal" .}}{{end}}

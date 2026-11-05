@@ -54,6 +54,7 @@ var kindNames = map[string]string{
 	monitor.KindBinlogDeadline:      "batas umur binlog master",
 	monitor.KindJobFailed:           "pekerjaan gagal",
 	monitor.KindTLSExpiring:         "sertifikat MySQL hampir kedaluwarsa",
+	monitor.KindWebTLSExpiring:      "sertifikat HTTPS panel hampir kedaluwarsa",
 }
 
 // masterKinds and replicaKinds link to the master's or the replica's page;

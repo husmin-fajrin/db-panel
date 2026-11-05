@@ -109,6 +109,46 @@ func TestCertPage(t *testing.T) {
 	}
 }
 
+// TestCertPageFingerprint: /sertifikat and the settings page show the same
+// SHA-256 fingerprint of the certificate to install, with the steps to
+// compare it (SEC-54); over plain HTTP the page warns that it could have
+// been changed and links its https:// form; the page names the http://
+// address by IP for a browser that refuses the panel's name (I2).
+func TestCertPageFingerprint(t *testing.T) {
+	rig, fc := certEnv(t)
+	const fp = "80:D9:DB:0C:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:C0:7C:01"
+	fc.info.CAFingerprint = fp
+	rec := rig.do("GET", "/sertifikat", nil, nil)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, fp, "Cocokkan sidik jari sebelum memasang", "certutil -dump dbpanel-panel.crt", "Cert Hash(sha256)",
+		"dibuka lewat http:// tanpa enkripsi", `href="https://example.com/sertifikat"`,
+		`href="http://192.168.1.10/sertifikat"`, "jangan dari unduhan browser")
+	rec = rig.do("GET", "/settings", nil, rig.cookie())
+	wantBody(t, rec, fp, "Simpan bookmark panel dengan alamat <code>https://</code>", "tidak untuk alamat IP",
+		"juga mencakup semua subnamanya")
+}
+
+// TestCertFallbackNotice: an uploaded certificate the panel cannot use any
+// more is shown on every page until the admin acts (I3), with the button
+// back to the panel's own certificate.
+func TestCertFallbackNotice(t *testing.T) {
+	rig, fc := certEnv(t)
+	c := rig.cookie()
+	const notice = "Sertifikat HTTPS yang dipasang admin kedaluwarsa atau rusak"
+	if strings.Contains(rig.do("GET", "/servers", nil, c).Body.String(), notice) {
+		t.Fatal("fallback notice without a fallback")
+	}
+	fc.info.CustomFallback = true
+	for _, path := range []string{"/", "/servers"} {
+		wantBody(t, rig.do("GET", path, nil, c), notice)
+	}
+	wantBody(t, rig.do("GET", "/settings", nil, c), notice, "Kembali ke sertifikat panel")
+	// The reinstall notice names the IP way in.
+	fc.info.CANeedsReinstall = true
+	wantBody(t, rig.do("GET", "/servers", nil, c), "Bila browser menolak membuka panel lewat nama tanpa pilihan lanjut",
+		"http://192.168.1.10/sertifikat")
+}
+
 func TestCertDownload(t *testing.T) {
 	rig, fc := certEnv(t)
 	rec := rig.do("GET", "/sertifikat/dbpanel-panel.crt", nil, nil)
@@ -141,27 +181,65 @@ func TestSettingsCertSection(t *testing.T) {
 	rec = rig.do("GET", "/settings", nil, c)
 	wantBody(t, rec, "Sertifikat yang dipasang admin", "Kembali ke sertifikat panel")
 
+	wantBody(t, rec, `data-confirm-action="cert_revert" data-confirm-kind="settings" data-confirm-id="0"`,
+		`data-confirm-action="cert_names" data-confirm-kind="settings" data-confirm-id="0"`,
+		`data-confirm-action="cert_upload" data-confirm-kind="settings" data-confirm-id="0"`)
+
+	// Without a password confirmation nothing changes (SEC-59).
 	rec = rig.do("POST", "/settings/cert-panel", url.Values{}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantBody(t, rec, msgConfirmInvalid)
+	rec = rig.do("POST", "/settings/cert-names", url.Values{"extra_names": {"rsud.local"}}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	if fc.usedPanel || fc.extraNames != "" {
+		t.Fatal("a certificate setting changed without confirmation")
+	}
+	// A token for another action does not do.
+	rec = rig.do("POST", "/settings/cert-panel", withToken(t, rig.env, url.Values{}, web.ActCertNames, "settings", 0), c)
+	wantCode(t, rec, http.StatusForbidden)
+
+	rec = rig.do("POST", "/settings/cert-panel", withToken(t, rig.env, url.Values{}, web.ActCertRevert, "settings", 0), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	if !fc.usedPanel || fc.info.Mode != "panel" {
 		t.Fatal("Kembali ke sertifikat panel did not switch back")
 	}
 
-	rec = rig.do("POST", "/settings/cert-names", url.Values{"extra_names": {"panel.kantor.local, 10.9.0.4"}}, c)
+	rec = rig.do("POST", "/settings/cert-names", withToken(t, rig.env,
+		url.Values{"extra_names": {"panel.kantor.local, 10.9.0.4"}}, web.ActCertNames, "settings", 0), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	if fc.extraNames != "panel.kantor.local, 10.9.0.4" {
 		t.Fatalf("extra names = %q", fc.extraNames)
 	}
 	fc.problem = "Bukan alamat IP atau nama host lengkap (mis. panel.kantor.local): lokal"
-	rec = rig.do("POST", "/settings/cert-names", url.Values{"extra_names": {"lokal"}}, c)
+	rec = rig.do("POST", "/settings/cert-names", withToken(t, rig.env,
+		url.Values{"extra_names": {"lokal"}}, web.ActCertNames, "settings", 0), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, fc.problem)
+
+	// Settings tokens are bound to id 0, server tokens never are.
+	for _, f := range []url.Values{
+		confirmForm(web.ActCertNames, "settings", 1, testPassword),
+		confirmForm(web.ActCertNames, "server", 1, testPassword),
+		confirmForm(web.ActResync, "settings", 0, testPassword),
+		confirmForm(web.ActResync, "replica", 0, testPassword),
+	} {
+		wantCode(t, rig.do("POST", "/confirm", f, c), http.StatusBadRequest)
+	}
 }
 
-// postUpload posts a certificate upload as the settings form does.
-func postUpload(rig *settingsRig, cert, key string, c *http.Cookie) *httptest.ResponseRecorder {
+// postUpload posts a certificate upload as the settings form does, with a
+// confirmation token for it.
+func postUpload(t *testing.T, rig *settingsRig, cert, key string, c *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	return postUploadToken(rig, cert, key, confirmToken(t, rig.env, web.ActCertUpload, "settings", 0), c)
+}
+
+func postUploadToken(rig *settingsRig, cert, key, token string, c *http.Cookie) *httptest.ResponseRecorder {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
+	if token != "" {
+		mw.WriteField("confirm_token", token)
+	}
 	for name, data := range map[string]string{"cert_file": cert, "key_file": key} {
 		if data == "" {
 			continue
@@ -184,17 +262,29 @@ func postUpload(rig *settingsRig, cert, key string, c *http.Cookie) *httptest.Re
 func TestUploadCertHandler(t *testing.T) {
 	rig, fc := certEnv(t)
 	c := rig.cookie()
+	// Without a token the files are not even read (SEC-59).
+	wantCode(t, postUploadToken(rig, "SERT", "KUNCI-RAHASIA", "", c), http.StatusForbidden)
+	if fc.uploads != 0 {
+		t.Fatal("upload without confirmation reached UseCustom")
+	}
+	// A file over 64 KiB is refused as too big, not cut short (M6).
+	rec := postUpload(t, rig, strings.Repeat("A", 64<<10+1), "KUNCI-RAHASIA", c)
+	wantCode(t, rec, http.StatusRequestEntityTooLarge)
+	wantBody(t, rec, "Berkas terlalu besar", "Sertifikat keamanan panel")
+	if fc.uploads != 0 {
+		t.Fatal("an oversized upload reached UseCustom")
+	}
 	fc.problem = "Kunci tidak cocok dengan sertifikat, atau bukan kunci PEM yang sah."
-	rec := postUpload(rig, "SERT", "KUNCI-RAHASIA", c)
+	rec = postUpload(t, rig, "SERT", "KUNCI-RAHASIA", c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, fc.problem)
 	if fc.cert != "SERT" || fc.key != "KUNCI-RAHASIA" {
 		t.Fatalf("UseCustom got %q, %q", fc.cert, fc.key)
 	}
-	wantCode(t, postUpload(rig, "SERT", "", c), http.StatusBadRequest)
+	wantCode(t, postUpload(t, rig, "SERT", "", c), http.StatusBadRequest)
 
 	fc.problem = ""
-	rec = postUpload(rig, "SERT", "KUNCI-RAHASIA", c)
+	rec = postUpload(t, rig, "SERT", "KUNCI-RAHASIA", c)
 	wantCode(t, rec, http.StatusSeeOther)
 	if loc := rec.Header().Get("Location"); loc != "/settings?pesan=sertifikat-sendiri" {
 		t.Fatalf("Location = %q", loc)
@@ -212,8 +302,8 @@ func TestUploadCertHandler(t *testing.T) {
 			t.Fatalf("audit entry holds the key: %+v", e)
 		}
 	}
-	if n != 3 {
-		t.Fatalf("https_cert_upload entries = %d, want 3", n)
+	if n != 4 {
+		t.Fatalf("https_cert_upload entries = %d, want 4", n)
 	}
 }
 

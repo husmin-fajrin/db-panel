@@ -141,6 +141,19 @@ func TestMasterSourceAddressEdit(t *testing.T) {
 	}
 	rec = e.do("GET", "/masters/1?pesan=sumber", nil, c)
 	wantBody(t, rec, "192.168.5.9:3307", "diperiksa saat membuat replika")
+
+	// The master's MySQL certificate does not name the new address: the
+	// notice says to renew it first (I8).
+	if err := e.st.SetServerTLS(store.ServerTLS{ServerID: 1, CertSerial: "01", NotAfter: time.Now().AddDate(1, 0, 0),
+		InstalledAt: time.Now(), Hosts: []string{"192.168.5.9"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec = e.do("POST", "/masters/1/source", url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3306"}}, c)
+	wantLocation(t, rec, "/masters/1?pesan=sumber")
+	rec = e.do("POST", "/masters/1/source", url.Values{"source_host": {"db-baru.kantor.local"}, "source_port": {"3306"}}, c)
+	wantLocation(t, rec, "/masters/1?pesan=sumber-sertifikat")
+	rec = e.do("GET", "/masters/1?pesan=sumber-sertifikat", nil, c)
+	wantBody(t, rec, "sertifikat MySQL master belum memuat alamat ini", "Perbarui sertifikat MySQL")
 }
 
 // TestReplicaFormsNotices: the create form says the master is locked

@@ -45,18 +45,18 @@ func TestMigrateSkipsApplied(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 6 {
-		t.Fatalf("schema_migrations rows = %d, want 6", n)
+	if n != 7 {
+		t.Fatalf("schema_migrations rows = %d, want 7", n)
 	}
 }
 
 // TestMigrate0004Applies: the monitoring tables and columns exist (0004
-// to 0006) and the schema is at version 6.
+// to 0007) and the schema is at version 7.
 func TestMigrate0004Applies(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 6 {
-		t.Fatalf("schema version = %d, %v; want 6", v, err)
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 7 {
+		t.Fatalf("schema version = %d, %v; want 7", v, err)
 	}
 	for _, table := range []string{"server_health", "status_events", "alerts", "audit_log", "confirmations", "server_tls"} {
 		var n int
@@ -64,7 +64,7 @@ func TestMigrate0004Applies(t *testing.T) {
 			t.Errorf("table %s missing (n=%d, err=%v)", table, n, err)
 		}
 	}
-	for _, col := range [][2]string{{"replicas", "paused"}, {"servers", "snooze_until"}, {"alerts", "close_reason"}, {"replicas", "tls_verified"}} {
+	for _, col := range [][2]string{{"replicas", "paused"}, {"servers", "snooze_until"}, {"alerts", "close_reason"}, {"replicas", "tls_verified"}, {"server_tls", "hosts"}} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, col[0], col[1]).Scan(&n); err != nil || n != 1 {
 			t.Errorf("column %s.%s missing (n=%d, err=%v)", col[0], col[1], n, err)

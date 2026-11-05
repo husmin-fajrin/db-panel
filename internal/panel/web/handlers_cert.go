@@ -2,12 +2,14 @@ package web
 
 import (
 	"errors"
-	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
 // CertInfo describes the panel's HTTPS certificate in use.
@@ -19,6 +21,12 @@ type CertInfo struct {
 	// CANeedsReinstall: the panel replaced the certificate users install
 	// (a name fell outside it) and no user has closed the notice yet.
 	CANeedsReinstall bool
+	// CAFingerprint is the SHA-256 of the certificate users install
+	// (AA:BB:...), to compare out of band before installing it.
+	CAFingerprint string
+	// CustomFallback: an uploaded certificate is set but unusable (expired
+	// or broken), so the panel serves its own.
+	CustomFallback bool
 }
 
 // CertAdmin is what the UI changes of the panel's HTTPS certificate.
@@ -57,12 +65,47 @@ const (
 type certPage struct {
 	Page
 	Custom bool
+	// Fingerprint is the SHA-256 of the certificate to install; HTTPS is
+	// false when the page came over plain HTTP (anyone on the network could
+	// have changed it, the fingerprint included).
+	Fingerprint string
+	HTTPS       bool
+	// HTTPSURL is this page over https://.
+	HTTPSURL string
 }
 
 // certPage serves GET /sertifikat (also over plain HTTP, without login):
 // how to install the panel's certificate on each system.
 func (a *app) certPage(w http.ResponseWriter, r *http.Request) {
-	a.render.Render(w, "cert", certPage{Page: Page{Version: a.Version}, Custom: a.CertInfo().Mode == certModeCustom})
+	ci := a.CertInfo()
+	p := certPage{Page: Page{Version: a.Version}, Custom: ci.Mode == certModeCustom, Fingerprint: ci.CAFingerprint,
+		HTTPS: r.TLS != nil, HTTPSURL: "https://" + r.Host + "/sertifikat"}
+	p.CertIPURL = certIPURL(r, ci)
+	a.render.Render(w, "cert", p)
+}
+
+// certIPURL is http://<IP>:<port>/sertifikat for the first IP (IPv4 first)
+// the certificate in use names, at the port of r: a browser that holds
+// HSTS for the panel's name and refuses it after a certificate change can
+// still reach the certificate page there, since HSTS never applies to an
+// IP address. "" when the certificate names no IP.
+func certIPURL(r *http.Request, ci CertInfo) string {
+	var ip net.IP
+	for _, n := range ci.Names {
+		if p := net.ParseIP(n); p != nil && (ip == nil || ip.To4() == nil && p.To4() != nil) {
+			ip = p
+		}
+	}
+	if ip == nil {
+		return ""
+	}
+	host := ip.String()
+	if _, port, err := net.SplitHostPort(r.Host); err == nil && port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if ip.To4() == nil {
+		host = "[" + host + "]"
+	}
+	return "http://" + host + "/sertifikat"
 }
 
 // certDownload serves GET /sertifikat/dbpanel-panel.crt: the certificate
@@ -78,15 +121,25 @@ func (a *app) certDownload(w http.ResponseWriter, r *http.Request) {
 	w.Write(pemBytes)
 }
 
+// msgUploadTooBig refuses an upload over maxCertUpload.
+const msgUploadTooBig = "Berkas terlalu besar: sertifikat (dengan rantainya) dan kunci bersama-sama paling besar 64 KiB."
+
+// errUploadTooBig: an uploaded file is over maxCertUpload.
+var errUploadTooBig = errors.New("berkas terlalu besar")
+
 // readUpload reads the multipart file field name, at most maxCertUpload
-// bytes.
+// bytes; a longer file is errUploadTooBig, never silently cut short.
 func readUpload(r *http.Request, name string) ([]byte, error) {
 	f, _, err := r.FormFile(name)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, maxCertUpload))
+	b, err := io.ReadAll(io.LimitReader(f, maxCertUpload+1))
+	if err == nil && len(b) > maxCertUpload {
+		return nil, errUploadTooBig
+	}
+	return b, err
 }
 
 // uploadCert serves POST /settings/cert: use an uploaded certificate and
@@ -99,7 +152,8 @@ func (a *app) uploadCert(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(maxCertUpload); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			http.Error(w, msgTooLarge, http.StatusRequestEntityTooLarge)
+			a.audit(r, "https_cert_upload", auditSettings, 0, nil, msgUploadTooBig)
+			a.renderStoredSettings(w, r, http.StatusRequestEntityTooLarge, msgUploadTooBig)
 			return
 		}
 		refuse("Pilih berkas sertifikat dan berkas kunci.")
@@ -108,10 +162,19 @@ func (a *app) uploadCert(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
+	// Parsing the form only reads it; the token is checked before anything
+	// is done with it.
+	if !a.requireConfirm(w, r, ActCertUpload, auditSettings, 0) {
+		return
+	}
 	certPEM, certErr := readUpload(r, "cert_file")
 	keyPEM, keyErr := readUpload(r, "key_file")
 	if errors.Is(certErr, http.ErrMissingFile) || errors.Is(keyErr, http.ErrMissingFile) {
 		refuse("Pilih berkas sertifikat dan berkas kunci.")
+		return
+	}
+	if errors.Is(certErr, errUploadTooBig) || errors.Is(keyErr, errUploadTooBig) {
+		refuse(msgUploadTooBig)
 		return
 	}
 	if err := errors.Join(certErr, keyErr); err != nil {
@@ -136,6 +199,9 @@ func (a *app) uploadCert(w http.ResponseWriter, r *http.Request) {
 // usePanelCert serves POST /settings/cert-panel: back to the panel's own
 // certificate.
 func (a *app) usePanelCert(w http.ResponseWriter, r *http.Request) {
+	if !a.requireConfirm(w, r, ActCertRevert, auditSettings, 0) {
+		return
+	}
 	err := a.Certs.UsePanel()
 	a.audit(r, "https_cert_panel", auditSettings, 0, nil, outcomeOf(err))
 	if err != nil {
@@ -148,6 +214,9 @@ func (a *app) usePanelCert(w http.ResponseWriter, r *http.Request) {
 // saveCertNames serves POST /settings/cert-names: the extra names of the
 // panel's own certificate.
 func (a *app) saveCertNames(w http.ResponseWriter, r *http.Request) {
+	if !a.requireConfirm(w, r, ActCertNames, auditSettings, 0) {
+		return
+	}
 	raw := strings.TrimSpace(r.PostFormValue("extra_names"))
 	problem, err := a.Certs.SetExtraNames(raw)
 	if problem != "" {

@@ -26,6 +26,13 @@ type Page struct {
 	AlertCount int
 	// CertNotice shows that the panel's certificate to install changed.
 	CertNotice bool
+	// CertFallback shows that the uploaded certificate is unusable and the
+	// panel serves its own.
+	CertFallback bool
+	// CertIPURL is the certificate page at the panel's IP over plain HTTP
+	// (HSTS never applies to an IP), for a browser that refuses the panel's
+	// name; "" when the certificate names no IP.
+	CertIPURL string
 }
 
 // pageNames are the page templates; each file templates/<name>.html defines

@@ -84,7 +84,7 @@ func running(s *proto.HealthSnapshot) {
 
 func TestAllKinds(t *testing.T) {
 	want := "replica_stopped replica_disconnected replica_lagging replica_unlocked master_locked master_down " +
-		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring"
+		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring web_tls_expiring"
 	if got := strings.Join(AllKinds(), " "); got != want {
 		t.Fatalf("AllKinds = %s", got)
 	}
@@ -800,5 +800,38 @@ func TestRedirectWindowOpensNoStoppedAlert(t *testing.T) {
 	}
 	if len(r.alerts(rID, KindReplicaStopped)) != 0 {
 		t.Fatalf("replica_stopped opened: %+v", r.alerts(rID, KindReplicaStopped))
+	}
+}
+
+// TestWebCertExpiringAlert: the panel's HTTPS certificate in use (an
+// uploaded one, typically) expiring within 14 days opens web_tls_expiring
+// on the panel's host, beside that host's own MySQL certificate alert (I3).
+func TestWebCertExpiringAlert(t *testing.T) {
+	r := newRig(t)
+	local := r.server("panel-host")
+	now := r.clk.Now()
+	webNotAfter := now.Add(10 * 24 * time.Hour)
+	r.m.webCert = func() (int64, time.Time, bool) { return local, webNotAfter, true }
+	if err := r.st.SetServerTLS(store.ServerTLS{ServerID: local, CertSerial: "01", NotAfter: now.Add(5 * 24 * time.Hour),
+		InstalledAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	r.m.CheckTLSExpiry(now)
+	if a := r.openAlert(local, KindWebTLSExpiring); a.Message != "Sertifikat keamanan panel kedaluwarsa dalam 10 hari." {
+		t.Fatalf("web message = %q", a.Message)
+	}
+	if a := r.openAlert(local, KindTLSExpiring); a.Message != "Sertifikat MySQL panel-host kedaluwarsa dalam 5 hari." {
+		t.Fatalf("mysql message = %q", a.Message)
+	}
+	r.clk.Add(24 * time.Hour)
+	r.m.CheckTLSExpiry(r.clk.Now())
+	if a := r.openAlert(local, KindWebTLSExpiring); a.Message != "Sertifikat keamanan panel kedaluwarsa dalam 9 hari." {
+		t.Fatalf("web message a day later = %q", a.Message)
+	}
+	// A new certificate in use closes the web alert only.
+	webNotAfter = r.clk.Now().AddDate(1, 0, 0)
+	r.m.CheckTLSExpiry(r.clk.Now())
+	if r.isOpen(local, KindWebTLSExpiring) || !r.isOpen(local, KindTLSExpiring) {
+		t.Fatal("after the new web certificate: want only the MySQL alert open")
 	}
 }

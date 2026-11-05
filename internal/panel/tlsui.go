@@ -24,6 +24,7 @@ package panel
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -85,8 +86,10 @@ type webCerts struct {
 	log        *slog.Logger
 	now        func() time.Time
 	publicHost string
-	// names returns the names the panel's own certificate must cover now.
-	names func() ca.WebNames
+	// names returns the names the panel's own certificate must cover now:
+	// those the operator chose (which may force a new web CA) and the
+	// interface addresses found on the host (which never do; see webNames).
+	names func() (chosen, found ca.WebNames)
 
 	mu     sync.Mutex
 	ca     *ca.WebCA
@@ -119,11 +122,11 @@ func newServedCert(certPEM, keyPEM []byte) (*servedCert, error) {
 func (w *webCerts) load() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	names := w.names()
-	if err := w.ensureCA(names); err != nil {
+	chosen, found := w.names()
+	if err := w.ensureCA(chosen, found); err != nil {
 		return err
 	}
-	if err := w.ensureOwn(names); err != nil {
+	if err := w.ensureOwn(w.leafNames(chosen, found)); err != nil {
 		return err
 	}
 	mode, err := w.st.GetSetting(store.SettingHTTPSMode)
@@ -152,44 +155,101 @@ func (w *webCerts) load() error {
 func (w *webCerts) path(name string) string { return filepath.Join(w.dir, name) }
 
 // ensureCA loads the web CA, replacing it when it cannot be read or does
-// not cover names.
+// not cover the names the operator chose. A new CA is constrained to those
+// and to the interface addresses and subnets found now (spec 5.8: "saat
+// dibuat"); an interface that appears later never replaces the CA (its
+// address is left out of the certificate instead, see leafNames).
 //
 // Only a CA that cannot be parsed (or half a pair) is replaced: an I/O error
 // (e.g. a permission problem) stops the start instead, since a new CA would
 // make every browser that installed the current one warn again.
-func (w *webCerts) ensureCA(names ca.WebNames) error {
+func (w *webCerts) ensureCA(chosen, found ca.WebNames) error {
 	_, certErr := os.ReadFile(w.path(webCAFiles + ".crt"))
 	_, keyErr := os.ReadFile(w.path(webCAFiles + ".key"))
 	if err := ioError(certErr, keyErr); err != nil {
 		return fmt.Errorf("baca CA web: %w", err)
 	}
-	c, err := ca.LoadOrCreateWebCA(w.dir, names)
+	all := mergeNames(chosen, found)
+	c, err := ca.LoadOrCreateWebCA(w.dir, all)
 	if err != nil {
 		if certErr != nil && keyErr != nil {
 			return err // creating a new CA failed
 		}
 		w.log.Warn("web CA broken; creating a new one", "err", err)
-		return w.regenerateCA(names)
+		return w.regenerateCA(all)
 	}
 	w.ca = c
-	if !c.Covers(names) {
+	if !c.Covers(chosen) {
 		w.log.Warn("panel names outside the web CA; creating a new one")
-		return w.regenerateCA(names)
+		return w.regenerateCA(all)
 	}
 	return nil
 }
 
-// regenerateCA moves the web CA files to *.old (replacing older ones),
-// creates a new CA for names and records when, so the UI asks users to
-// install it again.
+// mergeNames is a followed by what b adds (subnets included).
+func mergeNames(a, b ca.WebNames) ca.WebNames {
+	out := ca.WebNames{DNS: slices.Clone(a.DNS), IPs: slices.Clone(a.IPs), Subnets: slices.Clone(a.Subnets)}
+	for _, d := range b.DNS {
+		if !slices.Contains(out.DNS, d) {
+			out.DNS = append(out.DNS, d)
+		}
+	}
+	for _, ip := range b.IPs {
+		if !slices.ContainsFunc(out.IPs, ip.Equal) {
+			out.IPs = append(out.IPs, ip)
+		}
+	}
+	for _, n := range b.Subnets {
+		if !slices.ContainsFunc(out.Subnets, func(s *net.IPNet) bool { return s.String() == n.String() }) {
+			out.Subnets = append(out.Subnets, n)
+		}
+	}
+	return out
+}
+
+// leafNames are the names of the panel's own certificate: the chosen ones
+// and each found interface address the web CA covers. An address outside
+// it (a docker, libvirt or VPN bridge that came up after the CA was made)
+// is left out with a log line: nobody opens the panel there, and a new CA
+// would make every computer install it again.
+func (w *webCerts) leafNames(chosen, found ca.WebNames) ca.WebNames {
+	out := ca.WebNames{DNS: slices.Clone(chosen.DNS), IPs: slices.Clone(chosen.IPs)}
+	for _, ip := range found.IPs {
+		if slices.ContainsFunc(out.IPs, ip.Equal) {
+			continue
+		}
+		if !w.ca.Covers(ca.WebNames{IPs: []net.IP{ip}}) {
+			w.log.Info("interface address outside the web CA; left out of the HTTPS certificate", "ip", ip.String())
+			continue
+		}
+		out.IPs = append(out.IPs, ip)
+	}
+	return out
+}
+
+// regenerateCA moves the web CA files to *.old (an older *.old to
+// *.old2, so two generations are kept), creates a new CA for names and
+// records when, so the UI asks users to install it again.
 func (w *webCerts) regenerateCA(names ca.WebNames) error {
 	// The key first: a failure between the two leaves the old certificate
 	// without its key, which the next start replaces, never a new key
 	// beside the old certificate.
-	for _, ext := range []string{".key", ".crt"} {
-		p := w.path(webCAFiles + ext)
-		if err := os.Rename(p, p+".old"); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("simpan CA web lama: %w", err)
+	exts := []string{".key", ".crt"}
+	keep := false
+	for _, ext := range exts {
+		if _, err := os.Lstat(w.path(webCAFiles + ext)); err == nil {
+			keep = true
+		}
+	}
+	for _, from := range [][2]string{{".old", ".old2"}, {"", ".old"}} {
+		if !keep {
+			break
+		}
+		for _, ext := range exts {
+			p := w.path(webCAFiles + ext)
+			if err := os.Rename(p+from[0], p+from[1]); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("simpan CA web lama: %w", err)
+			}
 		}
 	}
 	c, err := ca.LoadOrCreateWebCA(w.dir, names)
@@ -294,14 +354,14 @@ func (w *webCerts) renew() error {
 		w.log.Warn("uploaded HTTPS certificate expired; using the panel's own", "not_after", w.custom.cert.Leaf.NotAfter)
 		w.custom = nil
 	}
-	names := w.names()
-	if !w.ca.Covers(names) {
+	chosen, found := w.names()
+	if !w.ca.Covers(chosen) {
 		w.log.Warn("panel names outside the web CA; creating a new one")
-		if err := w.regenerateCA(names); err != nil {
+		if err := w.regenerateCA(mergeNames(chosen, found)); err != nil {
 			return err
 		}
 	}
-	return w.ensureOwn(names)
+	return w.ensureOwn(w.leafNames(chosen, found))
 }
 
 // run renews the certificate every webRenewEvery until done is closed.
@@ -365,22 +425,43 @@ func (w *webCerts) info() CertInfo {
 	if w.custom != nil {
 		c, mode = w.custom, httpsModeCustom
 	}
+	caPEM := w.ca.CAPEM()
 	w.mu.Unlock()
 	leaf := c.cert.Leaf
-	info := CertInfo{Mode: mode, NotAfter: leaf.NotAfter, Pin: c.pin, Names: slices.Clone(leaf.DNSNames)}
+	info := CertInfo{Mode: mode, NotAfter: leaf.NotAfter, Pin: c.pin, Names: slices.Clone(leaf.DNSNames),
+		CAFingerprint: caFingerprint(caPEM)}
 	for _, ip := range leaf.IPAddresses {
 		info.Names = append(info.Names, ip.String())
 	}
-	kv, err := w.st.GetSettings(store.SettingHTTPSCARegeneratedAt, store.SettingHTTPSCANoticeClosedAt)
+	kv, err := w.st.GetSettings(store.SettingHTTPSCARegeneratedAt, store.SettingHTTPSCANoticeClosedAt, store.SettingHTTPSMode)
 	if err != nil {
 		w.log.Warn("read certificate notice settings", "err", err)
 		return info
 	}
+	// The admin's certificate is set but unusable (expired, broken): the
+	// panel serves its own, and says so until the admin acts (I3).
+	info.CustomFallback = mode == httpsModePanel && kv[store.SettingHTTPSMode] == httpsModeCustom
 	if regen, err := time.Parse(time.RFC3339Nano, kv[store.SettingHTTPSCARegeneratedAt]); err == nil {
 		closed, err := time.Parse(time.RFC3339Nano, kv[store.SettingHTTPSCANoticeClosedAt])
 		info.CANeedsReinstall = err != nil || regen.After(closed)
 	}
 	return info
+}
+
+// caFingerprint is the SHA-256 of the certificate in caPEM (DER), as
+// Windows, macOS and Firefox show it: upper-case hex pairs joined by
+// colons. "" when caPEM does not parse.
+func caFingerprint(caPEM []byte) string {
+	block, _ := pem.Decode(caPEM)
+	if block == nil {
+		return ""
+	}
+	sum := sha256.Sum256(block.Bytes)
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":")
 }
 
 // CAPEM is the web CA certificate users install.
@@ -440,19 +521,56 @@ func (w *webCerts) UsePanel() error {
 // problem lists the entries refused, in words for the user.
 func (w *webCerts) SetExtraNames(raw string) (problem string, err error) {
 	entries := splitNames(raw)
-	var bad []string
+	var bad, broad []string
 	for _, e := range entries {
-		if net.ParseIP(e) == nil && !ca.ValidWebHost(e) {
+		switch {
+		case net.ParseIP(e) != nil:
+		case !ca.ValidWebHost(e):
 			bad = append(bad, e)
+		case tooBroadName(e):
+			broad = append(broad, e)
 		}
 	}
 	if len(bad) > 0 {
 		return "Bukan alamat IP atau nama host lengkap (mis. panel.kantor.local): " + strings.Join(bad, ", "), nil
 	}
+	if len(broad) > 0 {
+		return "Nama terlalu umum, sertifikat panel akan berlaku untuk banyak situs lain: " + strings.Join(broad, ", ") +
+			". Pakai nama host lengkap minimal tiga bagian (mis. panel.rsud.go.id) atau nama berakhiran " +
+			".local, .lan, .internal, .home atau .corp.", nil
+	}
 	if err := w.st.SetSetting(store.SettingHTTPSExtraNames, strings.Join(entries, ",")); err != nil {
 		return "", err
 	}
 	return "", w.renew()
+}
+
+// privateTLDs end the names an extra name may have with only two labels
+// (rsud.local): they are never registered on the internet.
+var privateTLDs = []string{"local", "lan", "internal", "home", "corp"}
+
+// publicSuffixes are common two-label public suffixes: a name directly
+// below one (bank.co.id) is a whole organisation's domain, not the panel's.
+var publicSuffixes = []string{
+	"ac.id", "biz.id", "co.id", "desa.id", "go.id", "mil.id", "my.id", "net.id", "or.id", "ponpes.id", "sch.id", "web.id",
+	"co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "ne.jp", "or.jp",
+	"com.sg", "com.my", "co.nz", "com.br", "com.cn", "co.in", "co.za", "com.tr", "com.ph", "com.vn", "co.th",
+}
+
+// tooBroadName reports whether the extra name h (a valid host name) is too
+// broad for the web CA, which covers a name and all its subdomains: fewer
+// than three labels outside privateTLDs, or a domain directly below one of
+// publicSuffixes. The rule is in the README ("Nama tambahan").
+func tooBroadName(h string) bool {
+	h = strings.ToLower(h)
+	labels := strings.Split(h, ".")
+	if slices.Contains(privateTLDs, labels[len(labels)-1]) {
+		return len(labels) < 2 || slices.Contains(publicSuffixes, h)
+	}
+	if len(labels) < 3 {
+		return true
+	}
+	return slices.Contains(publicSuffixes, strings.Join(labels[1:], "."))
 }
 
 // ioError returns the first of errs that is neither nil nor "not found".
@@ -530,13 +648,14 @@ func validateCustomCert(certPEM, keyPEM []byte, publicHost string, now time.Time
 	return ""
 }
 
-// webNames builds the names of the panel's own certificate: the public
-// host, the machine's host name, every address of the interfaces (with
-// their subnets, for the web CA) and the extra names. Single-label and
+// webNames builds the names of the panel's own certificate. chosen are the
+// ones the operator chose: the public host, the machine's host name and the
+// extra names; found are every address of the interfaces (with their
+// subnets, for a new web CA), less those already chosen. Single-label and
 // invalid host names are left out (a CA cannot be limited to them), each
 // extra one with a log line.
-func webNames(publicHost, hostname string, ifaces []*net.IPNet, extra string, log *slog.Logger) ca.WebNames {
-	var n ca.WebNames
+func webNames(publicHost, hostname string, ifaces []*net.IPNet, extra string, log *slog.Logger) (chosen, found ca.WebNames) {
+	n := &chosen
 	addIP := func(ip net.IP) {
 		if !slices.ContainsFunc(n.IPs, ip.Equal) {
 			n.IPs = append(n.IPs, ip)
@@ -558,21 +677,23 @@ func webNames(publicHost, hostname string, ifaces []*net.IPNet, extra string, lo
 		log.Warn("public host is not a full host name; left out of the HTTPS certificate", "host", publicHost)
 	}
 	addDNS(hostname)
-	for _, ifn := range ifaces {
-		addIP(ifn.IP)
-		sub := &net.IPNet{IP: ifn.IP.Mask(ifn.Mask), Mask: ifn.Mask}
-		if !slices.ContainsFunc(n.Subnets, func(s *net.IPNet) bool { return s.String() == sub.String() }) {
-			n.Subnets = append(n.Subnets, sub)
-		}
-	}
 	for _, e := range splitNames(extra) {
 		if ip := net.ParseIP(e); ip != nil {
 			addIP(ip)
-		} else if !addDNS(e) {
+		} else if tooBroadName(e) || !addDNS(e) {
 			log.Warn("extra HTTPS name is not an IP or full host name; left out", "name", e)
 		}
 	}
-	return n
+	for _, ifn := range ifaces {
+		if !slices.ContainsFunc(chosen.IPs, ifn.IP.Equal) && !slices.ContainsFunc(found.IPs, ifn.IP.Equal) {
+			found.IPs = append(found.IPs, ifn.IP)
+		}
+		sub := &net.IPNet{IP: ifn.IP.Mask(ifn.Mask), Mask: ifn.Mask}
+		if !slices.ContainsFunc(found.Subnets, func(s *net.IPNet) bool { return s.String() == sub.String() }) {
+			found.Subnets = append(found.Subnets, sub)
+		}
+	}
+	return chosen, found
 }
 
 // interfaceNets returns the addresses, with prefixes, of the interfaces
@@ -605,8 +726,9 @@ func interfaceNets() []*net.IPNet {
 	return out
 }
 
-// currentWebNames are the names of the panel's own certificate now.
-func (p *Panel) currentWebNames() ca.WebNames {
+// currentWebNames are the names of the panel's own certificate now (see
+// webNames).
+func (p *Panel) currentWebNames() (chosen, found ca.WebNames) {
 	extra, err := p.Store.GetSetting(store.SettingHTTPSExtraNames)
 	if err != nil {
 		p.log.Warn("read extra HTTPS names", "err", err)

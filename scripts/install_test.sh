@@ -14,7 +14,25 @@ set -euo pipefail
 PANEL_SCRIPT=scripts/install.sh
 AGENT_TEMPLATE=web/templates/agent-install.sh.tmpl
 
+# install.sh prefixes every path with ROOT. No case may ever run it with an
+# empty one (the real /etc and /usr): a ROOT from the caller's environment
+# is dropped, each case sets its own under $tmp, and the cases that source
+# the script check it first (need_root).
+unset ROOT
 tmp=$(mktemp -d)
+[ -n "$tmp" ] && [ -d "$tmp" ] || exit 99
+unit_root="$tmp/unit-root"
+mkdir -p "$unit_root"
+# need_root fails the case unless ROOT is a directory under $tmp.
+need_root() {
+	case ${ROOT:-} in
+	"$tmp"/?*) [ -d "$ROOT" ] ;;
+	*)
+		echo "ROOT kosong atau di luar $tmp: '${ROOT:-}'" >&2
+		exit 99
+		;;
+	esac
+}
 # kill_root ROOT stops the processes the fake systemctl started there.
 kill_root() {
 	local f pid
@@ -172,6 +190,8 @@ printf 'binary panel arm64' >"$release/dbpanel_linux_arm64"
 # install_binary amd64 and prints its output; the exit status is its own.
 install_case() {
 	(
+		ROOT=$unit_root
+		need_root
 		# shellcheck source=/dev/null
 		source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
 		# shellcheck disable=SC2034 # read by install_binary
@@ -210,6 +230,8 @@ done
 # not match fails the whole fetch.
 fetch_case() {
 	(
+		ROOT=$unit_root
+		need_root
 		# shellcheck source=/dev/null
 		source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
 		dl="$tmp/fetch-$1/dl"
@@ -246,6 +268,8 @@ fi
 user_case() { # existing(0|1)
 	(
 		local exists=$1
+		ROOT=$unit_root
+		need_root
 		# shellcheck source=/dev/null
 		source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
 		# shellcheck disable=SC2329 # called by ensure_user
@@ -270,6 +294,7 @@ live_bin="$tmp/dbpanel"
 run_install() { # ROOT UI_PORT AGENT_PORT [svc:SERVICE|fn:FUNCTION: stop right before it]
 	(
 		ROOT=$1
+		need_root
 		# shellcheck source=/dev/null
 		source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
 		PANEL_USER=nobody
@@ -388,6 +413,11 @@ else
 		fail "fresh_nonroot: install.sh gagal: $(cat "$r/install.out")"
 	else
 		grep -q 'Sandi   : ' "$r/install.out" || fail "fresh_nonroot: sandi awal tidak dicetak"
+		# The fingerprint printed is the one of the CA the panel serves.
+		want_fp=$(openssl x509 -noout -fingerprint -sha256 -in "$r/etc/dbpanel/panel/web-ca.crt" | cut -d= -f2)
+		grep -qF "Sidik jari SHA-256 sertifikat itu: $want_fp" "$r/install.out" ||
+			fail "fresh_nonroot: sidik jari CA web tidak dicetak: $(grep -i sidik "$r/install.out")"
+		grep -q 'Buka https://.*:8080/sertifikat' "$r/install.out" || fail "fresh_nonroot: alamat sertifikat bukan https://"
 		live_checks "$r" "$ui" fresh_nonroot
 	fi
 
@@ -481,6 +511,7 @@ else
 	links_case() { # STEP
 		(
 			ROOT=$r
+			need_root
 			# shellcheck source=/dev/null
 			source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
 			PANEL_USER=nobody
@@ -499,6 +530,11 @@ else
 				;;
 			password-link)
 				ln -sfn "$victim/secret" "$PASSWORD_FILE"
+				print_summary
+				;;
+			password-esc)
+				rm -f "$PASSWORD_FILE"
+				printf 'abc\033]0;judul\007def\n' >"$PASSWORD_FILE"
 				print_summary
 				;;
 			bin-special)
@@ -539,6 +575,12 @@ else
 		fail "print_summary gagal: $(cat "$r/password-link.out")"
 	elif grep -q rahasia "$r/password-link.out"; then
 		fail "print_summary mencetak isi berkas lain lewat tautan sandi awal"
+	fi
+	# Control characters in the password file never reach the terminal.
+	if ! links_case password-esc; then
+		fail "print_summary gagal: $(cat "$r/password-esc.out")"
+	elif grep -q $'\033' "$r/password-esc.out" || ! grep -q 'Sandi   : abc]0;judul' "$r/password-esc.out"; then
+		fail "print_summary mencetak karakter kontrol dari berkas sandi: $(cat -v "$r/password-esc.out")"
 	fi
 	# Only regular files are kept from the old bin/, within bounds: a FIFO
 	# or /dev/zero neither hangs the script nor fills the disk.

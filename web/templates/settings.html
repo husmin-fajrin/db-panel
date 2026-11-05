@@ -148,12 +148,14 @@
           <tr><th>Berlaku untuk</th><td>{{range $i, $n := .Cert.Names}}{{if $i}}, {{end}}<code>{{$n}}</code>{{end}}</td></tr>
           <tr><th>Berlaku sampai</th><td>{{fmtTime .Cert.NotAfter}}</td></tr>
           <tr><th>Pin kunci</th><td><code class="break-all">{{.Cert.Pin}}</code></td></tr>
+          <tr><th>Sidik jari SHA-256 sertifikat untuk dipasang</th><td><code class="break-all" data-fingerprint>{{.Cert.CAFingerprint}}</code></td></tr>
         </tbody>
       </table>
     </div>
     {{if ne .Cert.Mode "custom"}}
-    <p>Komputer yang membuka panel perlu memasang sertifikat ini sekali. <a class="link" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat</a> · <a class="link" href="/sertifikat">Cara memasang</a></p>
+    <p>Komputer yang membuka panel perlu memasang sertifikat ini sekali. <a class="link" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat</a> · <a class="link" href="/sertifikat">Cara memasang</a>. Sebelum memasang, cocokkan sidik jari berkas yang diunduh dengan sidik jari di atas.</p>
     {{end}}
+    <div role="note" class="alert alert-info"><span>Simpan bookmark panel dengan alamat <code>https://</code>. Browser hanya mengingat "selalu pakai HTTPS" (HSTS) untuk nama seperti <code>panel.rsud.local</code>, tidak untuk alamat IP: alamat <code>http://</code> dengan IP selalu terbuka tanpa enkripsi dulu sebelum dialihkan, dan orang lain di jaringan bisa menyela di situ. Untuk keamanan penuh, buka panel lewat nama DNS dengan <code>https://</code>.</span></div>
     <details class="collapse collapse-arrow bg-base-200">
       <summary class="collapse-title font-semibold">Lanjutan</summary>
       <div class="collapse-content flex flex-col gap-6">
@@ -161,9 +163,9 @@
           <fieldset class="fieldset">
             <label class="label" for="extra_names">Nama dan alamat tambahan</label>
             <input type="text" id="extra_names" name="extra_names" value="{{.ExtraNames}}" class="input w-full" placeholder="mis. panel.kantor.local, 10.20.0.5">
-            <p class="label">Dipisah koma. Nama host lengkap (dengan titik) atau alamat IP lain yang dipakai untuk membuka panel. Alamat di luar jaringan panel membuat sertifikat baru yang perlu dipasang ulang di semua komputer.</p>
+            <p class="label">Dipisah koma. Nama host lengkap minimal tiga bagian (mis. panel.rsud.go.id; dua bagian hanya untuk nama berakhiran .local, .lan, .internal, .home atau .corp) atau alamat IP lain yang dipakai untuk membuka panel. Perhatian: sebuah nama juga mencakup semua subnamanya (panel.rsud.local mencakup x.panel.rsud.local), jadi pakai nama khusus panel, bukan nama domain kantor. Alamat di luar jaringan panel membuat sertifikat baru yang perlu dipasang ulang di semua komputer.</p>
           </fieldset>
-          <div><button type="submit" class="btn btn-sm">Simpan nama</button></div>
+          <div><button type="submit" class="btn btn-sm" data-confirm-action="cert_names" data-confirm-kind="settings" data-confirm-id="0" data-confirm-text="Ubah nama tambahan sertifikat HTTPS panel.">Simpan nama</button></div>
         </form>
         <form method="post" action="/settings/cert" enctype="multipart/form-data" class="flex flex-col gap-2">
           <p>Memakai sertifikat sendiri (misalnya dari tim keamanan kantor): unggah sertifikat dan kuncinya dalam bentuk PEM. Rantai sertifikat boleh disertakan di berkas sertifikat. Sertifikat harus memuat alamat panel dan belum kedaluwarsa. Kunci tidak pernah ditampilkan lagi.</p>
@@ -175,11 +177,11 @@
             <label class="label" for="key_file">Berkas kunci (.key / .pem)</label>
             <input type="file" id="key_file" name="key_file" class="file-input w-full" required>
           </fieldset>
-          <div><button type="submit" class="btn btn-sm">Pakai sertifikat ini</button></div>
+          <div><button type="submit" class="btn btn-sm" data-confirm-action="cert_upload" data-confirm-kind="settings" data-confirm-id="0" data-confirm-text="Pakai sertifikat HTTPS yang diunggah untuk panel.">Pakai sertifikat ini</button></div>
         </form>
-        {{if eq .Cert.Mode "custom"}}
+        {{if or (eq .Cert.Mode "custom") .Cert.CustomFallback}}
         <form method="post" action="/settings/cert-panel">
-          <button type="submit" class="btn btn-sm">Kembali ke sertifikat panel</button>
+          <button type="submit" class="btn btn-sm" data-confirm-action="cert_revert" data-confirm-kind="settings" data-confirm-id="0" data-confirm-text="Kembali ke sertifikat HTTPS buatan panel.">Kembali ke sertifikat panel</button>
         </form>
         {{end}}
       </div>

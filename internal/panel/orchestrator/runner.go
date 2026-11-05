@@ -114,6 +114,9 @@ type Alerts interface {
 	// ReplicaChanged: the replica's state or paused flag was just written
 	// (MySQL changed with it), so its last health report is out of date.
 	ReplicaChanged(serverID int64)
+	// AgentNeedsUpgrade: the server's agent answered a command it does not
+	// know (unknown_command), so it is older than this panel.
+	AgentNeedsUpgrade(serverID int64)
 }
 
 // Runner starts, runs and steers orchestrated jobs.
@@ -689,7 +692,37 @@ func (r *Runner) Resume(ctx context.Context) {
 			}
 			r.replicaChanged(j.ServerID)
 		}
+		if j.Kind == KindTightenTLS {
+			r.resumeTighten(ctx, j)
+		}
 		r.log.Info("job failed by restart", "job", j.ID, "kind", j.Kind, "step", j.CurrentStep)
+	}
+}
+
+// resumeTighten handles a tighten_tls job cut off by a restart while a
+// redirect had a replica stopped and marked paused (TightenPaused): as
+// cancelJob, it starts replication again (best effort). When that is not
+// possible (at startup the agent has rarely reconnected yet) the paused
+// mark is cleared anyway, so the replica's own health reports raise
+// replica_stopped instead of reading "Dihentikan" (stopped by the panel)
+// with no alert.
+func (r *Runner) resumeTighten(ctx context.Context, j store.Job) {
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		r.log.Warn("job params unreadable", "job", j.ID, "err", err)
+		return
+	}
+	id := st.TightenPaused
+	if id == 0 {
+		return
+	}
+	jr := &jobRun{r: r, job: j, st: st, idx: j.CurrentStep}
+	if r.d.Hub.IsOnline(id) {
+		jr.restartReplica(ctx, id)
+	}
+	if jr.st.TightenPaused == id {
+		r.log.Warn("replica left stopped by a redirect cut off by a restart; unmarked as paused", "job", j.ID, "server_id", id)
+		jr.unpause(id)
 	}
 }
 

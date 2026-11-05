@@ -9,7 +9,18 @@
   <div class="card-body gap-4">
     <p class="text-lg">Browser menampilkan peringatan? Unduh berkas ini, klik dua kali, pilih Pasang, lalu buka panel lagi.</p>
     <div><a class="btn btn-primary" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat keamanan panel</a></div>
-    <p class="text-sm text-base-content/70">Cukup sekali untuk tiap komputer atau ponsel. Setelah terpasang, browser membuka panel tanpa peringatan dan sambungannya terenkripsi. Sertifikat ini hanya berlaku untuk alamat panel ini.</p>
+    <p class="text-sm text-base-content/70">Cukup sekali untuk tiap komputer atau ponsel. Setelah terpasang, browser membuka panel tanpa peringatan dan sambungannya terenkripsi. Sertifikat ini hanya berlaku untuk alamat panel ini: nama panel beserta semua subnamanya, dan alamat IP di jaringan panel.</p>
+  </div>
+</section>
+
+<section class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Cocokkan sidik jari sebelum memasang</h2>
+    <p>Sidik jari SHA-256 sertifikat ini:</p>
+    <p><code class="break-all text-lg" data-fingerprint>{{.Fingerprint}}</code></p>
+    <p>Sebelum klik <b>Install</b>, <b>Add</b> atau <b>OK</b>, buka berkas yang diunduh dan pastikan sidik jari SHA-256-nya <b>sama persis</b> dengan angka yang tampil di layar pemasangan panel (keluaran <code>install.sh</code> di server panel) atau di halaman <b>Pengaturan</b> panel setelah login. Bila berbeda, jangan pasang: ada yang mengganti berkasnya di jaringan. Cara melihatnya ada di langkah tiap sistem di bawah.</p>
+    {{if not .HTTPS}}<div role="alert" class="alert alert-warning"><span>Halaman ini dibuka lewat http:// tanpa enkripsi, jadi isinya (juga sidik jari di atas) bisa diubah orang lain di jaringan. Cocokkan dengan keluaran <code>install.sh</code> atau halaman Pengaturan, atau buka <a class="link" href="{{.HTTPSURL}}">{{.HTTPSURL}}</a> (terima peringatan browser sekali).</span></div>{{end}}
+    {{with .CertIPURL}}<p class="text-sm text-base-content/70">Browser menolak membuka panel lewat nama tanpa pilihan lanjut (setelah sertifikat panel berganti)? Buka <a class="link" href="{{.}}">{{.}}</a>: alamat IP selalu bisa dibuka lewat http://, lalu pasang ulang sertifikatnya.</p>{{end}}
   </div>
 </section>
 
@@ -18,6 +29,7 @@
     <div class="card-body gap-3">
       <h2 class="card-title">Windows (Chrome, Edge)</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
+        <li>Cocokkan sidik jari dulu: buka Command Prompt di folder unduhan, jalankan <code>certutil -dump dbpanel-panel.crt</code>, lalu bandingkan baris <b>Cert Hash(sha256)</b> dengan sidik jari di atas (abaikan spasi, titik dua dan huruf besar/kecil).</li>
         <li>Klik dua kali berkas <code>dbpanel-panel.crt</code> yang sudah diunduh, lalu klik <b>Install Certificate...</b></li>
         <li>Pilih <b>Local Machine</b>, klik <b>Next</b>, lalu <b>Yes</b> bila Windows meminta izin.</li>
         <li>Pilih <b>Place all certificates in the following store</b>, klik <b>Browse...</b>, pilih <b>Trusted Root Certification Authorities</b>, lalu <b>OK</b> dan <b>Next</b>.</li>
@@ -32,6 +44,7 @@
     <div class="card-body gap-3">
       <h2 class="card-title">macOS (Safari, Chrome)</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
+        <li>Cocokkan sidik jari dulu: pilih berkas <code>dbpanel-panel.crt</code> di Finder dan tekan spasi (Quick Look), buka <b>Details</b>, lalu bandingkan <b>SHA-256</b> di bagian <b>Fingerprints</b> dengan sidik jari di atas.</li>
         <li>Klik dua kali berkas <code>dbpanel-panel.crt</code>. Pada pertanyaan Keychain pilih <b>System</b>, lalu <b>Add</b>, dan masukkan kata sandi Mac.</li>
         <li>Di <b>Keychain Access</b> buka <b>System</b>, klik dua kali <b>dbpanel-web-ca</b>.</li>
         <li>Buka bagian <b>Trust</b>, ubah <b>When using this certificate</b> menjadi <b>Always Trust</b>.</li>
@@ -48,7 +61,7 @@
       <ol class="list-decimal ml-6 flex flex-col gap-1">
         <li>Buka <b>Settings</b>, pilih <b>Privacy &amp; Security</b>.</li>
         <li>Di bagian <b>Certificates</b> klik <b>View Certificates...</b>, buka tab <b>Authorities</b>, klik <b>Import...</b></li>
-        <li>Pilih berkas <code>dbpanel-panel.crt</code>, centang <b>Trust this CA to identify websites</b>, lalu <b>OK</b>.</li>
+        <li>Pilih berkas <code>dbpanel-panel.crt</code>, klik <b>View</b>, lalu bandingkan <b>SHA-256</b> di bagian <b>Fingerprints</b> dengan sidik jari di atas. Bila sama, centang <b>Trust this CA to identify websites</b>, lalu <b>OK</b>.</li>
         <li>Buka panel lagi.</li>
       </ol>
       <img src="/static/cert/firefox.svg" alt="Langkah di Firefox: Settings, Privacy &amp; Security, View Certificates, Authorities, Import" class="max-w-full h-auto" width="520" height="300">
@@ -62,6 +75,7 @@
         <li>Unduh berkas dengan tombol di atas.</li>
         <li>Buka <b>Settings</b> → <b>Security</b> → <b>Encryption &amp; credentials</b> → <b>Install a certificate</b>.</li>
         <li>Pilih <b>CA certificate</b>, ketuk <b>Install anyway</b>, lalu pilih berkas <code>dbpanel-panel.crt</code>.</li>
+        <li>Cocokkan sidik jari: buka <b>Trusted credentials</b> → <b>User</b>, ketuk <b>dbpanel-web-ca</b>, lalu bandingkan sidik jari SHA-256 dengan yang di atas. Bila berbeda, ketuk <b>Remove</b>.</li>
         <li>Buka panel lagi. Nama menu bisa sedikit berbeda menurut merek ponsel; cari "certificate" di Settings.</li>
       </ol>
       <img src="/static/cert/android.svg" alt="Langkah di Android: Settings, Security, Encryption &amp; credentials, Install a certificate" class="max-w-full h-auto" width="520" height="300">
@@ -73,7 +87,7 @@
       <h2 class="card-title">iPhone dan iPad</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
         <li>Buka halaman ini di <b>Safari</b>, ketuk tombol unduh, lalu <b>Allow</b>.</li>
-        <li>Buka <b>Settings</b>, ketuk <b>Profile Downloaded</b>, lalu <b>Install</b> dan masukkan kode sandi.</li>
+        <li>Buka <b>Settings</b>, ketuk <b>Profile Downloaded</b>, ketuk <b>More Details</b> lalu nama sertifikat, dan bandingkan <b>SHA-256</b> di bagian <b>Fingerprints</b> dengan sidik jari di atas. Bila sama, ketuk <b>Install</b> dan masukkan kode sandi.</li>
         <li>Buka <b>Settings</b> → <b>General</b> → <b>About</b> → <b>Certificate Trust Settings</b>, aktifkan <b>dbpanel-web-ca</b>, lalu <b>Continue</b>.</li>
         <li>Buka panel lagi.</li>
       </ol>
@@ -84,7 +98,7 @@
   <section class="card bg-base-100 shadow">
     <div class="card-body gap-3">
       <h2 class="card-title">Banyak komputer sekaligus</h2>
-      <p>Admin domain Windows bisa menyebarkan berkas ini ke semua komputer lewat Group Policy (Computer Configuration → Policies → Windows Settings → Security Settings → Public Key Policies → Trusted Root Certification Authorities).</p>
+      <p>Admin domain Windows bisa menyebarkan berkas ini ke semua komputer lewat Group Policy (Computer Configuration → Policies → Windows Settings → Security Settings → Public Key Policies → Trusted Root Certification Authorities). Ambil berkasnya langsung dari server panel (<code>/etc/dbpanel/panel/web-ca.crt</code>, lewat SSH atau flashdisk) dan cocokkan sidik jarinya, jangan dari unduhan browser.</p>
     </div>
   </section>
 </div>

@@ -448,18 +448,32 @@ main() {
 	print_summary
 }
 
-# print_summary prints the panel's address, user and initial password. The
-# password file is in the panel's directory, so it is read as the panel user.
+# print_summary prints the panel's address, user and initial password, and
+# the SHA-256 fingerprint of the certificate users install (this terminal is
+# a channel an attacker on the network cannot change, unlike the page that
+# offers the download). The files are in the panel's directory, so they are
+# read as the panel user; only printable characters are printed.
 print_summary() {
-	local ip pw=""
+	local ip pw="" fp=""
 	ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
 	if [ -s "$PASSWORD_FILE" ]; then
-		pw=$(panel_read 4096 "$PASSWORD_FILE") || pw=""
+		pw=$(panel_read 4096 "$PASSWORD_FILE" | tr -cd '[:print:]') || pw=""
+	fi
+	if command -v openssl >/dev/null 2>&1; then
+		fp=$(panel_read 65536 "$PANEL_CONFIG_DIR/web-ca.crt" | openssl x509 -noout -fingerprint -sha256 2>/dev/null) || fp=""
+		fp=$(printf '%s' "${fp#*=}" | tr -cd '0-9A-Fa-f:')
 	fi
 	echo
 	echo "Panel terpasang."
 	echo "Alamat : https://${ip:-<ip-server>}:8080"
-	echo "Browser memperingatkan? Buka http://${ip:-<ip-server>}:8080/sertifikat dan pasang sertifikat keamanan panel."
+	echo "Browser memperingatkan? Buka https://${ip:-<ip-server>}:8080/sertifikat (terima peringatan sekali) dan pasang sertifikat keamanan panel."
+	if [ -n "$fp" ]; then
+		echo "Sidik jari SHA-256 sertifikat itu: $fp"
+		echo "Cocokkan dengan sidik jari berkas yang diunduh sebelum memasangnya; bila berbeda, jangan pasang."
+	else
+		echo "Sidik jari sertifikat itu tampil di halaman Pengaturan panel setelah login; cocokkan sebelum memasang."
+	fi
+	echo "Simpan bookmark dengan https://. Browser hanya mengingat HTTPS untuk nama DNS (mis. --public-host panel.rsud.local), tidak untuk alamat IP."
 	echo "Pengguna: admin"
 	if [ -n "$pw" ]; then
 		echo "Sandi   : $pw"

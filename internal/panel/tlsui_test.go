@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -31,6 +33,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent"
 	"github.com/husmin-fajrin/db-panel/internal/panel/agentapi"
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
+	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
@@ -295,11 +298,40 @@ func selfSigned(t *testing.T, notAfter time.Time, names ...string) (certPEM, key
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder})
 }
 
-// uploadCert posts a certificate and key to the settings page, logged in.
-func uploadCert(t *testing.T, base string, c *http.Cookie, certPEM, keyPEM []byte) (int, string) {
+// settingsToken asks POST /confirm, as the session c with the initial
+// password, for a token for a certificate setting (target settings/0).
+func settingsToken(t *testing.T, o Options, base string, c *http.Cookie, action string) string {
+	t.Helper()
+	form := url.Values{"action": {action}, "target_kind": {"settings"}, "target_id": {"0"},
+		"password": {readInitialPassword(t, o)}}
+	req, err := http.NewRequest("POST", base+"/confirm", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", base)
+	req.AddCookie(c)
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readAll(t, resp)
+	var out struct {
+		Token string `json:"token"`
+	}
+	if resp.StatusCode != http.StatusOK || json.Unmarshal([]byte(body), &out) != nil || out.Token == "" {
+		t.Fatalf("POST /confirm %s = %d: %s", action, resp.StatusCode, body)
+	}
+	return out.Token
+}
+
+// uploadCert posts a certificate and key to the settings page, logged in,
+// with a confirmation token.
+func uploadCert(t *testing.T, o Options, base string, c *http.Cookie, certPEM, keyPEM []byte) (int, string) {
 	t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
+	mw.WriteField("confirm_token", settingsToken(t, o, base, c, "cert_upload"))
 	for name, data := range map[string][]byte{"cert_file": certPEM, "key_file": keyPEM} {
 		fw, err := mw.CreateFormFile(name, name+".pem")
 		if err != nil {
@@ -360,7 +392,7 @@ func TestCustomCertValidation(t *testing.T) {
 		{"tanpa alamat panel", elsewhere, elsewhereKey, "Sertifikat tidak memuat alamat panel 127.0.0.1"},
 		{"bukan PEM", []byte("bukan sertifikat"), goodKey, "Berkas sertifikat bukan sertifikat PEM yang sah"},
 	} {
-		code, body := uploadCert(t, base, c, tc.cert, tc.key)
+		code, body := uploadCert(t, o, base, c, tc.cert, tc.key)
 		if code != http.StatusBadRequest || !strings.Contains(body, tc.want) {
 			t.Errorf("%s: %d, want 400 with %q", tc.name, code, tc.want)
 		}
@@ -371,7 +403,7 @@ func TestCustomCertValidation(t *testing.T) {
 
 	// A chain after the leaf is accepted.
 	chain := append(slices.Clone(good), p.certs.CAPEM()...)
-	if code, body := uploadCert(t, base, c, chain, goodKey); code != http.StatusSeeOther {
+	if code, body := uploadCert(t, o, base, c, chain, goodKey); code != http.StatusSeeOther {
 		t.Fatalf("good upload = %d: %s", code, body)
 	}
 	if info := p.certInfo(); info.Mode != httpsModeCustom || !slices.Contains(info.Names, "panel.kantor.example") {
@@ -389,7 +421,8 @@ func TestCustomCertValidation(t *testing.T) {
 		t.Fatalf("https_mode = %q", mode)
 	}
 
-	req, _ := http.NewRequest("POST", base+"/settings/cert-panel", strings.NewReader(""))
+	req, _ := http.NewRequest("POST", base+"/settings/cert-panel",
+		strings.NewReader(url.Values{"confirm_token": {settingsToken(t, o, base, c, "cert_revert")}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", base)
 	req.AddCookie(c)
@@ -438,8 +471,8 @@ func TestBrokenCertFallsBackToPanelCert(t *testing.T) {
 	o.Logger, logs = bufLogger()
 	p := newPanel(t, o)
 	info := p.certInfo()
-	if info.Mode != httpsModePanel || !slices.Contains(info.Names, "127.0.0.1") {
-		t.Fatalf("certInfo = %+v, want the panel's own certificate", info)
+	if info.Mode != httpsModePanel || !slices.Contains(info.Names, "127.0.0.1") || !info.CustomFallback {
+		t.Fatalf("certInfo = %+v, want the panel's own certificate, marked as a fall-back", info)
 	}
 	for _, want := range []string{"uploaded HTTPS certificate broken; using the panel's own", "panel HTTPS certificate unreadable; issuing a new one"} {
 		if !strings.Contains(logs.String(), want) {
@@ -552,28 +585,92 @@ func TestWebNames(t *testing.T) {
 	_, lan, _ := net.ParseCIDR("10.20.30.40/24")
 	lan.IP = net.ParseIP("10.20.30.40").To4()
 	log, logs := bufLogger()
-	n := webNames("Panel.RS.example", "dbhost", []*net.IPNet{lan}, "10.20.30.41, lokal, db.rs.example,bad_name.x", log)
-	if !slices.Equal(n.DNS, []string{"panel.rs.example", "db.rs.example"}) {
-		t.Errorf("DNS = %v", n.DNS)
+	chosen, found := webNames("Panel.RS.example", "dbhost", []*net.IPNet{lan}, "10.20.30.41, lokal, db.rs.example,bad_name.x", log)
+	if !slices.Equal(chosen.DNS, []string{"panel.rs.example", "db.rs.example"}) {
+		t.Errorf("DNS = %v", chosen.DNS)
 	}
-	var ips []string
-	for _, ip := range n.IPs {
-		ips = append(ips, ip.String())
+	ipStrings := func(ips []net.IP) []string {
+		var out []string
+		for _, ip := range ips {
+			out = append(out, ip.String())
+		}
+		return out
 	}
-	if !slices.Equal(ips, []string{"10.20.30.40", "10.20.30.41"}) {
-		t.Errorf("IPs = %v", ips)
+	if got := ipStrings(chosen.IPs); !slices.Equal(got, []string{"10.20.30.41"}) {
+		t.Errorf("chosen IPs = %v", got)
 	}
-	if len(n.Subnets) != 1 || n.Subnets[0].String() != "10.20.30.0/24" {
-		t.Errorf("Subnets = %v", n.Subnets)
+	if got := ipStrings(found.IPs); !slices.Equal(got, []string{"10.20.30.40"}) {
+		t.Errorf("found IPs = %v", got)
+	}
+	if len(chosen.Subnets) != 0 || len(found.Subnets) != 1 || found.Subnets[0].String() != "10.20.30.0/24" {
+		t.Errorf("Subnets = %v / %v", chosen.Subnets, found.Subnets)
 	}
 	for _, dropped := range []string{"name=lokal", "name=bad_name.x"} {
 		if !strings.Contains(logs.String(), dropped) {
 			t.Errorf("no log line for %s:\n%s", dropped, logs.String())
 		}
 	}
-	n = webNames("192.168.1.10", "srv.kantor.example", nil, "", log)
-	if len(n.IPs) != 1 || !n.IPs[0].Equal(net.ParseIP("192.168.1.10")) || !slices.Equal(n.DNS, []string{"srv.kantor.example"}) {
-		t.Errorf("names = %+v", n)
+	chosen, found = webNames("192.168.1.10", "srv.kantor.example", []*net.IPNet{{IP: net.ParseIP("192.168.1.10").To4(), Mask: net.CIDRMask(24, 32)}}, "", log)
+	if len(chosen.IPs) != 1 || !chosen.IPs[0].Equal(net.ParseIP("192.168.1.10")) || !slices.Equal(chosen.DNS, []string{"srv.kantor.example"}) {
+		t.Errorf("names = %+v", chosen)
+	}
+	if len(found.IPs) != 0 || len(found.Subnets) != 1 {
+		t.Errorf("found = %+v, want only the subnet (the address is chosen)", found)
+	}
+}
+
+// TestNewInterfaceKeepsWebCA: an interface that comes up after the web CA
+// was made (a docker or VPN bridge) never replaces the CA; its address is
+// left out of the certificate with a log line. A name the operator chose
+// outside the CA still replaces it, keeping two older generations.
+func TestNewInterfaceKeepsWebCA(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	var logs *syncBuffer
+	o.Logger, logs = bufLogger()
+	p := newPanel(t, o)
+	oldCA := p.certs.CAPEM()
+	bridge := &net.IPNet{IP: net.ParseIP("172.18.0.1").To4(), Mask: net.CIDRMask(16, 32)}
+	base := p.certs.names
+	p.certs.names = func() (ca.WebNames, ca.WebNames) {
+		chosen, found := base()
+		found.IPs = append(found.IPs, bridge.IP)
+		found.Subnets = append(found.Subnets, &net.IPNet{IP: bridge.IP.Mask(bridge.Mask), Mask: bridge.Mask})
+		return chosen, found
+	}
+	if err := p.certs.renew(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(p.certs.CAPEM(), oldCA) || p.certInfo().CANeedsReinstall {
+		t.Fatal("a new interface subnet replaced the web CA")
+	}
+	if slices.Contains(p.certInfo().Names, "172.18.0.1") {
+		t.Fatal("the bridge address outside the CA is in the certificate")
+	}
+	if !strings.Contains(logs.String(), "interface address outside the web CA") {
+		t.Fatalf("no log line for the bridge address:\n%s", logs.String())
+	}
+	// A restart with the bridge still up keeps the CA too.
+	if err := p.certs.load(); err != nil || !bytes.Equal(p.certs.CAPEM(), oldCA) {
+		t.Fatalf("load with the bridge: %v, CA replaced %v", err, !bytes.Equal(p.certs.CAPEM(), oldCA))
+	}
+	// Two operator changes: web-ca.*.old and .old2 hold the two CAs before.
+	if problem, err := p.certs.SetExtraNames("203.0.113.7"); problem != "" || err != nil {
+		t.Fatalf("SetExtraNames: %q %v", problem, err)
+	}
+	second := p.certs.CAPEM()
+	if problem, err := p.certs.SetExtraNames("198.51.100.9"); problem != "" || err != nil {
+		t.Fatalf("SetExtraNames: %q %v", problem, err)
+	}
+	for f, want := range map[string][]byte{"web-ca.crt.old": second, "web-ca.crt.old2": oldCA} {
+		if got, err := os.ReadFile(filepath.Join(o.ConfigDir, f)); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: %v, want an earlier CA", f, err)
+		}
+	}
+	for _, f := range []string{"web-ca.key.old", "web-ca.key.old2"} {
+		if _, err := os.Stat(filepath.Join(o.ConfigDir, f)); err != nil {
+			t.Errorf("%s: %v", f, err)
+		}
 	}
 }
 
@@ -763,5 +860,72 @@ func TestWebCertWritesAtomic(t *testing.T) {
 		if strings.Contains(e.Name(), ".tmp-") {
 			t.Fatalf("temporary file left: %s", e.Name())
 		}
+	}
+}
+
+// TestExtraNamesTooBroad: an extra name that would make the web CA valid
+// for a whole organisation or public suffix is refused (SEC-55); the CA is
+// left as it was.
+func TestExtraNamesTooBroad(t *testing.T) {
+	t.Parallel()
+	for name, broad := range map[string]bool{
+		"co.id": true, "go.id": true, "example.com": true, "bca.co.id": true, "rsud.go.id": true, "local.lan": false,
+		"rsud.local": false, "panel.rsud.go.id": false, "panel.kantor.example": false, "srv.home": false, "co.uk.local": false,
+	} {
+		if got := tooBroadName(name); got != broad {
+			t.Errorf("tooBroadName(%q) = %v, want %v", name, got, broad)
+		}
+	}
+	p := newPanel(t, testOptions(t))
+	oldCA := p.certs.CAPEM()
+	problem, err := p.certs.SetExtraNames("panel.rsud.go.id, co.id bca.co.id")
+	if err != nil || !strings.Contains(problem, "Nama terlalu umum") || !strings.Contains(problem, "co.id, bca.co.id") {
+		t.Fatalf("SetExtraNames = %q, %v", problem, err)
+	}
+	if !bytes.Equal(p.certs.CAPEM(), oldCA) {
+		t.Fatal("refused names replaced the web CA")
+	}
+	if extra, _ := p.Store.GetSetting(store.SettingHTTPSExtraNames); extra != "" {
+		t.Fatalf("refused names saved: %q", extra)
+	}
+}
+
+// TestCAFingerprintMatchesOpenSSL: the fingerprint on /sertifikat and in
+// the settings is what openssl x509 -fingerprint -sha256 prints for
+// web-ca.crt, the file install.sh reads (SEC-54).
+func TestCAFingerprintMatchesOpenSSL(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	fp := p.certInfo().CAFingerprint
+	if len(fp) != 95 {
+		t.Fatalf("fingerprint %q", fp)
+	}
+	if _, err := exec.LookPath("openssl"); err == nil {
+		out, err := exec.Command("openssl", "x509", "-noout", "-fingerprint", "-sha256", "-in",
+			filepath.Join(o.ConfigDir, "web-ca.crt")).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, got, _ := strings.Cut(strings.TrimSpace(string(out)), "="); got != fp {
+			t.Fatalf("openssl says %q, panel %q", got, fp)
+		}
+	}
+	uiAddr, _ := startPanel(t, p)
+	resp, err := plainClient.Get("http://" + uiAddr + "/sertifikat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := readAll(t, resp); !strings.Contains(body, fp) {
+		t.Fatal("/sertifikat lacks the fingerprint")
+	}
+	base := "https://" + uiAddr
+	req, _ := http.NewRequest("GET", base+"/settings", nil)
+	req.AddCookie(login(t, o, base))
+	if resp, err = noRedirect.Do(req); err != nil {
+		t.Fatal(err)
+	}
+	if body := readAll(t, resp); !strings.Contains(body, fp) {
+		t.Fatal("settings page lacks the fingerprint")
 	}
 }

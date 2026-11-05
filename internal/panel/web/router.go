@@ -344,7 +344,11 @@ func (f noDirFS) Open(name string) (fs.File, error) {
 func (a *app) page(r *http.Request) Page {
 	p := Page{Username: auth.UsernameFrom(r.Context()), Version: a.Version}
 	if p.Username != "" {
-		p.CertNotice = a.CertInfo().CANeedsReinstall
+		ci := a.CertInfo()
+		p.CertNotice, p.CertFallback = ci.CANeedsReinstall, ci.CustomFallback
+		if p.CertNotice {
+			p.CertIPURL = certIPURL(r, ci)
+		}
 		// The navbar's alert badge; a page still renders without it.
 		if open, err := a.Store.ListOpenAlerts(); err != nil {
 			a.Logger.Warn("count open alerts", "err", err)

@@ -59,7 +59,7 @@ func (jr *jobRun) prepareMasterSteps() []step {
 	return []step{
 		{names[0], jr.masterPreflight},
 		{names[1], jr.masterConfigure},
-		{names[2], jr.installCert(jr.job.ServerID)},
+		{names[2], jr.installCertOrSkip(jr.job.ServerID, jr.installCert(jr.job.ServerID))},
 		{names[3], jr.masterRestart},
 		{names[4], jr.masterVerify},
 	}

@@ -89,6 +89,9 @@ var notices = map[string]string{
 	"disegarkan": "Data MySQL sudah diperbarui.",
 	"sumber": "Alamat MySQL master untuk replika disimpan. Alamat ini diperiksa saat membuat replika berikutnya (replika harus bisa menjangkaunya). " +
 		"Replika yang sudah ada perlu diarahkan ke alamat ini di servernya sendiri: lihat perintahnya di bawah.",
+	"sumber-sertifikat": "Alamat MySQL master untuk replika disimpan, tetapi sertifikat MySQL master belum memuat alamat ini: " +
+		"klik Perbarui sertifikat MySQL di halaman server master sebelum membuat replika atau Resync ulang. " +
+		"Replika yang sudah ada perlu diarahkan ke alamat ini di servernya sendiri: lihat perintahnya di bawah.",
 	"dihentikan": "Replikasi dihentikan. Lag membesar sampai Anda menjalankannya lagi dengan Start replika.",
 	"dijalankan": "Replikasi dijalankan lagi. Status terbaru tampil setelah laporan berikutnya dari agent.",
 	"dikunci":    "Replika dikunci hanya-baca lagi.",
@@ -347,7 +350,7 @@ func (a *app) masterDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	p := masterPage{Page: a.page(r), Server: srv, Online: a.Hub.IsOnline(srv.ID), Topology: topo}
 	p.Notice = notices[r.URL.Query().Get("pesan")]
-	p.SourceSaved = r.URL.Query().Get("pesan") == "sumber"
+	p.SourceSaved = r.URL.Query().Get("pesan") == "sumber" || r.URL.Query().Get("pesan") == "sumber-sertifikat"
 	a.renderMaster(w, r, http.StatusOK, p)
 }
 
@@ -383,7 +386,13 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.Logger.Info("master source address changed", "master", srv.ID, "host", host, "port", port, "by", a.page(r).Username)
-	http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan=sumber", http.StatusSeeOther)
+	notice := "sumber"
+	// The master's MySQL certificate does not name the new address: the
+	// next replica would refuse it (I8).
+	if rec, err := a.Store.GetServerTLS(srv.ID); err == nil && rec.Hosts != nil && !orchestrator.CertNamesHost(rec.Hosts, host) {
+		notice = "sumber-sertifikat"
+	}
+	http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan="+notice, http.StatusSeeOther)
 }
 
 // renderMaster fills p's inventory, replicas and jobs and renders it.
