@@ -200,11 +200,14 @@ kandidat, sehingga panel yang dibobol tidak bisa mengunci master atas
 nama replika yang sudah mati. Monitor juga mencatat tiap host replika
 yang pernah tersambung di `/var/lib/dbpanel/replicas-seen` (tanpa batas
 waktu, dipangkas setelah 1 tahun); catatan ini dipakai `quarantine`.
-Lalu `SET GLOBAL super_read_only=ON` dan berkas kunci
+Lalu `SET PERSIST super_read_only=ON` (PERSIST, agar restart MySQL
+tidak membuka tulis walau sedetik) dan berkas kunci
 `/etc/dbpanel/promote-lock` (kandidat, tenggat); selama berkas itu ada,
 pin `master` menolak `setReadOnly{off}` (tombol "Buka kunci master"
-yang ada), dan saat MySQL restart agent memasang kunci lagi sebelum
-memeriksa apa pun, sehingga tidak ada celah tulis. Agent menjalankan
+yang ada; "Kunci kembali" di 5.7 adalah tombol replika dan tidak
+tersentuh). Membuka kunci berarti `RESET PERSIST super_read_only` lalu
+`SET GLOBAL super_read_only=OFF`, oleh penjaga, `unlockPromote`, atau
+CLI. Agent menjalankan
 penjaga: pada tenggat (`timeout`, dikirim panel;
 job promote memakai 30 menit, yaitu tenggat kejar 10 menit + tenggat
 terapan relay log 10 menit + cadangan; maksimum 60) agent memeriksa
@@ -231,12 +234,14 @@ dari luar panel (dipakai pada kasus M3 di 5.2 butir 3).
 
 - `planned`: master terjangkau, `super_read_only=ON` di master, dan
   `GTID_SUBTRACT(master.gtid_executed, own.gtid_executed)` kosong.
-- Prasyarat kedua mode: akun `dbpanel_repl@'%'` ada di replika ini.
-  Replika sebagian tidak memilikinya (bagian 3), maka pin `replica`
-  kini menerima `mysql.createReplUser` dengan aturan ketat yang sama
-  seperti master (hanya `dbpanel_repl@'%'`, sekali, tidak ada baris lain
-  dengan nama itu); job promote menjalankannya sebelum `lockForPromote`
-  agar penjaga master bisa memeriksa kandidat.
+- Akun `dbpanel_repl@'%'` di kandidat: replika sebagian tidak
+  memilikinya (bagian 3). Pin `replica` kini menerima
+  `mysql.createReplUser` dengan aturan ketat yang sama seperti master
+  (hanya `dbpanel_repl@'%'`, sekali, tidak ada baris lain dengan nama
+  itu). Pada `planned`, job menjalankannya di kandidat sebelum
+  `lockForPromote`, karena penjaga master memeriksa kandidat dengan akun
+  itu. Pada `emergency` tidak ada penjaga; `promote` sendiri membuatnya
+  setelah membuka tulis (langkah di bawah).
 - `emergency`: master tidak menjawab dari replika ini: tiga percobaan
   sambung TCP dan membaca salam MySQL, masing-masing tenggat 5 detik,
   berjarak 10 detik (sekitar 30 detik); semuanya gagal; dan IO thread
@@ -253,27 +258,32 @@ tenggat 10 menit, kemajuan dilaporkan ke job log) agar transaksi yang
 sudah sampai tidak dibuang; pada `planned`, verifikasi master terkunci
 diulang tepat sebelum langkah berikut (bila penjaga master sudah membuka
 kunci, promote dibatalkan dan replikasi dijalankan lagi); baru `STOP
-REPLICA; RESET REPLICA ALL; SET PERSIST read_only=OFF; SET PERSIST
-super_read_only=OFF`; bila akun
-`dbpanel_repl` tidak ada, dibuat dengan sandi topologi dari parameter;
-pin peran `master`, pin sumber dihapus,
+REPLICA`, lalu **membuka tulis**: `SET PERSIST read_only=OFF; SET
+PERSIST super_read_only=OFF` (sejak detik ini penjaga master melihat
+kandidat sudah master dan hanya akan mengkarantina, tidak pernah
+membuka kunci), baru `RESET REPLICA ALL`; bila akun `dbpanel_repl`
+tidak ada, dibuat dengan sandi topologi dari parameter (pada `planned`
+job sudah membuatnya lebih dulu, lihat prasyarat); pin peran `master`,
+pin sumber dihapus,
 catatan `/etc/dbpanel/promoted` berisi waktu, mode, sumber lama, dan
 `gtid_executed` saat promote (dipakai layar dan audit). Hasil memuat
-`gtid_executed` akhir dan `server_uuid`. Titik tanpa balik adalah `RESET
-REPLICA ALL`: kegagalan sebelum itu (verifikasi, menunggu relay log)
+`gtid_executed` akhir dan `server_uuid`. Titik tanpa balik adalah
+membuka tulis: kegagalan sebelum itu (verifikasi, menunggu relay log)
 membuat agent menjalankan `START REPLICA` lagi dan melapor gagal tanpa
 perubahan; kegagalan sesudahnya tidak dibalik, dan `promote` bisa
-dipanggil ulang: agent memeriksa keadaan (replikasi sudah dihapus,
-tulis sudah terbuka, pin) dan melanjutkan langkah yang belum, sehingga
-"Coba lagi" di job aman.
+dipanggil ulang: bila tulis sudah terbuka agent melanjutkan langkah
+yang belum (`RESET REPLICA ALL`, akun, pin, catatan) tanpa memeriksa
+master lagi, karena penjaga master sudah melihatnya sebagai master; bila
+tulis belum terbuka, promote diulang dari verifikasi awal. Dengan itu
+"Coba lagi" tidak pernah menghasilkan dua master.
 
 **`mysql.quarantine{new master host:port, repl cred}`** di master lama
 (pin `master`, terkunci oleh `lockForPromote` atau tidak). Agent
 memverifikasi `new master` terjangkau, `super_read_only=OFF`, dan
 `gtid_executed`-nya memuat UUID server ini; bila server ini tidak
 terkunci oleh `lockForPromote`, `new master` juga harus host yang pernah
-tercatat sebagai replika di `replicas-seen` (tanpa batas waktu), supaya
-master lama yang kembali berbulan-bulan kemudian tetap bisa
+tercatat sebagai replika di `replicas-seen` (catatan dipangkas setelah
+1 tahun), supaya master lama yang kembali berbulan-bulan kemudian tetap bisa
 dikarantina, sementara server asing tidak bisa dipakai panel yang
 dibobol untuk mengunci master sehat. Lalu `SET PERSIST
 super_read_only=ON; SET PERSIST read_only=ON`, pin peran `quarantined`,
@@ -293,9 +303,12 @@ terjangkau, `super_read_only=OFF`, `gtid_executed`-nya memuat semua
 dan memuat UUID sumber lama. Lalu `STOP REPLICA; CHANGE REPLICATION
 SOURCE TO` host baru dengan auto position; verifikasi sertifikat (5.9)
 dinyalakan bila parameter `verify` dari panel benar, yaitu master baru
-sudah punya sertifikat panel (`server_tls`), selain itu `SOURCE_SSL=1`
-tanpa verifikasi seperti hari ini dan panel menampilkan peringatan
-"Sambungan replikasi belum diverifikasi"; `START REPLICA`; pin sumber =
+sudah punya sertifikat panel (`server_tls`); parameter membawa PEM CA
+MySQL dan agent menulis `<datadir>/dbpanel-tls/mysql-ca.crt` bila belum
+ada (hanya berkas CA, tanpa sertifikat server); selain itu
+`SOURCE_SSL=1` tanpa verifikasi seperti hari ini dan panel menandai
+`replicas.tls_verified=0` dengan peringatan "Sambungan replikasi belum
+diverifikasi"; `START REPLICA`; pin sumber =
 `new master`. Bila replika ini punya transaksi yang tidak ada di master
 baru, agent tidak mengubah replikasi, tetapi tetap memindahkan pin
 sumber ke `new master` (verifikasi yang sama tanpa syarat superset) dan
@@ -408,7 +421,8 @@ di tabel `promotions` (5.13) sejak mulai.
    tenggat 10 menit, log kemajuan tiap 5 detik. Gagal → batalkan dengan
    `mysql.unlockPromote`, job gagal, master tidak berubah.
 3. Promote replika terpilih: `mysql.promote{planned}`.
-4. Karantina master lama: `mysql.quarantine{new master}`. Gagal (agent
+4. Karantina master lama: `mysql.quarantine{new master, repl cred}`.
+   Gagal (agent
    master lama lepas di tengah) → job menandai "karantina tertunda",
    panel mengirim ulang pada OnOnline; penjaga agent master (5.1) juga
    menutup sendiri pada tenggat.
@@ -432,9 +446,10 @@ sebagian" dan daftar langkah yang belum, masing-masing dengan tombol
 replika). Dashboard menampilkan banner sampai semua selesai.
 
 **`promote_emergency`**, langkah: promote replika terpilih
-(`mysql.promote{emergency}`), tukar data panel, arahkan replika lain,
-karantina tertunda (dikirim pada OnOnline master lama), layar
-pengalihan. Master lama yang kembali sebelum karantina terkirim bisa
+(`mysql.promote{emergency}`), tukar data panel, karantina master lama
+(`mysql.quarantine` segera bila agent master lama masih tersambung,
+misalnya MySQL-nya yang mati; selain itu "karantina tertunda", dikirim
+pada OnOnline), arahkan replika lain, layar pengalihan. Master lama yang kembali sebelum karantina terkirim bisa
 sempat ditulis aplikasi yang belum dialihkan; jendela ini (dari MySQL
 hidup sampai agent tersambung dan `quarantine` masuk, biasanya detik)
 ditulis di layar pengalihan dan di README. Transaksi yang masuk di
@@ -640,17 +655,24 @@ yang dibuat panel yang dibobol (4.B). Pagar agent adalah 5.1.
   INSTANCE RELOAD TLS` butuh `CONNECTION_ADMIN`: masuk daftar hak wajib
   preflight akun admin; server lama yang kekurangan ditampilkan dengan
   perintah `GRANT` seperti hak lain yang kurang.
-- Replika: `CHANGE REPLICATION SOURCE TO ... SOURCE_SSL=1,
+- Replika: bila master punya sertifikat panel (`server_tls`; selalu
+  benar untuk topologi yang disiapkan setelah Rencana 4, karena "Siapkan
+  master" memasangnya), `CHANGE REPLICATION SOURCE TO ... SOURCE_SSL=1,
   SOURCE_SSL_CA='<datadir>/dbpanel-tls/mysql-ca.crt',
-  SOURCE_SSL_VERIFY_SERVER_CERT=1` (memverifikasi nama host sumber).
-  `mysqldump`/CLONE dari master memakai `--ssl-mode=VERIFY_IDENTITY`
-  dan `clone_ssl_ca`. Akun replikasi tetap `REQUIRE SSL`.
+  SOURCE_SSL_VERIFY_SERVER_CERT=1` (memverifikasi nama host sumber) dan
+  `mysqldump`/CLONE memakai `--ssl-mode=VERIFY_IDENTITY` dan
+  `clone_ssl_ca`; `replicas.tls_verified=1`. Bila master belum punya
+  (topologi lama yang belum "Diperketat"), seperti hari ini:
+  `SOURCE_SSL=1` tanpa verifikasi, `tls_verified=0`, dan peringatan
+  "Sambungan replikasi belum diverifikasi" di halaman master. Akun
+  replikasi tetap `REQUIRE SSL`.
 - Replika yang sudah berjalan sebelum Rencana 4: tombol "Perketat
   sambungan replikasi" di halaman master menjalankan `mysql_tls` di
   master dan di tiap replika (tiap server mendapat sertifikatnya sendiri
   dan berkas `mysql-ca.crt`, yang dibutuhkan `SOURCE_SSL_CA` dan berguna
   saat replika itu kelak dipromote), lalu `CHANGE REPLICATION SOURCE`
-  ulang di tiap replika (STOP/START singkat), dengan token 5.7. Panel menampilkan peringatan
+  ulang di tiap replika (STOP/START singkat) dan menandai
+  `tls_verified=1`, dengan token 5.7. Panel menampilkan peringatan
   "Sambungan replikasi belum diverifikasi" (bukan alert Telegram) pada
   topologi lama sampai dijalankan.
 - Perpanjangan: agent meminta sertifikat baru 30 hari sebelum
@@ -769,7 +791,9 @@ yang dibuat panel yang dibobol (4.B). Pagar agent adalah 5.1.
 
 - `servers.role` menerima `quarantined`; kolom baru `pin_role TEXT`,
   `pin_source TEXT`, `pin_error TEXT` (laporan terakhir).
-- `replicas.state` menerima `needs_repoint`, `needs_rebuild`.
+- `replicas.state` menerima `needs_repoint`, `needs_rebuild`; kolom baru
+  `tls_verified INTEGER NOT NULL DEFAULT 0` (sambungan replikasi
+  memverifikasi sertifikat master).
 - `topologies`: `cutover_pending INTEGER NOT NULL DEFAULT 0`,
   `old_master_server_id INTEGER NOT NULL DEFAULT 0`. Apakah master
   punya sertifikat panel dibaca dari `server_tls`, tidak disimpan dua
@@ -811,14 +835,16 @@ pengalihan.
 
 - Halaman master: tombol "Promote…" (selalu ada; teks di bawahnya
   menyebut mode yang akan dipakai), kotak "Perketat sambungan
-  replikasi" bila master belum punya baris `server_tls`.
+  replikasi" bila master belum punya baris `server_tls` atau ada replika
+  dengan `tls_verified=0`.
 - `GET /masters/{id}/promote` (5.2), `POST /masters/{id}/promote`
   (replika terpilih, token), `GET /masters/{id}/cutover` dan `POST
   /masters/{id}/cutover/done` (5.5), fragmen koneksi `GET
   /servers/{id}/connections-fragment`.
 - Halaman server `quarantined` (5.4): `POST /servers/{id}/leftover`,
   `POST /servers/{id}/salvage`, `GET /servers/{id}/salvage/{name}`,
-  tombol bangun ulang dan hapus.
+  `POST /servers/{id}/salvage/{name}/delete`, tombol bangun ulang dan
+  hapus.
 - `POST /confirm` dan komponen modal (5.7) dipakai semua tombol
   destruktif yang ada; tombol lama yang hanya mengetik nama server
   sekarang juga meminta kata sandi.
@@ -976,15 +1002,19 @@ dibangun, jawabannya sudah dimasukkan ke bagian terkait:
     tersambung; kunci dicatat di berkas dan dipasang lagi saat MySQL
     restart; selama berkas ada, "Buka kunci master" ditolak; kandidat
     yang hilang membuat master tetap terkunci sampai `dbpanel agent
-    unlock-master`; penjaga memberi tenggang 60 detik sebelum membuka
-    (5.1, 8).
-14. (Pemeriksaan konsistensi) Titik tanpa balik promote adalah `RESET
-    REPLICA ALL`; promote bisa dilanjutkan dengan "Coba lagi" (5.1,
-    5.3).
+    unlock-master`; penjaga memberi tenggang 60 detik sebelum membuka;
+    kunci memakai PERSIST agar restart tidak membuka tulis (5.1, 8).
+14. (Pemeriksaan konsistensi) Titik tanpa balik promote adalah membuka
+    tulis, yang dilakukan sebelum `RESET REPLICA ALL`, sehingga penjaga
+    master hanya bisa mengkarantina sesudahnya; "Coba lagi" melanjutkan
+    tanpa memeriksa master bila tulis sudah terbuka (5.1, 5.3).
 15. (Pemeriksaan konsistensi) Pin `replica` menerima `createReplUser`
     ketat agar replika sebagian bisa menjadi kandidat (5.1, 8).
-16. (Pemeriksaan konsistensi) `replicas-seen` tanpa batas waktu untuk
-    `quarantine`; "Perketat" memasang sertifikat di semua server
+16. (Pemeriksaan konsistensi) `replicas-seen` disimpan 1 tahun untuk
+    `quarantine`; `repoint` membawa berkas CA ke replika; verifikasi
+    sertifikat pada "Siapkan replika" dan `repoint` mengikuti ada
+    tidaknya sertifikat master, dicatat per replika di `tls_verified`;
+    karantina darurat dikirim segera bila agent master lama tersambung; "Perketat" memasang sertifikat di semua server
     topologi; perintah pasang agent memakai `-k` + pin dan dibuat dari
     kunci aktif; upgrade memulai panel dulu lalu agent lokal; hapus
     berkas salvage dan hapus master lama diatur (5.1, 5.4, 5.8, 5.9,
