@@ -67,12 +67,30 @@ pertama. Alamat `http://` lama tetap bisa dibuka; browser dialihkan ke
 
 Saat pertama membuka `https://<ip-panel>:8080`, browser memperingatkan
 bahwa sambungan "tidak aman" atau "tidak pribadi", karena sertifikat panel
-belum dikenal komputer itu. Buka `http://<ip-panel>:8080/sertifikat`
-(halaman ini sengaja bisa dibuka tanpa HTTPS dan tanpa login), unduh
-sertifikat keamanan panel, klik dua kali, pilih Pasang, lalu buka panel
-lagi. Halaman itu menjelaskan langkahnya untuk Windows, macOS, Firefox,
-Android, dan iPhone/iPad. Cukup sekali per komputer atau ponsel; sesudahnya
-browser membuka panel tanpa peringatan.
+belum dikenal komputer itu. Terima peringatan itu sekali, buka
+`https://<ip-panel>:8080/sertifikat` (tanpa login), unduh sertifikat
+keamanan panel, **cocokkan sidik jari SHA-256-nya** dengan yang dicetak
+`install.sh` di akhir pemasangan (juga tampil di **Pengaturan >
+Sertifikat keamanan panel** setelah login), baru pasang, lalu buka panel
+lagi. Halaman itu menjelaskan langkahnya, termasuk cara melihat sidik
+jari, untuk Windows, macOS, Firefox, Android, dan iPhone/iPad. Cukup sekali
+per komputer atau ponsel; sesudahnya browser membuka panel tanpa
+peringatan. Sertifikat itu dipasang sebagai penerbit tepercaya: bila sidik
+jarinya berbeda, jangan pasang (ada yang mengganti berkasnya di jaringan).
+Halaman `/sertifikat` juga bisa dibuka lewat `http://` untuk browser yang
+menolak HTTPS, tetapi isinya (sidik jarinya juga) tidak terlindung di
+jaringan; cocokkan selalu dengan keluaran `install.sh` atau Pengaturan.
+Untuk banyak komputer lewat Group Policy, salin `web-ca.crt` langsung dari
+host panel (SSH atau flashdisk) dan cocokkan sidik jarinya, jangan dari
+unduhan browser.
+
+Simpan bookmark panel dengan `https://`. Browser hanya mengingat "selalu
+HTTPS" (HSTS) untuk nama DNS, tidak untuk alamat IP: alamat `http://`
+dengan IP selalu terbuka tanpa enkripsi dulu sebelum dialihkan, dan orang
+lain di jaringan bisa menyela di situ (mis. menampilkan halaman login
+palsu). Untuk perlindungan penuh, buka panel lewat nama DNS
+(`--public-host panel.rsud.local` atau **Nama dan alamat tambahan**)
+dengan `https://`.
 
 ## Login pertama
 
@@ -101,7 +119,8 @@ beberapa detik, tanpa restart panel). Sesi berakhir setelah 12 jam tanpa
 aktivitas dan paling lama 24 jam setelah login.
 
 Login dibatasi 5 percobaan per alamat IP dan 20 sandi salah per nama
-pengguna dalam 15 menit, dan hanya beberapa pemeriksaan sandi yang berjalan
+pengguna dalam 15 menit (sandi salah di konfirmasi kata sandi ikut
+dihitung), dan hanya beberapa pemeriksaan sandi yang berjalan
 bersamaan (selebihnya "Server sibuk, coba lagi sebentar"). Bila akun
 terkunci, misalnya karena orang lain sengaja salah sandi berulang kali,
 penghitung itu ada di memori panel: `sudo systemctl restart dbpanel-panel`
@@ -352,7 +371,10 @@ sertifikat sendiri (masa 2 tahun) yang hanya memuat nama yang panel
 ketahui sendiri: alamat server di panel dan, untuk master, alamat untuk
 replika. Agent membuat kuncinya di server itu
 (`<datadir>/dbpanel-tls/server.key`, folder 0700 dan berkas 0600 milik
-user `mysql`); kunci tidak pernah meninggalkan server. MySQL memuat
+user `mysql`); kunci tidak pernah meninggalkan server. Agent (root)
+membuka folder itu sekali dan menulis, mengganti nama, serta mengatur izin
+lewat descriptor-nya, tidak lewat path: tautan yang dipasang pemilik
+datadir tidak pernah diikuti. MySQL memuat
 sertifikat baru tanpa restart (`ALTER INSTANCE RELOAD TLS`, butuh hak
 `CONNECTION_ADMIN`), lalu agent mencoba sambungan baru yang memeriksa
 sertifikat itu; bila gagal, berkas lama dikembalikan dan pekerjaan gagal.
@@ -384,7 +406,22 @@ sertifikat itu; bila gagal, berkas lama dikembalikan dan pekerjaan gagal.
   kedaluwarsa** ("Sertifikat MySQL <nama> kedaluwarsa dalam N hari",
   tingkat peringatan, ikut dikirim ke Telegram) terbuka sampai
   sertifikatnya diperpanjang. Sertifikat keamanan panel (web)
-  memperbarui dirinya sendiri; lihat "Keamanan".
+  memperbarui dirinya sendiri; lihat "Keamanan". Sertifikat HTTPS yang
+  sedang dipakai panel (biasanya sertifikat sendiri yang diunggah) yang
+  tinggal kurang dari 14 hari membuka peringatan **Sertifikat HTTPS panel
+  hampir kedaluwarsa** di server host panel.
+- **Alamat master berubah.** Sertifikat MySQL master hanya memuat alamat
+  saat diterbitkan. Setelah **Ubah alamat untuk replika** ke alamat yang
+  belum dimuat, halaman master meminta **Perbarui sertifikat MySQL** dulu,
+  dan **Buat replika**/**Resync ulang** menolak di tahap pertama
+  ("Alamat master berubah ...") sampai sertifikatnya diperbarui.
+- **Sertifikat klien MySQL.** Sertifikat panel mengganti `ssl_ca` MySQL.
+  Bila ada akun yang masuk dengan sertifikat klien (`REQUIRE X509`,
+  `ISSUER` atau `SUBJECT`) dan `ssl_ca` saat ini berbeda, agent menolak
+  memasang sertifikat panel dan menyebut akun-akun itu: aplikasi itu akan
+  terkunci bila `ssl_ca` diganti. Server seperti itu tetap tanpa sertifikat
+  panel (replikasinya tidak diverifikasi) sampai akun itu tidak lagi
+  memakai sertifikat klien.
 
 ### Akun yang dibuat panel di master
 
@@ -675,10 +712,18 @@ dicatat di **Audit**.
 Tombol yang merusak atau sulit dibatalkan (Resync ulang, Lepas replika,
 Hapus server, Lepas database, Buka kunci master, Siapkan sebagai master
 untuk server yang sudah menjadi master, Pasang sertifikat MySQL, dan
-Perketat sambungan replikasi) meminta kata sandi panel Anda lagi,
-dan nama server bila disebut di bawah. Konfirmasi itu berlaku 2 menit untuk
-satu tindakan saja; salah kata sandi dicatat di **Audit**, dan setelah 5
-percobaan dalam semenit panel menolak sampai menit itu lewat.
+Perketat sambungan replikasi; juga unggah sertifikat HTTPS, Kembali ke
+sertifikat panel, dan Nama dan alamat tambahan di Pengaturan) meminta kata
+sandi panel Anda lagi, dan nama server bila disebut di bawah. Konfirmasi
+itu berlaku 2 menit untuk satu tindakan saja; salah kata sandi dicatat di
+**Audit** (`confirm_failed`), begitu juga tindakan yang ditolak karena
+konfirmasinya tidak berlaku, kedaluwarsa, atau sudah dipakai
+(`confirm_rejected`). Hanya sandi salah yang dihitung: setelah 5 sandi
+salah dalam semenit panel menolak konfirmasi sampai menit itu lewat, dan
+sandi yang benar mengosongkan hitungannya. Sandi salah di sini juga
+dihitung ke batas login nama pengguna itu (20 sandi salah per 15 menit),
+dan sebaliknya: setelah batas itu habis, login dan konfirmasi sama-sama
+ditolak.
 
 - **Stop replika / Start replika:** menghentikan atau menjalankan lagi
   replikasi; statusnya menjadi **Dihentikan** (tanpa peringatan) lalu
@@ -785,10 +830,15 @@ dimutakhirkan**. Untuk memutakhirkannya:
 pasang ulang agent di setiap server database** dengan langkah di atas
 (tidak perlu di host panel: `install.sh` sudah memasang agent-nya). Agent
 lama tetap terhubung dan dipantau, tetapi tidak mengenal perintah
-sertifikat MySQL: **Siapkan master**, **Buat replika**, **Resync ulang**,
-**Pasang sertifikat MySQL**, dan **Perketat sambungan replikasi** gagal di
-tahap sertifikat dengan "perintah tidak dikenal: mysql.tlsRequest" sampai
-agent server itu diperbarui. Perintah pemasangan baru memakai HTTPS
+sertifikat MySQL. Panel lalu menandainya **perlu dimutakhirkan**.
+**Siapkan master**, dan tahap sertifikat replika yang masternya belum punya
+sertifikat, melewati tahap sertifikat dengan peringatan di log pekerjaan
+(replikasinya belum diverifikasi; jalankan **Perketat sambungan
+replikasi** setelah agent diperbarui). **Pasang sertifikat MySQL**,
+**Perketat sambungan replikasi**, dan **Buat replika**/**Resync ulang**
+dari master yang sudah bersertifikat gagal dengan "Agent di <server> versi
+lama dan belum mengenal sertifikat MySQL. Klik Pasang ulang agent di
+halaman server itu, jalankan perintahnya, lalu Ulangi." Perintah pemasangan baru memakai HTTPS
 berpin; perintah lama berisi `http://` tidak berlaku lagi.
 
 Pemasangan ulang hanya mengganti binary, sertifikat, dan `agent.yaml`.
@@ -805,33 +855,62 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   `/sertifikat` (beserta unduhan `dbpanel-panel.crt` dan gaya halamannya);
   jalur lain dialihkan (301) ke `https://`. Cookie sesi selalu `Secure`,
   dan jawaban HTTPS membawa `Strict-Transport-Security` (1 tahun), jadi
-  browser yang pernah membuka panel lewat HTTPS tidak lagi mencoba HTTP.
+  browser yang pernah membuka panel lewat HTTPS **dengan nama DNS** tidak
+  lagi mencoba HTTP. HSTS tidak berlaku untuk alamat IP: `http://` dengan
+  IP selalu lewat HTTP biasa dulu sampai dialihkan, dan orang lain di
+  jaringan bisa menyela di situ. Simpan bookmark dengan `https://`, dan
+  pakai nama DNS bila bisa. Bila browser menolak membuka panel lewat nama
+  tanpa pilihan lanjut (HSTS, setelah CA web berganti atau sertifikat
+  sendiri kedaluwarsa), buka `http://<IP-panel>:8080/sertifikat` lalu
+  pasang ulang sertifikatnya; pemberitahuan di panel juga menyebut alamat
+  itu.
   Panel tidak pernah jatuh ke HTTP biasa: bila sertifikat atau kuncinya
   rusak saat start, panel menulis peringatan ke log dan memakai (atau
   membuat ulang) sertifikatnya sendiri.
 - **Sertifikat keamanan panel** yang dipasang pengguna (`dbpanel-panel.crt`)
   adalah sertifikat penerbit (CA web, `/etc/dbpanel/panel/web-ca.crt`) yang
-  dibatasi hanya untuk alamat panel: nama dan IP panel serta subnet kartu
-  jaringannya saat dibuat (name constraints). Sekalipun kuncinya bocor,
-  sertifikat itu tidak bisa dipakai untuk menyamar sebagai situs lain.
+  dibatasi (name constraints) pada nama panel **beserta semua subnamanya**,
+  IP panel, dan **seluruh subnet** kartu jaringan host panel saat CA dibuat.
+  Bila kuncinya bocor (mis. panel disusupi), sertifikat itu bisa dipakai
+  menyamar sebagai layanan lain di subnet itu (alamat IP) atau di bawah
+  nama-nama itu, di komputer yang memasangnya; tidak untuk situs lain.
+  Karena itu **Nama dan alamat tambahan** menolak nama yang terlalu umum:
+  nama harus punya minimal tiga bagian (mis. `panel.rsud.go.id`) kecuali
+  berakhiran `.local`, `.lan`, `.internal`, `.home` atau `.corp` (cukup dua,
+  mis. `rsud.local`), dan tidak boleh langsung di bawah akhiran publik umum
+  (mis. `bank.co.id`, `rsud.go.id`). Pakai nama khusus panel, bukan nama
+  domain kantor. Sidik jari SHA-256 sertifikat ini tampil di
+  **Pengaturan** dan dicetak `install.sh`.
   Sertifikat HTTPS panel (`web.crt`) berlaku 2 tahun dan diterbitkan ulang
   otomatis 30 hari sebelum habis atau saat alamat panel berubah, dengan
   kunci yang sama (pin di perintah pemasangan tetap berlaku), tanpa
-  restart. Bila alamat baru berada di luar batas CA web, panel membuat CA
-  web baru (yang lama disimpan sebagai `web-ca.crt.old`) dan menampilkan
-  pemberitahuan di setiap halaman sampai ada yang menutupnya: komputer yang
-  pernah memasang sertifikat perlu memasang ulang.
+  restart. Hanya nama yang dipilih operator (`--public-host`, nama host
+  mesin, **Nama dan alamat tambahan**) yang bisa membuat CA web baru: bila
+  salah satunya berada di luar batas CA web, panel membuat CA web baru (dua
+  CA sebelumnya disimpan sebagai `web-ca.*.old` dan `web-ca.*.old2`) dan
+  menampilkan pemberitahuan di setiap halaman sampai ada yang menutupnya:
+  komputer yang pernah memasang sertifikat perlu memasang ulang. Kartu
+  jaringan yang muncul belakangan (bridge docker, libvirt, VPN) tidak
+  pernah membuat CA baru; alamatnya yang di luar batas CA tidak dimuat
+  sertifikat (dicatat di log).
 - Admin domain Windows bisa menyebarkan `dbpanel-panel.crt` ke semua
   komputer lewat Group Policy (Computer Configuration → Policies → Windows
   Settings → Security Settings → Public Key Policies → Trusted Root
   Certification Authorities).
 - **Sertifikat sendiri.** Punya sertifikat dari CA kantor atau publik?
-  Unggah sertifikat (PEM, boleh dengan rantainya) dan kuncinya di
-  **Pengaturan > Sertifikat keamanan panel > Lanjutan**. Panel memeriksa
+  Unggah sertifikat (PEM, boleh dengan rantainya; sertifikat dan kunci
+  bersama paling besar 64 KiB) dan kuncinya di
+  **Pengaturan > Sertifikat keamanan panel > Lanjutan** (dengan konfirmasi
+  kata sandi). Panel memeriksa
   bahwa kunci cocok, sertifikat belum kedaluwarsa, dan memuat alamat panel,
   lalu langsung memakainya (disimpan 0600 sebagai `web.custom.crt`/`.key`;
   kunci tidak pernah ditampilkan lagi). **Kembali ke sertifikat panel**
-  mengembalikan sertifikat buatan panel. Pin di perintah pemasangan agent
+  mengembalikan sertifikat buatan panel. Bila sertifikat yang diunggah
+  kedaluwarsa atau rusak, panel memakai sertifikatnya sendiri dan
+  menampilkan pemberitahuan di setiap halaman sampai admin mengunggah
+  sertifikat baru atau memilih Kembali ke sertifikat panel; 14 hari
+  sebelumnya peringatan **Sertifikat HTTPS panel hampir kedaluwarsa**
+  terbuka. Pin di perintah pemasangan agent
   mengikuti sertifikat yang sedang dipakai.
 - Panel hanya menjawab permintaan yang header `Host`-nya alamat panel:
   `--public-host`, `localhost`, alamat loopback, IP salah satu kartu
@@ -913,9 +992,20 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   `RELOAD` dan log pekerjaan di panel (juga journal agent) mencatat
   peringatan dengan perintah
   `GRANT FLUSH_TABLES ON *.* TO '<admin>'@'<host>' WITH GRANT OPTION`.
+- `FLUSH_TABLES` tetap membolehkan `FLUSH TABLES WITH READ LOCK`, yang
+  menghentikan semua penulisan selama dipegang. Panel yang disusupi bisa
+  membuat akun dump dan memakainya untuk itu. Pagarnya ada di agent:
+  akun dump dibatasi 2 sesi (`MAX_USER_CONNECTIONS 2`); pemantau agent,
+  setiap pemeriksaan (15 detik), memutus sesi akun `dbpanel_dump_<8 hex>`
+  yang memegang kunci global itu 1 menit atau lebih (`mysqldump` hanya
+  memegangnya sesaat; dibaca dari `performance_schema.metadata_locks`,
+  jadi tanpa `performance_schema` pagar ini tidak bekerja); dan sapuan
+  berikut memutus sesi akun yang disapu sebelum menghapusnya. Agent tidak
+  pernah memutus sesi akun lain.
 - Agent menyapu sendiri akun dump yang tertinggal (pekerjaan mati di
   tengah jalan): tiap jam, dari pemantau kesehatan agent, akun
-  `dbpanel_dump_*` yang sandinya lebih tua dari 24 jam dihapus dan
+  `dbpanel_dump_*` yang sandinya lebih tua dari 24 jam dihapus (sesinya
+  diputus dulu; `DROP USER` menunggu kunci paling lama 5 detik) dan
   dicatat di journal. Server yang punya sumber replikasi dilewati (hapusan
   di master ikut tereplikasi).
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
