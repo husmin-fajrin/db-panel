@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,12 @@ func auditEntries(t *testing.T, st *store.Store) []store.AuditEntry {
 		got[i], got[j] = got[j], got[i]
 	}
 	return got
+}
+
+// withoutConfirms drops the confirm_issued entries of the tokens a test
+// obtained.
+func withoutConfirms(entries []store.AuditEntry) []store.AuditEntry {
+	return slices.DeleteFunc(entries, func(a store.AuditEntry) bool { return a.Action == "confirm_issued" })
 }
 
 // wantNoSecretInDetail fails when an entry's detail is not a JSON object
@@ -98,12 +105,25 @@ func TestEveryPostWritesAudit(t *testing.T) {
 		{"/servers/2/delete", url.Values{"confirm_name": {"db-replika"}}, "server_delete", "server", 2},
 		{"/logout", noForm, "logout", "session", 0},
 	}
+	// The destructive posts carry a confirmation token; its confirm_issued
+	// entries are left out of the count.
+	needsToken := map[string]string{
+		"/replicas/2/databases/remove": web.ActRemoveDatabases,
+		"/replicas/2/resync":           web.ActResync,
+		"/replicas/2/detach":           web.ActDetach,
+		"/masters/1/unlock":            web.ActUnlockMaster,
+		"/servers/2/delete":            web.ActDeleteServer,
+	}
 	for i, rt := range routes {
-		rec := e.do("POST", rt.path, rt.form, c)
+		form := rt.form
+		if action, ok := needsToken[rt.path]; ok {
+			form = withToken(t, e, form, action, rt.targetKind, rt.targetID)
+		}
+		rec := e.do("POST", rt.path, form, c)
 		if rec.Code >= 500 {
 			t.Fatalf("POST %s: status %d", rt.path, rec.Code)
 		}
-		got := auditEntries(t, e.st)
+		got := withoutConfirms(auditEntries(t, e.st))
 		if len(got) != i+1 {
 			t.Fatalf("POST %s: %d audit entries, want %d", rt.path, len(got), i+1)
 		}
@@ -118,7 +138,7 @@ func TestEveryPostWritesAudit(t *testing.T) {
 		wantNoSecretInDetail(t, a)
 	}
 
-	got := auditEntries(t, e.st)
+	got := withoutConfirms(auditEntries(t, e.st))
 	byPath := func(i int) store.AuditEntry { return got[i] }
 	if a := byPath(2); a.Outcome != "ok" || !strings.Contains(a.DetailJSON, `"mysql_user":"admin"`) {
 		t.Errorf("mysql_connect audit = %+v", a)
@@ -221,6 +241,7 @@ func TestAuditRejectedInputIsBounded(t *testing.T) {
 		}
 		form.Add("wipe_list[]", name)
 	}
+	form.Set("confirm_token", confirmToken(t, e, web.ActResync, "replica", 2))
 	rec := e.do("POST", "/replicas/2/resync", form, c)
 	if rec.Code == http.StatusSeeOther {
 		t.Fatalf("resync with an unknown wipe list accepted")

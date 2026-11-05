@@ -34,6 +34,7 @@
 {{with .Notice}}<div role="status" class="alert alert-success mb-4"><span>{{.}}</span></div>{{end}}
 {{template "content" .}}
 </main>
+{{if .Username}}{{template "confirm-modal" .}}{{end}}
 <footer class="text-center text-xs text-base-content/60 p-4">dbpanel {{.Version}}</footer>
 </body>
 </html>

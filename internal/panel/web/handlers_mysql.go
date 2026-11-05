@@ -191,9 +191,22 @@ func (a *app) refreshMySQL(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, serverURL(srv.ID)+"?pesan=disegarkan", http.StatusSeeOther)
 }
 
+// prepareMaster starts the prepare-master job on {id}.
 func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok {
+		return
+	}
+	// Preparing a server that already is a master (it has a topology)
+	// again needs the password confirmed.
+	_, err := a.Store.GetTopologyByMaster(srv.ID)
+	switch {
+	case err == nil:
+		if !a.requireConfirm(w, r, ActPrepareMasterAgain, auditServer, srv.ID) {
+			return
+		}
+	case !errors.Is(err, store.ErrNotFound):
+		a.internalError(w, "get topology", err)
 		return
 	}
 	id, err := a.Orchestrator.StartPrepareMaster(r.Context(), srv.ID)
@@ -784,6 +797,10 @@ func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
+	srv, _, ok := a.subsetReplicaFromPath(w, r)
+	if !ok || !a.requireConfirm(w, r, ActRemoveDatabases, auditReplica, srv.ID) {
+		return
+	}
 	dropData := r.PostFormValue("drop_data") != ""
 	a.changeReplicaDatabases(w, r, "remove_databases", map[string]any{"drop_data": dropData}, func(p replicaDatabasesPage, selected []string) (string, string) {
 		for _, d := range selected {

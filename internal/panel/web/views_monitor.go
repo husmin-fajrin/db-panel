@@ -239,6 +239,8 @@ func auditEntry(e store.AuditEntry) timelineEntry {
 
 // auditActions word the audit log's actions for people.
 var auditActions = map[string]string{
+	"confirm_issued":   "Konfirmasi kata sandi",
+	"confirm_failed":   "Konfirmasi kata sandi gagal",
 	"server_create":    "Server ditambahkan",
 	"server_token":     "Perintah pemasangan dibuat",
 	"server_delete":    "Hapus server",

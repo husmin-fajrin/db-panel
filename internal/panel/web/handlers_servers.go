@@ -89,6 +89,9 @@ type serverDetailPage struct {
 	CanPrepare bool            // connected, no missing grants, not a replica
 	Connect    connectForm     // the account form after a failed attempt
 	ActiveJob  *store.Job      // the server's unfinished job, if any
+	// PrepareAgain: the server already is a master (it has a topology), so
+	// preparing it again asks for the password.
+	PrepareAgain bool
 	// PlainHTTP: the page came over plain HTTP, so the MySQL password typed
 	// into the form crosses the network unencrypted (SEC-29).
 	PlainHTTP bool
@@ -270,6 +273,14 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 		p.ShowMySQL = p.Probe == nil || p.Probe.MySQL.Installed
 		p.InventoryCut = len(p.Inventory.Databases) >= inventoryCap
 		p.CanPrepare = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0 && srv.Role != store.RoleReplica
+		if p.CanPrepare {
+			_, err := a.Store.GetTopologyByMaster(srv.ID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				a.internalError(w, "get topology", err)
+				return
+			}
+			p.PrepareAgain = err == nil
+		}
 		p.Controls = a.controls(srv)
 	}
 	switch {
@@ -336,12 +347,13 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
 }
 
-// deleteServer removes a server once its name is typed. The panel host's
-// own server cannot be deleted; the orchestrator refuses a master with
-// replicas and a registered replica, and drops the agent's connection.
+// deleteServer removes a server once the password is confirmed and its
+// name typed. The panel host's own server cannot be deleted; the
+// orchestrator refuses a master with replicas and a registered replica,
+// and drops the agent's connection.
 func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
-	if !ok {
+	if !ok || !a.requireConfirm(w, r, ActDeleteServer, auditServer, srv.ID) {
 		return
 	}
 	detail := map[string]any{"name": srv.Name}

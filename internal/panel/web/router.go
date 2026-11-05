@@ -34,7 +34,8 @@ const (
 )
 
 // Deps are the panel services the UI uses. All fields except Now, Version,
-// Logger, CheckPassword, LoginConcurrency and UserLimiter are required.
+// Logger, CheckPassword, LoginConcurrency, UserLimiter and ConfirmLimiter
+// are required.
 // Sessions and the limiters are configured (TTL, limits) by the caller.
 type Deps struct {
 	Store    *store.Store
@@ -51,6 +52,9 @@ type Deps struct {
 	Now         func() time.Time // nil means time.Now
 	Version     string
 	Logger      *slog.Logger // nil means slog.Default()
+	// ConfirmLimiter counts POST /confirm attempts per username; nil
+	// means 5 per minute.
+	ConfirmLimiter *auth.RateLimiter
 	// CheckPassword compares a password with a stored hash; nil means
 	// auth.CheckPassword. Tests replace it with a slow fake.
 	CheckPassword func(hash, password string) bool
@@ -137,6 +141,9 @@ func NewRouter(d Deps) http.Handler {
 	if d.UserLimiter == nil {
 		d.UserLimiter = auth.NewRateLimiter(defaultUserMaxFailures, defaultUserWindow, d.Now)
 	}
+	if d.ConfirmLimiter == nil {
+		d.ConfirmLimiter = auth.NewRateLimiter(defaultConfirmMax, defaultConfirmWindow, d.Now)
+	}
 	render, err := NewRenderer()
 	if err != nil {
 		panic("web: " + err.Error())
@@ -159,6 +166,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /login", post(http.HandlerFunc(a.login)))
 	mux.Handle("POST /logout", post(http.HandlerFunc(a.logout)))
 	mux.Handle("GET /{$}", authed(a.dashboard))
+	mux.Handle("POST /confirm", authedPost(a.issueConfirm))
 	mux.Handle("GET /servers", authed(a.listServers))
 	mux.Handle("GET /servers/new", authed(a.newServerForm))
 	mux.Handle("POST /servers", authedPost(a.createServer))

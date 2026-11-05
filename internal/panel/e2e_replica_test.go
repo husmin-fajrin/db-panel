@@ -27,6 +27,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
 )
@@ -414,9 +415,10 @@ func readPin(t *testing.T, dir, name string) string {
 // uiClient is a browser for the panel UI: a cookie jar, the Origin header
 // form posts carry, and no redirect following.
 type uiClient struct {
-	t    *testing.T
-	base string
-	c    *http.Client
+	t        *testing.T
+	base     string
+	c        *http.Client
+	password string // admin's, for the confirmation tokens
 }
 
 func newUIClient(t *testing.T, base string) *uiClient {
@@ -433,6 +435,7 @@ func newUIClient(t *testing.T, base string) *uiClient {
 
 func (u *uiClient) login(password string) {
 	u.t.Helper()
+	u.password = password
 	if loc := u.postRedirect("/login", url.Values{"username": {"admin"}, "password": {password}}); loc != "/" {
 		u.t.Fatalf("login redirected to %q, want /", loc)
 	}
@@ -796,7 +799,8 @@ func TestE2EPinnedRole(t *testing.T) {
 	}
 
 	path := serverPath(e.masterSrv) + "/delete"
-	status, body := e.ui.post(path, url.Values{"confirm_name": {e.masterName}})
+	status, body := e.ui.post(path, url.Values{"confirm_name": {e.masterName},
+		"confirm_token": {e.ui.confirmToken(web.ActDeleteServer, "server", e.masterSrv)}})
 	if (status != http.StatusBadRequest && status != http.StatusConflict) ||
 		!strings.Contains(body, "lepas atau hapus semua replikanya dulu") {
 		t.Fatalf("POST %s = %d, want 400/409 with the refusal:\n%s", path, status, body)

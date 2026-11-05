@@ -51,6 +51,9 @@ const (
 	loginMaxFailures = 20 // per username, wrong passwords only
 	loginWindow      = 15 * time.Minute
 
+	confirmMaxAttempts = 5 // password confirmations per username, every attempt
+	confirmWindow      = time.Minute
+
 	defaultProbeInterval = 60 * time.Second
 	probeTimeout         = 30 * time.Second
 )
@@ -78,6 +81,9 @@ type Panel struct {
 	Limiter     *auth.RateLimiter // login attempts per IP
 	UserLimiter *auth.RateLimiter // failed logins per username
 	Broker      *web.Broker
+	// ConfirmLimiter counts password confirmations (POST /confirm) per
+	// username.
+	ConfirmLimiter *auth.RateLimiter
 	// Orchestrator runs the prepare-master and create-replica jobs.
 	Orchestrator *orchestrator.Runner
 	// Monitor turns the agents' health reports into statuses and the
@@ -154,6 +160,7 @@ func New(o Options) (*Panel, error) {
 		probeInterval: defaultProbeInterval,
 		readTimeout:   readTimeout,
 	}
+	p.ConfirmLimiter = auth.NewRateLimiter(confirmMaxAttempts, confirmWindow, func() time.Time { return p.now() })
 	p.publish = p.Broker.Publish
 	p.Hub = hub.New(&listenerImpl{p: p})
 	if err := p.init(); err != nil {

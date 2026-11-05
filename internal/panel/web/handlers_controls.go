@@ -141,7 +141,7 @@ func (a *app) validWipeList(serverID int64, list []string) (bool, error) {
 
 func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	srv, rep, ok := a.replicaFromPath(w, r)
-	if !ok {
+	if !ok || !a.requireConfirm(w, r, ActResync, auditReplica, srv.ID) {
 		return
 	}
 	p := orchestrator.ResyncParams{ServerID: srv.ID, ForceDump: r.PostFormValue("force_dump") != "",
@@ -177,7 +177,7 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) detachReplica(w http.ResponseWriter, r *http.Request) {
 	srv, rep, ok := a.replicaFromPath(w, r)
-	if !ok {
+	if !ok || !a.requireConfirm(w, r, ActDetach, auditReplica, srv.ID) {
 		return
 	}
 	mode := r.PostFormValue("mode")
@@ -212,7 +212,7 @@ func (a *app) detachReplica(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) unlockMaster(w http.ResponseWriter, r *http.Request) {
 	srv, topo, ok := a.masterFromPath(w, r)
-	if !ok {
+	if !ok || !a.requireConfirm(w, r, ActUnlockMaster, auditMaster, srv.ID) {
 		return
 	}
 	var err error
@@ -284,21 +284,28 @@ func (a *app) snoozeServer(w http.ResponseWriter, r *http.Request) {
 // controlError shows msg with 400 on srv's page for its role (master,
 // replica or plain server page).
 func (a *app) controlError(w http.ResponseWriter, r *http.Request, srv store.Server, msg string) {
+	a.showError(w, r, srv, http.StatusBadRequest, msg)
+}
+
+// showError shows msg with status on srv's page for its role.
+func (a *app) showError(w http.ResponseWriter, r *http.Request, srv store.Server, status int, msg string) {
 	switch srv.Role {
 	case store.RoleMaster:
 		if topo, err := a.Store.GetTopologyByMaster(srv.ID); err == nil {
 			p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
 			p.Flash = msg
-			a.renderMaster(w, r, http.StatusBadRequest, p)
+			a.renderMaster(w, r, status, p)
 			return
 		}
 	case store.RoleReplica:
 		if rep, err := a.Store.GetReplicaByServer(srv.ID); err == nil {
-			a.replicaError(w, r, srv, rep, msg)
+			p := replicaPage{Page: a.page(r), Server: srv, Replica: rep}
+			p.Flash = msg
+			a.renderReplica(w, r, status, p)
 			return
 		}
 	}
-	a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msg})
+	a.renderServer(w, r, srv, serverView{Status: status, Flash: msg})
 }
 
 // replicaError shows msg with 400 on the replica's page.

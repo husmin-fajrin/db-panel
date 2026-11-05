@@ -706,7 +706,11 @@ func TestReplicaDatabasesPageListsAndPosts(t *testing.T) {
 		t.Errorf("remove form offers the wrong databases:\n%s", removeForm)
 	}
 
+	// Removing databases needs a confirmation token.
 	post := func(path string, form url.Values) *httptest.ResponseRecorder {
+		if strings.HasSuffix(path, "/remove") {
+			form = withToken(t, e, form, web.ActRemoveDatabases, "replica", 2)
+		}
 		return e.do("POST", path, form, c)
 	}
 	bad := []struct {

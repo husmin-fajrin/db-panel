@@ -78,16 +78,16 @@ func (m *fakeMonitor) setView(v monitor.View) {
 
 // controlEnv is a master (server 1, db-master) with a ready replica
 // (server 2, db-replika) following toko and gudang, a fake orchestrator
-// and a fake monitor.
-func controlEnv(t *testing.T) (*env, *fakeOrch, *fakeMonitor) {
+// and a fake monitor; mods adjust its Deps after those.
+func controlEnv(t *testing.T, mods ...func(*web.Deps)) (*env, *fakeOrch, *fakeMonitor) {
 	t.Helper()
 	mon := &fakeMonitor{}
 	f := &fakeOrch{nextID: "0123456789abcdef0123456789abcdef"}
-	e := newEnv(t, func(d *web.Deps) {
+	e := newEnv(t, append([]func(*web.Deps){func(d *web.Deps) {
 		f.st = d.Store
 		d.Orchestrator = f
 		d.Monitor = mon
-	})
+	}}, mods...)...)
 	master := e.pairedOnline(t, "db-master")
 	rep := e.pairedOnline(t, "db-replika")
 	topo := e.makeMaster(t, master, shopDatabases...)
@@ -172,7 +172,7 @@ func TestResyncRequiresTypedName(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	c := e.cookie()
 	for _, name := range []string{"", "db-master", "DB-REPLIKA", "db-replika "} {
-		form := url.Values{"confirm_name": {name}, "wipe_list[]": {"toko"}}
+		form := withToken(t, e, url.Values{"confirm_name": {name}, "wipe_list[]": {"toko"}}, web.ActResync, "replica", 2)
 		rec := e.do("POST", "/replicas/2/resync", form, c)
 		wantCode(t, rec, http.StatusBadRequest)
 		wantBody(t, rec, "Nama server tidak cocok")
@@ -208,7 +208,7 @@ func TestResyncPassesWipeListAndForceDump(t *testing.T) {
 	rec = e.do("GET", "/replicas/2?buka=resync", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, `id="modal-resync" class="modal" x-data="openDialog" data-open="true"`,
-		`x-data="confirmName"`, `data-name="db-replika"`, `name="confirm_name"`,
+		`data-confirm-action="resync"`, `data-confirm-name="db-replika"`,
 		`name="wipe_list[]" value="toko"`, `name="wipe_list[]" value="gudang"`,
 		`name="force_dump"`, "1.8 GB", "luar jam sibuk", "MySQL di replika bisa dimulai ulang (restart)")
 	wantNoBody(t, rec, `value="sisa-lama"`)
@@ -222,26 +222,26 @@ func TestResyncPassesWipeListAndForceDump(t *testing.T) {
 	f.err = nil
 
 	form := url.Values{"confirm_name": {"db-replika"}, "force_dump": {"1"}, "wipe_list[]": {"toko", "gudang"}}
-	rec = e.do("POST", "/replicas/2/resync", form, c)
+	rec = e.do("POST", "/replicas/2/resync", withToken(t, e, form, web.ActResync, "replica", 2), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/jobs/"+f.nextID)
 
 	form.Del("force_dump")
 	form.Del("wipe_list[]")
-	wantCode(t, e.do("POST", "/replicas/2/resync", form, c), http.StatusSeeOther)
+	wantCode(t, e.do("POST", "/replicas/2/resync", withToken(t, e, form, web.ActResync, "replica", 2), c), http.StatusSeeOther)
 
 	// Only databases of the stored inventory, each once: a stale or crafted
 	// list is refused before the orchestrator.
 	for _, list := range [][]string{{"sisa-lama"}, {"toko", "toko"}, {"toko", "tidak-ada"}, {""}} {
 		form["wipe_list[]"] = list
-		rec = e.do("POST", "/replicas/2/resync", form, c)
+		rec = e.do("POST", "/replicas/2/resync", withToken(t, e, form, web.ActResync, "replica", 2), c)
 		wantCode(t, rec, http.StatusBadRequest)
 		wantBody(t, rec, "Daftar database tidak sesuai dengan inventaris; segarkan daftar lalu coba lagi")
 	}
 
 	f.err = errors.New("replika sedang diubah; Resync ulang hanya bisa saat replika siap, perlu perhatian, atau gagal")
 	form.Set("wipe_list[]", "toko")
-	rec = e.do("POST", "/replicas/2/resync", form, c)
+	rec = e.do("POST", "/replicas/2/resync", withToken(t, e, form, web.ActResync, "replica", 2), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Resync ulang hanya bisa saat replika siap")
 	wantCalls(t, f, "refresh 2", "refresh 2", "resync 2 toko,gudang force=true", "resync 2  force=false",
@@ -265,23 +265,23 @@ func TestDetachModes(t *testing.T) {
 		{"confirm_name": {"db-replika"}},
 		{"confirm_name": {"db-replika"}, "mode": {"hapus"}},
 	} {
-		wantCode(t, e.do("POST", "/replicas/2/detach", form, c), http.StatusBadRequest)
+		wantCode(t, e.do("POST", "/replicas/2/detach", withToken(t, e, form, web.ActDetach, "replica", 2), c), http.StatusBadRequest)
 	}
 	wantCalls(t, f)
 
-	rec = e.do("POST", "/replicas/2/detach", url.Values{"confirm_name": {"db-replika"}, "mode": {"keep"}}, c)
+	rec = e.do("POST", "/replicas/2/detach", withToken(t, e, url.Values{"confirm_name": {"db-replika"}, "mode": {"keep"}}, web.ActDetach, "replica", 2), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/servers/2?pesan=dilepas")
 	wantBody(t, e.do("GET", "/servers/2?pesan=dilepas", nil, c), "panel tidak lagi memantaunya")
 
-	rec = e.do("POST", "/replicas/2/detach", url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, c)
+	rec = e.do("POST", "/replicas/2/detach", withToken(t, e, url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, web.ActDetach, "replica", 2), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/servers/2?pesan=dilepas-henti")
 	wantBody(t, e.do("GET", "/servers/2?pesan=dilepas-henti", nil, c),
 		"SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF", "tetap terbuka walau MySQL di-restart")
 
 	f.err = errors.New("server ini masih punya pekerjaan yang belum selesai")
-	rec = e.do("POST", "/replicas/2/detach", url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, c)
+	rec = e.do("POST", "/replicas/2/detach", withToken(t, e, url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, web.ActDetach, "replica", 2), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "server ini masih punya pekerjaan yang belum selesai")
 	wantCalls(t, f, "detach 2 stop=false", "detach 2 stop=true", "detach 2 stop=true")
@@ -294,15 +294,15 @@ func TestUnlockMasterRequiresTypedName(t *testing.T) {
 	wantNoBody(t, e.do("GET", "/masters/1", nil, c), `action="/masters/1/unlock"`)
 	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, Status: monitor.Status{Code: monitor.StatusLocked}})
 	rec := e.do("GET", "/masters/1", nil, c)
-	wantBody(t, rec, `action="/masters/1/unlock"`, "Buka kunci master", `data-name="db-master"`,
+	wantBody(t, rec, `action="/masters/1/unlock"`, "Buka kunci master", `data-confirm-name="db-master"`,
 		`action="/servers/1/check"`, `action="/servers/1/snooze"`)
 
-	rec = e.do("POST", "/masters/1/unlock", url.Values{"confirm_name": {"db-replika"}}, c)
+	rec = e.do("POST", "/masters/1/unlock", withToken(t, e, url.Values{"confirm_name": {"db-replika"}}, web.ActUnlockMaster, "master", 1), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Nama server tidak cocok")
 	wantCalls(t, f)
 
-	rec = e.do("POST", "/masters/1/unlock", url.Values{"confirm_name": {"db-master"}}, c)
+	rec = e.do("POST", "/masters/1/unlock", withToken(t, e, url.Values{"confirm_name": {"db-master"}}, web.ActUnlockMaster, "master", 1), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/masters/1?pesan=kunci-dibuka")
 	wantCalls(t, f, "unlock-master 1")
@@ -312,9 +312,9 @@ func TestDeleteRefusalMessageShown(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	c := e.cookie()
 	rec := e.do("GET", "/servers/1", nil, c)
-	wantBody(t, rec, `action="/servers/1/delete"`, `x-data="confirmName"`, `data-name="db-master"`, `name="confirm_name"`)
+	wantBody(t, rec, `action="/servers/1/delete"`, `data-confirm-action="delete_server"`, `data-confirm-name="db-master"`)
 
-	rec = e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-replika"}}, c)
+	rec = e.do("POST", "/servers/1/delete", withToken(t, e, url.Values{"confirm_name": {"db-replika"}}, web.ActDeleteServer, "server", 1), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Nama server tidak cocok")
 	wantCalls(t, f)
@@ -323,14 +323,14 @@ func TestDeleteRefusalMessageShown(t *testing.T) {
 	for _, refusal := range []error{orchestrator.ErrServerIsMaster, orchestrator.ErrServerIsReplica,
 		orchestrator.ErrLocalServer, fmt.Errorf("server ini %w", orchestrator.ErrBusy)} {
 		f.err = refusal
-		rec = e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-master"}}, c)
+		rec = e.do("POST", "/servers/1/delete", withToken(t, e, url.Values{"confirm_name": {"db-master"}}, web.ActDeleteServer, "server", 1), c)
 		wantCode(t, rec, http.StatusBadRequest)
 		wantBody(t, rec, template.HTMLEscapeString(refusal.Error()), "db-master")
 	}
 	// Any other failure is the panel's: a generic 500, its text only in
 	// the log.
 	f.err = fmt.Errorf("delete server: %w", errors.New("database is locked (SQLITE_BUSY)"))
-	rec = e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-master"}}, c)
+	rec = e.do("POST", "/servers/1/delete", withToken(t, e, url.Values{"confirm_name": {"db-master"}}, web.ActDeleteServer, "server", 1), c)
 	wantCode(t, rec, http.StatusInternalServerError)
 	wantBody(t, rec, "Terjadi kesalahan pada panel")
 	wantNoBody(t, rec, "SQLITE_BUSY")

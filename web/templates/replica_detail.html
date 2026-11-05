@@ -149,7 +149,7 @@
 
 {{if .CanResync}}
 <dialog id="modal-resync" class="modal" x-data="openDialog" data-open="{{.OpenResync}}">
-  <form method="post" action="/replicas/{{.Server.ID}}/resync" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
+  <form method="post" action="/replicas/{{.Server.ID}}/resync" class="modal-box flex flex-col gap-2">
     <h3 class="text-lg font-bold">Resync ulang {{.Server.Name}}?</h3>
     <p>Panel menyalin ulang data dari master <strong>{{.Master.Name}}</strong> ke replika ini, lalu menyambungkan replikasinya lagi.</p>
     {{if .WipeList}}
@@ -165,13 +165,9 @@
     <p>Ukuran data master: <strong>{{fmtBytes .MasterBytes}}</strong>. Jalankan di luar jam sibuk: penyalinan membebani master dan jaringan.</p>
     <p>Selama resync, data di replika ini belum lengkap untuk dibaca, dan MySQL di replika bisa dimulai ulang (restart) bila pengaturannya perlu diubah.</p>
     <label class="label"><input type="checkbox" name="force_dump" value="1" class="checkbox checkbox-sm"> Paksa dump (jangan pakai CLONE)</label>
-    <label class="flex flex-col gap-1">
-      <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
-      <input class="input input-sm w-full" type="text" name="confirm_name" x-ref="typed" @input="input" autocomplete="off" required>
-    </label>
-    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" :disabled="blocked" disabled>Ya, resync ulang</button>
+      <button type="submit" class="btn btn-error" data-confirm-action="resync" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="Resync ulang {{.Server.Name}}: data replika ini disalin ulang dari master.">Ya, resync ulang</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
   </form>
@@ -181,7 +177,7 @@
 
 {{if .CanDetach}}
 <dialog id="modal-detach" class="modal">
-  <form method="post" action="/replicas/{{.Server.ID}}/detach" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
+  <form method="post" action="/replicas/{{.Server.ID}}/detach" class="modal-box flex flex-col gap-2">
     <h3 class="text-lg font-bold">Lepas replika {{.Server.Name}}?</h3>
     <p>Panel berhenti mengelola server ini sebagai replika master <strong>{{.Master.Name}}</strong>. Akun replikasi di master tidak disentuh.</p>
     <label class="flex gap-2 items-start">
@@ -192,13 +188,9 @@
       <input type="radio" class="radio radio-sm mt-1" name="mode" value="stop">
       <span><strong>Lepas dan hentikan replikasi.</strong> Replikasi dihentikan dan pengaturannya dihapus. MySQL di server ini tetap terkunci hanya-baca; untuk membukanya jalankan di server itu: <code>mysql -e "SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF"</code> (tetap terbuka walau MySQL di-restart).</span>
     </label>
-    <label class="flex flex-col gap-1">
-      <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
-      <input class="input input-sm w-full" type="text" name="confirm_name" x-ref="typed" @input="input" autocomplete="off" required>
-    </label>
-    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" :disabled="blocked" disabled>Ya, lepas</button>
+      <button type="submit" class="btn btn-error" data-confirm-action="detach" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="Lepas replika {{.Server.Name}}: panel berhenti mengelolanya.">Ya, lepas</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
   </form>

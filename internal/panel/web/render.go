@@ -58,7 +58,8 @@ var templateFuncs = template.FuncMap{
 
 // partials are the templates shared by several pages and rendered on their
 // own by the fragment endpoint.
-var partials = []string{"templates/layout.html", "templates/_status.html", "templates/_timeline.html"}
+var partials = []string{"templates/layout.html", "templates/_status.html", "templates/_timeline.html",
+	"templates/_confirm.html"}
 
 // NewRenderer parses the layout and the shared partials together with each
 // page into its own template set, plus one set of the partials alone for

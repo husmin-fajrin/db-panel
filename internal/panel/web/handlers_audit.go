@@ -20,6 +20,8 @@ var auditActionLabels = map[string]string{
 	"login":            "Masuk",
 	"login_failed":     "Gagal masuk",
 	"logout":           "Keluar",
+	"confirm_issued":   "Konfirmasi kata sandi",
+	"confirm_failed":   "Konfirmasi kata sandi gagal",
 	"server_create":    "Tambah server",
 	"server_token":     "Token pemasangan baru",
 	"server_delete":    "Hapus server",

@@ -519,6 +519,13 @@ yang disebut). Setiap tombol membuka dialog yang menjelaskan akibatnya,
 hanya tersedia bila server itu tidak sedang menjalankan pekerjaan, dan
 dicatat di **Audit**.
 
+Tombol yang merusak atau sulit dibatalkan (Resync ulang, Lepas replika,
+Hapus server, Lepas database, Buka kunci master, dan Siapkan sebagai master
+untuk server yang sudah menjadi master) meminta kata sandi panel Anda lagi,
+dan nama server bila disebut di bawah. Konfirmasi itu berlaku 2 menit untuk
+satu tindakan saja; salah kata sandi dicatat di **Audit**, dan setelah 5
+percobaan dalam semenit panel menolak sampai menit itu lewat.
+
 - **Stop replika / Start replika:** menghentikan atau menjalankan lagi
   replikasi; statusnya menjadi **Dihentikan** (tanpa peringatan) lalu
   kembali **Sinkron**. Selama berhenti lag membesar; bila lebih lama dari

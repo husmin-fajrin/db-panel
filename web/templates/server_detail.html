@@ -144,16 +144,12 @@
 {{end}}
 
 <dialog id="modal-hapus" class="modal">
-  <form method="post" action="/servers/{{.Server.ID}}/delete" class="modal-box flex flex-col gap-2" x-data="confirmName" data-name="{{.Server.Name}}">
+  <form method="post" action="/servers/{{.Server.ID}}/delete" class="modal-box flex flex-col gap-2">
     <h3 class="text-lg font-bold">Hapus server {{.Server.Name}}?</h3>
     <p>Server akan dihapus dari panel, koneksi agent-nya langsung diputus, dan sertifikatnya tidak diterima lagi. Panel menolak menghapus master yang masih punya replika dan replika yang belum dilepas. Service <code>dbpanel-agent</code> di server itu tetap terpasang dan terus mencoba terhubung sampai dimatikan (<code>sudo systemctl disable --now dbpanel-agent</code>). Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang server ini dan jalankan perintah pemasangan yang baru.</p>
-    <label class="flex flex-col gap-1">
-      <span>Ketik nama server <strong>{{.Server.Name}}</strong> untuk melanjutkan:</span>
-      <input class="input input-sm w-full" type="text" name="confirm_name" x-ref="typed" @input="input" autocomplete="off" required>
-    </label>
-    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" :disabled="blocked" disabled>Ya, hapus</button>
+      <button type="submit" class="btn btn-error" data-confirm-action="delete_server" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="Hapus server {{.Server.Name}} dari panel.">Ya, hapus</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
   </form>
@@ -209,7 +205,7 @@
   </form>
   {{if .CanPrepare}}
   <form method="post" action="/servers/{{.Server.ID}}/prepare-master">
-    <button type="submit" class="btn btn-primary btn-sm">Siapkan sebagai master</button>
+    <button type="submit" class="btn btn-primary btn-sm"{{if .PrepareAgain}} data-confirm-action="prepare_master_again" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="{{.Server.Name}} sudah menjadi master; panel menyiapkannya sekali lagi."{{end}}>Siapkan sebagai master</button>
   </form>
   {{end}}
 </div>

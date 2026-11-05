@@ -1,0 +1,27 @@
+{{define "confirm-modal"}}
+{{/* Konfirmasi kata sandi untuk tombol destruktif (spec 5.7). Tombol
+     dengan data-confirm-action membukanya; komponen confirmModal di
+     app.js meminta token ke POST /confirm lalu mengirim formulir tombol
+     itu dengan confirm_token (dan confirm_name). */}}
+<dialog id="modal-konfirmasi" class="modal" x-data="confirmModal">
+  <form class="modal-box flex flex-col gap-2" @submit.prevent="submit">
+    <h3 class="text-lg font-bold">Konfirmasi dengan kata sandi</h3>
+    <p x-text="text"></p>
+    <label class="flex flex-col gap-1 hidden" :class="nameClass">
+      <span>Ketik nama server <strong x-text="name"></strong> untuk melanjutkan:</span>
+      <input class="input input-sm w-full" type="text" x-ref="typed" @input="input" autocomplete="off">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span>Kata sandi panel Anda:</span>
+      <input class="input input-sm w-full" type="password" name="password" x-ref="password" autocomplete="current-password" required>
+    </label>
+    <p class="text-sm text-error" x-text="error"></p>
+    <!-- The confirming button comes first, so Enter submits only once it is enabled. -->
+    <div class="modal-action flex-row-reverse justify-start">
+      <button type="submit" class="btn btn-error" :disabled="blocked">Konfirmasi</button>
+      <button type="button" class="btn" @click="close">Batal</button>
+    </div>
+  </form>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}

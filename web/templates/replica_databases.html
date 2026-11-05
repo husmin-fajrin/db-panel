@@ -103,7 +103,7 @@
       <p class="py-2 font-semibold text-error hidden" :class="dropClass">Datanya juga dihapus dari replika dan tidak bisa dikembalikan dari panel.</p>
       <div class="modal-action">
         <form method="dialog"><button class="btn">Batal</button></form>
-        <button type="submit" form="form-lepas" class="btn btn-error">Ya, lepas</button>
+        <button type="submit" form="form-lepas" class="btn btn-error" data-confirm-action="remove_databases" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-text="Lepas database yang dipilih dari replika {{.Server.Name}}.">Ya, lepas</button>
       </div>
     </div>
     <form method="dialog" class="modal-backdrop"><button>tutup</button></form>

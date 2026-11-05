@@ -67,6 +67,19 @@
     return status === "queued" || status === "running" ? "aktif" : status;
   }
 
+  // isiTersembunyi mengisi <input type="hidden" name=name> di form,
+  // membuatnya bila belum ada.
+  function isiTersembunyi(form, name, value) {
+    let el = Array.from(form.elements).find((x) => x.name === name);
+    if (!el) {
+      el = document.createElement("input");
+      el.type = "hidden";
+      el.name = name;
+      form.appendChild(el);
+    }
+    el.value = value;
+  }
+
   document.addEventListener("alpine:init", () => {
     // Halaman pekerjaan: baris log baru (event job_log) ditambahkan sebagai
     // teks, lencana dan pesan tahap diperbarui (event job_update). Bila
@@ -283,21 +296,98 @@
       },
     }));
 
-    // Konfirmasi dengan mengetik nama server (Resync ulang, Lepas replika,
-    // Buka kunci master, Hapus server): tombol kirim (:disabled="blocked")
-    // aktif hanya bila isi kolom x-ref="typed" persis sama dengan
-    // data-name di elemen komponen. Panel memeriksanya lagi.
-    window.Alpine.data("confirmName", () => ({
+    // Konfirmasi kata sandi (spec 5.7), satu dialog per halaman
+    // (_confirm.html). Tombol destruktif membawa data-confirm-action,
+    // data-confirm-kind, data-confirm-id, data-confirm-text dan, bila nama
+    // server harus diketik, data-confirm-name. Klik tombol itu (juga Enter
+    // di formulirnya) ditahan: dialog meminta kata sandi panel (dan nama
+    // server), meminta token ke POST /confirm, lalu mengisi confirm_token
+    // (dan confirm_name) di formulir tombol dan mengirimnya. Panel
+    // memeriksa token dan nama itu lagi.
+    window.Alpine.data("confirmModal", () => ({
+      text: "",
       name: "",
       typed: "",
+      error: "",
+      busy: false,
+      tombol: null,
       init() {
-        this.name = this.$el.dataset.name || "";
+        document.addEventListener("click", (e) => {
+          const btn = e.target.closest("[data-confirm-action]");
+          if (!btn) {
+            return;
+          }
+          e.preventDefault();
+          if (!btn.form || !btn.form.reportValidity()) {
+            return;
+          }
+          this.open(btn);
+        });
+      },
+      open(btn) {
+        this.tombol = btn;
+        this.text = btn.dataset.confirmText || "";
+        this.name = btn.dataset.confirmName || "";
+        this.typed = "";
+        this.error = "";
+        this.busy = false;
+        this.$refs.typed.value = "";
+        this.$refs.password.value = "";
+        this.$root.showModal();
+        (this.name ? this.$refs.typed : this.$refs.password).focus();
       },
       input() {
         this.typed = this.$refs.typed.value;
       },
+      close() {
+        this.$refs.password.value = "";
+        this.$root.close();
+      },
+      get nameClass() {
+        return { hidden: this.name === "" };
+      },
       get blocked() {
-        return this.name === "" || this.typed !== this.name;
+        return this.busy || (this.name !== "" && this.typed !== this.name);
+      },
+      submit() {
+        if (this.blocked || !this.tombol) {
+          return;
+        }
+        const d = this.tombol.dataset;
+        const form = this.tombol.form;
+        const body = new URLSearchParams({
+          action: d.confirmAction || "",
+          target_kind: d.confirmKind || "",
+          target_id: d.confirmId || "",
+          password: this.$refs.password.value,
+        });
+        this.busy = true;
+        this.error = "";
+        fetch("/confirm", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" }, body })
+          .then((r) => {
+            // Sesi habis: fetch mengikuti redirect ke /login.
+            if (r.redirected) {
+              throw new Error("Sesi berakhir; muat ulang halaman lalu masuk lagi.");
+            }
+            return r.json().catch(() => ({})).then((j) => {
+              if (!r.ok || typeof j.token !== "string") {
+                throw new Error(j.error || "Konfirmasi gagal; coba lagi.");
+              }
+              return j.token;
+            });
+          })
+          .then((token) => {
+            isiTersembunyi(form, "confirm_token", token);
+            if (this.name !== "") {
+              isiTersembunyi(form, "confirm_name", this.typed);
+            }
+            this.$refs.password.value = "";
+            form.submit();
+          })
+          .catch((err) => {
+            this.error = err.message;
+            this.busy = false;
+          });
       },
     }));
 

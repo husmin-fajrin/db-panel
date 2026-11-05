@@ -23,6 +23,7 @@ import (
 	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 )
 
 // e2eWait bounds each monitoring step of the end-to-end tests: with the
@@ -266,7 +267,8 @@ func resyncThroughUI(t *testing.T, p *Panel, ui *uiClient, serverID int64, name 
 	for _, m := range wipeListRe.FindAllStringSubmatch(ui.get(loc), -1) {
 		wipe = append(wipe, m[1])
 	}
-	id := ui.postJob(path+"/resync", url.Values{"confirm_name": {name}, "wipe_list[]": wipe})
+	id := ui.postJob(path+"/resync", url.Values{"confirm_name": {name}, "wipe_list[]": wipe,
+		"confirm_token": {ui.confirmToken(web.ActResync, "replica", serverID)}})
 	job := waitJob(t, p, id, e2eCreateTimeout, nil) // nil: a waiting step fails the test
 	if job.Kind != "resync_replica" || job.Status != store.JobSucceeded {
 		t.Fatalf("resync job %s ended %s: %s\n%s", job.Kind, job.Status, job.Error, jobLogText(t, p, id))
@@ -341,6 +343,22 @@ func (u *uiClient) post(path string, form url.Values) (int, string) {
 		u.t.Fatal(err)
 	}
 	return resp.StatusCode, string(b)
+}
+
+// confirmToken asks POST /confirm for a token for action on the target,
+// with the password the client logged in with, as the confirmation
+// dialog does.
+func (u *uiClient) confirmToken(action, kind string, id int64) string {
+	u.t.Helper()
+	status, body := u.post("/confirm", url.Values{"action": {action}, "target_kind": {kind},
+		"target_id": {strconv.FormatInt(id, 10)}, "password": {u.password}})
+	var out struct {
+		Token string `json:"token"`
+	}
+	if status != http.StatusOK || json.Unmarshal([]byte(body), &out) != nil || out.Token == "" {
+		u.t.Fatalf("POST /confirm %s %s/%d = %d: %s", action, kind, id, status, body)
+	}
+	return out.Token
 }
 
 // tail is the last n lines of s.

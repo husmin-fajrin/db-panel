@@ -108,6 +108,9 @@ func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 		Logger:              slog.New(slog.DiscardHandler),
 		Orchestrator:        &fakeOrch{st: st, nextID: "0123456789abcdef0123456789abcdef"},
 		Monitor:             &fakeMonitor{},
+		// Tests obtain many confirmation tokens; TestConfirmRateLimited
+		// uses the router's own limit.
+		ConfirmLimiter: auth.NewRateLimiter(1000, time.Minute, time.Now),
 	}
 	for _, m := range mods {
 		m(&d)
@@ -431,7 +434,8 @@ func TestPostRejectsCrossOrigin(t *testing.T) {
 		t.Errorf("servers after rejected POSTs = %d, want 1", len(list))
 	}
 	// A matching Referer is accepted when Origin is absent.
-	req := httptest.NewRequest("POST", "/servers/1/delete", strings.NewReader("confirm_name=db-1"))
+	form := withToken(t, e, url.Values{"confirm_name": {"db-1"}}, web.ActDeleteServer, "server", 1)
+	req := httptest.NewRequest("POST", "/servers/1/delete", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Referer", testOrigin+"/servers/1")
 	req.AddCookie(e.cookie())
@@ -629,10 +633,12 @@ func TestDeleteServer(t *testing.T) {
 	e := newEnv(t)
 	srv, _ := e.st.CreateServer("db-hapus")
 	c := e.cookie()
-	wantBody(t, e.do("GET", "/servers/1", nil, c), `action="/servers/1/delete"`, "<dialog", `name="confirm_name"`)
+	wantBody(t, e.do("GET", "/servers/1", nil, c), `action="/servers/1/delete"`, "<dialog",
+		`data-confirm-action="delete_server"`, `data-confirm-name="db-hapus"`)
 	// The orchestrator deletes it (and drops its agent's connection, see
 	// the orchestrator's tests); the list then says how to remove the agent.
-	rec := e.do("POST", "/servers/1/delete", url.Values{"confirm_name": {"db-hapus"}}, c)
+	form := withToken(t, e, url.Values{"confirm_name": {"db-hapus"}}, web.ActDeleteServer, "server", 1)
+	rec := e.do("POST", "/servers/1/delete", form, c)
 	wantCode(t, rec, http.StatusSeeOther)
 	if loc := rec.Header().Get("Location"); loc != "/servers?pesan=dihapus" {
 		t.Errorf("Location = %q", loc)
@@ -659,7 +665,7 @@ func TestDeleteLocalServerRefused(t *testing.T) {
 			t.Errorf("detail page of the panel host shows %q", s)
 		}
 	}
-	rec = e.do("POST", "/servers/1/delete", url.Values{}, c)
+	rec = e.do("POST", "/servers/1/delete", withToken(t, e, url.Values{}, web.ActDeleteServer, "server", 1), c)
 	wantCode(t, rec, http.StatusConflict)
 	wantBody(t, rec, "Server ini adalah host panel dan tidak bisa dihapus")
 	if _, err := e.st.GetServer(srv.ID); err != nil {

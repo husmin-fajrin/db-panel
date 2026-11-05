@@ -45,6 +45,11 @@ const (
 // characters), well inside maxAuditDetail.
 var auditFullKeys = map[string]bool{store.SettingPanelBaseURL: true, store.SettingTelegramChatID: true}
 
+// auditKeptKeys are detail keys whose string value is kept even when the
+// action did not succeed: the handler checked it against a fixed list
+// first (the action and target kind of a confirmation).
+var auditKeptKeys = map[string]bool{"action": true, "target_kind": true}
+
 // unknownUser stands for a login_failed username that names no account: a
 // password typed in the username field must not be kept for ever.
 const unknownUser = "(tidak dikenal)"
@@ -160,7 +165,7 @@ func limit(v any) any {
 
 // lengths replaces, in a refused or failed action's detail, each string
 // by its length in runes (<name>_len) and each list by its count
-// (<name>_count); numbers and booleans stay.
+// (<name>_count); numbers, booleans and the strings of auditKeptKeys stay.
 func lengths(v any) any {
 	m, ok := v.(map[string]any)
 	if !ok {
@@ -170,6 +175,10 @@ func lengths(v any) any {
 	for k, val := range m {
 		switch x := val.(type) {
 		case string:
+			if auditKeptKeys[k] {
+				out[k] = x
+				continue
+			}
 			out[k+"_len"] = utf8.RuneCountInString(x)
 		case []any:
 			out[k+"_count"] = len(x)
