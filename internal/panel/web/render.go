@@ -24,13 +24,15 @@ type Page struct {
 	// AlertCount is the number of open alerts, on the navbar's Peringatan
 	// link.
 	AlertCount int
+	// CertNotice shows that the panel's certificate to install changed.
+	CertNotice bool
 }
 
 // pageNames are the page templates; each file templates/<name>.html defines
 // "title" and "content".
 var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
 	"master_detail", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail",
-	"alerts", "settings", "audit"}
+	"alerts", "settings", "audit", "cert"}
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {

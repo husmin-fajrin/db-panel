@@ -1,0 +1,92 @@
+{{define "title"}}Pasang sertifikat keamanan panel{{end}}
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-4">Pasang sertifikat keamanan panel</h1>
+{{if .Custom}}
+<div role="status" class="alert alert-info"><span>Panel memakai sertifikat yang dipasang admin; tidak ada yang perlu dipasang.</span></div>
+<p class="mt-4"><a class="link" href="/">Buka panel</a></p>
+{{else}}
+<section class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-4">
+    <p class="text-lg">Browser menampilkan peringatan? Unduh berkas ini, klik dua kali, pilih Pasang, lalu buka panel lagi.</p>
+    <div><a class="btn btn-primary" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat keamanan panel</a></div>
+    <p class="text-sm text-base-content/70">Cukup sekali untuk tiap komputer atau ponsel. Setelah terpasang, browser membuka panel tanpa peringatan dan sambungannya terenkripsi. Sertifikat ini hanya berlaku untuk alamat panel ini.</p>
+  </div>
+</section>
+
+<div class="flex flex-col gap-6">
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">Windows (Chrome, Edge)</h2>
+      <ol class="list-decimal ml-6 flex flex-col gap-1">
+        <li>Klik dua kali berkas <code>dbpanel-panel.crt</code> yang sudah diunduh, lalu klik <b>Install Certificate...</b></li>
+        <li>Pilih <b>Local Machine</b>, klik <b>Next</b>, lalu <b>Yes</b> bila Windows meminta izin.</li>
+        <li>Pilih <b>Place all certificates in the following store</b>, klik <b>Browse...</b>, pilih <b>Trusted Root Certification Authorities</b>, lalu <b>OK</b> dan <b>Next</b>.</li>
+        <li>Klik <b>Finish</b>, lalu <b>Yes</b> pada peringatan keamanan.</li>
+        <li>Tutup semua jendela browser, lalu buka panel lagi.</li>
+      </ol>
+      <img src="/static/cert/windows.svg" alt="Langkah di Windows: Install Certificate, Local Machine, Trusted Root Certification Authorities, Finish" class="max-w-full h-auto" width="520" height="300">
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">macOS (Safari, Chrome)</h2>
+      <ol class="list-decimal ml-6 flex flex-col gap-1">
+        <li>Klik dua kali berkas <code>dbpanel-panel.crt</code>. Pada pertanyaan Keychain pilih <b>System</b>, lalu <b>Add</b>, dan masukkan kata sandi Mac.</li>
+        <li>Di <b>Keychain Access</b> buka <b>System</b>, klik dua kali <b>dbpanel-web-ca</b>.</li>
+        <li>Buka bagian <b>Trust</b>, ubah <b>When using this certificate</b> menjadi <b>Always Trust</b>.</li>
+        <li>Tutup jendelanya dan masukkan kata sandi Mac, lalu buka panel lagi.</li>
+      </ol>
+      <img src="/static/cert/macos.svg" alt="Langkah di macOS: Keychain System, dbpanel-web-ca, Trust, Always Trust" class="max-w-full h-auto" width="520" height="300">
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">Firefox</h2>
+      <p class="text-sm text-base-content/70">Firefox memakai daftarnya sendiri, juga di Windows dan macOS.</p>
+      <ol class="list-decimal ml-6 flex flex-col gap-1">
+        <li>Buka <b>Settings</b>, pilih <b>Privacy &amp; Security</b>.</li>
+        <li>Di bagian <b>Certificates</b> klik <b>View Certificates...</b>, buka tab <b>Authorities</b>, klik <b>Import...</b></li>
+        <li>Pilih berkas <code>dbpanel-panel.crt</code>, centang <b>Trust this CA to identify websites</b>, lalu <b>OK</b>.</li>
+        <li>Buka panel lagi.</li>
+      </ol>
+      <img src="/static/cert/firefox.svg" alt="Langkah di Firefox: Settings, Privacy &amp; Security, View Certificates, Authorities, Import" class="max-w-full h-auto" width="520" height="300">
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">Android</h2>
+      <ol class="list-decimal ml-6 flex flex-col gap-1">
+        <li>Unduh berkas dengan tombol di atas.</li>
+        <li>Buka <b>Settings</b> → <b>Security</b> → <b>Encryption &amp; credentials</b> → <b>Install a certificate</b>.</li>
+        <li>Pilih <b>CA certificate</b>, ketuk <b>Install anyway</b>, lalu pilih berkas <code>dbpanel-panel.crt</code>.</li>
+        <li>Buka panel lagi. Nama menu bisa sedikit berbeda menurut merek ponsel; cari "certificate" di Settings.</li>
+      </ol>
+      <img src="/static/cert/android.svg" alt="Langkah di Android: Settings, Security, Encryption &amp; credentials, Install a certificate" class="max-w-full h-auto" width="520" height="300">
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">iPhone dan iPad</h2>
+      <ol class="list-decimal ml-6 flex flex-col gap-1">
+        <li>Buka halaman ini di <b>Safari</b>, ketuk tombol unduh, lalu <b>Allow</b>.</li>
+        <li>Buka <b>Settings</b>, ketuk <b>Profile Downloaded</b>, lalu <b>Install</b> dan masukkan kode sandi.</li>
+        <li>Buka <b>Settings</b> → <b>General</b> → <b>About</b> → <b>Certificate Trust Settings</b>, aktifkan <b>dbpanel-web-ca</b>, lalu <b>Continue</b>.</li>
+        <li>Buka panel lagi.</li>
+      </ol>
+      <img src="/static/cert/ios.svg" alt="Langkah di iPhone dan iPad: Profile Downloaded, Install, Certificate Trust Settings" class="max-w-full h-auto" width="520" height="300">
+    </div>
+  </section>
+
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">Banyak komputer sekaligus</h2>
+      <p>Admin domain Windows bisa menyebarkan berkas ini ke semua komputer lewat Group Policy (Computer Configuration → Policies → Windows Settings → Security Settings → Public Key Policies → Trusted Root Certification Authorities).</p>
+    </div>
+  </section>
+</div>
+{{end}}
+{{end}}

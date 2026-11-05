@@ -99,7 +99,9 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 
 	a.Limiter.Reset(ip)
 	a.UserLimiter.Reset(userKey)
-	auth.SetSessionCookie(w, a.Sessions.Create(user.Username), r.TLS != nil)
+	// Secure always: the panel serves the UI over HTTPS only (plain HTTP
+	// is redirected before it reaches here).
+	auth.SetSessionCookie(w, a.Sessions.Create(user.Username), true)
 	a.auditAs(r, user.Username, "login", auditSession, 0, nil, auditOK)
 	a.Logger.Info("login", "username", user.Username, "ip", ip)
 	http.Redirect(w, r, safeNext(next), http.StatusSeeOther)
@@ -119,7 +121,7 @@ func (a *app) logout(w http.ResponseWriter, r *http.Request) {
 		}
 		a.Sessions.Delete(tok)
 	}
-	auth.ClearSessionCookie(w, r.TLS != nil)
+	auth.ClearSessionCookie(w, true)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 

@@ -79,6 +79,23 @@ const (
 	SettingWeeklyLastSent = "weekly_last_sent"
 )
 
+// Setting keys of the panel's HTTPS certificate.
+const (
+	// SettingHTTPSMode is "panel" (the certificate the panel issues itself,
+	// the default) or "custom" (one the admin uploaded).
+	SettingHTTPSMode = "https_mode"
+	// SettingHTTPSExtraNames lists, comma-separated, further host names and
+	// IPs the panel's own certificate covers.
+	SettingHTTPSExtraNames = "https_extra_names"
+	// SettingHTTPSCARegeneratedAt (RFC3339) is when the panel last replaced
+	// its web CA because a name fell outside it; computers that installed
+	// the old one must install the new one.
+	SettingHTTPSCARegeneratedAt = "https_ca_regenerated_at"
+	// SettingHTTPSCANoticeClosedAt (RFC3339) is when a user last closed the
+	// notice about it.
+	SettingHTTPSCANoticeClosedAt = "https_ca_notice_closed_at"
+)
+
 // GetSettings returns the values of the given keys that are set; a key that
 // is not set is absent from the map.
 func (s *Store) GetSettings(keys ...string) (map[string]string, error) {

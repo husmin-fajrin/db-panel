@@ -30,7 +30,8 @@ import (
 
 const (
 	testPassword  = "rahasia-panel"
-	testPublicURL = "http://192.168.1.10:8080"
+	testPublicURL = "https://192.168.1.10:8080"
+	testWebPin    = "sha256//q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA="
 	testOrigin    = "http://example.com" // httptest.NewRequest uses Host example.com
 )
 
@@ -111,6 +112,7 @@ func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 		// Tests obtain many confirmation tokens; TestConfirmRateLimited
 		// uses the router's own limit.
 		ConfirmLimiter: auth.NewRateLimiter(1000, time.Minute, time.Now),
+		CertInfo:       func() web.CertInfo { return web.CertInfo{Mode: "panel", Pin: testWebPin} },
 	}
 	for _, m := range mods {
 		m(&d)
@@ -343,7 +345,7 @@ func TestLoginSuccessSetsCookie(t *testing.T) {
 		t.Errorf("Location = %q, want /", loc)
 	}
 	cs := rec.Result().Cookies()
-	if len(cs) != 1 || cs[0].Name != auth.CookieName || !cs[0].HttpOnly {
+	if len(cs) != 1 || cs[0].Name != auth.SecureCookieName || !cs[0].HttpOnly || !cs[0].Secure {
 		t.Fatalf("cookies = %+v", cs)
 	}
 	if u, ok := e.sessions.Get(cs[0].Value); !ok || u != "admin" {
@@ -495,7 +497,7 @@ func TestCreateServerShowsPairingCommand(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	sum, _ := fakeScriptSHA256(tok.Token)
 	wantBody(t, rec, "db-utama", "/agent/install?token=",
-		"f=$(mktemp) &amp;&amp; curl -fsSL --max-redirs 0 -K - &lt;&lt;&lt;&#39;url = &#34;"+testPublicURL+"/agent/install?token="+tok.Token+
+		"f=$(mktemp) &amp;&amp; curl -fsSL -k --pinnedpubkey "+testWebPin+" --max-redirs 0 -K - &lt;&lt;&lt;&#39;url = &#34;"+testPublicURL+"/agent/install?token="+tok.Token+
 			"&#34;&#39; -o &#34;$f&#34; &amp;&amp; echo &#34;"+sum+
 			"  $f&#34; | sha256sum -c - &amp;&amp; sudo bash &#34;$f&#34;",
 		`action="/servers/1/token"`, "Buat token baru")
@@ -961,7 +963,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestPairCommandKeepsTokenOutOfArgv(t *testing.T) {
 	const token = "ABCDE-FGHJK-MNPQR"
 	sum, _ := fakeScriptSHA256(token)
-	cmd := web.PairCommand(testPublicURL, token, sum)
+	cmd := web.PairCommand(testPublicURL, token, sum, testWebPin)
 	if strings.Contains(cmd, "/tmp/") {
 		t.Fatalf("command uses a fixed /tmp path: %s", cmd)
 	}
@@ -976,7 +978,7 @@ sudo() { printf 'SUDO:%s\n' "$*"; }
 		t.Fatalf("bash: %v\n%s", err, out)
 	}
 	want := []string{
-		"ARGS:-fsSL --max-redirs 0 -K - -o " + tmp,
+		"ARGS:-fsSL -k --pinnedpubkey " + testWebPin + " --max-redirs 0 -K - -o " + tmp,
 		`url = "` + testPublicURL + `/agent/install?token=` + token + `"`,
 		"SUM:-c -",
 		sum + "  " + tmp,

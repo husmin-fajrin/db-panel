@@ -221,7 +221,8 @@ UNIT
 	ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
 	echo
 	echo "Panel terpasang."
-	echo "Alamat : http://${ip:-<ip-server>}:8080"
+	echo "Alamat : https://${ip:-<ip-server>}:8080"
+	echo "Browser memperingatkan? Buka http://${ip:-<ip-server>}:8080/sertifikat dan pasang sertifikat keamanan panel."
 	echo "Pengguna: admin"
 	if [ -s "$PASSWORD_FILE" ]; then
 		echo "Sandi   : $(cat "$PASSWORD_FILE")"

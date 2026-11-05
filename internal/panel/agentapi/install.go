@@ -37,10 +37,13 @@ func shellQuote(s string) string {
 
 // InstallScriptParams fill agent-install.sh.tmpl.
 type InstallScriptParams struct {
-	PanelURL  string // UI base URL, e.g. http://192.168.1.10:8080
+	PanelURL  string // UI base URL, e.g. https://192.168.1.10:8080
 	Token     string // pairing token (Crockford base32, safe in the script)
 	AgentAddr string // host:port of the mTLS agent listener
 	CASHA256  string // CAFingerprint of the panel's CA, pinned by the agent
+	// WebPin is the SPKI pin of the panel's HTTPS certificate: the
+	// script's downloads and "dbpanel agent pair" trust the panel by it.
+	WebPin string
 	// BinSHA256 maps an architecture (amd64, arm64) to the sha256 of the
 	// agent binary the panel serves for it; a missing one is rendered empty
 	// and the script refuses that architecture.
@@ -70,7 +73,7 @@ func CAFingerprint(caPEM []byte) string {
 }
 
 // NewInstallScriptParams are the parameters GET /agent/install renders the
-// script with for token: the panel's public URL, its agent address, its CA
+// script with for token: the panel's public URL, its HTTPS pin, its agent address, its CA
 // fingerprint and the hash of every agent binary it can serve. The UI uses
 // the same function, so the hash it shows matches the served script.
 func NewInstallScriptParams(d Deps, publicURL, token string, hashes *BinHashes) InstallScriptParams {
@@ -80,6 +83,9 @@ func NewInstallScriptParams(d Deps, publicURL, token string, hashes *BinHashes) 
 		AgentAddr: d.AgentAddr(),
 		CASHA256:  CAFingerprint(d.CA.CAPEM()),
 		BinSHA256: map[string]string{},
+	}
+	if d.WebPin != nil {
+		p.WebPin = d.WebPin()
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
 		sum, err := hashes.For(arch)

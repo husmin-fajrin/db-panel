@@ -92,7 +92,7 @@ type settingsRig struct {
 	sender *fakeSender
 }
 
-func settingsEnv(t *testing.T) *settingsRig {
+func settingsEnv(t *testing.T, mods ...func(*web.Deps)) *settingsRig {
 	t.Helper()
 	box, err := secrets.LoadOrCreate(filepath.Join(t.TempDir(), "panel.key"))
 	if err != nil {
@@ -105,6 +105,9 @@ func settingsEnv(t *testing.T) *settingsRig {
 			n: notify.New(notify.Deps{Store: d.Store, Box: box, Sender: rig.sender})}
 		d.Settings = rig.set
 		d.Telegram = rig.tg
+		for _, m := range mods {
+			m(d)
+		}
 	})
 	return rig
 }

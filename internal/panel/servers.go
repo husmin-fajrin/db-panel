@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"net"
@@ -80,6 +81,7 @@ func (p *Panel) Run(ctx context.Context) error {
 	wg.Go(func() { p.probeLoop(ctx) })
 	wg.Go(func() { p.Monitor.Run(ctx) })
 	wg.Go(func() { p.Notifier.Run(ctx) })
+	wg.Go(func() { p.certs.run(ctx.Done()) })
 
 	<-ctx.Done()
 	// Stop the jobs before their agents disconnect, so none fails as
@@ -101,40 +103,75 @@ func (p *Panel) agentDeps() agentapi.Deps {
 		AgentVersion: p.opts.Version,
 		Now:          p.now,
 		Logger:       p.log,
+		WebPin:       p.certs.pin,
 	}
 }
 
-// serveUI serves the UI and the unauthenticated agent endpoints on ln until
-// ctx is done, then shuts down within 5 s, closing whatever connections are
-// left after that. Open SSE streams end with ctx through BaseContext; there
-// is no WriteTimeout because of them.
+// serveUI serves the UI and the unauthenticated agent endpoints over HTTPS
+// on ln, and the certificate page with redirects to HTTPS over plain HTTP on
+// the same port (see splitListener), until ctx is done; then it shuts both
+// down within 5 s, closing whatever connections are left after that. Open
+// SSE streams end with ctx through BaseContext; there is no WriteTimeout
+// because of them.
 func (p *Panel) serveUI(ctx context.Context, ln net.Listener, deps agentapi.Deps) error {
+	split := newSplitListener(ln)
+	defer split.Close()
+	ui := p.uiHandler(deps)
+	base := func(net.Listener) context.Context { return ctx }
 	srv := &http.Server{
-		Handler:           p.uiHandler(deps),
+		Handler:           ui,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       p.readTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
+		BaseContext:       base,
+		ErrorLog:          serverErrorLog(p.log),
 	}
-	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
+	// Plain HTTP only answers the certificate page and redirects: short
+	// timeouts, so a client that sends half a request is soon closed.
+	helper := &http.Server{
+		Handler:           httpHelperHandler(ui, p.hostAllowed),
+		ReadHeaderTimeout: peekTimeout,
+		ReadTimeout:       peekTimeout,
+		WriteTimeout:      readTimeout,
+		IdleTimeout:       peekTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+		BaseContext:       base,
+		ErrorLog:          serverErrorLog(p.log),
+	}
+	served := make(chan error, 2)
+	go func() { served <- srv.Serve(tls.NewListener(split.tls, p.certs.tlsConfig())) }()
+	go func() { served <- helper.Serve(split.plain) }()
 
+	var err error
 	select {
-	case err := <-served:
-		return err
+	case err = <-served:
+		// One server failed: stop the other below and report the failure.
 	case <-ctx.Done():
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	err := srv.Shutdown(sctx)
-	if errors.Is(err, context.DeadlineExceeded) {
-		p.log.Warn("UI requests still running after the shutdown timeout; closing their connections")
-		srv.Close()
-		err = nil
+	var wg sync.WaitGroup
+	for _, s := range []*http.Server{srv, helper} {
+		wg.Go(func() {
+			if errors.Is(s.Shutdown(sctx), context.DeadlineExceeded) {
+				p.log.Warn("UI requests still running after the shutdown timeout; closing their connections")
+				s.Close()
+			}
+		})
 	}
-	if serr := <-served; !errors.Is(serr, http.ErrServerClosed) && err == nil {
-		err = serr
+	wg.Wait()
+	remaining := 2
+	if err != nil {
+		remaining = 1
+	}
+	for range remaining {
+		if serr := <-served; !errors.Is(serr, http.ErrServerClosed) && err == nil {
+			err = serr
+		}
+	}
+	if errors.Is(err, http.ErrServerClosed) {
+		err = nil
 	}
 	return err
 }
@@ -169,6 +206,8 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 		Monitor:        p.Monitor,
 		Settings:       settingsAdmin{st: p.Store, mon: p.Monitor},
 		Telegram:       telegramAdmin{st: p.Store, box: p.box, n: p.Notifier},
+		CertInfo:       p.certInfo,
+		Certs:          p.certs,
 		// The same parameters as GET /agent/install, so the hash in the
 		// pairing command is that of the script the endpoint serves.
 		InstallScriptSHA256: func(token string) (string, error) {

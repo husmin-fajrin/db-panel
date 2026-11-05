@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Pemasang agent dbpanel, dibuat oleh panel di PANEL_URL (lihat di bawah).
+# Panel dihubungi lewat HTTPS. Sertifikat panel diterbitkan panel sendiri dan
+# tidak dikenal mesin ini, jadi curl memakai -k (rantai sertifikat tidak
+# diperiksa) bersama --pinnedpubkey: koneksi hanya diterima bila kunci
+# sertifikat panel sama dengan WEB_PIN. Pin yang sama dipakai "dbpanel agent
+# pair".
 # Perintah pairing di panel mengunduh skrip ini ke berkas sementara baru
 # (mktemp), mencocokkan sha256-nya dengan yang ditampilkan panel, baru
 # menjalankannya dengan sudo. Tidak ada unduhan yang mengikuti pengalihan
@@ -16,6 +21,8 @@ BIN=/usr/local/bin/dbpanel
 # Nilai dari panel, dalam kutip tunggal: shell tidak mengekspansi isinya.
 PANEL_URL={{shq .PanelURL}}
 AGENT_ADDR={{shq .AgentAddr}}
+# Pin kunci sertifikat HTTPS panel (sha256//..., bentuk curl --pinnedpubkey).
+WEB_PIN={{shq .WebPin}}
 # sha256 sertifikat CA panel (DER). Panel lain, mis. penyusup di jaringan
 # yang menjawab pairing, ditolak oleh "dbpanel agent pair".
 CA_SHA256={{shq .CASHA256}}
@@ -25,7 +32,8 @@ BIN_SHA256_AMD64={{shq (index .BinSHA256 "amd64")}}
 BIN_SHA256_ARM64={{shq (index .BinSHA256 "arm64")}}
 # Token sekali pakai. Tidak pernah ditaruh di argumen perintah (argv bisa
 # dibaca semua pengguna lewat ps): curl menerimanya lewat konfigurasi di
-# stdin, dbpanel lewat variabel lingkungan DBPANEL_TOKEN.
+# stdin, dbpanel lewat variabel lingkungan DBPANEL_TOKEN (pin lewat
+# DBPANEL_WEB_PIN).
 TOKEN={{shq .Token}}
 
 die() {
@@ -56,8 +64,8 @@ download_agent() {
 	# printf is a bash builtin, so the URL with the token is never in argv.
 	# max-redirs = 0: a redirect would send the token to another host.
 	if ! code=$(printf 'url = "%s"\nmax-redirs = 0\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |
-		curl -sSL -o "$BIN.new" -w '%{http_code}' -K -); then
-		die "Gagal menghubungi panel $PANEL_URL. Periksa alamat panel dan jaringan, lalu ulangi."
+		curl -sSL -o "$BIN.new" -w '%{http_code}' -k --pinnedpubkey "$WEB_PIN" -K -); then
+		die "Gagal menghubungi panel $PANEL_URL. Periksa alamat panel dan jaringan, lalu ulangi. Bila kunci sertifikat panel tidak cocok dengan WEB_PIN, ada yang menyusup di jaringan atau sertifikat panel berganti: salin ulang perintah pasang dari panel."
 	fi
 	if [ "$code" != 200 ]; then
 		die "Panel menolak unduhan binary (HTTP $code): $(head -c 512 "$BIN.new")"
@@ -115,7 +123,7 @@ WantedBy=multi-user.target
 UNIT
 
 	echo "Memasangkan agent ke panel..."
-	if ! DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"; then
+	if ! DBPANEL_TOKEN="$TOKEN" DBPANEL_WEB_PIN="$WEB_PIN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"; then
 		die "Pairing gagal. Periksa token dan alamat panel, lalu ulangi."
 	fi
 

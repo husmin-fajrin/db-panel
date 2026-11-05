@@ -53,7 +53,9 @@ func UsernameFrom(ctx context.Context) string {
 }
 
 // SetSessionCookie sets the session cookie for token. With secure (TLS) the
-// cookie is Secure and named SecureCookieName.
+// cookie is Secure and named SecureCookieName. The panel serves its UI over
+// HTTPS only and always passes secure; plain cookies remain for tests and
+// sessions from before HTTPS.
 func SetSessionCookie(w http.ResponseWriter, token string, secure bool) {
 	name := CookieName
 	if secure {

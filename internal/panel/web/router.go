@@ -47,7 +47,7 @@ type Deps struct {
 	// rotating source addresses does not buy more guesses for one account;
 	// nil means 20 per 15 minutes.
 	UserLimiter *auth.RateLimiter
-	PublicURL   func() string // e.g. "http://192.168.1.10:8080", used in the pairing command
+	PublicURL   func() string // e.g. "https://192.168.1.10:8080", used in the pairing command
 	Events      *Broker
 	Now         func() time.Time // nil means time.Now
 	Version     string
@@ -76,6 +76,11 @@ type Deps struct {
 	// Telegram reads the Telegram settings, stores the bot token sealed and
 	// sends the test message.
 	Telegram TelegramAdmin
+	// CertInfo describes the panel's HTTPS certificate in use; nil means
+	// none (tests).
+	CertInfo func() CertInfo
+	// Certs changes the panel's HTTPS certificate; nil refuses (tests).
+	Certs CertAdmin
 }
 
 // SettingsStore is what the settings page uses to read and change the
@@ -144,6 +149,12 @@ func NewRouter(d Deps) http.Handler {
 	if d.ConfirmLimiter == nil {
 		d.ConfirmLimiter = auth.NewRateLimiter(defaultConfirmMax, defaultConfirmWindow, d.Now)
 	}
+	if d.CertInfo == nil {
+		d.CertInfo = func() CertInfo { return CertInfo{} }
+	}
+	if d.Certs == nil {
+		d.Certs = noCerts{}
+	}
 	render, err := NewRenderer()
 	if err != nil {
 		panic("web: " + err.Error())
@@ -205,6 +216,16 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /settings", authed(a.showSettings))
 	mux.Handle("POST /settings", authedPost(a.saveSettings))
 	mux.Handle("POST /settings/telegram-test", authedPost(a.testTelegram))
+	mux.Handle("POST /settings/cert", authedPost(a.uploadCert))
+	mux.Handle("POST /settings/cert-panel", authedPost(a.usePanelCert))
+	mux.Handle("POST /settings/cert-names", authedPost(a.saveCertNames))
+	mux.Handle("POST /settings/cert-notice-close", authedPost(a.closeCertNotice))
+	mux.Handle("POST /settings/base-url-https", authedPost(a.baseURLToHTTPS))
+	// The certificate page and its download need no login: they are what
+	// a browser that does not trust the panel yet must reach, also over
+	// plain HTTP.
+	mux.HandleFunc("GET /sertifikat", a.certPage)
+	mux.HandleFunc("GET /sertifikat/dbpanel-panel.crt", a.certDownload)
 	mux.Handle("GET /audit", authed(a.auditLog))
 	mux.Handle("GET /events", login(d.Events))
 	return SecurityHeaders(mux)
@@ -318,6 +339,7 @@ func (f noDirFS) Open(name string) (fs.File, error) {
 func (a *app) page(r *http.Request) Page {
 	p := Page{Username: auth.UsernameFrom(r.Context()), Version: a.Version}
 	if p.Username != "" {
+		p.CertNotice = a.CertInfo().CANeedsReinstall
 		// The navbar's alert badge; a page still renders without it.
 		if open, err := a.Store.ListOpenAlerts(); err != nil {
 			a.Logger.Warn("count open alerts", "err", err)

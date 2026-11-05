@@ -54,9 +54,24 @@ Berkas `dbpanel_linux_amd64`/`dbpanel_linux_arm64` disalin ke
 dijalankan ulang untuk memperbarui panel: binary diganti dan service dimulai
 ulang.
 
+**HTTPS sejak pasang.** Panel langsung memakai HTTPS di port 8080, tanpa
+langkah tambahan: ia membuat sertifikat keamanannya sendiri saat start
+pertama. Alamat `http://` lama tetap bisa dibuka; browser dialihkan ke
+`https://` alamat yang sama.
+
+Saat pertama membuka `https://<ip-panel>:8080`, browser memperingatkan
+bahwa sambungan "tidak aman" atau "tidak pribadi", karena sertifikat panel
+belum dikenal komputer itu. Buka `http://<ip-panel>:8080/sertifikat`
+(halaman ini sengaja bisa dibuka tanpa HTTPS dan tanpa login), unduh
+sertifikat keamanan panel, klik dua kali, pilih Pasang, lalu buka panel
+lagi. Halaman itu menjelaskan langkahnya untuk Windows, macOS, Firefox,
+Android, dan iPhone/iPad. Cukup sekali per komputer atau ponsel; sesudahnya
+browser membuka panel tanpa peringatan.
+
 ## Login pertama
 
-Buka `http://<ip-panel>:8080` dan masuk sebagai `admin`. Sandi awal
+Buka `https://<ip-panel>:8080` dan masuk sebagai `admin` (peringatan
+browser? lihat "HTTPS sejak pasang" di atas). Sandi awal
 dicetak di akhir instalasi dan tersimpan di
 `/etc/dbpanel/admin-initial-password` (hanya bisa dibaca root):
 
@@ -90,25 +105,31 @@ menghapusnya (semua sesi yang sedang login juga berakhir).
 2. Salin perintah pemasangan yang ditampilkan, misalnya
 
    ```sh
-   f=$(mktemp) && curl -fsSL --max-redirs 0 -K - <<<'url = "http://192.168.1.10:8080/agent/install?token=..."' -o "$f" && echo "<sha256 skrip>  $f" | sha256sum -c - && sudo bash "$f"
+   f=$(mktemp) && curl -fsSL -k --pinnedpubkey sha256//<pin> --max-redirs 0 -K - <<<'url = "https://192.168.1.10:8080/agent/install?token=..."' -o "$f" && echo "<sha256 skrip>  $f" | sha256sum -c - && sudo bash "$f"
    ```
 
    Perintah ini terdiri dari tiga langkah:
-   1. `curl` mengunduh skrip pemasang ke berkas sementara baru dari
+   1. `curl` mengunduh skrip pemasang lewat HTTPS ke berkas sementara baru dari
       `mktemp` (nama acak, hanya bisa dibaca pemiliknya; nama tetap di
       `/tmp` bisa disiapkan lebih dulu oleh pengguna lain di server itu
-      lalu diubah tepat sebelum `sudo`). `curl` tidak mengikuti pengalihan
-      (`--max-redirs 0`), agar token tidak ikut terkirim ke host lain;
+      lalu diubah tepat sebelum `sudo`). Server database belum mengenal
+      sertifikat panel, jadi `-k` mematikan pemeriksaan penerbitnya;
+      sebagai gantinya `--pinnedpubkey` hanya menerima kunci sertifikat
+      panel itu sendiri (pin `sha256//...`). Mesin lain di jaringan yang
+      menjawab atas nama panel ditolak sebelum token terkirim. `curl` tidak
+      mengikuti pengalihan (`--max-redirs 0`), agar token tidak ikut
+      terkirim ke host lain;
    2. `sha256sum -c` mencocokkan isi skrip dengan sha256 yang ditampilkan
       panel (dihitung dari skrip yang sama persis yang disajikan untuk token
       itu);
    3. hanya bila cocok, skrip dijalankan dengan `sudo`.
 
-   Pairing berjalan lewat HTTP polos, jadi pihak yang bisa menyadap atau
-   mengubah lalu lintas antara server database dan panel (on-path) bisa
-   mengganti skrip, binary agent, atau CA panel di jawaban pairing. Hash
-   menutup celah itu: skrip yang diubah ditolak oleh `sha256sum -c` sebelum
-   apa pun berjalan sebagai root. Skrip yang sudah terverifikasi membawa
+   Pin dan hash saling melengkapi: pin memastikan yang menjawab adalah
+   panel, hash memastikan skrip yang dijalankan sebagai root adalah skrip
+   yang ditampilkan panel. Skrip yang sudah terverifikasi membawa pin yang
+   sama (`WEB_PIN`), yang dipakai untuk mengunduh binary agent dan
+   diberikan ke `dbpanel agent pair` lewat variabel lingkungan
+   `DBPANEL_WEB_PIN`; skrip itu juga membawa
    sha256 binary agent (unduhan yang tidak cocok ditolak dengan "Checksum
    binary agent tidak cocok; kemungkinan ada yang menyusup di jaringan") dan
    sidik jari CA panel, yang diberikan ke `dbpanel agent pair --ca-sha256`:
@@ -116,7 +137,7 @@ menghapusnya (semua sesi yang sedang login juga berakhir).
    yang diharapkan") dan menghubungi alamat agent dari skrip
    (`--agent-addr`), bukan dari jawaban pairing. Unduhan binary dan
    `dbpanel agent pair` juga tidak mengikuti pengalihan (redirect). Hash di perintah berubah
-   bila token, alamat panel, CA, atau binary agent di panel berubah; bila
+   bila token, alamat panel, CA, sertifikat panel, atau binary agent di panel berubah; bila
    `sha256sum -c` gagal tanpa alasan jelas, muat ulang halaman server lalu
    salin perintah yang baru.
 
@@ -167,6 +188,27 @@ Nilai `--public-host` yang pernah diberikan disimpan di database panel dan
 tetap dipakai (mengalahkan deteksi otomatis) pada start berikutnya,
 walaupun flag tidak diberikan lagi.
 
+Agent menghubungi panel lewat HTTPS. Perintah pemasangan di halaman server
+selalu memuat alamat `https://` dan pin kunci sertifikat panel
+(`--pinnedpubkey sha256//...`); perintah lama yang masih berisi `http://`
+tidak berlaku lagi (tokennya pun sudah kedaluwarsa), jadi salin perintah
+baru dari halaman server. Pairing manual:
+
+```sh
+sudo DBPANEL_TOKEN=... DBPANEL_WEB_PIN='sha256//...' dbpanel agent pair \
+  --panel https://192.168.1.10:8080 --ca-sha256 <sidik jari CA>
+```
+
+Pin ada di **Pengaturan > Sertifikat keamanan panel** (juga `WEB_PIN=` di
+skrip pemasang). Tanpa pin, `agent pair` menolak panel HTTPS yang
+sertifikatnya tidak dikenal mesin itu.
+
+Sertifikat panel memuat alamat panel (`--public-host`), nama host mesin
+(bila berupa nama lengkap dengan titik), dan alamat kartu jaringan panel.
+Panel dibuka dengan nama atau alamat lain (mis. nama DNS kantor)? Tambahkan
+di **Pengaturan > Sertifikat keamanan panel > Lanjutan > Nama dan alamat
+tambahan**.
+
 ## Replikasi MySQL
 
 Alurnya: **Hubungkan MySQL** di setiap server, **Siapkan sebagai master**
@@ -183,13 +225,8 @@ tersegel di `/etc/dbpanel/mysql.cred` di server itu; panel tidak
 menyimpannya dan tidak menampilkannya lagi. Bila akun kurang hak, panel
 menampilkan perintah `GRANT` yang perlu dijalankan.
 
-UI panel masih HTTP biasa: kata sandi MySQL yang Anda ketik melintas
-jaringan tanpa enkripsi. Buka panel hanya dari jaringan manajemen yang
-tepercaya, atau lewat tunnel SSH:
-
-```sh
-ssh -L 8080:127.0.0.1:8080 admin@<ip-panel>   # lalu buka http://127.0.0.1:8080
-```
+Kata sandi MySQL yang Anda ketik melintas jaringan lewat HTTPS
+(terenkripsi).
 
 ### Siapkan master
 
@@ -457,7 +494,7 @@ Panel mengirim peringatan ke grup Telegram lewat bot milik Anda sendiri.
    `panel.key`, tidak ditampilkan lagi, dan tidak pernah ditulis ke log.
 5. Klik **Kirim tes**. Pesan tes harus muncul di grup; bila gagal, panel
    menyebut alasannya.
-6. Isi **Alamat dasar panel** (mis. `http://192.168.1.10:8080`) agar pesan
+6. Isi **Alamat dasar panel** (mis. `https://192.168.1.10:8080`) agar pesan
    memuat tautan ke halaman server. Bila kolom ini kosong, pesan tidak
    memuat tautan; alamat abu-abu di kolom hanya saran (alamat publik
    panel) dan tidak dipakai sebelum diketik. Centang hanya jenis peringatan yang
@@ -477,7 +514,7 @@ dikirim (bisa memuat isi baris data). Contoh:
 ⛔ Replika RS-2 berhenti
 Data ganda (error 1062): ada baris yang sudah ada di replika.
 Saran: Resync ulang.
-Master: RS-1 · Sejak: 02:14 · http://192.168.1.10:8080/replicas/3
+Master: RS-1 · Sejak: 02:14 · https://192.168.1.10:8080/replicas/3
 ```
 
 Setiap peringatan dikirim sekali saat muncul, diulang tiap 6 jam selama
@@ -617,6 +654,39 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
 
 ## Keamanan
 
+- **HTTPS.** UI panel, unduhan agent, dan pairing hanya dilayani lewat
+  HTTPS di port 8080. Di port yang sama, HTTP biasa hanya melayani halaman
+  `/sertifikat` (beserta unduhan `dbpanel-panel.crt` dan gaya halamannya);
+  jalur lain dialihkan (301) ke `https://`. Cookie sesi selalu `Secure`,
+  dan jawaban HTTPS membawa `Strict-Transport-Security` (1 tahun), jadi
+  browser yang pernah membuka panel lewat HTTPS tidak lagi mencoba HTTP.
+  Panel tidak pernah jatuh ke HTTP biasa: bila sertifikat atau kuncinya
+  rusak saat start, panel menulis peringatan ke log dan memakai (atau
+  membuat ulang) sertifikatnya sendiri.
+- **Sertifikat keamanan panel** yang dipasang pengguna (`dbpanel-panel.crt`)
+  adalah sertifikat penerbit (CA web, `/etc/dbpanel/web-ca.crt`) yang
+  dibatasi hanya untuk alamat panel: nama dan IP panel serta subnet kartu
+  jaringannya saat dibuat (name constraints). Sekalipun kuncinya bocor,
+  sertifikat itu tidak bisa dipakai untuk menyamar sebagai situs lain.
+  Sertifikat HTTPS panel (`web.crt`) berlaku 2 tahun dan diterbitkan ulang
+  otomatis 30 hari sebelum habis atau saat alamat panel berubah, dengan
+  kunci yang sama (pin di perintah pemasangan tetap berlaku), tanpa
+  restart. Bila alamat baru berada di luar batas CA web, panel membuat CA
+  web baru (yang lama disimpan sebagai `web-ca.crt.old`) dan menampilkan
+  pemberitahuan di setiap halaman sampai ada yang menutupnya: komputer yang
+  pernah memasang sertifikat perlu memasang ulang.
+- Admin domain Windows bisa menyebarkan `dbpanel-panel.crt` ke semua
+  komputer lewat Group Policy (Computer Configuration → Policies → Windows
+  Settings → Security Settings → Public Key Policies → Trusted Root
+  Certification Authorities).
+- **Sertifikat sendiri.** Punya sertifikat dari CA kantor atau publik?
+  Unggah sertifikat (PEM, boleh dengan rantainya) dan kuncinya di
+  **Pengaturan > Sertifikat keamanan panel > Lanjutan**. Panel memeriksa
+  bahwa kunci cocok, sertifikat belum kedaluwarsa, dan memuat alamat panel,
+  lalu langsung memakainya (disimpan 0600 sebagai `web.custom.crt`/`.key`;
+  kunci tidak pernah ditampilkan lagi). **Kembali ke sertifikat panel**
+  mengembalikan sertifikat buatan panel. Pin di perintah pemasangan agent
+  mengikuti sertifikat yang sedang dipakai.
 - Panel hanya menjawab permintaan yang header `Host`-nya alamat panel:
   `--public-host`, `localhost`, alamat loopback, atau IP salah satu kartu
   jaringan host panel. Nama lain (mis. alias DNS buatan sendiri) mendapat
@@ -628,8 +698,9 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   hanya bisa ditampilkan ulang selama panel belum dimulai ulang; sesudahnya
   buat token baru. Skrip pemasang memberikan token ke `dbpanel agent pair`
   lewat variabel lingkungan `DBPANEL_TOKEN` (bukan argumen, yang terlihat di
-  `ps`). Pairing manual: `sudo DBPANEL_TOKEN=... dbpanel agent pair --panel
-  http://<ip-panel>:8080 --ca-sha256 <sidik jari CA>`, atau `--token-stdin`.
+  `ps`). Pairing manual: `sudo DBPANEL_TOKEN=... DBPANEL_WEB_PIN=sha256//...
+  dbpanel agent pair --panel https://<ip-panel>:8080 --ca-sha256 <sidik jari
+  CA>`, atau `--token-stdin` (lihat "Alamat panel untuk agent").
   Sidik jari CA ada di skrip pemasang (`CA_SHA256=...`), atau hitung di host
   panel dengan `openssl x509 -in /etc/dbpanel/ca.crt -outform DER | sha256sum`.
   `--ca-sha256` wajib; `--insecure-skip-ca-pin` mematikan pemeriksaan itu

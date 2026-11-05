@@ -209,7 +209,7 @@ func (a *app) upgradeCommand(id int64, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return pairCommand(a.PublicURL(), tok.Token, sum), nil
+	return pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin), nil
 }
 
 func (a *app) newServerForm(w http.ResponseWriter, r *http.Request) {
@@ -294,14 +294,18 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 			a.internalError(w, "install script hash", err)
 			return
 		}
-		p.Command = pairCommand(a.PublicURL(), tok.Token, sum)
+		p.Command = pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin)
 		p.TokenExpires = tok.ExpiresAt
 	}
 	a.render.renderStatus(w, v.Status, "server_detail", p)
 }
 
 // pairCommand is the command an operator runs on a new database server. It
-// saves the install script to a fresh mktemp file (0600, unpredictable name:
+// fetches over HTTPS with -k and --pinnedpubkey: the panel's certificate is
+// not checked against a CA (the new server does not know the panel's), but
+// curl accepts only the key whose pin is webPin (sha256//<base64>), so a
+// machine in between cannot answer instead of the panel. It saves the
+// install script to a fresh mktemp file (0600, unpredictable name:
 // a fixed /tmp name could be pre-created by a local user and rewritten
 // between the check and sudo), checks it against scriptSHA256 (the hash of
 // the script the panel serves for this token) and only then runs it as
@@ -313,11 +317,12 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 // token is in no process's argv (readable by every local user through
 // /proc). Single quotes: nothing in them is expanded, and "?" would be a
 // glob character in zsh. PublicURL is an IP or a validated host name, the
-// token is Crockford base32 and the hash is hex, so none contains a quote.
+// token is Crockford base32, the hash is hex and the pin base64, so none
+// contains a quote.
 // --max-redirs is an argument rather than a config line because the config
 // here-string has to stay on one line.
-func pairCommand(publicURL, token, scriptSHA256 string) string {
-	return `f=$(mktemp) && curl -fsSL --max-redirs 0 -K - <<<'url = "` + publicURL + "/agent/install?token=" + token +
+func pairCommand(publicURL, token, scriptSHA256, webPin string) string {
+	return `f=$(mktemp) && curl -fsSL -k --pinnedpubkey ` + webPin + ` --max-redirs 0 -K - <<<'url = "` + publicURL + "/agent/install?token=" + token +
 		`"' -o "$f" && echo "` + scriptSHA256 + `  $f" | sha256sum -c - && sudo bash "$f"`
 }
 

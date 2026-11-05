@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -55,6 +56,7 @@ func newPanel(t *testing.T, o Options) *Panel {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { p.Close() })
+	trustPanel(p)
 	return p
 }
 
@@ -199,10 +201,10 @@ func TestRunServesLoginAndProbesLocal(t *testing.T) {
 	localID := p.localID
 	uiAddr, stop := startPanel(t, p)
 
-	if got, want := p.PublicURL(), "http://127.0.0.1:"+portOf(t, uiAddr); got != want {
+	if got, want := p.PublicURL(), "https://127.0.0.1:"+portOf(t, uiAddr); got != want {
 		t.Fatalf("PublicURL = %q, want %q", got, want)
 	}
-	base := "http://" + uiAddr
+	base := "https://" + uiAddr
 	if code := getStatus(t, base+"/login"); code != http.StatusOK {
 		t.Fatalf("GET /login = %d, want 200", code)
 	}
@@ -212,7 +214,7 @@ func TestRunServesLoginAndProbesLocal(t *testing.T) {
 	if code := getStatus(t, base+"/agent/bin/amd64?token=x"); code != http.StatusForbidden {
 		t.Fatalf("GET /agent/bin/amd64 with a bad token = %d, want 403", code)
 	}
-	resp, err := http.Post(base+"/agent/pair", "application/json", strings.NewReader("{"))
+	resp, err := testClient.Post(base+"/agent/pair", "application/json", strings.NewReader("{"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +269,7 @@ func TestRemoteAgentPairsAndIsProbed(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cfg, err := agent.Pair(ctx, p.PublicURL(), tok.Token, t.TempDir(), nil, agent.PairOptions{})
+	cfg, err := agent.Pair(ctx, p.PublicURL(), tok.Token, t.TempDir(), nil, agent.PairOptions{WebPin: p.certInfo().Pin})
 	if err != nil {
 		t.Fatalf("Pair: %v", err)
 	}
@@ -307,7 +309,7 @@ func TestAgentInstallEndpoints(t *testing.T) {
 	o := testOptions(t)
 	p := newPanel(t, o)
 	uiAddr, _ := startPanel(t, p)
-	base := "http://" + uiAddr
+	base := "https://" + uiAddr
 
 	srv, err := p.Store.CreateServer("db-baru")
 	if err != nil {
@@ -322,8 +324,9 @@ func TestAgentInstallEndpoints(t *testing.T) {
 		"PANEL_URL='" + p.PublicURL() + "'\n",
 		"AGENT_ADDR='" + p.AgentAddr() + "'\n",
 		"TOKEN='" + tok.Token + "'\n",
-		`DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"`,
+		`DBPANEL_TOKEN="$TOKEN" DBPANEL_WEB_PIN="$WEB_PIN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"`,
 		"CA_SHA256='" + agentapi.CAFingerprint(p.CA.CAPEM()) + "'\n",
+		"WEB_PIN='" + p.certInfo().Pin + "'\n",
 		"systemctl enable --now dbpanel-agent",
 	} {
 		if !strings.Contains(script, want) {
@@ -351,7 +354,7 @@ func TestAgentInstallEndpoints(t *testing.T) {
 }
 
 // pairCommandRE matches the pairing command on a server page (unescaped).
-var pairCommandRE = regexp.MustCompile(`^f=\$\(mktemp\) && curl -fsSL --max-redirs 0 -K - <<<'url = "([^"]+)"' -o "\$f" && ` +
+var pairCommandRE = regexp.MustCompile(`^f=\$\(mktemp\) && curl -fsSL -k --pinnedpubkey (sha256//[A-Za-z0-9+/=]{44}) --max-redirs 0 -K - <<<'url = "([^"]+)"' -o "\$f" && ` +
 	`echo "([0-9a-f]{64})  \$f" \| sha256sum -c - && sudo bash "\$f"$`)
 
 // TestPairingCommandContainsScriptHash (SEC-23): the hash in the command
@@ -363,7 +366,7 @@ func TestPairingCommandContainsScriptHash(t *testing.T) {
 	o := testOptions(t)
 	p := newPanel(t, o)
 	uiAddr, _ := startPanel(t, p)
-	base := "http://" + uiAddr
+	base := "https://" + uiAddr
 
 	// An arm64 build in <data dir>/bin: its hash goes into the script too.
 	binDir := filepath.Join(o.DataDir, "bin")
@@ -390,17 +393,21 @@ func TestPairingCommandContainsScriptHash(t *testing.T) {
 	if m == nil {
 		t.Fatalf("no pairing command with a script hash on the server page:\n%s", page)
 	}
-	if want := p.PublicURL() + "/agent/install?token=" + tok.Token; m[1] != want {
-		t.Fatalf("command URL = %q, want %q", m[1], want)
+	if m[1] != p.certInfo().Pin {
+		t.Fatalf("command pin = %q, want the panel certificate's %q", m[1], p.certInfo().Pin)
 	}
-	script := getBody(t, m[1])
+	if want := p.PublicURL() + "/agent/install?token=" + tok.Token; m[2] != want {
+		t.Fatalf("command URL = %q, want %q", m[2], want)
+	}
+	script := getBody(t, m[2])
 	sum := sha256.Sum256([]byte(script))
-	if got := hex.EncodeToString(sum[:]); got != m[2] {
-		t.Fatalf("command says the script hash is %s, the served script hashes to %s", m[2], got)
+	if got := hex.EncodeToString(sum[:]); got != m[3] {
+		t.Fatalf("command says the script hash is %s, the served script hashes to %s", m[3], got)
 	}
 	armSum := sha256.Sum256([]byte("dbpanel arm64"))
 	for _, want := range []string{
 		"CA_SHA256='" + agentapi.CAFingerprint(p.CA.CAPEM()) + "'\n",
+		"WEB_PIN='" + p.certInfo().Pin + "'\n",
 		"BIN_SHA256_ARM64='" + hex.EncodeToString(armSum[:]) + "'\n",
 	} {
 		if !strings.Contains(script, want) {
@@ -433,7 +440,7 @@ func TestPairRejectsCAMismatch(t *testing.T) {
 		wrong[0] = '0'
 	}
 	dir := t.TempDir()
-	_, err = agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil, agent.PairOptions{CASHA256: string(wrong)})
+	_, err = agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil, agent.PairOptions{CASHA256: string(wrong), WebPin: p.certInfo().Pin})
 	if err == nil || !strings.Contains(err.Error(), "CA panel tidak cocok dengan yang diharapkan") {
 		t.Fatalf("Pair with a wrong pin: err = %v", err)
 	}
@@ -447,7 +454,7 @@ func TestPairRejectsCAMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil,
-		agent.PairOptions{CASHA256: strings.ToUpper(pin)}); err != nil {
+		agent.PairOptions{CASHA256: strings.ToUpper(pin), WebPin: p.certInfo().Pin}); err != nil {
 		t.Fatalf("Pair with the right pin: %v", err)
 	}
 }
@@ -470,7 +477,7 @@ func TestPairPinsAgentAddr(t *testing.T) {
 	const pinned = "192.0.2.77:8443"
 	dir := t.TempDir()
 	cfg, err := agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil,
-		agent.PairOptions{CASHA256: agentapi.CAFingerprint(p.CA.CAPEM()), AgentAddr: pinned})
+		agent.PairOptions{CASHA256: agentapi.CAFingerprint(p.CA.CAPEM()), AgentAddr: pinned, WebPin: p.certInfo().Pin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +519,7 @@ func getBodyWith(t *testing.T, url string, c *http.Cookie) string {
 // getBody GETs url, requires 200 and returns the body.
 func getBody(t *testing.T, url string) string {
 	t.Helper()
-	resp, err := http.Get(url)
+	resp, err := testClient.Get(url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +545,7 @@ func portOf(t *testing.T, addr string) string {
 
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
-	resp, err := http.Get(url)
+	resp, err := testClient.Get(url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -803,7 +810,7 @@ func TestPanelRestartKeepsRemoteAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg, err := agent.Pair(ctx, p1.PublicURL(), tok.Token, t.TempDir(), nil, agent.PairOptions{})
+	cfg, err := agent.Pair(ctx, p1.PublicURL(), tok.Token, t.TempDir(), nil, agent.PairOptions{WebPin: p1.certInfo().Pin})
 	if err != nil {
 		cancel()
 		t.Fatalf("Pair: %v", err)
@@ -863,7 +870,7 @@ func login(t *testing.T, o Options, base string) *http.Cookie {
 	}
 	resp.Body.Close()
 	for _, c := range resp.Cookies() {
-		if c.Name == auth.CookieName {
+		if c.Name == auth.SecureCookieName {
 			return c
 		}
 	}
@@ -871,7 +878,7 @@ func login(t *testing.T, o Options, base string) *http.Cookie {
 	return nil
 }
 
-var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var noRedirect = &http.Client{Transport: testTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // getWith GETs url with cookie c, without following redirects.
 func getWith(t *testing.T, url string, c *http.Cookie) *http.Response {
@@ -900,7 +907,7 @@ func TestResetPasswordEndsSessions(t *testing.T) {
 	p := newPanel(t, o)
 	p.epoch.ttl = 0 // read the epoch on every request instead of every 5 s
 	uiAddr, _ := startPanel(t, p)
-	base := "http://" + uiAddr
+	base := "https://" + uiAddr
 	c := login(t, o, base)
 	if resp := getWith(t, base+"/servers", c); resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /servers before reset = %d, want 200", resp.StatusCode)
@@ -975,9 +982,9 @@ func TestAgentEndpointsSecurityHeaders(t *testing.T) {
 	o := testOptions(t)
 	p := newPanel(t, o)
 	uiAddr, _ := startPanel(t, p)
-	base := "http://" + uiAddr
+	base := "https://" + uiAddr
 
-	resp, err := http.Post(base+"/agent/pair", "application/json", strings.NewReader(`{"token":"x"}`))
+	resp, err := testClient.Post(base+"/agent/pair", "application/json", strings.NewReader(`{"token":"x"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,7 +1035,7 @@ func TestHostAllowlist(t *testing.T) {
 	port := portOf(t, uiAddr)
 	do := func(host, path string) *http.Response {
 		t.Helper()
-		req, err := http.NewRequest("GET", "http://"+uiAddr+path, nil)
+		req, err := http.NewRequest("GET", "https://"+uiAddr+path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1068,9 +1075,9 @@ func TestHostAllowlist(t *testing.T) {
 		}
 	}
 	// The body explains what to do, in Indonesian.
-	req, _ := http.NewRequest("GET", "http://"+uiAddr+"/login", nil)
+	req, _ := http.NewRequest("GET", "https://"+uiAddr+"/login", nil)
 	req.Host = "evil.example"
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1254,7 +1261,7 @@ func (s *syncBuffer) String() string {
 // the server took to close the connection (or max if it did not).
 func slowBody(t *testing.T, addr, reqLine string, max time.Duration) time.Duration {
 	t.Helper()
-	c, err := net.Dial("tcp", addr)
+	c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1284,10 +1291,10 @@ func TestSlowBodyCut(t *testing.T) {
 		}
 	}
 
-	c := login(t, o, "http://"+uiAddr)
-	req, _ := http.NewRequest("GET", "http://"+uiAddr+"/events", nil)
+	c := login(t, o, "https://"+uiAddr)
+	req, _ := http.NewRequest("GET", "https://"+uiAddr+"/events", nil)
 	req.AddCookie(c)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

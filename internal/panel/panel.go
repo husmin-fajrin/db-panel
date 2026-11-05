@@ -92,6 +92,7 @@ type Panel struct {
 	// Notifier sends the alerts to Telegram.
 	Notifier *notify.Notifier
 
+	certs         *webCerts        // the UI's HTTPS certificates
 	telegram      *notify.Telegram // the Notifier's Bot API client; tests point it elsewhere
 	box           *secrets.Box     // seals the Telegram bot token (panel.key)
 	opts          Options
@@ -291,6 +292,9 @@ func (p *Panel) init() error {
 	if err := p.resolvePublicHost(); err != nil {
 		return err
 	}
+	if err := p.initWebCerts(); err != nil {
+		return err
+	}
 	if err := p.bootstrapAdmin(); err != nil {
 		return err
 	}
@@ -475,9 +479,9 @@ func (p *Panel) AgentListenAddr() string {
 }
 
 // PublicURL is the UI base URL as agents and browsers reach it, e.g.
-// "http://192.168.1.10:8080". It uses the bound port once Run listens.
+// "https://192.168.1.10:8080". It uses the bound port once Run listens.
 func (p *Panel) PublicURL() string {
-	return "http://" + net.JoinHostPort(p.opts.PublicHost, p.port(p.UIAddr(), p.opts.HTTPAddr))
+	return "https://" + net.JoinHostPort(p.opts.PublicHost, p.port(p.UIAddr(), p.opts.HTTPAddr))
 }
 
 // AgentAddr is host:port of the agent listener as agents reach it.

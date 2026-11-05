@@ -92,12 +92,15 @@ var notices = map[string]string{
 	"dilepas-henti": "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca; " +
 		"untuk membukanya jalankan di server itu: mysql -e \"SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF\" " +
 		"(SET PERSIST: tetap terbuka walau MySQL di-restart).",
-	"kunci-dibuka": "Kunci hanya-baca master dibuka; aplikasi bisa menulis lagi.",
-	"diperiksa":    "Server sudah diperiksa; status di bawah memakai laporan terbaru.",
-	"senyap":       "Pemberitahuan untuk server ini ditunda (Jangan ganggu).",
-	"senyap-batal": "Jangan ganggu dibatalkan; pemberitahuan untuk server ini aktif lagi.",
-	"pengaturan":   "Pengaturan disimpan.",
-	"tes-terkirim": "Pesan tes terkirim ke Telegram; periksa chat tujuannya.",
+	"kunci-dibuka":       "Kunci hanya-baca master dibuka; aplikasi bisa menulis lagi.",
+	"diperiksa":          "Server sudah diperiksa; status di bawah memakai laporan terbaru.",
+	"senyap":             "Pemberitahuan untuk server ini ditunda (Jangan ganggu).",
+	"senyap-batal":       "Jangan ganggu dibatalkan; pemberitahuan untuk server ini aktif lagi.",
+	"pengaturan":         "Pengaturan disimpan.",
+	"tes-terkirim":       "Pesan tes terkirim ke Telegram; periksa chat tujuannya.",
+	"sertifikat-sendiri": "Sertifikat yang Anda unggah sekarang dipakai panel.",
+	"sertifikat-panel":   "Panel kembali memakai sertifikatnya sendiri.",
+	"sertifikat-nama":    "Nama tambahan disimpan; sertifikat panel sudah diperbarui.",
 	"dihapus": "Server dihapus dari panel. Agent di server itu masih terpasang dan terus mencoba terhubung; " +
 		"matikan dengan: sudo systemctl disable --now dbpanel-agent",
 }

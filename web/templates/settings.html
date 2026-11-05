@@ -3,6 +3,8 @@
 <h1 class="text-2xl font-bold mb-4">Pengaturan</h1>
 <!-- "Kirim tes" posts this form; its button sits in the Telegram card of the main form. -->
 <form id="telegram-test" method="post" action="/settings/telegram-test"></form>
+<!-- "ubah ke https" posts this form; its button sits in the Alamat dasar panel card. -->
+<form id="base-url-https" method="post" action="/settings/base-url-https"></form>
 <form method="post" action="/settings" class="flex flex-col gap-6">
 
   <section class="card bg-base-100 shadow">
@@ -126,7 +128,10 @@
       <fieldset class="fieldset">
         <label class="label" for="base_url">Alamat untuk tautan di pesan Telegram</label>
         <input type="url" id="base_url" name="base_url" value="{{.Form.BaseURL}}" placeholder="{{.PublicURL}}" class="input w-full">
-        <p class="label">Alamat http:// atau https:// yang bisa dibuka dari ponsel penerima pesan, misalnya {{.PublicURL}}. Bila dikosongkan, pesan tidak memuat tautan ke panel. Alamat abu-abu di kolom hanya saran (alamat publik panel), bukan nilai yang dipakai: ketik atau salin alamatnya bila pesan perlu tautan.</p>
+        {{if .PlainBaseURL}}
+        <div role="alert" class="alert alert-warning"><span>Alamat ini diawali http://. Panel kini hanya melayani https://; tautan http:// dialihkan, tetapi sebaiknya langsung memakai https://.</span><button type="submit" form="base-url-https" class="btn btn-sm">ubah ke https</button></div>
+        {{end}}
+        <p class="label">Alamat https:// yang bisa dibuka dari ponsel penerima pesan, misalnya {{.PublicURL}}. Bila dikosongkan, pesan tidak memuat tautan ke panel. Alamat abu-abu di kolom hanya saran (alamat publik panel), bukan nilai yang dipakai: ketik atau salin alamatnya bila pesan perlu tautan.</p>
       </fieldset>
     </div>
   </section>
@@ -135,4 +140,53 @@
     <button type="submit" class="btn btn-primary">Simpan pengaturan</button>
   </div>
 </form>
+
+<section class="card bg-base-100 shadow mt-6">
+  <div class="card-body gap-4">
+    <h2 class="card-title">Sertifikat keamanan panel</h2>
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <tbody>
+          <tr><th>Dipakai</th><td>{{if eq .Cert.Mode "custom"}}Sertifikat yang dipasang admin{{else}}Sertifikat buatan panel{{end}}</td></tr>
+          <tr><th>Berlaku untuk</th><td>{{range $i, $n := .Cert.Names}}{{if $i}}, {{end}}<code>{{$n}}</code>{{end}}</td></tr>
+          <tr><th>Berlaku sampai</th><td>{{fmtTime .Cert.NotAfter}}</td></tr>
+          <tr><th>Pin kunci</th><td><code class="break-all">{{.Cert.Pin}}</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    {{if ne .Cert.Mode "custom"}}
+    <p>Komputer yang membuka panel perlu memasang sertifikat ini sekali. <a class="link" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat</a> · <a class="link" href="/sertifikat">Cara memasang</a></p>
+    {{end}}
+    <details class="collapse collapse-arrow bg-base-200">
+      <summary class="collapse-title font-semibold">Lanjutan</summary>
+      <div class="collapse-content flex flex-col gap-6">
+        <form method="post" action="/settings/cert-names" class="flex flex-col gap-2">
+          <fieldset class="fieldset">
+            <label class="label" for="extra_names">Nama dan alamat tambahan</label>
+            <input type="text" id="extra_names" name="extra_names" value="{{.ExtraNames}}" class="input w-full" placeholder="mis. panel.kantor.local, 10.20.0.5">
+            <p class="label">Dipisah koma. Nama host lengkap (dengan titik) atau alamat IP lain yang dipakai untuk membuka panel. Alamat di luar jaringan panel membuat sertifikat baru yang perlu dipasang ulang di semua komputer.</p>
+          </fieldset>
+          <div><button type="submit" class="btn btn-sm">Simpan nama</button></div>
+        </form>
+        <form method="post" action="/settings/cert" enctype="multipart/form-data" class="flex flex-col gap-2">
+          <p>Memakai sertifikat sendiri (misalnya dari tim keamanan kantor): unggah sertifikat dan kuncinya dalam bentuk PEM. Rantai sertifikat boleh disertakan di berkas sertifikat. Sertifikat harus memuat alamat panel dan belum kedaluwarsa. Kunci tidak pernah ditampilkan lagi.</p>
+          <fieldset class="fieldset">
+            <label class="label" for="cert_file">Berkas sertifikat (.crt / .pem)</label>
+            <input type="file" id="cert_file" name="cert_file" class="file-input w-full" required>
+          </fieldset>
+          <fieldset class="fieldset">
+            <label class="label" for="key_file">Berkas kunci (.key / .pem)</label>
+            <input type="file" id="key_file" name="key_file" class="file-input w-full" required>
+          </fieldset>
+          <div><button type="submit" class="btn btn-sm">Pakai sertifikat ini</button></div>
+        </form>
+        {{if eq .Cert.Mode "custom"}}
+        <form method="post" action="/settings/cert-panel">
+          <button type="submit" class="btn btn-sm">Kembali ke sertifikat panel</button>
+        </form>
+        {{end}}
+      </div>
+    </details>
+  </div>
+</section>
 {{end}}

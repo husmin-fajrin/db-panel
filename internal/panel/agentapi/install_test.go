@@ -23,7 +23,8 @@ import (
 )
 
 const (
-	installPanelURL  = "http://192.0.2.10:8080"
+	installPanelURL  = "https://192.0.2.10:8080"
+	installWebPin    = "sha256//q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA="
 	installAgentAddr = "192.0.2.10:8443"
 )
 
@@ -60,6 +61,7 @@ func installEnvCA(t *testing.T, binDir string) (string, string, *ca.CA) {
 		Store:     st,
 		CA:        authority,
 		AgentAddr: func() string { return installAgentAddr },
+		WebPin:    func() string { return installWebPin },
 		Now:       time.Now,
 		Logger:    slog.New(slog.DiscardHandler),
 	}
@@ -149,8 +151,10 @@ func TestInstallScriptRendersToken(t *testing.T) {
 		"TOKEN='" + token + "'\n",
 		// SEC-23: no redirects (the token would follow them to another host).
 		`printf 'url = "%s"\nmax-redirs = 0\n' "$PANEL_URL/agent/bin/$arch?token=$TOKEN" |`,
-		`curl -sSL -o "$BIN.new" -w '%{http_code}' -K -)`,
-		`DBPANEL_TOKEN="$TOKEN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"`,
+		// The panel's certificate is trusted by its pin, not a CA.
+		"WEB_PIN='" + installWebPin + "'\n",
+		`curl -sSL -o "$BIN.new" -w '%{http_code}' -k --pinnedpubkey "$WEB_PIN" -K -)`,
+		`DBPANEL_TOKEN="$TOKEN" DBPANEL_WEB_PIN="$WEB_PIN" "$BIN" agent pair --panel "$PANEL_URL" --ca-sha256 "$CA_SHA256" --agent-addr "$AGENT_ADDR"`,
 		// The CA the agent will pin is the panel's: sha256 of its DER.
 		"CA_SHA256='" + sha256Hex(authority.Cert.Raw) + "'\n",
 		"BIN_SHA256_ARM64='" + sha256Hex(arm) + "'\n",
@@ -207,6 +211,7 @@ func TestRenderInstallScriptDeterministic(t *testing.T) {
 		Token:     "ABCDE-FGHJK-MNPQR",
 		AgentAddr: installAgentAddr,
 		CASHA256:  strings.Repeat("ab", 32),
+		WebPin:    installWebPin,
 		BinSHA256: map[string]string{"amd64": strings.Repeat("11", 32), "arm64": strings.Repeat("22", 32)},
 	}
 	first, err := agentapi.RenderInstallScript(p)
@@ -227,6 +232,7 @@ func TestRenderInstallScriptDeterministic(t *testing.T) {
 		"AGENT_ADDR='" + installAgentAddr + "'\n",
 		"TOKEN='ABCDE-FGHJK-MNPQR'\n",
 		"CA_SHA256='" + strings.Repeat("ab", 32) + "'\n",
+		"WEB_PIN='" + installWebPin + "'\n",
 		"BIN_SHA256_AMD64='" + strings.Repeat("11", 32) + "'\n",
 		"BIN_SHA256_ARM64='" + strings.Repeat("22", 32) + "'\n",
 	} {

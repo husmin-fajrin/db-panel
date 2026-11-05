@@ -106,6 +106,12 @@ func normalizeHosts(names []string) ([]string, error) {
 	return out, nil
 }
 
+// ValidWebHost reports whether h (any case) is a name LoadOrCreateWebCA and
+// the web certificate accept: a fully qualified host name.
+func ValidWebHost(h string) bool {
+	return validHost(strings.ToLower(h))
+}
+
 func validHost(h string) bool {
 	if len(h) > 253 {
 		return false

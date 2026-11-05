@@ -33,6 +33,10 @@ type Deps struct {
 	AgentVersion string
 	Now          func() time.Time // nil means time.Now
 	Logger       *slog.Logger     // nil discards
+	// WebPin returns the SPKI pin (curl --pinnedpubkey form) of the
+	// panel's HTTPS certificate, put into the install script; nil renders
+	// it empty.
+	WebPin func() string
 	// OnAttach, if set, is called with each connection right after it is
 	// attached to the hub (used by tests to reach the connection).
 	OnAttach func(serverID int64, c *hub.WSConn)

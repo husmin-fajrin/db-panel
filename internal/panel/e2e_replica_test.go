@@ -80,7 +80,7 @@ func TestE2ECreateReplica(t *testing.T) {
 	o.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	p := newPanel(t, o)
 	uiAddr, _ := startPanel(t, p)
-	base := "http://" + uiAddr
+	base := "https://" + uiAddr
 
 	masterSrv, masterPins := startE2EAgent(t, p, "master-e2e", masterInst, &logs)
 	replicaSrv, replicaPins := startE2EAgent(t, p, "replika-e2e", replicaInst, &logs)
@@ -343,7 +343,7 @@ func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance
 	}
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg, err := agent.Pair(ctx, p.PublicURL(), tok.Token, dir, nil, agent.PairOptions{})
+	cfg, err := agent.Pair(ctx, p.PublicURL(), tok.Token, dir, nil, agent.PairOptions{WebPin: p.certInfo().Pin})
 	if err != nil {
 		cancel()
 		t.Fatalf("Pair %s: %v", name, err)
@@ -427,6 +427,7 @@ func newUIClient(t *testing.T, base string) *uiClient {
 		t.Fatal(err)
 	}
 	return &uiClient{t: t, base: base, c: &http.Client{
+		Transport:     testTransport,
 		Jar:           jar,
 		Timeout:       3 * time.Minute, // mysql.connect answers within the agent's call timeout
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

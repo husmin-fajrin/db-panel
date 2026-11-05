@@ -105,7 +105,7 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 	e.tg = newFakeTelegram(t)
 	configureE2EMonitoring(t, e.p, e.tg)
 	uiAddr, _ := startPanel(t, e.p)
-	base := "http://" + uiAddr
+	base := "https://" + uiAddr
 
 	e.masterSrv, e.masterPins = startE2EAgent(t, e.p, e.masterName, masterInst, &logs)
 	e.replicaSrv, _ = startE2EAgent(t, e.p, e.replicaName, replicaInst, &logs)

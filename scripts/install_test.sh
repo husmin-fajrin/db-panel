@@ -34,7 +34,8 @@ rendered="$tmp/agent-install.sh"
 sha_a=$(printf 'a%.0s' {1..64})
 sha_b=$(printf 'b%.0s' {1..64})
 sha_c=$(printf 'c%.0s' {1..64})
-sed -e "s|{{shq \.PanelURL}}|'http://192.0.2.10:8080'|g" \
+sed -e "s|{{shq \.PanelURL}}|'https://192.0.2.10:8080'|g" \
+	-e "s|{{shq \.WebPin}}|'sha256//q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA='|g" \
 	-e "s|{{shq \.Token}}|'ABCDE-FGHJK-MNPQR'|g" \
 	-e "s|{{shq \.AgentAddr}}|'192.0.2.10:8443'|g" \
 	-e "s|{{shq \.CASHA256}}|'$sha_a'|g" \
@@ -42,12 +43,17 @@ sed -e "s|{{shq \.PanelURL}}|'http://192.0.2.10:8080'|g" \
 	-e "s|{{shq (index \.BinSHA256 \"arm64\")}}|'$sha_c'|g" \
 	"$AGENT_TEMPLATE" >"$rendered"
 if grep -q '{{' "$rendered"; then
-	fail "$AGENT_TEMPLATE memakai aksi template selain shq PanelURL, Token, AgentAddr, CASHA256, BinSHA256 amd64/arm64"
+	fail "$AGENT_TEMPLATE memakai aksi template selain shq PanelURL, WebPin, Token, AgentAddr, CASHA256, BinSHA256 amd64/arm64"
 fi
 # SEC-23: the agent pins the panel CA and the binary is checked.
 # shellcheck disable=SC2016 # the literal text of the script
 if ! grep -q -- '--ca-sha256 "$CA_SHA256"' "$rendered"; then
 	fail "$AGENT_TEMPLATE tidak memanggil agent pair dengan --ca-sha256"
+fi
+# The panel is reached over HTTPS, trusted by the pin of its key.
+# shellcheck disable=SC2016 # the literal text of the script
+if ! grep -q -- '--pinnedpubkey "$WEB_PIN"' "$rendered" || ! grep -q -- 'DBPANEL_WEB_PIN="$WEB_PIN"' "$rendered"; then
+	fail "$AGENT_TEMPLATE tidak memakai pin sertifikat panel (WEB_PIN)"
 fi
 if ! grep -q 'sha256sum -c' "$rendered"; then
 	fail "$AGENT_TEMPLATE tidak memeriksa sha256 binary agent"
