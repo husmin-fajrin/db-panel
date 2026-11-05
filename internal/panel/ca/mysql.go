@@ -26,7 +26,11 @@ type MySQLCA struct {
 // LoadOrCreateMySQLCA loads dir/mysql-ca.crt and dir/mysql-ca.key, or creates
 // them (both 0600) when neither exists.
 func LoadOrCreateMySQLCA(dir string) (*MySQLCA, error) {
-	tmpl := &x509.Certificate{Subject: pkix.Name{CommonName: "dbpanel-mysql-ca"}}
+	tmpl := &x509.Certificate{
+		Subject: pkix.Name{CommonName: "dbpanel-mysql-ca"},
+		// Signs MySQL server certificates only.
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
 	c, err := loadOrCreate(dir, mysqlCACertFile, mysqlCAKeyFile, tmpl, 0o600)
 	if err != nil {
 		return nil, err

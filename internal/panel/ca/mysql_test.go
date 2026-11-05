@@ -76,6 +76,10 @@ func TestMySQLCertSANOnlyFromHosts(t *testing.T) {
 		t.Fatal("SAN asing dari CSR tidak boleh terverifikasi")
 	}
 
+	if eku := m.ca.Cert.ExtKeyUsage; len(eku) != 1 || eku[0] != x509.ExtKeyUsageServerAuth {
+		t.Fatalf("MySQL CA ExtKeyUsage = %v", eku)
+	}
+
 	if _, _, _, err := m.IssueMySQLCert(csrPEM, 7, nil); err == nil {
 		t.Fatal("hosts kosong: want error")
 	}

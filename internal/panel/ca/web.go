@@ -18,20 +18,20 @@ import (
 const (
 	webCACertFile = "web-ca.crt"
 	webCAKeyFile  = "web-ca.key"
-	// unmatchableDNS is the permitted DNS subtree of a web CA given no DNS
-	// names: without any DNS subtree RFC 5280 leaves DNS names unconstrained,
-	// so the CA could sign any domain. "invalid" is reserved (RFC 6761) and
-	// never resolves.
-	unmatchableDNS = "invalid"
 )
 
-// unmatchableIPs are the permitted IP ranges of a web CA given no IPs or
-// subnets, for the same reason as unmatchableDNS: a single unusable address
-// per family.
-var unmatchableIPs = []*net.IPNet{
-	{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(32, 32)},
-	{IP: net.IPv6unspecified, Mask: net.CIDRMask(128, 128)},
-}
+// RFC 5280 constrains a name type only when the CA lists a subtree of that
+// type; any type left out is unconstrained. Every type the web CA does not
+// permit is therefore excluded outright, in the CA/Browser Forum Baseline
+// Requirements form: a zero-length name excludes every DNS name, email
+// address and URI host, and 0.0.0.0/0 plus ::/0 exclude every IP.
+var (
+	excludeAll   = []string{""}
+	excludeAllIP = []*net.IPNet{
+		{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)},
+		{IP: net.IPv6unspecified, Mask: net.CIDRMask(0, 128)},
+	}
+)
 
 // WebNames are the names the panel's HTTPS certificate is for. The web CA is
 // constrained to DNS (each name and its subdomains), IPs (each a /32 or
@@ -50,35 +50,82 @@ type WebCA struct {
 }
 
 // LoadOrCreateWebCA loads dir/web-ca.crt and dir/web-ca.key, or creates a
-// web CA constrained to names when neither exists (both files 0600). An
-// existing CA is loaded as is, whatever names says: use Covers to decide
-// whether it still fits.
+// web CA constrained to names when neither exists (both files 0600). DNS
+// names are lowercased and must be fully qualified host names (see
+// normalizeHosts). An existing CA is loaded as is, whatever names says: use
+// Covers to decide whether it still fits.
 func LoadOrCreateWebCA(dir string, names WebNames) (*WebCA, error) {
 	if len(names.DNS) == 0 && len(names.IPs) == 0 && len(names.Subnets) == 0 {
 		return nil, errors.New("ca: web CA butuh minimal satu nama, IP atau subnet")
 	}
-	dns := names.DNS
-	if len(dns) == 0 {
-		dns = []string{unmatchableDNS}
+	dns, err := normalizeHosts(names.DNS)
+	if err != nil {
+		return nil, fmt.Errorf("ca: web CA: %w", err)
 	}
 	ranges := append([]*net.IPNet(nil), names.Subnets...)
 	for _, ip := range names.IPs {
 		ranges = append(ranges, hostNet(ip))
 	}
-	if len(ranges) == 0 {
-		ranges = unmatchableIPs
-	}
 	tmpl := &x509.Certificate{
-		Subject:                     pkix.Name{CommonName: "dbpanel-web-ca"},
+		Subject: pkix.Name{CommonName: "dbpanel-web-ca"},
+		// Only ever vouches for TLS servers, whatever a leaf claims.
+		ExtKeyUsage:                 []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		PermittedDNSDomainsCritical: true,
 		PermittedDNSDomains:         dns,
 		PermittedIPRanges:           ranges,
+		ExcludedEmailAddresses:      excludeAll,
+		ExcludedURIDomains:          excludeAll,
+	}
+	if len(dns) == 0 {
+		tmpl.ExcludedDNSDomains = excludeAll
+	}
+	if len(ranges) == 0 {
+		tmpl.ExcludedIPRanges = excludeAllIP
 	}
 	c, err := loadOrCreate(dir, webCACertFile, webCAKeyFile, tmpl, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	return &WebCA{ca: c}, nil
+}
+
+// normalizeHosts lowercases names and checks each is a fully qualified host
+// name: at least two labels of ASCII letters, digits and inner hyphens (1-63
+// bytes each, 253 in all), no wildcard, no leading or trailing dot. An empty
+// name would lift the DNS constraint entirely and a single label ("local")
+// would cover a whole TLD, so both are rejected.
+func normalizeHosts(names []string) ([]string, error) {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		h := strings.ToLower(name)
+		if !validHost(h) {
+			return nil, fmt.Errorf("nama %q bukan nama host lengkap yang sah", name)
+		}
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+func validHost(h string) bool {
+	if len(h) > 253 {
+		return false
+	}
+	labels := strings.Split(h, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // hostNet is the single-address network of ip (/32 for IPv4, /128 for IPv6).
@@ -172,7 +219,11 @@ func (w *WebCA) IssueWebCertWithKey(names WebNames, keyPEM []byte) ([]byte, erro
 }
 
 func (w *WebCA) issue(names WebNames, key *ecdsa.PrivateKey) ([]byte, error) {
-	leaf := WebNames{DNS: names.DNS, IPs: names.IPs}
+	dns, err := normalizeHosts(names.DNS)
+	if err != nil {
+		return nil, fmt.Errorf("sertifikat web: %w", err)
+	}
+	leaf := WebNames{DNS: dns, IPs: names.IPs}
 	var cn string
 	switch {
 	case len(leaf.DNS) > 0:

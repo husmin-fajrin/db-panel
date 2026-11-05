@@ -7,9 +7,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +49,15 @@ func newWebCA(t *testing.T, names WebNames) *WebCA {
 // bypassing IssueWebCert's own checks, to test what verifiers accept.
 func forgeLeaf(t *testing.T, w *WebCA, dns []string, ips []net.IP) *x509.Certificate {
 	t.Helper()
+	return forgeLeafWith(t, w, func(c *x509.Certificate) {
+		c.DNSNames = dns
+		c.IPAddresses = ips
+	})
+}
+
+// forgeLeafWith is forgeLeaf with arbitrary changes to the leaf template.
+func forgeLeafWith(t *testing.T, w *WebCA, edit func(*x509.Certificate)) *x509.Certificate {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -55,16 +67,16 @@ func forgeLeaf(t *testing.T, w *WebCA, dns []string, ips []net.IP) *x509.Certifi
 		t.Fatal(err)
 	}
 	now := time.Now()
-	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+	tmpl := &x509.Certificate{
 		SerialNumber: sn,
 		Subject:      pkix.Name{CommonName: "x"},
-		DNSNames:     dns,
-		IPAddresses:  ips,
 		NotBefore:    now.Add(-time.Minute),
 		NotAfter:     now.Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}, w.ca.Cert, &key.PublicKey, w.ca.Key)
+	}
+	edit(tmpl)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, w.ca.Cert, &key.PublicKey, w.ca.Key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,4 +287,87 @@ func TestWebCAPersistsAndIsSeparate(t *testing.T) {
 	if _, err := LoadOrCreateWebCA(dir, testWebNames(t)); err == nil {
 		t.Fatal("want error when web-ca.key is missing")
 	}
+}
+
+// TestWebCARejectsBadDNSNames: an empty dNSName constraint matches every name
+// (RFC 5280), a single label such as "local" covers a whole TLD, and
+// wildcards or stray dots are not host names. None may reach the constraints.
+func TestWebCARejectsBadDNSNames(t *testing.T) {
+	bad := []string{"", "local", "com", "*.panel.rs.local", "panel.rs.local.", ".panel.rs.local",
+		"pa nel.rs.local", "-a.rs.local", "a-.rs.local", "a_b.rs.local", "\u00fcber.rs.local", "a..rs.local",
+		strings.Repeat("a", 64) + ".rs.local"}
+	for _, name := range bad {
+		dir := t.TempDir()
+		_, err := LoadOrCreateWebCA(dir, WebNames{DNS: []string{"panel.rs.local", name}})
+		if err == nil {
+			t.Errorf("LoadOrCreateWebCA(%q): want error", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("%q", name)) {
+			t.Errorf("error should name %q: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "web-ca.key")); !os.IsNotExist(err) {
+			t.Errorf("%q: web-ca.key must not be written, stat err = %v", name, err)
+		}
+	}
+
+	w := newWebCA(t, testWebNames(t))
+	for _, name := range bad {
+		if _, _, err := w.IssueWebCert(WebNames{DNS: []string{name}}); err == nil {
+			t.Errorf("IssueWebCert(%q): want error", name)
+		}
+	}
+}
+
+func TestWebCALowercasesNames(t *testing.T) {
+	w := newWebCA(t, WebNames{DNS: []string{"Panel.RS.Local"}})
+	if got := w.ca.Cert.PermittedDNSDomains; len(got) != 1 || got[0] != "panel.rs.local" {
+		t.Fatalf("PermittedDNSDomains = %v", got)
+	}
+	certPEM, _, err := w.IssueWebCert(WebNames{DNS: []string{"PANEL.rs.local"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf := mustParseCert(t, certPEM); leaf.DNSNames[0] != "panel.rs.local" || leaf.Subject.CommonName != "panel.rs.local" {
+		t.Fatalf("leaf names = %v / %q", leaf.DNSNames, leaf.Subject.CommonName)
+	}
+}
+
+// TestWebCAOnlyServerAuth: a leaked web CA key must not yield certificates
+// for other purposes or for email/URI names.
+func TestWebCAOnlyServerAuth(t *testing.T) {
+	w := newWebCA(t, testWebNames(t))
+	if eku := w.ca.Cert.ExtKeyUsage; len(eku) != 1 || eku[0] != x509.ExtKeyUsageServerAuth {
+		t.Fatalf("CA ExtKeyUsage = %v", eku)
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(w.CAPEM())
+
+	for _, usage := range []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning, x509.ExtKeyUsageEmailProtection, x509.ExtKeyUsageClientAuth} {
+		leaf := forgeLeafWith(t, w, func(c *x509.Certificate) {
+			c.DNSNames = []string{"panel.rs.local"}
+			c.ExtKeyUsage = []x509.ExtKeyUsage{usage}
+		})
+		_, err := leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{usage}})
+		var inv x509.CertificateInvalidError
+		if !errors.As(err, &inv) || inv.Reason != x509.IncompatibleUsage {
+			t.Errorf("EKU %v: want IncompatibleUsage, got %v", usage, err)
+		}
+	}
+
+	email := forgeLeafWith(t, w, func(c *x509.Certificate) {
+		c.DNSNames = []string{"panel.rs.local"}
+		c.EmailAddresses = []string{"ceo@bank.example"}
+	})
+	wantConstraintFailure(t, verifyLeaf(w, email, "panel.rs.local"), "email SAN")
+
+	u, err := url.Parse("https://google.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri := forgeLeafWith(t, w, func(c *x509.Certificate) {
+		c.DNSNames = []string{"panel.rs.local"}
+		c.URIs = []*url.URL{u}
+	})
+	wantConstraintFailure(t, verifyLeaf(w, uri, "panel.rs.local"), "URI SAN")
 }
