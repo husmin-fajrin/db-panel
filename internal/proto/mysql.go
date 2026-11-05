@@ -169,6 +169,14 @@ type DumpUserParams struct {
 	RequireSSL bool   `json:"require_ssl"`
 }
 
+// DumpUserResult is the answer to mysql.createDumpUser. Warning is set
+// when the account got RELOAD instead of FLUSH_TABLES because the admin
+// account cannot grant FLUSH_TABLES; it names the GRANT that fixes it. An
+// agent older than this field answers null.
+type DumpUserResult struct {
+	Warning string `json:"warning,omitempty"`
+}
+
 // DropUserParams are the parameters of mysql.dropUser. The name must start
 // with "dbpanel_".
 type DropUserParams struct {

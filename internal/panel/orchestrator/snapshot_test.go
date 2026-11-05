@@ -439,3 +439,36 @@ func TestOfflineMasterLogWording(t *testing.T) {
 		t.Fatalf("dropUser %d, createDumpUser %d", m.count("mysql.dropUser"), m.count("mysql.createDumpUser"))
 	}
 }
+
+// TestDumpUserWarningReachesJobLog: a master agent that had to give the
+// dump account RELOAD says so in mysql.createDumpUser's answer, and the
+// job log carries that warning with its remedy.
+func TestDumpUserWarningReachesJobLog(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	const warning = "akun dump sementara mendapat RELOAD ... Jalankan di master: GRANT FLUSH_TABLES ON *.* TO 'adm'@'%' WITH GRANT OPTION"
+	m.reply("mysql.createDumpUser", proto.DumpUserResult{Warning: warning})
+	r := e.replicaAgent("replica1", "dump")
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	lines, err := e.st.JobLog(id, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, l := range lines {
+		if l.Message == warning {
+			found = true
+			if l.Level != "warn" {
+				t.Errorf("warning logged at %q, want warn", l.Level)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("job log lacks the createDumpUser warning:\n%s", e.jobLog(id))
+	}
+}

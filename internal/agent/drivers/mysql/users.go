@@ -107,7 +107,7 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		grants, err := d.dumpGrantsHere(ctx, h)
+		grants, warning, err := dumpGrantsHere(ctx, h)
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +115,10 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 			return nil, err
 		}
 		d.log("mysql dump user created", "user", a.User, "from_host", a.Host, "require_ssl", a.RequireSSL)
-		return nil, nil
+		if warning != "" && d.Logger != nil {
+			d.Logger.Warn("mysql dump user got RELOAD: the admin account cannot grant FLUSH_TABLES", "user", a.User, "warning", warning)
+		}
+		return proto.DumpUserResult{Warning: warning}, nil
 	})
 
 	reg.Register("mysql.dropUser", func(ctx context.Context, params json.RawMessage) (any, error) {
@@ -398,35 +401,33 @@ func SweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, logf func(m
 }
 
 // dumpGrantsHere is dumpGrantsFor this server's version, except that it
-// keeps RELOAD (with a warning naming the remedy) while the admin account
-// cannot pass FLUSH_TABLES on: such an account would fail every
-// mysql.createDumpUser.
-func (d *Driver) dumpGrantsHere(ctx context.Context, h Host) (string, error) {
+// keeps RELOAD while the admin account cannot pass FLUSH_TABLES on (such an
+// account would fail every mysql.createDumpUser). warning then says so and
+// names the GRANT that fixes it, for the panel's job log.
+func dumpGrantsHere(ctx context.Context, h Host) (grants, warning string, err error) {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer db.Close()
 	var version, account string
 	if err := db.QueryRowContext(ctx, "SELECT @@version, CURRENT_USER()").Scan(&version, &account); err != nil {
-		return "", fmt.Errorf("baca versi MySQL: %w", err)
+		return "", "", fmt.Errorf("baca versi MySQL: %w", err)
 	}
-	grants := dumpGrantsFor(version)
+	grants = dumpGrantsFor(version)
 	if grants == dumpGrantsReload {
-		return grants, nil
+		return grants, "", nil
 	}
 	held, err := showGrants(ctx, db)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !grantable(held, "FLUSH_TABLES") {
-		if d.Logger != nil {
-			d.Logger.Warn("mysql dump user gets RELOAD: the admin account cannot grant FLUSH_TABLES",
-				"version", version, "remedy", "GRANT FLUSH_TABLES ON *.* TO "+quoteAccount(account)+" WITH GRANT OPTION")
-		}
-		return dumpGrantsReload, nil
+		return dumpGrantsReload, fmt.Sprintf("akun dump sementara mendapat RELOAD (yang juga membolehkan RESET MASTER), "+
+			"bukan FLUSH_TABLES, karena akun admin MySQL %s tidak bisa memberikan FLUSH_TABLES. "+
+			"Jalankan di master: GRANT FLUSH_TABLES ON *.* TO %s WITH GRANT OPTION", version, quoteAccount(account)), nil
 	}
-	return grants, nil
+	return grants, "", nil
 }
 
 // grantable reports whether the SHOW GRANTS rows grants hold the global

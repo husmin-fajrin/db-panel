@@ -339,6 +339,9 @@ func TestCreateDumpUserNoReloadOnSupportedSeries(t *testing.T) {
 	if !r.OK {
 		t.Fatalf("createDumpUser: %+v", r.Error)
 	}
+	if string(r.Result) != "{}" {
+		t.Errorf("createDumpUser result = %s, want {} (no warning)", r.Result)
+	}
 	grants := showGrants(t, root, user, "127.0.0.1")
 	if grantsInclude(grants, "RELOAD") || !grantsInclude(grants, "FLUSH_TABLES") {
 		t.Fatalf("MySQL %s dump grants = %q, want FLUSH_TABLES and no RELOAD", version, grants)
@@ -394,24 +397,37 @@ func TestCreateDumpUserAdminWithoutFlushTables(t *testing.T) {
 	var logs bytes.Buffer
 	reg := commands.NewRegistry()
 	(&mysql.Driver{Host: inst.HostWith(creds), Creds: creds, Logger: slog.New(slog.NewTextHandler(&logs, nil))}).Register(reg)
-	create := func(user string) []string {
+	create := func(user string) ([]string, proto.DumpUserResult) {
 		t.Helper()
 		r := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.createDumpUser",
 			Params: mustJSON(t, proto.DumpUserParams{User: user, Password: "pw-2", FromHost: "127.0.0.1"})})
 		if !r.OK {
 			t.Fatalf("createDumpUser %s as adm: %+v", user, r.Error)
 		}
-		return showGrants(t, root, user, "127.0.0.1")
+		var res proto.DumpUserResult
+		if err := json.Unmarshal(r.Result, &res); err != nil {
+			t.Fatalf("createDumpUser result %s: %v", r.Result, err)
+		}
+		return showGrants(t, root, user, "127.0.0.1"), res
 	}
-	if g := create("dbpanel_dump_00000001"); !grantsInclude(g, "RELOAD") || grantsInclude(g, "FLUSH_TABLES") {
+	const remedy = "GRANT FLUSH_TABLES ON *.* TO 'adm'@'%' WITH GRANT OPTION"
+	g, res := create("dbpanel_dump_00000001")
+	if !grantsInclude(g, "RELOAD") || grantsInclude(g, "FLUSH_TABLES") {
 		t.Errorf("grants by an admin without FLUSH_TABLES = %q, want RELOAD", g)
 	}
-	if !strings.Contains(logs.String(), "GRANT FLUSH_TABLES ON *.* TO 'adm'@'%' WITH GRANT OPTION") {
+	if !strings.Contains(res.Warning, remedy) || !strings.Contains(res.Warning, "RELOAD") {
+		t.Errorf("createDumpUser warning = %q, want RELOAD and %q", res.Warning, remedy)
+	}
+	if !strings.Contains(logs.String(), remedy) {
 		t.Errorf("log does not name the remedy:\n%s", logs.String())
 	}
 	execAll(t, root, "GRANT FLUSH_TABLES ON *.* TO adm@'%' WITH GRANT OPTION")
-	if g := create("dbpanel_dump_00000002"); grantsInclude(g, "RELOAD") || !grantsInclude(g, "FLUSH_TABLES") {
+	g, res = create("dbpanel_dump_00000002")
+	if grantsInclude(g, "RELOAD") || !grantsInclude(g, "FLUSH_TABLES") {
 		t.Errorf("grants after the remedy = %q, want FLUSH_TABLES", g)
+	}
+	if res.Warning != "" {
+		t.Errorf("createDumpUser warning after the remedy = %q, want none", res.Warning)
 	}
 }
 

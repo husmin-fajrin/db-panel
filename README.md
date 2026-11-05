@@ -666,7 +666,8 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   `FLUSH_TABLES`, jadi akun dump di sana tetap memakai `RELOAD`. Akun admin
   yang dipakai agent harus memegang `FLUSH_TABLES ... WITH GRANT OPTION`
   untuk memberikannya (root sudah); bila belum, akun dump tetap mendapat
-  `RELOAD` dan journal agent mencatat peringatan dengan perintah
+  `RELOAD` dan log pekerjaan di panel (juga journal agent) mencatat
+  peringatan dengan perintah
   `GRANT FLUSH_TABLES ON *.* TO '<admin>'@'<host>' WITH GRANT OPTION`.
 - Agent menyapu sendiri akun dump yang tertinggal (pekerjaan mati di
   tengah jalan): tiap jam, dari pemantau kesehatan agent, akun

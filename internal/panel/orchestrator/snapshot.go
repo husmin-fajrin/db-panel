@@ -78,11 +78,15 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	// defer, a retry or Cancel then drop it (DROP USER IF EXISTS).
 	jr.st.DumpUser, jr.st.DumpHost = user, host
 	jr.save()
+	var created proto.DumpUserResult
 	if err := jr.call(ctx, jr.master(), "mysql.createDumpUser",
-		proto.DumpUserParams{User: user, Password: password, FromHost: host, RequireSSL: p.SSL}, nil); err != nil {
+		proto.DumpUserParams{User: user, Password: password, FromHost: host, RequireSSL: p.SSL}, &created); err != nil {
 		return fmt.Errorf("buat akun dump sementara di master: %w", err)
 	}
 	jr.logf("info", "Akun dump sementara %s@%s dibuat di master; dihapus lagi setelah salinan selesai.", user, host)
+	if created.Warning != "" {
+		jr.logf("warn", "%s", created.Warning)
+	}
 	p.User, p.Password = user, password
 	return jr.runAgentJob(ctx, jr.target(), cmd, p, res)
 }
