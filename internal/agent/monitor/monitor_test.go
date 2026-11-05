@@ -683,3 +683,40 @@ func TestMonitorSweepsDumpUsersHourly(t *testing.T) {
 		t.Errorf("DefaultSweepEvery = %v, want 1h", got)
 	}
 }
+
+// guardSource is a fakeSource that also guards against dump sessions
+// holding the global read lock (DumpLockGuard), recording each call.
+type guardSource struct {
+	*fakeSource
+	mu    sync.Mutex
+	calls []time.Duration // maxHold of each call
+}
+
+func (s *guardSource) KillDumpLocks(_ context.Context, maxHold time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, maxHold)
+	return 0, nil
+}
+
+func (s *guardSource) guards() []time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Duration(nil), s.calls...)
+}
+
+// TestMonitorGuardsDumpLocksEveryCheck: the guard runs after every check
+// (not hourly like the sweep), with a one-minute bound (SEC-56).
+func TestMonitorGuardsDumpLocksEveryCheck(t *testing.T) {
+	src := &guardSource{fakeSource: &fakeSource{snap: base()}}
+	r := startRig(t, src.fakeSource, src, nil)
+	if got := src.guards(); len(got) != 1 || got[0] != time.Minute {
+		t.Fatalf("guards after the first check = %v, want [1m]", got)
+	}
+	for i := 0; i < 3; i++ {
+		r.tick(15 * time.Second)
+	}
+	if n := len(src.guards()); n != 4 {
+		t.Fatalf("guards after four checks = %d, want 4", n)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
@@ -46,6 +47,11 @@ type Driver struct {
 	monCreds proto.ConnectParams
 
 	pins *Pins // nil without PinDir; set by Register
+
+	// KillDumpLocks: when each dump session was first seen holding the
+	// global read lock.
+	lockMu   sync.Mutex
+	lockSeen map[uint64]time.Time
 
 	tlsMu sync.Mutex // one mysql.tls* command at a time
 

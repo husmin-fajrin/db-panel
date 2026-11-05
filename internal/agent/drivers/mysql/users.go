@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	drv "github.com/go-sql-driver/mysql"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -93,7 +96,8 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, &commands.ParamError{Msg: "parameter tidak valid: " + err.Error()}
 		}
-		a := account{User: strings.TrimSpace(p.User), Host: strings.TrimSpace(p.FromHost), Password: p.Password, RequireSSL: p.RequireSSL}
+		a := account{User: strings.TrimSpace(p.User), Host: strings.TrimSpace(p.FromHost), Password: p.Password, RequireSSL: p.RequireSSL,
+			MaxConns: dumpMaxConnections}
 		if a.Host == "" {
 			return nil, &commands.ParamError{Msg: "host user dump wajib diisi (alamat replika)"}
 		}
@@ -170,6 +174,9 @@ const minSweepAgeSec = 60
 type account struct {
 	User, Host, Password string
 	RequireSSL           bool
+	// MaxConns caps the account's sessions (MAX_USER_CONNECTIONS); 0
+	// leaves the server's default.
+	MaxConns int
 }
 
 // validateAccountName checks a managed account's name and host; what names
@@ -288,7 +295,11 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 	if a.RequireSSL {
 		tls = "SSL"
 	}
-	stmts := []string{"ALTER USER " + name + " REQUIRE " + tls}
+	limit := ""
+	if a.MaxConns > 0 {
+		limit = " WITH MAX_USER_CONNECTIONS " + strconv.Itoa(a.MaxConns)
+	}
+	stmts := []string{"ALTER USER " + name + " REQUIRE " + tls + limit}
 	if n {
 		// An older dbpanel granted more: leave exactly grants.
 		stmts = append(stmts, "REVOKE ALL PRIVILEGES, GRANT OPTION FROM "+name)
@@ -340,9 +351,14 @@ func DropUser(ctx context.Context, h Host, user, host string) error {
 	return err
 }
 
+// execer is a *sql.DB or a *sql.Conn.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // dropAccount drops user@host if it exists and returns its quoted name.
 // The caller has validated user and host: they hold no quote or backslash.
-func dropAccount(ctx context.Context, db *sql.DB, user, host string) (string, error) {
+func dropAccount(ctx context.Context, db execer, user, host string) (string, error) {
 	name := quoteString(user) + "@" + quoteString(host)
 	if _, err := db.ExecContext(ctx, "DROP USER IF EXISTS "+name); err != nil {
 		return name, fmt.Errorf("hapus user %s: %w", name, err)
@@ -355,12 +371,78 @@ func dropAccount(ctx context.Context, db *sql.DB, user, host string) (string, er
 // mysql.createDumpUser and mysql.dropUser left behind. No other account is
 // read or dropped. logf gets one line per dropped account.
 func SweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, logf func(msg string, args ...any)) (proto.SweepDumpUsersResult, error) {
+	return sweepDumpUsers(ctx, h, olderThanSec, false, logf)
+}
+
+const (
+	// sweepLockWait bounds how long the sweep's DROP USER waits for a lock
+	// (lock_wait_timeout is a year by default): a global read lock still
+	// held must not hold up the sweep, nor the sweep the server.
+	sweepLockWait = 5 // seconds
+	// dumpMaxConnections caps the sessions of a dump account: mysqldump
+	// needs one.
+	dumpMaxConnections = 2
+)
+
+// killSessions kills every session of user, which must match
+// dumpAccountRe (pins.go: the only accounts whose sessions the agent ever
+// kills), and returns how many.
+func killSessions(ctx context.Context, conn *sql.Conn, user string) (int, error) {
+	if !dumpAccountRe.MatchString(user) {
+		return 0, fmt.Errorf("sesi akun %q tidak diputus: bukan akun dump panel", user)
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT ID FROM information_schema.PROCESSLIST WHERE USER = ?`, user)
+	if err != nil {
+		return 0, fmt.Errorf("baca sesi %s: %w", user, err)
+	}
+	var ids []uint64
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("baca sesi %s: %w", user, err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("baca sesi %s: %w", user, err)
+	}
+	n := 0
+	for _, id := range ids {
+		if _, err := conn.ExecContext(ctx, "KILL "+strconv.FormatUint(id, 10)); err != nil {
+			// Ended meanwhile (unknown thread): nothing to do.
+			if me, ok := errors.AsType[*drv.MySQLError](err); ok && me.Number == 1094 {
+				continue
+			}
+			return n, fmt.Errorf("putus sesi %d akun %s: %w", id, user, err)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// sweepDumpUsers is SweepDumpUsers; with kill (the agent's own hourly
+// sweep only, never a panel command) the sessions of each stale account
+// are killed before it is dropped (SEC-56): DROP USER ends no session, and
+// a session holding FLUSH TABLES WITH READ LOCK would block the DROP and
+// every write on the server. Every statement waits at most sweepLockWait
+// for a lock.
+func sweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, kill bool, logf func(msg string, args ...any)) (proto.SweepDumpUsersResult, error) {
 	res := proto.SweepDumpUsersResult{Dropped: []string{}}
-	db, err := openAdmin(ctx, h)
+	pool, err := openAdmin(ctx, h)
+	if err != nil {
+		return res, err
+	}
+	defer pool.Close()
+	db, err := pool.Conn(ctx)
 	if err != nil {
 		return res, err
 	}
 	defer db.Close()
+	if _, err := db.ExecContext(ctx, "SET SESSION lock_wait_timeout = "+strconv.Itoa(sweepLockWait)); err != nil {
+		return res, fmt.Errorf("atur lock_wait_timeout: %w", err)
+	}
 	// _ is a LIKE wildcard: escaped, so only the literal prefix matches.
 	pattern := strings.ReplaceAll(dumpUserPrefix, "_", "!_") + "%"
 	rows, err := db.QueryContext(ctx, `SELECT user, host FROM mysql.user
@@ -389,6 +471,15 @@ func SweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, logf func(m
 		if !strings.HasPrefix(a.user, dumpUserPrefix) || validateAccountName(a.user, a.host, "user") != nil {
 			logf("mysql dump user skipped by sweep: unexpected name", "user", a.user, "from_host", a.host)
 			continue
+		}
+		if kill && dumpAccountRe.MatchString(a.user) {
+			n, err := killSessions(ctx, db, a.user)
+			if err != nil {
+				return res, err
+			}
+			if n > 0 {
+				logf("mysql sessions of a stale dump user killed", "user", a.user, "sessions", n)
+			}
 		}
 		name, err := dropAccount(ctx, db, a.user, a.host)
 		if err != nil {
@@ -476,8 +567,102 @@ func (d *Driver) SweepDumpUsers(ctx context.Context, olderThan time.Duration) (i
 	if rs != nil {
 		return 0, nil
 	}
-	res, err := SweepDumpUsers(ctx, h, int64(olderThan/time.Second), d.log)
+	res, err := sweepDumpUsers(ctx, h, int64(olderThan/time.Second), true, d.log)
 	return len(res.Dropped), err
+}
+
+// KillDumpLocks is the health monitor's guard against a dump account
+// holding the global read lock (FLUSH TABLES WITH READ LOCK), which stops
+// every write on the server (monitor.DumpLockGuard, SEC-56): a session of
+// a dump account (dumpAccountRe) seen holding it for maxHold or longer,
+// across checks, is killed. mysqldump --single-transaction holds it for a
+// moment only. It reads performance_schema; without it (or without its
+// metadata-lock instrument) nothing is seen and nothing is killed.
+func (d *Driver) KillDumpLocks(ctx context.Context, maxHold time.Duration) (int, error) {
+	h, err := d.host()
+	if errors.Is(err, ErrNoHost) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	pool, err := h.Open(ctx)
+	if errors.Is(err, ErrNotConnected) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer pool.Close()
+	db, err := pool.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `SELECT t.PROCESSLIST_ID, t.PROCESSLIST_USER
+		FROM performance_schema.metadata_locks ml
+		JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID
+		WHERE ml.OBJECT_TYPE = 'GLOBAL' AND ml.LOCK_TYPE = 'SHARED' AND ml.LOCK_STATUS = 'GRANTED'
+			AND t.PROCESSLIST_ID IS NOT NULL AND t.PROCESSLIST_USER LIKE 'dbpanel!_dump!_%' ESCAPE '!'`)
+	if err != nil {
+		return 0, fmt.Errorf("baca kunci global: %w", err)
+	}
+	holders := map[uint64]string{}
+	for rows.Next() {
+		var id uint64
+		var user string
+		if err := rows.Scan(&id, &user); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("baca kunci global: %w", err)
+		}
+		if dumpAccountRe.MatchString(user) {
+			holders[id] = user
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("baca kunci global: %w", err)
+	}
+	now := time.Now()
+	d.lockMu.Lock()
+	if d.lockSeen == nil {
+		d.lockSeen = map[uint64]time.Time{}
+	}
+	var due []uint64
+	for id := range d.lockSeen {
+		if _, ok := holders[id]; !ok {
+			delete(d.lockSeen, id)
+		}
+	}
+	for id := range holders {
+		first, ok := d.lockSeen[id]
+		if !ok {
+			first = now
+			d.lockSeen[id] = now
+		}
+		if now.Sub(first) >= maxHold {
+			due = append(due, id)
+		}
+	}
+	d.lockMu.Unlock()
+	killed := 0
+	for _, id := range due {
+		if _, err := db.ExecContext(ctx, "KILL "+strconv.FormatUint(id, 10)); err != nil {
+			if me, ok := errors.AsType[*drv.MySQLError](err); ok && me.Number == 1094 {
+				continue
+			}
+			return killed, fmt.Errorf("putus sesi %d akun %s: %w", id, holders[id], err)
+		}
+		killed++
+		d.lockMu.Lock()
+		delete(d.lockSeen, id)
+		d.lockMu.Unlock()
+		if d.Logger != nil {
+			d.Logger.Warn("mysql dump session holding the global read lock killed", "user", holders[id], "session", id,
+				"held_at_least", maxHold)
+		}
+	}
+	return killed, nil
 }
 
 // quotePassword is s as a string literal. Without NO_BACKSLASH_ESCAPES a

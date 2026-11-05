@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -237,17 +238,10 @@ func validateTLSInstall(p *proto.TLSInstallParams) (tlsInstall, error) {
 // get: mysqld runs as that user and must read them.
 type tlsOwner struct{ uid, gid int }
 
-func dataDirOwner(l Layout) (tlsOwner, error) {
-	if l.DataDir == "" {
-		return tlsOwner{}, errors.New("direktori data MySQL tidak diketahui")
-	}
-	fi, err := os.Stat(l.DataDir)
-	if err != nil {
-		return tlsOwner{}, fmt.Errorf("baca direktori data MySQL: %w", err)
-	}
+func ownerOf(fi os.FileInfo, name string) (tlsOwner, error) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return tlsOwner{}, fmt.Errorf("pemilik %s tidak terbaca", l.DataDir)
+		return tlsOwner{}, fmt.Errorf("pemilik %s tidak terbaca", name)
 	}
 	return tlsOwner{uid: int(st.Uid), gid: int(st.Gid)}, nil
 }
@@ -255,49 +249,100 @@ func dataDirOwner(l Layout) (tlsOwner, error) {
 // mine reports whether files this process creates already have o.
 func (o tlsOwner) mine() bool { return o.uid == os.Geteuid() && o.gid == os.Getegid() }
 
-// tlsDir creates TLSDir(l) or makes the existing one a 0700 directory
-// owned by the data directory's owner. A symlink is refused.
-func tlsDir(l Layout) (string, tlsOwner, error) {
-	owner, err := dataDirOwner(l)
-	if err != nil {
-		return "", owner, err
-	}
-	dir := TLSDir(l)
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return "", owner, fmt.Errorf("buat %s: %w", dir, err)
-	}
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return "", owner, fmt.Errorf("baca %s: %w", dir, err)
-	}
-	if !fi.IsDir() {
-		return "", owner, fmt.Errorf("%s bukan direktori", dir)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", owner, fmt.Errorf("atur izin %s: %w", dir, err)
-	}
-	if !owner.mine() {
-		if err := os.Lchown(dir, owner.uid, owner.gid); err != nil {
-			return "", owner, fmt.Errorf("atur pemilik %s: %w", dir, err)
-		}
-	}
-	return dir, owner, nil
+// tlsFiles is TLSDir, opened once. The data directory belongs to the MySQL
+// service user, who could swap dbpanel-tls for a symlink at any moment
+// (SEC-58): every operation therefore goes through the directory's own
+// descriptor (an *os.Root, which never leaves it, and fchmod/fchown),
+// never through a path. path is only for messages and for MySQL.
+type tlsFiles struct {
+	path  string
+	root  *os.Root
+	owner tlsOwner
 }
 
-// writeTLSFile replaces dir/name with data: a temporary file (0600, owned
-// by owner) renamed over it.
-func writeTLSFile(dir, name string, data []byte, owner tlsOwner) error {
-	path := filepath.Join(dir, name)
-	fail := func(err error) error { return fmt.Errorf("tulis %s: %w", path, err) }
-	f, err := os.CreateTemp(dir, "."+name+".tmp-*")
+// openTLSDir creates TLSDir(l) or makes the existing one a 0700 directory
+// owned by the data directory's owner, and opens it. A symlink is refused.
+// The caller closes it.
+func openTLSDir(l Layout) (*tlsFiles, error) {
+	if l.DataDir == "" {
+		return nil, errors.New("direktori data MySQL tidak diketahui")
+	}
+	data, err := os.OpenRoot(l.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("buka direktori data MySQL: %w", err)
+	}
+	defer data.Close()
+	fi, err := data.Stat(".")
+	if err != nil {
+		return nil, fmt.Errorf("baca direktori data MySQL: %w", err)
+	}
+	owner, err := ownerOf(fi, l.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	path := TLSDir(l)
+	if err := data.Mkdir(tlsDirName, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, fmt.Errorf("buat %s: %w", path, err)
+	}
+	if fi, err := data.Lstat(tlsDirName); err != nil {
+		return nil, fmt.Errorf("baca %s: %w", path, err)
+	} else if !fi.IsDir() {
+		return nil, fmt.Errorf("%s bukan direktori", path)
+	}
+	root, err := data.OpenRoot(tlsDirName)
+	if err != nil {
+		return nil, fmt.Errorf("buka %s: %w", path, err)
+	}
+	d := &tlsFiles{path: path, root: root, owner: owner}
+	if err := d.fixDir(); err != nil {
+		root.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+// fixDir makes the opened directory 0700 and owned by d.owner, through its
+// descriptor.
+func (d *tlsFiles) fixDir() error {
+	f, err := d.root.Open(".")
+	if err != nil {
+		return fmt.Errorf("buka %s: %w", d.path, err)
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.IsDir() {
+		return fmt.Errorf("%s bukan direktori", d.path)
+	}
+	if err := f.Chmod(0o700); err != nil {
+		return fmt.Errorf("atur izin %s: %w", d.path, err)
+	}
+	if !d.owner.mine() {
+		if err := f.Chown(d.owner.uid, d.owner.gid); err != nil {
+			return fmt.Errorf("atur pemilik %s: %w", d.path, err)
+		}
+	}
+	return nil
+}
+
+func (d *tlsFiles) Close() error { return d.root.Close() }
+
+// join is the path of name in the directory, for messages and MySQL.
+func (d *tlsFiles) join(name string) string { return filepath.Join(d.path, name) }
+
+// write replaces name with data: a new temporary file (0600, owned by
+// d.owner) renamed over it.
+func (d *tlsFiles) write(name string, data []byte) error {
+	fail := func(err error) error { return fmt.Errorf("tulis %s: %w", d.join(name), err) }
+	var rnd [8]byte
+	rand.Read(rnd[:]) // never fails (crypto/rand)
+	tmp := "." + name + ".tmp-" + hex.EncodeToString(rnd[:])
+	f, err := d.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fail(err)
 	}
-	tmp := f.Name()
-	defer os.Remove(tmp) // no-op after the rename
+	defer d.root.Remove(tmp) // no-op after the rename
 	err = f.Chmod(0o600)
-	if err == nil && !owner.mine() {
-		err = f.Chown(owner.uid, owner.gid)
+	if err == nil && !d.owner.mine() {
+		err = f.Chown(d.owner.uid, d.owner.gid)
 	}
 	if err == nil {
 		_, err = f.Write(data)
@@ -309,7 +354,7 @@ func writeTLSFile(dir, name string, data []byte, owner tlsOwner) error {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Rename(tmp, path)
+		err = d.root.Rename(tmp, name)
 	}
 	if err != nil {
 		return fail(err)
@@ -323,10 +368,11 @@ func writeTLSFile(dir, name string, data []byte, owner tlsOwner) error {
 // leaves the directory.
 func requestTLS(l Layout) (proto.TLSRequestResult, error) {
 	var res proto.TLSRequestResult
-	dir, owner, err := tlsDir(l)
+	d, err := openTLSDir(l)
 	if err != nil {
 		return res, err
 	}
+	defer d.Close()
 	res.Hostname, _ = os.Hostname()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -342,7 +388,7 @@ func requestTLS(l Layout) (proto.TLSRequestResult, error) {
 	if err != nil {
 		return res, fmt.Errorf("buat CSR MySQL: %w", err)
 	}
-	if err := writeTLSFile(dir, tlsKeyFile+tlsNew, keyPEM, owner); err != nil {
+	if err := d.write(tlsKeyFile+tlsNew, keyPEM); err != nil {
 		return res, err
 	}
 	res.CSRPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
@@ -352,15 +398,16 @@ func requestTLS(l Layout) (proto.TLSRequestResult, error) {
 // trustTLS stores caPEM as TLSDir(l)/mysql-ca.crt and returns its path.
 // The same CA again changes nothing.
 func trustTLS(l Layout, caPEM []byte) (string, error) {
-	dir, owner, err := tlsDir(l)
+	d, err := openTLSDir(l)
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, tlsCAFile)
-	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, caPEM) {
+	defer d.Close()
+	path := d.join(tlsCAFile)
+	if old, err := d.root.ReadFile(tlsCAFile); err == nil && bytes.Equal(old, caPEM) {
 		return path, nil
 	}
-	return path, writeTLSFile(dir, tlsCAFile, caPEM, owner)
+	return path, d.write(tlsCAFile, caPEM)
 }
 
 // keyMatches reports whether keyPEM (an EC PRIVATE KEY) is the private key
@@ -400,7 +447,7 @@ func setTLSVars(ctx context.Context, db *sql.DB, scope string, v tlsVars) error 
 
 // rotation is the renames of one install, undone in reverse on failure.
 type rotation struct {
-	dir  string
+	d    *tlsFiles
 	done []rotated
 }
 
@@ -409,19 +456,19 @@ type rotated struct {
 	hadPrev bool // name existed and was moved to name.prev
 }
 
-// swap moves dir/name to name.prev (when it exists) and name.new to name.
+// swap moves name to name.prev (when it exists) and name.new to name.
 func (r *rotation) swap(name string) error {
-	path := filepath.Join(r.dir, name)
+	root, path := r.d.root, r.d.join(name)
 	hadPrev := false
-	if _, err := os.Lstat(path); err == nil {
-		if err := os.Rename(path, path+tlsPrev); err != nil {
+	if _, err := root.Lstat(name); err == nil {
+		if err := root.Rename(name, name+tlsPrev); err != nil {
 			return fmt.Errorf("simpan %s lama: %w", path, err)
 		}
 		hadPrev = true
 	}
-	if err := os.Rename(path+tlsNew, path); err != nil {
+	if err := root.Rename(name+tlsNew, name); err != nil {
 		if hadPrev {
-			_ = os.Rename(path+tlsPrev, path)
+			_ = root.Rename(name+tlsPrev, name)
 		}
 		return fmt.Errorf("pasang %s: %w", path, err)
 	}
@@ -434,10 +481,10 @@ func (r *rotation) swap(name string) error {
 func (r *rotation) undo() error {
 	var first error
 	for i := len(r.done) - 1; i >= 0; i-- {
-		path := filepath.Join(r.dir, r.done[i].name)
-		err := os.Rename(path, path+tlsNew)
+		name := r.done[i].name
+		err := r.d.root.Rename(name, name+tlsNew)
 		if err == nil && r.done[i].hadPrev {
-			err = os.Rename(path+tlsPrev, path)
+			err = r.d.root.Rename(name+tlsPrev, name)
 		}
 		if err != nil && first == nil {
 			first = err
@@ -466,15 +513,16 @@ func (r *rotation) undo() error {
 func installTLS(ctx context.Context, h Host, creds CredentialStore, in tlsInstall) (proto.TLSInstallResult, error) {
 	var res proto.TLSInstallResult
 	l := h.Layout()
-	dir, owner, err := tlsDir(l)
+	d, err := openTLSDir(l)
 	if err != nil {
 		return res, err
 	}
+	defer d.Close()
 	keyName := tlsKeyFile + tlsNew
-	keyPEM, err := os.ReadFile(filepath.Join(dir, keyName))
+	keyPEM, err := d.root.ReadFile(keyName)
 	if errors.Is(err, os.ErrNotExist) {
 		keyName = tlsKeyFile
-		keyPEM, err = os.ReadFile(filepath.Join(dir, keyName))
+		keyPEM, err = d.root.ReadFile(keyName)
 		if errors.Is(err, os.ErrNotExist) {
 			return res, &commands.ParamError{Msg: "belum ada kunci MySQL di server ini; jalankan mysql.tlsRequest dulu"}
 		}
@@ -495,23 +543,26 @@ func installTLS(ctx context.Context, h Host, creds CredentialStore, in tlsInstal
 	if err != nil {
 		return res, err
 	}
+	installed := tlsVars{
+		ca:   sql.NullString{String: d.join(tlsCAFile), Valid: true},
+		cert: sql.NullString{String: d.join(tlsCertFile), Valid: true},
+		key:  sql.NullString{String: d.join(tlsKeyFile), Valid: true},
+	}
+	if err := refuseClientCertAccounts(ctx, db, old, installed.ca.String); err != nil {
+		return res, err
+	}
 
-	if err := writeTLSFile(dir, tlsCertFile+tlsNew, in.cert.pem, owner); err != nil {
+	if err := d.write(tlsCertFile+tlsNew, in.cert.pem); err != nil {
 		return res, err
 	}
-	if err := writeTLSFile(dir, tlsCAFile+tlsNew, in.ca.pem, owner); err != nil {
-		os.Remove(filepath.Join(dir, tlsCertFile+tlsNew))
+	if err := d.write(tlsCAFile+tlsNew, in.ca.pem); err != nil {
+		d.root.Remove(tlsCertFile + tlsNew)
 		return res, err
 	}
-	rot := &rotation{dir: dir}
+	rot := &rotation{d: d}
 	names := []string{tlsCertFile, tlsCAFile}
 	if keyName != tlsKeyFile {
 		names = append(names, tlsKeyFile)
-	}
-	installed := tlsVars{
-		ca:   sql.NullString{String: filepath.Join(dir, tlsCAFile), Valid: true},
-		cert: sql.NullString{String: filepath.Join(dir, tlsCertFile), Valid: true},
-		key:  sql.NullString{String: filepath.Join(dir, tlsKeyFile), Valid: true},
 	}
 
 	err = func() error {
@@ -541,6 +592,41 @@ func installTLS(ctx context.Context, h Host, creds CredentialStore, in tlsInstal
 	return res, nil
 }
 
+// refuseClientCertAccounts refuses an install that would change MySQL's
+// ssl_ca while accounts log in with client certificates (REQUIRE X509,
+// ISSUER or SUBJECT): MySQL checks those against ssl_ca, and the panel's CA
+// in its place would lock the applications out (I7). An unset ssl_ca, or
+// the panel's own from an earlier install, is no change.
+func refuseClientCertAccounts(ctx context.Context, db *sql.DB, old tlsVars, newCA string) error {
+	if !old.ca.Valid || old.ca.String == "" || old.ca.String == newCA {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT user, host FROM mysql.user WHERE ssl_type IN ('X509', 'SPECIFIED')
+		ORDER BY user, host`)
+	if err != nil {
+		return fmt.Errorf("baca akun bersertifikat klien: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var user, host string
+		if err := rows.Scan(&user, &host); err != nil {
+			return fmt.Errorf("baca akun bersertifikat klien: %w", err)
+		}
+		names = append(names, quoteString(user)+"@"+quoteString(host))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("baca akun bersertifikat klien: %w", err)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return &commands.ParamError{Msg: fmt.Sprintf("akun %s memakai sertifikat klien yang diperiksa MySQL dengan ssl_ca "+
+		"saat ini (%s); sertifikat MySQL panel mengganti ssl_ca sehingga aplikasi itu tidak bisa masuk lagi. "+
+		"Sertifikat MySQL panel tidak dipasang di server ini (lihat README, Sertifikat klien MySQL)",
+		strings.Join(names, ", "), old.ca.String)}
+}
+
 // rollbackTLS undoes a failed install: the files, the settings, and the
 // loaded certificate. cause is the install's error; the result says
 // whether MySQL is back on its previous certificate.
@@ -550,7 +636,7 @@ func rollbackTLS(ctx context.Context, db *sql.DB, rot *rotation, old tlsVars, ca
 		problems = append(problems, "kembalikan berkas: "+err.Error())
 	}
 	for _, name := range []string{tlsCertFile + tlsNew, tlsCAFile + tlsNew} {
-		os.Remove(filepath.Join(rot.dir, name)) // the key stays for another try
+		rot.d.root.Remove(name) // the key stays for another try
 	}
 	if err := setTLSVars(ctx, db, "GLOBAL", old); err != nil {
 		problems = append(problems, err.Error())

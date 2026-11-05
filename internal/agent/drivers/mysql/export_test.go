@@ -144,3 +144,9 @@ func SetCommandHook(seen func(*exec.Cmd)) (restore func()) {
 	}
 	return func() { newCommand = old }
 }
+
+// TLS directory operations, testable without a server.
+var (
+	TrustTLS   = trustTLS
+	RequestTLS = requestTLS
+)

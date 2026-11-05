@@ -578,3 +578,98 @@ func grantsInclude(grants []string, priv string) bool {
 	}
 	return false
 }
+
+// The health monitor guards against dump sessions holding the global read
+// lock through the driver.
+var _ monitor.DumpLockGuard = (*mysql.Driver)(nil)
+
+// TestDumpAccountCannotHoldGlobalLock (SEC-56, the audit's PoC): a dump
+// account is limited to two sessions; one holding FLUSH TABLES WITH READ
+// LOCK is killed by the lock guard once seen for maxHold, and by the
+// hourly sweep (which waits for no lock) before its stale account is
+// dropped. Sessions of any other account are never killed.
+func TestDumpAccountCannotHoldGlobalLock(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	root := rootDB(t, inst)
+	d := &mysql.Driver{Host: inst.Host(), Logger: slog.New(slog.DiscardHandler)}
+	reg := commands.NewRegistry()
+	d.Register(reg)
+	const user, pw = "dbpanel_dump_deadbeef", "Dump-pw-123"
+	if r := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.createDumpUser",
+		Params: mustJSON(t, proto.DumpUserParams{User: user, Password: pw, FromHost: "127.0.0.1"})}); !r.OK {
+		t.Fatalf("createDumpUser: %+v", r.Error)
+	}
+	if n := count(t, root, "SELECT max_user_connections FROM mysql.user WHERE user = '"+user+"'"); n != 2 {
+		t.Fatalf("max_user_connections = %d, want 2", n)
+	}
+	execAll(t, root, "CREATE USER 'simrs_app'@'127.0.0.1' IDENTIFIED BY 'App-pw-123'", "GRANT RELOAD ON *.* TO 'simrs_app'@'127.0.0.1'")
+	ctx := context.Background()
+	hold := func(u, p string) *sql.Conn {
+		t.Helper()
+		db, err := sql.Open("mysql", mysql.DSN(proto.ConnectParams{User: u, Password: p, Host: "127.0.0.1", Port: inst.Port}, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		c, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
+			t.Fatalf("FTWRL as %s: %v", u, err)
+		}
+		return c
+	}
+	alive := func(c *sql.Conn) bool { return c.PingContext(ctx) == nil }
+	canWrite := func() bool {
+		t.Helper()
+		c, err := root.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if _, err := c.ExecContext(ctx, "SET SESSION lock_wait_timeout = 2"); err != nil {
+			t.Fatal(err)
+		}
+		_, err = c.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS schreibtest")
+		return err == nil
+	}
+
+	// An application holding the lock is never touched.
+	app := hold("simrs_app", "App-pw-123")
+	if n, err := d.KillDumpLocks(ctx, 0); n != 0 || err != nil {
+		t.Fatalf("KillDumpLocks with an application's lock = %d, %v", n, err)
+	}
+	if !alive(app) {
+		t.Fatal("the application's session was killed")
+	}
+	app.ExecContext(ctx, "UNLOCK TABLES")
+
+	// The guard: first seen, then killed once held for maxHold.
+	c := hold(user, pw)
+	if canWrite() {
+		t.Fatal("writes go on while the dump account holds the lock")
+	}
+	if n, err := d.KillDumpLocks(ctx, time.Hour); n != 0 || err != nil {
+		t.Fatalf("KillDumpLocks before maxHold = %d, %v", n, err)
+	}
+	if n, err := d.KillDumpLocks(ctx, 0); n != 1 || err != nil {
+		t.Fatalf("KillDumpLocks = %d, %v; want 1", n, err)
+	}
+	if alive(c) || !canWrite() {
+		t.Fatalf("after the guard: session alive %v, writes blocked %v", alive(c), !canWrite())
+	}
+
+	// The sweep: a stale account holding the lock is killed, then dropped.
+	execAll(t, root, "UPDATE mysql.user SET password_last_changed = NOW() - INTERVAL 2 DAY WHERE user = '"+user+"'")
+	c = hold(user, pw)
+	if n, err := d.SweepDumpUsers(ctx, 24*time.Hour); n != 1 || err != nil {
+		t.Fatalf("SweepDumpUsers = %d, %v; want 1", n, err)
+	}
+	if alive(c) || !canWrite() {
+		t.Fatalf("after the sweep: session alive %v, writes blocked %v", alive(c), !canWrite())
+	}
+	if n := count(t, root, "SELECT COUNT(*) FROM mysql.user WHERE user = '"+user+"'"); n != 0 {
+		t.Fatal("stale dump account not dropped")
+	}
+}

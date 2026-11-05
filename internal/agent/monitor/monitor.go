@@ -32,6 +32,14 @@ type DumpSweeper interface {
 	SweepDumpUsers(ctx context.Context, olderThan time.Duration) (dropped int, err error)
 }
 
+// DumpLockGuard is a Source that can also end the session of a per-job
+// dump account that has held the global read lock (FLUSH TABLES WITH READ
+// LOCK, which stops every write) for maxHold or longer
+// (mysql.Driver.KillDumpLocks). The monitor runs it after every check.
+type DumpLockGuard interface {
+	KillDumpLocks(ctx context.Context, maxHold time.Duration) (killed int, err error)
+}
+
 // Emitter sends an event to the panel; an error (proto.ErrOffline while
 // there is no connection) means the event was not delivered.
 type Emitter interface {
@@ -51,6 +59,10 @@ const (
 const (
 	DumpUserMaxAge = 24 * time.Hour
 	sweepTimeout   = time.Minute
+	// DumpLockMaxHold is how long a dump account may hold the global read
+	// lock: mysqldump --single-transaction needs it for a moment only.
+	DumpLockMaxHold  = time.Minute
+	lockGuardTimeout = 10 * time.Second
 )
 
 // Bounds of the intervals monitor.configure accepts, in seconds.
@@ -218,6 +230,7 @@ func (m *Monitor) options() Options {
 func (m *Monitor) Run(ctx context.Context) {
 	for {
 		m.tick(ctx)
+		m.guardDumpLocks(ctx)
 		m.sweep(ctx)
 		if !m.pause(ctx) {
 			return
@@ -245,6 +258,21 @@ func (m *Monitor) sweep(ctx context.Context) {
 		m.logger.Warn("stale dump users not swept", "err", err)
 	case n > 0:
 		m.logger.Info("stale dump users swept", "dropped", n)
+	}
+}
+
+// guardDumpLocks runs the Source's DumpLockGuard, when it is one.
+func (m *Monitor) guardDumpLocks(ctx context.Context) {
+	g, ok := m.src.(DumpLockGuard)
+	if !ok || ctx.Err() != nil {
+		return
+	}
+	gctx, cancel := context.WithTimeout(ctx, lockGuardTimeout)
+	defer cancel()
+	if n, err := g.KillDumpLocks(gctx, DumpLockMaxHold); err != nil {
+		m.logger.Debug("dump lock guard", "err", err)
+	} else if n > 0 {
+		m.logger.Warn("dump sessions holding the global read lock killed", "killed", n)
 	}
 }
 

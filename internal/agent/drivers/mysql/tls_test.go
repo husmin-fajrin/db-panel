@@ -329,6 +329,47 @@ func TestTLSInstallRollbackOnBadCert(t *testing.T) {
 	}
 }
 
+// TestTLSInstallRefusesClientCertAccounts (I7): accounts that log in with
+// client certificates are checked against ssl_ca; an install that would
+// replace it is refused, naming them, before anything changes. With the
+// panel's CA already in place (an earlier install) a renewal goes on.
+func TestTLSInstallRefusesClientCertAccounts(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	tlsCheckUser(t, db)
+	m := testMySQLCA(t)
+	if _, err := db.Exec("CREATE USER 'aplikasi'@'%' IDENTIFIED BY 'Rahasia-123' REQUIRE X509"); err != nil {
+		t.Fatal(err)
+	}
+	before := variable(t, db, "ssl_ca")
+	certPEM, _, _ := requestCert(t, inst, m, "127.0.0.1")
+	r := dispatch(t, inst.Host(), "mysql.tlsInstall",
+		proto.TLSInstallParams{CertPEM: string(certPEM), CAPEM: string(m.CAPEM()), VerifyHost: "127.0.0.1"})
+	if r.OK || !strings.Contains(r.Error.Message, "akun 'aplikasi'@'%' memakai sertifikat klien") {
+		t.Fatalf("install with a REQUIRE X509 account = %+v", r)
+	}
+	if got := variable(t, db, "ssl_ca"); got != before {
+		t.Fatalf("ssl_ca = %q after the refusal, want %q", got, before)
+	}
+	if exists(filepath.Join(mysql.TLSDir(inst.Layout()), "server.crt")) {
+		t.Fatal("certificate installed despite the refusal")
+	}
+	// Without the account the install goes on; with the panel's CA as
+	// ssl_ca an account with REQUIRE SUBJECT no longer stops a renewal.
+	if _, err := db.Exec("DROP USER 'aplikasi'@'%'"); err != nil {
+		t.Fatal(err)
+	}
+	r = dispatch(t, inst.Host(), "mysql.tlsInstall",
+		proto.TLSInstallParams{CertPEM: string(certPEM), CAPEM: string(m.CAPEM()), VerifyHost: "127.0.0.1"})
+	if !r.OK {
+		t.Fatalf("install = %+v", r.Error)
+	}
+	if _, err := db.Exec("CREATE USER 'aplikasi'@'%' IDENTIFIED BY 'Rahasia-123' REQUIRE SUBJECT '/CN=aplikasi'"); err != nil {
+		t.Fatal(err)
+	}
+	installCert(t, inst, m)
+}
+
 func TestTLSInstallRejectsBadParams(t *testing.T) {
 	m := testMySQLCA(t)
 	certPEM := otherKeyCert(t, m)
