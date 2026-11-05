@@ -398,8 +398,11 @@ func (jr *jobRun) tightenReplicaCert(serverID int64) func(ctx context.Context, a
 
 // tightenRepoint points the replica at its master again, now verifying
 // the master's certificate: STOP REPLICA, the CA file, CHANGE REPLICATION
-// SOURCE with SOURCE_SSL_VERIFY_SERVER_CERT, START REPLICA (not for a
-// replica an operator stopped), and tls_verified.
+// SOURCE with SOURCE_SSL_VERIFY_SERVER_CERT, START REPLICA, and
+// tls_verified. Around the stop the replica is marked paused, as Stop
+// replika does, so a health report in between reads "Dihentikan" (stopped
+// by the panel) and opens no replica_stopped alert; a replica an operator
+// stopped stays stopped and paused.
 func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, approved bool) (outcome, error) {
 	return func(ctx context.Context, _ bool) (outcome, error) {
 		reason, err := jr.tightenSkip(serverID)
@@ -416,12 +419,22 @@ func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, appro
 		if err != nil {
 			return outcome{}, err
 		}
+		// Paused by this job's earlier attempt is not the operator's stop.
+		operatorPaused := rep.Paused && jr.st.TightenPaused != serverID
 		topo, password, err := jr.replAccount()
 		if err != nil {
 			return outcome{}, err
 		}
-		name := jr.serverName(serverID)
+		if !operatorPaused {
+			jr.st.TightenPaused = serverID
+			jr.save()
+			if err := jr.r.d.Store.SetReplicaPaused(serverID, true); err != nil {
+				return outcome{}, err
+			}
+			jr.r.replicaChanged(serverID)
+		}
 		if err := jr.call(ctx, serverID, "mysql.stopReplica", nil, nil); err != nil {
+			jr.restartReplica(ctx, serverID)
 			return outcome{}, err
 		}
 		path, err := jr.trustCA(ctx, serverID)
@@ -433,37 +446,55 @@ func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, appro
 		}
 		if err != nil {
 			// Replication goes on as it was configured before.
-			jr.restartReplica(ctx, serverID, rep)
+			jr.restartReplica(ctx, serverID)
 			return outcome{}, err
 		}
-		if !rep.Paused {
+		if !operatorPaused {
 			if err := jr.call(ctx, serverID, "mysql.startReplica", nil, nil); err != nil {
+				// Stays paused ("Dihentikan"): Ulangi, or Start replika.
 				return outcome{}, err
 			}
+			jr.unpause(serverID)
 		}
 		if err := jr.r.d.Store.SetReplicaTLSVerified(serverID, true); err != nil {
 			return outcome{}, err
 		}
-		jr.logf("info", "Replikasi %s sekarang memverifikasi sertifikat master %s.", name, topo.SourceHost)
-		if rep.Paused {
+		jr.logf("info", "Replikasi %s sekarang memverifikasi sertifikat master %s.", jr.serverName(serverID), topo.SourceHost)
+		if operatorPaused {
 			return done("terverifikasi; replikasi tetap dihentikan seperti sebelumnya"), nil
 		}
 		return done("terverifikasi"), nil
 	}
 }
 
+// unpause clears the paused mark tightenRepoint set on the replica, now
+// that its replication runs again.
+func (jr *jobRun) unpause(serverID int64) {
+	if err := jr.r.d.Store.SetReplicaPaused(serverID, false); err != nil {
+		jr.r.log.Warn("clear paused after redirect", "job", jr.job.ID, "server_id", serverID, "err", err)
+		return
+	}
+	jr.st.TightenPaused = 0
+	jr.save()
+	jr.r.replicaChanged(serverID)
+}
+
 // restartReplica starts the replica's replication again after a redirect
-// that stopped it did not finish (best effort; a replica an operator
-// stopped stays stopped).
-func (jr *jobRun) restartReplica(ctx context.Context, serverID int64, rep store.Replica) {
-	if rep.Paused {
+// that stopped it did not finish, and clears the paused mark (best
+// effort). A replica this job did not mark paused (the operator stopped
+// it, or the redirect had not begun) is left alone. When the start fails
+// it stays paused: Dihentikan, until Ulangi or Start replika.
+func (jr *jobRun) restartReplica(ctx context.Context, serverID int64) {
+	if jr.st.TightenPaused != serverID {
 		return
 	}
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelTimeout)
 	defer cancel()
 	if err := jr.r.d.Hub.Call(sctx, serverID, "mysql.startReplica", nil, nil); err != nil {
 		jr.r.log.Warn("start replica after unfinished redirect", "job", jr.job.ID, "server_id", serverID, "err", err)
+		return
 	}
+	jr.unpause(serverID)
 }
 
 // tightenReplicaAt is the replica whose steps tighten_tls step idx belongs

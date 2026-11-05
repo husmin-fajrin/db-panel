@@ -352,8 +352,11 @@ sertifikat itu; bila gagal, berkas lama dikembalikan dan pekerjaan gagal.
   kata sandi) untuk topologi yang dibuat sebelum versi ini, atau bila ada
   replika yang belum memverifikasi master: panel memasang sertifikat di
   master, lalu untuk tiap replika memasang sertifikatnya dan menyambungkan
-  ulang replikasinya dengan verifikasi (replikasi berhenti beberapa detik;
-  replika yang dihentikan lewat **Stop replika** tetap berhenti). Replika
+  ulang replikasinya dengan verifikasi (replikasi berhenti beberapa detik
+  dan selama itu replika tampil **Dihentikan**, tanpa peringatan; bila
+  replikasi gagal dijalankan lagi, replika tetap Dihentikan sampai
+  **Ulangi** atau **Start replika**; replika yang dihentikan lewat **Stop
+  replika** tetap berhenti). Replika
   yang sedang tidak terjangkau atau punya pekerjaan lain dilewati
   ("replika tidak terjangkau; ulangi nanti") tanpa menggagalkan
   pekerjaan; jalankan lagi nanti. Kotak ini tampil selama master belum

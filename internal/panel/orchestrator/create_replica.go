@@ -32,12 +32,25 @@ type CreateReplicaParams struct {
 
 func createReplicaStepNames() []string {
 	return []string{"Periksa master", "Periksa server tujuan", "Pasang MySQL", "Siapkan replika",
-		"Salin data", stepInstallCert, "Sambungkan replikasi", "Verifikasi"}
+		"Salin data", stepInstallCert, stepConnectName, "Verifikasi"}
 }
 
-// Index of the first step after which the target may have replication
-// configured (create_replica; resync_replica has no install step before it).
-const stepConnect = 6
+// stepConnectName is the step after which the target may have
+// replication configured. Its index differs between create_replica and
+// resync_replica, and between jobs stored before and after the
+// certificate step was added; connectIndex finds it in the stored steps.
+const stepConnectName = "Sambungkan replikasi"
+
+// connectIndex is the index of stepConnectName in a job's stored steps; -1
+// when it has none.
+func connectIndex(rows []store.JobStep) int {
+	for i, s := range rows {
+		if s.Name == stepConnectName {
+			return i
+		}
+	}
+	return -1
+}
 
 // StartCreateReplica starts the create_replica job and registers the target
 // as a replica in state creating. It refuses a master that is not ready,
@@ -866,11 +879,7 @@ func (jr *jobRun) setReplicaState(state, lastError string) {
 // or after the step that starts it, so a broken source does not keep
 // retrying (best effort).
 func (jr *jobRun) stopReplicaAfter(ctx context.Context) {
-	connect := stepConnect
-	if jr.job.Kind == KindResyncReplica {
-		connect-- // no install step
-	}
-	if jr.idx < connect {
+	if jr.connect < 0 || jr.idx < jr.connect {
 		return
 	}
 	if err := jr.r.d.Hub.Call(ctx, jr.job.ServerID, "mysql.stopReplica", nil, nil); err != nil {

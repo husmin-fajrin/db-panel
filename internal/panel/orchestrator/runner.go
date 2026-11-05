@@ -414,7 +414,7 @@ func (r *Runner) execute(lj *liveJob, act action) {
 		return
 	}
 	if act.kind == actCancel || lj.userCanceled.Load() {
-		r.cancelJob(lj, j)
+		r.cancelJob(lj, j, steps)
 		return
 	}
 	if lj.ctx.Err() != nil { // shutting down
@@ -437,10 +437,39 @@ func (r *Runner) execute(lj *liveJob, act action) {
 	}
 	jr, err := r.newRun(lj, j, steps)
 	if err != nil {
-		r.log.Error("job params unreadable", "job", j.ID, "err", err)
+		// Never leave it running (Retry reopened it) or waiting with
+		// nothing to pick it up: it would block its server.
+		r.log.Error("job cannot run", "job", j.ID, "kind", j.Kind, "err", err)
+		r.failUnrunnable(j, steps, err)
 		return
 	}
 	jr.run(j.CurrentStep, act.kind == actApprove)
+}
+
+// failUnrunnable fails a job whose steps cannot be rebuilt (its params
+// unreadable, or a step list this panel does not know), with the reason.
+func (r *Runner) failUnrunnable(j store.Job, rows []store.JobStep, cause error) {
+	msg := truncate("pekerjaan tidak bisa dilanjutkan setelah pembaruan panel: "+cause.Error(), maxLogLine)
+	now := r.now()
+	if err := r.d.Store.SetStep(j.ID, j.CurrentStep, store.StepFailed, msg, now); err != nil {
+		r.log.Warn("fail step of unrunnable job", "job", j.ID, "err", err)
+	}
+	if _, err := r.d.Store.AppendJobLog(j.ID, "error", msg, now); err != nil {
+		r.log.Warn("job log", "job", j.ID, "err", err)
+	}
+	if err := r.d.Store.UpdateJob(j.ID, store.JobFailed, j.CurrentStep, msg, now); err != nil {
+		if !errors.Is(err, store.ErrJobFinished) {
+			r.log.Warn("fail unrunnable job", "job", j.ID, "err", err)
+		}
+		return
+	}
+	r.d.Publish("job_update", map[string]any{"id": j.ID, "kind": j.Kind, "server_id": j.ServerID,
+		"status": store.JobFailed, "step": j.CurrentStep, "error": msg})
+	step := ""
+	if j.CurrentStep >= 0 && j.CurrentStep < len(rows) {
+		step = rows[j.CurrentStep].Name
+	}
+	r.jobFailed(j.ServerID, j.ID, j.Kind, step, msg)
 }
 
 // Approve lets a job waiting for the user continue: the waiting step runs
@@ -700,7 +729,7 @@ func (r *Runner) HandleEvent(serverID int64, ev proto.Event) {
 }
 
 // cancelJob ends a job the user canceled.
-func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
+func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 	switch j.Status {
 	case store.JobSucceeded, store.JobFailed, store.JobCanceled:
 		return
@@ -716,7 +745,7 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 			r.log.Warn("cancel agent job", "job", j.ID, "agent_job", st.AgentJobID, "err", err)
 		}
 	}
-	jr := &jobRun{r: r, lj: lj, job: j, st: st, idx: j.CurrentStep}
+	jr := &jobRun{r: r, lj: lj, job: j, st: st, idx: j.CurrentStep, connect: connectIndex(rows)}
 	// A dump account an interrupted step left on the master goes too.
 	jr.dropDumpAccount(ctx)
 	const msg = "dibatalkan oleh pengguna"
@@ -731,7 +760,7 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 		// the connect step ran, replication (stopped above) is reset first,
 		// since the agent refuses releaseRole while it is configured. All
 		// best effort.
-		if j.CurrentStep >= stepConnect {
+		if jr.connect >= 0 && j.CurrentStep >= jr.connect {
 			if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.resetReplica", nil, nil); err != nil {
 				r.log.Warn("reset replication on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
 			}
@@ -751,9 +780,7 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job) {
 	case j.Kind == KindTightenTLS:
 		// A redirect cut off may have left the replica stopped.
 		if id, repoint, ok := st.tightenReplicaAt(j.CurrentStep); ok && repoint {
-			if rep, err := r.d.Store.GetReplicaByServer(id); err == nil {
-				jr.restartReplica(ctx, id, rep)
-			}
+			jr.restartReplica(ctx, id)
 		}
 	}
 	jr.setStep(store.StepFailed, msg)
@@ -829,6 +856,9 @@ type jobState struct {
 	// steps were skipped, with the reason.
 	TightenReplicas []int64          `json:"tighten_replicas,omitempty"`
 	TightenSkipped  map[int64]string `json:"tighten_skipped,omitempty"`
+	// TightenPaused is the replica the redirect marked paused while its
+	// replication is stopped (0: none); cleared once it runs again.
+	TightenPaused int64 `json:"tighten_paused,omitempty"`
 
 	// The agent job the current step waits for.
 	AgentServerID int64  `json:"agent_server_id,omitempty"`
@@ -885,10 +915,13 @@ type jobRun struct {
 	st    jobState
 	steps []step
 	idx   int // current step
+	// connect is the index of stepConnectName in the job's stored steps,
+	// -1 when it has none (create_replica, resync_replica).
+	connect int
 }
 
 func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun, error) {
-	jr := &jobRun{r: r, lj: lj, job: j}
+	jr := &jobRun{r: r, lj: lj, job: j, connect: connectIndex(rows)}
 	if err := json.Unmarshal([]byte(j.ParamsJSON), &jr.st); err != nil {
 		return nil, err
 	}
@@ -910,10 +943,26 @@ func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun
 	default:
 		return nil, fmt.Errorf("jenis pekerjaan tidak dikenal: %q", j.Kind)
 	}
+	jr.steps = matchStoredSteps(jr.steps, rows)
 	if len(jr.steps) != len(rows) {
 		return nil, fmt.Errorf("pekerjaan punya %d tahap, diharapkan %d", len(rows), len(jr.steps))
 	}
 	return jr, nil
+}
+
+// matchStoredSteps fits steps to a job stored before the certificate step
+// ("Pasang sertifikat MySQL") was added to Siapkan master, Buat replika
+// and Resync ulang: when the stored steps lack it, the job keeps the step
+// list it was created with. Otherwise steps is returned as it is.
+func matchStoredSteps(steps []step, rows []store.JobStep) []step {
+	if len(steps) != len(rows)+1 || slices.ContainsFunc(rows, func(s store.JobStep) bool { return s.Name == stepInstallCert }) {
+		return steps
+	}
+	i := slices.IndexFunc(steps, func(s step) bool { return s.title == stepInstallCert })
+	if i < 0 {
+		return steps
+	}
+	return slices.Delete(slices.Clone(steps), i, i+1)
 }
 
 // run executes the steps from from on. approved applies to the first one.

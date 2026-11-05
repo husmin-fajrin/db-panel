@@ -758,3 +758,47 @@ func TestTLSExpiringAlert(t *testing.T) {
 		t.Fatalf("message = %q", a.Message)
 	}
 }
+
+// TestRedirectWindowOpensNoStoppedAlert: Perketat marks the replica
+// paused around its STOP/START; a report taken in between reads
+// Dihentikan and opens nothing, and once unpaused and running again the
+// replica is Sinkron.
+func TestRedirectWindowOpensNoStoppedAlert(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ra.send()
+
+	if err := r.st.SetReplicaPaused(rID, true); err != nil {
+		t.Fatal(err)
+	}
+	r.m.ReplicaChanged(rID)
+	r.settle()
+	ra.setSnap(func(s *proto.HealthSnapshot) { s.Replica.SQLRunning, s.Replica.IORunning = "No", "No" })
+	r.clk.Add(5 * time.Second)
+	ra.send()
+	if v := r.view(rID); v.Status.Code != StatusPaused {
+		t.Fatalf("status during the redirect %q, want Dihentikan", v.Status.Code)
+	}
+	if r.isOpen(rID, KindReplicaStopped) || len(r.alerts(rID, KindReplicaStopped)) != 0 {
+		t.Fatal("replica_stopped opened during the redirect")
+	}
+
+	// START REPLICA first, then the paused mark is cleared.
+	r.clk.Add(time.Second)
+	ra.setSnap(running)
+	if err := r.st.SetReplicaPaused(rID, false); err != nil {
+		t.Fatal(err)
+	}
+	r.m.ReplicaChanged(rID)
+	r.settle()
+	r.clk.Add(5 * time.Second)
+	ra.send()
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("status after START %q, want Sinkron", v.Status.Code)
+	}
+	if len(r.alerts(rID, KindReplicaStopped)) != 0 {
+		t.Fatalf("replica_stopped opened: %+v", r.alerts(rID, KindReplicaStopped))
+	}
+}

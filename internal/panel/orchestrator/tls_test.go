@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -399,5 +400,55 @@ func TestAddDatabasesDumpVerifiesMasterCert(t *testing.T) {
 	r.params("mysql.dumpFrom", &snap)
 	if !snap.SSL || !snap.VerifyIdentity || snap.SSLCA != fakeCAPath {
 		t.Fatalf("dumpFrom params = %+v", snap)
+	}
+}
+
+// TestTightenRepointMarksReplicaPaused: replication is stopped for the
+// redirect with the replica marked paused (so the monitor reads
+// "Dihentikan", not a stop outside the panel), and unmarked once it runs
+// again.
+func TestTightenRepointMarksReplicaPaused(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	r := e.followingReplica(topo, "a")
+	var pausedAtStop, pausedAtStart bool
+	r.on("mysql.stopReplica", func(json.RawMessage) (any, error) {
+		pausedAtStop = e.replica(r.id).Paused
+		return nil, nil
+	})
+	r.on("mysql.startReplica", func(json.RawMessage) (any, error) {
+		pausedAtStart = e.replica(r.id).Paused
+		return nil, nil
+	})
+	id, err := e.r.StartTightenTLS(context.Background(), m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if !pausedAtStop || !pausedAtStart {
+		t.Fatalf("paused at STOP %v, at START %v; want both", pausedAtStop, pausedAtStart)
+	}
+	if rep := e.replica(r.id); rep.Paused || !rep.TLSVerified {
+		t.Fatalf("replica after the redirect = %+v", rep)
+	}
+	if n := e.alerts.changes(r.id); n < 2 {
+		t.Fatalf("ReplicaChanged called %d times, want at least 2", n)
+	}
+
+	// A failed CHANGE SOURCE restarts replication and unmarks it.
+	r.fail("mysql.configureReplication", "CHANGE REPLICATION SOURCE gagal")
+	if err := e.st.SetReplicaTLSVerified(r.id, false); err != nil {
+		t.Fatal(err)
+	}
+	mark := r.mark()
+	id, err = e.r.StartTightenTLS(context.Background(), m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.tlsRequest", "mysql.tlsInstall", "mysql.stopReplica",
+		"mysql.tlsTrust", "mysql.configureReplication", "mysql.startReplica"})
+	if rep := e.replica(r.id); rep.Paused {
+		t.Fatal("replica left paused after a failed redirect")
 	}
 }
