@@ -426,7 +426,8 @@ func TestSourcePinWrittenThenEnforced(t *testing.T) {
 
 // TestReleaseRoleRequiresNoReplication: mysql.releaseRole is refused while
 // a replication source is configured or replicas read this server's
-// binlog, and once replication is reset it removes both pins.
+// binlog, and once replication is reset it unpins the role and keeps the
+// source pin (spec 5.10).
 func TestReleaseRoleRequiresNoReplication(t *testing.T) {
 	master, replica := sourceWithReplica(t)
 	src := "127.0.0.1:" + strconv.Itoa(master.Port)
@@ -452,10 +453,8 @@ func TestReleaseRoleRequiresNoReplication(t *testing.T) {
 	if resp := r.dispatch("mysql.releaseRole", nil); !resp.OK {
 		t.Fatalf("releaseRole after reset = %+v", resp.Error)
 	}
-	for _, name := range []string{mysql.RoleFile, mysql.SourceFile} {
-		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s after release: %v, want removed", name, err)
-		}
+	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "unassigned" || s != src {
+		t.Errorf("pins after release = %q, %q; want unassigned, %q", role, s, src)
 	}
 	// Released, the server takes the master role from the panel again.
 	if c := r.d.Pins(); c.Role() != "unassigned" {
@@ -464,6 +463,40 @@ func TestReleaseRoleRequiresNoReplication(t *testing.T) {
 	// Nothing pinned: releaseRole is a no-op that needs no MySQL.
 	if resp := newPinRig(t, nil, pinDir(t, "", "")).dispatch("mysql.releaseRole", nil); !resp.OK {
 		t.Errorf("releaseRole with nothing pinned = %+v", resp.Error)
+	}
+}
+
+// TestReleaseRoleKeepsSourcePin: a released replica is unassigned but
+// still follows only its pinned source: replication to another host is
+// refused with the pinned source and the set-source command.
+func TestReleaseRoleKeepsSourcePin(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	const src = "10.0.0.1:3306"
+	dir := pinDir(t, "replica", src)
+	r := newPinRig(t, inst.Host(), dir)
+	if resp := r.dispatch("mysql.releaseRole", nil); !resp.OK {
+		t.Fatalf("releaseRole = %+v", resp.Error)
+	}
+	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "unassigned" || s != src {
+		t.Fatalf("pins after release = %q, %q; want unassigned, %q", role, s, src)
+	}
+	p := r.d.Pins()
+	if p.Role() != "unassigned" {
+		t.Errorf("Role() = %q, want unassigned", p.Role())
+	}
+	if host, port, ok := p.Source(); !ok || host != "10.0.0.1" || port != 3306 {
+		t.Errorf("Source() = %q, %d, %v; want 10.0.0.1, 3306, true", host, port, ok)
+	}
+	other := sourceParams(inst)
+	other.Host, other.Port = "10.0.0.2", 3306
+	wantRefused(t, "configureReplication to another host after release", r.dispatch("mysql.configureReplication", other),
+		"server ini dipin mengikuti sumber "+src, "sudo dbpanel agent set-source <host:port>")
+	// Released again: still a no-op on the source pin.
+	if resp := r.dispatch("mysql.releaseRole", nil); !resp.OK {
+		t.Fatalf("second releaseRole = %+v", resp.Error)
+	}
+	if s := pinFile(t, dir, mysql.SourceFile); s != src {
+		t.Errorf("source pin after a second release = %q, want %q", s, src)
 	}
 }
 

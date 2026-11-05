@@ -152,17 +152,25 @@ func newRig(t *testing.T, snap proto.HealthSnapshot) *rig {
 // newRigWith is newRig whose monitor bootstraps pins.
 func newRigWith(t *testing.T, snap proto.HealthSnapshot, pins Pinner) *rig {
 	t.Helper()
+	src := &fakeSource{snap: snap}
+	return startRig(t, src, src, pins)
+}
+
+// startRig runs a Monitor reading monSrc, which wraps src (the fake the
+// test edits).
+func startRig(t *testing.T, src *fakeSource, monSrc Source, pins Pinner) *rig {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &rig{
 		t:     t,
-		src:   &fakeSource{snap: snap},
+		src:   src,
 		em:    &fakeEmitter{acceptLeft: -1},
 		clock: &fakeClock{t: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)},
 		reg:   commands.NewRegistry(),
 		ctx:   ctx,
 		waits: make(chan wait),
 	}
-	r.m = New(r.src, r.em, slog.New(slog.DiscardHandler), Options{
+	r.m = New(monSrc, r.em, slog.New(slog.DiscardHandler), Options{
 		Pins: pins,
 		Now:  r.clock.Now,
 		After: func(d time.Duration) <-chan time.Time {
@@ -618,5 +626,60 @@ func TestBootstrapsPinsAfterEachReading(t *testing.T) {
 	resultEvent(t, r.dispatch("monitor.snapshot", nil))
 	if got := pins.calls(); len(got) != 3 {
 		t.Fatalf("failed readings were bootstrapped: %q", got)
+	}
+}
+
+// sweepSource is a fakeSource that also sweeps dump accounts
+// (DumpSweeper), recording each call.
+type sweepSource struct {
+	*fakeSource
+	mu    sync.Mutex
+	calls []time.Duration // olderThan of each call
+}
+
+func (s *sweepSource) SweepDumpUsers(_ context.Context, olderThan time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, olderThan)
+	return 1, nil
+}
+
+func (s *sweepSource) sweeps() []time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Duration(nil), s.calls...)
+}
+
+// TestMonitorSweepsDumpUsersHourly: a source that sweeps dump accounts is
+// swept at the first check and then once per SweepEvery (an hour), for
+// accounts older than a day; the checks keep their own interval.
+func TestMonitorSweepsDumpUsersHourly(t *testing.T) {
+	src := &sweepSource{fakeSource: &fakeSource{snap: base()}}
+	r := startRig(t, src.fakeSource, src, nil)
+	if got := src.sweeps(); len(got) != 1 || got[0] != 24*time.Hour {
+		t.Fatalf("sweeps after the first check = %v, want [24h]", got)
+	}
+	if r.cur.d != DefaultCheckEvery {
+		t.Errorf("loop waits %v, want %v", r.cur.d, DefaultCheckEvery)
+	}
+	// 59 min 45 s of checks: no second sweep.
+	for i := 0; i < 239; i++ {
+		r.tick(15 * time.Second)
+	}
+	if n := len(src.sweeps()); n != 1 {
+		t.Fatalf("sweeps before an hour passed = %d, want 1", n)
+	}
+	r.tick(15 * time.Second)
+	if n := len(src.sweeps()); n != 2 {
+		t.Fatalf("sweeps after an hour = %d, want 2", n)
+	}
+	for i := 0; i < 240; i++ {
+		r.tick(15 * time.Second)
+	}
+	if n := len(src.sweeps()); n != 3 {
+		t.Errorf("sweeps after two hours = %d, want 3", n)
+	}
+	if got := DefaultSweepEvery; got != time.Hour {
+		t.Errorf("DefaultSweepEvery = %v, want 1h", got)
 	}
 }

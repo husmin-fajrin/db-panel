@@ -1,12 +1,15 @@
 package mysql
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
@@ -30,11 +33,34 @@ const (
 	// log but neither the tables directly nor reset or lock the master.
 	replGrants = "REPLICATION SLAVE, BACKUP_ADMIN"
 	// dumpGrants are what mysqldump --single-transaction --set-gtid-purged
-	// --triggers --routines --events --no-tablespaces needs (RELOAD for its
-	// brief FLUSH TABLES WITH READ LOCK). Only a temporary per-job account
-	// holds them (mysql.createDumpUser, dropped with mysql.dropUser).
-	dumpGrants = "SELECT, RELOAD, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT"
+	// --triggers --routines --events --no-tablespaces needs: FLUSH_TABLES
+	// for its FLUSH TABLES and brief FLUSH TABLES WITH READ LOCK. Only a
+	// temporary per-job account holds them (mysql.createDumpUser, dropped
+	// with mysql.dropUser, swept hourly by the health monitor).
+	dumpGrants = "SELECT, FLUSH_TABLES, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT"
+	// dumpGrantsReload is dumpGrants before FLUSH_TABLES existed: RELOAD,
+	// which also allows RESET MASTER and every other FLUSH statement.
+	dumpGrantsReload = "SELECT, RELOAD, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT"
+	// flushTablesMinVersion is the first MySQL release with the
+	// FLUSH_TABLES dynamic privilege (added in 8.0.31 with
+	// FLUSH_OPTIMIZER_COSTS, FLUSH_STATUS and FLUSH_USER_RESOURCES).
+	flushTablesMinVersion = "8.0.31"
 )
+
+// dumpGrantsFor is dumpGrants for a server of version (@@version), and
+// dumpGrantsReload for one older than flushTablesMinVersion or whose
+// version cannot be read.
+func dumpGrantsFor(version string) string {
+	v, err := ParseVersion(version)
+	if err != nil {
+		return dumpGrantsReload
+	}
+	floor, _ := ParseVersion(flushTablesMinVersion)
+	if cmp.Or(cmp.Compare(v.Major, floor.Major), cmp.Compare(v.Minor, floor.Minor), cmp.Compare(v.Patch, floor.Patch)) < 0 {
+		return dumpGrantsReload
+	}
+	return dumpGrants
+}
 
 func (d *Driver) registerUsers(reg *commands.Registry) {
 	reg.Register("mysql.createReplUser", func(ctx context.Context, params json.RawMessage) (any, error) {
@@ -81,7 +107,11 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		if err := createAccount(ctx, h, a, dumpGrants, "dump", d.pins.RoleIs(roleMaster)); err != nil {
+		grants, err := d.dumpGrantsHere(ctx, h)
+		if err != nil {
+			return nil, err
+		}
+		if err := createAccount(ctx, h, a, grants, "dump", d.pins.RoleIs(roleMaster)); err != nil {
 			return nil, err
 		}
 		d.log("mysql dump user created", "user", a.User, "from_host", a.Host, "require_ssl", a.RequireSSL)
@@ -365,6 +395,88 @@ func SweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, logf func(m
 		res.Dropped = append(res.Dropped, name)
 	}
 	return res, nil
+}
+
+// dumpGrantsHere is dumpGrantsFor this server's version, except that it
+// keeps RELOAD (with a warning naming the remedy) while the admin account
+// cannot pass FLUSH_TABLES on: such an account would fail every
+// mysql.createDumpUser.
+func (d *Driver) dumpGrantsHere(ctx context.Context, h Host) (string, error) {
+	db, err := openAdmin(ctx, h)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	var version, account string
+	if err := db.QueryRowContext(ctx, "SELECT @@version, CURRENT_USER()").Scan(&version, &account); err != nil {
+		return "", fmt.Errorf("baca versi MySQL: %w", err)
+	}
+	grants := dumpGrantsFor(version)
+	if grants == dumpGrantsReload {
+		return grants, nil
+	}
+	held, err := showGrants(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	if !grantable(held, "FLUSH_TABLES") {
+		if d.Logger != nil {
+			d.Logger.Warn("mysql dump user gets RELOAD: the admin account cannot grant FLUSH_TABLES",
+				"version", version, "remedy", "GRANT FLUSH_TABLES ON *.* TO "+quoteAccount(account)+" WITH GRANT OPTION")
+		}
+		return dumpGrantsReload, nil
+	}
+	return grants, nil
+}
+
+// grantable reports whether the SHOW GRANTS rows grants hold the global
+// privilege priv (or ALL) WITH GRANT OPTION.
+func grantable(grants []string, priv string) bool {
+	for _, g := range grants {
+		m := globalGrant.FindStringSubmatch(strings.TrimSpace(g))
+		if m == nil || m[2] == "" {
+			continue
+		}
+		for _, p := range strings.Split(m[1], ",") {
+			p = strings.ToUpper(strings.TrimSpace(p))
+			if p == priv || p == "ALL" || p == "ALL PRIVILEGES" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SweepDumpUsers is the health monitor's hourly sweep (monitor.DumpSweeper):
+// SweepDumpUsers for the per-job dump accounts older than olderThan. It
+// does nothing without MySQL or a stored account, and on a server with a
+// replication source: the master's own sweep drops them there through
+// replication, and a local drop would be an errant transaction.
+func (d *Driver) SweepDumpUsers(ctx context.Context, olderThan time.Duration) (int, error) {
+	h, err := d.host()
+	if errors.Is(err, ErrNoHost) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	db, err := h.Open(ctx)
+	if errors.Is(err, ErrNotConnected) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	rs, err := replicaStatus(ctx, db)
+	db.Close()
+	if err != nil {
+		return 0, fmt.Errorf("baca status replika: %w", err)
+	}
+	if rs != nil {
+		return 0, nil
+	}
+	res, err := SweepDumpUsers(ctx, h, int64(olderThan/time.Second), d.log)
+	return len(res.Dropped), err
 }
 
 // quotePassword is s as a string literal. Without NO_BACKSLASH_ESCAPES a

@@ -264,8 +264,11 @@ dan masa simpan binary log yang sudah ada dipertahankan.
   `SELECT ON *.*`** (misalnya akun laporan), pakai grant per database.
 - `dbpanel_dump_<8 heksa>@'<alamat replika>'`: akun sementara untuk satu
   dump (baca data, kunci singkat), dibuat sesaat sebelum dump dan dihapus
-  sesudahnya, juga bila dump gagal atau dibatalkan. Bila penghapusan gagal,
-  log pekerjaan menyebut perintah `DROP USER` yang perlu dijalankan.
+  sesudahnya, juga bila dump gagal atau dibatalkan. Di MySQL 8.0.31 ke atas
+  akun ini mendapat `FLUSH_TABLES`, bukan `RELOAD` (lihat "Keamanan"). Bila
+  penghapusan gagal, log pekerjaan menyebut perintah `DROP USER` yang perlu
+  dijalankan; agent juga menyapu sendiri, tiap jam, akun dump yang berumur
+  lebih dari 24 jam.
 
 Agent hanya mau membuat, mengubah, atau menghapus akun yang namanya
 diawali `dbpanel_`, dan menolak perintah yang menghapus data, menimpa
@@ -316,14 +319,18 @@ dan restart MySQL kecuali sekali sesudah pengaturan yang memang menunggu
 restart; replika menolak buka kunci, dijadikan master, akun replikasi, dan
 master selain sumbernya.
 
-Pin **master** tidak bisa diubah dari panel. Pin **replika** (peran dan
-sumbernya) bisa dilepas panel sendiri, setelah replikasinya dihentikan
-dan direset, lewat **Lepas dan hentikan replikasi**, **Hapus server**, atau
-saat pekerjaan **Buat replika** dibatalkan. Artinya server itu kembali tanpa
-peran dan tanpa sumber, dan sesudahnya panel bisa lagi mengarahkannya ke
-master mana pun atau menimpa datanya: pin replika melindungi dari
-kesalahan, bukan dari panel yang disusupi. Selain itu, peran dan sumber
-hanya diubah di server itu sendiri:
+Pin **master** tidak bisa diubah dari panel. Peran **replika** bisa
+dilepas panel sendiri, setelah replikasinya dihentikan dan direset, lewat
+**Lepas dan hentikan replikasi**, **Hapus server**, atau saat pekerjaan
+**Buat replika** dibatalkan. Server itu kembali tanpa peran (`role` berisi
+`unassigned`), tetapi **pin sumbernya tetap**: panel masih hanya bisa
+mengarahkan replikasi, dump, atau CLONE ke master yang sama. Perintah ke
+master lain ditolak dengan pesan "server ini dipin mengikuti sumber
+`<host:port>`; … jalankan di server ini: sudo dbpanel agent set-source
+<host:port>". Jadi panel yang disusupi tidak bisa memakai pelepasan peran
+untuk mengarahkan replika ke master pilihannya; ia masih bisa menimpa data
+server yang dilepas dari master yang sama. Peran dan sumber hanya diubah di
+server itu sendiri:
 
 ```sh
 sudo dbpanel agent set-role master       # atau replica, atau unassigned (hapus peran dan sumber)
@@ -648,6 +655,24 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   terhadap proses panel sendiri: panel yang disusupi bisa mengubahnya.
   Pin master hanya melindungi master yang agentnya berjalan di server
   lain.
+- Akun dump sementara (`dbpanel_dump_*`) di MySQL 8.0.31 ke atas mendapat
+  `SELECT, FLUSH_TABLES, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT`, tanpa
+  `RELOAD`. `FLUSH_TABLES` (hak dinamis sejak 8.0.31) cukup untuk `FLUSH
+  TABLES` dan `FLUSH TABLES WITH READ LOCK` singkat yang dijalankan
+  `mysqldump --single-transaction --set-gtid-purged`; sudah diuji dengan
+  dump nyata di MySQL 8.0.46, dan akun itu ditolak (error 1227) saat
+  mencoba mereset binary log (`RESET MASTER`, di 8.2 ke atas `RESET BINARY
+  LOGS AND GTIDS`), yang dibuka `RELOAD`. MySQL 8.0.26–8.0.30 tidak punya
+  `FLUSH_TABLES`, jadi akun dump di sana tetap memakai `RELOAD`. Akun admin
+  yang dipakai agent harus memegang `FLUSH_TABLES ... WITH GRANT OPTION`
+  untuk memberikannya (root sudah); bila belum, akun dump tetap mendapat
+  `RELOAD` dan journal agent mencatat peringatan dengan perintah
+  `GRANT FLUSH_TABLES ON *.* TO '<admin>'@'<host>' WITH GRANT OPTION`.
+- Agent menyapu sendiri akun dump yang tertinggal (pekerjaan mati di
+  tengah jalan): tiap jam, dari pemantau kesehatan agent, akun
+  `dbpanel_dump_*` yang sandinya lebih tua dari 24 jam dihapus dan
+  dicatat di journal. Server yang punya sumber replikasi dilewati (hapusan
+  di master ikut tereplikasi).
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
   tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan
   setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum

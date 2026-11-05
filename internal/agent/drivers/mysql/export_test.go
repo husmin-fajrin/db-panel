@@ -32,8 +32,12 @@ var (
 	TLSAvailable   = tlsAvailable
 )
 
+// FlushTablesMinVersion is the first MySQL release with FLUSH_TABLES.
+const FlushTablesMinVersion = flushTablesMinVersion
+
 // Snapshot helpers, testable without a server.
 var (
+	DumpGrantsFor  = dumpGrantsFor
 	DumpArgs       = dumpArgs
 	ProbeArgs      = probeArgs
 	LoadArgs       = loadArgs

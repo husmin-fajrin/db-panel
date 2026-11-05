@@ -5,16 +5,22 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	drv "github.com/go-sql-driver/mysql"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -231,12 +237,12 @@ func TestDumpUserLifecycle(t *testing.T) {
 		t.Fatalf("login as the dump user: %v", err)
 	}
 	grants := showGrants(t, root, user, "127.0.0.1")
-	for _, priv := range []string{"SELECT", "RELOAD", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT"} {
+	for _, priv := range []string{"SELECT", "FLUSH_TABLES", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT"} {
 		if !grantsInclude(grants, priv) {
 			t.Errorf("dump grants lack %s: %q", priv, grants)
 		}
 	}
-	for _, priv := range []string{"REPLICATION SLAVE", "BACKUP_ADMIN", "INSERT", "DROP", "SUPER", "CREATE USER"} {
+	for _, priv := range []string{"RELOAD", "REPLICATION SLAVE", "BACKUP_ADMIN", "INSERT", "DROP", "SUPER", "CREATE USER"} {
 		if grantsInclude(grants, priv) {
 			t.Errorf("dump grants include %s: %q", priv, grants)
 		}
@@ -283,6 +289,139 @@ func TestDumpUserLifecycle(t *testing.T) {
 	if strings.Contains(logs.String(), pw) {
 		t.Errorf("logs leak the dump password:\n%s", logs.String())
 	}
+}
+
+// TestDumpGrantsByVersion: FLUSH_TABLES replaces RELOAD from the first
+// release that has it; an older (or unparsable) version keeps RELOAD.
+func TestDumpGrantsByVersion(t *testing.T) {
+	const withReload = "SELECT, RELOAD, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT"
+	const withFlush = "SELECT, FLUSH_TABLES, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT"
+	for _, c := range []struct{ version, want string }{
+		{"8.0.26", withReload},
+		{"8.0.30-log", withReload},
+		{"8.0.31", withFlush},
+		{"8.0.46-0ubuntu0.24.04.4", withFlush},
+		{"8.0.36-28", withFlush},
+		{"8.4.3", withFlush},
+		{"9.1.0", withFlush},
+		{"", withReload},
+		{"10.11.6-MariaDB", withReload},
+	} {
+		if got := mysql.DumpGrantsFor(c.version); got != c.want {
+			t.Errorf("DumpGrantsFor(%q) = %q, want %q", c.version, got, c.want)
+		}
+	}
+	if got := mysql.DumpGrantsFor(mysql.FlushTablesMinVersion); got != withFlush {
+		t.Errorf("DumpGrantsFor(FlushTablesMinVersion %q) = %q, want %q", mysql.FlushTablesMinVersion, got, withFlush)
+	}
+}
+
+// TestCreateDumpUserNoReloadOnSupportedSeries: on a server with
+// FLUSH_TABLES the dump account holds no RELOAD, the dump as DumpFrom runs
+// it (FLUSH TABLES WITH READ LOCK included, --no-data here) still works,
+// and the account cannot reset the binary logs.
+func TestCreateDumpUserNoReloadOnSupportedSeries(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	reg := commands.NewRegistry()
+	(&mysql.Driver{Host: inst.Host(), Logger: slog.New(slog.DiscardHandler)}).Register(reg)
+	root := rootDB(t, inst)
+	version := serverVersionOf(t, root)
+	d, err := mysql.ParseVersion(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mysql.DumpGrantsFor(version) == mysql.DumpGrantsFor("8.0.26") {
+		t.Skipf("MySQL %s predates FLUSH_TABLES", version)
+	}
+	const user, pw = "dbpanel_dump_0badc0de", "dump-Secret-1"
+	r := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.createDumpUser",
+		Params: mustJSON(t, proto.DumpUserParams{User: user, Password: pw, FromHost: "127.0.0.1"})})
+	if !r.OK {
+		t.Fatalf("createDumpUser: %+v", r.Error)
+	}
+	grants := showGrants(t, root, user, "127.0.0.1")
+	if grantsInclude(grants, "RELOAD") || !grantsInclude(grants, "FLUSH_TABLES") {
+		t.Fatalf("MySQL %s dump grants = %q, want FLUSH_TABLES and no RELOAD", version, grants)
+	}
+
+	execAll(t, root, "CREATE DATABASE a", "CREATE TABLE a.t (id INT PRIMARY KEY)", "INSERT INTO a.t VALUES (1)")
+	content, err := mysql.ClientDefaults(proto.ConnectParams{User: user, Password: pw, Host: "127.0.0.1", Port: inst.Port}, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "dump.cnf")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dump, err := mysql.FindClientTool(inst.Layout().MysqldPath, "mysqldump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The real run's arguments (--set-gtid-purged=ON takes FLUSH TABLES
+	// and FLUSH TABLES WITH READ LOCK), schema only.
+	args := mysql.DumpArgs(path, []string{"a"}, "ON")
+	args = append([]string{args[0], "--no-data"}, args[1:]...)
+	if err := inst.Host().Exec(context.Background(), nil, io.Discard, dump, args...); err != nil {
+		t.Fatalf("mysqldump as the dump account on MySQL %s: %v", version, err)
+	}
+
+	db, err := sql.Open("mysql", mysql.DSN(proto.ConnectParams{User: user, Password: pw, Host: "127.0.0.1", Port: inst.Port}, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(d.ResetBinaryLogs())
+	var me *drv.MySQLError
+	if !errors.As(err, &me) || me.Number != 1227 {
+		t.Errorf("%s as the dump account = %v, want error 1227", d.ResetBinaryLogs(), err)
+	}
+}
+
+// TestCreateDumpUserAdminWithoutFlushTables: an admin account holding only
+// what mysql.connect asks for cannot grant FLUSH_TABLES; the dump account
+// then keeps RELOAD and the log names the remedy, after which the account
+// gets FLUSH_TABLES.
+func TestCreateDumpUserAdminWithoutFlushTables(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	root := rootDB(t, inst)
+	if mysql.DumpGrantsFor(serverVersionOf(t, root)) == mysql.DumpGrantsFor("8.0.26") {
+		t.Skip("MySQL predates FLUSH_TABLES")
+	}
+	execAll(t, root, "CREATE USER adm@'%' IDENTIFIED BY 'pw-1'",
+		"GRANT CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO adm@'%' WITH GRANT OPTION",
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO adm@'%' WITH GRANT OPTION")
+	creds := &memCreds{p: proto.ConnectParams{User: "adm", Password: "pw-1", Host: "127.0.0.1", Port: inst.Port}}
+	var logs bytes.Buffer
+	reg := commands.NewRegistry()
+	(&mysql.Driver{Host: inst.HostWith(creds), Creds: creds, Logger: slog.New(slog.NewTextHandler(&logs, nil))}).Register(reg)
+	create := func(user string) []string {
+		t.Helper()
+		r := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.createDumpUser",
+			Params: mustJSON(t, proto.DumpUserParams{User: user, Password: "pw-2", FromHost: "127.0.0.1"})})
+		if !r.OK {
+			t.Fatalf("createDumpUser %s as adm: %+v", user, r.Error)
+		}
+		return showGrants(t, root, user, "127.0.0.1")
+	}
+	if g := create("dbpanel_dump_00000001"); !grantsInclude(g, "RELOAD") || grantsInclude(g, "FLUSH_TABLES") {
+		t.Errorf("grants by an admin without FLUSH_TABLES = %q, want RELOAD", g)
+	}
+	if !strings.Contains(logs.String(), "GRANT FLUSH_TABLES ON *.* TO 'adm'@'%' WITH GRANT OPTION") {
+		t.Errorf("log does not name the remedy:\n%s", logs.String())
+	}
+	execAll(t, root, "GRANT FLUSH_TABLES ON *.* TO adm@'%' WITH GRANT OPTION")
+	if g := create("dbpanel_dump_00000002"); grantsInclude(g, "RELOAD") || !grantsInclude(g, "FLUSH_TABLES") {
+		t.Errorf("grants after the remedy = %q, want FLUSH_TABLES", g)
+	}
+}
+
+func serverVersionOf(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var v string
+	if err := db.QueryRow("SELECT @@version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v
 }
 
 // TestSweepDumpUsersDropsOldOnly: mysql.sweepDumpUsers drops the per-job
@@ -355,6 +494,51 @@ func TestSweepDumpUsersDropsOldOnly(t *testing.T) {
 		if r := sweep(p); r.OK || r.Error == nil || r.Error.Code != proto.CodeBadParams {
 			t.Errorf("%+v: response = %+v / %+v, want bad_params", p, r, r.Error)
 		}
+	}
+}
+
+// The health monitor sweeps through the driver.
+var _ monitor.DumpSweeper = (*mysql.Driver)(nil)
+
+// TestDriverSweepDumpUsers: the monitor's hourly sweep drops the stale
+// per-job dump accounts on a server without a replication source, skips a
+// server with one (the master's drop replicates; a local drop would be an
+// errant transaction) and does nothing without MySQL.
+func TestDriverSweepDumpUsers(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	root := rootDB(t, inst)
+	aged := func(user string) {
+		t.Helper()
+		execAll(t, root, "CREATE USER '"+user+"'@'10.0.0.2' IDENTIFIED BY 'pw-1'",
+			"UPDATE mysql.user SET password_last_changed = NOW() - INTERVAL 2 DAY WHERE user = '"+user+"'",
+			"FLUSH PRIVILEGES")
+	}
+	exists := func(user string) bool {
+		t.Helper()
+		return count(t, root, "SELECT COUNT(*) FROM mysql.user WHERE user = '"+user+"'") == 1
+	}
+	aged("dbpanel_dump_old1")
+	execAll(t, root, "CREATE USER 'dbpanel_dump_new1'@'10.0.0.2' IDENTIFIED BY 'pw-1'")
+	d := &mysql.Driver{Host: inst.Host(), Logger: slog.New(slog.DiscardHandler)}
+	ctx := context.Background()
+	if n, err := d.SweepDumpUsers(ctx, 24*time.Hour); n != 1 || err != nil {
+		t.Fatalf("SweepDumpUsers = %d, %v; want 1, nil", n, err)
+	}
+	if exists("dbpanel_dump_old1") || !exists("dbpanel_dump_new1") {
+		t.Errorf("after the sweep: old1 %v, new1 %v; want only new1", exists("dbpanel_dump_old1"), exists("dbpanel_dump_new1"))
+	}
+
+	aged("dbpanel_dump_old2")
+	execAll(t, root, "CHANGE REPLICATION SOURCE TO SOURCE_HOST = '10.0.0.9', SOURCE_PORT = 3306")
+	if n, err := d.SweepDumpUsers(ctx, 24*time.Hour); n != 0 || err != nil {
+		t.Errorf("SweepDumpUsers with a replication source = %d, %v; want 0, nil", n, err)
+	}
+	if !exists("dbpanel_dump_old2") {
+		t.Error("a server with a replication source dropped a dump account")
+	}
+
+	if n, err := (&mysql.Driver{}).SweepDumpUsers(ctx, 24*time.Hour); n != 0 || err != nil {
+		t.Errorf("SweepDumpUsers without MySQL = %d, %v; want 0, nil", n, err)
 	}
 }
 

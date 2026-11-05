@@ -341,8 +341,10 @@ func (p *Pins) SetSource(host string, port int) error {
 }
 
 // Release turns a replica (or an unassigned server) into an unassigned one
-// without a source pin. A master is refused: only the local CLI changes
-// it. mysql.releaseRole checks the replication state first.
+// by writing role=unassigned. The source pin stays (spec 5.10): a released
+// server still follows only its pinned source until root runs set-source.
+// A master is refused: only the local CLI changes it. mysql.releaseRole
+// checks the replication state first.
 func (p *Pins) Release() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -353,7 +355,8 @@ func (p *Pins) Release() error {
 		return roleRefusal(roleMaster, "mysql.releaseRole")
 	}
 	defer p.forget()
-	return p.removePins()
+	p.settled = true
+	return writePin(p.path(RoleFile), roleUnassigned)
 }
 
 // pinned reports whether a role other than unassigned, or a source, is

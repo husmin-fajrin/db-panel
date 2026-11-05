@@ -183,7 +183,11 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		if err := d.pins.Release(); err != nil {
 			return nil, err
 		}
-		d.log("pinned role and source released")
+		if host, port, ok := d.pins.Source(); ok {
+			d.log("pinned role released; source pin kept", "source", net.JoinHostPort(host, strconv.Itoa(port)))
+		} else {
+			d.log("pinned role released")
+		}
 		return nil, nil
 	})
 

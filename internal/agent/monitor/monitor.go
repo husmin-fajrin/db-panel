@@ -24,6 +24,14 @@ type Source interface {
 	Snapshot(ctx context.Context) proto.HealthSnapshot
 }
 
+// DumpSweeper is a Source that can also drop the per-job dump accounts a
+// dead job left behind (mysql.Driver.SweepDumpUsers): those older than
+// olderThan. The monitor sweeps every SweepEvery when its Source is one;
+// the panel never schedules it.
+type DumpSweeper interface {
+	SweepDumpUsers(ctx context.Context, olderThan time.Duration) (dropped int, err error)
+}
+
 // Emitter sends an event to the panel; an error (proto.ErrOffline while
 // there is no connection) means the event was not delivered.
 type Emitter interface {
@@ -35,6 +43,14 @@ const (
 	DefaultCheckEvery   = 15 * time.Second
 	DefaultSummaryEvery = 120 * time.Second
 	DefaultLagThreshold = 60 * time.Second
+	DefaultSweepEvery   = time.Hour
+)
+
+// DumpUserMaxAge is the age past which the sweep drops a dump account: no
+// dump job runs that long. sweepTimeout bounds one sweep.
+const (
+	DumpUserMaxAge = 24 * time.Hour
+	sweepTimeout   = time.Minute
 )
 
 // Bounds of the intervals monitor.configure accepts, in seconds.
@@ -60,6 +76,9 @@ type Options struct {
 	After func(d time.Duration) <-chan time.Time
 	// Pins, when set, gets every reading MySQL answered (Pinner).
 	Pins Pinner
+	// SweepEvery paces the dump-account sweep when the Source is a
+	// DumpSweeper; default DefaultSweepEvery.
+	SweepEvery time.Duration
 }
 
 // Monitor runs the check loop and answers the monitor.* commands. The loop
@@ -83,6 +102,8 @@ type Monitor struct {
 	prev     proto.HealthSnapshot // last snapshot reported (sent or kept)
 	lastSent time.Time            // when the last fresh report reached the panel
 	buf      ring
+
+	lastSweep time.Time // loop goroutine only
 }
 
 // New returns a Monitor reading src and reporting through em.
@@ -104,6 +125,9 @@ func New(src Source, em Emitter, logger *slog.Logger, o Options) *Monitor {
 	}
 	if o.After == nil {
 		o.After = time.After
+	}
+	if o.SweepEvery <= 0 {
+		o.SweepEvery = DefaultSweepEvery
 	}
 	return &Monitor{
 		src: src, em: em, pins: o.Pins, logger: logger, now: o.Now, after: o.After,
@@ -188,13 +212,39 @@ func (m *Monitor) options() Options {
 	return m.opts
 }
 
-// Run checks at once, then every CheckEvery, until ctx is done.
+// Run checks at once, then every CheckEvery, until ctx is done. After a
+// check it sweeps the dump accounts when SweepEvery has passed since the
+// last sweep (the first one at once).
 func (m *Monitor) Run(ctx context.Context) {
 	for {
 		m.tick(ctx)
+		m.sweep(ctx)
 		if !m.pause(ctx) {
 			return
 		}
+	}
+}
+
+// sweep drops the stale dump accounts when the Source is a DumpSweeper
+// and a sweep is due. A failed sweep is tried again a SweepEvery later.
+func (m *Monitor) sweep(ctx context.Context) {
+	sw, ok := m.src.(DumpSweeper)
+	if !ok || ctx.Err() != nil {
+		return
+	}
+	now := m.now()
+	if !m.lastSweep.IsZero() && now.Sub(m.lastSweep) < m.options().SweepEvery {
+		return
+	}
+	m.lastSweep = now
+	sctx, cancel := context.WithTimeout(ctx, sweepTimeout)
+	defer cancel()
+	n, err := sw.SweepDumpUsers(sctx, DumpUserMaxAge)
+	switch {
+	case err != nil:
+		m.logger.Warn("stale dump users not swept", "err", err)
+	case n > 0:
+		m.logger.Info("stale dump users swept", "dropped", n)
 	}
 }
 
