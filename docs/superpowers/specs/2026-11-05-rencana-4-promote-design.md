@@ -795,7 +795,7 @@ yang dibuat panel yang dibobol (4.B). Pagar agent adalah 5.1.
   baris yang benar-benar ada; (3) `createReplUser` diserialkan per
   driver sehingga dua permintaan serentak tidak mengulang `ALTER`.
 
-### 5.13 Model data (migrasi 0006)
+### 5.13 Model data (migrasi 0006–0009)
 
 - `servers.role` menerima `quarantined`; kolom baru `pin_role TEXT`,
   `pin_source TEXT`, `pin_error TEXT` (laporan terakhir).

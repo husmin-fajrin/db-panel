@@ -12,7 +12,7 @@ terakhir Rencana 3 dibayar.
 peringatan bertambah satu aturan. Hub memakai ember token per server
 sebelum `OnEvent` dan `readLimit` 1 MiB. Pemangkasan harian di panel.
 `audit_log` memperoleh `prev_hash`/`hash` yang dihitung di `AddAudit`
-dalam transaksi; migrasi 0008 melepas dan memasang kembali trigger
+dalam transaksi; migrasi 0009 melepas dan memasang kembali trigger
 append-only untuk mengisi rantai lama; CLI `panel audit-verify`.
 Sensor kutipan adalah fungsi murni yang dipanggil di satu tempat:
 `Monitor.ingest` dan `jobRun.logf`.
@@ -96,11 +96,11 @@ Audit: SEC-34, SEC-45, SEC-46, SEC-48, SEC-50. Ledger Rencana 3 baris
 
 ---
 
-### Task 3: Audit: hash chain, migrasi 0008, `panel audit-verify`, status di `/audit`, salinan journald
+### Task 3: Audit: hash chain, migrasi 0009, `panel audit-verify`, status di `/audit`, salinan journald
 
 **Files:**
-- Create: `internal/panel/store/migrations/0008_audit_chain.sql` (kolom), `internal/panel/store/audit_chain.go`
-- Modify: `internal/panel/store/migrate.go` (migrasi 0008 memakai hook Go: `DROP TRIGGER` ×2, isi rantai berurutan `id`, `CREATE TRIGGER` ×2,
+- Create: `internal/panel/store/migrations/0009_audit_chain.sql` (kolom), `internal/panel/store/audit_chain.go`
+- Modify: `internal/panel/store/migrate.go` (migrasi 0009 memakai hook Go: `DROP TRIGGER` ×2, isi rantai berurutan `id`, `CREATE TRIGGER` ×2,
   dalam satu transaksi), `audit.go` (`AddAudit` menghitung hash dalam transaksi dengan `SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1`),
   `internal/panel/cli.go` (`audit-verify [--data-dir]` → keluar 0 "Rantai utuh sampai #N" atau 1 "Rantai putus di #M"),
   `internal/panel/web/handlers_audit.go` + `audit.html` (baris status rantai, dihitung saat halaman dibuka, dibatasi 1×/menit cache),
@@ -114,9 +114,9 @@ func AuditHash(prev string, e AuditEntry) string
 func (s *Store) VerifyAuditChain() (lastOK int64, brokenAt int64, err error)   // brokenAt 0 bila utuh
 ```
 
-- [ ] **Step 1: Tulis test** `TestAuditHashDeterministic`, `TestAddAuditChains`, `TestVerifyDetectsTamper` (ubah lewat `sql.DB` dengan trigger dilepas sementara di test → `brokenAt` baris itu), `TestMigrate0008BackfillsEmptyAndLarge` (0 dan 10.000 baris; trigger kembali ada: `UPDATE` ditolak), `TestAuditVerifyCLI`, `TestAuditPageShowsChainStatus`, `TestAuditInsertLogged`.
+- [ ] **Step 1: Tulis test** `TestAuditHashDeterministic`, `TestAddAuditChains`, `TestVerifyDetectsTamper` (ubah lewat `sql.DB` dengan trigger dilepas sementara di test → `brokenAt` baris itu), `TestMigrate0009BackfillsEmptyAndLarge` (0 dan 10.000 baris; trigger kembali ada: `UPDATE` ditolak), `TestAuditVerifyCLI`, `TestAuditPageShowsChainStatus`, `TestAuditInsertLogged`.
 - [ ] **Step 2–4.** Implementasi; `go test ./internal/panel/... -race`.
-- [ ] **Step 5: Commit** — `git commit -m "feat(audit): hash chain with verification and journald copy (migration 0008)"`
+- [ ] **Step 5: Commit** — `git commit -m "feat(audit): hash chain with verification and journald copy (migration 0009)"`
 
 ---
 
