@@ -1,7 +1,9 @@
-// Package ca implements the panel's private certificate authority. It issues
-// one client certificate per agent (from a CSR generated on the agent, so
-// private keys never leave it) and the server certificate for the panel's
-// agent listener.
+// Package ca implements the panel's private certificate authorities. The
+// agent CA (ca.crt) issues one client certificate per agent (from a CSR
+// generated on the agent, so private keys never leave it) and the server
+// certificate for the panel's agent listener. The web CA (web.go) issues the
+// panel's HTTPS certificate and the MySQL CA (mysql.go) the managed servers'
+// MySQL certificates; each lives in its own files.
 package ca
 
 import (
@@ -15,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,48 +57,71 @@ type CA struct {
 // when neither exists. If only one exists it returns an error naming the
 // missing file.
 func LoadOrCreate(dir string) (*CA, error) {
-	certPath := filepath.Join(dir, caCertFile)
-	keyPath := filepath.Join(dir, caKeyFile)
+	return loadOrCreate(dir, caCertFile, caKeyFile, agentCATemplate(), 0o644)
+}
+
+// agentCATemplate is the subject of the agent CA. createCAWith fills in the
+// rest.
+func agentCATemplate() *x509.Certificate {
+	return &x509.Certificate{Subject: pkix.Name{CommonName: "dbpanel-ca"}}
+}
+
+// loadOrCreate loads dir/certFile and dir/keyFile, or creates a CA from tmpl
+// (see createCAWith) when neither exists. If only one exists it returns an
+// error naming the missing file.
+func loadOrCreate(dir, certFile, keyFile string, tmpl *x509.Certificate, certMode os.FileMode) (*CA, error) {
+	certPath := filepath.Join(dir, certFile)
+	keyPath := filepath.Join(dir, keyFile)
 	certBytes, certErr := os.ReadFile(certPath)
 	keyBytes, keyErr := os.ReadFile(keyPath)
 
 	switch {
 	case certErr == nil && keyErr == nil:
-		return parseCA(certBytes, keyBytes)
+		return parseCA(certBytes, keyBytes, certFile, keyFile)
 	case errors.Is(certErr, os.ErrNotExist) && errors.Is(keyErr, os.ErrNotExist):
-		return createCA(dir, certPath, keyPath)
+		return createCAWith(dir, certPath, keyPath, tmpl, certMode)
 	case errors.Is(certErr, os.ErrNotExist) && keyErr == nil:
-		return nil, fmt.Errorf("ca: %s tidak ada (hanya %s yang ditemukan di %s)", caCertFile, caKeyFile, dir)
+		return nil, fmt.Errorf("ca: %s tidak ada (hanya %s yang ditemukan di %s)", certFile, keyFile, dir)
 	case errors.Is(keyErr, os.ErrNotExist) && certErr == nil:
-		return nil, fmt.Errorf("ca: %s tidak ada (hanya %s yang ditemukan di %s)", caKeyFile, caCertFile, dir)
+		return nil, fmt.Errorf("ca: %s tidak ada (hanya %s yang ditemukan di %s)", keyFile, certFile, dir)
 	case certErr != nil:
-		return nil, fmt.Errorf("ca: baca %s: %w", caCertFile, certErr)
+		return nil, fmt.Errorf("ca: baca %s: %w", certFile, certErr)
 	default:
-		return nil, fmt.Errorf("ca: baca %s: %w", caKeyFile, keyErr)
+		return nil, fmt.Errorf("ca: baca %s: %w", keyFile, keyErr)
 	}
 }
 
-func parseCA(certPEM, keyPEM []byte) (*CA, error) {
+func parseCA(certPEM, keyPEM []byte, certFile, keyFile string) (*CA, error) {
 	cert, err := parseCertPEM(certPEM)
 	if err != nil {
-		return nil, fmt.Errorf("ca: %s: %w", caCertFile, err)
+		return nil, fmt.Errorf("ca: %s: %w", certFile, err)
 	}
 	block, _ := pem.Decode(keyPEM)
 	if block == nil || block.Type != "EC PRIVATE KEY" {
-		return nil, fmt.Errorf("ca: %s bukan PEM EC PRIVATE KEY", caKeyFile)
+		return nil, fmt.Errorf("ca: %s bukan PEM EC PRIVATE KEY", keyFile)
 	}
 	key, err := x509.ParseECPrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("ca: %s: %w", caKeyFile, err)
+		return nil, fmt.Errorf("ca: %s: %w", keyFile, err)
 	}
 	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
 	if !ok || !pub.Equal(&key.PublicKey) {
-		return nil, errors.New("ca: ca.crt dan ca.key tidak cocok")
+		return nil, fmt.Errorf("ca: %s dan %s tidak cocok", certFile, keyFile)
 	}
 	return &CA{Cert: cert, Key: key}, nil
 }
 
+// createCA creates the agent CA at certPath/keyPath.
 func createCA(dir, certPath, keyPath string) (*CA, error) {
+	return createCAWith(dir, certPath, keyPath, agentCATemplate(), 0o644)
+}
+
+// createCAWith generates a P-256 key and a self-signed 10-year CA certificate
+// from tmpl, which carries the subject and any name constraints; the serial,
+// validity, basic constraints and key usage are set here. The key is written
+// to keyPath (0600) and the certificate to certPath (certMode), both with
+// exclusive create.
+func createCAWith(dir, certPath, keyPath string, tmpl *x509.Certificate, certMode os.FileMode) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("ca: buat direktori: %w", err)
 	}
@@ -108,16 +134,13 @@ func createCA(dir, certPath, keyPath string) (*CA, error) {
 		return nil, err
 	}
 	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "dbpanel-ca"},
-		NotBefore:             now.Add(-clockSkew),
-		NotAfter:              now.Add(caValidity),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		MaxPathLenZero:        true, // signs leaves only, never another CA
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-	}
+	tmpl.SerialNumber = serial
+	tmpl.NotBefore = now.Add(-clockSkew)
+	tmpl.NotAfter = now.Add(caValidity)
+	tmpl.IsCA = true
+	tmpl.BasicConstraintsValid = true
+	tmpl.MaxPathLenZero = true // signs leaves only, never another CA
+	tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, fmt.Errorf("ca: buat sertifikat: %w", err)
@@ -132,13 +155,13 @@ func createCA(dir, certPath, keyPath string) (*CA, error) {
 	}
 	// Key first, exclusive create: never overwrite existing material.
 	if err := writeNew(keyPath, keyPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("ca: tulis %s: %w", caKeyFile, err)
+		return nil, fmt.Errorf("ca: tulis %s: %w", filepath.Base(keyPath), err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := writeNew(certPath, certPEM, 0o644); err != nil {
-		// Do not leave a lone ca.key behind: that state is a permanent error.
+	if err := writeNew(certPath, certPEM, certMode); err != nil {
+		// Do not leave a lone key behind: that state is a permanent error.
 		os.Remove(keyPath)
-		return nil, fmt.Errorf("ca: tulis %s: %w", caCertFile, err)
+		return nil, fmt.Errorf("ca: tulis %s: %w", filepath.Base(certPath), err)
 	}
 	return &CA{Cert: cert, Key: key}, nil
 }
@@ -193,6 +216,37 @@ func (c *CA) leafNotAfter(now time.Time) time.Time {
 		return na
 	}
 	return c.Cert.NotAfter
+}
+
+// issueServerLeaf signs a ServerAuth certificate for pub with the given CN
+// and SANs, valid for leafValidity (capped by the CA's expiry).
+func (c *CA) issueServerLeaf(cn string, dns []string, ips []net.IP, pub any) (certPEM []byte, sn *big.Int, notAfter time.Time, err error) {
+	sn, err = randomSerial()
+	if err != nil {
+		return nil, nil, time.Time{}, err
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          sn,
+		Subject:               pkix.Name{CommonName: cn},
+		DNSNames:              dns,
+		IPAddresses:           ips,
+		NotBefore:             now.Add(-clockSkew),
+		NotAfter:              c.leafNotAfter(now),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.Cert, pub, c.Key)
+	if err != nil {
+		return nil, nil, time.Time{}, fmt.Errorf("terbitkan sertifikat server: %w", err)
+	}
+	// NotAfter as encoded (whole seconds), not the template's.
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, nil, time.Time{}, fmt.Errorf("parse sertifikat server: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), sn, cert.NotAfter, nil
 }
 
 // IssueAgentCert signs the CSR as a client certificate for the given server.
