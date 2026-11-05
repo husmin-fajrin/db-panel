@@ -153,10 +153,22 @@ func (w *webCerts) path(name string) string { return filepath.Join(w.dir, name) 
 
 // ensureCA loads the web CA, replacing it when it cannot be read or does
 // not cover names.
+//
+// Only a CA that cannot be parsed (or half a pair) is replaced: an I/O error
+// (e.g. a permission problem) stops the start instead, since a new CA would
+// make every browser that installed the current one warn again.
 func (w *webCerts) ensureCA(names ca.WebNames) error {
+	_, certErr := os.ReadFile(w.path(webCAFiles + ".crt"))
+	_, keyErr := os.ReadFile(w.path(webCAFiles + ".key"))
+	if err := ioError(certErr, keyErr); err != nil {
+		return fmt.Errorf("baca CA web: %w", err)
+	}
 	c, err := ca.LoadOrCreateWebCA(w.dir, names)
 	if err != nil {
-		w.log.Warn("web CA unreadable; creating a new one", "err", err)
+		if certErr != nil && keyErr != nil {
+			return err // creating a new CA failed
+		}
+		w.log.Warn("web CA broken; creating a new one", "err", err)
 		return w.regenerateCA(names)
 	}
 	w.ca = c
@@ -171,7 +183,10 @@ func (w *webCerts) ensureCA(names ca.WebNames) error {
 // creates a new CA for names and records when, so the UI asks users to
 // install it again.
 func (w *webCerts) regenerateCA(names ca.WebNames) error {
-	for _, ext := range []string{".crt", ".key"} {
+	// The key first: a failure between the two leaves the old certificate
+	// without its key, which the next start replaces, never a new key
+	// beside the old certificate.
+	for _, ext := range []string{".key", ".crt"} {
 		p := w.path(webCAFiles + ext)
 		if err := os.Rename(p, p+".old"); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("simpan CA web lama: %w", err)
@@ -188,10 +203,14 @@ func (w *webCerts) regenerateCA(names ca.WebNames) error {
 // ensureOwn loads web.crt/web.key and re-issues the certificate, keeping
 // its key, when the CA changed, the names changed or it expires within
 // webRenewBefore. A missing or broken pair is replaced by a new key and
-// certificate.
+// certificate; an I/O error is returned (a new key would break the pin in
+// pairing commands already shown).
 func (w *webCerts) ensureOwn(names ca.WebNames) error {
 	certPEM, certErr := os.ReadFile(w.path(webCertFile))
 	keyPEM, keyErr := os.ReadFile(w.path(webKeyFile))
+	if err := ioError(certErr, keyErr); err != nil {
+		return fmt.Errorf("baca sertifikat HTTPS panel: %w", err)
+	}
 	cur, err := newServedCert(certPEM, keyPEM)
 	if certErr != nil || keyErr != nil || err != nil {
 		if !errors.Is(certErr, os.ErrNotExist) || !errors.Is(keyErr, os.ErrNotExist) {
@@ -201,7 +220,7 @@ func (w *webCerts) ensureOwn(names ca.WebNames) error {
 		if err != nil {
 			return err
 		}
-		return w.storeOwn(certPEM, keyPEM)
+		return w.storeOwn(certPEM, keyPEM, true)
 	}
 	if reason := w.reissueReason(cur.cert.Leaf, names); reason != "" {
 		certPEM, err = w.ca.IssueWebCertWithKey(names, keyPEM)
@@ -209,7 +228,7 @@ func (w *webCerts) ensureOwn(names ca.WebNames) error {
 			return err
 		}
 		w.log.Info("panel HTTPS certificate re-issued", "reason", reason)
-		return w.storeOwn(certPEM, keyPEM)
+		return w.storeOwn(certPEM, keyPEM, false)
 	}
 	w.own = cur
 	return nil
@@ -246,16 +265,20 @@ func sameNames(leaf *x509.Certificate, names ca.WebNames) bool {
 	return slices.Equal(norm(leaf.DNSNames, leaf.IPAddresses), norm(names.DNS, names.IPs))
 }
 
-// storeOwn writes the panel's own pair (0600) and serves it.
-func (w *webCerts) storeOwn(certPEM, keyPEM []byte) error {
+// storeOwn writes the panel's own pair (0600, each file replaced
+// atomically) and serves it. A re-issue keeps the key, so only the
+// certificate is written and a crash leaves a matching pair either way.
+func (w *webCerts) storeOwn(certPEM, keyPEM []byte, newKey bool) error {
 	c, err := newServedCert(certPEM, keyPEM)
 	if err != nil {
 		return err
 	}
-	if err := writeSecret(w.path(webKeyFile), string(keyPEM)); err != nil {
-		return err
+	if newKey {
+		if err := writeFileAtomic(w.path(webKeyFile), keyPEM); err != nil {
+			return err
+		}
 	}
-	if err := writeSecret(w.path(webCertFile), string(certPEM)); err != nil {
+	if err := writeFileAtomic(w.path(webCertFile), certPEM); err != nil {
 		return err
 	}
 	w.own = c
@@ -295,6 +318,20 @@ func (w *webCerts) run(done <-chan struct{}) {
 			}
 		}
 	}
+}
+
+// coversHost reports whether the panel's own or the uploaded certificate
+// is valid for host (a name or IP from a Host header), so hostAllowed
+// accepts every name the panel can be opened by over HTTPS.
+func (w *webCerts) coversHost(host string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, c := range []*servedCert{w.own, w.custom} {
+		if c != nil && c.cert.Leaf.VerifyHostname(host) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // active is the certificate the listener serves.
@@ -366,10 +403,12 @@ func (w *webCerts) UseCustom(certPEM, keyPEM []byte) (problem string, err error)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := writeSecret(w.path(customKeyFile), string(keyPEM)); err != nil {
+	// A crash between the two leaves a mismatched pair, which the next
+	// start refuses (falling back to the panel's own certificate).
+	if err := writeFileAtomic(w.path(customKeyFile), keyPEM); err != nil {
 		return "", err
 	}
-	if err := writeSecret(w.path(customCertFile), string(certPEM)); err != nil {
+	if err := writeFileAtomic(w.path(customCertFile), certPEM); err != nil {
 		return "", err
 	}
 	if err := w.st.SetSetting(store.SettingHTTPSMode, httpsModeCustom); err != nil {
@@ -414,6 +453,44 @@ func (w *webCerts) SetExtraNames(raw string) (problem string, err error) {
 		return "", err
 	}
 	return "", w.renew()
+}
+
+// ioError returns the first of errs that is neither nil nor "not found".
+func ioError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFileAtomic replaces path with data (mode 0600) through a temporary
+// file in the same directory and a rename, so a crash leaves the old file
+// or the new one, never part of either.
+func writeFileAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op after the rename
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // splitNames splits a list of names on commas and white space.

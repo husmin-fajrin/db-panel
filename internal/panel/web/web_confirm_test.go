@@ -201,7 +201,7 @@ func TestHandlerRefusesMissingOrForeignToken(t *testing.T) {
 	if err := e.st.CreateUser("operator", adminHash()); err != nil {
 		t.Fatal(err)
 	}
-	other := &http.Cookie{Name: auth.CookieName, Value: e.sessions.Create("operator")}
+	other := &http.Cookie{Name: auth.SecureCookieName, Value: e.sessions.Create("operator")}
 	_, otherTok := e.postConfirm(web.ActResync, "replica", 2, testPassword, other)
 	if otherTok == "" {
 		t.Fatal("no token for operator")

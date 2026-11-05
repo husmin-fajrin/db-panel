@@ -6,22 +6,20 @@ import (
 	"net/url"
 )
 
-// CookieName is the name of the session cookie over plain HTTP.
+// CookieName is the name of the session cookie the panel set while it
+// served plain HTTP. It is no longer read; logout still expires it.
 const CookieName = "dbpanel_session"
 
-// SecureCookieName is the name of the session cookie when it is set with
-// Secure (the request came over TLS). Browsers only accept a "__Host-"
-// cookie that is Secure, has Path=/ and no Domain, which pins it to this
-// exact origin; over plain HTTP the prefix cannot be used.
+// SecureCookieName is the name of the session cookie. Browsers only accept
+// a "__Host-" cookie that is Secure, has Path=/ and no Domain, which pins it
+// to this exact origin.
 const SecureCookieName = "__Host-" + CookieName
 
-// SessionToken returns the session token the request carries, preferring
-// the "__Host-" cookie.
+// SessionToken returns the session token the request carries in the
+// "__Host-" cookie.
 func SessionToken(r *http.Request) (string, bool) {
-	for _, name := range []string{SecureCookieName, CookieName} {
-		if c, err := r.Cookie(name); err == nil && c.Value != "" {
-			return c.Value, true
-		}
+	if c, err := r.Cookie(SecureCookieName); err == nil && c.Value != "" {
+		return c.Value, true
 	}
 	return "", false
 }
@@ -52,45 +50,27 @@ func UsernameFrom(ctx context.Context) string {
 	return u
 }
 
-// SetSessionCookie sets the session cookie for token. With secure (TLS) the
-// cookie is Secure and named SecureCookieName. The panel serves its UI over
-// HTTPS only and always passes secure; plain cookies remain for tests and
-// sessions from before HTTPS.
-func SetSessionCookie(w http.ResponseWriter, token string, secure bool) {
-	name := CookieName
-	if secure {
-		name = SecureCookieName
-	}
+// SetSessionCookie sets the session cookie for token: Secure and named
+// SecureCookieName, since the panel serves its UI over HTTPS only.
+func SetSessionCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     name,
+		Name:     SecureCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   secure,
+		Secure:   true,
 	})
 }
 
-// ClearSessionCookie expires the session cookie. With secure it also
-// expires the "__Host-" cookie, which browsers only accept over TLS.
-func ClearSessionCookie(w http.ResponseWriter, secure bool) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     CookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	})
-	if secure {
-		http.SetCookie(w, &http.Cookie{
-			Name:     SecureCookieName,
-			Value:    "",
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Secure:   true,
-			MaxAge:   -1,
-		})
+// ClearSessionCookie expires the session cookie, and the plain one a
+// browser may still hold from before HTTPS.
+func ClearSessionCookie(w http.ResponseWriter) {
+	for _, c := range []*http.Cookie{
+		{Name: SecureCookieName, Secure: true},
+		{Name: CookieName},
+	} {
+		c.Path, c.HttpOnly, c.SameSite, c.MaxAge = "/", true, http.SameSiteLaxMode, -1
+		http.SetCookie(w, c)
 	}
 }

@@ -122,7 +122,7 @@ func newEnv(t *testing.T, mods ...func(*web.Deps)) *env {
 }
 
 func (e *env) cookie() *http.Cookie {
-	return &http.Cookie{Name: auth.CookieName, Value: e.sessions.Create("admin")}
+	return &http.Cookie{Name: auth.SecureCookieName, Value: e.sessions.Create("admin")}
 }
 
 // do sends a request through the router. POSTs carry a same-site Origin.
@@ -963,7 +963,10 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestPairCommandKeepsTokenOutOfArgv(t *testing.T) {
 	const token = "ABCDE-FGHJK-MNPQR"
 	sum, _ := fakeScriptSHA256(token)
-	cmd := web.PairCommand(testPublicURL, token, sum, testWebPin)
+	cmd, err := web.PairCommand(testPublicURL, token, sum, testWebPin)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(cmd, "/tmp/") {
 		t.Fatalf("command uses a fixed /tmp path: %s", cmd)
 	}

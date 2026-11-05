@@ -240,6 +240,13 @@ func TestRenderInstallScriptDeterministic(t *testing.T) {
 			t.Errorf("script does not contain %q", want)
 		}
 	}
+	// Without the pin nothing is rendered: the script's curl -k would
+	// trust any server.
+	noPin := p
+	noPin.WebPin = ""
+	if _, err := agentapi.RenderInstallScript(noPin); err == nil {
+		t.Error("rendered an install script without the web pin")
+	}
 	// A missing architecture renders as an empty hash, which the script
 	// refuses ("belum tersedia").
 	p.BinSHA256 = map[string]string{"amd64": strings.Repeat("11", 32)}
@@ -264,20 +271,27 @@ func TestInstallScriptBinaryHashGate(t *testing.T) {
 	for _, tc := range []struct {
 		name, served, wantErr string
 		hashes                map[string]string
+		pin                   string
 	}{
-		{"cocok", string(good), "", map[string]string{"amd64": sha256Hex(good), "arm64": sha256Hex(good)}},
+		{"cocok", string(good), "", map[string]string{"amd64": sha256Hex(good), "arm64": sha256Hex(good)}, installWebPin},
 		{"disusupi", "\x7fELF agent jahat", "Checksum binary agent tidak cocok; kemungkinan ada yang menyusup di jaringan",
-			map[string]string{"amd64": sha256Hex(good), "arm64": sha256Hex(good)}},
-		{"tanpa-hash", string(good), "binary untuk arsitektur ini belum tersedia di panel", map[string]string{}},
+			map[string]string{"amd64": sha256Hex(good), "arm64": sha256Hex(good)}, installWebPin},
+		{"tanpa-hash", string(good), "binary untuk arsitektur ini belum tersedia di panel", map[string]string{}, installWebPin},
+		// A script whose pin went missing never runs curl -k unpinned.
+		{"tanpa-pin", string(good), "Skrip tidak memuat pin sertifikat panel (WEB_PIN)",
+			map[string]string{"amd64": sha256Hex(good), "arm64": sha256Hex(good)}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			script, err := agentapi.RenderInstallScript(agentapi.InstallScriptParams{
 				PanelURL: installPanelURL, Token: "ABCDE-FGHJK-MNPQR", AgentAddr: installAgentAddr,
-				CASHA256: strings.Repeat("ab", 32), BinSHA256: tc.hashes,
+				CASHA256: strings.Repeat("ab", 32), BinSHA256: tc.hashes, WebPin: installWebPin,
 			})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.pin == "" {
+				script = bytes.Replace(script, []byte("WEB_PIN='"+installWebPin+"'"), []byte("WEB_PIN=''"), 1)
 			}
 			dir := t.TempDir()
 			served := filepath.Join(dir, "served")

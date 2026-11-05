@@ -92,9 +92,6 @@ type serverDetailPage struct {
 	// PrepareAgain: the server already is a master (it has a topology), so
 	// preparing it again asks for the password.
 	PrepareAgain bool
-	// PlainHTTP: the page came over plain HTTP, so the MySQL password typed
-	// into the form crosses the network unencrypted (SEC-29).
-	PlainHTTP bool
 	// InventoryCut: the inventory holds as many databases as the panel
 	// keeps; the list may be cut.
 	InventoryCut bool
@@ -209,7 +206,7 @@ func (a *app) upgradeCommand(id int64, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin), nil
+	return pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin)
 }
 
 func (a *app) newServerForm(w http.ResponseWriter, r *http.Request) {
@@ -242,8 +239,7 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 
 // renderServer renders the server page with v's status and messages.
 func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView) {
-	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial, Connect: v.Form,
-		PlainHTTP: r.TLS == nil}
+	p := serverDetailPage{Page: a.page(r), Server: srv, Local: srv.CertSerial == localCertSerial, Connect: v.Form}
 	p.Flash, p.Notice = v.Flash, v.Notice
 	now := a.Now()
 	tok, found, err := a.Store.ActivePairToken(srv.ID, now)
@@ -294,7 +290,10 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 			a.internalError(w, "install script hash", err)
 			return
 		}
-		p.Command = pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin)
+		if p.Command, err = pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin); err != nil {
+			a.internalError(w, "pairing command", err)
+			return
+		}
 		p.TokenExpires = tok.ExpiresAt
 	}
 	a.render.renderStatus(w, v.Status, "server_detail", p)
@@ -320,10 +319,14 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 // token is Crockford base32, the hash is hex and the pin base64, so none
 // contains a quote.
 // --max-redirs is an argument rather than a config line because the config
-// here-string has to stay on one line.
-func pairCommand(publicURL, token, scriptSHA256, webPin string) string {
+// here-string has to stay on one line. Without a pin -k would trust any
+// server, so an empty one is an error.
+func pairCommand(publicURL, token, scriptSHA256, webPin string) (string, error) {
+	if webPin == "" {
+		return "", errors.New("perintah pasang butuh pin sertifikat panel")
+	}
 	return `f=$(mktemp) && curl -fsSL -k --pinnedpubkey ` + webPin + ` --max-redirs 0 -K - <<<'url = "` + publicURL + "/agent/install?token=" + token +
-		`"' -o "$f" && echo "` + scriptSHA256 + `  $f" | sha256sum -c - && sudo bash "$f"`
+		`"' -o "$f" && echo "` + scriptSHA256 + `  $f" | sha256sum -c - && sudo bash "$f"`, nil
 }
 
 // newToken issues a fresh pairing token. For a paired server this starts a

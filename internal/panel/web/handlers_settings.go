@@ -190,9 +190,6 @@ type settingsPage struct {
 	PublicURL  string
 	Kinds      []kindOption
 	Days       []weekDay
-	// PlainHTTP: the page came over plain HTTP, so a bot token typed here
-	// crosses the network unencrypted (SEC-47).
-	PlainHTTP bool
 	// PlainBaseURL: the address for links starts with http://; the page
 	// offers to change it to https://.
 	PlainBaseURL bool
@@ -202,7 +199,7 @@ type settingsPage struct {
 
 func (a *app) renderSettings(w http.ResponseWriter, r *http.Request, status int, f settingsForm, tokenSaved bool, flash string) {
 	p := settingsPage{Page: a.page(r), Form: f, TokenSaved: tokenSaved, PublicURL: a.PublicURL(), Days: weekDays,
-		PlainHTTP: r.TLS == nil, PlainBaseURL: plainBaseURL(f.BaseURL), Cert: a.CertInfo()}
+		PlainBaseURL: plainBaseURL(f.BaseURL), Cert: a.CertInfo()}
 	extra, err := a.Store.GetSetting(store.SettingHTTPSExtraNames)
 	if err != nil {
 		a.Logger.Warn("read extra certificate names", "err", err)

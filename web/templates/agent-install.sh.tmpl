@@ -54,6 +54,10 @@ download_agent() {
 	if [ -z "$want" ]; then
 		die "binary untuk arsitektur ini belum tersedia di panel"
 	fi
+	# curl -k is safe only together with the pin.
+	if [ -z "$WEB_PIN" ]; then
+		die "Skrip tidak memuat pin sertifikat panel (WEB_PIN); salin ulang perintah pasang dari panel."
+	fi
 
 	echo "Mengunduh dbpanel ($arch) dari panel..."
 	trap 'rm -f "$BIN.new"' EXIT

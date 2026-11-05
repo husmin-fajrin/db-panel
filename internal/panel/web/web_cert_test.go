@@ -57,7 +57,13 @@ func certEnv(t *testing.T) (*settingsRig, *fakeCerts) {
 }
 
 func TestPairCommandHasPin(t *testing.T) {
-	cmd := web.PairCommand(testPublicURL, "ABCDE-FGHJK-MNPQR", strings.Repeat("ab", 32), testWebPin)
+	if _, err := web.PairCommand(testPublicURL, "ABCDE-FGHJK-MNPQR", strings.Repeat("ab", 32), ""); err == nil {
+		t.Fatal("pairing command without a pin")
+	}
+	cmd, err := web.PairCommand(testPublicURL, "ABCDE-FGHJK-MNPQR", strings.Repeat("ab", 32), testWebPin)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := `f=$(mktemp) && curl -fsSL -k --pinnedpubkey ` + testWebPin + ` --max-redirs 0 -K - <<<'url = "` +
 		testPublicURL + `/agent/install?token=ABCDE-FGHJK-MNPQR"' -o "$f" && echo "` + strings.Repeat("ab", 32) +
 		`  $f" | sha256sum -c - && sudo bash "$f"`

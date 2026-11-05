@@ -265,7 +265,7 @@ func TestRequireLoginRedirects(t *testing.T) {
 
 	// invalid cookie also redirects, and the query string is preserved in next.
 	req := httptest.NewRequest("GET", "/servers?x=1&y=2", nil)
-	req.AddCookie(&http.Cookie{Name: CookieName, Value: "palsu"})
+	req.AddCookie(&http.Cookie{Name: SecureCookieName, Value: "palsu"})
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther {
@@ -286,11 +286,20 @@ func TestRequireLoginPassesWithCookie(t *testing.T) {
 	h := RequireLogin(s, "/login")(okHandler(&got))
 
 	req := httptest.NewRequest("GET", "/servers", nil)
-	req.AddCookie(&http.Cookie{Name: CookieName, Value: tok})
+	req.AddCookie(&http.Cookie{Name: SecureCookieName, Value: tok})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d", rec.Code)
+	}
+
+	// The plain (non-Secure) cookie of the HTTP days is no longer read.
+	req = httptest.NewRequest("GET", "/servers", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: tok})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("plain cookie: code = %d, want 303 to login", rec.Code)
 	}
 	if got != "admin" {
 		t.Errorf("username in context = %q", got)
@@ -306,58 +315,30 @@ func TestUsernameFromEmpty(t *testing.T) {
 
 func TestCookies(t *testing.T) {
 	rec := httptest.NewRecorder()
-	SetSessionCookie(rec, "tok", true)
+	SetSessionCookie(rec, "tok")
 	c := rec.Result().Cookies()[0]
-	if c.Name != SecureCookieName || c.Value != "tok" || c.Path != "/" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
+	if c.Name != SecureCookieName || c.Value != "tok" || c.Path != "/" || !c.HttpOnly || !c.Secure ||
+		c.SameSite != http.SameSiteLaxMode || c.Domain != "" {
 		t.Errorf("cookie = %+v", c)
 	}
-	rec = httptest.NewRecorder()
-	SetSessionCookie(rec, "tok", false)
-	if rec.Result().Cookies()[0].Secure {
-		t.Error("Secure set when secure=false")
-	}
 
+	// Logout expires the "__Host-" cookie and the plain one a browser may
+	// still hold from before HTTPS.
 	rec = httptest.NewRecorder()
-	ClearSessionCookie(rec, false)
-	c = rec.Result().Cookies()[0]
-	if c.Name != CookieName || c.Value != "" || c.MaxAge >= 0 || c.Path != "/" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
-		t.Errorf("clear cookie = %+v", c)
+	ClearSessionCookie(rec)
+	cs := rec.Result().Cookies()
+	if len(cs) != 2 {
+		t.Fatalf("clear sets %d cookies, want 2", len(cs))
 	}
-	if n := len(rec.Result().Cookies()); n != 1 {
-		t.Errorf("plain-HTTP clear sets %d cookies, want 1", n)
+	names := map[string]bool{}
+	for _, c := range cs {
+		names[c.Name] = true
+		if c.Value != "" || c.MaxAge >= 0 || c.Path != "/" || !c.HttpOnly {
+			t.Errorf("clear cookie = %+v", c)
+		}
 	}
-	rec = httptest.NewRecorder()
-	ClearSessionCookie(rec, true)
-	if cs := rec.Result().Cookies(); len(cs) != 2 || cs[1].Name != SecureCookieName || !cs[1].Secure || cs[1].MaxAge >= 0 {
-		t.Errorf("secure clear cookies = %+v", cs)
-	}
-}
-
-// TestSecureCookieUsesHostPrefix: over TLS the cookie is "__Host-" prefixed
-// (Secure, Path=/, no Domain) and RequireLogin accepts it.
-func TestSecureCookieUsesHostPrefix(t *testing.T) {
-	rec := httptest.NewRecorder()
-	SetSessionCookie(rec, "tok", true)
-	c := rec.Result().Cookies()[0]
-	if c.Name != "__Host-dbpanel_session" || !c.Secure || c.Path != "/" || c.Domain != "" {
-		t.Fatalf("secure cookie = %+v", c)
-	}
-	rec = httptest.NewRecorder()
-	SetSessionCookie(rec, "tok", false)
-	if c := rec.Result().Cookies()[0]; c.Name != CookieName {
-		t.Fatalf("plain cookie name = %q, want %q", c.Name, CookieName)
-	}
-
-	s := NewSessions(time.Hour, time.Now)
-	tok := s.Create("admin")
-	var got string
-	h := RequireLogin(s, "/login")(okHandler(&got))
-	req := httptest.NewRequest("GET", "/servers", nil)
-	req.AddCookie(&http.Cookie{Name: SecureCookieName, Value: tok})
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || got != "admin" {
-		t.Fatalf("code = %d, user = %q", rec.Code, got)
+	if !names[SecureCookieName] || !names[CookieName] {
+		t.Errorf("cleared %v", names)
 	}
 }
 

@@ -629,3 +629,139 @@ func TestPairOverHTTPSWithPin(t *testing.T) {
 		}
 	}
 }
+
+// TestHostAllowsCertificateNames: a name added under "Nama dan alamat
+// tambahan" gets a certificate and is accepted as Host; other names still
+// get 421.
+func TestHostAllowsCertificateNames(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	uiAddr, _ := startPanel(t, p)
+	port := portOf(t, uiAddr)
+	if problem, err := p.certs.SetExtraNames("panel.kantor.example"); problem != "" || err != nil {
+		t.Fatalf("SetExtraNames: %q %v", problem, err)
+	}
+	trustPanel(p) // the name was outside the web CA, so it is a new one
+	get := func(host string) int {
+		t.Helper()
+		req, err := http.NewRequest("GET", "https://"+uiAddr+"/login", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readAll(t, resp)
+		return resp.StatusCode
+	}
+	for _, host := range []string{"panel.kantor.example:" + port, "PANEL.kantor.example"} {
+		if code := get(host); code != http.StatusOK {
+			t.Errorf("Host %q: %d, want 200", host, code)
+		}
+	}
+	for _, host := range []string{"lain.kantor.example:" + port, "kantor.example", "evil.example"} {
+		if code := get(host); code != http.StatusMisdirectedRequest {
+			t.Errorf("Host %q: %d, want 421", host, code)
+		}
+	}
+}
+
+// TestWebCAReadErrorStopsStart: a web CA file that cannot be read (not one
+// that does not parse) stops the start instead of replacing the CA every
+// browser trusts; a CA that does not parse is replaced, with the notice.
+func TestWebCAReadErrorStopsStart(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p1, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1.Close()
+	keyPath := filepath.Join(o.ConfigDir, "web-ca.key")
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certBefore, err := os.ReadFile(filepath.Join(o.ConfigDir, "web-ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory in place of the key: reading it fails with EISDIR.
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(keyPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := New(o); err == nil {
+		p.Close()
+		t.Fatal("New started with an unreadable web CA key")
+	}
+	if after, _ := os.ReadFile(filepath.Join(o.ConfigDir, "web-ca.crt")); !bytes.Equal(after, certBefore) {
+		t.Fatal("unreadable key replaced the web CA")
+	}
+	if _, err := os.Stat(filepath.Join(o.ConfigDir, "web-ca.crt.old")); err == nil {
+		t.Fatal("unreadable key moved the CA to .old")
+	}
+
+	os.Remove(keyPath)
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(o.ConfigDir, "web-ca.crt"), []byte("rusak"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := newPanel(t, o)
+	if bytes.Equal(p.certs.CAPEM(), certBefore) || !p.certInfo().CANeedsReinstall {
+		t.Fatal("a web CA that does not parse was not replaced with the notice")
+	}
+}
+
+// TestWebCertWritesAtomic: a renewal rewrites only the certificate (the
+// key file is the same file), by rename, leaving no temporary files.
+func TestWebCertWritesAtomic(t *testing.T) {
+	t.Parallel()
+	o := testOptions(t)
+	p := newPanel(t, o)
+	keyBefore, err := os.Stat(filepath.Join(o.ConfigDir, webKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	certBefore, err := os.Stat(filepath.Join(o.ConfigDir, webCertFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := p.certs.active().cert.Leaf.NotAfter.Add(-29 * 24 * time.Hour)
+	p.certs.now = func() time.Time { return later }
+	if err := p.certs.renew(); err != nil {
+		t.Fatal(err)
+	}
+	keyAfter, err := os.Stat(filepath.Join(o.ConfigDir, webKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	certAfter, err := os.Stat(filepath.Join(o.ConfigDir, webCertFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(keyBefore, keyAfter) || !keyAfter.ModTime().Equal(keyBefore.ModTime()) {
+		t.Fatal("renewal rewrote the key")
+	}
+	if os.SameFile(certBefore, certAfter) {
+		t.Fatal("certificate not replaced by rename")
+	}
+	if certAfter.Mode().Perm() != 0o600 {
+		t.Fatalf("web.crt mode %v", certAfter.Mode().Perm())
+	}
+	entries, err := os.ReadDir(o.ConfigDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("temporary file left: %s", e.Name())
+		}
+	}
+}

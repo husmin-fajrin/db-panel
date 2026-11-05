@@ -228,11 +228,16 @@ func (p *Panel) uiHandler(deps agentapi.Deps) http.Handler {
 const localAddrsTTL = 30 * time.Second
 
 // hostAllowed reports whether host (from the Host header, port removed) names
-// this panel: the public host, localhost, a loopback address or an address
-// of one of the host's interfaces. Anything else is most likely a DNS name
-// rebound to the panel's address by another site.
+// this panel: the public host, localhost, a loopback address, an address
+// of one of the host's interfaces, or a name the HTTPS certificate is valid
+// for (the extra names in Settings, the machine's host name, an uploaded
+// certificate's names). Anything else is most likely a DNS name rebound to
+// the panel's address by another site.
 func (p *Panel) hostAllowed(host string) bool {
 	if strings.EqualFold(host, p.opts.PublicHost) || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if p.certs.coversHost(host) {
 		return true
 	}
 	ip := net.ParseIP(host)

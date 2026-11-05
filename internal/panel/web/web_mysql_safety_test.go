@@ -84,15 +84,15 @@ func TestSupersededJobHidesRetry(t *testing.T) {
 	wantNoBody(t, rec, "Ulangi dari tahap ini", "/retry", "/approve")
 }
 
-// TestConnectFormHostAndPlainHTTPWarning: the form warns that the password
-// crosses plain HTTP, and a host that is not an address or a name is
-// refused before the agent sees it.
-func TestConnectFormHostAndPlainHTTPWarning(t *testing.T) {
+// TestConnectFormHost: a host that is not an address or a name is refused
+// before the agent sees it. (The page is HTTPS only, so it no longer warns
+// about plain HTTP.)
+func TestConnectFormHost(t *testing.T) {
 	e, f, _ := newMySQLEnv(t)
 	c := e.cookie()
 	e.pairedOnline(t, "db-utama")
 	rec := e.do("GET", "/servers/1", nil, c)
-	wantBody(t, rec, "Halaman ini dibuka lewat HTTP biasa", "tunnel SSH")
+	wantNoBody(t, rec, "HTTP biasa")
 	for _, host := range []string{"db/x?allowAllFiles=true", "a b", "user@db", "db:3306"} {
 		rec := e.do("POST", "/servers/1/mysql/connect", url.Values{"user": {"root"}, "password": {mysqlSecret}, "host": {host}}, c)
 		wantCode(t, rec, http.StatusBadRequest)

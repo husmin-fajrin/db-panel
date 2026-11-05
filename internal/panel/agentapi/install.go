@@ -50,11 +50,17 @@ type InstallScriptParams struct {
 	BinSHA256 map[string]string
 }
 
-// RenderInstallScript renders the agent install script. The output depends
+// RenderInstallScript renders the agent install script; it refuses
+// parameters without WebPin. The output depends
 // only on p, so the UI can put its hash in the pairing command and the
 // operator's shell can check that the script GET /agent/install serves is
 // the one the panel rendered.
 func RenderInstallScript(p InstallScriptParams) ([]byte, error) {
+	// The script fetches with curl -k: without the pin nothing would
+	// check that it talks to the panel.
+	if p.WebPin == "" {
+		return nil, errors.New("skrip pemasang butuh pin sertifikat panel")
+	}
 	var buf bytes.Buffer
 	if err := installScript.Execute(&buf, p); err != nil {
 		return nil, err

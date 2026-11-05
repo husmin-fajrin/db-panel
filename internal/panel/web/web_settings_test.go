@@ -161,9 +161,9 @@ func TestSettingsPageShowsDefaults(t *testing.T) {
 		`name="base_url" value="" placeholder="`+testPublicURL+`"`,
 		"Bila dikosongkan, pesan tidak memuat tautan ke panel",
 		"Alamat abu-abu di kolom hanya saran (alamat publik panel), bukan nilai yang dipakai",
-		// Served over plain HTTP: the token field warns (SEC-47).
-		"token bot yang Anda ketik melintas jaringan tanpa enkripsi",
 		"Replika berhenti", "Master diduga tumbang", "Pekerjaan gagal")
+	// The page is HTTPS only: no plain-HTTP warning any more.
+	wantNoBody(t, rec, "melintas jaringan tanpa enkripsi")
 	for _, k := range monitor.AllKinds() {
 		wantBody(t, rec, `name="kinds" value="`+k+`" checked`)
 	}
