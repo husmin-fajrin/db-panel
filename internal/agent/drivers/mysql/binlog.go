@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	drv "github.com/go-sql-driver/mysql"
+
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -47,21 +49,26 @@ func (d *Driver) registerBinlog(reg *commands.Registry) {
 }
 
 // BinlogTail is @@global.gtid_executed when MySQL answers (MySQLRunning);
-// otherwise the set the binary log records: the last file's
-// Previous-GTIDs plus every GTID in that file. File is the last binary
-// log file either way ("" when MySQL answers but its index cannot be
-// read). A server that refuses the stored account is read from its files
-// too: they are what the binary log holds at that moment.
+// when nothing answers (no socket, connection refused, timeout), the set
+// the binary log records: the last file's Previous-GTIDs plus every GTID
+// in that file. A server that answers but refuses the account or the
+// query is an error, never a snapshot of a live server's files. File is
+// the last binary log file either way ("" when MySQL answers but its
+// index cannot be read).
 func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 	var res proto.BinlogTailResult
-	if set, index, ok := liveExecuted(ctx, h); ok {
+	set, index, err := liveExecuted(ctx, h)
+	if err == nil {
 		res.GTIDExecuted, res.MySQLRunning = set, true
 		if index != "" {
 			res.File, _ = lastBinlogFile(index, h.Layout().DataDir)
 		}
 		return res, nil
 	}
-	index, err := binlogIndexPath(h.Layout())
+	if answered(err) {
+		return res, fmt.Errorf("MySQL di server ini menjawab tetapi gtid_executed tidak bisa dibaca: %w", err)
+	}
+	index, err = binlogIndexPath(h.Layout())
 	if err != nil {
 		return res, err
 	}
@@ -73,29 +80,37 @@ func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 	if err != nil {
 		return res, err
 	}
-	set, err := readBinlogGTIDs(ctx, h, bin, file)
+	logged, err := readBinlogGTIDs(ctx, h, bin, file)
 	if err != nil {
 		return res, err
 	}
-	res.GTIDExecuted, res.File = set.String(), file
+	res.GTIDExecuted, res.File = logged.String(), file
 	return res, nil
 }
 
 // liveExecuted asks MySQL for gtid_executed (one line) and the binary log
-// index path; ok is false when MySQL does not answer in time.
-func liveExecuted(ctx context.Context, h Host) (set, index string, ok bool) {
+// index path, within binlogAliveTimeout.
+func liveExecuted(ctx context.Context, h Host) (set, index string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, binlogAliveTimeout)
 	defer cancel()
 	db, err := h.Open(ctx)
 	if err != nil {
-		return "", "", false
+		return "", "", err
 	}
 	defer db.Close()
 	var idx sql.NullString
 	if err := db.QueryRowContext(ctx, "SELECT @@global.gtid_executed, @@global.log_bin_index").Scan(&set, &idx); err != nil {
-		return "", "", false
+		return "", "", err
 	}
-	return strings.ReplaceAll(set, "\n", ""), idx.String, true
+	return strings.ReplaceAll(set, "\n", ""), idx.String, nil
+}
+
+// answered reports whether err came from a MySQL server that answered
+// (a server error such as a refused login or too many connections), not
+// from reaching none.
+func answered(err error) bool {
+	var me *drv.MySQLError
+	return errors.As(err, &me)
 }
 
 // binlogIndexPath finds the binary log index from the option files
@@ -184,7 +199,8 @@ func lastBinlogFile(index, dataDir string) (string, error) {
 	return filepath.Clean(last), nil
 }
 
-// readBinlogGTIDs runs mysqlbinlog --no-defaults on file and collects its
+// readBinlogGTIDs runs mysqlbinlog --no-defaults on file (rows not
+// printed: GTID_NEXT and Previous-GTIDs stay) and collects its
 // Previous-GTIDs and every GTID_NEXT, reading the output line by line.
 func readBinlogGTIDs(ctx context.Context, h Host, bin, file string) (gtidSet, error) {
 	ctx, cancel := context.WithTimeout(ctx, binlogReadTimeout)
@@ -192,7 +208,7 @@ func readBinlogGTIDs(ctx context.Context, h Host, bin, file string) (gtidSet, er
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := h.Exec(ctx, nil, pw, bin, "--no-defaults", file)
+		err := h.Exec(ctx, nil, pw, bin, "--no-defaults", "--base64-output=DECODE-ROWS", file)
 		pw.CloseWithError(err)
 		done <- err
 	}()

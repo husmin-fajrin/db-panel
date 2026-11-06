@@ -150,6 +150,13 @@ func TestBinlogTailWithMySQLDown(t *testing.T) {
 		t.Fatalf("binlogTail with MySQL up = %+v; want %q", up, want)
 	}
 
+	// A server that answers but refuses the account is an error, not a
+	// read of its files.
+	refused := inst.HostWith(&memCreds{p: proto.ConnectParams{User: "root", Password: "salah"}})
+	if resp := dispatch(t, refused, "mysql.binlogTail", nil); resp.OK || !strings.Contains(resp.Error.Message, "menjawab") {
+		t.Errorf("binlogTail with a refused login = %+v", resp)
+	}
+
 	inst.Stop(t)
 	down := decode[proto.BinlogTailResult](t, dispatch(t, inst.Host(), "mysql.binlogTail", nil))
 	if down.MySQLRunning || down.GTIDExecuted != want || down.File != up.File {

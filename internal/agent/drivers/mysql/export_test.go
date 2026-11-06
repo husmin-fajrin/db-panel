@@ -212,3 +212,17 @@ func ParseBinlogText(text string) (string, error) {
 
 // BinlogIndexPath finds the binary log index of l without a server.
 var BinlogIndexPath = binlogIndexPath
+
+// SetPromoteCrash makes mysql.promote call f at its crash points.
+func SetPromoteCrash(f func(stage string)) (restore func()) {
+	old := promoteCrash
+	promoteCrash = f
+	return func() { promoteCrash = old }
+}
+
+// SetRelayWait changes step 3's bound and its stall time.
+func SetRelayWait(sec int, stall time.Duration) (restore func()) {
+	oldSec, oldStall := relayWaitSec, relayStall
+	relayWaitSec, relayStall = sec, stall
+	return func() { relayWaitSec, relayStall = oldSec, oldStall }
+}

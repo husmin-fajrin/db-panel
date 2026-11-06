@@ -173,6 +173,9 @@ func (r *promoteRig) wantPromoted(res proto.PromoteResult, mode string) {
 	if mysql.GTIDHasUUID(res.GTIDExecuted, r.replicaServerID) {
 		r.t.Errorf("the promoted replica has transactions of its own: %s", res.GTIDExecuted)
 	}
+	if got := pinFile(r.t, r.dir, mysql.PromotingFile); got != "" {
+		r.t.Errorf("promoting marker left: %s", got)
+	}
 	if n := count(r.t, r.rdb, "SELECT COUNT(*) FROM mysql.user WHERE user = 'dbpanel_repl' AND host = '%'"); n != 1 {
 		r.t.Errorf("dbpanel_repl@%% rows = %d", n)
 	}
@@ -286,32 +289,8 @@ func TestPromoteEmergencyAppliesRelayLog(t *testing.T) {
 		t.Errorf("probeSource with the master up = %+v", res)
 	}
 
-	execAll(t, r.rdb, "STOP REPLICA SQL_THREAD")
-	execAll(t, r.mdb, "INSERT INTO toko.t VALUES (1)", "INSERT INTO toko.t VALUES (2)", "INSERT INTO toko.t VALUES (3)")
-	want := gtidExecuted(t, r.mdb)
-	deadline := time.Now().Add(time.Minute)
-	for {
-		var ok bool
-		if err := r.rdb.QueryRow(`SELECT GTID_SUBSET(?, (SELECT RECEIVED_TRANSACTION_SET FROM performance_schema.replication_connection_status
-			WHERE CHANNEL_NAME = ''))`, want).Scan(&ok); err != nil {
-			t.Fatal(err)
-		}
-		if ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("replica never received the rows")
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	r.master.Stop(t)
-	deadline = time.Now().Add(time.Minute)
-	for count(t, r.rdb, "SELECT COUNT(*) FROM performance_schema.replication_connection_status WHERE SERVICE_STATE = 'ON'") > 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("receiver still connected after the master stopped")
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	want := r.receivedNotApplied(3)
+	r.masterDown()
 	if res := decode[proto.ProbeSourceResult](t, r.dispatch("mysql.probeSource", nil)); res.Reachable || res.Err == "" {
 		t.Errorf("probeSource with the master down = %+v", res)
 	}
@@ -338,6 +317,128 @@ func TestPromoteEmergencyAppliesRelayLog(t *testing.T) {
 	}
 }
 
+// receivedNotApplied stops the replica's applier, inserts n rows on the
+// master and waits until the replica received them; it returns the
+// master's gtid_executed.
+func (r *promoteRig) receivedNotApplied(n int) string {
+	t := r.t
+	t.Helper()
+	execAll(t, r.rdb, "STOP REPLICA SQL_THREAD")
+	for i := 1; i <= n; i++ {
+		execAll(t, r.mdb, "INSERT INTO toko.t VALUES ("+strconv.Itoa(i)+")")
+	}
+	want := gtidExecuted(t, r.mdb)
+	deadline := time.Now().Add(time.Minute)
+	for {
+		var ok bool
+		if err := r.rdb.QueryRow(`SELECT GTID_SUBSET(?, (SELECT RECEIVED_TRANSACTION_SET FROM performance_schema.replication_connection_status
+			WHERE CHANNEL_NAME = ''))`, want).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			return want
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replica never received the rows")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// masterDown stops the master and waits until the replica's receiver
+// noticed.
+func (r *promoteRig) masterDown() {
+	t := r.t
+	t.Helper()
+	r.master.Stop(t)
+	deadline := time.Now().Add(time.Minute)
+	for count(t, r.rdb, "SELECT COUNT(*) FROM performance_schema.replication_connection_status WHERE SERVICE_STATE = 'ON'") > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("receiver still connected after the master stopped")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestPromoteEmergencyGivesUpIncomplete: a relay log transaction that
+// cannot be applied within the bound (here held by a table lock, as an
+// incomplete one never would be) is reported and left behind.
+func TestPromoteEmergencyGivesUpIncomplete(t *testing.T) {
+	r := newPromoteRig(t)
+	t.Cleanup(mysql.SetProbeSpacing(50 * time.Millisecond))
+	t.Cleanup(mysql.SetRelayWait(3, time.Minute))
+	r.receivedNotApplied(2)
+	conn, err := r.rdb.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "LOCK TABLES toko.t READ"); err != nil {
+		t.Fatal(err)
+	}
+	r.masterDown()
+	// STOP REPLICA waits for an applier blocked on the lock (an applier
+	// at the end of an incomplete relay log is idle and stops at once):
+	// the lock goes once the promotion has given the transactions up.
+	unlocked := make(chan error, 1)
+	go func() {
+		for !r.ev.logged("transaksi tidak lengkap dari master lama diabaikan") {
+			time.Sleep(50 * time.Millisecond)
+		}
+		_, err := conn.ExecContext(context.Background(), "UNLOCK TABLES")
+		unlocked <- err
+	}()
+	res := promoteResult(t, r.run(r.params(proto.PromoteEmergency)))
+	if err := <-unlocked; err != nil {
+		t.Fatal(err)
+	}
+	if res.Applied != 0 || res.Unapplied == "" {
+		t.Errorf("result = %+v; want 2 transactions given up", res)
+	}
+	if n, err := mysql.GTIDCount(res.Unapplied); err != nil || n != 2 {
+		t.Errorf("unapplied %q: %d transactions (%v), want 2", res.Unapplied, n, err)
+	}
+	if !r.ev.logged("transaksi tidak lengkap dari master lama diabaikan: " + res.Unapplied) {
+		t.Errorf("logs = %q", r.ev.logs)
+	}
+	r.wantPromoted(res, proto.PromoteEmergency)
+}
+
+// TestPromoteEmergencyRefusedWhenMasterReturns: the old master is down
+// for the three probes but answers, writable, before writes would open:
+// the promotion is refused and replication restarted.
+func TestPromoteEmergencyRefusedWhenMasterReturns(t *testing.T) {
+	r := newPromoteRig(t)
+	t.Cleanup(mysql.SetProbeSpacing(50 * time.Millisecond))
+	execAll(t, r.rdb, "STOP REPLICA IO_THREAD")
+	probes := 0
+	t.Cleanup(mysql.SetProbePeer(func(ctx context.Context, host string, port int, timeout time.Duration) error {
+		if probes++; probes <= 3 {
+			return errors.New("connection refused")
+		}
+		return mysql.ProbePeer(ctx, host, port, timeout)
+	}))
+	r.wantFailed(r.run(r.params(proto.PromoteEmergency)), "sudo dbpanel agent lock-master")
+	if probes != 4 {
+		t.Errorf("%d probes, want 4", probes)
+	}
+	if got := pinFile(t, r.dir, mysql.PromotingFile); got != "" {
+		t.Errorf("promoting marker left: %s", got)
+	}
+}
+
+// logged reports whether a job log line holds part.
+func (e *jobEvents) logged(part string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, l := range e.logs {
+		if strings.Contains(l, part) {
+			return true
+		}
+	}
+	return false
+}
+
 func subset(db *sql.DB, a, b string) (bool, error) {
 	var ok bool
 	err := db.QueryRow("SELECT GTID_SUBSET(?, ?)", a, b).Scan(&ok)
@@ -351,11 +452,99 @@ func TestPromoteEmergencyRefusedWhenMasterAnswers(t *testing.T) {
 	r.wantFailed(r.run(r.params(proto.PromoteEmergency)), "sudo dbpanel agent lock-master")
 }
 
-// TestPromoteResumesAfterOpenWrites: a promotion that opened writes but
-// did not finish is resumed without reading the old master again.
+// TestPromoteRefusesWritableReplicaWithoutMarker: a replica made
+// writable outside a promotion (a load interrupted by a crash, a manual
+// SET GLOBAL) is not taken for a promotion to resume.
+func TestPromoteRefusesWritableReplicaWithoutMarker(t *testing.T) {
+	r := newPromoteRig(t)
+	execAll(t, r.rdb, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+	t.Cleanup(mysql.SetProbePeer(func(context.Context, string, int, time.Duration) error {
+		t.Error("probed the old master")
+		return nil
+	}))
+	d := r.run(r.params(proto.PromoteEmergency))
+	if d.OK || !strings.Contains(d.Error, "tanpa catatan promote") || !strings.Contains(d.Error, "setReadOnly on") {
+		t.Fatalf("promote of a writable replica = ok %v, %q", d.OK, d.Error)
+	}
+	if n := count(t, r.rdb, "SELECT COUNT(*) FROM performance_schema.replication_connection_configuration"); n != 1 {
+		t.Errorf("%d replication channels, want the replica's", n)
+	}
+	if got := pinFile(t, r.dir, mysql.RoleFile); got != "replica" {
+		t.Errorf("role pin = %q, want replica", got)
+	}
+}
+
+// crashAt makes the promotion panic at stage, as a crash there would end
+// it, until the test ends or the returned function is called.
+func crashAt(t *testing.T, stage string) (stop func()) {
+	restore := mysql.SetPromoteCrash(func(s string) {
+		if s == stage {
+			panic("crash at " + s)
+		}
+	})
+	t.Cleanup(restore)
+	return restore
+}
+
+// TestPromoteRerunAfterCrashBeforeOpen: a crash after the marker but
+// before writes open leaves a read-only replica; promote again verifies
+// again and completes.
+func TestPromoteRerunAfterCrashBeforeOpen(t *testing.T) {
+	r := newPromoteRig(t)
+	execAll(t, r.mdb, "SET GLOBAL super_read_only = ON")
+	stop := crashAt(t, "before-open")
+	if d := r.run(r.params(proto.PromotePlanned)); d.OK || !strings.Contains(d.Error, "crash at before-open") {
+		t.Fatalf("crashed promote = ok %v, %q", d.OK, d.Error)
+	}
+	stop()
+	if sro, ro := readOnly(t, r.rdb); !sro || !ro {
+		t.Fatalf("after a crash before opening writes: super_read_only=%v read_only=%v", sro, ro)
+	}
+	if got := pinFile(t, r.dir, mysql.PromotingFile); got == "" {
+		t.Error("no promoting marker after the crash")
+	}
+	peer := &fakePeer{}
+	peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true, GTIDExecuted: gtidExecuted(t, r.mdb)})
+	t.Cleanup(mysql.SetReadPeer(peer.read))
+	res := promoteResult(t, r.run(r.params(proto.PromotePlanned)))
+	if res.Resumed {
+		t.Errorf("result = %+v; want a verified run, not a resume", res)
+	}
+	if peer.count() == 0 {
+		t.Error("the re-run did not read the old master")
+	}
+	r.wantPromoted(res, proto.PromotePlanned)
+}
+
+// TestPromoteResumesAfterOpenWrites: a crash after writes opened is
+// resumed without reading the old master again.
 func TestPromoteResumesAfterOpenWrites(t *testing.T) {
 	r := newPromoteRig(t)
-	execAll(t, r.rdb, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+	execAll(t, r.mdb, "SET GLOBAL super_read_only = ON")
+	stop := crashAt(t, "after-open")
+	if d := r.run(r.params(proto.PromotePlanned)); d.OK || !strings.Contains(d.Error, "crash at after-open") {
+		t.Fatalf("crashed promote = ok %v, %q", d.OK, d.Error)
+	}
+	stop()
+	if sro, ro := readOnly(t, r.rdb); sro || ro {
+		t.Fatalf("after a crash past the point of no return: super_read_only=%v read_only=%v", sro, ro)
+	}
+	if got := pinFile(t, r.dir, mysql.RoleFile); got != "replica" {
+		t.Fatalf("role pin after the crash = %q", got)
+	}
+	// Another old master is not the marker's: refused.
+	other := r.params(proto.PromotePlanned)
+	other.OldSource.Host = "localhost"
+	if err := r.d.Pins().SetSource("localhost", r.master.Port); err != nil {
+		t.Fatal(err)
+	}
+	if d := r.run(other); d.OK || !strings.Contains(d.Error, "tanpa catatan promote") {
+		t.Errorf("resume for another old master = ok %v, %q", d.OK, d.Error)
+	}
+	if err := r.d.Pins().SetSource("127.0.0.1", r.master.Port); err != nil {
+		t.Fatal(err)
+	}
+
 	t.Cleanup(mysql.SetReadPeer(func(context.Context, proto.PeerCred, time.Duration) mysql.PeerState {
 		t.Error("resume read the old master")
 		return mysql.PeerState{}

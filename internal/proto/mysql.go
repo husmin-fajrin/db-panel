@@ -412,13 +412,17 @@ type PromoteParams struct {
 
 // PromoteResult is the result of the mysql.promote job: this server's
 // gtid_executed and server_uuid as the new master, how many relay log
-// transactions it applied before opening writes, and whether it resumed a
+// transactions it applied before opening writes (and which it gave up
+// on), and whether it resumed a
 // promotion that had already opened writes.
 type PromoteResult struct {
 	GTIDExecuted string `json:"gtid_executed"`
 	ServerUUID   string `json:"server_uuid"`
 	Applied      int    `json:"applied"`
-	Resumed      bool   `json:"resumed"`
+	// Unapplied are the incomplete transactions of the relay log given
+	// up on (a master that died sending one); "" when none.
+	Unapplied string `json:"unapplied,omitempty"`
+	Resumed   bool   `json:"resumed"`
 }
 
 // ProbeSourceResult is the answer to mysql.probeSource: whether a MySQL

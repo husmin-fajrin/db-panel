@@ -23,6 +23,10 @@ const (
 	LockFile = "promote-lock"
 	// PromotedFile records the last promotion of this server to master.
 	PromotedFile = "promoted"
+	// PromotingFile marks a promotion about to open writes on this
+	// replica: only with it does mysql.promote resume on a writable
+	// server.
+	PromotingFile = "promoting"
 )
 
 // SeenFile is where the agent records the replicas that read this
@@ -76,6 +80,48 @@ type promotedJSON struct {
 	Mode         string `json:"mode"`
 	OldSource    string `json:"old_source"`
 	GTIDExecuted string `json:"gtid_executed"`
+}
+
+// Promoting is the marker of a promotion that passed its verification
+// and is about to open writes (or did): its mode, the old master
+// (host:port) and when.
+type Promoting struct {
+	Mode      string
+	OldSource string
+	At        time.Time
+}
+
+type promotingJSON struct {
+	Mode      string `json:"mode"`
+	OldSource string `json:"old_source"`
+	At        string `json:"at"`
+}
+
+// WritePromoting writes the marker (synced to disk), replacing any.
+func (p *Pins) WritePromoting(m Promoting) error {
+	return writeJSON(p.path(PromotingFile), promotingJSON{Mode: m.Mode, OldSource: m.OldSource, At: m.At.UTC().Format(time.RFC3339)})
+}
+
+// ReadPromoting reads the marker; ok is false when there is none.
+func (p *Pins) ReadPromoting() (Promoting, bool, error) {
+	var v promotingJSON
+	ok, err := readJSON(p.path(PromotingFile), &v)
+	if err != nil || !ok {
+		return Promoting{}, false, err
+	}
+	at, err := time.Parse(time.RFC3339, v.At)
+	if err != nil || v.OldSource == "" {
+		return Promoting{}, false, fmt.Errorf("%s tidak valid", p.path(PromotingFile))
+	}
+	return Promoting{Mode: v.Mode, OldSource: v.OldSource, At: at}, true, nil
+}
+
+// ClearPromoting removes the marker; none is not an error.
+func (p *Pins) ClearPromoting() error {
+	if err := os.Remove(p.path(PromotingFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("hapus %s: %w", p.path(PromotingFile), err)
+	}
+	return nil
 }
 
 // WriteLock writes the promote lock, replacing any.

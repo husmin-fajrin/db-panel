@@ -17,23 +17,29 @@ import (
 // mysql.promote (spec 5.1) makes this replica the master, as an agent
 // job. It verifies the old master itself before it opens writes:
 //
-//  1. Writes already open (read_only and super_read_only off): an earlier
-//     run passed the point of no return; go to 6 (Resumed).
+//  1. Writes already open (read_only and super_read_only off): resumed
+//     at 6 only when the promoting marker of an earlier run from the
+//     same old master exists and replication is stopped; refused
+//     otherwise (the replica must be locked again first).
 //  2. planned: the old master answers, is super_read_only and holds no
 //     transaction this server lacks. emergency: three probes of the old
 //     master, 10 s apart, all fail and the replica's receiver is not
 //     connected; an old master that answers read-only continues as
 //     planned, a writable one refuses.
-//  3. STOP REPLICA IO_THREAD, then apply the relay log.
-//  4. planned: the lock's deadline is at least 2 minutes away and the old
-//     master is still read-only with nothing this server lacks.
-//  5. STOP REPLICA, then SET PERSIST read_only/super_read_only OFF: the
-//     point of no return.
+//  3. STOP REPLICA IO_THREAD, then apply the relay log (bounded: an
+//     incomplete last transaction is given up and reported).
+//  4. emergency: one more probe; an old master that answers again is
+//     treated as in 2. planned: the lock's deadline is at least 2
+//     minutes away and the old master is still read-only with nothing
+//     this server lacks.
+//  5. The promoting marker (synced), STOP REPLICA, then SET PERSIST
+//     read_only/super_read_only OFF: the point of no return.
 //  6. RESET REPLICA ALL, the replication account for its own replicas,
-//     pin master, write the promotion record.
+//     pin master, write the promotion record, remove the marker.
 //
-// A failure from 3 up to 5 starts replication again; one after 5 is only
-// reported, and mysql.promote run again resumes at 6.
+// A failure from 3 until read_only is off removes the marker and starts
+// replication again; one after is only reported, and mysql.promote run
+// again resumes at 6.
 
 const (
 	// promoteLockMargin is the least time left on the old master's lock
@@ -41,8 +47,6 @@ const (
 	promoteLockMargin = 2 * time.Minute
 	// emergencyProbes is how many probes of the old master must all fail.
 	emergencyProbes = 3
-	// relayWaitSec is the WAIT_FOR_EXECUTED_GTID_SET timeout.
-	relayWaitSec = 600
 	// relayLogEvery is how often applying the relay log is reported.
 	relayLogEvery = 5 * time.Second
 )
@@ -50,6 +54,15 @@ const (
 // probeSpacing is the pause between two emergency probes; tests shorten
 // it.
 var probeSpacing = 10 * time.Second
+
+var (
+	// relayWaitSec is the WAIT_FOR_EXECUTED_GTID_SET timeout, the bound
+	// of step 3; tests shorten it.
+	relayWaitSec = 600
+	// relayStall is how long step 3 waits without progress before it
+	// asks whether the applier has read all the relay log.
+	relayStall = 60 * time.Second
+)
 
 // errRelayWaitTimeout is WAIT_FOR_EXECUTED_GTID_SET returning 1.
 var errRelayWaitTimeout = errors.New("WAIT_FOR_EXECUTED_GTID_SET habis waktu")
@@ -141,44 +154,96 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams) (proto.Prom
 	if err := db.QueryRowContext(ctx, "SELECT @@global.read_only, @@global.super_read_only").Scan(&ro, &sro); err != nil {
 		return res, fmt.Errorf("baca read_only: %w", err)
 	}
+	mode := p.Mode
 	if !ro && !sro {
-		// Never opens writes itself: an earlier run already did, after
-		// its verification.
-		j.Logf("warn", "server ini sudah bisa ditulis: promote sebelumnya sudah melewati titik tanpa balik; dilanjutkan tanpa verifikasi ulang")
-		res.Resumed = true
-	} else {
-		applied, err := d.openWrites(j, db, p)
+		// Never opens writes itself: an earlier run opened them, after
+		// its verification, and left the promoting marker.
+		m, err := d.checkResume(ctx, db, p)
 		if err != nil {
 			return res, err
 		}
-		res.Applied = applied
+		j.Logf("warn", "server ini sudah bisa ditulis oleh promote sebelumnya (%s, %s); dilanjutkan tanpa verifikasi ulang",
+			m.Mode, m.At.UTC().Format(time.RFC3339))
+		res.Resumed, mode = true, m.Mode
+	} else {
+		applied, unapplied, err := d.openWrites(j, db, p)
+		if err != nil {
+			return res, err
+		}
+		res.Applied, res.Unapplied = applied, unapplied
 	}
-	if err := d.finishPromote(j, h, db, p, &res); err != nil {
+	if err := d.finishPromote(j, h, db, p, mode, &res); err != nil {
 		return res, err
 	}
 	return res, nil
 }
 
-// openWrites runs steps 2 to 5 and returns how many relay log
-// transactions were applied. Writes are open when it returns nil.
-func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (int, error) {
-	ctx := j.Context()
+// checkResume allows step 1's resume only for a promotion of this replica
+// from the same old master that wrote the promoting marker (so passed its
+// verification) and stopped replication: a replica writable for any
+// other reason (a load interrupted by a crash, a manual SET GLOBAL) is
+// never promoted unverified.
+func (d *Driver) checkResume(ctx context.Context, db *sql.DB, p proto.PromoteParams) (Promoting, error) {
+	key := peerKey(p.OldSource)
+	m, ok, err := d.pins.ReadPromoting()
+	if err != nil {
+		return m, &commands.ParamError{Msg: fmt.Sprintf("catatan promote tidak bisa dibaca, promote ditolak: %v", err)}
+	}
+	if !ok || !strings.EqualFold(m.OldSource, key) {
+		return m, &commands.ParamError{Msg: fmt.Sprintf(
+			"server ini bisa ditulis (read_only=OFF) tanpa catatan promote dari %s yang sedang berjalan; promote ditolak. "+
+				"Kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", key)}
+	}
 	rs, err := currentStatus(ctx, db)
 	if err != nil {
-		return 0, err
+		return m, err
+	}
+	if rs != nil && (rs.IORunning == "Yes" || rs.IORunning == "Connecting" || rs.SQLRunning == "Yes") {
+		return m, &commands.ParamError{Msg: fmt.Sprintf(
+			"server ini bisa ditulis tetapi replikasi masih berjalan (IO: %s, SQL: %s); promote tidak dilanjutkan. "+
+				"Kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", rs.IORunning, rs.SQLRunning)}
+	}
+	return m, nil
+}
+
+// promoteCrash, when set, is called at the stages "before-open" (marker
+// written, replication stopped) and "after-open" (writes open); tests
+// make it panic to stand for a crash there.
+var promoteCrash func(stage string)
+
+func crashPoint(stage string) {
+	if promoteCrash != nil {
+		promoteCrash(stage)
+	}
+}
+
+// openWrites runs steps 2 to 5 and returns how many relay log
+// transactions were applied and the incomplete ones left unapplied.
+// Writes are open when it returns nil.
+func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (int, string, error) {
+	ctx := j.Context()
+	key := peerKey(p.OldSource)
+	rs, err := currentStatus(ctx, db)
+	if err != nil {
+		return 0, "", err
 	}
 	if rs == nil {
-		return 0, &commands.ParamError{Msg: "replikasi tidak dikonfigurasi di server ini; tidak ada yang bisa dipromosikan"}
+		return 0, "", &commands.ParamError{Msg: "replikasi tidak dikonfigurasi di server ini; tidak ada yang bisa dipromosikan"}
 	}
 	planned, err := d.verifyOldSource(j, db, p)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
-	// From here replication is changed: a failure starts it again.
+	// From here replication is changed: a failure removes the marker and
+	// starts replication again.
 	restore := func(cause error) error {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancel()
+		if err := d.pins.ClearPromoting(); err != nil {
+			j.Logf("error", "%v", err)
+			cause = fmt.Errorf("%w; catatan promote juga gagal dihapus (%v)", cause, err)
+		}
 		if _, err := db.ExecContext(rctx, "START REPLICA"); err != nil {
 			j.Logf("error", "START REPLICA gagal: %v", err)
 			return fmt.Errorf("%w; replikasi juga gagal dijalankan kembali (START REPLICA: %v)", cause, err)
@@ -186,26 +251,46 @@ func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (int
 		j.Logf("info", "promote dibatalkan; replikasi dijalankan kembali")
 		return cause
 	}
-	applied, err := applyRelayLog(j, db)
+	applied, unapplied, err := applyRelayLog(j, db)
 	if err != nil {
-		return 0, restore(err)
+		return 0, "", restore(err)
+	}
+	if !planned {
+		// The old master may have come back while the relay log was
+		// applied: probe it once more.
+		if perr := probePeer(ctx, p.OldSource.Host, p.OldSource.Port, peerTimeout); perr == nil {
+			st := readPeer(ctx, p.OldSource, peerTimeout)
+			if !st.Reachable || !st.SuperReadOnly {
+				return 0, "", restore(&commands.ParamError{Msg: "master masih menjawab dari replika ini; gunakan promote terencana, atau kunci master dari " +
+					"servernya dengan `sudo dbpanel agent lock-master` bila agent-nya tidak bisa dipulihkan"})
+			}
+			j.Logf("info", "master lama %s menjawab lagi dan read-only: dilanjutkan sebagai promote terencana", key)
+			planned = true
+		}
 	}
 	if planned {
 		if err := d.recheckOldSource(j, db, p); err != nil {
-			return 0, restore(err)
+			return 0, "", restore(err)
 		}
+	}
+	if err := d.pins.WritePromoting(Promoting{Mode: p.Mode, OldSource: key, At: d.now()}); err != nil {
+		return 0, "", restore(fmt.Errorf("catatan promote gagal ditulis: %w", err))
 	}
 	if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
-		return 0, restore(fmt.Errorf("STOP REPLICA: %w", err))
+		return 0, "", restore(fmt.Errorf("STOP REPLICA: %w", err))
 	}
-	// The point of no return: no rollback after this, whatever fails.
+	crashPoint("before-open")
+	// The point of no return: no rollback once read_only is off.
 	j.Logf("info", "membuka tulis di server ini (titik tanpa balik)")
-	for _, q := range []string{"SET PERSIST read_only = OFF", "SET PERSIST super_read_only = OFF"} {
-		if _, err := db.ExecContext(context.WithoutCancel(ctx), q); err != nil {
-			return 0, fmt.Errorf("%s: %w; replikasi sudah dihentikan, jalankan promote lagi untuk melanjutkan", q, err)
-		}
+	wctx := context.WithoutCancel(ctx)
+	if _, err := db.ExecContext(wctx, "SET PERSIST read_only = OFF"); err != nil {
+		return 0, "", restore(fmt.Errorf("SET PERSIST read_only = OFF: %w", err))
 	}
-	return applied, nil
+	if _, err := db.ExecContext(wctx, "SET PERSIST super_read_only = OFF"); err != nil {
+		return 0, "", fmt.Errorf("SET PERSIST super_read_only = OFF: %w; tulis sudah terbuka, jalankan promote lagi untuk melanjutkan", err)
+	}
+	crashPoint("after-open")
+	return applied, unapplied, nil
 }
 
 // verifyOldSource is step 2. planned reports whether the old master
@@ -306,45 +391,51 @@ func (d *Driver) recheckOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams
 
 // applyRelayLog is step 3: it stops the receiver and waits until this
 // server executed every transaction it retrieved, reporting every
-// relayLogEvery. It returns how many transactions were applied.
-func applyRelayLog(j *jobs.Job, db *sql.DB) (int, error) {
+// relayLogEvery. It returns how many transactions were applied, and the
+// ones it gave up on: at the WAIT_FOR_EXECUTED_GTID_SET timeout, or after
+// relayStall without progress while the applier has read all the relay
+// log (an incomplete transaction from a master that died sending it,
+// which RESET REPLICA ALL discards).
+func applyRelayLog(j *jobs.Job, db *sql.DB) (int, string, error) {
 	ctx := j.Context()
 	if _, err := db.ExecContext(ctx, "STOP REPLICA IO_THREAD"); err != nil {
-		return 0, fmt.Errorf("STOP REPLICA IO_THREAD: %w", err)
+		return 0, "", fmt.Errorf("STOP REPLICA IO_THREAD: %w", err)
 	}
 	rs, err := currentStatus(ctx, db)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if rs == nil {
-		return 0, errNotReplica
+		return 0, "", errNotReplica
 	}
 	retrieved := rs.RetrievedGTID
-	pending := func() (int64, error) {
+	pending := func() (string, int64, error) {
 		var left string
 		if err := db.QueryRowContext(ctx, "SELECT GTID_SUBTRACT(?, @@global.gtid_executed)", retrieved).Scan(&left); err != nil {
-			return 0, fmt.Errorf("bandingkan set GTID relay log: %w", err)
+			return "", 0, fmt.Errorf("bandingkan set GTID relay log: %w", err)
 		}
-		return gtidCount(left)
+		left = strings.ReplaceAll(left, "\n", "")
+		n, err := gtidCount(left)
+		return left, n, err
 	}
-	before, err := pending()
+	_, before, err := pending()
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if before == 0 {
 		j.Logf("info", "relay log sudah diterapkan seluruhnya")
-		return 0, nil
+		return 0, "", nil
 	}
 	j.Logf("info", "menerapkan %d transaksi relay log yang tersisa", before)
 	if rs.SQLRunning != "Yes" {
 		if _, err := db.ExecContext(ctx, "START REPLICA SQL_THREAD"); err != nil {
-			return 0, fmt.Errorf("START REPLICA SQL_THREAD: %w", err)
+			return 0, "", fmt.Errorf("START REPLICA SQL_THREAD: %w", err)
 		}
 	}
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer conn.Close()
 	wctx, cancel := context.WithCancel(ctx)
@@ -358,50 +449,85 @@ func applyRelayLog(j *jobs.Job, db *sql.DB) (int, error) {
 		}
 		waited <- err
 	}()
+	giveUp := func(left string, n int64) (int, string, error) {
+		j.Logf("warn", "transaksi tidak lengkap dari master lama diabaikan: %s", left)
+		return int(before - n), left, nil
+	}
 	tick := time.NewTicker(relayLogEvery)
 	defer tick.Stop()
+	start := time.Now()
+	lastLeft, lastChange := before, start
 	for {
+		timedOut := false
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return 0, "", ctx.Err()
 		case err := <-waited:
 			waited = nil
 			switch {
 			case errors.Is(err, errRelayWaitTimeout):
-				j.Logf("warn", "relay log belum selesai diterapkan setelah %d detik; terus menunggu", relayWaitSec)
+				timedOut = true
 			case err != nil && ctx.Err() == nil:
-				return 0, fmt.Errorf("tunggu relay log diterapkan: %w", err)
+				return 0, "", fmt.Errorf("tunggu relay log diterapkan: %w", err)
 			}
 		case <-tick.C:
 		}
-		left, err := pending()
+		left, n, err := pending()
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
-		if left == 0 {
+		if n == 0 {
 			j.Logf("info", "relay log diterapkan: %d transaksi", before)
-			return int(before), nil
+			return int(before), "", nil
+		}
+		if timedOut || time.Since(start) > time.Duration(relayWaitSec)*time.Second {
+			j.Logf("warn", "relay log belum selesai diterapkan setelah %d detik", relayWaitSec)
+			return giveUp(left, n)
+		}
+		if n != lastLeft {
+			lastLeft, lastChange = n, time.Now()
 		}
 		rs, err := currentStatus(ctx, db)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		switch {
 		case rs == nil:
-			return 0, errNotReplica
+			return 0, "", errNotReplica
 		case rs.LastSQLErrno != 0:
-			return 0, sqlError(rs)
+			return 0, "", sqlError(rs)
 		case rs.SQLRunning != "Yes":
-			return 0, errors.New("thread SQL replika berhenti sebelum relay log selesai diterapkan")
+			return 0, "", errors.New("thread SQL replika berhenti sebelum relay log selesai diterapkan")
 		}
-		msg := fmt.Sprintf("menerapkan relay log: %d dari %d transaksi, %d tersisa", before-left, before, left)
+		if time.Since(lastChange) >= relayStall {
+			idle, err := applierIdle(ctx, db)
+			if err != nil {
+				return 0, "", err
+			}
+			if idle {
+				return giveUp(left, n)
+			}
+		}
+		msg := fmt.Sprintf("menerapkan relay log: %d dari %d transaksi, %d tersisa", before-n, before, n)
 		j.Logf("info", "%s", msg)
-		j.Progress(percentOf(uint64(before-left), uint64(before)), msg)
+		j.Progress(percentOf(uint64(before-n), uint64(before)), msg)
 	}
 }
 
+// applierIdle reports whether the applier says it has read all the relay
+// log and waits for more.
+func applierIdle(ctx context.Context, db *sql.DB) (bool, error) {
+	var n int
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM performance_schema.threads
+		WHERE NAME IN ('thread/sql/replica_sql', 'thread/sql/slave_sql') AND PROCESSLIST_STATE LIKE '%has read all relay log%'`).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("baca keadaan thread SQL replika: %w", err)
+	}
+	return n > 0, nil
+}
+
 // finishPromote is step 6, run with writes open.
-func (d *Driver) finishPromote(j *jobs.Job, h Host, db *sql.DB, p proto.PromoteParams, res *proto.PromoteResult) error {
+func (d *Driver) finishPromote(j *jobs.Job, h Host, db *sql.DB, p proto.PromoteParams, mode string, res *proto.PromoteResult) error {
 	// Past the point of no return: a cancelled job still finishes.
 	ctx := context.WithoutCancel(j.Context())
 	rs, err := currentStatus(ctx, db)
@@ -433,6 +559,9 @@ func (d *Driver) finishPromote(j *jobs.Job, h Host, db *sql.DB, p proto.PromoteP
 	pr := Promoted{At: d.now().UTC(), Mode: p.Mode, OldSource: peerKey(p.OldSource), GTIDExecuted: res.GTIDExecuted}
 	if err := d.pins.WritePromoted(pr); err != nil {
 		return fmt.Errorf("server ini sudah dipin master, tetapi catatan promosi gagal ditulis: %w", err)
+	}
+	if err := d.pins.ClearPromoting(); err != nil {
+		return fmt.Errorf("server ini sudah master, tetapi catatan promote berjalan gagal dihapus: %w", err)
 	}
 	j.Logf("info", "server ini sekarang master")
 	return nil
