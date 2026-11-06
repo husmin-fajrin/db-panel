@@ -47,6 +47,13 @@ type ReplicaRecorder interface {
 	RecordReplicas(ctx context.Context, now time.Time) error
 }
 
+// PromoteGuard is a Source that also guards a promote lock
+// (mysql.Driver.GuardTick): it keeps a locked master read-only and ends
+// the lock at its deadline, at now. The monitor runs it after every check.
+type PromoteGuard interface {
+	GuardTick(ctx context.Context, now time.Time) error
+}
+
 // Emitter sends an event to the panel; an error (proto.ErrOffline while
 // there is no connection) means the event was not delivered.
 type Emitter interface {
@@ -74,6 +81,9 @@ const (
 	lockGuardTimeout = 10 * time.Second
 	// recordTimeout bounds one RecordReplicas.
 	recordTimeout = 10 * time.Second
+	// promoteGuardTimeout bounds one GuardTick (a 5 s read of the
+	// candidate plus statements on MySQL).
+	promoteGuardTimeout = 30 * time.Second
 )
 
 // Bounds of the intervals monitor.configure accepts, in seconds.
@@ -236,12 +246,14 @@ func (m *Monitor) options() Options {
 }
 
 // Run checks at once, then every CheckEvery, until ctx is done. After a
-// check it guards against dump locks, records the replicas seen, and sweeps the dump accounts when SweepEvery has passed since the
-// last sweep (the first one at once).
+// check it guards against dump locks, guards the promote lock, records
+// the replicas seen, and sweeps the dump accounts when SweepEvery has
+// passed since the last sweep (the first one at once).
 func (m *Monitor) Run(ctx context.Context) {
 	for {
 		m.tick(ctx)
 		m.guardDumpLocks(ctx)
+		m.guardPromote(ctx)
 		m.recordReplicas(ctx)
 		m.sweep(ctx)
 		if !m.pause(ctx) {
@@ -285,6 +297,19 @@ func (m *Monitor) guardDumpLocks(ctx context.Context) {
 		m.logger.Debug("dump lock guard", "err", err)
 	} else if n > 0 {
 		m.logger.Warn("dump sessions holding the global read lock killed", "killed", n)
+	}
+}
+
+// guardPromote runs the Source's PromoteGuard, when it is one.
+func (m *Monitor) guardPromote(ctx context.Context) {
+	g, ok := m.src.(PromoteGuard)
+	if !ok || ctx.Err() != nil {
+		return
+	}
+	gctx, cancel := context.WithTimeout(ctx, promoteGuardTimeout)
+	defer cancel()
+	if err := g.GuardTick(gctx, m.now()); err != nil {
+		m.logger.Warn("promote lock guard", "err", err)
 	}
 }
 

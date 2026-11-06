@@ -141,6 +141,7 @@ func mainRun(args []string, stderr io.Writer) int {
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
 	drv := RegisterMySQL(reg, cfg, *dir, sys, runner, logger)
+	drv.Events = a
 	mon := monitor.New(drv, a, logger, monitor.Options{Pins: drv.Pins()})
 	mon.Register(reg)
 	reg.SetLogger(logger)

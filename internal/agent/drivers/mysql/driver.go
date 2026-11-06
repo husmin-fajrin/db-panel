@@ -39,6 +39,9 @@ type Driver struct {
 	// SeenPath is the replicas-seen file (RecordReplicas); empty means
 	// SeenFile. Tests point it elsewhere.
 	SeenPath string
+	// Events, when set, sends the promote lock guard's events to the
+	// panel (the agent's connection).
+	Events Emitter
 
 	mu sync.RWMutex // guards Host once Register has run
 
@@ -62,6 +65,11 @@ type Driver struct {
 	seenMu    sync.Mutex
 	seenHosts []string
 	seenAt    time.Time
+
+	// The promote lock (promote_lock.go): lockForPromote, unlockPromote
+	// and the guard run one at a time.
+	promoteMu sync.Mutex
+	guard     promoteGuard
 
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
@@ -89,6 +97,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerInstall(reg)
 	d.registerDatabases(reg)
 	d.registerTLS(reg)
+	d.registerPromote(reg)
 }
 
 // Pins is the driver's pinned role and source; nil without PinDir. The

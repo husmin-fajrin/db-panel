@@ -153,3 +153,17 @@ var (
 	TrustTLS   = trustTLS
 	RequestTLS = requestTLS
 )
+
+// SetReadPeer replaces how the driver reads another server's globals.
+func SetReadPeer(f func(context.Context, proto.PeerCred, time.Duration) PeerState) (restore func()) {
+	old := readPeer
+	readPeer = f
+	return func() { readPeer = old }
+}
+
+// ArmGuard gives the guard the candidate's account, as lockForPromote
+// does, without a connected replica.
+func (d *Driver) ArmGuard(c proto.PeerCred) { d.armGuard(c) }
+
+// GTIDHasUUID reports whether a GTID set holds a transaction of uuid.
+var GTIDHasUUID = gtidHasUUID

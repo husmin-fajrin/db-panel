@@ -758,3 +758,41 @@ func TestMonitorRecordsReplicasSeenEveryCheck(t *testing.T) {
 		t.Errorf("records after four checks = %v", got)
 	}
 }
+
+// promoteSource is a fakeSource that also guards the promote lock
+// (PromoteGuard), recording each call's time.
+type promoteSource struct {
+	*fakeSource
+	mu    sync.Mutex
+	calls []time.Time
+}
+
+func (s *promoteSource) GuardTick(_ context.Context, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, now)
+	return nil
+}
+
+func (s *promoteSource) ticks() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.calls...)
+}
+
+// TestMonitorRunsPromoteGuardEveryCheck: the promote-lock guard runs after
+// every check, at the monitor's (injectable) time.
+func TestMonitorRunsPromoteGuardEveryCheck(t *testing.T) {
+	src := &promoteSource{fakeSource: &fakeSource{snap: base()}}
+	r := startRig(t, src.fakeSource, src, nil)
+	if got := src.ticks(); len(got) != 1 || !got[0].Equal(r.clock.Now()) {
+		t.Fatalf("guard ticks after the first check = %v, want [%v]", got, r.clock.Now())
+	}
+	for i := 0; i < 3; i++ {
+		r.tick(15 * time.Second)
+	}
+	got := src.ticks()
+	if len(got) != 4 || !got[3].Equal(r.clock.Now()) {
+		t.Errorf("guard ticks after four checks = %v", got)
+	}
+}

@@ -349,3 +349,64 @@ type TLSTrustParams struct {
 type TLSTrustResult struct {
 	CAPath string `json:"ca_path"`
 }
+
+// PeerCred is how an agent logs in to another MySQL server of the
+// topology (the replication account) to read its globals during a
+// promotion. The agent never stores it.
+type PeerCred struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	// SSLCA, with Verify, is the CA file the server's certificate is
+	// verified against (chain and host name); without Verify the
+	// connection uses TLS when the server offers it, unverified.
+	SSLCA  string `json:"ssl_ca,omitempty"`
+	Verify bool   `json:"verify,omitempty"`
+}
+
+// LockForPromoteParams are the parameters of mysql.lockForPromote: the
+// replica about to be promoted and how long the lock lasts before the
+// agent's guard checks on it (60 to 3600 seconds).
+type LockForPromoteParams struct {
+	Candidate  PeerCred `json:"candidate"`
+	TimeoutSec int      `json:"timeout_sec"`
+}
+
+// LockForPromoteResult is the answer to mysql.lockForPromote: when the
+// master was locked, the lock's deadline, and the master's identity and
+// final gtid_executed.
+type LockForPromoteResult struct {
+	LockedAt     time.Time `json:"locked_at"`
+	Deadline     time.Time `json:"deadline"`
+	ServerUUID   string    `json:"server_uuid"`
+	GTIDExecuted string    `json:"gtid_executed"`
+}
+
+// UnlockPromoteParams are the parameters of mysql.unlockPromote: the
+// lock's candidate, which must still be a replica.
+type UnlockPromoteParams struct {
+	Candidate PeerCred `json:"candidate"`
+}
+
+// Events of the promote lock's guard on a master.
+const (
+	// EventQuarantined: the server quarantined itself under its new
+	// master (QuarantinedEvent).
+	EventQuarantined = "monitor.quarantined"
+	// EventLockExpired: the promote lock reached its deadline
+	// (LockExpiredEvent).
+	EventLockExpired = "monitor.lockExpired"
+)
+
+// QuarantinedEvent is the payload of EventQuarantined.
+type QuarantinedEvent struct {
+	NewSource string `json:"new_source"` // host:port of the new master
+}
+
+// LockExpiredEvent is the payload of EventLockExpired.
+type LockExpiredEvent struct {
+	Action    string `json:"action"`    // "unlocked" | "kept"
+	Candidate string `json:"candidate"` // host:port
+	Reason    string `json:"reason,omitempty"`
+}
