@@ -87,3 +87,10 @@ Rulings:
 - Parked: SEC-59 notice close tokenless — Ruling: accepted; closing the notice only hides a legitimate notice now that a session cannot trigger a new CA — cost if wrong: a stolen session hides the "pasang ulang" notice until the next regeneration.
 - Parked (minor): N2 e2e helper adds o+x to temp-dir parents; N3 allowlist misses /root, ~, $HOME, /tmp and has no setpriv backstop when not root; N4–N7 per report (sweep cadence, SEC-58 test coverage, .old2 overwritten on third regeneration, stale comment panel.go:209).
 - Plan 4a complete on d6ba8f4 (+321d529 docs). Workspace archived to docs/superpowers/ledgers/.
+
+## Release fixes (2026-11-06, after Plan 4a close)
+
+- Product owner: "Ikut rekomendasi mu" → residual mini-cycle: N1 (/confirm limiter atomic) and SEC-56 butir 3 (PASSWORD EXPIRE INTERVAL 1 DAY, sweep age 6 h). Commits 7ba0661, 47f7d0f.
+- Ruling: the age sweep must never kill a running dump (hospital dumps can exceed 6 h) — stale accounts with active sessions are skipped and logged; only session-less accounts are dropped; the FTWRL guard still kills global-lock holders — cost if wrong: an attacker holding a dump-account session (or table-level READ locks, which the guard does not see) keeps it until the password expires or the panel sweep; accepted as residual. Commit 3952294.
+- Re-review (opus): Clean, all three addressed. Residual recorded: table-level LOCK TABLES by a dump account is not guarded; README wording should say sessions are "dianggap" a running dump. Out of scope: login handler keeps check-then-act (bounded by per-IP limiter and loginSem).
+- Full suite on the final tree before merge: see below.
