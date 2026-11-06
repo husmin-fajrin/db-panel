@@ -525,7 +525,10 @@ sudo dbpanel agent unlock-master   # RESET PERSIST, read_only OFF, hapus kunci p
 `/etc/dbpanel/promote-lock` tanpa kandidat promosi (`"candidate":"cli"`);
 selama berkas itu ada, master yang dipin menolak dibuka kuncinya dari panel,
 dan tidak ada proses otomatis yang membukanya. `lock-master` menolak bila
-kunci sudah ada; `unlock-master` aman diulang. Catatan promosi terakhir
+kunci sudah ada; `unlock-master` aman diulang dan hanya berjalan di server
+yang dipin `master` (atau server `unassigned` yang dikunci dengan
+`lock-master`): replika dan server `quarantined` tidak pernah dibuat bisa
+ditulis olehnya. Catatan promosi terakhir
 disimpan di `/etc/dbpanel/promoted`. Kedua berkas ini ditulis dan dibaca
 seperti berkas pin.
 

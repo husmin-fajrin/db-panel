@@ -471,6 +471,64 @@ func TestCLILockUnlockMaster(t *testing.T) {
 		return p
 	}
 
+	// Only a master (or a server under a lock-master lock) is unlocked.
+	for _, role := range []string{"replica", "quarantined", ""} {
+		if role != "" {
+			if code, _, errOut := run("set-role", role, "--dir", dir); code != 0 {
+				t.Fatalf("set-role %s = %d, %q", role, code, errOut)
+			}
+		}
+		if code, _, errOut := run("unlock-master", "--dir", dir); code != 1 || !strings.Contains(errOut, "unlock-master hanya untuk master") {
+			t.Errorf("unlock-master on %q = %d, %q; want 1 and a refusal", role, code, errOut)
+		}
+		if role == "" {
+			continue
+		}
+		if code, _, errOut := run("set-role", "unassigned", "--dir", dir); code != 0 {
+			t.Fatalf("set-role unassigned = %d, %q", code, errOut)
+		}
+	}
+	if ro, sro := vars(); ro != "0" || sro != "0" {
+		t.Fatalf("refused unlocks changed MySQL: read_only %s, super_read_only %s", ro, sro)
+	}
+
+	// A lock-master lock does not open a replica either.
+	if code, _, errOut := run("set-role", "replica", "--dir", dir); code != 0 {
+		t.Fatalf("set-role replica = %d, %q", code, errOut)
+	}
+	if code, _, errOut := run("lock-master", "--dir", dir); code != 0 {
+		t.Fatalf("lock-master on replica = %d, %q", code, errOut)
+	}
+	if code, _, errOut := run("unlock-master", "--dir", dir); code != 1 || !strings.Contains(errOut, "dipin sebagai replica") {
+		t.Errorf("unlock-master on a locked replica = %d, %q; want 1 and a refusal", code, errOut)
+	}
+	if _, sro := vars(); sro != "1" {
+		t.Errorf("refused unlock on a locked replica: super_read_only %s, want 1", sro)
+	}
+	if code, _, errOut := run("set-role", "master", "--dir", dir); code != 0 {
+		t.Fatalf("set-role master = %d, %q", code, errOut)
+	}
+	if code, _, errOut := run("unlock-master", "--dir", dir); code != 0 {
+		t.Fatalf("unlock-master on master = %d, %q", code, errOut)
+	}
+	if code, _, errOut := run("set-role", "unassigned", "--dir", dir); code != 0 {
+		t.Fatalf("set-role unassigned = %d, %q", code, errOut)
+	}
+
+	// An unpinned server locked with lock-master can be unlocked again.
+	if code, _, errOut := run("lock-master", "--dir", dir); code != 0 {
+		t.Fatalf("lock-master unpinned = %d, %q", code, errOut)
+	}
+	if code, _, errOut := run("unlock-master", "--dir", dir); code != 0 {
+		t.Fatalf("unlock-master under its own lock = %d, %q", code, errOut)
+	}
+	if code, _, errOut := run("unlock-master", "--dir", dir); code != 1 {
+		t.Errorf("unlock-master unpinned without a lock = %d, %q; want 1", code, errOut)
+	}
+
+	if code, _, errOut := run("set-role", "master", "--dir", dir); code != 0 {
+		t.Fatalf("set-role master = %d, %q", code, errOut)
+	}
 	before := time.Now()
 	code, out, errOut := run("lock-master", "--dir", dir)
 	if code != 0 || !strings.Contains(out, "master dikunci") {

@@ -272,7 +272,7 @@ type accountMode struct {
 // m.keepExisting the account is refused instead when a row of a.User
 // exists at any host: an existing one is never altered, and no second
 // row (which could shadow the first for some clients) is added.
-func createAccount(ctx context.Context, h Host, a account, grants, what string, m accountMode) error {
+func createAccount(ctx context.Context, h Host, a account, grants, what string, m accountMode) (err error) {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return err
@@ -308,11 +308,16 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 		if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
 			return fmt.Errorf("SET sql_log_bin: %w", err)
 		}
-		restore, err := liftReadOnly(ctx, m.local, db)
-		if err != nil {
-			return err
+		restore, lerr := liftReadOnly(ctx, m.local, db)
+		if lerr != nil {
+			return lerr
 		}
-		defer restore()
+		defer func() {
+			// A replica left writable is a failure, whatever came before.
+			if rerr := restore(); rerr != nil && err == nil {
+				err = fmt.Errorf("akun %s dibuat, tetapi read_only server ini gagal dipasang kembali (%v); jalankan: SET GLOBAL super_read_only = ON", what, rerr)
+			}
+		}()
 	}
 	var mode string
 	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {

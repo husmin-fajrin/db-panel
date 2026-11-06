@@ -403,12 +403,13 @@ func writeDefaultsFile(h Host, p proto.ConnectParams, socket string, port int, t
 // function that turns back on what was on. SET GLOBAL, not PERSIST: a
 // restart restores the configured values whatever happens here. logf
 // receives what it did (a job's Logf).
-func liftReadOnly(ctx context.Context, logf func(level, format string, args ...any), db *sql.DB) (restore func(), err error) {
+func liftReadOnly(ctx context.Context, logf func(level, format string, args ...any), db *sql.DB) (restore func() error, err error) {
 	var ro, sro bool
 	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only").Scan(&ro, &sro); err != nil {
 		return nil, fmt.Errorf("baca read_only: %w", err)
 	}
-	restore = func() {
+	// restore puts both back; it logs each failure and returns the first.
+	restore = func() error {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancel()
 		var stmts []string
@@ -418,11 +419,16 @@ func liftReadOnly(ctx context.Context, logf func(level, format string, args ...a
 		if sro {
 			stmts = append(stmts, "SET GLOBAL super_read_only = ON")
 		}
+		var first error
 		for _, q := range stmts {
 			if _, err := db.ExecContext(rctx, q); err != nil {
 				logf("error", "%s failed: %v", q, err)
+				if first == nil {
+					first = fmt.Errorf("%s: %w", q, err)
+				}
 			}
 		}
+		return first
 	}
 	for _, q := range []string{"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF"} {
 		if _, err := db.ExecContext(ctx, q); err != nil {

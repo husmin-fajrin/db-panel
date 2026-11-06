@@ -134,6 +134,14 @@ func sourceClaimRefusal(pinned, asked string) error {
 		pinned, asked)}}
 }
 
+// unsourcedQuarantineRefusal is a rebuild command on a quarantined server
+// without a source pin: it may be rebuilt only from its new master.
+func unsourcedQuarantineRefusal(cmd string) error {
+	return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
+		"server ini dipin sebagai quarantined tanpa sumber yang dipin; perintah %s ditolak. Pin master barunya dulu di server ini: sudo dbpanel agent set-source <host:port>",
+		cmd)}}
+}
+
 // lockRefusal is setReadOnly{off} on a master under the promote lock.
 func lockRefusal(l PromoteLock) error {
 	return &pinError{kind: ErrRolePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
@@ -392,11 +400,13 @@ func (p *Pins) SetQuarantined(newSource string) error {
 	defer p.mu.Unlock()
 	defer p.forget()
 	p.settled = true
-	// The role first: a failure in between leaves the stricter pin.
-	if err := writePin(p.path(RoleFile), roleQuarantined); err != nil {
+	// The source first: a failure in between leaves the old role with a
+	// source pin (harmless on a master, which refuses every command that
+	// names a source), never a quarantined server without one.
+	if err := writePin(p.path(SourceFile), net.JoinHostPort(host, strconv.Itoa(port))); err != nil {
 		return err
 	}
-	return writePin(p.path(SourceFile), net.JoinHostPort(host, strconv.Itoa(port)))
+	return writePin(p.path(RoleFile), roleQuarantined)
 }
 
 // PromoteToMaster pins this server as master and removes its source pin:
@@ -573,8 +583,17 @@ func (p *Pins) Allow(cmd string, params any) error {
 		}
 	}
 	host, port, names, err := sourceOf(cmd, params)
-	if err != nil || !names || !p.hasSrc || p.sameSource(host, port) {
+	if err != nil {
 		return err
+	}
+	// A quarantined server without a source pin (an interrupted
+	// quarantine, or set-role without set-source) is never wiped or
+	// pointed anywhere: there is no pinned new master to rebuild from.
+	if p.role == roleQuarantined && !p.hasSrc && (names || cmd == "mysql.dropDatabases") {
+		return unsourcedQuarantineRefusal(cmd)
+	}
+	if !names || !p.hasSrc || p.sameSource(host, port) {
+		return nil
 	}
 	return sourceRefusal(net.JoinHostPort(p.srcHost, strconv.Itoa(p.srcPort)), net.JoinHostPort(host, strconv.Itoa(port)), cmd)
 }

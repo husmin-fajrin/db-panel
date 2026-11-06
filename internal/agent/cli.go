@@ -357,19 +357,35 @@ func mainLockMaster(args []string, stdout, stderr io.Writer) int {
 }
 
 // mainUnlockMaster is "agent unlock-master": MySQL writable again (also
-// after a restart) and the promote lock removed. Running it again is
-// harmless.
+// after a restart) and the promote lock removed. Running it again on a
+// master is harmless. It runs only on a server pinned master, or an
+// unassigned one holding a lock-master lock (candidate "cli"): a replica
+// or quarantined server is never made writable by it.
 func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
 	dir, ok := parseDirOnly("agent unlock-master", args, stderr)
 	if !ok {
 		return 2
+	}
+	p, perr := mysql.LoadPins(dir)
+	role := p.Role()
+	l, locked, lerr := p.ReadLock()
+	cliLocked := role == "unassigned" && lerr == nil && locked && l.Candidate == mysql.CLILockCandidate
+	if role != "master" && !cliLocked {
+		switch {
+		case perr != nil:
+			fmt.Fprintf(stderr, "pin peran tidak bisa dibaca (%v); unlock-master hanya untuk master\n", perr)
+		case lerr != nil:
+			fmt.Fprintf(stderr, "server ini dipin sebagai %s dan kunci promosi tidak bisa dibaca (%v); unlock-master hanya untuk master\n", role, lerr)
+		default:
+			fmt.Fprintf(stderr, "server ini dipin sebagai %s; unlock-master hanya untuk master atau server yang dikunci dengan lock-master\n", role)
+		}
+		return 1
 	}
 	if err := cliExec(dir, "RESET PERSIST IF EXISTS super_read_only",
 		"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF"); err != nil {
 		fmt.Fprintf(stderr, "gagal membuka kunci MySQL: %v\n", err)
 		return 1
 	}
-	p, _ := mysql.LoadPins(dir)
 	if err := p.ClearLock(); err != nil {
 		fmt.Fprintf(stderr, "MySQL sudah bisa ditulis, tetapi kunci promosi gagal dihapus: %v\n", err)
 		return 1

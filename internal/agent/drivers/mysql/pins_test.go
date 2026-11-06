@@ -938,3 +938,47 @@ func TestSetQuarantinedAndPromoteToMaster(t *testing.T) {
 		t.Errorf("replica pins after SetQuarantined = %q, %q", role, src)
 	}
 }
+
+// TestQuarantinedWithoutSourceFailsClosed: a quarantined server with no
+// source pin refuses dropDatabases and every command that names a source,
+// whatever host it names; SetQuarantined writes the source before the
+// role, so an interrupted quarantine never leaves this state.
+func TestQuarantinedWithoutSourceFailsClosed(t *testing.T) {
+	dir := pinDir(t, "quarantined", "")
+	r := newPinRig(t, nil, dir)
+	for _, c := range []pinCase{
+		{"mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}},
+		{"mysql.dumpFrom", validSnapshot},
+		{"mysql.cloneFrom", validSnapshot},
+		{"mysql.configureReplication", validSource},
+	} {
+		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params), "quarantined tanpa sumber yang dipin",
+			"perintah "+c.cmd+" ditolak", "sudo dbpanel agent set-source")
+	}
+	if err := r.d.Pins().Allow("mysql.dumpFrom", validSnapshot); !errors.Is(err, mysql.ErrSourcePinned) {
+		t.Errorf("Allow(dumpFrom) = %v, want ErrSourcePinned", err)
+	}
+	// Commands that touch no data and name no source are the table's.
+	wantPastPins(t, "stopReplica", r.dispatch("mysql.stopReplica", nil))
+	// Once root pins the new master, the rebuild toward it is allowed.
+	if err := mustPins(t, dir).SetSource("10.0.0.1", 3306); err != nil {
+		t.Fatal(err)
+	}
+	wantPastPins(t, "dumpFrom the pinned source", r.dispatch("mysql.dumpFrom", validSnapshot))
+	wantPastPins(t, "dropDatabases with a source pin", r.dispatch("mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}))
+
+	// The source is written before the role: when the role cannot be
+	// written (here a directory blocks the rename), the source pin is
+	// already there.
+	bdir := pinDir(t, "", "")
+	if err := os.MkdirAll(filepath.Join(bdir, mysql.RoleFile, "blok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := mysql.LoadPins(bdir)
+	if err := p.SetQuarantined("10.0.0.2:3306"); err == nil {
+		t.Fatal("SetQuarantined succeeded over a directory")
+	}
+	if src := pinFile(t, bdir, mysql.SourceFile); src != "10.0.0.2:3306" {
+		t.Errorf("source pin after a failed role write = %q, want 10.0.0.2:3306", src)
+	}
+}
