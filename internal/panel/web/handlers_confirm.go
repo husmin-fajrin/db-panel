@@ -97,20 +97,28 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	detail := map[string]any{"action": action, "target_kind": kind, "target_id": id}
 	userKey := usernameKey(username)
-	if a.ConfirmLimiter.Blocked(username) || a.UserLimiter.Blocked(userKey) {
-		a.audit(r, "confirm_failed", kind, id, detail, outcomeRateLimited)
-		a.Logger.Warn("confirmation rate limited", "username", username)
-		writeJSONError(w, http.StatusTooManyRequests, msgConfirmBlocked)
+	// Reserve a slot in both budgets before the slow password check, so
+	// concurrent requests cannot all pass a check made before any of them
+	// is counted (check-then-act). A wrong password keeps its slots; a
+	// right one resets both below; a request that never reaches the check
+	// gives its slots back.
+	if !a.ConfirmLimiter.Allow(username) {
+		a.confirmRateLimited(w, r, username, kind, id, detail)
+		return
+	}
+	if !a.UserLimiter.Allow(userKey) {
+		a.ConfirmLimiter.Refund(username)
+		a.confirmRateLimited(w, r, username, kind, id, detail)
 		return
 	}
 	user, err := a.Store.GetUser(username)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		a.ConfirmLimiter.Refund(username)
+		a.UserLimiter.Refund(userKey)
 		a.internalError(w, "get user", err)
 		return
 	}
 	if err != nil || !a.CheckPassword(user.PasswordHash, r.PostFormValue("password")) {
-		a.ConfirmLimiter.Fail(username)
-		a.UserLimiter.Fail(userKey)
 		a.audit(r, "confirm_failed", kind, id, detail, msgConfirmPassword)
 		a.Logger.Info("confirmation refused: wrong password", "username", username, "action", action)
 		writeJSONError(w, http.StatusUnauthorized, msgConfirmPassword)
@@ -135,6 +143,14 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
+}
+
+// confirmRateLimited answers 429 for a confirmation refused by a limiter.
+func (a *app) confirmRateLimited(w http.ResponseWriter, r *http.Request, username, kind string, id int64,
+	detail map[string]any) {
+	a.audit(r, "confirm_failed", kind, id, detail, outcomeRateLimited)
+	a.Logger.Warn("confirmation rate limited", "username", username)
+	writeJSONError(w, http.StatusTooManyRequests, msgConfirmBlocked)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {

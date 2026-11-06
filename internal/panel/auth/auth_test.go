@@ -208,6 +208,24 @@ func TestRateLimiterReset(t *testing.T) {
 	}
 }
 
+func TestRateLimiterRefund(t *testing.T) {
+	c := newClock()
+	r := NewRateLimiter(2, time.Minute, c.now)
+	r.Allow("u")
+	r.Allow("u")
+	r.Refund("u")
+	if !r.Allow("u") {
+		t.Fatal("Refund did not give back a slot")
+	}
+	if r.Allow("u") {
+		t.Fatal("Refund gave back more than one slot")
+	}
+	r.Refund("baru") // unknown key: no-op
+	if r.Len() != 1 {
+		t.Errorf("Len = %d, want 1", r.Len())
+	}
+}
+
 func TestRateLimiterSweepsExpired(t *testing.T) {
 	c := newClock()
 	r := NewRateLimiter(2, time.Minute, c.now)

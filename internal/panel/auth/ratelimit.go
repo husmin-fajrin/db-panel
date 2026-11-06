@@ -90,6 +90,20 @@ func (r *RateLimiter) Fail(key string) {
 	r.m[key] = w
 }
 
+// Refund gives back one attempt Allow recorded for key in the current
+// window: callers that reserve a slot before a slow check use it when the
+// check never ran. Nothing happens once the window has elapsed.
+func (r *RateLimiter) Refund(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.current(key, r.now())
+	if !ok || w.count == 0 {
+		return
+	}
+	w.count--
+	r.m[key] = w
+}
+
 // Reset forgets key (called after a successful login).
 func (r *RateLimiter) Reset(key string) {
 	r.mu.Lock()

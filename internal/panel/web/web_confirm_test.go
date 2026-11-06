@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -322,6 +323,83 @@ func TestConfirmLimiterCountsWrongPasswords(t *testing.T) {
 	}
 	if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusTooManyRequests {
 		t.Fatalf("confirm after 3 wrong logins: status %d, want 429", code)
+	}
+}
+
+// TestConfirmLimiterConcurrent (N1): concurrent wrong confirmations from
+// one session cannot all pass the limit before any is counted. With the
+// password checks held open, only the budget's worth reach CheckPassword;
+// the rest are refused at once, and the user's login is then blocked too.
+func TestConfirmLimiterConcurrent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		confirm *auth.RateLimiter // nil: the router's 5 per minute
+		user    *auth.RateLimiter
+		limit   int
+	}{
+		{"confirm budget", nil, auth.NewRateLimiter(5, 15*time.Minute, time.Now), 5},
+		{"shared login budget", auth.NewRateLimiter(1000, time.Minute, time.Now),
+			auth.NewRateLimiter(3, 15*time.Minute, time.Now), 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const n = 20
+			var (
+				checks  atomic.Int32
+				refused atomic.Int32
+				release = make(chan struct{})
+			)
+			e := newEnv(t, func(d *web.Deps) {
+				d.ConfirmLimiter = tc.confirm
+				d.UserLimiter = tc.user
+				d.CheckPassword = func(_, pw string) bool {
+					checks.Add(1)
+					<-release
+					return pw == testPassword
+				}
+			})
+			c := e.cookie()
+			codes := make([]int, n)
+			var wg sync.WaitGroup
+			for i := range n {
+				wg.Go(func() {
+					codes[i], _ = e.postConfirm(web.ActDeleteServer, "server", 1, "salah", c)
+					if codes[i] == http.StatusTooManyRequests {
+						refused.Add(1)
+					}
+				})
+			}
+			// Every request is either in the password check or refused.
+			waitFor(t, func() bool { return int(checks.Load()+refused.Load()) == n })
+			if got := int(checks.Load()); got != tc.limit {
+				close(release)
+				wg.Wait()
+				t.Fatalf("password checks started = %d, want %d", got, tc.limit)
+			}
+			close(release)
+			wg.Wait()
+			var wrong int
+			for _, code := range codes {
+				switch code {
+				case http.StatusUnauthorized:
+					wrong++
+				case http.StatusTooManyRequests:
+				default:
+					t.Errorf("unexpected status %d", code)
+				}
+			}
+			if wrong != tc.limit {
+				t.Errorf("401 answers = %d, want %d", wrong, tc.limit)
+			}
+			// The right password is refused now, here and at the login.
+			if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusTooManyRequests {
+				t.Errorf("confirm after the burst: status %d, want 429", code)
+			}
+			rec := e.do("POST", "/login", url.Values{"username": {"admin"}, "password": {testPassword}}, nil)
+			wantCode(t, rec, http.StatusTooManyRequests)
+			if got := int(checks.Load()); got != tc.limit {
+				t.Errorf("password checks after the burst = %d, want %d", got, tc.limit)
+			}
+		})
 	}
 }
 
