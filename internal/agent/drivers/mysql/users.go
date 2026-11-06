@@ -83,10 +83,19 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		}
 		// A pinned master's existing account is never changed: a new
 		// password or other grants would cut every replica off. A pinned
-		// replica or quarantined server keeps it the same way.
+		// replica or quarantined server keeps it the same way, and makes
+		// it locally: read-only lifted for the statements and no binary
+		// logging, so no errant GTID blocks a later promotion.
 		a := account{User: p.User, Host: p.FromHost, Password: p.Password, RequireSSL: p.RequireSSL}
-		keep := d.pins != nil && strictReplUser(d.pins.Role())
-		if err := createAccount(ctx, h, a, replGrants, "replikasi", keep); err != nil {
+		role := ""
+		if d.pins != nil {
+			role = d.pins.Role()
+		}
+		mode := accountMode{keepExisting: strictReplUser(role)}
+		if replicaLike(role) {
+			mode.local = func(level, format string, args ...any) { d.log(fmt.Sprintf(format, args...), "level", level) }
+		}
+		if err := createAccount(ctx, h, a, replGrants, "replikasi", mode); err != nil {
 			return nil, err
 		}
 		d.log("mysql replication user ready", "user", p.User, "from_host", p.FromHost, "require_ssl", p.RequireSSL)
@@ -117,7 +126,7 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		if err := createAccount(ctx, h, a, grants, "dump", d.pins.RoleIs(roleMaster)); err != nil {
+		if err := createAccount(ctx, h, a, grants, "dump", accountMode{keepExisting: d.pins.RoleIs(roleMaster)}); err != nil {
 			return nil, err
 		}
 		d.log("mysql dump user created", "user", a.User, "from_host", a.Host, "require_ssl", a.RequireSSL)
@@ -233,7 +242,7 @@ func validateReplUser(p *proto.ReplUserParams) error {
 // masks it in its own logs, and it never reaches ours or an error.
 func CreateReplUser(ctx context.Context, h Host, p proto.ReplUserParams) error {
 	return createAccount(ctx, h, account{User: p.User, Host: p.FromHost, Password: p.Password, RequireSSL: p.RequireSSL},
-		replGrants, "replikasi", false)
+		replGrants, "replikasi", accountMode{})
 }
 
 // accountExistsOnMaster is the refusal of keepExisting: the panel matches
@@ -245,12 +254,25 @@ func accountExistsOnMaster(names []string) error {
 		strings.Join(names, ", "))}}
 }
 
+// accountMode is how createAccount treats the server.
+type accountMode struct {
+	// keepExisting (a pinned master, replica or quarantined server):
+	// refuse when a row of the user exists at any host.
+	keepExisting bool
+	// local, when set (a pinned replica or quarantined server), makes the
+	// account on this server only: super_read_only and read_only are
+	// lifted for the statements and put back (liftReadOnly, logging
+	// through local), and the session does not write the binary log, so
+	// the replica gets no GTID of its own.
+	local func(level, format string, args ...any)
+}
+
 // createAccount creates a, or sets the password of the existing account,
 // requires TLS or not, and leaves it holding exactly grants ON *.*. With
-// keepExisting (a pinned master) the account is refused instead when a
-// row of a.User exists at any host: an existing one is never altered, and
-// no second row (which could shadow the first for some clients) is added.
-func createAccount(ctx context.Context, h Host, a account, grants, what string, keepExisting bool) error {
+// m.keepExisting the account is refused instead when a row of a.User
+// exists at any host: an existing one is never altered, and no second
+// row (which could shadow the first for some clients) is added.
+func createAccount(ctx context.Context, h Host, a account, grants, what string, m accountMode) error {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return err
@@ -269,7 +291,7 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 	if err != nil {
 		return fmt.Errorf("baca user %s: %w", what, err)
 	}
-	if keepExisting {
+	if m.keepExisting {
 		hosts, err := accountHosts(ctx, conn, a.User)
 		if err != nil {
 			return fmt.Errorf("baca user %s: %w", what, err)
@@ -281,6 +303,16 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 			}
 			return accountExistsOnMaster(names)
 		}
+	}
+	if m.local != nil {
+		if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
+			return fmt.Errorf("SET sql_log_bin: %w", err)
+		}
+		restore, err := liftReadOnly(ctx, m.local, db)
+		if err != nil {
+			return err
+		}
+		defer restore()
 	}
 	var mode string
 	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {

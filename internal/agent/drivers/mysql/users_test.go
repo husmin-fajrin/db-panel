@@ -741,3 +741,48 @@ func TestReplicaCreatesReplUserOnceStrict(t *testing.T) {
 		}
 	}
 }
+
+// TestReplicaCreatesReplUserLocally: on a running, super_read_only replica
+// the replication account is made locally: read-only is lifted only for
+// the statements, nothing reaches the binary log (gtid_executed keeps no
+// GTID of the replica's own), and replication keeps running.
+func TestReplicaCreatesReplUserLocally(t *testing.T) {
+	master, replica := sourceWithReplica(t)
+	rdb := rootDB(t, replica)
+	// The accounts replicated from the master (the helper's is at host
+	// ''): drop them here only.
+	ctx := context.Background()
+	conn, err := rdb.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"SET SESSION sql_log_bin = 0", "SET GLOBAL super_read_only = OFF",
+		"DROP USER IF EXISTS 'dbpanel_repl'@'%'", "DROP USER IF EXISTS 'dbpanel_repl'@''", "SET GLOBAL super_read_only = ON"} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	conn.Close()
+	before := gtidExecuted(t, rdb)
+
+	r := newPinRig(t, replica.Host(), pinDir(t, "replica", "127.0.0.1:3306"))
+	if resp := r.dispatch("mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "%", Password: "rahasia-lokal"}); !resp.OK {
+		t.Fatalf("createReplUser on a read-only replica = %+v", resp.Error)
+	}
+	if err := loginTCP(t, replica, "dbpanel_repl", "rahasia-lokal"); err != nil {
+		t.Errorf("replication account not usable on the replica: %v", err)
+	}
+	if ro, sro := variable(t, rdb, "read_only"), variable(t, rdb, "super_read_only"); ro != "ON" || sro != "ON" {
+		t.Errorf("after createReplUser: read_only %s, super_read_only %s; want ON, ON", ro, sro)
+	}
+	if after := gtidExecuted(t, rdb); after != before {
+		t.Errorf("gtid_executed changed by the account: %q -> %q", before, after)
+	}
+	// Replication still applies the master's writes.
+	execAll(t, rootDB(t, master), "CREATE DATABASE lokal_cek")
+	synced(t, master, replica)
+	var n int
+	if err := rdb.QueryRow("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'lokal_cek'").Scan(&n); err != nil || n != 1 {
+		t.Errorf("replication after createReplUser: count %d, err %v", n, err)
+	}
+}

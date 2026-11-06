@@ -58,6 +58,11 @@ type Driver struct {
 
 	tlsMu sync.Mutex // one mysql.tls* command at a time
 
+	// RecordReplicas: the hosts it last wrote and when.
+	seenMu    sync.Mutex
+	seenHosts []string
+	seenAt    time.Time
+
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
 	newHost hostFactory

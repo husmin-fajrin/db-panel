@@ -163,6 +163,20 @@ func TestDriverRecordsReplicasSeen(t *testing.T) {
 	if ok, err := mysql.ReplicaSeen(path, host); !ok || err != nil {
 		t.Errorf("ReplicaSeen(%q) = %v, %v", host, ok, err)
 	}
+	// The same replicas a check later: nothing is rewritten; a day later
+	// the times are refreshed.
+	if err := d.RecordReplicas(context.Background(), now.Add(15*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != host+" 2026-11-06T10:00:00Z\n" {
+		t.Errorf("replicas-seen rewritten for the same hosts: %q", b)
+	}
+	if err := d.RecordReplicas(context.Background(), now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != host+" 2026-11-07T10:00:00Z\n" {
+		t.Errorf("replicas-seen after a day = %q, want refreshed", b)
+	}
 	// Without MySQL there is nothing to record and nothing fails.
 	if err := (&mysql.Driver{SeenPath: path}).RecordReplicas(context.Background(), now); err != nil {
 		t.Errorf("RecordReplicas without MySQL = %v", err)

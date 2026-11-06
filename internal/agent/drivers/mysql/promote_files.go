@@ -37,6 +37,10 @@ const (
 	maxSeenSize = 1 << 20
 	// seenDirMode is the mode of the directory RecordReplicasSeen creates.
 	seenDirMode = 0o755
+	// seenRefresh is how often RecordReplicas rewrites the file while the
+	// same replicas stay connected, so their times (and the one-year
+	// pruning) stay current.
+	seenRefresh = 24 * time.Hour
 )
 
 // PromoteLock is the promote lock: the server stays read-only for the
@@ -229,7 +233,9 @@ func (d *Driver) seenPath() string {
 
 // RecordReplicas records the hosts of the replicas reading this server's
 // binary log now in the replicas-seen file (monitor.ReplicaRecorder). It
-// does nothing without MySQL, a stored account, or such a replica.
+// does nothing without MySQL, a stored account, or such a replica, and
+// writes only when the set of hosts changed since its last write or that
+// write is seenRefresh old.
 func (d *Driver) RecordReplicas(ctx context.Context, now time.Time) error {
 	h, err := d.host()
 	if errors.Is(err, ErrNoHost) {
@@ -250,5 +256,15 @@ func (d *Driver) RecordReplicas(ctx context.Context, now time.Time) error {
 	if err != nil || len(hosts) == 0 {
 		return err
 	}
-	return RecordReplicasSeen(d.seenPath(), hosts, now)
+	slices.Sort(hosts)
+	d.seenMu.Lock()
+	defer d.seenMu.Unlock()
+	if slices.Equal(hosts, d.seenHosts) && now.Sub(d.seenAt) < seenRefresh {
+		return nil
+	}
+	if err := RecordReplicasSeen(d.seenPath(), hosts, now); err != nil {
+		return err
+	}
+	d.seenHosts, d.seenAt = hosts, now
+	return nil
 }
