@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
@@ -174,3 +175,40 @@ func SetWriteLock(f func(*Pins, PromoteLock) error) (restore func()) {
 	writeLock = f
 	return func() { writeLock = old }
 }
+
+// SetProbePeer replaces how the driver probes another server.
+func SetProbePeer(f func(context.Context, string, int, time.Duration) error) (restore func()) {
+	old := probePeer
+	probePeer = f
+	return func() { probePeer = old }
+}
+
+// SetProbeSpacing changes the pause between emergency probes.
+func SetProbeSpacing(d time.Duration) (restore func()) {
+	old := probeSpacing
+	probeSpacing = d
+	return func() { probeSpacing = old }
+}
+
+// GTID set helpers and the mysqlbinlog parser, testable without a server.
+func NormalizeGTIDSet(s string) (string, error) {
+	g, err := parseGTIDSet(s)
+	if err != nil {
+		return "", err
+	}
+	return g.String(), nil
+}
+
+var GTIDCount = gtidCount
+
+// ParseBinlogText is the GTID set of mysqlbinlog's output.
+func ParseBinlogText(text string) (string, error) {
+	g, err := parseBinlogText(strings.NewReader(text))
+	if err != nil {
+		return "", err
+	}
+	return g.String(), nil
+}
+
+// BinlogIndexPath finds the binary log index of l without a server.
+var BinlogIndexPath = binlogIndexPath

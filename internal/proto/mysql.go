@@ -389,6 +389,56 @@ type UnlockPromoteParams struct {
 	Candidate PeerCred `json:"candidate"`
 }
 
+// Promotion modes of mysql.promote.
+const (
+	// PromotePlanned: the old master answers and is locked read-only.
+	PromotePlanned = "planned"
+	// PromoteEmergency: the old master is down.
+	PromoteEmergency = "emergency"
+)
+
+// PromoteParams are the parameters of mysql.promote, run on the replica
+// being promoted: the mode, the master it follows (OldSource, which must
+// be its pinned source), the deadline of the old master's promote lock
+// (planned; nil when unknown) and the replication account this server
+// keeps for its own replicas.
+type PromoteParams struct {
+	Mode         string     `json:"mode"`
+	OldSource    PeerCred   `json:"old_source"`
+	LockDeadline *time.Time `json:"lock_deadline,omitempty"`
+	ReplUser     string     `json:"repl_user"`
+	ReplPassword string     `json:"repl_password"`
+}
+
+// PromoteResult is the result of the mysql.promote job: this server's
+// gtid_executed and server_uuid as the new master, how many relay log
+// transactions it applied before opening writes, and whether it resumed a
+// promotion that had already opened writes.
+type PromoteResult struct {
+	GTIDExecuted string `json:"gtid_executed"`
+	ServerUUID   string `json:"server_uuid"`
+	Applied      int    `json:"applied"`
+	Resumed      bool   `json:"resumed"`
+}
+
+// ProbeSourceResult is the answer to mysql.probeSource: whether a MySQL
+// server answers at the pinned source (Host:Port), and why not.
+type ProbeSourceResult struct {
+	Reachable bool   `json:"reachable"`
+	Err       string `json:"err,omitempty"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+}
+
+// BinlogTailResult is the answer to mysql.binlogTail: the GTID set this
+// server executed, from MySQL when it runs (MySQLRunning) or else from its
+// binary log files, and the last binary log file.
+type BinlogTailResult struct {
+	GTIDExecuted string `json:"gtid_executed"`
+	File         string `json:"file"`
+	MySQLRunning bool   `json:"mysql_running"`
+}
+
 // Events of the promote lock's guard on a master.
 const (
 	// EventQuarantined: the server quarantined itself under its new

@@ -239,3 +239,14 @@ func (i *Instance) logTail() string {
 	}
 	return string(b)
 }
+
+// Stop shuts the server down (SIGTERM, a clean shutdown) and waits for it
+// to exit; Restart or the end of the test starts or removes it.
+func (i *Instance) Stop(t testing.TB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+	defer cancel()
+	if err := i.svc.Stop(ctx); err != nil {
+		t.Fatalf("testmysql: stop: %v", err)
+	}
+}

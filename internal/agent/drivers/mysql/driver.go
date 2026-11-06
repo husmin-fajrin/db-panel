@@ -101,6 +101,8 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerDatabases(reg)
 	d.registerTLS(reg)
 	d.registerPromote(reg)
+	d.registerPromoteJob(reg)
+	d.registerBinlog(reg)
 }
 
 // Pins is the driver's pinned role and source; nil without PinDir. The

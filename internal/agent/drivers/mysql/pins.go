@@ -70,7 +70,8 @@ var dumpAccountRe = regexp.MustCompile(`^dbpanel_dump_[0-9a-f]{8}$`)
 // master every dropUser but a per-job dump account's and every
 // createDumpUser but a per-job dump account from one IP address, and on a
 // master, replica or quarantined server every createReplUser but the
-// replication account's). On a master, an existing account is never
+// replication account's, and mysql.promote anywhere but on a replica,
+// which Allow also refuses without a source pin). On a master, an existing account is never
 // changed (createAccount), mysql.restart needs a configure that asked for
 // it (Pins.AllowRestart), and setReadOnly{off} is refused while the
 // promote lock exists (Pins.Allow). A quarantined server refuses what a
@@ -592,6 +593,12 @@ func (p *Pins) Allow(cmd string, params any) error {
 	if p.role == roleQuarantined && !p.hasSrc && (names || cmd == "mysql.dropDatabases") {
 		return unsourcedQuarantineRefusal(cmd)
 	}
+	// A replica is promoted only from the source it is pinned to follow.
+	if cmd == "mysql.promote" && !p.hasSrc {
+		return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
+			"server ini dipin sebagai replica tanpa sumber yang dipin; perintah %s ditolak. Pin sumbernya dulu di server ini: sudo dbpanel agent set-source <host:port>",
+			cmd)}}
+	}
 	if !names || !p.hasSrc || p.sameSource(host, port) {
 		return nil
 	}
@@ -621,6 +628,12 @@ func sourceOf(cmd string, params any) (host string, port int, names bool, err er
 			return "", 0, false, fmt.Errorf("pins: %s with %T", cmd, params)
 		}
 		return v.Host, v.Port, true, nil
+	case "mysql.promote":
+		v, ok := params.(proto.PromoteParams)
+		if !ok {
+			return "", 0, false, fmt.Errorf("pins: %s with %T", cmd, params)
+		}
+		return v.OldSource.Host, v.OldSource.Port, true, nil
 	}
 	return "", 0, false, nil
 }
@@ -633,6 +646,9 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 		return true, nil
 	}
 	switch cmd {
+	case "mysql.promote":
+		// Only a replica is promoted (a quarantined one is refused above).
+		return role != roleReplica, nil
 	case "mysql.configure":
 		c, ok := params.(proto.ConfigureParams)
 		if !ok {
