@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -201,6 +202,45 @@ func replicaStatus(ctx context.Context, db *sql.DB) (*proto.ReplicaStatus, error
 		}
 	}
 	return r, frows.Err()
+}
+
+// binlogDumpHosts lists the hosts (without the port) of the replicas
+// reading this server's binary log, each once.
+func binlogDumpHosts(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT HOST FROM information_schema.PROCESSLIST
+		WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')`)
+	if err != nil {
+		return nil, fmt.Errorf("baca daftar proses: %w", err)
+	}
+	defer rows.Close()
+	var hosts []string
+	for rows.Next() {
+		var h sql.NullString
+		if err := rows.Scan(&h); err != nil {
+			return nil, fmt.Errorf("baca daftar proses: %w", err)
+		}
+		if host := hostWithoutPort(h.String); host != "" && !slices.Contains(hosts, host) {
+			hosts = append(hosts, host)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("baca daftar proses: %w", err)
+	}
+	return hosts, nil
+}
+
+// hostWithoutPort is a processlist HOST ("host:port", an IPv6 address
+// without brackets too) without its port; a host without one ("localhost"
+// over the socket) is returned as is.
+func hostWithoutPort(h string) string {
+	i := strings.LastIndexByte(h, ':')
+	if i < 0 {
+		return h
+	}
+	if port := h[i+1:]; port == "" || strings.Trim(port, "0123456789") != "" {
+		return h
+	}
+	return h[:i]
 }
 
 // binlogDumpThreads counts the replicas reading this server's binary log.

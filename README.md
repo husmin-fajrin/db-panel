@@ -473,8 +473,8 @@ journal.
 
 ### Peran dan sumber yang dipin
 
-Agent mengingat peran servernya di `/etc/dbpanel/role` (`master` atau
-`replica`) dan master yang diikuti replika di `/etc/dbpanel/source`
+Agent mengingat peran servernya di `/etc/dbpanel/role` (`master`,
+`replica`, atau `quarantined`) dan master yang diikuti replika di `/etc/dbpanel/source`
 (`host:port`). Berkas peran ditulis saat "Siapkan master" atau "Buat
 replika" pertama berhasil; berkas sumber saat replikasi atau salinan data
 (dump, CLONE) pertama kali diarahkan ke master. Sesudah itu agent sendiri
@@ -484,8 +484,17 @@ dikonfigurasi sebagai replika, dikunci read-only, membuat akun selain akun
 replikasi `dbpanel_repl` dan akun dump sementara `dbpanel_dump_<8 heksa>`
 dari satu alamat IP, mengubah akun yang sudah ada, mengganti `server_id`,
 dan restart MySQL kecuali sekali sesudah pengaturan yang memang menunggu
-restart; replika menolak buka kunci, dijadikan master, akun replikasi, dan
-master selain sumbernya.
+restart; replika menolak buka kunci, dijadikan master, akun replikasi
+selain `dbpanel_repl@'%'` (dan akun itu pun hanya bila belum ada baris
+`dbpanel_repl` di host mana pun), dan master selain sumbernya.
+
+Peran **quarantined** dipakai untuk master lama sesudah promosi replika:
+servernya menolak semua yang ditolak replika, ditambah perintah promosi
+(`mysql.lockForPromote`, `mysql.promote`, `mysql.repoint`). Ia hanya bisa
+dibangun ulang (hapus database, dump atau CLONE, dikonfigurasi sebagai
+replika, replikasi) dari sumber yang dipin, yaitu master barunya, atau
+dilepas seperti replika. Agent tidak pernah menurunkan pin `quarantined`
+(atau pin lain) berdasarkan keadaan MySQL.
 
 Pin **master** tidak bisa diubah dari panel. Peran **replika** bisa
 dilepas panel sendiri, setelah replikasinya dihentikan dan direset, lewat
@@ -501,9 +510,30 @@ server yang dilepas dari master yang sama. Peran dan sumber hanya diubah di
 server itu sendiri:
 
 ```sh
-sudo dbpanel agent set-role master       # atau replica, atau unassigned (hapus peran dan sumber)
+sudo dbpanel agent set-role master       # atau replica, quarantined, atau unassigned (hapus peran dan sumber)
 sudo dbpanel agent set-source 10.0.0.5:3306
 ```
+
+Master bisa dikunci dan dibuka langsung di servernya:
+
+```sh
+sudo dbpanel agent lock-master     # SET PERSIST super_read_only=ON + kunci promosi
+sudo dbpanel agent unlock-master   # RESET PERSIST, read_only OFF, hapus kunci promosi
+```
+
+`lock-master` membuat MySQL read-only, juga sesudah restart, dan menulis
+`/etc/dbpanel/promote-lock` tanpa kandidat promosi (`"candidate":"cli"`);
+selama berkas itu ada, master yang dipin menolak dibuka kuncinya dari panel,
+dan tidak ada proses otomatis yang membukanya. `lock-master` menolak bila
+kunci sudah ada; `unlock-master` aman diulang. Catatan promosi terakhir
+disimpan di `/etc/dbpanel/promoted`. Kedua berkas ini ditulis dan dibaca
+seperti berkas pin.
+
+Agent juga mencatat replika yang membaca binlog server ini pada tiap
+pemeriksaan kesehatan di `/var/lib/dbpanel/replicas-seen`: satu baris per
+host, `<host> <waktu RFC3339>`, dengan waktu terbaru; host yang tidak
+terlihat lebih dari setahun dibuang. Host diambil dari kolom `HOST` daftar
+proses MySQL tanpa port, jadi berupa nama bila `skip_name_resolve` mati.
 
 Agent membacanya ulang pada perintah berikutnya, tanpa restart. Bila alamat
 master untuk replika diubah di halaman master, halaman itu menampilkan

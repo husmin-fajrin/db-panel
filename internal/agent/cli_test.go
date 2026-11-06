@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,12 +14,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -429,5 +432,86 @@ func TestRunPairsWithLocalTokenFirst(t *testing.T) {
 		}
 	default:
 		t.Fatal("no pairing request")
+	}
+}
+
+// TestCLILockUnlockMaster: lock-master makes MySQL super_read_only, also
+// across a restart (SET PERSIST), and writes the promote lock with no
+// candidate ("cli") for 24 hours; a second lock-master is refused;
+// unlock-master makes MySQL writable, clears the lock, and is idempotent.
+func TestCLILockUnlockMaster(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	dir := t.TempDir()
+	var gotDir string
+	old := cliMySQLHost
+	cliMySQLHost = func(d string) (mysql.Host, error) { gotDir = d; return inst.Host(), nil }
+	t.Cleanup(func() { cliMySQLHost = old })
+	run := func(args ...string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		code := Main(args, &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+	vars := func() (ro, sro string) {
+		t.Helper()
+		db, err := sql.Open("mysql", inst.DSN())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if err := db.QueryRow("SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only").Scan(&ro, &sro); err != nil {
+			t.Fatal(err)
+		}
+		return ro, sro
+	}
+	pins := func() *mysql.Pins {
+		p, err := mysql.LoadPins(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	before := time.Now()
+	code, out, errOut := run("lock-master", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "master dikunci") {
+		t.Fatalf("lock-master = %d, %q, %q", code, out, errOut)
+	}
+	if gotDir != dir {
+		t.Errorf("MySQL looked up in %q, want %q", gotDir, dir)
+	}
+	if ro, sro := vars(); ro != "1" || sro != "1" {
+		t.Errorf("after lock-master: read_only %s, super_read_only %s; want 1, 1", ro, sro)
+	}
+	l, ok, err := pins().ReadLock()
+	if err != nil || !ok || l.Candidate != "cli" || l.Deadline.Before(before.Add(24*time.Hour-time.Minute)) || l.Deadline.After(time.Now().Add(24*time.Hour+time.Minute)) {
+		t.Errorf("lock after lock-master = %+v, %v, %v; want candidate cli, deadline in 24h", l, ok, err)
+	}
+	if code, _, errOut := run("lock-master", "--dir", dir); code != 1 || !strings.Contains(errOut, "sudah dikunci") {
+		t.Errorf("second lock-master = %d, %q; want 1 and a refusal", code, errOut)
+	}
+	inst.Restart(t)
+	if ro, sro := vars(); ro != "1" || sro != "1" {
+		t.Errorf("after a restart: read_only %s, super_read_only %s; want 1, 1", ro, sro)
+	}
+
+	code, out, errOut = run("unlock-master", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "master dibuka") {
+		t.Fatalf("unlock-master = %d, %q, %q", code, out, errOut)
+	}
+	if ro, sro := vars(); ro != "0" || sro != "0" {
+		t.Errorf("after unlock-master: read_only %s, super_read_only %s; want 0, 0", ro, sro)
+	}
+	if _, ok, err := pins().ReadLock(); ok || err != nil {
+		t.Errorf("lock after unlock-master: %v, %v", ok, err)
+	}
+	if code, _, errOut := run("unlock-master", "--dir", dir); code != 0 {
+		t.Errorf("second unlock-master = %d, %q; want 0", code, errOut)
+	}
+	inst.Restart(t)
+	if ro, sro := vars(); ro != "0" || sro != "0" {
+		t.Errorf("after unlock and a restart: read_only %s, super_read_only %s; want 0, 0", ro, sro)
+	}
+	if code, _, errOut := run("lock-master", "--dir", dir, "lagi"); code != 2 || errOut == "" {
+		t.Errorf("lock-master with an argument = %d, %q; want 2", code, errOut)
 	}
 }

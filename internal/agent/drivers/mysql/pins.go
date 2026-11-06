@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -25,7 +26,8 @@ import (
 // production master into a replica, drop or replace its data, or point a
 // replica at a source of its choosing.
 const (
-	// RoleFile holds master, replica or unassigned; no file is unassigned.
+	// RoleFile holds master, replica, quarantined or unassigned; no file
+	// is unassigned.
 	RoleFile = "role"
 	// SourceFile holds the host:port a replica follows; no file is no pin.
 	SourceFile = "source"
@@ -33,11 +35,16 @@ const (
 
 const (
 	roleUnassigned = "unassigned"
+	// roleQuarantined is the old master after a promotion (spec 5.1): it
+	// is refused what a replica is, plus the promotion commands, until it
+	// is rebuilt from its pinned source (the new master) or released.
+	roleQuarantined = "quarantined"
 	// dumpUserPrefix starts the per-job dump accounts (mysql.createDumpUser),
 	// the only accounts a pinned master lets the panel drop.
 	dumpUserPrefix = managedUserPrefix + "dump_"
 	// replUserName is the replication account, the only one
-	// mysql.createReplUser makes on a pinned master.
+	// mysql.createReplUser makes on a pinned master, replica or
+	// quarantined server.
 	replUserName = managedUserPrefix + "repl"
 	// pinFileMode is the mode the agent writes pins with.
 	pinFileMode = 0o644
@@ -59,13 +66,16 @@ var dumpAccountRe = regexp.MustCompile(`^dbpanel_dump_[0-9a-f]{8}$`)
 
 // roleRefuses is the refusal table of spec 5.5: per pinned role, the
 // commands refused whatever their parameters, plus the parameter-dependent
-// rules in refusedByRole (configure's role, setReadOnly's direction, and on
-// a master every dropUser but a per-job dump account's, every
-// createDumpUser but a per-job dump account from one IP address, and every
-// createReplUser but the replication account's). On a master, an existing
-// account is never changed (createAccount) and mysql.restart needs a
-// configure that asked for it (Pins.AllowRestart). An unassigned server
-// refuses nothing extra (refuseOnSource still guards it).
+// rules in refusedByRole (configure's role, setReadOnly's direction, on a
+// master every dropUser but a per-job dump account's and every
+// createDumpUser but a per-job dump account from one IP address, and on a
+// master, replica or quarantined server every createReplUser but the
+// replication account's). On a master, an existing account is never
+// changed (createAccount), mysql.restart needs a configure that asked for
+// it (Pins.AllowRestart), and setReadOnly{off} is refused while the
+// promote lock exists (Pins.Allow). A quarantined server refuses what a
+// replica does plus the promotion commands (init below). An unassigned
+// server refuses nothing extra (refuseOnSource still guards it).
 var roleRefuses = map[string]map[string]bool{
 	roleMaster: {
 		"mysql.dropDatabases":        true,
@@ -79,10 +89,26 @@ var roleRefuses = map[string]map[string]bool{
 		// A master is released only through the local CLI.
 		"mysql.releaseRole": true,
 	},
-	roleReplica: {
-		"mysql.createReplUser": true,
+	roleReplica: {},
+	roleQuarantined: {
+		// The old master never takes part in a promotion again before it
+		// is rebuilt.
+		"mysql.lockForPromote": true,
+		"mysql.promote":        true,
+		"mysql.repoint":        true,
 	},
 }
+
+func init() {
+	// A quarantined server inherits every fixed refusal of a replica.
+	for cmd := range roleRefuses[roleReplica] {
+		roleRefuses[roleQuarantined][cmd] = true
+	}
+}
+
+// replicaLike reports whether role takes a replica's parameter-dependent
+// rules: a replica, or a quarantined server.
+func replicaLike(role string) bool { return role == roleReplica || role == roleQuarantined }
 
 // pinError is a refusal by the pins: a ParamError for the panel that also
 // matches ErrRolePinned or ErrSourcePinned.
@@ -108,6 +134,13 @@ func sourceClaimRefusal(pinned, asked string) error {
 		pinned, asked)}}
 }
 
+// lockRefusal is setReadOnly{off} on a master under the promote lock.
+func lockRefusal(l PromoteLock) error {
+	return &pinError{kind: ErrRolePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
+		"server ini dikunci untuk promosi (kandidat %s, sampai %s); perintah mysql.setReadOnly{off} ditolak. Untuk membuka kunci jalankan di server ini: sudo dbpanel agent unlock-master",
+		l.Candidate, l.Deadline.UTC().Format(time.RFC3339))}}
+}
+
 func sourceRefusal(pinned, asked, cmd string) error {
 	return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
 		"server ini dipin mengikuti sumber %s; perintah %s ke %s ditolak. Untuk mengubah sumber jalankan di server ini: sudo dbpanel agent set-source <host:port>",
@@ -126,7 +159,7 @@ type Pins struct {
 	loaded    bool // the fields below match roleStamp and srcStamp
 	roleStamp fileStamp
 	srcStamp  fileStamp
-	role      string // master, replica or unassigned
+	role      string // master, replica, quarantined or unassigned
 	srcHost   string
 	srcPort   int
 	hasSrc    bool
@@ -196,7 +229,7 @@ func (p *Pins) reload() error {
 	}
 	if ok {
 		if !validRole(content) {
-			return p.fail(fmt.Errorf("%s tidak valid: %q (harus master, replica atau unassigned); perbaiki dengan: sudo dbpanel agent set-role <peran>",
+			return p.fail(fmt.Errorf("%s tidak valid: %q (harus master, replica, quarantined atau unassigned); perbaiki dengan: sudo dbpanel agent set-role <peran>",
 				p.path(RoleFile), content))
 		}
 		role = content
@@ -230,6 +263,11 @@ func (p *Pins) fail(err error) error {
 // local policy file: a regular file owned by root (or the agent's user)
 // that neither group nor others can write. ok is false when it is absent.
 func readPinFile(path string) (content string, ok bool, err error) {
+	return readTrustedFile(path, maxPinSize)
+}
+
+// readTrustedFile is readPinFile for a file of at most max bytes.
+func readTrustedFile(path string, max int) (content string, ok bool, err error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", false, nil
@@ -251,17 +289,19 @@ func readPinFile(path string) (content string, ok bool, err error) {
 		return "", false, fmt.Errorf("baca %s: %w", path, err)
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxPinSize+1))
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
 	if err != nil {
 		return "", false, fmt.Errorf("baca %s: %w", path, err)
 	}
-	if len(b) > maxPinSize {
+	if len(b) > max {
 		return "", false, fmt.Errorf("%s terlalu besar", path)
 	}
 	return strings.TrimSpace(string(b)), true, nil
 }
 
-func validRole(r string) bool { return r == roleMaster || r == roleReplica || r == roleUnassigned }
+func validRole(r string) bool {
+	return r == roleMaster || r == roleReplica || r == roleQuarantined || r == roleUnassigned
+}
 
 // ParseSource splits a pinned source, host:port with an IPv6 host in
 // brackets, and validates both as the replication commands do.
@@ -288,8 +328,8 @@ func validSourceHost(h string) error {
 	return nil
 }
 
-// Role is the pinned role: master, replica or unassigned; "" when the
-// files cannot be read.
+// Role is the pinned role: master, replica, quarantined or unassigned; ""
+// when the files cannot be read.
 func (p *Pins) Role() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -316,7 +356,7 @@ func (p *Pins) Source() (host string, port int, ok bool) {
 // be valid, so it also repairs them.
 func (p *Pins) SetRole(role string) error {
 	if !validRole(role) {
-		return fmt.Errorf("peran harus master, replica atau unassigned: %q", role)
+		return fmt.Errorf("peran harus master, replica, quarantined atau unassigned: %q", role)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -340,11 +380,46 @@ func (p *Pins) SetSource(host string, port int) error {
 	return writePin(p.path(SourceFile), src)
 }
 
-// Release turns a replica (or an unassigned server) into an unassigned one
-// by writing role=unassigned. The source pin stays (spec 5.10): a released
-// server still follows only its pinned source until root runs set-source.
-// A master is refused: only the local CLI changes it. mysql.releaseRole
-// checks the replication state first.
+// SetQuarantined pins this server as quarantined following newSource
+// (host:port), from a master or a replica: the old master after a
+// promotion, which only the new master (newSource) may rebuild.
+func (p *Pins) SetQuarantined(newSource string) error {
+	host, port, err := ParseSource(newSource)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	defer p.forget()
+	p.settled = true
+	// The role first: a failure in between leaves the stricter pin.
+	if err := writePin(p.path(RoleFile), roleQuarantined); err != nil {
+		return err
+	}
+	return writePin(p.path(SourceFile), net.JoinHostPort(host, strconv.Itoa(port)))
+}
+
+// PromoteToMaster pins this server as master and removes its source pin:
+// the candidate at the end of a promotion.
+func (p *Pins) PromoteToMaster() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	defer p.forget()
+	p.settled = true
+	if err := writePin(p.path(RoleFile), roleMaster); err != nil {
+		return err
+	}
+	if err := os.Remove(p.path(SourceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("hapus %s: %w", p.path(SourceFile), err)
+	}
+	return nil
+}
+
+// Release turns a replica, a quarantined or an unassigned server into an
+// unassigned one by writing role=unassigned. The source pin stays (spec
+// 5.10): a released server still follows only its pinned source until
+// root runs set-source. A master is refused: only the local CLI changes
+// it. mysql.releaseRole checks the replication state first.
 func (p *Pins) Release() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -375,7 +450,9 @@ func (p *Pins) pinned() (bool, error) {
 // when the hint says replica and MySQL has a replication source, master
 // when the hint says master, the binary log is on and no replication
 // source is configured. It writes at most once per process, and never once
-// this process has seen a role file.
+// this process has seen a role file: an existing pin (quarantined
+// included) is never changed from MySQL's state. The promotion record is
+// read for the log only.
 func (p *Pins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
 	if p == nil {
 		return nil
@@ -406,13 +483,17 @@ func (p *Pins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
 	p.settled = true
 	if p.logger != nil {
 		p.logger.Info("role pinned from the panel's hint and MySQL's state", "role", role, "file", p.path(RoleFile))
+		if pr, ok, err := p.ReadPromoted(); err == nil && ok {
+			p.logger.Info("this server was promoted to master before", "at", pr.At, "mode", pr.Mode, "old_source", pr.OldSource)
+		}
 	}
 	return nil
 }
 
 // claimRole pins role after a successful mysql.configure when no role is
 // pinned. An existing pin is never changed: claiming it again is a no-op,
-// claiming another role an ErrRolePinned error.
+// as is claiming replica on a quarantined server (its rebuild), and
+// claiming another role is an ErrRolePinned error.
 func (p *Pins) claimRole(role string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -420,10 +501,10 @@ func (p *Pins) claimRole(role string) error {
 		return err
 	}
 	p.settled = true
-	switch p.role {
-	case role:
+	switch {
+	case p.role == role, p.role == roleQuarantined && role == roleReplica:
 		return nil
-	case roleUnassigned:
+	case p.role == roleUnassigned:
 	default:
 		return roleRefusal(p.role, "mysql.configure")
 	}
@@ -481,6 +562,16 @@ func (p *Pins) Allow(cmd string, params any) error {
 	if refused {
 		return roleRefusal(p.role, cmd)
 	}
+	// Under the promote lock a master stays read-only (spec 5.1).
+	if ro, ok := params.(proto.ReadOnlyParams); ok && p.role == roleMaster && cmd == "mysql.setReadOnly" && !ro.On {
+		l, locked, err := p.ReadLock()
+		if err != nil {
+			return &commands.ParamError{Msg: fmt.Sprintf("kunci promosi tidak bisa dibaca, perintah %s ditolak: %v", cmd, err)}
+		}
+		if locked {
+			return lockRefusal(l)
+		}
+	}
 	host, port, names, err := sourceOf(cmd, params)
 	if err != nil || !names || !p.hasSrc || p.sameSource(host, port) {
 		return err
@@ -528,13 +619,13 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("pins: %s with %T", cmd, params)
 		}
-		return (role == roleMaster && c.Role == roleReplica) || (role == roleReplica && c.Role == roleMaster), nil
+		return (role == roleMaster && c.Role == roleReplica) || (replicaLike(role) && c.Role == roleMaster), nil
 	case "mysql.setReadOnly":
 		r, ok := params.(proto.ReadOnlyParams)
 		if !ok {
 			return false, fmt.Errorf("pins: %s with %T", cmd, params)
 		}
-		return (role == roleMaster && r.On) || (role == roleReplica && !r.On), nil
+		return (role == roleMaster && r.On) || (replicaLike(role) && !r.On), nil
 	case "mysql.dropUser":
 		u, ok := params.(proto.DropUserParams)
 		if !ok {
@@ -559,11 +650,16 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 		// Only dbpanel_repl@'%' (what preparing the master sends): a row at
 		// a more specific host would shadow it for the replicas it matches
 		// and hand its own password REPLICATION SLAVE and BACKUP_ADMIN.
-		// createAccount refuses it once any dbpanel_repl row exists.
-		return role == roleMaster && !(u.User == replUserName && u.FromHost == "%"), nil
+		// createAccount refuses it once any dbpanel_repl row exists. A
+		// replica or quarantined server (a promotion candidate preparing
+		// for its own replicas) takes the same rule.
+		return strictReplUser(role) && !(u.User == replUserName && u.FromHost == "%"), nil
 	}
 	return false, nil
 }
+
+// strictReplUser reports whether role makes only dbpanel_repl@'%', once.
+func strictReplUser(role string) bool { return role == roleMaster || replicaLike(role) }
 
 // literalIP reports whether host is one IPv4 or IPv6 address, not a name
 // or a pattern.

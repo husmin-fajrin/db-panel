@@ -720,3 +720,41 @@ func TestMonitorGuardsDumpLocksEveryCheck(t *testing.T) {
 		t.Fatalf("guards after four checks = %d, want 4", n)
 	}
 }
+
+// seenSource is a fakeSource that also records the replicas reading its
+// binary log (ReplicaRecorder), recording each call's time.
+type seenSource struct {
+	*fakeSource
+	mu    sync.Mutex
+	calls []time.Time
+}
+
+func (s *seenSource) RecordReplicas(_ context.Context, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, now)
+	return nil
+}
+
+func (s *seenSource) records() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.calls...)
+}
+
+// TestMonitorRecordsReplicasSeenEveryCheck: the replicas reading the
+// binary log are recorded after every check, at the monitor's time.
+func TestMonitorRecordsReplicasSeenEveryCheck(t *testing.T) {
+	src := &seenSource{fakeSource: &fakeSource{snap: base()}}
+	r := startRig(t, src.fakeSource, src, nil)
+	if got := src.records(); len(got) != 1 || !got[0].Equal(r.clock.Now()) {
+		t.Fatalf("records after the first check = %v, want [%v]", got, r.clock.Now())
+	}
+	for i := 0; i < 3; i++ {
+		r.tick(15 * time.Second)
+	}
+	got := src.records()
+	if len(got) != 4 || !got[3].Equal(r.clock.Now()) {
+		t.Errorf("records after four checks = %v", got)
+	}
+}

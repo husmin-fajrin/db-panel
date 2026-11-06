@@ -707,3 +707,37 @@ func TestDumpAccountCannotHoldGlobalLock(t *testing.T) {
 		t.Fatal("stale dump account not dropped")
 	}
 }
+
+// TestReplicaCreatesReplUserOnceStrict: a pinned replica or quarantined
+// server (a promotion candidate preparing its own replicas) makes the
+// replication account under the master's rule: only dbpanel_repl@'%',
+// and only while no dbpanel_repl row exists at any host.
+func TestReplicaCreatesReplUserOnceStrict(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	for _, role := range []string{"replica", "quarantined"} {
+		execAll(t, db, "DROP USER IF EXISTS 'dbpanel_repl'@'%'", "DROP USER IF EXISTS 'dbpanel_repl'@'10.9.9.9'")
+		r := newPinRig(t, inst.Host(), pinDir(t, role, "10.0.0.1:3306"))
+		for _, c := range replUserRefused {
+			wantRefused(t, role+" "+c.cmd, r.dispatch(c.cmd, c.params), "dipin sebagai "+role, "perintah mysql.createReplUser ditolak")
+		}
+		repl := proto.ReplUserParams{User: "dbpanel_repl", FromHost: "%", Password: "rahasia-satu"}
+		if resp := r.dispatch("mysql.createReplUser", repl); !resp.OK {
+			t.Fatalf("%s: fresh createReplUser = %+v", role, resp.Error)
+		}
+		repl.Password = "rahasia-dua"
+		wantRefused(t, role+": createReplUser for an existing account", r.dispatch("mysql.createReplUser", repl),
+			"sudah ada di master yang dipin")
+		if err := loginTCP(t, inst, "dbpanel_repl", "rahasia-satu"); err != nil {
+			t.Errorf("%s: replication account's password changed: %v", role, err)
+		}
+		// A row at any other host blocks the account at '%' too.
+		execAll(t, db, "DROP USER 'dbpanel_repl'@'%'", "CREATE USER 'dbpanel_repl'@'10.9.9.9' IDENTIFIED BY 'lain'")
+		wantRefused(t, role+": createReplUser while dbpanel_repl exists at another host", r.dispatch("mysql.createReplUser", repl),
+			"sudah ada di master yang dipin", "10.9.9.9")
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM mysql.user WHERE user = 'dbpanel_repl' AND host = '%'").Scan(&n); err != nil || n != 0 {
+			t.Errorf("%s: dbpanel_repl@'%%' after the refusal: count %d, err %v; want none", role, n, err)
+		}
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
@@ -37,9 +38,12 @@ const usage = `Penggunaan:
   dbpanel agent pair --panel URL --token-file PATH [--dir DIR]
                                                          idem, token dan pin dari berkas (dihapus
                                                          setelah berhasil)
-  dbpanel agent set-role {master|replica|unassigned} [--dir DIR]
+  dbpanel agent set-role {master|replica|quarantined|unassigned} [--dir DIR]
                                                          ubah peran yang dipin
   dbpanel agent set-source HOST:PORT [--dir DIR]         ubah sumber replikasi yang dipin
+  dbpanel agent lock-master [--dir DIR]                  kunci master (super_read_only, juga
+                                                         setelah restart) tanpa kandidat promosi
+  dbpanel agent unlock-master [--dir DIR]                buka kunci master dan hapus kunci promosi
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -75,6 +79,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			return mainSetRole(args[1:], stdout, stderr)
 		case "set-source":
 			return mainSetSource(args[1:], stdout, stderr)
+		case "lock-master":
+			return mainLockMaster(args[1:], stdout, stderr)
+		case "unlock-master":
+			return mainUnlockMaster(args[1:], stdout, stderr)
 		case "version":
 			fmt.Fprintf(stdout, "dbpanel agent %s\n", version.Version)
 			return 0
@@ -232,8 +240,8 @@ func mainSetRole(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return 2
 	}
-	if role != "master" && role != "replica" && role != "unassigned" {
-		fmt.Fprintf(stderr, "peran harus master, replica atau unassigned: %q\n", role)
+	if role != "master" && role != "replica" && role != "quarantined" && role != "unassigned" {
+		fmt.Fprintf(stderr, "peran harus master, replica, quarantined atau unassigned: %q\n", role)
 		return 2
 	}
 	if err := loadPinsForCLI(dir, stderr).SetRole(role); err != nil {
@@ -259,6 +267,114 @@ func mainSetSource(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stdout, "sumber "+pinsUpdated)
+	return 0
+}
+
+// cliMySQLHost is the MySQL of the agent in dir, logged in to with the
+// admin account the agent stores there (as RegisterMySQL wires it). Tests
+// replace it.
+var cliMySQLHost = func(dir string) (mysql.Host, error) {
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	box, err := secrets.LoadOrCreate(filepath.Join(dir, secretsKeyFile))
+	if err != nil {
+		return nil, fmt.Errorf("kunci kredensial: %w", err)
+	}
+	creds := mysql.NewFileCredentialStore(filepath.Join(dir, credFile), box)
+	return mysql.NewRealHost(cfg, creds, probe.RealSystem(), slog.New(slog.DiscardHandler))
+}
+
+// parseDirOnly parses "[--dir DIR]" with no other argument.
+func parseDirOnly(name string, args []string, stderr io.Writer) (dir string, ok bool) {
+	fs := newFlagSet(name, stderr)
+	d := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
+	if err := fs.Parse(args); err != nil {
+		return "", false
+	}
+	if fs.NArg() > 0 {
+		fs.Usage()
+		return "", false
+	}
+	return *d, true
+}
+
+// cliExec runs stmts, in order, on the agent's MySQL in dir.
+func cliExec(dir string, stmts ...string) error {
+	h, err := cliMySQLHost(dir)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	db, err := h.Open(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	for _, q := range stmts {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("%s: %w", q, err)
+		}
+	}
+	return nil
+}
+
+// cliLockFor is how long a lock-master lock lasts on paper; a lock with
+// no candidate is never lifted automatically, whatever its deadline.
+const cliLockFor = 24 * time.Hour
+
+// mainLockMaster is "agent lock-master": root makes MySQL read-only, also
+// across restarts, and writes the promote lock with no candidate
+// (mysql.CLILockCandidate), so the panel cannot make it writable again.
+func mainLockMaster(args []string, stdout, stderr io.Writer) int {
+	dir, ok := parseDirOnly("agent lock-master", args, stderr)
+	if !ok {
+		return 2
+	}
+	p, _ := mysql.LoadPins(dir) // the lock does not depend on the role or source pins
+	if l, locked, err := p.ReadLock(); err != nil {
+		fmt.Fprintf(stderr, "kunci promosi tidak bisa dibaca: %v\n", err)
+		return 1
+	} else if locked {
+		fmt.Fprintf(stderr, "master sudah dikunci (kandidat %s, sampai %s); buka dulu dengan: sudo dbpanel agent unlock-master\n",
+			l.Candidate, l.Deadline.Local().Format(time.RFC3339))
+		return 1
+	}
+	if err := cliExec(dir, "SET PERSIST super_read_only = ON"); err != nil {
+		fmt.Fprintf(stderr, "gagal mengunci MySQL: %v\n", err)
+		return 1
+	}
+	if err := p.WriteLock(mysql.PromoteLock{Candidate: mysql.CLILockCandidate, Deadline: time.Now().Add(cliLockFor)}); err != nil {
+		fmt.Fprintf(stderr, "MySQL sudah read-only, tetapi kunci promosi gagal ditulis: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "master dikunci (super_read_only, juga setelah restart); buka dengan: sudo dbpanel agent unlock-master")
+	return 0
+}
+
+// mainUnlockMaster is "agent unlock-master": MySQL writable again (also
+// after a restart) and the promote lock removed. Running it again is
+// harmless.
+func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
+	dir, ok := parseDirOnly("agent unlock-master", args, stderr)
+	if !ok {
+		return 2
+	}
+	if err := cliExec(dir, "RESET PERSIST IF EXISTS super_read_only",
+		"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF"); err != nil {
+		fmt.Fprintf(stderr, "gagal membuka kunci MySQL: %v\n", err)
+		return 1
+	}
+	p, _ := mysql.LoadPins(dir)
+	if err := p.ClearLock(); err != nil {
+		fmt.Fprintf(stderr, "MySQL sudah bisa ditulis, tetapi kunci promosi gagal dihapus: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "master dibuka: MySQL bisa ditulis dan kunci promosi dihapus")
 	return 0
 }
 

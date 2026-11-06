@@ -135,7 +135,16 @@ var masterRefused = []pinCase{
 var replicaRefused = []pinCase{
 	{"mysql.setReadOnly", proto.ReadOnlyParams{On: false}},
 	{"mysql.configure", proto.ConfigureParams{Role: "master"}},
-	{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", Password: "rahasia"}},
+}
+
+// replUserRefused are the replication accounts a pinned master, replica or
+// quarantined server never creates: only dbpanel_repl@'%' gets past the
+// pins.
+var replUserRefused = []pinCase{
+	{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_x", Password: "rahasia"}},
+	{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "10.0.0.%", Password: "rahasia"}},
+	{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "10.0.0.5", Password: "rahasia"}},
+	{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", FromHost: "localhost", Password: "rahasia"}},
 }
 
 // TestMasterRefusesDestructiveCommands: on a server pinned as master every
@@ -297,14 +306,16 @@ func sqlLogin(t *testing.T, inst *testmysql.Instance, user, password string) err
 }
 
 // TestReplicaRefusesUnlockAndCreateReplUser: a replica refuses to be made
-// writable, made a master or given a replication account; the commands a
-// replica's flows use get past the pins.
+// writable, made a master or given a replication account other than
+// dbpanel_repl@'%'; the commands a replica's flows use get past the pins.
 func TestReplicaRefusesUnlockAndCreateReplUser(t *testing.T) {
 	r := newPinRig(t, nil, pinDir(t, "replica", ""))
-	for _, c := range replicaRefused {
+	for _, c := range append(replicaRefused, replUserRefused...) {
 		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params),
 			"server ini dipin sebagai replica", "perintah "+c.cmd+" ditolak", "sudo dbpanel agent set-role <peran>")
 	}
+	wantPastPins(t, "createReplUser{dbpanel_repl@%}", r.dispatch("mysql.createReplUser",
+		proto.ReplUserParams{User: "dbpanel_repl", Password: "rahasia"}))
 	for _, c := range masterRefused {
 		if c.cmd == "mysql.releaseRole" {
 			continue // allowed on a replica; it needs MySQL to check replication is gone
@@ -722,5 +733,208 @@ func TestAllowFailsClosedOnUnexpectedParams(t *testing.T) {
 				t.Errorf("%s: Allow(%s, %T) = nil, want an error", dir, c.cmd, c.params)
 			}
 		}
+	}
+}
+
+// promoteCommands are the commands of a promotion (Plan 4b) a quarantined
+// server refuses whatever their parameters.
+var promoteCommands = []string{"mysql.lockForPromote", "mysql.promote", "mysql.repoint"}
+
+// TestQuarantinedRefusalTable: a quarantined server (the old master after
+// a promotion) refuses what a replica refuses plus the promotion commands;
+// its rebuild path is allowed only toward the pinned source, and it can be
+// released like a replica.
+func TestQuarantinedRefusalTable(t *testing.T) {
+	const src = "10.0.0.1:3306"
+	dir := pinDir(t, "quarantined", src)
+	r := newPinRig(t, nil, dir)
+	for _, c := range append(replicaRefused, replUserRefused...) {
+		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params),
+			"server ini dipin sebagai quarantined", "perintah "+c.cmd+" ditolak", "sudo dbpanel agent set-role <peran>")
+	}
+	p := r.d.Pins()
+	if got := p.Role(); got != "quarantined" {
+		t.Fatalf("Role() = %q, want quarantined", got)
+	}
+	for _, cmd := range promoteCommands {
+		if err := p.Allow(cmd, nil); !errors.Is(err, mysql.ErrRolePinned) {
+			t.Errorf("Allow(%s) on quarantined = %v, want ErrRolePinned", cmd, err)
+		}
+	}
+	// Elsewhere these commands are not the role table's business yet.
+	for _, role := range []string{"master", "replica", ""} {
+		q, err := mysql.LoadPins(pinDir(t, role, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cmd := range promoteCommands {
+			if err := q.Allow(cmd, nil); err != nil {
+				t.Errorf("Allow(%s) on %q = %v", cmd, role, err)
+			}
+		}
+	}
+
+	// The rebuild path toward the pinned source.
+	for _, c := range []pinCase{
+		{"mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}},
+		{"mysql.dumpFrom", validSnapshot},
+		{"mysql.cloneFrom", validSnapshot},
+		{"mysql.configure", proto.ConfigureParams{Role: "replica"}},
+		{"mysql.configureReplication", validSource},
+		{"mysql.setReplicationFilter", proto.ReplicationFilterParams{Databases: []string{"toko"}}},
+		{"mysql.resetReplica", nil},
+		{"mysql.startReplica", nil},
+		{"mysql.setReadOnly", proto.ReadOnlyParams{On: true}},
+		{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", Password: "rahasia"}},
+	} {
+		wantPastPins(t, c.cmd, r.dispatch(c.cmd, c.params))
+	}
+	// ... and nowhere else.
+	other := validSnapshot
+	other.Host = "10.0.0.2"
+	wantRefused(t, "dumpFrom another host", r.dispatch("mysql.dumpFrom", other), "server ini dipin mengikuti sumber "+src)
+	wantRefused(t, "cloneFrom another host", r.dispatch("mysql.cloneFrom", other), "sudo dbpanel agent set-source")
+	otherSrc := validSource
+	otherSrc.Port = 3307
+	wantRefused(t, "configureReplication to another port", r.dispatch("mysql.configureReplication", otherSrc), "set-source")
+
+	// configure{replica} on a quarantined server keeps the pin.
+	if err := p.ClaimRole("replica"); err != nil {
+		t.Errorf("claimRole replica on quarantined = %v", err)
+	}
+	if err := p.ClaimRole("master"); !errors.Is(err, mysql.ErrRolePinned) {
+		t.Errorf("claimRole master on quarantined = %v, want ErrRolePinned", err)
+	}
+	if got := pinFile(t, dir, mysql.RoleFile); got != "quarantined" {
+		t.Errorf("role pin after claims = %q, want quarantined", got)
+	}
+
+	// Released like a replica: unassigned, source kept.
+	if err := p.Release(); err != nil {
+		t.Fatalf("Release on quarantined = %v", err)
+	}
+	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "unassigned" || s != src {
+		t.Errorf("pins after release = %q, %q; want unassigned, %q", role, s, src)
+	}
+}
+
+// TestMasterRefusesUnlockWhileLocked: while the promote lock exists a
+// pinned master is not made writable; locking it again stays allowed, and
+// without the lock "Buka kunci master" gets past the pins again.
+func TestMasterRefusesUnlockWhileLocked(t *testing.T) {
+	dir := pinDir(t, "master", "")
+	r := newPinRig(t, nil, dir)
+	p := r.d.Pins()
+	off, on := proto.ReadOnlyParams{On: false}, proto.ReadOnlyParams{On: true}
+	wantPastPins(t, "setReadOnly off without a lock", r.dispatch("mysql.setReadOnly", off))
+
+	if err := p.WriteLock(mysql.PromoteLock{Candidate: "srv-2", Deadline: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(t, "setReadOnly off while locked", r.dispatch("mysql.setReadOnly", off),
+		"dikunci untuk promosi", "sudo dbpanel agent unlock-master")
+	if err := p.Allow("mysql.setReadOnly", off); !errors.Is(err, mysql.ErrRolePinned) {
+		t.Errorf("Allow(setReadOnly off) while locked = %v, want ErrRolePinned", err)
+	}
+	// Locking stays the master table's: setReadOnly on is refused as before.
+	wantRefused(t, "setReadOnly on", r.dispatch("mysql.setReadOnly", on), "server ini dipin sebagai master")
+
+	// A lock file the agent cannot trust also refuses the unlock.
+	lock := filepath.Join(dir, mysql.LockFile)
+	if err := os.Chmod(lock, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(t, "setReadOnly off with an untrusted lock", r.dispatch("mysql.setReadOnly", off), "chmod 0644")
+	if err := os.Chmod(lock, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.ClearLock(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ClearLock(); err != nil {
+		t.Errorf("second ClearLock = %v, want nil", err)
+	}
+	wantPastPins(t, "setReadOnly off after ClearLock", r.dispatch("mysql.setReadOnly", off))
+}
+
+// mustPins loads the pins in dir.
+func mustPins(t *testing.T, dir string) *mysql.Pins {
+	t.Helper()
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestBootstrapKeepsQuarantined: a quarantined server whose MySQL is
+// writable again (and logs, with no replication source: what Bootstrap
+// would pin master) stays quarantined, also in a fresh process and with a
+// promotion record present.
+func TestBootstrapKeepsQuarantined(t *testing.T) {
+	rw := proto.HealthSnapshot{MySQLOK: true, LogBin: true, BinlogDumpThreads: 1}
+	dir := pinDir(t, "quarantined", "10.0.0.2:3306")
+	p := mustPins(t, dir)
+	if err := p.WritePromoted(mysql.Promoted{At: time.Now(), Mode: "planned", OldSource: "10.0.0.1:3306",
+		GTIDExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, hint := range []string{"master", "replica", ""} {
+		if err := mustPins(t, dir).Bootstrap(hint, rw); err != nil {
+			t.Fatalf("Bootstrap(%q) = %v", hint, err)
+		}
+		if err := p.Bootstrap(hint, rw); err != nil {
+			t.Fatalf("Bootstrap(%q) = %v", hint, err)
+		}
+		if role, src := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "quarantined" || src != "10.0.0.2:3306" {
+			t.Errorf("hint %q: pins = %q, %q; want quarantined, 10.0.0.2:3306", hint, role, src)
+		}
+	}
+}
+
+// TestSetQuarantinedAndPromoteToMaster: the two transitions of a promotion
+// write both pins, and a running driver sees them on its next command.
+func TestSetQuarantinedAndPromoteToMaster(t *testing.T) {
+	dir := pinDir(t, "master", "")
+	r := newPinRig(t, nil, dir)
+	p := r.d.Pins()
+	cli := mustPins(t, dir)
+	if err := cli.SetQuarantined("10.0.0.2:3306"); err != nil {
+		t.Fatal(err)
+	}
+	if role, src := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "quarantined" || src != "10.0.0.2:3306" {
+		t.Errorf("pins after SetQuarantined = %q, %q", role, src)
+	}
+	if got := p.Role(); got != "quarantined" {
+		t.Errorf("driver's Role() after SetQuarantined = %q", got)
+	}
+	wantRefused(t, "setReadOnly off on quarantined", r.dispatch("mysql.setReadOnly", proto.ReadOnlyParams{On: false}),
+		"dipin sebagai quarantined")
+	if err := cli.SetQuarantined("bukan sumber"); err == nil {
+		t.Error("SetQuarantined accepted a bad source")
+	}
+	for _, fi := range []string{mysql.RoleFile, mysql.SourceFile} {
+		if st, err := os.Stat(filepath.Join(dir, fi)); err != nil || st.Mode().Perm() != 0o644 {
+			t.Errorf("%s: %v, %v; want mode 0644", fi, st, err)
+		}
+	}
+
+	if err := p.PromoteToMaster(); err != nil {
+		t.Fatal(err)
+	}
+	if role, src := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "master" || src != "" {
+		t.Errorf("pins after PromoteToMaster = %q, %q; want master and no source", role, src)
+	}
+	if _, _, ok := p.Source(); ok || p.Role() != "master" {
+		t.Errorf("after PromoteToMaster: Role %q, source pinned %v", p.Role(), ok)
+	}
+	// From a replica too, with its source pin.
+	rdir := pinDir(t, "replica", "10.0.0.1:3306")
+	if err := mustPins(t, rdir).SetQuarantined("10.0.0.3:3306"); err != nil {
+		t.Fatal(err)
+	}
+	if role, src := pinFile(t, rdir, mysql.RoleFile), pinFile(t, rdir, mysql.SourceFile); role != "quarantined" || src != "10.0.0.3:3306" {
+		t.Errorf("replica pins after SetQuarantined = %q, %q", role, src)
 	}
 }

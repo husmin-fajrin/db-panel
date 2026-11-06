@@ -36,6 +36,9 @@ type Driver struct {
 	// PinDir holds the pinned role and source (pins.go): the agent
 	// directory, /etc/dbpanel. Empty means no pins (tests only).
 	PinDir string
+	// SeenPath is the replicas-seen file (RecordReplicas); empty means
+	// SeenFile. Tests point it elsewhere.
+	SeenPath string
 
 	mu sync.RWMutex // guards Host once Register has run
 

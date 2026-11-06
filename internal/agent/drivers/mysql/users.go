@@ -82,9 +82,11 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 			return nil, err
 		}
 		// A pinned master's existing account is never changed: a new
-		// password or other grants would cut every replica off.
+		// password or other grants would cut every replica off. A pinned
+		// replica or quarantined server keeps it the same way.
 		a := account{User: p.User, Host: p.FromHost, Password: p.Password, RequireSSL: p.RequireSSL}
-		if err := createAccount(ctx, h, a, replGrants, "replikasi", d.pins.RoleIs(roleMaster)); err != nil {
+		keep := d.pins != nil && strictReplUser(d.pins.Role())
+		if err := createAccount(ctx, h, a, replGrants, "replikasi", keep); err != nil {
 			return nil, err
 		}
 		d.log("mysql replication user ready", "user", p.User, "from_host", p.FromHost, "require_ssl", p.RequireSSL)

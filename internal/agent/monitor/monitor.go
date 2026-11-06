@@ -40,6 +40,13 @@ type DumpLockGuard interface {
 	KillDumpLocks(ctx context.Context, maxHold time.Duration) (killed int, err error)
 }
 
+// ReplicaRecorder is a Source that can also record the hosts of the
+// replicas reading its binary log, seen at now, in the replicas-seen file
+// (mysql.Driver.RecordReplicas). The monitor runs it after every check.
+type ReplicaRecorder interface {
+	RecordReplicas(ctx context.Context, now time.Time) error
+}
+
 // Emitter sends an event to the panel; an error (proto.ErrOffline while
 // there is no connection) means the event was not delivered.
 type Emitter interface {
@@ -65,6 +72,8 @@ const (
 	// lock: mysqldump --single-transaction needs it for a moment only.
 	DumpLockMaxHold  = time.Minute
 	lockGuardTimeout = 10 * time.Second
+	// recordTimeout bounds one RecordReplicas.
+	recordTimeout = 10 * time.Second
 )
 
 // Bounds of the intervals monitor.configure accepts, in seconds.
@@ -227,12 +236,13 @@ func (m *Monitor) options() Options {
 }
 
 // Run checks at once, then every CheckEvery, until ctx is done. After a
-// check it sweeps the dump accounts when SweepEvery has passed since the
+// check it guards against dump locks, records the replicas seen, and sweeps the dump accounts when SweepEvery has passed since the
 // last sweep (the first one at once).
 func (m *Monitor) Run(ctx context.Context) {
 	for {
 		m.tick(ctx)
 		m.guardDumpLocks(ctx)
+		m.recordReplicas(ctx)
 		m.sweep(ctx)
 		if !m.pause(ctx) {
 			return
@@ -275,6 +285,19 @@ func (m *Monitor) guardDumpLocks(ctx context.Context) {
 		m.logger.Debug("dump lock guard", "err", err)
 	} else if n > 0 {
 		m.logger.Warn("dump sessions holding the global read lock killed", "killed", n)
+	}
+}
+
+// recordReplicas runs the Source's ReplicaRecorder, when it is one.
+func (m *Monitor) recordReplicas(ctx context.Context) {
+	r, ok := m.src.(ReplicaRecorder)
+	if !ok || ctx.Err() != nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, recordTimeout)
+	defer cancel()
+	if err := r.RecordReplicas(rctx, m.now()); err != nil {
+		m.logger.Warn("replicas seen not recorded", "err", err)
 	}
 }
 
