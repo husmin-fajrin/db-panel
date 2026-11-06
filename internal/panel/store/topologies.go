@@ -17,18 +17,25 @@ type Topology struct {
 	SourceHost      string
 	SourcePort      int
 	CreatedAt       time.Time
+	// CutoverPending: a promotion swapped the master and clients have not
+	// yet been confirmed on the new one. OldMasterServerID is the master
+	// it replaced (0 when never promoted).
+	CutoverPending    bool
+	OldMasterServerID int64
 }
 
-const topologyColumns = `id, master_server_id, repl_user, repl_password_enc, source_host, source_port, created_at`
+const topologyColumns = `id, master_server_id, repl_user, repl_password_enc, source_host, source_port, created_at, cutover_pending, old_master_server_id`
 
 func scanTopology(r rowScanner) (Topology, error) {
 	var (
 		t       Topology
 		created string
+		pending int
 	)
-	if err := r.Scan(&t.ID, &t.MasterServerID, &t.ReplUser, &t.ReplPasswordEnc, &t.SourceHost, &t.SourcePort, &created); err != nil {
+	if err := r.Scan(&t.ID, &t.MasterServerID, &t.ReplUser, &t.ReplPasswordEnc, &t.SourceHost, &t.SourcePort, &created, &pending, &t.OldMasterServerID); err != nil {
 		return Topology{}, err
 	}
+	t.CutoverPending = pending != 0
 	var err error
 	if t.CreatedAt, err = parseTime(created); err != nil {
 		return Topology{}, err
@@ -48,6 +55,10 @@ const (
 	ReplicaFailed    = "failed" // its creation failed
 	// ReplicaResyncing: a job is re-seeding the replica from the master.
 	ReplicaResyncing = "resyncing"
+	// After a promotion: the replica still follows the old master and must
+	// be pointed at the new one, or cannot (diverged) and must be rebuilt.
+	ReplicaNeedsRepoint = "needs_repoint"
+	ReplicaNeedsRebuild = "needs_rebuild"
 )
 
 // Replica is a server that follows a topology's master.
@@ -100,7 +111,7 @@ func marshalDatabases(databases []string) (string, error) {
 }
 
 func validRole(role string) bool {
-	return role == RoleUnassigned || role == RoleMaster || role == RoleReplica
+	return role == RoleUnassigned || role == RoleMaster || role == RoleReplica || role == RoleQuarantined
 }
 
 // SetServerRole sets a server's role.
@@ -344,6 +355,71 @@ func (s *Store) RemoveReplica(serverID int64) error {
 		return ErrNotFound
 	}
 	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleUnassigned, serverID); err != nil {
+		return fmt.Errorf("set role: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// GetTopologyByOldMaster returns the topology whose previous master is
+// serverID, or ErrNotFound.
+func (s *Store) GetTopologyByOldMaster(serverID int64) (Topology, error) {
+	t, err := scanTopology(s.db.QueryRow(`SELECT `+topologyColumns+` FROM topologies WHERE old_master_server_id = ?`, serverID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Topology{}, ErrNotFound
+	}
+	if err != nil {
+		return Topology{}, fmt.Errorf("get topology: %w", err)
+	}
+	return t, nil
+}
+
+// SetCutoverPending records whether clients still have to be cut over to
+// the topology's master after a promotion.
+func (s *Store) SetCutoverPending(topologyID int64, pending bool) error {
+	v := 0
+	if pending {
+		v = 1
+	}
+	return s.execOne(`UPDATE topologies SET cutover_pending = ? WHERE id = ?`, v, topologyID)
+}
+
+// SwapMaster makes newServerID the topology's master and quarantines
+// oldServerID, in one transaction: the topology points at the new master's
+// address with cutover pending, the new master's replica row is deleted and
+// both roles change. Nothing changes when a server or the topology is
+// missing (ErrNotFound).
+func (s *Store) SwapMaster(topologyID, oldServerID, newServerID int64, newHost string, newPort int) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	for _, id := range []int64{oldServerID, newServerID} {
+		if _, err := serverRoleTx(tx, id); err != nil {
+			return err
+		}
+	}
+	res, err := tx.Exec(`UPDATE topologies SET master_server_id = ?, source_host = ?, source_port = ?,
+		old_master_server_id = ?, cutover_pending = 1 WHERE id = ?`,
+		newServerID, newHost, newPort, oldServerID, topologyID)
+	if err != nil {
+		return fmt.Errorf("update topology: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("update topology: %w", err)
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(`DELETE FROM replicas WHERE server_id = ?`, newServerID); err != nil {
+		return fmt.Errorf("delete replica: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleMaster, newServerID); err != nil {
+		return fmt.Errorf("set role: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleQuarantined, oldServerID); err != nil {
 		return fmt.Errorf("set role: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

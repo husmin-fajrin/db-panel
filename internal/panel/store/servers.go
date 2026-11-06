@@ -17,6 +17,9 @@ const (
 	RoleUnassigned = "unassigned"
 	RoleMaster     = "master"
 	RoleReplica    = "replica"
+	// RoleQuarantined: the former master after a promotion; it is kept out
+	// of service until an operator rebuilds it.
+	RoleQuarantined = "quarantined"
 )
 
 // Server is a managed host running a dbpanel agent.
