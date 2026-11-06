@@ -394,51 +394,23 @@ const (
 	dumpPasswordExpireDays = 1
 )
 
-// killSessions kills every session of user, which must match
-// dumpAccountRe (pins.go: the only accounts whose sessions the agent ever
-// kills), and returns how many.
-func killSessions(ctx context.Context, conn *sql.Conn, user string) (int, error) {
-	if !dumpAccountRe.MatchString(user) {
-		return 0, fmt.Errorf("sesi akun %q tidak diputus: bukan akun dump panel", user)
-	}
-	rows, err := conn.QueryContext(ctx, `SELECT ID FROM information_schema.PROCESSLIST WHERE USER = ?`, user)
-	if err != nil {
+// dumpSessions counts the sessions logged in as user.
+func dumpSessions(ctx context.Context, conn *sql.Conn, user string) (int, error) {
+	var n int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = ?`,
+		user).Scan(&n); err != nil {
 		return 0, fmt.Errorf("baca sesi %s: %w", user, err)
-	}
-	var ids []uint64
-	for rows.Next() {
-		var id uint64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("baca sesi %s: %w", user, err)
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("baca sesi %s: %w", user, err)
-	}
-	n := 0
-	for _, id := range ids {
-		if _, err := conn.ExecContext(ctx, "KILL "+strconv.FormatUint(id, 10)); err != nil {
-			// Ended meanwhile (unknown thread): nothing to do.
-			if me, ok := errors.AsType[*drv.MySQLError](err); ok && me.Number == 1094 {
-				continue
-			}
-			return n, fmt.Errorf("putus sesi %d akun %s: %w", id, user, err)
-		}
-		n++
 	}
 	return n, nil
 }
 
-// sweepDumpUsers is SweepDumpUsers; with kill (the agent's own hourly
-// sweep only, never a panel command) the sessions of each stale account
-// are killed before it is dropped (SEC-56): DROP USER ends no session, and
-// a session holding FLUSH TABLES WITH READ LOCK would block the DROP and
-// every write on the server. Every statement waits at most sweepLockWait
-// for a lock.
-func sweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, kill bool, logf func(msg string, args ...any)) (proto.SweepDumpUsersResult, error) {
+// sweepDumpUsers is SweepDumpUsers; with skipBusy (the agent's own hourly
+// sweep only, never a panel command) a stale account that still has a
+// session is left for a later sweep: a long dump (hours, on a large
+// database) must never be cut off by its age. A session stuck holding
+// FLUSH TABLES WITH READ LOCK is KillDumpLocks' job, not the sweep's.
+// Every statement waits at most sweepLockWait for a lock.
+func sweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, skipBusy bool, logf func(msg string, args ...any)) (proto.SweepDumpUsersResult, error) {
 	res := proto.SweepDumpUsersResult{Dropped: []string{}}
 	pool, err := openAdmin(ctx, h)
 	if err != nil {
@@ -482,13 +454,14 @@ func sweepDumpUsers(ctx context.Context, h Host, olderThanSec int64, kill bool, 
 			logf("mysql dump user skipped by sweep: unexpected name", "user", a.user, "from_host", a.host)
 			continue
 		}
-		if kill && dumpAccountRe.MatchString(a.user) {
-			n, err := killSessions(ctx, db, a.user)
+		if skipBusy {
+			n, err := dumpSessions(ctx, db, a.user)
 			if err != nil {
 				return res, err
 			}
 			if n > 0 {
-				logf("mysql sessions of a stale dump user killed", "user", a.user, "sessions", n)
+				logf("akun dump masih dipakai, sapuan ditunda", "user", a.user, "from_host", a.host, "sessions", n)
+				continue
 			}
 		}
 		name, err := dropAccount(ctx, db, a.user, a.host)

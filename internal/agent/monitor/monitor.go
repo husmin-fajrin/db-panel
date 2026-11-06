@@ -54,9 +54,10 @@ const (
 	DefaultSweepEvery   = time.Hour
 )
 
-// DumpUserMaxAge is the age past which the sweep drops a dump account (and
-// kills its sessions): an account that old is taken as left behind by a
-// dead job (SEC-56). sweepTimeout bounds one sweep.
+// DumpUserMaxAge is the age past which the sweep drops a dump account that
+// has no session left: one that old is taken as left behind by a dead job
+// (SEC-56); one still in use is a long dump and waits for a later sweep.
+// sweepTimeout bounds one sweep.
 const (
 	DumpUserMaxAge = 6 * time.Hour
 	sweepTimeout   = time.Minute

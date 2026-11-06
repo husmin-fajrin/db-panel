@@ -238,7 +238,7 @@ func TestDumpUserLifecycle(t *testing.T) {
 	}
 	// SEC-56: the password expires a day after it is set.
 	var create string
-	if err := root.QueryRow("SHOW CREATE USER '"+user+"'@'127.0.0.1'").Scan(&create); err != nil {
+	if err := root.QueryRow("SHOW CREATE USER '" + user + "'@'127.0.0.1'").Scan(&create); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"PASSWORD EXPIRE INTERVAL 1 DAY", "MAX_USER_CONNECTIONS 2"} {
@@ -595,9 +595,9 @@ var _ monitor.DumpLockGuard = (*mysql.Driver)(nil)
 
 // TestDumpAccountCannotHoldGlobalLock (SEC-56, the audit's PoC): a dump
 // account is limited to two sessions; one holding FLUSH TABLES WITH READ
-// LOCK is killed by the lock guard once seen for maxHold, and by the
-// hourly sweep (which waits for no lock) before its stale account is
-// dropped. Sessions of any other account are never killed.
+// LOCK is killed by the lock guard once seen for maxHold. The hourly sweep
+// kills nothing: a stale account with a session open is left for later,
+// one without is dropped. Sessions of any other account are never killed.
 func TestDumpAccountCannotHoldGlobalLock(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	root := rootDB(t, inst)
@@ -670,14 +670,38 @@ func TestDumpAccountCannotHoldGlobalLock(t *testing.T) {
 		t.Fatalf("after the guard: session alive %v, writes blocked %v", alive(c), !canWrite())
 	}
 
-	// The sweep: a stale account holding the lock is killed, then dropped.
-	execAll(t, root, "UPDATE mysql.user SET password_last_changed = NOW() - INTERVAL 2 DAY WHERE user = '"+user+"'")
-	c = hold(user, pw)
-	if n, err := d.SweepDumpUsers(ctx, 24*time.Hour); n != 1 || err != nil {
-		t.Fatalf("SweepDumpUsers = %d, %v; want 1", n, err)
+	// The sweep: a stale account (past the 6 h age) still in use is a
+	// long dump and is left alone; once its sessions end it is dropped.
+	sess, err := sql.Open("mysql", mysql.DSN(proto.ConnectParams{User: user, Password: pw, Host: "127.0.0.1", Port: inst.Port}, ""))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if alive(c) || !canWrite() {
-		t.Fatalf("after the sweep: session alive %v, writes blocked %v", alive(c), !canWrite())
+	defer sess.Close()
+	dump, err := sess.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execAll(t, root, "UPDATE mysql.user SET password_last_changed = NOW() - INTERVAL 7 HOUR WHERE user = '"+user+"'")
+	if n, err := d.SweepDumpUsers(ctx, 6*time.Hour); n != 0 || err != nil {
+		t.Fatalf("SweepDumpUsers with a session open = %d, %v; want 0", n, err)
+	}
+	if !alive(dump) {
+		t.Fatal("the sweep killed a running dump's session")
+	}
+	if n := count(t, root, "SELECT COUNT(*) FROM mysql.user WHERE user = '"+user+"'"); n != 1 {
+		t.Fatal("the sweep dropped a dump account still in use")
+	}
+	dump.Close()
+	sess.Close()
+	deadline := time.Now().Add(10 * time.Second)
+	for count(t, root, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = '"+user+"'") != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the dump session did not end")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n, err := d.SweepDumpUsers(ctx, 6*time.Hour); n != 1 || err != nil {
+		t.Fatalf("SweepDumpUsers = %d, %v; want 1", n, err)
 	}
 	if n := count(t, root, "SELECT COUNT(*) FROM mysql.user WHERE user = '"+user+"'"); n != 0 {
 		t.Fatal("stale dump account not dropped")
