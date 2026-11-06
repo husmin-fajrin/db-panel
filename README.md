@@ -435,7 +435,8 @@ sertifikat itu; bila gagal, berkas lama dikembalikan dan pekerjaan gagal.
   akun ini mendapat `FLUSH_TABLES`, bukan `RELOAD` (lihat "Keamanan"). Bila
   penghapusan gagal, log pekerjaan menyebut perintah `DROP USER` yang perlu
   dijalankan; agent juga menyapu sendiri, tiap jam, akun dump yang berumur
-  lebih dari 24 jam.
+  lebih dari 6 jam. Sandi akun dump kedaluwarsa 1 hari setelah dibuat
+  (`PASSWORD EXPIRE INTERVAL 1 DAY`).
 
 Agent hanya mau membuat, mengubah, atau menghapus akun yang namanya
 diawali `dbpanel_`, dan menolak perintah yang menghapus data, menimpa
@@ -995,7 +996,9 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
 - `FLUSH_TABLES` tetap membolehkan `FLUSH TABLES WITH READ LOCK`, yang
   menghentikan semua penulisan selama dipegang. Panel yang disusupi bisa
   membuat akun dump dan memakainya untuk itu. Pagarnya ada di agent:
-  akun dump dibatasi 2 sesi (`MAX_USER_CONNECTIONS 2`); pemantau agent,
+  akun dump dibatasi 2 sesi (`MAX_USER_CONNECTIONS 2`) dan sandinya
+  kedaluwarsa 1 hari setelah dibuat (`PASSWORD EXPIRE INTERVAL 1 DAY`);
+  pemantau agent,
   setiap pemeriksaan (15 detik), memutus sesi akun `dbpanel_dump_<8 hex>`
   yang memegang kunci global itu 1 menit atau lebih (`mysqldump` hanya
   memegangnya sesaat; dibaca dari `performance_schema.metadata_locks`,
@@ -1004,9 +1007,10 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   pernah memutus sesi akun lain.
 - Agent menyapu sendiri akun dump yang tertinggal (pekerjaan mati di
   tengah jalan): tiap jam, dari pemantau kesehatan agent, akun
-  `dbpanel_dump_*` yang sandinya lebih tua dari 24 jam dihapus (sesinya
+  `dbpanel_dump_*` yang sandinya lebih tua dari 6 jam dihapus (sesinya
   diputus dulu; `DROP USER` menunggu kunci paling lama 5 detik) dan
-  dicatat di journal. Server yang punya sumber replikasi dilewati (hapusan
+  dicatat di journal. Karena itu dump yang berjalan lebih dari 6 jam ikut
+  terputus. Server yang punya sumber replikasi dilewati (hapusan
   di master ikut tereplikasi).
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
   tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan

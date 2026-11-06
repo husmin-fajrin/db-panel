@@ -236,6 +236,16 @@ func TestDumpUserLifecycle(t *testing.T) {
 	if err := loginTCP(t, inst, user, pw); err != nil {
 		t.Fatalf("login as the dump user: %v", err)
 	}
+	// SEC-56: the password expires a day after it is set.
+	var create string
+	if err := root.QueryRow("SHOW CREATE USER '"+user+"'@'127.0.0.1'").Scan(&create); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"PASSWORD EXPIRE INTERVAL 1 DAY", "MAX_USER_CONNECTIONS 2"} {
+		if !strings.Contains(create, want) {
+			t.Errorf("SHOW CREATE USER lacks %q: %s", want, create)
+		}
+	}
 	grants := showGrants(t, root, user, "127.0.0.1")
 	for _, priv := range []string{"SELECT", "FLUSH_TABLES", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT"} {
 		if !grantsInclude(grants, priv) {

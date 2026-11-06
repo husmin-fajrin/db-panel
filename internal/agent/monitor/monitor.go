@@ -54,10 +54,11 @@ const (
 	DefaultSweepEvery   = time.Hour
 )
 
-// DumpUserMaxAge is the age past which the sweep drops a dump account: no
-// dump job runs that long. sweepTimeout bounds one sweep.
+// DumpUserMaxAge is the age past which the sweep drops a dump account (and
+// kills its sessions): an account that old is taken as left behind by a
+// dead job (SEC-56). sweepTimeout bounds one sweep.
 const (
-	DumpUserMaxAge = 24 * time.Hour
+	DumpUserMaxAge = 6 * time.Hour
 	sweepTimeout   = time.Minute
 	// DumpLockMaxHold is how long a dump account may hold the global read
 	// lock: mysqldump --single-transaction needs it for a moment only.

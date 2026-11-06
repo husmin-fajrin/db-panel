@@ -652,12 +652,12 @@ func (s *sweepSource) sweeps() []time.Duration {
 
 // TestMonitorSweepsDumpUsersHourly: a source that sweeps dump accounts is
 // swept at the first check and then once per SweepEvery (an hour), for
-// accounts older than a day; the checks keep their own interval.
+// accounts older than 6 hours; the checks keep their own interval.
 func TestMonitorSweepsDumpUsersHourly(t *testing.T) {
 	src := &sweepSource{fakeSource: &fakeSource{snap: base()}}
 	r := startRig(t, src.fakeSource, src, nil)
-	if got := src.sweeps(); len(got) != 1 || got[0] != 24*time.Hour {
-		t.Fatalf("sweeps after the first check = %v, want [24h]", got)
+	if got := src.sweeps(); len(got) != 1 || got[0] != 6*time.Hour {
+		t.Fatalf("sweeps after the first check = %v, want [6h]", got)
 	}
 	if r.cur.d != DefaultCheckEvery {
 		t.Errorf("loop waits %v, want %v", r.cur.d, DefaultCheckEvery)

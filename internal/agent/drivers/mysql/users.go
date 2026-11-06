@@ -97,7 +97,7 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 			return nil, &commands.ParamError{Msg: "parameter tidak valid: " + err.Error()}
 		}
 		a := account{User: strings.TrimSpace(p.User), Host: strings.TrimSpace(p.FromHost), Password: p.Password, RequireSSL: p.RequireSSL,
-			MaxConns: dumpMaxConnections}
+			MaxConns: dumpMaxConnections, ExpireDays: dumpPasswordExpireDays}
 		if a.Host == "" {
 			return nil, &commands.ParamError{Msg: "host user dump wajib diisi (alamat replika)"}
 		}
@@ -177,6 +177,9 @@ type account struct {
 	// MaxConns caps the account's sessions (MAX_USER_CONNECTIONS); 0
 	// leaves the server's default.
 	MaxConns int
+	// ExpireDays expires the account's password that many days after it
+	// was set (PASSWORD EXPIRE INTERVAL); 0 leaves the server's default.
+	ExpireDays int
 }
 
 // validateAccountName checks a managed account's name and host; what names
@@ -299,6 +302,9 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 	if a.MaxConns > 0 {
 		limit = " WITH MAX_USER_CONNECTIONS " + strconv.Itoa(a.MaxConns)
 	}
+	if a.ExpireDays > 0 {
+		limit += " PASSWORD EXPIRE INTERVAL " + strconv.Itoa(a.ExpireDays) + " DAY"
+	}
 	stmts := []string{"ALTER USER " + name + " REQUIRE " + tls + limit}
 	if n {
 		// An older dbpanel granted more: leave exactly grants.
@@ -382,6 +388,10 @@ const (
 	// dumpMaxConnections caps the sessions of a dump account: mysqldump
 	// needs one.
 	dumpMaxConnections = 2
+	// dumpPasswordExpireDays expires a dump account's password a day after
+	// it is set: a forgotten account is useless by then even before the
+	// sweep drops it.
+	dumpPasswordExpireDays = 1
 )
 
 // killSessions kills every session of user, which must match
