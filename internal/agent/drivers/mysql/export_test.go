@@ -167,3 +167,10 @@ func (d *Driver) ArmGuard(c proto.PeerCred) { d.armGuard(c) }
 
 // GTIDHasUUID reports whether a GTID set holds a transaction of uuid.
 var GTIDHasUUID = gtidHasUUID
+
+// SetWriteLock replaces how mysql.lockForPromote writes the lock file.
+func SetWriteLock(f func(*Pins, PromoteLock) error) (restore func()) {
+	old := writeLock
+	writeLock = f
+	return func() { writeLock = old }
+}

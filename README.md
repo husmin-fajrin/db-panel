@@ -535,9 +535,12 @@ seperti berkas pin.
 Panel mengunci master untuk promosi dengan `mysql.lockForPromote`: hanya
 pada server yang dipin `master`, hanya bila kandidat saat ini membaca binlog
 master (alamat IP kandidat sama dengan host thread `Binlog Dump`), dan
-hanya bila belum ada kunci. Kunci itu `SET PERSIST super_read_only=ON`
-ditambah `/etc/dbpanel/promote-lock` berisi `host:port` kandidat dan
-tenggat (60 sampai 3600 detik). Selama berkas itu ada di master, agent
+hanya bila belum ada kunci. Kandidat yang tersambung ke master lewat NAT
+atau proxy (alamat thread `Binlog Dump` bukan alamat kandidat) tidak bisa
+dipakai untuk mengunci. Kunci itu `/etc/dbpanel/promote-lock` berisi
+`host:port` kandidat dan tenggat (60 sampai 3600 detik), ditulis lebih
+dulu, lalu `SET PERSIST super_read_only=ON` (bila MySQL menolaknya, berkas
+kunci dihapus lagi). Selama berkas itu ada di master, agent
 memasang lagi `super_read_only` pada tiap pemeriksaan kesehatan bila
 mati (misalnya sesudah MySQL restart). Pada tenggat agent membaca kandidat
 dengan akun replikasi yang dikirim panel (hanya disimpan di memori): bila
@@ -549,7 +552,9 @@ agent dimulai ulang sehingga akunnya hilang) kunci tetap dan dicoba lagi
 tiap menit, dilaporkan ke panel paling sering sejam sekali, sampai
 `unlock-master`. `mysql.unlockPromote` membatalkan kunci sebelum tenggat
 hanya bila kandidat terbaca masih read-only. Kunci `lock-master` tidak
-pernah disentuh keduanya.
+pernah disentuh keduanya. Bila pemeriksaan agent jatuh tepat di antara
+langkah `unlock-master` (MySQL dibuka, lalu berkas kunci dihapus), MySQL
+bisa terkunci lagi; jalankan `unlock-master` sekali lagi.
 
 Agent juga mencatat replika yang membaca binlog server ini pada tiap
 pemeriksaan kesehatan di `/var/lib/dbpanel/replicas-seen`: satu baris per

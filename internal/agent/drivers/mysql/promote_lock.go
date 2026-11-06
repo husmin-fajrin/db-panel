@@ -170,21 +170,40 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 		return res, &commands.ParamError{Msg: fmt.Sprintf(
 			"kandidat %s tidak sedang tersambung ke master ini sebagai replika (tidak ada thread Binlog Dump dari alamatnya); master tidak dikunci", key)}
 	}
-	// PERSIST: a MySQL restart never opens writes, not even for a moment.
-	if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {
-		return res, fmt.Errorf("kunci master (SET PERSIST super_read_only = ON): %w", err)
-	}
-	if err := db.QueryRowContext(ctx, "SELECT @@global.server_uuid, @@global.gtid_executed").Scan(&res.ServerUUID, &res.GTIDExecuted); err != nil {
-		return res, fmt.Errorf("master sudah dikunci, tetapi server_uuid/gtid_executed gagal dibaca: %w", err)
-	}
-	// The lock file keeps whole seconds.
-	res.LockedAt = time.Now().UTC().Truncate(time.Second)
+	// The lock file first: a failure or a crash after it leaves a lock
+	// the guard turns into super_read_only on its next tick, never a
+	// read-only master without a lock nothing automatic would open. The
+	// lock file keeps whole seconds.
+	res.LockedAt = d.now().UTC().Truncate(time.Second)
 	res.Deadline = res.LockedAt.Add(time.Duration(p.TimeoutSec) * time.Second)
-	if err := d.pins.WriteLock(PromoteLock{Candidate: key, Deadline: res.Deadline}); err != nil {
-		return res, fmt.Errorf("MySQL sudah read-only, tetapi kunci promosi gagal ditulis: %w", err)
+	if err := writeLock(d.pins, PromoteLock{Candidate: key, Deadline: res.Deadline}); err != nil {
+		return res, fmt.Errorf("kunci promosi gagal ditulis, master tidak dikunci: %w", err)
 	}
 	d.guard.reset(&p.Candidate)
+	// PERSIST: a MySQL restart never opens writes, not even for a moment.
+	if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {
+		err = fmt.Errorf("kunci master (SET PERSIST super_read_only = ON): %w", err)
+		if cerr := d.pins.ClearLock(); cerr != nil {
+			return res, fmt.Errorf("%w; berkas kunci promosi juga gagal dihapus (%v), hapus dengan: sudo dbpanel agent unlock-master", err, cerr)
+		}
+		d.guard.reset(nil)
+		return res, err
+	}
+	if err := db.QueryRowContext(ctx, "SELECT @@global.server_uuid, @@global.gtid_executed").Scan(&res.ServerUUID, &res.GTIDExecuted); err != nil {
+		return res, fmt.Errorf("master sudah dikunci (kunci promosi tetap), tetapi server_uuid/gtid_executed gagal dibaca: %w", err)
+	}
 	return res, nil
+}
+
+// writeLock is Pins.WriteLock; tests replace it.
+var writeLock = (*Pins).WriteLock
+
+// now is Now, or time.Now when it is nil.
+func (d *Driver) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
 }
 
 // unlockPromote cancels the lock while its candidate c is reachable and

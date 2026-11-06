@@ -42,6 +42,9 @@ type Driver struct {
 	// Events, when set, sends the promote lock guard's events to the
 	// panel (the agent's connection).
 	Events Emitter
+	// Now is the driver's clock (the promote lock's time); nil means
+	// time.Now. Tests replace it.
+	Now func() time.Time
 
 	mu sync.RWMutex // guards Host once Register has run
 

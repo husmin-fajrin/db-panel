@@ -226,14 +226,36 @@ func TestLockRequiresConnectedCandidate(t *testing.T) {
 		t.Fatalf("lock for an address no replica connects from = %+v", resp)
 	}
 
+	// The lock file is written first: when it cannot be, MySQL is not
+	// locked.
+	restore := mysql.SetWriteLock(func(*mysql.Pins, mysql.PromoteLock) error { return errors.New("disk penuh") })
+	if resp := r.dispatch("mysql.lockForPromote", p); resp.OK || !strings.Contains(resp.Error.Message, "disk penuh") {
+		t.Errorf("lock with a failing lock file = %+v", resp)
+	}
+	restore()
+	if sro, _ := readOnly(t, mdb); sro || pinFile(t, dir, mysql.LockFile) != "" {
+		t.Errorf("failed lock file write left super_read_only=%v, lock file %q", sro, pinFile(t, dir, mysql.LockFile))
+	}
+	// When MySQL refuses the PERSIST (an account without
+	// SYSTEM_VARIABLES_ADMIN), the lock file is removed again.
+	execAll(t, mdb, "CREATE USER 'adm'@'localhost' IDENTIFIED BY 'Adm-pw-1'", "GRANT PROCESS ON *.* TO 'adm'@'localhost'")
+	weak := newPinRig(t, master.HostWith(&memCreds{p: proto.ConnectParams{User: "adm", Password: "Adm-pw-1"}}), dir)
+	if resp := weak.dispatch("mysql.lockForPromote", p); resp.OK || !strings.Contains(resp.Error.Message, "SET PERSIST") {
+		t.Errorf("lock with a refused PERSIST = %+v", resp)
+	}
+	if sro, _ := readOnly(t, mdb); sro || pinFile(t, dir, mysql.LockFile) != "" {
+		t.Errorf("refused PERSIST left super_read_only=%v, lock file %q", sro, pinFile(t, dir, mysql.LockFile))
+	}
+
 	var uuid string
 	if err := mdb.QueryRow("SELECT @@global.server_uuid").Scan(&uuid); err != nil {
 		t.Fatal(err)
 	}
-	before := time.Now().Add(-time.Second)
+	lockedAt := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	r.d.Now = func() time.Time { return lockedAt.Add(400 * time.Millisecond) }
 	res := decode[proto.LockForPromoteResult](t, r.dispatch("mysql.lockForPromote", p))
-	if res.LockedAt.Before(before) || res.LockedAt.After(time.Now()) || !res.Deadline.Equal(res.LockedAt.Add(600*time.Second)) {
-		t.Errorf("locked at %v, deadline %v", res.LockedAt, res.Deadline)
+	if !res.LockedAt.Equal(lockedAt) || !res.Deadline.Equal(lockedAt.Add(600*time.Second)) {
+		t.Errorf("locked at %v, deadline %v; want %v and 10 minutes later", res.LockedAt, res.Deadline, lockedAt)
 	}
 	if res.ServerUUID != uuid || res.GTIDExecuted != gtidExecuted(t, mdb) || res.GTIDExecuted == "" {
 		t.Errorf("result = %+v; want uuid %s, executed %q", res, uuid, gtidExecuted(t, mdb))
@@ -245,7 +267,7 @@ func TestLockRequiresConnectedCandidate(t *testing.T) {
 		t.Errorf("persisted super_read_only = %q, want ON", got)
 	}
 	l, ok, err := r.d.Pins().ReadLock()
-	if err != nil || !ok || l.Candidate != key || !l.Deadline.Equal(res.Deadline.Truncate(time.Second)) {
+	if err != nil || !ok || l.Candidate != key || !l.Deadline.Equal(res.Deadline) {
 		t.Errorf("lock file = %+v, %v, %v", l, ok, err)
 	}
 	if resp := r.dispatch("mysql.lockForPromote", p); resp.OK || !strings.Contains(resp.Error.Message, "dikunci") {
