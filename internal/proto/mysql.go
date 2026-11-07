@@ -363,6 +363,10 @@ type PeerCred struct {
 	// connection uses TLS when the server offers it, unverified.
 	SSLCA  string `json:"ssl_ca,omitempty"`
 	Verify bool   `json:"verify,omitempty"`
+	// ServerName, set by the agent only (never sent), is the name the
+	// certificate is verified against when Host is an address the agent
+	// resolved that name to; "" means Host.
+	ServerName string `json:"-"`
 }
 
 // LockForPromoteParams are the parameters of mysql.lockForPromote: the
@@ -461,11 +465,15 @@ type RepointParams struct {
 // replica holds transactions the new master lacks (Errant); its source
 // pin moved to the new master, replication was left as it was, and it
 // must be rebuilt from the new master. Otherwise it replicates from the
-// new master and IORunning says whether its receiver connected in time.
+// new master and IORunning says whether its receiver connected in time
+// (IOError: why not, while MySQL keeps retrying).
 type RepointResult struct {
 	NeedsRebuild bool   `json:"needs_rebuild"`
 	Errant       string `json:"errant,omitempty"`
 	IORunning    bool   `json:"io_running"`
+	// IOError is the receiver's last error when it was still retrying
+	// (network, login) at the end of the wait; "" otherwise.
+	IOError string `json:"io_error,omitempty"`
 }
 
 // ProbeSourceResult is the answer to mysql.probeSource: whether a MySQL

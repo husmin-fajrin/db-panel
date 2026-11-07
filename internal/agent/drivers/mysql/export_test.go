@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -234,6 +235,26 @@ func SetRelayLogEvery(d time.Duration) (restore func()) {
 	return func() { relayLogEvery = old }
 }
 
-// ReplicaSeenAs reports whether a host is in the replicas-seen file in a
-// form the processlist shows it in.
-var ReplicaSeenAs = replicaSeenAs
+// SeenAddr is the address of a host the replicas-seen file holds.
+var SeenAddr = seenAddr
+
+// SetResolver replaces the seen check's forward and reverse lookups.
+func SetResolver(ip func(context.Context, string) ([]net.IP, error), addr func(context.Context, string) ([]string, error)) (restore func()) {
+	oldIP, oldAddr := lookupIP, lookupAddr
+	lookupIP, lookupAddr = ip, addr
+	return func() { lookupIP, lookupAddr = oldIP, oldAddr }
+}
+
+// SetRepointHook makes mysql.repoint call f at its test points.
+func SetRepointHook(f func(stage string)) (restore func()) {
+	old := repointHook
+	repointHook = f
+	return func() { repointHook = old }
+}
+
+// SetRepointIOWait changes how long mysql.repoint waits for the receiver.
+func SetRepointIOWait(d time.Duration) (restore func()) {
+	old := repointIOWait
+	repointIOWait = d
+	return func() { repointIOWait = old }
+}

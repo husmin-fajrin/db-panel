@@ -3,14 +3,18 @@ package mysql_test
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -177,16 +181,105 @@ func TestQuarantineIdempotent(t *testing.T) {
 	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
 	r.wantEvents(proto.EventQuarantined)
 
-	// The guard: nothing to do while read-only; flags lost, put back and
-	// reported.
+	// The guard: nothing to do while read-only. Flags lifted while MySQL
+	// stays up (a rebuild's load) are left alone; a MySQL that comes back
+	// writable is made read-only again and reported.
 	r.tick()
 	r.wantEvents(proto.EventQuarantined)
 	execAll(t, r.db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
 	r.tick()
-	if sro, ro := readOnly(t, r.db); !sro || !ro {
-		t.Errorf("after the guard: super_read_only=%v read_only=%v", sro, ro)
+	if sro, ro := readOnly(t, r.db); sro || ro {
+		t.Errorf("guard put read-only back while MySQL stayed up: super_read_only=%v read_only=%v", sro, ro)
 	}
+	r.wantEvents(proto.EventQuarantined)
+	execAll(t, r.db, "RESET PERSIST super_read_only", "RESET PERSIST read_only")
+	r.inst.Restart(t)
+	if sro, _ := readOnly(t, r.db); sro {
+		t.Fatal("MySQL came back read-only by itself; the test proves nothing")
+	}
+	r.tick()
+	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
 	r.wantEvents(proto.EventQuarantined, proto.EventQuarantined)
+	r.tick()
+	r.wantEvents(proto.EventQuarantined, proto.EventQuarantined)
+}
+
+// TestQuarantineDownReportedOnceWhenAlreadyReadOnly: a quarantine written
+// while MySQL was down is reported once MySQL answers, also when it came
+// back read-only already (nothing to put back).
+func TestQuarantineDownReportedOnceWhenAlreadyReadOnly(t *testing.T) {
+	r := newQuarantineRig(t)
+	r.seenHosts("10.9.9.9")
+	r.promoted()
+	execAll(t, r.db, "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+	r.inst.Stop(t)
+	res := decode[proto.QuarantineResult](t, r.quarantine(quarantineParams))
+	if res.Applied {
+		t.Errorf("quarantine while down = %+v", res)
+	}
+	r.inst.Restart(t)
+	r.tick()
+	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
+	r.wantEvents(proto.EventQuarantined)
+	r.tick()
+	r.wantEvents(proto.EventQuarantined)
+}
+
+// TestQuarantineGuardLeavesRebuildAlone: the rebuild of a quarantined
+// server from its pinned source (dumpFrom, which lifts read-only for its
+// load) succeeds while the guard ticks, and the guard reports nothing.
+func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	target := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	dumpUser(t, mdb)
+	execAll(t, mdb, "CREATE DATABASE toko", "CREATE TABLE toko.t (id INT PRIMARY KEY)", "INSERT INTO toko.t VALUES (1), (2), (3)")
+	tdb := rootDB(t, target)
+	execAll(t, tdb, "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+
+	dir := pinDir(t, "quarantined", "127.0.0.1:"+strconv.Itoa(master.Port))
+	creds := &memCreds{p: proto.ConnectParams{User: "root"}}
+	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
+	runner := jobs.NewRunner(jev, slog.New(slog.DiscardHandler))
+	rig := &snapshotRig{reg: commands.NewRegistry(), runner: runner, events: jev}
+	ev := &eventLog{}
+	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir, Events: ev}
+	d.Register(rig.reg)
+	tick := func() {
+		if err := d.GuardTick(context.Background(), time.Now()); err != nil {
+			t.Errorf("GuardTick: %v", err)
+		}
+	}
+	tick()
+
+	stop := make(chan struct{})
+	ticked := make(chan int)
+	go func() {
+		n := 0
+		for {
+			select {
+			case <-stop:
+				ticked <- n
+				return
+			case <-time.After(20 * time.Millisecond):
+				tick()
+				n++
+			}
+		}
+	}()
+	done := rig.run(t, "mysql.dumpFrom", dumpParams(master, "toko"))
+	close(stop)
+	n := <-ticked
+	if !done.OK {
+		t.Fatalf("dumpFrom on a quarantined server with the guard ticking: %s", done.Error)
+	}
+	if got := count(t, tdb, "SELECT COUNT(*) FROM toko.t"); got != 3 {
+		t.Errorf("rows loaded = %d, want 3", got)
+	}
+	if len(ev.all()) != 0 {
+		t.Errorf("guard reported %d events during the rebuild", len(ev.all()))
+	}
+	t.Logf("guard ticked %d times during the load", n)
 }
 
 // TestQuarantineWhenMySQLDownWritesPinThenLocksOnStart: with MySQL down
@@ -280,11 +373,48 @@ func TestQuarantineUnlockedMasterNeedsReplicaSeen(t *testing.T) {
 	wantRefused(t, "quarantine on an unassigned server", un.dispatch("mysql.quarantine", quarantineParams), "dipin sebagai unassigned")
 }
 
-// TestQuarantineSeenHostForms: the new master's host matches the
-// replicas-seen file as the processlist shows it: as given, as an
-// address it resolves to, or as a name its addresses resolve back to.
+// fakeDNS is a resolver: forward records by name, reverse by address.
+type fakeDNS struct {
+	fwd map[string][]string
+	rev map[string][]string
+}
+
+func (f fakeDNS) ip(_ context.Context, host string) ([]net.IP, error) {
+	var ips []net.IP
+	for _, a := range f.fwd[strings.ToLower(host)] {
+		ips = append(ips, net.ParseIP(a))
+	}
+	if len(ips) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	return ips, nil
+}
+
+func (f fakeDNS) addr(_ context.Context, a string) ([]string, error) { return f.rev[a], nil }
+
+// TestQuarantineSeenHostForms: the new master's host is resolved once and
+// matches the replicas-seen file by one of its addresses, or by a reverse
+// name of one that resolves back to it; the address that matched is the
+// one returned (and read). A name with the attacker's address beside a
+// seen replica's yields the replica's address; an unconfirmed reverse
+// name never matches.
 func TestQuarantineSeenHostForms(t *testing.T) {
 	ctx := context.Background()
+	dns := fakeDNS{
+		fwd: map[string][]string{
+			"evil.example":      {"6.6.6.6", "10.0.0.5"},
+			"spoof.example":     {"6.6.6.6"},
+			"replica1.internal": {"10.0.0.5"},
+			"replica2.internal": {"10.0.0.6"},
+			"localhost":         {"127.0.0.1"},
+		},
+		rev: map[string][]string{
+			"6.6.6.6":   {"replica1.internal."}, // a PTR the attacker controls
+			"10.0.0.6":  {"replica2.internal."},
+			"127.0.0.1": {"localhost"},
+		},
+	}
+	t.Cleanup(mysql.SetResolver(dns.ip, dns.addr))
 	path := filepath.Join(t.TempDir(), "replicas-seen")
 	seen := func(hosts ...string) {
 		t.Helper()
@@ -292,32 +422,48 @@ func TestQuarantineSeenHostForms(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := func(host string, ok bool) {
+	want := func(host, addr string, ok bool) {
 		t.Helper()
-		got, err := mysql.ReplicaSeenAs(ctx, path, host)
-		if err != nil || got != ok {
-			t.Errorf("ReplicaSeenAs(%q) = %v, %v; want %v", host, got, err, ok)
+		got, gotOK, err := mysql.SeenAddr(ctx, path, host)
+		if err != nil || gotOK != ok || got != addr {
+			t.Errorf("SeenAddr(%q) = %q, %v, %v; want %q, %v", host, got, gotOK, err, addr, ok)
 		}
 	}
-	want("10.9.9.9", false) // no file
-	seen("10.9.9.9", "DB2.Example")
-	want("10.9.9.9", true)
-	want("db2.example", true)
-	want("10.9.9.90", false)
-	want("10.9.9", false)
-
-	// By resolution: localhost resolves to 127.0.0.1.
+	want("10.9.9.9", "", false) // no file
+	seen("10.9.9.9", "10.0.0.5", "Replica1.Internal", "replica2.internal")
+	want("10.9.9.9", "10.9.9.9", true)
+	want("10.9.9.90", "", false)
+	// Several A records: the seen replica's address, never the attacker's.
+	want("evil.example", "10.0.0.5", true)
+	// The attacker's PTR claims a seen name but does not resolve back.
+	want("spoof.example", "", false)
+	want("6.6.6.6", "", false)
+	// A forward-confirmed reverse name matches.
+	want("10.0.0.6", "10.0.0.6", true)
+	// The host string alone is not enough: it must resolve to the address.
+	want("unknown.example", "", false)
+	// Resolution of a name to a seen address.
 	seen("127.0.0.1")
-	want("localhost", true)
-	// By reverse resolution, when this host's resolver maps 127.0.0.1
-	// back to a name (MySQL's own lookup without skip_name_resolve).
-	path = filepath.Join(t.TempDir(), "replicas-seen")
-	if names, _ := net.DefaultResolver.LookupAddr(ctx, "127.0.0.1"); len(names) > 0 {
-		seen(strings.TrimSuffix(names[0], "."))
-		want("127.0.0.1", true)
-	} else {
-		t.Log("127.0.0.1 has no reverse name here; reverse form not checked")
+	want("localhost", "127.0.0.1", true)
+}
+
+// TestQuarantineReadsNewMasterAtSeenAddress: without a lock the new
+// master named by a host with several addresses is read at the address
+// the replicas-seen file matched, with its name kept for TLS.
+func TestQuarantineReadsNewMasterAtSeenAddress(t *testing.T) {
+	r := newQuarantineRig(t)
+	dns := fakeDNS{fwd: map[string][]string{"db2.example": {"6.6.6.6", "10.9.9.9"}}}
+	t.Cleanup(mysql.SetResolver(dns.ip, dns.addr))
+	r.seenHosts("10.9.9.9")
+	r.promoted()
+	p := quarantineParams
+	p.NewMaster.Host = "db2.example"
+	decode[proto.QuarantineResult](t, r.quarantine(p))
+	c := r.peer.creds[len(r.peer.creds)-1]
+	if c.Host != "10.9.9.9" || c.ServerName != "db2.example" {
+		t.Errorf("new master read at %q (name %q), want 10.9.9.9 (db2.example)", c.Host, c.ServerName)
 	}
+	wantQuarantined(t, r.db, r.dir, "db2.example:3306")
 }
 
 func (r *quarantineRig) wantEvents(types ...string) {

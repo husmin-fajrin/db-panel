@@ -67,7 +67,11 @@ func ReadPeer(ctx context.Context, c proto.PeerCred, timeout time.Duration) Peer
 		if !pool.AppendCertsFromPEM(pem) {
 			return fail(fmt.Errorf("berkas CA %s tidak berisi sertifikat", c.SSLCA))
 		}
-		cfg.TLS = &tls.Config{RootCAs: pool, ServerName: c.Host, MinVersion: tls.VersionTLS12}
+		name := c.Host
+		if c.ServerName != "" {
+			name = c.ServerName
+		}
+		cfg.TLS = &tls.Config{RootCAs: pool, ServerName: name, MinVersion: tls.VersionTLS12}
 	} else {
 		cfg.TLSConfig = "preferred"
 	}

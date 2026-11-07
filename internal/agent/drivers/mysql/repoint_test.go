@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -179,6 +180,11 @@ func TestRepointErrantReturnsNeedsRebuildAndMovesPin(t *testing.T) {
 	if role, src := pinFile(t, r.dir, mysql.RoleFile), pinFile(t, r.dir, mysql.SourceFile); role != "replica" || src != r.bKey() {
 		t.Errorf("pins = %q, %q; want replica, %s", role, src, r.bKey())
 	}
+	// Replication was running (connecting to the dead master): it runs
+	// again.
+	if state := applierState(t, r.cdb); state != "ON" {
+		t.Errorf("applier after the errant answer = %s, want ON", state)
+	}
 	if err := r.d.Pins().Allow("mysql.dumpFrom", proto.SnapshotParams{Host: "127.0.0.1", Port: r.b.Port}); err != nil {
 		t.Errorf("rebuild from the new master refused: %v", err)
 	}
@@ -250,5 +256,114 @@ func TestRepointPinRules(t *testing.T) {
 	bad.Verify, bad.CAPEM = true, "bukan sertifikat"
 	if resp := r.dispatch("mysql.repoint", bad); resp.OK || resp.Error.Code != proto.CodeBadParams {
 		t.Errorf("repoint with a bad CA = %+v", resp)
+	}
+}
+
+// applierState is the SERVICE_STATE of the default channel's applier.
+func applierState(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var st string
+	if err := db.QueryRow("SELECT SERVICE_STATE FROM performance_schema.replication_applier_status WHERE CHANNEL_NAME = ''").Scan(&st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// TestRepointStopsApplierBeforeErrantCheck: a transaction of the old
+// master the new master lacks sits in the replica's relay log, delayed;
+// replication is stopped before the errant check, so it is never applied
+// once the check passed (the test point lets the delay run out there),
+// and the repointed replica holds nothing the new master lacks.
+func TestRepointStopsApplierBeforeErrantCheck(t *testing.T) {
+	r := newRepointRig(t, nil)
+	execAll(t, r.cdb, "STOP REPLICA", "CHANGE REPLICATION SOURCE TO SOURCE_DELAY = 2", "START REPLICA")
+	execAll(t, r.bdb, "STOP REPLICA") // the candidate never gets the next transaction
+	before := gtidExecuted(t, r.adb)
+	execAll(t, r.adb, "INSERT INTO toko.t VALUES (4)")
+	var x string
+	if err := r.adb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&x); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	for {
+		var received bool
+		if err := r.cdb.QueryRow(`SELECT GTID_SUBSET(?, RECEIVED_TRANSACTION_SET) FROM performance_schema.replication_connection_status
+			WHERE CHANNEL_NAME = ''`, x).Scan(&received); err != nil {
+			t.Fatal(err)
+		}
+		if received {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the replica never received the last transaction")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n := count(t, r.cdb, "SELECT COUNT(*) FROM toko.t WHERE id = 4"); n != 0 {
+		t.Fatal("the delayed transaction was applied already; the test proves nothing")
+	}
+	r.promoteB()
+	r.lockA()
+	t.Cleanup(mysql.SetRepointHook(func(stage string) {
+		if stage == "after-errant-check" {
+			time.Sleep(4 * time.Second) // past SOURCE_DELAY
+		}
+	}))
+
+	res := decode[proto.RepointResult](t, r.dispatch("mysql.repoint", r.params()))
+	if res.NeedsRebuild {
+		t.Fatalf("repoint = %+v", res)
+	}
+	var subset bool
+	if err := r.cdb.QueryRow("SELECT GTID_SUBSET(@@global.gtid_executed, ?)", gtidExecuted(t, r.bdb)).Scan(&subset); err != nil {
+		t.Fatal(err)
+	}
+	if !subset {
+		t.Errorf("repointed replica holds transactions the new master lacks: %s vs %s", gtidExecuted(t, r.cdb), gtidExecuted(t, r.bdb))
+	}
+	if n := count(t, r.cdb, "SELECT COUNT(*) FROM toko.t WHERE id = 4"); n != 0 {
+		t.Error("the old master's transaction the new master lacks was applied")
+	}
+}
+
+// TestRepointRetryingReceiverReportsIOError: a receiver that keeps
+// retrying (nothing listens at the new master's port) is not a failure:
+// the pin has moved, and the result says the receiver is not running and
+// why.
+func TestRepointRetryingReceiverReportsIOError(t *testing.T) {
+	r := newRepointRig(t, nil)
+	r.lockA()
+	t.Cleanup(mysql.SetRepointIOWait(3 * time.Second))
+	// A port nothing listens on; the fake read stands in for a promoted
+	// replica holding everything this replica executed.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	cExec := gtidExecuted(t, r.cdb)
+	t.Cleanup(mysql.SetReadPeer(func(ctx context.Context, c proto.PeerCred, to time.Duration) mysql.PeerState {
+		if c.Port == port {
+			return mysql.PeerState{Reachable: true, GTIDExecuted: cExec + ",aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1"}
+		}
+		return mysql.ReadPeer(ctx, c, to)
+	}))
+	p := r.params()
+	p.NewMaster.Port = port
+	resp := r.dispatch("mysql.repoint", p)
+	res := decode[proto.RepointResult](t, resp)
+	if res.IORunning || !strings.Contains(res.IOError, "2003") {
+		t.Errorf("repoint = %+v; want not running with error 2003", res)
+	}
+	want := "127.0.0.1:" + strconv.Itoa(port)
+	if got := r.channelSource(); got != want {
+		t.Errorf("channel points at %s, want %s", got, want)
+	}
+	if got := pinFile(t, r.dir, mysql.SourceFile); got != want {
+		t.Errorf("source pin = %q, want %s", got, want)
+	}
+	if strings.Contains(string(resp.Result), replPassword) {
+		t.Errorf("result shows the password: %s", resp.Result)
 	}
 }

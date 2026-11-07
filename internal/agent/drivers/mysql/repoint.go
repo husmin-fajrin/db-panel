@@ -33,19 +33,34 @@ import (
 //     else, when that is empty (MySQL restarted since the receiver last
 //     connected), every server_uuid in this replica's gtid_executed but
 //     its own, all of which the new master must hold.
-//  3. errant = GTID_SUBTRACT(this replica's gtid_executed, the new
+//  3. STOP REPLICA, so that nothing is applied after the next reading;
+//     then errant = GTID_SUBTRACT(this replica's gtid_executed, the new
 //     master's), computed here. Not empty: the source pin moves to the
-//     new master (so a rebuild from it is accepted) and NeedsRebuild is
-//     answered; replication is left as it was.
-//  4. Otherwise STOP REPLICA; the CA file is written when Verify needs it
-//     and it is absent; the channel is pointed at the new master (SSL,
-//     verified when Verify); START REPLICA; the source pin moves; the
-//     receiver is watched for up to repointIOWait. A receiver error is
-//     returned, with replication left on the new master (the panel
-//     decides).
+//     new master (so a rebuild from it is accepted), replication is
+//     started again when it ran (left as it was) and NeedsRebuild is
+//     answered.
+//  4. Otherwise the CA file is written when Verify needs it and it is
+//     absent; the channel is pointed at the new master (SSL, verified
+//     when Verify); a failure up to here starts replication on the old
+//     channel again. START REPLICA; the source pin moves; the receiver is
+//     watched for up to repointIOWait. A connection error MySQL retries
+//     (network, refused login while the new master warms up) is reported
+//     in IOError with IORunning false; any other receiver error is
+//     returned. Either way replication stays on the new master (the
+//     panel decides).
 
 // repointIOWait bounds the wait for the receiver after START REPLICA.
 var repointIOWait = 15 * time.Second
+
+// repointHook, when set, is called at the stage "after-errant-check";
+// tests use it to let an applier backlog run there.
+var repointHook func(stage string)
+
+func repointPoint(stage string) {
+	if repointHook != nil {
+		repointHook(stage)
+	}
+}
 
 func (d *Driver) registerRepoint(reg *commands.Registry) {
 	reg.Register("mysql.repoint", func(ctx context.Context, params json.RawMessage) (any, error) {
@@ -85,7 +100,7 @@ func (d *Driver) registerRepoint(reg *commands.Registry) {
 			d.warn("mysql repoint failed", "new_source", key, "err", err)
 			return nil, err
 		}
-		d.log("mysql repointed", "new_source", key, "needs_rebuild", res.NeedsRebuild, "errant", res.Errant, "io_running", res.IORunning)
+		d.log("mysql repointed", "new_source", key, "needs_rebuild", res.NeedsRebuild, "errant", res.Errant, "io_running", res.IORunning, "io_error", res.IOError)
 		return res, nil
 	})
 }
@@ -165,39 +180,54 @@ func (d *Driver) repoint(ctx context.Context, h Host, p proto.RepointParams, caP
 		}
 	}
 
-	var errant string
-	if err := db.QueryRowContext(ctx, "SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", st.GTIDExecuted).Scan(&errant); err != nil {
-		return res, fmt.Errorf("bandingkan set GTID dengan master baru: %w", err)
-	}
-	if errant = strings.ReplaceAll(errant, "\n", ""); errant != "" {
-		if err := d.pins.SetSource(nm.Host, nm.Port); err != nil {
-			return res, fmt.Errorf("pin sumber gagal dipindah ke %s: %w", key, err)
-		}
-		d.warn("replica holds transactions the new master lacks; source pin moved, rebuild needed", "new_source", key, "errant", errant)
-		return proto.RepointResult{NeedsRebuild: true, Errant: errant}, nil
-	}
-
+	// The applier is stopped before gtid_executed is read: a transaction
+	// applied after the reading would be an errant one nobody checked.
+	// From here every way out but the new channel's START REPLICA starts
+	// replication again when it ran before (resume).
+	wasRunning := rs.IORunning == "Yes" || rs.IORunning == "Connecting" || rs.SQLRunning == "Yes"
 	if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
 		return res, fmt.Errorf("STOP REPLICA: %w", err)
 	}
-	restart := func(cause error) error {
+	resume := func(cause error) error {
+		if !wasRunning {
+			return cause
+		}
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancel()
 		if _, err := db.ExecContext(rctx, "START REPLICA"); err != nil {
-			return fmt.Errorf("%w; replikasi ke sumber lama juga gagal dijalankan kembali (START REPLICA: %v)", cause, err)
+			if cause == nil {
+				return fmt.Errorf("replikasi gagal dijalankan kembali (START REPLICA: %v)", err)
+			}
+			return fmt.Errorf("%w; replikasi juga gagal dijalankan kembali (START REPLICA: %v)", cause, err)
 		}
 		return cause
 	}
+	var errant string
+	if err := db.QueryRowContext(ctx, "SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", st.GTIDExecuted).Scan(&errant); err != nil {
+		return res, resume(fmt.Errorf("bandingkan set GTID dengan master baru: %w", err))
+	}
+	repointPoint("after-errant-check")
+	if errant = strings.ReplaceAll(errant, "\n", ""); errant != "" {
+		if err := d.pins.SetSource(nm.Host, nm.Port); err != nil {
+			return res, resume(fmt.Errorf("pin sumber gagal dipindah ke %s: %w", key, err))
+		}
+		d.warn("replica holds transactions the new master lacks; source pin moved, rebuild needed", "new_source", key, "errant", errant)
+		if err := resume(nil); err != nil {
+			return res, fmt.Errorf("pin sumber sudah dipindah ke %s (perlu dibangun ulang, errant %s), tetapi %w", key, errant, err)
+		}
+		return proto.RepointResult{NeedsRebuild: true, Errant: errant}, nil
+	}
+
 	if writeCA {
 		d.tlsMu.Lock()
 		_, err := trustTLS(h.Layout(), caPEM)
 		d.tlsMu.Unlock()
 		if err != nil {
-			return res, restart(fmt.Errorf("simpan CA: %w", err))
+			return res, resume(fmt.Errorf("simpan CA: %w", err))
 		}
 	}
 	if _, err := ConfigureReplication(ctx, h, src); err != nil {
-		return res, restart(err)
+		return res, resume(err)
 	}
 	if _, err := db.ExecContext(ctx, "START REPLICA"); err != nil {
 		return res, fmt.Errorf("replikasi sudah diarahkan ke %s, tetapi START REPLICA gagal: %w", key, err)
@@ -205,7 +235,7 @@ func (d *Driver) repoint(ctx context.Context, h Host, p proto.RepointParams, caP
 	if err := d.pins.SetSource(nm.Host, nm.Port); err != nil {
 		return res, fmt.Errorf("replikasi sudah diarahkan ke %s, tetapi pin sumber gagal dipindah: %w", key, err)
 	}
-	res.IORunning, err = awaitReceiver(ctx, db)
+	res.IORunning, res.IOError, err = awaitReceiver(ctx, db)
 	if err != nil {
 		return res, fmt.Errorf("replikasi sudah diarahkan ke %s dan pin sumber dipindah, tetapi: %w", key, err)
 	}
@@ -284,27 +314,36 @@ func oldSourceUUIDs(ctx context.Context, db *sql.DB, known string) ([]string, er
 	return uuids, nil
 }
 
-// awaitReceiver watches the receiver for up to repointIOWait: true once
-// it runs, false when it is still connecting at the end, its error when
-// it fails.
-func awaitReceiver(ctx context.Context, db *sql.DB) (bool, error) {
+// retryableIOErrnos are receiver errors MySQL keeps retrying: the new
+// master not reachable yet, the connection lost, a login refused while
+// its accounts are being set up.
+var retryableIOErrnos = map[int]bool{1045: true, 2003: true, 2005: true, 2013: true}
+
+// awaitReceiver watches the receiver for up to repointIOWait: running
+// once it runs; still connecting at the end, or failing with a retryable
+// error (ioErr, its text), not running; any other receiver error is
+// returned.
+func awaitReceiver(ctx context.Context, db *sql.DB) (running bool, ioErr string, err error) {
 	deadline := time.Now().Add(repointIOWait)
 	for {
 		rs, err := currentStatus(ctx, db)
 		switch {
 		case err != nil:
-			return false, err
+			return false, "", err
 		case rs == nil:
-			return false, errNotReplica
-		case rs.LastIOErrno != 0:
-			return false, ioError(rs)
-		case rs.IORunning == "Yes":
-			return true, nil
+			return false, "", errNotReplica
+		case rs.IORunning == "Yes" && rs.LastIOErrno == 0:
+			return true, "", nil
+		case rs.LastIOErrno != 0 && !retryableIOErrnos[rs.LastIOErrno]:
+			return false, "", ioError(rs)
 		case time.Now().After(deadline):
-			return false, nil
+			if rs.LastIOErrno != 0 {
+				return false, ioError(rs).Error(), nil
+			}
+			return false, "", nil
 		}
 		if err := pause(ctx, ReadyPollInterval); err != nil {
-			return false, err
+			return false, "", err
 		}
 	}
 }

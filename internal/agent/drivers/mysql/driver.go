@@ -73,6 +73,13 @@ type Driver struct {
 	// quarantine, repoint and the guard run one at a time.
 	promoteMu sync.Mutex
 	guard     promoteGuard
+	// quarantinePending: a quarantine was written while MySQL was down;
+	// the guard reports it once MySQL answers (guardQuarantined).
+	quarantinePending bool
+	// qUptime is MySQL's Uptime as guardQuarantined last read it, at
+	// qUptimeAt.
+	qUptime   int64
+	qUptimeAt time.Time
 
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
