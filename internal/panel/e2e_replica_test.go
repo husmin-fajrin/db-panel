@@ -19,12 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/husmin-fajrin/db-panel/internal/agent"
-	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
-	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
-	agentmon "github.com/husmin-fajrin/db-panel/internal/agent/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -358,70 +354,9 @@ func TestE2ECreateReplica(t *testing.T) {
 // stops when the test ends, before inst does.
 func startE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance, logs io.Writer) (int64, string) {
 	t.Helper()
-	srv, err := p.Store.CreateServer(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tok, err := p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	cfg, err := agent.Pair(ctx, p.PublicURL(), tok.Token, dir, nil, agent.PairOptions{WebPin: p.certInfo().Pin})
-	if err != nil {
-		cancel()
-		t.Fatalf("Pair %s: %v", name, err)
-	}
-	box, err := secrets.LoadOrCreate(filepath.Join(dir, "secrets.key"))
-	if err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	creds := mysql.NewFileCredentialStore(filepath.Join(dir, "mysql.cred"), box)
-
-	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})).With("agent", name)
-	sys := probe.RealSystem()
-	reg := commands.NewRegistry()
-	probe.Register(reg, sys, "e2e")
-	a := agent.New(cfg, reg, logger)
-	runner := jobs.NewRunner(a, logger)
-	runner.Register(reg)
-	d := &mysql.Driver{Host: inst.HostWith(creds), Creds: creds, Jobs: runner, Logger: logger, Sys: sys, Cfg: cfg, PinDir: dir}
-	d.Register(reg)
-	// The health monitor, as "dbpanel agent" runs it; the panel sends its
-	// intervals with monitor.configure once the agent is online.
-	mon := agentmon.New(d, a, logger, agentmon.Options{Pins: d.Pins()})
-	mon.Register(reg)
-
-	done := make(chan error, 1)
-	monDone := make(chan struct{})
-	go func() { done <- a.Run(ctx) }()
-	go func() {
-		defer close(monDone)
-		mon.Run(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			t.Errorf("agent %s did not stop", name)
-		}
-		select {
-		case <-monDone:
-		case <-time.After(30 * time.Second):
-			t.Errorf("health monitor of agent %s did not stop", name)
-		}
-	})
-	waitForWithin(t, 30*time.Second, "agent "+name+" online", func() bool {
-		got, err := p.Store.GetServer(srv.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return p.Hub.IsOnline(srv.ID) && got.ProbeJSON != ""
-	})
-	return srv.ID, dir
+	ag := pairE2EAgent(t, p, name, inst, logs)
+	ag.start(t)
+	return ag.srv, ag.dir
 }
 
 // readPin is a pin file's content without the newline; "" when absent.

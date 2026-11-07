@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -10,20 +11,29 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent"
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
+	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
+	agentmon "github.com/husmin-fajrin/db-panel/internal/agent/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
+	"github.com/husmin-fajrin/db-panel/internal/secrets"
 )
 
 // e2eWait bounds each monitoring step of the end-to-end tests: with the
@@ -368,4 +378,312 @@ func tail(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// e2eAgent is an in-process agent paired with the panel whose MySQL driver
+// manages inst. Unlike a plain startE2EAgent it can be stopped and started
+// again with the same directory (its certificate, pins, promote lock and
+// salvage files), as "systemctl stop/start dbpanel-agent" would.
+type e2eAgent struct {
+	p    *Panel
+	name string
+	inst *testmysql.Instance
+	logs io.Writer
+	srv  int64
+	dir  string
+	cfg  config.Config
+
+	stopFn func() // nil while stopped
+}
+
+// pairE2EAgent creates a server called name on p and pairs an agent
+// directory with it; start runs the agent. The agent, if running, stops
+// when the test ends, before inst does.
+func pairE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance, logs io.Writer) *e2eAgent {
+	t.Helper()
+	srv, err := p.Store.CreateServer(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := p.Store.CreatePairToken(srv.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cfg, err := agent.Pair(context.Background(), p.PublicURL(), tok.Token, dir, nil, agent.PairOptions{WebPin: p.certInfo().Pin})
+	if err != nil {
+		t.Fatalf("Pair %s: %v", name, err)
+	}
+	ag := &e2eAgent{p: p, name: name, inst: inst, logs: logs, srv: srv.ID, dir: dir, cfg: cfg}
+	t.Cleanup(func() {
+		if ag.stopFn != nil {
+			ag.stopFn()
+		}
+	})
+	return ag
+}
+
+// start runs the agent and its health monitor, wired as "dbpanel agent"
+// wires them (the promote guard's events go to the panel), with the
+// replicas-seen file and the salvage directory in the agent's own
+// directory so the test's agents do not share them, and waits until the
+// panel sees it online with its probe.
+func (ag *e2eAgent) start(t *testing.T) {
+	t.Helper()
+	if ag.stopFn != nil {
+		t.Fatalf("agent %s already running", ag.name)
+	}
+	box, err := secrets.LoadOrCreate(filepath.Join(ag.dir, "secrets.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := mysql.NewFileCredentialStore(filepath.Join(ag.dir, "mysql.cred"), box)
+	logger := slog.New(slog.NewTextHandler(ag.logs, &slog.HandlerOptions{Level: slog.LevelDebug})).With("agent", ag.name)
+	sys := probe.RealSystem()
+	reg := commands.NewRegistry()
+	probe.Register(reg, sys, "e2e")
+	a := agent.New(ag.cfg, reg, logger)
+	runner := jobs.NewRunner(a, logger)
+	runner.Register(reg)
+	d := &mysql.Driver{Host: ag.inst.HostWith(creds), Creds: creds, Jobs: runner, Logger: logger, Sys: sys, Cfg: ag.cfg,
+		PinDir: ag.dir, SeenPath: filepath.Join(ag.dir, "replicas-seen"), SalvageDir: filepath.Join(ag.dir, "salvage"),
+		Events: a}
+	d.Register(reg)
+	// The health monitor, as "dbpanel agent" runs it; the panel sends its
+	// intervals with monitor.configure once the agent is online.
+	mon := agentmon.New(d, a, logger, agentmon.Options{Pins: d.Pins()})
+	mon.Register(reg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	monDone := make(chan struct{})
+	go func() { done <- a.Run(ctx) }()
+	go func() {
+		defer close(monDone)
+		mon.Run(ctx)
+	}()
+	ag.stopFn = func() {
+		ag.stopFn = nil
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Errorf("agent %s did not stop", ag.name)
+		}
+		select {
+		case <-monDone:
+		case <-time.After(30 * time.Second):
+			t.Errorf("health monitor of agent %s did not stop", ag.name)
+		}
+	}
+	waitForWithin(t, 30*time.Second, "agent "+ag.name+" online", func() bool {
+		got, err := ag.p.Store.GetServer(ag.srv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ag.p.Hub.IsOnline(ag.srv) && got.ProbeJSON != ""
+	})
+}
+
+// stop stops the agent process (its MySQL keeps running) and waits until
+// the panel sees it offline.
+func (ag *e2eAgent) stop(t *testing.T) {
+	t.Helper()
+	if ag.stopFn == nil {
+		t.Fatalf("agent %s is not running", ag.name)
+	}
+	ag.stopFn()
+	waitForWithin(t, e2eWait, "agent "+ag.name+" offline", func() bool { return !ag.p.Hub.IsOnline(ag.srv) })
+}
+
+// killMySQL kills inst's mysqld with SIGKILL, a crash without a clean
+// shutdown, and waits until it is gone. restartMySQL starts it again.
+func killMySQL(t *testing.T, inst *testmysql.Instance) {
+	t.Helper()
+	b, err := os.ReadFile(inst.PIDFile)
+	if err != nil {
+		t.Fatalf("killMySQL: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("killMySQL: pid file %q", b)
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("killMySQL %d: %v", pid, err)
+	}
+	// A zombie (nobody reaps the daemonised server) has an empty cmdline.
+	waitForWithin(t, e2eWait, "mysqld "+strconv.Itoa(pid)+" gone", func() bool {
+		cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+		return err != nil || !strings.Contains(string(cmdline), "--defaults-file="+inst.ConfigFile+"\x00")
+	})
+}
+
+// restartMySQL starts inst's mysqld after killMySQL (or restarts a running
+// one) and waits until it accepts connections.
+func restartMySQL(t *testing.T, inst *testmysql.Instance) {
+	t.Helper()
+	inst.Restart(t)
+}
+
+// e2eNode is one server of e2ePromoteTopology.
+type e2eNode struct {
+	name  string
+	inst  *testmysql.Instance
+	db    *sql.DB
+	agent *e2eAgent
+}
+
+func (n *e2eNode) srv() int64 { return n.agent.srv }
+
+// addr is the node's MySQL address as the topology knows it.
+func (n *e2eNode) addr() string { return "127.0.0.1:" + strconv.Itoa(n.inst.Port) }
+
+// e2ePromoteTopology is a running panel with a master of database a and two
+// replicas (A and B) following every database, made through the UI, with
+// Telegram pointed at a fake Bot API and short monitoring intervals.
+type e2ePromoteTopology struct {
+	p              *Panel
+	ui             *uiClient
+	tg             *fakeTelegram
+	logs           *syncBuffer
+	master, ra, rb *e2eNode
+}
+
+// startE2EPromoteTopology starts three mysqld instances (the baseline
+// settings of testmysql, so three fit next to each other), the panel and
+// three agents, then runs "Siapkan master" and "Buat replika" of every
+// database twice over the UI. Replica B's create starts once A is ready.
+func startE2EPromoteTopology(t *testing.T) *e2ePromoteTopology {
+	t.Helper()
+	start := time.Now()
+	// The instances first, so their cleanup (stop mysqld) runs last.
+	insts := []*testmysql.Instance{testmysql.Start(t, testmysql.Options{}), testmysql.Start(t, testmysql.Options{}),
+		testmysql.Start(t, testmysql.Options{})}
+	e := &e2ePromoteTopology{logs: &syncBuffer{}}
+	nodes := []**e2eNode{&e.master, &e.ra, &e.rb}
+	for i, name := range []string{"master-e2e", "replika-a", "replika-b"} {
+		*nodes[i] = &e2eNode{name: name, inst: insts[i], db: openInstance(t, insts[i])}
+	}
+	execSQL(t, e.master.db,
+		"CREATE DATABASE a", "CREATE TABLE a.t (id INT PRIMARY KEY, v VARCHAR(64))", "INSERT INTO a.t VALUES (1, 'awal')")
+
+	o := testOptions(t)
+	o.Logger = slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("panel and agent log:\n%s", tail(e.logs.String(), 300))
+		}
+	})
+	e.p = newPanel(t, o)
+	e.tg = newFakeTelegram(t)
+	configureE2EMonitoring(t, e.p, e.tg)
+	uiAddr, _ := startPanel(t, e.p)
+	for _, n := range []*e2eNode{e.master, e.ra, e.rb} {
+		n.agent = pairE2EAgent(t, e.p, n.name, n.inst, e.logs)
+		n.agent.start(t)
+	}
+
+	e.ui = newUIClient(t, "https://"+uiAddr)
+	e.ui.login(readInitialPassword(t, o))
+	for _, n := range []*e2eNode{e.master, e.ra, e.rb} {
+		e.connectRoot(t, n)
+	}
+	prepareID := e.ui.postJob(serverPath(e.master.srv())+"/prepare-master", nil)
+	job := waitJob(t, e.p, prepareID, e2ePrepareTimeout, func(j store.Job) bool {
+		// The instance binds 127.0.0.1 only: approve the restart.
+		e.ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
+		return true
+	})
+	if job.Status != store.JobSucceeded {
+		t.Fatalf("prepare_master ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, e.p, prepareID))
+	}
+	for _, n := range []*e2eNode{e.ra, e.rb} {
+		e.createReplica(t, e.master, n, false)
+	}
+	for _, n := range []*e2eNode{e.ra, e.rb} {
+		waitRow(t, n.db, "a", 1, "awal")
+	}
+	waitStatus(t, e.p, e.master.srv(), healthmon.StatusHealthy)
+	for _, n := range []*e2eNode{e.ra, e.rb} {
+		waitStatus(t, e.p, n.srv(), healthmon.StatusSynced)
+	}
+	t.Logf("three-server topology ready after %s", time.Since(start).Round(time.Second))
+	return e
+}
+
+// connectRoot is "Hubungkan MySQL" on n as the instance's root over the
+// socket.
+func (e *e2ePromoteTopology) connectRoot(t *testing.T, n *e2eNode) {
+	t.Helper()
+	loc := e.ui.postRedirect(serverPath(n.srv())+"/mysql/connect", url.Values{"user": {"root"}, "password": {""}, "host": {""}})
+	if want := serverPath(n.srv()) + "?pesan=terhubung"; loc != want {
+		t.Fatalf("connect MySQL on %s redirected to %q, want %q", n.name, loc, want)
+	}
+}
+
+// replicaFormDBs are the databases the replica form offers.
+var replicaFormDBs = regexp.MustCompile(`name="databases" value="([^"]*)"`)
+
+// createReplica runs "Buat replika" of every database the form of master
+// offers onto target over the UI; with rebuild, it is "Bangun ulang sebagai
+// replika" of the quarantined old master target (token and typed name). A
+// job that waits for the admin account to be reconnected (CLONE replaced
+// it) gets root reconnected and approved; any other wait is approved. The
+// job must succeed.
+func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode, rebuild bool) string {
+	t.Helper()
+	formPath := fmt.Sprintf("/masters/%d/replicas/new", master.srv())
+	if rebuild {
+		formPath += "?bangun-ulang=" + strconv.FormatInt(target.srv(), 10)
+	}
+	form := e.ui.get(formPath)
+	var dbs []string
+	for _, m := range replicaFormDBs.FindAllStringSubmatch(form, -1) {
+		dbs = append(dbs, m[1])
+	}
+	if len(dbs) == 0 {
+		t.Fatalf("replica form %s offers no database:\n%s", formPath, form)
+	}
+	vals := url.Values{"target": {strconv.FormatInt(target.srv(), 10)}, "databases": dbs, "confirm_wipe": {"1"}}
+	if rebuild {
+		vals.Set("rebuild", "1")
+		vals.Set("confirm_name", target.name)
+		vals.Set("confirm_token", e.ui.confirmToken(web.ActRebuildOldMaster, "server", target.srv()))
+	}
+	id := e.ui.postJob(fmt.Sprintf("/masters/%d/replicas", master.srv()), vals)
+	job := waitJob(t, e.p, id, e2eCreateTimeout, func(j store.Job) bool {
+		if strings.Contains(j.ParamsJSON, `"wait_reason":"reconnect"`) {
+			e.connectRoot(t, target)
+		}
+		e.ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
+		return true
+	})
+	if job.Status != store.JobSucceeded {
+		t.Fatalf("create_replica of %s (rebuild %v) ended %s: %s\n%s", target.name, rebuild, job.Status, job.Error,
+			jobLogText(t, e.p, id))
+	}
+	if rep, err := e.p.Store.GetReplicaByServer(target.srv()); err != nil || rep.State != store.ReplicaReady {
+		t.Fatalf("replica %s after create = %+v, %v; want ready", target.name, rep, err)
+	}
+	t.Logf("create_replica of %s (rebuild %v) succeeded", target.name, rebuild)
+	return id
+}
+
+// globalVar reads a global system variable of the MySQL behind db.
+func globalVar(t *testing.T, db *sql.DB, name string) string {
+	t.Helper()
+	var n, v string
+	if err := db.QueryRow("SHOW GLOBAL VARIABLES LIKE ?", name).Scan(&n, &v); err != nil {
+		t.Fatalf("SHOW GLOBAL VARIABLES LIKE %s: %v", name, err)
+	}
+	return v
+}
+
+// waitVar waits up to e2eWait for a global variable to read want.
+func waitVar(t *testing.T, db *sql.DB, name, want string) {
+	t.Helper()
+	waitForWithin(t, e2eWait, name+" = "+want, func() bool {
+		var n, v string
+		return db.QueryRow("SHOW GLOBAL VARIABLES LIKE ?", name).Scan(&n, &v) == nil && v == want
+	})
 }

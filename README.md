@@ -837,6 +837,153 @@ ditolak.
 - **Periksa sekarang** dan **Jangan ganggu**: lihat "Pemantauan" dan
   "Notifikasi Telegram".
 
+## Promote
+
+Promote menjadikan salah satu replika master baru. Buka halaman master dan
+tekan **Promote…**: panel membuka layar pertimbangan, dan dari situ juga
+memilih jenisnya sendiri. Anda tidak memilih jenis promote; layar
+menjelaskan kenapa jenis itu yang tersedia.
+
+**Jangan jalankan panel di server master.** Bila server master mati,
+panel ikut mati dan promote darurat tidak bisa dilakukan dari panel. Selama
+panel berjalan di server master, halaman master dan layar promote
+menampilkan peringatan tetap "Panel berjalan di server ini; bila server ini
+mati, promote darurat tidak bisa dilakukan dari panel". Panel boleh berjalan
+di salah satu replika, dan replika itu boleh dipilih menjadi master baru.
+
+### Promote terencana dan darurat
+
+- **Terencana (master hidup):** master berstatus Sehat atau Terkunci.
+  Panel mengunci master (`super_read_only` dengan `SET PERSIST`, bertahan
+  saat MySQL restart), menunggu replika terpilih menerapkan semua
+  transaksinya (paling lama 10 menit), menjadikannya master baru, lalu
+  mengkarantina master lama. Aplikasi tidak bisa menulis sejak master
+  dikunci sampai alamatnya diganti di tiap aplikasi. Bila replika gagal
+  menyusul, kunci master dibuka lagi dan tidak ada yang berubah.
+- **Darurat (master tidak terjangkau):** master Diduga tumbang, Tidak
+  terjangkau, atau agent-nya offline. Replika terpilih dijadikan master
+  dengan transaksi yang sudah diterimanya: relay log yang sudah sampai
+  diterapkan dulu (paling lama 10 menit), jadi tidak dibuang. Agent
+  replika memeriksa sendiri bahwa master memang tidak menjawab (tiga kali
+  coba dalam sekitar 30 detik); bila master ternyata menjawab dan bisa
+  ditulis, promote ditolak. Konfirmasi meminta kata sandi dan nama master
+  lama.
+
+Bila master menjawab dari replika tetapi agent master tidak bisa dipulihkan,
+kunci master langsung di servernya dengan `sudo dbpanel agent lock-master`;
+promote darurat lalu berjalan sebagai terencana. Kunci yang dipasang
+dengan `lock-master` hanya dibuka dengan `sudo dbpanel agent unlock-master`
+(lihat "Peran dan sumber yang dipin"). Perintah yang sama, dijalankan di
+server master, membuka kunci promote terencana yang tertinggal bila
+kandidatnya hilang untuk waktu lama (peringatan **Master terkunci** tetap
+terbuka selama itu).
+
+### Layar pertimbangan
+
+Layar promote menampilkan, untuk tiap replika: status, lag, posisi
+terhadap master, antrean terapan ("semua diterima, 2 belum diterapkan;
+akan diterapkan sebelum promote"), cakupan database, kesegaran laporan,
+tanda **Paling mutakhir**, dan alasan bila replika tidak bisa dipilih
+(Dihentikan, Berhenti dengan error, Agent offline, data tidak segar, atau
+mempunyai transaksi di luar master). Pilihan bawaan adalah replika lengkap
+yang paling mutakhir.
+
+Pada promote darurat posisi dihitung dari laporan terakhir master. Bila
+agent master masih tersambung tetapi MySQL-nya mati, panel membaca binlog
+terakhir di disk master, jadi angkanya pasti ("ada 3 transaksi yang belum
+sampai ke replika mana pun"). Panel juga meminta tiap replika mencoba
+menyambung ke master (**Periksa sekarang** mengulangnya). Transaksi yang
+belum sampai ke replika terpilih hilang dari master baru; bila master lama
+hidup lagi, panel bisa memeriksa dan mengamankannya (lihat di bawah).
+
+**Replika sebagian** (yang hanya mengikuti beberapa database) boleh
+dipilih. Layar menampilkan kotak merah "Database berikut tidak akan ada di
+master baru: …"; data itu tetap utuh di master lama yang dikarantina dan
+bisa diamankan dari sana. Centang persetujuannya, dan konfirmasi meminta
+nama replika. Replika yang tidak terjangkau tidak menghalangi promote:
+centang persetujuannya, dan replika itu ditandai **Perlu diarahkan ulang**
+lalu diarahkan ke master baru saat tersambung lagi.
+
+**Jaringan terbelah.** Promote darurat membuktikan bahwa master tidak
+terjangkau dari replika, bukan bahwa master mati. Master yang masih hidup
+di sisi jaringan lain tetap bisa ditulis aplikasi di sisi itu, dan
+karantina tidak bisa sampai ke sana. Panel tidak mengunci master secara
+otomatis saat ia tidak melihat panel dan replika (itu akan memadamkan
+master yang sehat pada kebetulan yang salah). Layar mengatakannya: "Pastikan
+master benar-benar mati atau tidak lagi dipakai aplikasi; bila ia hidup di
+jaringan lain, tulisan di sana akan tertinggal". **Periksa data tertinggal**
+menemukan tulisan yang masuk di sana.
+
+### Pengalihan aplikasi
+
+Setelah promote selesai, panel membuka layar pengalihan (juga lewat banner
+dashboard "Promote menunggu pengalihan aplikasi" dan halaman master baru)
+dan mengirim ringkasan ke Telegram dengan alamat master baru. Layar itu
+menampilkan alamat master baru (dengan tombol salin) dan alamat lama,
+lalu dua tabel yang diperbarui tiap 15 detik: koneksi yang masih ke master
+lama dan koneksi yang sudah ke master baru (per host asal, akun, dan
+database; akun `dbpanel_*` dan thread MySQL sendiri tidak ditampilkan).
+Arahkan semua aplikasi yang menulis ke database ke alamat baru, restart
+aplikasinya, lalu tekan **Sudah saya alihkan**. Selama belum ditekan,
+Telegram mengingatkan dengan jarak pengulangan peringatan (bawaan 6 jam),
+dan master lama tidak bisa dibangun ulang atau dihapus.
+
+Pada promote darurat dengan master lama yang belum terjangkau, karantina
+dikirim begitu agent master lama tersambung lagi. Master lama yang hidup
+kembali bisa sempat ditulis aplikasi yang belum dialihkan di antara MySQL
+hidup dan agent-nya tersambung (biasanya hitungan detik); layar pengalihan
+mengingatkannya ("Master lama belum dikarantina karena belum terjangkau.
+Pastikan aplikasi dialihkan sebelum ia dihidupkan kembali."). Transaksi yang
+masuk di jendela itu ditemukan oleh **Periksa data tertinggal**.
+
+### Master lama
+
+Master lama dikarantina: agent-nya memasang `super_read_only` dengan
+`SET PERSIST`, pin perannya menjadi `quarantined`, dan sumbernya master
+baru. Saat agent itu start atau MySQL-nya hidup lagi, agent memasang
+`super_read_only` lebih dulu sebelum hal lain. Halaman server master lama
+memuat kotak **Master lama** dengan:
+
+- **Periksa data tertinggal:** membandingkan GTID master lama dengan master
+  baru dan merangkum transaksi yang tidak sampai ke master baru dari binlog
+  (jumlah transaksi, tabel dan jumlah baris, rentang waktu; isi baris tidak
+  ditampilkan). Hasilnya "Tidak ada data tertinggal" atau, misalnya, "Ada 1
+  transaksi yang tidak sampai ke master baru, menyentuh simrs.pasien (1
+  baris), antara 09:41:20 dan 09:41:20". Pada promote terencana hasilnya
+  selalu kosong.
+- **Amankan data tertinggal** (bila ada): menulis transaksi itu sebagai
+  berkas SQL di `/var/lib/dbpanel/salvage` di server master lama, yang bisa
+  dijalankan dengan `mysql` dan berisi komentar yang bisa dibaca untuk tiap
+  baris. Berkas disimpan 7 hari. Daftar berkas di halaman yang sama punya
+  tombol **Unduh** (lewat HTTPS, dialirkan dari agent tanpa disimpan di
+  panel) dan **Hapus**; keduanya meminta kata sandi panel untuk berkas itu
+  saja, karena berkas itu bisa jadi satu-satunya salinan data tertinggal.
+- **Bangun ulang sebagai replika:** formulir "Buat replika" dari master
+  baru dengan master lama sebagai tujuan. Semua data MySQL di master lama
+  diganti salinan dari master baru; konfirmasi menyebut koneksi aplikasi
+  yang masih ada dan data tertinggal yang belum diperiksa atau belum
+  diamankan, lalu meminta kata sandi dan nama server. Berkas yang sudah
+  diamankan tidak ikut dihapus.
+- **Hapus server:** melepas pin `quarantined` (agent tidak lagi menjaga
+  baca-saja saat start). Seperti bangun ulang, baru tersedia setelah
+  **Sudah saya alihkan**.
+
+### Replika lain
+
+Replika lain diarahkan ke master baru di akhir promote. Replika yang tidak
+terjangkau saat itu berstatus **Perlu diarahkan ulang ke master baru; akan
+dilakukan saat tersambung** dan diarahkan otomatis saat agent-nya
+tersambung lagi; tombol **Arahkan sekarang** mencobanya saat itu juga.
+Replika yang punya transaksi yang tidak ada di master baru berstatus **Perlu
+dibangun ulang**: replikasinya tidak diubah, pin sumbernya dipindah ke
+master baru, dan **Resync ulang** dari master baru memperbaikinya (tidak
+otomatis). Keduanya memunculkan peringatan sampai selesai.
+
+Bila promote berhenti setelah replika terpilih sudah bisa ditulis, panel
+tidak membatalkannya (tidak ada jalan mundur yang aman dari dua master).
+Pekerjaan berhenti dengan status selesai sebagian; buka pekerjaannya dan
+tekan **Ulangi dari tahap ini**.
+
 ## Catatan audit
 
 Menu **Audit** mencatat setiap tindakan yang mengubah sesuatu: login
