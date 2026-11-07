@@ -7,6 +7,18 @@
         :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
 </div>
 
+{{if eq .Replica.State "needs_repoint"}}
+<div role="alert" class="alert alert-warning mb-6 flex flex-col items-start gap-2" data-needs-repoint>
+  <span>Perlu diarahkan ulang ke master baru; akan dilakukan saat tersambung. Master baru: <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a>.</span>
+  {{if .CanRepoint}}<form method="post" action="/replicas/{{.Server.ID}}/repoint"><button type="submit" class="btn btn-sm btn-primary">Arahkan sekarang</button></form>{{end}}
+</div>
+{{else if eq .Replica.State "needs_rebuild"}}
+<div role="alert" class="alert alert-error mb-6 flex flex-col items-start gap-2" data-needs-rebuild>
+  <span>Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru. Tekan <strong>Resync ulang</strong> di bagian Kontrol untuk menyalin ulang dari master baru <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a>; ini tidak dilakukan otomatis.</span>
+</div>
+{{end}}
+{{with .RepointInfo}}<div role="status" class="alert alert-info mb-6"><span>{{.}}</span></div>{{end}}
+
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
     <h2 class="card-title">Status</h2>

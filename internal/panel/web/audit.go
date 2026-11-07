@@ -48,7 +48,13 @@ var auditFullKeys = map[string]bool{store.SettingPanelBaseURL: true, store.Setti
 // auditKeptKeys are detail keys whose string value is kept even when the
 // action did not succeed: the handler checked it against a fixed list
 // first (the action and target kind of a confirmation).
-var auditKeptKeys = map[string]bool{"action": true, "target_kind": true}
+// salvage_file is a salvage file name the handler checked against the
+// agent's strict pattern before auditing it.
+var auditKeptKeys = map[string]bool{"action": true, "target_kind": true, auditSalvageFile: true}
+
+// auditSalvageFile is the detail key of a salvage file's name
+// (salvage_download, salvage_delete).
+const auditSalvageFile = "salvage_file"
 
 // unknownUser stands for a login_failed username that names no account: a
 // password typed in the username field must not be kept for ever.

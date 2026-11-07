@@ -230,6 +230,9 @@ func New(o Options) (*Panel, error) {
 		// Monitor's views; agents of another version are refused.
 		Health:  p.Monitor,
 		Version: p.opts.Version,
+		// The result of "Periksa data tertinggal" goes to Telegram too
+		// (spec 5.4).
+		SendText: p.Notifier.SendText,
 	})
 	p.Orchestrator.Resume(context.Background())
 	return p, nil

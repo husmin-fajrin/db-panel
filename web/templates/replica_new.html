@@ -1,6 +1,17 @@
 {{define "title"}}Buat replika{{end}}
 {{define "content"}}
+{{with .Rebuild}}
+<h1 class="text-2xl font-bold mb-4">Bangun ulang {{.Server.Name}} sebagai replika {{$.Master.Name}}</h1>
+<div role="alert" class="alert alert-warning mb-4 flex flex-col items-start gap-2">
+  <span>{{.Server.Name}} adalah master lama yang dikarantina. Semua data MySQL-nya diganti salinan dari master baru {{$.Master.Name}}, lalu ia mengikuti master baru sebagai replika.</span>
+  {{if .Warnings}}<ul class="list-disc ml-6">{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>{{end}}
+</div>
+{{if .CutoverPending}}
+<div role="alert" class="alert alert-error mb-4"><span>Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini. <a class="link" href="/masters/{{$.Master.ID}}/cutover">Buka layar pengalihan</a></span></div>
+{{end}}
+{{else}}
 <h1 class="text-2xl font-bold mb-4">Buat replika dari {{.Master.Name}}</h1>
+{{end}}
 {{if not .Inventory.MasterReady}}
 <div role="alert" class="alert alert-warning mb-4"><span>Master belum siap. Jalankan <strong>Siapkan sebagai master</strong> di <a class="link" href="/servers/{{.Master.ID}}">halaman server</a> dulu.</span></div>
 {{end}}
@@ -8,7 +19,12 @@
   <div class="card-body gap-4">
     <fieldset class="fieldset">
       <legend class="fieldset-legend">Server tujuan</legend>
-      {{if .Targets}}
+      {{if .Rebuild}}
+      <input type="hidden" name="rebuild" value="1">
+      <input type="hidden" name="target" value="{{.Rebuild.Server.ID}}">
+      <p><strong>{{.Rebuild.Server.Name}}</strong>{{with .Rebuild.Server.Address}} ({{.}}){{end}}</p>
+      {{range .Targets}}{{if .NotConnected}}<p class="text-sm">MySQL di <strong>{{.Name}}</strong> belum dihubungkan: <a class="link" href="/servers/{{.ID}}">buka halaman servernya dan klik Hubungkan MySQL</a> dulu.</p>{{end}}{{else}}<p class="text-sm text-warning">Agent {{.Rebuild.Server.Name}} offline; bangun ulang bisa dimulai setelah agent-nya tersambung.</p>{{end}}
+      {{else if .Targets}}
       <select class="select w-full" name="target" required>
         <option value="" disabled{{if not .Target}} selected{{end}}>Pilih server</option>
         {{range .Targets}}
@@ -62,7 +78,11 @@
 
     <div class="card-actions justify-between">
       <a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Batal</a>
-      <button type="submit" class="btn btn-primary"{{if not .Targets}} disabled{{end}}>Buat replika</button>
+      {{with .Rebuild}}
+      <button type="submit" class="btn btn-warning"{{if or (not $.Targets) .CutoverPending}} disabled{{end}} data-confirm-action="rebuild_old_master" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="{{.ConfirmText}}">Bangun ulang sebagai replika</button>
+      {{else}}
+      <button type="submit" class="btn btn-primary"{{if or (not .Targets) .RebuildBad}} disabled{{end}}>Buat replika</button>
+      {{end}}
     </div>
   </div>
 </form>

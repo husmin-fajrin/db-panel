@@ -46,6 +46,24 @@ type fakeOrch struct {
 	view       orchestrator.PromoteView
 	promoteErr error
 	promotes   []orchestrator.PromoteParams
+
+	// The old master and the cutover (web_oldmaster_test.go):
+	// connections and connErr answer Connections per server;
+	// cutoverWarning is ConfirmCutover's warning; deleteErr and repointErr
+	// what DeleteServer and RepointNow answer; salvageFiles what
+	// SalvageList lists; chunks the file SalvageRead serves, one chunk per
+	// call (endless repeats the last one without EOF); onRead runs before
+	// each read.
+	connections    map[int64]proto.ConnectionsResult
+	connErr        map[int64]error
+	cutoverWarning string
+	deleteErr      error
+	repointErr     error
+	salvageFiles   []proto.SalvageFile
+	chunks         [][]byte
+	endless        bool
+	onRead         func(offset int64)
+	reads          int
 }
 
 func (f *fakeOrch) record(call string) {
@@ -156,6 +174,9 @@ func (f *fakeOrch) DeleteServer(_ context.Context, id int64) error {
 	if f.err != nil {
 		return f.err
 	}
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	return f.st.DeleteServer(id)
 }
 
@@ -199,9 +220,19 @@ func (f *fakeOrch) StartPromote(_ context.Context, p orchestrator.PromoteParams)
 	return f.nextID, nil
 }
 
+// ConfirmCutover clears cutover_pending in the store like the
+// orchestrator.
 func (f *fakeOrch) ConfirmCutover(topologyID int64) (string, error) {
 	f.record(fmt.Sprintf("confirm-cutover %d", topologyID))
-	return "", f.err
+	if f.err != nil {
+		return "", f.err
+	}
+	if err := f.st.SetCutoverPending(topologyID, false); err != nil {
+		return "", err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cutoverWarning, nil
 }
 
 func (f *fakeOrch) DeleteUnquarantined(_ context.Context, id int64) error {
@@ -211,6 +242,73 @@ func (f *fakeOrch) DeleteUnquarantined(_ context.Context, id int64) error {
 
 func (f *fakeOrch) RepointNow(_ context.Context, id int64) error {
 	f.record(fmt.Sprintf("repoint %d", id))
+	if f.repointErr != nil {
+		return f.repointErr
+	}
+	return f.err
+}
+
+func (f *fakeOrch) StartLeftover(_ context.Context, id int64) (string, error) {
+	f.record(fmt.Sprintf("leftover %d", id))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
+func (f *fakeOrch) StartSalvage(_ context.Context, id int64) (string, error) {
+	f.record(fmt.Sprintf("salvage %d", id))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
+func (f *fakeOrch) Connections(_ context.Context, id int64) (proto.ConnectionsResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.connErr[id]; err != nil {
+		return proto.ConnectionsResult{}, err
+	}
+	return f.connections[id], nil
+}
+
+func (f *fakeOrch) SalvageList(_ context.Context, id int64) ([]proto.SalvageFile, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]proto.SalvageFile(nil), f.salvageFiles...), f.err
+}
+
+func (f *fakeOrch) SalvageRead(_ context.Context, id int64, name string, offset int64) (proto.SalvageReadResult, error) {
+	f.record(fmt.Sprintf("salvage-read %d %s %d", id, name, offset))
+	f.mu.Lock()
+	hook := f.onRead
+	f.mu.Unlock()
+	if hook != nil {
+		hook(offset)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return proto.SalvageReadResult{}, f.err
+	}
+	var size int64
+	for _, c := range f.chunks {
+		size += int64(len(c))
+	}
+	i := f.reads
+	f.reads++
+	if f.endless {
+		return proto.SalvageReadResult{Data: f.chunks[0], Size: 1 << 40}, nil
+	}
+	if i >= len(f.chunks) {
+		return proto.SalvageReadResult{EOF: true, Size: size}, nil
+	}
+	return proto.SalvageReadResult{Data: f.chunks[i], EOF: i == len(f.chunks)-1, Size: size}, nil
+}
+
+func (f *fakeOrch) SalvageDelete(_ context.Context, id int64, name string) error {
+	f.record(fmt.Sprintf("salvage-delete %d %s", id, name))
 	return f.err
 }
 

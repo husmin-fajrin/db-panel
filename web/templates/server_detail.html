@@ -16,6 +16,8 @@
 {{else if eq .Server.Role "replica"}}
 <div role="status" class="alert mb-4"><span>Server ini adalah replika.</span><a class="btn btn-sm" href="/replicas/{{.Server.ID}}">Buka halaman replika</a></div>
 {{end}}
+{{with .OldMaster}}{{template "old-master-box" $}}{{end}}
+{{with .Salvage}}{{template "salvage-files" $}}{{end}}
 {{with .ActiveJob}}
 <div role="status" class="alert alert-info mb-4"><span>Pekerjaan <strong>{{kindLabel .Kind}}</strong> belum selesai ({{statusLabel .Status}}).</span><a class="btn btn-sm" href="/jobs/{{.ID}}">Lihat pekerjaan</a></div>
 {{end}}
@@ -123,10 +125,15 @@
     {{if .Server.Paired}}
     <button type="button" class="btn btn-outline" data-open-modal="modal-pasang-ulang">Pasang ulang agent</button>
     {{end}}
-    <button type="button" class="btn btn-error btn-outline" data-open-modal="modal-hapus">Hapus server</button>
+    {{if .DeleteBlocked}}
+    <button type="button" class="btn btn-error btn-outline" disabled>Hapus server</button>
+    {{else}}
+    <button type="button" class="btn btn-error btn-outline" data-open-modal="modal-hapus">{{if .DeleteUnquarantined}}Hapus tanpa karantina{{else}}Hapus server{{end}}</button>
+    {{end}}
   </div>
   {{end}}
 </div>
+{{with .DeleteBlocked}}{{if not $.Local}}<p class="text-sm text-base-content/70 mt-2">{{.}}</p>{{end}}{{end}}
 
 {{if not .Local}}
 {{if .Server.Paired}}
@@ -143,18 +150,26 @@
 </dialog>
 {{end}}
 
+{{if not .DeleteBlocked}}
 <dialog id="modal-hapus" class="modal">
   <form method="post" action="/servers/{{.Server.ID}}/delete" class="modal-box flex flex-col gap-2">
+    {{if .DeleteUnquarantined}}
+    <h3 class="text-lg font-bold">Hapus tanpa karantina: {{.Server.Name}}?</h3>
+    <input type="hidden" name="unquarantined" value="1">
+    <p>Master lama ini tidak pernah dikarantina: agent-nya tidak terjangkau sejak promote, jadi MySQL-nya belum dikunci. Hapus hanya bila server itu sudah mati dan tidak akan dihidupkan lagi. <strong>Jangan hidupkan server ini lagi</strong>: bila MySQL-nya hidup, ia menerima tulisan seperti master dan aplikasi yang belum dialihkan bisa menulis ke sana.</p>
+    {{else}}
     <h3 class="text-lg font-bold">Hapus server {{.Server.Name}}?</h3>
     <p>Server akan dihapus dari panel, koneksi agent-nya langsung diputus, dan sertifikatnya tidak diterima lagi. Panel menolak menghapus master yang masih punya replika dan replika yang belum dilepas. Service <code>dbpanel-agent</code> di server itu tetap terpasang dan terus mencoba terhubung sampai dimatikan (<code>sudo systemctl disable --now dbpanel-agent</code>). Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang server ini dan jalankan perintah pemasangan yang baru.</p>
+    {{end}}
     <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" data-confirm-action="delete_server" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="Hapus server {{.Server.Name}} dari panel.">Ya, hapus</button>
+      <button type="submit" class="btn btn-error" data-confirm-action="delete_server" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="{{if .DeleteUnquarantined}}Hapus {{.Server.Name}} tanpa karantina: server ini tidak pernah dikarantina dan tidak boleh dihidupkan lagi.{{else}}Hapus server {{.Server.Name}} dari panel.{{end}}">Ya, hapus</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
   </form>
   <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
 </dialog>
+{{end}}
 {{end}}
 {{end}}
 
@@ -253,3 +268,107 @@
   <div><button type="submit" class="btn btn-primary btn-sm">Hubungkan MySQL</button></div>
 </form>
 {{end}}
+
+{{/* Kotak "Master lama" server yang dikarantina setelah promote (spec
+     5.4). Data: serverDetailPage dengan OldMaster terisi. */}}
+{{define "old-master-box"}}{{$s := .Server}}{{with .OldMaster}}
+<div class="card bg-base-100 shadow mb-6 border border-warning" data-old-master>
+  <div class="card-body gap-3">
+    <h2 class="card-title">Master lama (dikarantina sejak {{fmtTime (or .Promotion.FinishedAt .Promotion.StartedAt)}}, promote {{if .Planned}}terencana{{else}}darurat{{end}} ke {{or .NewMaster.Name "master baru"}})</h2>
+    <div data-status-for="{{$s.ID}}">{{template "status-full" .Status}}</div>
+    {{if .CutoverPending}}
+    <div role="alert" class="alert alert-warning flex flex-col items-start gap-2">
+      <span>Aplikasi belum dinyatakan dialihkan ke master baru. Bangun ulang dan hapus menunggu tombol "Sudah saya alihkan".</span>
+      <a class="btn btn-sm" href="/masters/{{.Topology.MasterServerID}}/cutover">Buka layar pengalihan</a>
+    </div>
+    {{end}}
+
+    <h3 class="font-semibold">Data tertinggal</h3>
+    <p class="text-sm">Transaksi yang tercatat di master lama tetapi tidak sampai ke master baru. Pada promote terencana hasilnya selalu kosong.</p>
+    {{with .Leftover}}
+    {{if .Transactions}}
+    <div role="alert" class="alert alert-error alert-soft flex flex-col items-start gap-2">
+      <p>{{$.OldMaster.LeftoverSummary}}.</p>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Tabel</th><th>Baris</th></tr></thead>
+        <tbody>
+          {{range .Tables}}<tr><td>{{.Schema}}.{{.Table}}</td><td>{{.Rows}}</td></tr>{{end}}
+        </tbody>
+      </table>
+    </div>
+    <table class="table table-sm w-auto">
+      <tbody>
+        <tr><th>Transaksi</th><td>{{.Transactions}}</td></tr>
+        <tr><th>Waktu</th><td>{{fmtTime .From}} sampai {{fmtTime .To}}</td></tr>
+        <tr><th>Binlog</th><td>{{range $i, $b := .Binlogs}}{{if $i}}, {{end}}<code>{{$b}}</code>{{else}}-{{end}}</td></tr>
+        <tr><th>GTID</th><td><code class="break-all">{{.GTIDSet}}</code></td></tr>
+      </tbody>
+    </table>
+    {{else}}
+    <div role="status" class="alert alert-success alert-soft"><span>Tidak ada data tertinggal.</span></div>
+    {{end}}
+    <p class="text-xs text-base-content/60">Diperiksa {{fmtTime .CheckedAt}}{{with .JobID}} · <a class="link" href="/jobs/{{.}}">pekerjaan</a>{{end}}</p>
+    {{else}}
+    <p class="text-sm">Belum diperiksa.</p>
+    {{end}}
+    <div class="flex flex-wrap gap-2">
+      <form method="post" action="/servers/{{$s.ID}}/leftover"><button type="submit" class="btn btn-sm"{{if or (not .Online) .Busy}} disabled{{end}}>Periksa data tertinggal</button></form>
+      {{with .Leftover}}{{if .Transactions}}
+      <form method="post" action="/servers/{{$s.ID}}/salvage"><button type="submit" class="btn btn-sm btn-warning"{{if or (not $.OldMaster.Online) $.OldMaster.Busy}} disabled{{end}}>Amankan data tertinggal</button></form>
+      {{end}}{{end}}
+    </div>
+    {{if not .Online}}<p class="text-sm text-base-content/70">Agent server ini offline; pemeriksaan bisa dijalankan setelah agent tersambung.</p>{{end}}
+    {{with .Leftover}}{{if .Transactions}}<p class="text-sm">Amankan menyimpan transaksi itu sebagai berkas SQL di server ini (bisa dijalankan dengan <code>mysql</code>, berisi komentar yang bisa dibaca untuk tiap baris). Berkas disimpan 7 hari; unduh dari daftar di bawah.</p>{{end}}{{end}}
+
+    <h3 class="font-semibold">Bangun ulang sebagai replika</h3>
+    <p class="text-sm">Isi MySQL server ini diganti salinan dari master baru, lalu server ini mengikuti master baru sebagai replika. Berkas data tertinggal yang sudah diamankan tidak ikut dihapus.</p>
+    {{if .CutoverPending}}
+    <div><button type="button" class="btn btn-sm" disabled>Bangun ulang sebagai replika</button></div>
+    <p class="text-sm text-base-content/70">Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini.</p>
+    {{else if .HasTopology}}
+    <div><a class="btn btn-sm" href="/masters/{{.Topology.MasterServerID}}/replicas/new?bangun-ulang={{$s.ID}}">Bangun ulang sebagai replika</a></div>
+    {{end}}
+  </div>
+</div>
+{{end}}{{end}}
+
+{{/* Berkas data tertinggal (salvage) di server ini, dengan unduh dan
+     hapus yang meminta kata sandi. Data: serverDetailPage. */}}
+{{define "salvage-files"}}{{$s := .Server}}{{with .Salvage}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Berkas data tertinggal</h2>
+    {{with .Unreadable}}<p class="text-warning">{{.}}</p>{{end}}
+    {{if .Files}}
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Berkas</th><th>Ukuran</th><th>Dibuat</th><th>Sisa</th><th></th></tr></thead>
+        <tbody>
+          {{range .Files}}
+          <tr>
+            <td><code>{{.Name}}</code></td>
+            <td>{{fmtBytes (bytesOf .Size)}}</td>
+            <td>{{fmtTime .CreatedAt}}</td>
+            <td>{{.DaysLeft}}</td>
+            <td class="flex flex-wrap gap-2">
+              <form method="get" action="/servers/{{$s.ID}}/salvage/{{.Name}}">
+                <button type="submit" class="btn btn-xs" data-confirm-action="salvage_download" data-confirm-kind="server" data-confirm-id="{{$s.ID}}" data-confirm-text="Unduh berkas data tertinggal {{.Name}} dari {{$s.Name}}. Berkas ini berisi data aplikasi; simpan di tempat yang aman.">Unduh</button>
+              </form>
+              <form method="post" action="/servers/{{$s.ID}}/salvage/{{.Name}}/delete">
+                <button type="submit" class="btn btn-xs btn-error btn-outline" data-confirm-action="salvage_delete" data-confirm-kind="server" data-confirm-id="{{$s.ID}}" data-confirm-text="Hapus berkas data tertinggal {{.Name}} dari {{$s.Name}}. Bila belum diunduh, ini satu-satunya salinan data itu.">Hapus</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    <p class="text-sm text-base-content/70">Agent menghapus berkas 7 hari setelah dibuat.</p>
+    {{else if not .Unreadable}}
+    <p class="text-sm">Belum ada berkas.</p>
+    {{end}}
+  </div>
+</div>
+{{end}}{{end}}

@@ -56,6 +56,16 @@ type Orchestrator interface {
 	// is not quarantined yet.
 	ConfirmCutover(topologyID int64) (warning string, err error)
 	RepointNow(ctx context.Context, replicaServerID int64) error
+	// The quarantined old master (spec 5.4): "Periksa data tertinggal"
+	// and "Amankan data tertinggal" start short jobs; the salvage files
+	// are listed, read a chunk at a time and deleted directly. Connections
+	// feeds the cutover screen (spec 5.5).
+	StartLeftover(ctx context.Context, serverID int64) (string, error)
+	StartSalvage(ctx context.Context, serverID int64) (string, error)
+	Connections(ctx context.Context, serverID int64) (proto.ConnectionsResult, error)
+	SalvageList(ctx context.Context, serverID int64) ([]proto.SalvageFile, error)
+	SalvageRead(ctx context.Context, serverID int64, name string, offset int64) (proto.SalvageReadResult, error)
+	SalvageDelete(ctx context.Context, serverID int64, name string) error
 }
 
 const (
@@ -122,6 +132,10 @@ var notices = map[string]string{
 	"sertifikat-sendiri": "Sertifikat yang Anda unggah sekarang dipakai panel.",
 	"sertifikat-panel":   "Panel kembali memakai sertifikatnya sendiri.",
 	"sertifikat-nama":    "Nama tambahan disimpan; sertifikat panel sudah diperbarui.",
+	"dialihkan": "Pengalihan aplikasi dicatat: promote selesai. Master lama sekarang bisa diperiksa, dibangun ulang sebagai " +
+		"replika, atau dihapus dari halaman servernya.",
+	"diarahkan":      "Replika diarahkan ke master baru. Status terbaru tampil setelah laporan berikutnya dari agent.",
+	"berkas-dihapus": "Berkas data tertinggal dihapus dari server.",
 	"dihapus": "Server dihapus dari panel. Agent di server itu masih terpasang dan terus mencoba terhubung; " +
 		"matikan dengan: sudo systemctl disable --now dbpanel-agent",
 }
@@ -506,11 +520,17 @@ type replicaNewPage struct {
 	Databases []databaseChoice
 	Target    int64
 	ForceDump bool
+	// Rebuild: the form rebuilds the quarantined old master Rebuild.Server
+	// as a replica of master ("Bangun ulang sebagai replika", spec 5.4);
+	// it is the only target. RebuildBad: the server asked for is not one.
+	Rebuild    *rebuildInfo
+	RebuildBad bool
 }
 
 // replicaForm builds the replica form for master. checked nil means every
-// database is selected.
-func (a *app) replicaForm(r *http.Request, master store.Server, checked map[string]bool) (replicaNewPage, error) {
+// database is selected. rebuild, when not 0, is the quarantined old
+// master the form rebuilds: it is then the only target.
+func (a *app) replicaForm(r *http.Request, master store.Server, checked map[string]bool, rebuild int64) (replicaNewPage, error) {
 	p := replicaNewPage{Page: a.page(r), Master: master}
 	var err error
 	if p.Inventory, err = a.inventory(master.ID); err != nil {
@@ -518,6 +538,27 @@ func (a *app) replicaForm(r *http.Request, master store.Server, checked map[stri
 	}
 	for _, d := range p.Inventory.Databases {
 		p.Databases = append(p.Databases, databaseChoice{DatabaseInfo: d, Checked: checked == nil || checked[d.Name]})
+	}
+	if rebuild != 0 {
+		if p.Rebuild, err = a.rebuildTarget(r.Context(), master, rebuild); err != nil {
+			return p, err
+		}
+		if p.Rebuild == nil {
+			p.RebuildBad = true
+			p.Flash = msgRebuildTarget
+			return p, nil
+		}
+		s := p.Rebuild.Server
+		p.Target = s.ID
+		if !s.Paired || !a.Hub.IsOnline(s.ID) {
+			return p, nil
+		}
+		inv, err := a.inventory(s.ID)
+		if err != nil {
+			return p, err
+		}
+		p.Targets = []targetChoice{{Server: s, NotConnected: !inv.Connected}}
+		return p, nil
 	}
 	servers, err := a.Store.ListServers()
 	if err != nil {
@@ -556,17 +597,30 @@ func (a *app) newReplicaForm(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, err := a.replicaForm(r, master, nil)
+	rebuild, _ := strconv.ParseInt(r.URL.Query().Get("bangun-ulang"), 10, 64)
+	p, err := a.replicaForm(r, master, nil, max(rebuild, 0))
 	if err != nil {
 		a.internalError(w, "replica form", err)
 		return
 	}
-	a.render.Render(w, "replica_new", p)
+	status := http.StatusOK
+	if p.RebuildBad {
+		status = http.StatusBadRequest
+	}
+	a.render.renderStatus(w, status, "replica_new", p)
 }
 
+// createReplica starts "Buat replika"; with rebuild=1 it rebuilds the
+// quarantined old master posted as target, behind a confirmation token
+// and its typed name, and never while the cutover is pending.
 func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	master, _, ok := a.masterFromPath(w, r)
 	if !ok {
+		return
+	}
+	target, _ := strconv.ParseInt(r.PostFormValue("target"), 10, 64)
+	rebuild := r.PostFormValue("rebuild") == "1"
+	if rebuild && !a.requireConfirm(w, r, ActRebuildOldMaster, auditServer, target) {
 		return
 	}
 	selected := r.PostForm["databases"]
@@ -574,22 +628,41 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	for _, d := range selected {
 		checked[d] = true
 	}
-	p, err := a.replicaForm(r, master, checked)
+	var rebuildID int64
+	if rebuild {
+		rebuildID = max(target, 1)
+	}
+	p, err := a.replicaForm(r, master, checked, rebuildID)
 	if err != nil {
 		a.internalError(w, "replica form", err)
 		return
 	}
-	p.Target, _ = strconv.ParseInt(r.PostFormValue("target"), 10, 64)
+	p.Target = target
 	p.ForceDump = r.PostFormValue("force_dump") != ""
-	detail := map[string]any{"master_server_id": master.ID, "databases": selected, "force_dump": p.ForceDump}
-	fail := func(msg string) {
+	detail := map[string]any{"master_server_id": master.ID, "databases": selected, "force_dump": p.ForceDump,
+		"rebuild_old_master": rebuild}
+	failStatus := func(status int, msg string) {
 		a.audit(r, "create_replica", auditReplica, p.Target, detail, msg)
 		p.Flash = msg
-		a.render.renderStatus(w, http.StatusBadRequest, "replica_new", p)
+		a.render.renderStatus(w, status, "replica_new", p)
 	}
+	fail := func(msg string) { failStatus(http.StatusBadRequest, msg) }
 	if p.Target <= 0 {
 		fail(msgReplicaTarget)
 		return
+	}
+	if rebuild {
+		switch {
+		case p.Rebuild == nil:
+			fail(msgRebuildTarget)
+			return
+		case p.Rebuild.CutoverPending:
+			failStatus(http.StatusConflict, msgRebuildCutover)
+			return
+		case !typedName(r, p.Rebuild.Server):
+			fail(msgNameMismatch)
+			return
+		}
 	}
 	// Only a server the form offers (a stale form or a crafted post may
 	// name another one).
@@ -621,7 +694,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := a.Orchestrator.StartCreateReplica(r.Context(), orchestrator.CreateReplicaParams{
 		MasterServerID: master.ID, TargetServerID: p.Target,
-		Databases: selected, ForceDump: p.ForceDump, ConfirmWipe: true,
+		Databases: selected, ForceDump: p.ForceDump, ConfirmWipe: true, RebuildOldMaster: rebuild,
 	})
 	if err != nil {
 		a.Logger.Warn("create replica refused", "master", master.ID, "target", p.Target, "err", err)
@@ -650,6 +723,11 @@ type replicaPage struct {
 	Busy bool
 	// The controls that make sense now.
 	CanStop, CanStart, CanRelock, CanResync, CanDetach bool
+	// CanRepoint offers "Arahkan sekarang" (needs_repoint, spec 5.6);
+	// RepointInfo is why it just did not repoint (the replica must be
+	// rebuilt), shown as information.
+	CanRepoint  bool
+	RepointInfo string
 	// BinlogKeep is how long the master keeps binary logs ("7 hari"); ""
 	// when unknown.
 	BinlogKeep string
@@ -779,7 +857,9 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 	p.CanStop = controllable && !rep.Paused && !stopped
 	p.CanStart = controllable && (rep.Paused || stopped)
 	p.CanRelock = controllable && p.Health != nil && p.Health.Status.LockLost
-	p.CanResync = !p.Busy && (canChangeDatabases(rep) || rep.State == store.ReplicaFailed)
+	p.CanResync = !p.Busy && (canChangeDatabases(rep) || rep.State == store.ReplicaFailed ||
+		rep.State == store.ReplicaNeedsRebuild)
+	p.CanRepoint = !p.Busy && rep.State == store.ReplicaNeedsRepoint
 	p.CanDetach = !p.Busy
 	a.render.renderStatus(w, status, "replica_detail", p)
 }

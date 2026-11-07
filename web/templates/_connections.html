@@ -1,0 +1,24 @@
+{{/* Koneksi aplikasi ke satu server (connectionsView): layar pengalihan
+     (cutover.html) memuatnya di dalam elemen x-data="pollFragment"
+     data-url="/servers/<id>/connections-fragment", yang diisi ulang tiap
+     15 detik. */}}
+{{define "connections"}}
+{{if .Unreadable}}
+<p class="text-warning">{{.Unreadable}}</p>
+{{else if not .Rows}}
+<p class="text-success">{{.Empty}}</p>
+{{else}}
+<div class="overflow-x-auto">
+  <table class="table table-sm">
+    <thead><tr><th>Dari host</th><th>Akun</th><th>Database</th><th>Jumlah</th></tr></thead>
+    <tbody>
+      {{range .Rows}}
+      <tr><td>{{.Host}}</td><td>{{.User}}</td><td>{{or .DB "-"}}</td><td>{{.Count}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+<p class="text-sm">Jumlah koneksi: <strong>{{.Total}}</strong></p>
+{{end}}
+{{if not .TakenAt.IsZero}}<p class="text-xs text-base-content/60">Dibaca {{fmtTime .TakenAt}}</p>{{end}}
+{{end}}

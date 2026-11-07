@@ -29,6 +29,12 @@ const (
 	ActTightenTLS         = "tighten_tls"
 	// ActPromote starts the promotion of a replica of the master.
 	ActPromote = "promote"
+	// The quarantined old master after a promotion (spec 5.4): rebuild it
+	// as a replica of the new master, download or delete a salvage file
+	// (the only copy of its leftover data). Bound to the old master.
+	ActRebuildOldMaster = "rebuild_old_master"
+	ActSalvageDownload  = "salvage_download"
+	ActSalvageDelete    = "salvage_delete"
 	// The panel's HTTPS certificate (target kind settings, id 0): a session
 	// alone must not swap the key the panel serves or widen its web CA.
 	ActCertUpload = "cert_upload"
@@ -38,7 +44,8 @@ const (
 
 // confirmActions are the actions POST /confirm issues tokens for.
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,
-	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActPromote, ActCertUpload, ActCertRevert, ActCertNames}
+	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActPromote, ActCertUpload, ActCertRevert, ActCertNames,
+	ActRebuildOldMaster, ActSalvageDownload, ActSalvageDelete}
 
 // settingsActions are the actions bound to the settings (target id 0)
 // rather than to a server.
@@ -166,8 +173,15 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 // msgConfirmInvalid on the target's page and returns false; the handler
 // must then do nothing else. Handlers call it before any other check.
 func (a *app) requireConfirm(w http.ResponseWriter, r *http.Request, action, targetKind string, targetID int64) bool {
+	return a.requireConfirmToken(w, r, r.PostFormValue("confirm_token"), action, targetKind, targetID)
+}
+
+// requireConfirmToken is requireConfirm for a token taken from elsewhere
+// than the posted form: the salvage download is a GET whose token is in
+// its query.
+func (a *app) requireConfirmToken(w http.ResponseWriter, r *http.Request, token, action, targetKind string, targetID int64) bool {
 	err := store.ErrConfirmInvalid
-	if token := r.PostFormValue("confirm_token"); token != "" {
+	if token != "" {
 		err = a.Store.ConsumeConfirmation(confirmHash(token), auth.UsernameFrom(r.Context()), action, targetKind,
 			targetID, a.Now())
 	}

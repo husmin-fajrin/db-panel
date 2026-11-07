@@ -500,11 +500,27 @@ func (n *Notifier) SendTest(ctx context.Context) error {
 	return nil
 }
 
-// SendWeekly sends the weekly summary text with the saved settings. It is
-// no alert: the alert kinds do not filter it, a snooze does not hold it
-// back, and nothing is recorded. Without a bot token and chat id it returns
-// ErrNotConfigured.
+// SendWeekly sends the weekly summary text with the saved settings
+// (SendText). It is no alert: the alert kinds do not filter it, a snooze
+// does not hold it back, and nothing is recorded. Without a bot token and
+// chat id it returns ErrNotConfigured.
 func (n *Notifier) SendWeekly(ctx context.Context, text string) error {
+	if err := n.SendText(ctx, text); err != nil {
+		if !errors.Is(err, ErrNotConfigured) {
+			n.log.Warn("notify: telegram weekly summary failed", "err", err)
+		}
+		return err
+	}
+	n.log.Info("notify: telegram weekly summary sent")
+	return nil
+}
+
+// SendText sends text with the saved settings, as it is: no alert kind
+// filters it, no snooze holds it back, and nothing is recorded (the
+// weekly summary, the result of "Periksa data tertinggal"). Without a bot
+// token and chat id it returns ErrNotConfigured; a failure's text never
+// carries the bot token.
+func (n *Notifier) SendText(ctx context.Context, text string) error {
 	cfg, err := LoadConfig(n.st, n.box)
 	if err != nil {
 		return err
@@ -513,10 +529,7 @@ func (n *Notifier) SendWeekly(ctx context.Context, text string) error {
 		return ErrNotConfigured
 	}
 	if err := n.sender.Send(ctx, cfg.Token, cfg.ChatID, text); err != nil {
-		reason := scrub(err.Error(), cfg.Token)
-		n.log.Warn("notify: telegram weekly summary failed", "err", reason)
-		return errors.New(reason)
+		return errors.New(scrub(err.Error(), cfg.Token))
 	}
-	n.log.Info("notify: telegram weekly summary sent")
 	return nil
 }

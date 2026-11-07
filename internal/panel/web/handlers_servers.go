@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -34,6 +35,9 @@ type dashboardPage struct {
 	// PromotePartial are the open promote_partial alerts, each with the
 	// job of its promotion.
 	PromotePartial []promoteBanner
+	// Cutover are the masters whose promotion waits for the applications
+	// to be cut over (topologies.cutover_pending).
+	Cutover []store.Server
 }
 
 // promoteBanner is a promotion that stopped partway (spec 5.3): its
@@ -113,6 +117,15 @@ type serverDetailPage struct {
 	// missing grants).
 	MySQLCert      *store.ServerTLS
 	CanInstallCert bool
+
+	// After a promotion (spec 5.4): the box of a quarantined old master
+	// (nil otherwise) and its salvage files (nil when it never was one).
+	OldMaster *oldMasterBox
+	Salvage   *salvageFiles
+	// DeleteBlocked says why Hapus server is not offered now ("" when it
+	// is); DeleteUnquarantined: the delete is "Hapus tanpa karantina".
+	DeleteBlocked       string
+	DeleteUnquarantined bool
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +171,19 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.PromotePartial = append(p.PromotePartial, b)
+	}
+	topos, err := a.Store.ListTopologies()
+	if err != nil {
+		a.internalError(w, "list topologies", err)
+		return
+	}
+	for _, t := range topos {
+		if !t.CutoverPending {
+			continue
+		}
+		if i := slices.IndexFunc(servers, func(s store.Server) bool { return s.ID == t.MasterServerID }); i >= 0 {
+			p.Cutover = append(p.Cutover, servers[i])
+		}
 	}
 	if p.Topologies, err = a.topologyCards(servers); err != nil {
 		a.internalError(w, "topology cards", err)
@@ -319,6 +345,10 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 			a.internalError(w, "get server tls", err)
 			return
 		}
+		if err := a.oldMasterViews(r.Context(), srv, &p); err != nil {
+			a.internalError(w, "old master", err)
+			return
+		}
 	}
 	switch {
 	case !found || p.Local:
@@ -399,13 +429,16 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 // deleteServer removes a server once the password is confirmed and its
 // name typed. The panel host's own server cannot be deleted; the
 // orchestrator refuses a master with replicas and a registered replica,
-// and drops the agent's connection.
+// and drops the agent's connection. A quarantined old master is refused
+// while its cutover is pending; one whose quarantine never arrived is
+// deleted only through "Hapus tanpa karantina" (unquarantined=1).
 func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok || !a.requireConfirm(w, r, ActDeleteServer, auditServer, srv.ID) {
 		return
 	}
-	detail := map[string]any{"name": srv.Name}
+	unquarantined := srv.Role == store.RoleQuarantined && r.PostFormValue("unquarantined") == "1"
+	detail := map[string]any{"name": srv.Name, "unquarantined": unquarantined}
 	if a.isLocal(srv) {
 		a.audit(r, "server_delete", auditServer, srv.ID, detail, msgLocalDelete)
 		http.Error(w, msgLocalDelete, http.StatusConflict)
@@ -416,14 +449,32 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msgNameMismatch})
 		return
 	}
-	err := a.Orchestrator.DeleteServer(r.Context(), srv.ID)
+	if srv.Role == store.RoleQuarantined {
+		topo, err := a.Store.GetTopologyByOldMaster(srv.ID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			a.internalError(w, "get topology", err)
+			return
+		}
+		if err == nil && topo.CutoverPending {
+			msg := orchestrator.ErrCutoverPending.Error()
+			a.audit(r, "server_delete", auditServer, srv.ID, detail, msg)
+			a.renderServer(w, r, srv, serverView{Status: http.StatusConflict, Flash: msg})
+			return
+		}
+	}
+	del := a.Orchestrator.DeleteServer
+	if unquarantined {
+		del = a.Orchestrator.DeleteUnquarantined
+	}
+	err := del(r.Context(), srv.ID)
 	a.audit(r, "server_delete", auditServer, srv.ID, detail, outcomeOf(err))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, msgServerNotFound, http.StatusNotFound)
 		return
 	case errors.Is(err, orchestrator.ErrServerIsMaster), errors.Is(err, orchestrator.ErrServerIsReplica),
-		errors.Is(err, orchestrator.ErrLocalServer), errors.Is(err, orchestrator.ErrBusy):
+		errors.Is(err, orchestrator.ErrLocalServer), errors.Is(err, orchestrator.ErrBusy),
+		errors.Is(err, orchestrator.ErrCutoverPending), errors.Is(err, orchestrator.ErrQuarantinePending):
 		// The orchestrator's refusals are written for the user.
 		a.Logger.Warn("delete server refused", "id", srv.ID, "err", err)
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
@@ -432,7 +483,7 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "delete server", err)
 		return
 	}
-	a.Logger.Info("server deleted", "id", srv.ID, "name", srv.Name, "by", a.page(r).Username)
+	a.Logger.Info("server deleted", "id", srv.ID, "name", srv.Name, "unquarantined", unquarantined, "by", a.page(r).Username)
 	http.Redirect(w, r, "/servers?pesan=dihapus", http.StatusSeeOther)
 }
 

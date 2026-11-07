@@ -39,7 +39,7 @@ type Page struct {
 // "title" and "content".
 var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
 	"master_detail", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail",
-	"alerts", "settings", "audit", "cert", "promote"}
+	"alerts", "settings", "audit", "cert", "promote", "cutover"}
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {
@@ -63,12 +63,14 @@ var templateFuncs = template.FuncMap{
 	"fmtDuration":   fmtDuration,
 	"fmtPct":        fmtPct,
 	"ago":           ago,
+	// bytesOf is a size in bytes from the agent (int64) for fmtBytes.
+	"bytesOf": func(n int64) uint64 { return uint64(max(n, 0)) },
 }
 
 // partials are the templates shared by several pages and rendered on their
 // own by the fragment endpoint.
 var partials = []string{"templates/layout.html", "templates/_status.html", "templates/_timeline.html",
-	"templates/_confirm.html"}
+	"templates/_confirm.html", "templates/_connections.html"}
 
 // NewRenderer parses the layout and the shared partials together with each
 // page into its own template set, plus one set of the partials alone for

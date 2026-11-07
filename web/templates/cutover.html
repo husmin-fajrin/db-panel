@@ -1,0 +1,81 @@
+{{define "title"}}Pengalihan aplikasi ke {{.Master.Name}}{{end}}
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-4">Pengalihan aplikasi ke {{.Master.Name}}</h1>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Alamat master baru</h2>
+    <div class="flex flex-wrap items-center gap-2" x-data="copyCommand">
+      <code class="text-xl font-bold break-all" x-ref="perintah">{{.NewAddress}}</code>
+      <button type="button" class="btn btn-sm" @click="copy" x-text="buttonLabel">Salin</button>
+    </div>
+    <p>Arahkan semua aplikasi yang menulis ke database ke alamat ini, lalu restart aplikasinya.</p>
+    {{with .OldAddress}}<p class="text-sm text-base-content/70">Alamat lama{{if $.HasOld}} ({{$.Old.Name}}){{end}}: <code>{{.}}</code></p>{{end}}
+    {{with .Promotion}}
+    <table class="table table-sm w-auto">
+      <tbody>
+        <tr><th>Promote</th><td>{{if $.Planned}}terencana{{else}}darurat{{end}}</td></tr>
+        <tr><th>Promote selesai</th><td>{{fmtTime .FinishedAt}}</td></tr>
+        {{if $.Planned}}
+        <tr><th>Master lama dikunci</th><td>{{fmtTime .LockAt}}</td></tr>
+        {{with $.WritePause}}<tr><th>Lama jeda tulis</th><td>{{.}}</td></tr>{{end}}
+        {{end}}
+      </tbody>
+    </table>
+    {{end}}
+  </div>
+</div>
+
+{{if .QuarantinePending}}
+<div role="alert" class="alert alert-warning mb-6">
+  <span>Master lama belum dikarantina karena belum terjangkau. Pastikan aplikasi dialihkan sebelum ia dihidupkan kembali.</span>
+</div>
+{{end}}
+
+<div class="grid gap-6 md:grid-cols-2 mb-6">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">Koneksi yang masih ke master lama</h2>
+      {{if .HasOld}}
+      <p class="text-sm text-base-content/70"><a class="link" href="/servers/{{.Old.ID}}">{{.Old.Name}}</a></p>
+      <div x-data="pollFragment" data-url="/servers/{{.Old.ID}}/connections-fragment" data-every="{{.EveryMS}}">{{template "connections" .OldConns}}</div>
+      {{else}}
+      <p>Master lama sudah tidak terdaftar di panel.</p>
+      {{end}}
+    </div>
+  </div>
+  <div class="card bg-base-100 shadow">
+    <div class="card-body gap-3">
+      <h2 class="card-title">Koneksi yang sudah ke master baru</h2>
+      <p class="text-sm text-base-content/70"><a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></p>
+      <div x-data="pollFragment" data-url="/servers/{{.Master.ID}}/connections-fragment" data-every="{{.EveryMS}}">{{template "connections" .NewConns}}</div>
+    </div>
+  </div>
+</div>
+<p class="text-sm text-base-content/70 mb-6">Kedua tabel diperbarui tiap 15 detik. Akun panel (dbpanel_*), replika, dan thread MySQL sendiri tidak ditampilkan.</p>
+
+{{if .Topology.CutoverPending}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body gap-3">
+    <h2 class="card-title">Sudah dialihkan?</h2>
+    <p>Tekan tombol ini setelah semua aplikasi memakai alamat master baru. Panel berhenti mengingatkan, dan master lama bisa dibangun ulang sebagai replika atau dihapus.</p>
+    <div><button type="button" class="btn btn-primary" data-open-modal="modal-dialihkan">Sudah saya alihkan</button></div>
+  </div>
+</div>
+<dialog id="modal-dialihkan" class="modal">
+  <div class="modal-box">
+    <h3 class="text-lg font-bold">Semua aplikasi sudah memakai {{.NewAddress}}?</h3>
+    <p class="py-2">{{if .HasOld}}{{if .OldConns.Total}}Masih terlihat {{.OldConns.Total}} koneksi ke master lama {{.Old.Name}}. {{end}}{{end}}Aplikasi yang masih menulis ke master lama kehilangan tulisannya saat master lama dibangun ulang.</p>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn">Batal</button></form>
+      <form method="post" action="/masters/{{.Master.ID}}/cutover/done"><button type="submit" class="btn btn-primary">Sudah saya alihkan</button></form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{else}}
+<div role="status" class="alert alert-success mb-6"><span>Pengalihan aplikasi sudah dinyatakan selesai; tidak ada promote yang menunggu di topologi ini.</span></div>
+{{end}}
+
+<a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Kembali ke halaman master</a>
+{{end}}

@@ -94,6 +94,10 @@ func kindLabel(kind string) string {
 		return "Promote terencana"
 	case orchestrator.KindPromoteEmergency:
 		return "Promote darurat"
+	case orchestrator.KindLeftover:
+		return "Periksa data tertinggal"
+	case orchestrator.KindSalvage:
+		return "Amankan data tertinggal"
 	}
 	return kind
 }

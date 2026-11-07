@@ -50,6 +50,12 @@ var auditActionLabels = map[string]string{
 	"https_cert_upload": "Pasang sertifikat keamanan panel sendiri",
 	"https_cert_panel":  "Kembali ke sertifikat panel",
 	"https_cert_names":  "Ubah nama sertifikat panel",
+	"leftover_check":    "Periksa data tertinggal",
+	"salvage":           "Amankan data tertinggal",
+	"salvage_download":  "Unduh data tertinggal",
+	"salvage_delete":    "Hapus berkas data tertinggal",
+	"cutover_confirmed": "Sudah saya alihkan",
+	"replica_repoint":   "Arahkan sekarang",
 }
 
 // auditTargetLabels name the target kinds.

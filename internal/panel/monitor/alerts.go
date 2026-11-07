@@ -406,6 +406,8 @@ var jobKindNames = map[string]string{
 	"tighten_tls":       "Perketat sambungan replikasi",
 	"promote_planned":   "Promote terencana",
 	"promote_emergency": "Promote darurat",
+	"leftover":          "Periksa data tertinggal",
+	"salvage":           "Amankan data tertinggal",
 }
 
 // alertUpdate is one alert_update to publish once the lock is released.

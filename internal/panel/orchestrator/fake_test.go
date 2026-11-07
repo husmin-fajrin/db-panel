@@ -51,6 +51,7 @@ var agentCommands = []string{
 	"mysql.tlsRequest", "mysql.tlsInstall", "mysql.tlsTrust",
 	"mysql.lockForPromote", "mysql.unlockPromote", "mysql.promote", "mysql.probeSource", "mysql.binlogTail",
 	"mysql.quarantine", "mysql.repoint",
+	"mysql.leftover", "mysql.salvage", "mysql.connections", "mysql.salvageList", "mysql.salvageRead", "mysql.salvageDelete",
 }
 
 type call struct {

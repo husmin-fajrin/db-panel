@@ -1,0 +1,565 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
+)
+
+// After a promotion: the application cutover screen (spec 5.5), the
+// quarantined old master's page with its leftover check, salvage files,
+// rebuild and delete (spec 5.4), and "Arahkan sekarang" of a replica left
+// to repoint (spec 5.6).
+
+const (
+	msgOldUnreachable = "Master lama tidak terjangkau, tidak bisa membaca koneksinya"
+	msgNewUnreachable = "Master baru tidak terjangkau, tidak bisa membaca koneksinya"
+	msgOldNoConns     = "Tidak ada koneksi aplikasi tersisa"
+	msgNewNoConns     = "Belum ada koneksi aplikasi ke master baru"
+	msgConnsFailed    = "Koneksi tidak bisa dibaca: "
+	msgNotOldMaster   = "Server ini bukan master lama yang dikarantina."
+
+	// msgRebuildCutover is spec 5.4's reason the rebuild waits.
+	msgRebuildCutover = "Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, " +
+		"dan aplikasi yang belum dialihkan bisa menulis ke sini"
+	msgDeleteCutover = "Master lama ini tidak bisa dihapus sebelum aplikasi dinyatakan dialihkan: tekan 'Sudah saya alihkan' " +
+		"di layar pengalihan dulu (menghapusnya melepas penjagaan baca-saja saat MySQL-nya hidup lagi)."
+	msgRebuildTarget = "Server ini bukan master lama yang dikarantina dari topologi master ini."
+
+	msgSalvageName    = "Nama berkas data tertinggal tidak valid."
+	msgSalvageOffline = "Agent server ini offline; berkas data tertinggal tidak bisa dibaca sekarang."
+	msgSalvageRead    = "Berkas data tertinggal tidak bisa dibaca: "
+	msgSalvageList    = "Daftar berkas data tertinggal tidak bisa dibaca: "
+
+	// pageCallTimeout bounds an agent call made while rendering a page.
+	pageCallTimeout = 5 * time.Second
+	// connectionsEveryMS is how often the cutover screen reloads the
+	// connections (spec 5.5: every 15 seconds).
+	connectionsEveryMS = 15000
+)
+
+// Audit outcomes of an interrupted salvage download.
+const (
+	outcomeDownloadGone    = "unduhan dibatalkan browser"
+	outcomeDownloadWrite   = "unduhan terputus"
+	outcomeDownloadChanged = "berkas berubah saat diunduh"
+	outcomeDownloadEmpty   = "agent tidak mengirim isi berkas"
+)
+
+// connectionsView is one side's table of the cutover screen
+// (_connections.html).
+type connectionsView struct {
+	ServerID int64
+	Name     string
+	Rows     []proto.ConnectionRow
+	Total    int
+	TakenAt  time.Time
+	// Unreadable says why the connections could not be read ("" when
+	// they were); Empty what to say when there are none.
+	Unreadable string
+	Empty      string
+}
+
+// connectionsOf reads srv's client connections; the side follows its
+// role (the quarantined old master or the new one). An unreachable agent
+// is said, never an error page.
+func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsView {
+	v := connectionsView{ServerID: srv.ID, Name: srv.Name, Empty: msgNewNoConns}
+	unreachable := msgNewUnreachable
+	if srv.Role == store.RoleQuarantined {
+		v.Empty, unreachable = msgOldNoConns, msgOldUnreachable
+	}
+	if !a.Hub.IsOnline(srv.ID) {
+		v.Unreadable = unreachable
+		return v
+	}
+	ctx, cancel := context.WithTimeout(ctx, pageCallTimeout)
+	defer cancel()
+	res, err := a.Orchestrator.Connections(ctx, srv.ID)
+	switch {
+	case errors.Is(err, proto.ErrOffline):
+		v.Unreadable = unreachable
+	case err != nil:
+		a.Logger.Warn("read connections", "server", srv.ID, "err", err)
+		v.Unreadable = msgConnsFailed + err.Error()
+	}
+	if err != nil {
+		return v
+	}
+	v.Rows, v.TakenAt = res.Rows, res.TakenAt
+	for _, row := range res.Rows {
+		v.Total += row.Count
+	}
+	return v
+}
+
+// connectionsFragment answers GET /servers/{id}/connections-fragment: the
+// connections table of the server; the cutover screen reloads it every
+// 15 seconds.
+func (a *app) connectionsFragment(w http.ResponseWriter, r *http.Request) {
+	srv, ok := a.serverFromPath(w, r)
+	if !ok {
+		return
+	}
+	a.render.RenderFragment(w, "connections", a.connectionsOf(r.Context(), srv))
+}
+
+// cutoverPage is the cutover screen of a new master (cutover.html).
+type cutoverPage struct {
+	Page
+	Master   store.Server
+	Topology store.Topology
+	// Old is the old master (HasOld false when it was deleted).
+	Old    store.Server
+	HasOld bool
+	// NewAddress is where the applications must write now; OldAddress
+	// where they wrote before ("" when unknown).
+	NewAddress, OldAddress string
+	Promotion              *store.Promotion
+	Planned                bool
+	// WritePause is how long writes were stopped (planned only; "" when
+	// unknown).
+	WritePause        string
+	QuarantinePending bool
+	OldConns          connectionsView
+	NewConns          connectionsView
+	EveryMS           int
+}
+
+// cutoverPage shows GET /masters/{id}/cutover.
+func (a *app) cutoverPage(w http.ResponseWriter, r *http.Request) {
+	srv, topo, ok := a.masterFromPath(w, r)
+	if !ok {
+		return
+	}
+	a.renderCutover(w, r, http.StatusOK, srv, topo, "")
+}
+
+func (a *app) renderCutover(w http.ResponseWriter, r *http.Request, status int, srv store.Server, topo store.Topology, flash string) {
+	p := cutoverPage{Page: a.page(r), Master: srv, Topology: topo, EveryMS: connectionsEveryMS,
+		NewAddress: net.JoinHostPort(topo.SourceHost, strconv.Itoa(topo.SourcePort))}
+	p.Flash = flash
+	if topo.OldMasterServerID != 0 {
+		old, err := a.Store.GetServer(topo.OldMasterServerID)
+		switch {
+		case err == nil:
+			p.Old, p.HasOld = old, true
+			p.OldConns = a.connectionsOf(r.Context(), old)
+		case !errors.Is(err, store.ErrNotFound):
+			a.internalError(w, "get old master", err)
+			return
+		}
+	}
+	p.NewConns = a.connectionsOf(r.Context(), srv)
+	prom, err := a.Store.LatestPromotion(topo.ID)
+	switch {
+	case err == nil:
+		p.Promotion = &prom
+		p.Planned = prom.Mode == proto.PromotePlanned
+		p.QuarantinePending = orchestrator.QuarantinePending(prom)
+		if p.Planned && prom.LockAt != nil && prom.FinishedAt != nil {
+			p.WritePause = fmtDuration(int64(prom.FinishedAt.Sub(*prom.LockAt).Seconds()))
+		}
+		p.OldAddress = a.oldAddress(prom, p.Old)
+	case !errors.Is(err, store.ErrNotFound):
+		a.internalError(w, "latest promotion", err)
+		return
+	}
+	a.render.renderStatus(w, status, "cutover", p)
+}
+
+// oldAddress is the old master as the applications reached it: the
+// address its replicas followed, from the promotion's job; else its
+// panel address with its MySQL port.
+func (a *app) oldAddress(prom store.Promotion, old store.Server) string {
+	if prom.JobID != "" {
+		if j, _, err := a.Store.GetJob(prom.JobID); err == nil {
+			var st struct {
+				Host string `json:"old_source_host"`
+				Port int    `json:"old_source_port"`
+			}
+			if json.Unmarshal([]byte(j.ParamsJSON), &st) == nil && st.Host != "" && st.Port != 0 {
+				return net.JoinHostPort(st.Host, strconv.Itoa(st.Port))
+			}
+		}
+	}
+	if old.Address == "" {
+		return ""
+	}
+	port := 3306
+	if pr := a.probe(old); pr != nil && pr.MySQL.Port != 0 {
+		port = pr.MySQL.Port
+	}
+	return net.JoinHostPort(old.Address, strconv.Itoa(port))
+}
+
+// cutoverDone is "Sudah saya alihkan" (no token, audited, spec 5.7): the
+// cutover is no longer pending. The orchestrator's warning (the old
+// master was never quarantined) is shown on the master page.
+func (a *app) cutoverDone(w http.ResponseWriter, r *http.Request) {
+	srv, topo, ok := a.masterFromPath(w, r)
+	if !ok {
+		return
+	}
+	warning, err := a.Orchestrator.ConfirmCutover(topo.ID)
+	a.audit(r, "cutover_confirmed", auditMaster, srv.ID,
+		map[string]any{"topology_id": topo.ID, "old_master_server_id": topo.OldMasterServerID, "warning": warning != ""},
+		outcomeOf(err))
+	if err != nil {
+		a.Logger.Warn("cutover confirmation refused", "master", srv.ID, "err", err)
+		a.renderCutover(w, r, http.StatusConflict, srv, topo, err.Error())
+		return
+	}
+	a.Logger.Info("cutover confirmed", "master", srv.ID, "topology", topo.ID, "by", a.page(r).Username)
+	if warning == "" {
+		http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan=dialihkan", http.StatusSeeOther)
+		return
+	}
+	topo.CutoverPending = false
+	p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
+	p.Notice, p.Flash = notices["dialihkan"], warning
+	a.renderMaster(w, r, http.StatusOK, p)
+}
+
+// oldMasterBox is the "Master lama" box of a quarantined server's page.
+type oldMasterBox struct {
+	Promotion store.Promotion
+	Planned   bool
+	NewMaster store.Server
+	Topology  store.Topology
+	// HasTopology: the topology still names this server as its old
+	// master.
+	HasTopology       bool
+	CutoverPending    bool
+	QuarantinePending bool
+	Status            statusView
+	// Leftover is the latest check (nil: never run); LeftoverSummary its
+	// sentence.
+	Leftover        *orchestrator.LeftoverCheck
+	LeftoverSummary string
+	Online, Busy    bool
+}
+
+// salvageFiles is the list of salvage files of a server page.
+type salvageFiles struct {
+	ServerID int64
+	Files    []salvageRow
+	// Unreadable says why the list could not be read.
+	Unreadable string
+}
+
+type salvageRow struct {
+	proto.SalvageFile
+	DaysLeft string
+}
+
+// oldMasterViews fills the old-master box and the salvage files of srv's
+// page: the box for a quarantined server, the files for any server that
+// was the old master of a promotion (rebuilt ones keep their files for 7
+// days).
+func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDetailPage) error {
+	prom, err := a.Store.PromotionByOldMaster(srv.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if p.Online {
+		sf := &salvageFiles{ServerID: srv.ID}
+		lctx, cancel := context.WithTimeout(ctx, pageCallTimeout)
+		files, err := a.Orchestrator.SalvageList(lctx, srv.ID)
+		cancel()
+		if err != nil {
+			a.Logger.Warn("list salvage files", "server", srv.ID, "err", err)
+			sf.Unreadable = msgSalvageList + err.Error()
+		}
+		now := a.Now()
+		for _, f := range files {
+			days := int(f.ExpiresAt.Sub(now).Hours() / 24)
+			sf.Files = append(sf.Files, salvageRow{SalvageFile: f, DaysLeft: fmt.Sprintf("%d hari", max(days, 0))})
+		}
+		p.Salvage = sf
+	} else {
+		p.Salvage = &salvageFiles{ServerID: srv.ID, Unreadable: msgSalvageOffline}
+	}
+	if srv.Role != store.RoleQuarantined {
+		if len(p.Salvage.Files) == 0 {
+			p.Salvage = nil
+		}
+		return nil
+	}
+	box := &oldMasterBox{Promotion: prom, Planned: prom.Mode == proto.PromotePlanned, Online: p.Online,
+		QuarantinePending: orchestrator.QuarantinePending(prom), Status: a.statusOf(srv.ID, srv.Role),
+		Busy: p.ActiveJob != nil}
+	if box.NewMaster, err = a.Store.GetServer(prom.NewMasterServerID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	topo, err := a.Store.GetTopologyByOldMaster(srv.ID)
+	switch {
+	case err == nil:
+		box.Topology, box.HasTopology, box.CutoverPending = topo, true, topo.CutoverPending
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+	if c, ok := orchestrator.LeftoverOf(prom); ok {
+		box.Leftover = &c
+		box.LeftoverSummary = orchestrator.LeftoverSummary(c.LeftoverResult)
+	}
+	p.OldMaster = box
+	switch {
+	case box.CutoverPending:
+		p.DeleteBlocked = msgDeleteCutover
+	case box.QuarantinePending:
+		p.DeleteUnquarantined = true
+	}
+	return nil
+}
+
+// oldMasterFromPath loads {id} and refuses (400 on its page) a server
+// that is not a quarantined old master.
+func (a *app) oldMasterFromPath(w http.ResponseWriter, r *http.Request) (store.Server, bool) {
+	srv, ok := a.serverFromPath(w, r)
+	if !ok {
+		return srv, false
+	}
+	if srv.Role != store.RoleQuarantined {
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msgNotOldMaster})
+		return srv, false
+	}
+	return srv, true
+}
+
+// startLeftover is "Periksa data tertinggal" (no token: it only reads).
+func (a *app) startLeftover(w http.ResponseWriter, r *http.Request) {
+	a.startOldMasterJob(w, r, "leftover_check", a.Orchestrator.StartLeftover)
+}
+
+// startSalvage is "Amankan data tertinggal" (no token: it only writes a
+// file the agent removes after 7 days).
+func (a *app) startSalvage(w http.ResponseWriter, r *http.Request) {
+	a.startOldMasterJob(w, r, "salvage", a.Orchestrator.StartSalvage)
+}
+
+func (a *app) startOldMasterJob(w http.ResponseWriter, r *http.Request, action string,
+	start func(ctx context.Context, serverID int64) (string, error)) {
+	srv, ok := a.oldMasterFromPath(w, r)
+	if !ok {
+		return
+	}
+	id, err := start(r.Context(), srv.ID)
+	detail := map[string]any{}
+	if err == nil {
+		detail["job_id"] = id
+	}
+	a.audit(r, action, auditServer, srv.ID, detail, outcomeOf(err))
+	if err != nil {
+		a.Logger.Warn("old master job refused", "action", action, "server", srv.ID, "err", err)
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		return
+	}
+	a.Logger.Info("old master job started", "action", action, "server", srv.ID, "job", id, "by", a.page(r).Username)
+	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
+}
+
+// salvageDownload streams a salvage file to the browser a chunk at a time
+// (nothing is kept on the panel), behind a confirmation token in the
+// query. The name is checked against the agent's pattern before anything
+// is sent to the agent; the transfer stops when the browser goes away.
+func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
+	srv, ok := a.serverFromPath(w, r)
+	if !ok || !a.requireConfirmToken(w, r, r.URL.Query().Get("confirm_token"), ActSalvageDownload, auditServer, srv.ID) {
+		return
+	}
+	name := r.PathValue("name")
+	if !orchestrator.ValidSalvageName(name) {
+		a.audit(r, "salvage_download", auditServer, srv.ID, nil, msgSalvageName)
+		http.Error(w, msgSalvageName, http.StatusBadRequest)
+		return
+	}
+	detail := map[string]any{auditSalvageFile: name}
+	ctx := r.Context()
+	chunk, err := a.Orchestrator.SalvageRead(ctx, srv.ID, name, 0)
+	if err != nil {
+		a.audit(r, "salvage_download", auditServer, srv.ID, detail, outcomeOf(err))
+		msg := msgSalvageRead + err.Error()
+		if errors.Is(err, proto.ErrOffline) {
+			msg = msgSalvageOffline
+		}
+		a.Logger.Warn("salvage download failed", "server", srv.ID, "file", name, "err", err)
+		a.showError(w, r, srv, http.StatusBadGateway, msg)
+		return
+	}
+	size := chunk.Size
+	h := w.Header()
+	h.Set("Content-Type", "application/sql")
+	h.Set("Content-Disposition", "attachment; filename="+name)
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
+	var sent int64
+	outcome := auditOK
+	for {
+		if sent+int64(len(chunk.Data)) > size {
+			outcome = outcomeDownloadChanged
+			break
+		}
+		n, err := w.Write(chunk.Data)
+		sent += int64(n)
+		if err != nil {
+			outcome = outcomeDownloadWrite
+			break
+		}
+		if chunk.EOF {
+			if sent != size {
+				outcome = outcomeDownloadChanged
+			}
+			break
+		}
+		if ctx.Err() != nil {
+			outcome = outcomeDownloadGone
+			break
+		}
+		if len(chunk.Data) == 0 {
+			outcome = outcomeDownloadEmpty
+			break
+		}
+		if chunk, err = a.Orchestrator.SalvageRead(ctx, srv.ID, name, sent); err != nil {
+			outcome = msgSalvageRead + err.Error()
+			if ctx.Err() != nil {
+				outcome = outcomeDownloadGone
+			}
+			break
+		}
+	}
+	detail["size"], detail["sent"] = size, sent
+	a.audit(r, "salvage_download", auditServer, srv.ID, detail, outcome)
+	a.Logger.Info("salvage download", "server", srv.ID, "file", name, "size", size, "sent", sent, "outcome", outcome,
+		"by", a.page(r).Username)
+}
+
+// salvageDelete deletes a salvage file (token: it may be the only copy of
+// the leftover data).
+func (a *app) salvageDelete(w http.ResponseWriter, r *http.Request) {
+	srv, ok := a.serverFromPath(w, r)
+	if !ok || !a.requireConfirm(w, r, ActSalvageDelete, auditServer, srv.ID) {
+		return
+	}
+	name := r.PathValue("name")
+	if !orchestrator.ValidSalvageName(name) {
+		a.audit(r, "salvage_delete", auditServer, srv.ID, nil, msgSalvageName)
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msgSalvageName})
+		return
+	}
+	err := a.Orchestrator.SalvageDelete(r.Context(), srv.ID, name)
+	a.audit(r, "salvage_delete", auditServer, srv.ID, map[string]any{auditSalvageFile: name}, outcomeOf(err))
+	if err != nil {
+		msg := err.Error()
+		if errors.Is(err, proto.ErrOffline) {
+			msg = msgSalvageOffline
+		}
+		a.Logger.Warn("salvage delete failed", "server", srv.ID, "file", name, "err", err)
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msg})
+		return
+	}
+	a.Logger.Info("salvage file deleted", "server", srv.ID, "file", name, "by", a.page(r).Username)
+	http.Redirect(w, r, serverURL(srv.ID)+"?pesan=berkas-dihapus", http.StatusSeeOther)
+}
+
+// rebuildInfo is what the replica form shows when it rebuilds the
+// quarantined old master as a replica of the new one (spec 5.4).
+type rebuildInfo struct {
+	Server         store.Server
+	CutoverPending bool
+	// Warnings are shown on the form and in the confirmation.
+	Warnings    []string
+	ConfirmText string
+}
+
+// rebuildTarget checks that id is the quarantined old master of master's
+// topology and words what rebuilding it loses.
+func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) (*rebuildInfo, error) {
+	srv, err := a.Store.GetServer(id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if srv.Role != store.RoleQuarantined {
+		return nil, nil
+	}
+	topo, err := a.Store.GetTopologyByOldMaster(id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && topo.MasterServerID != master.ID) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	info := &rebuildInfo{Server: srv, CutoverPending: topo.CutoverPending}
+	conns := a.connectionsOf(ctx, srv)
+	switch {
+	case conns.Unreadable != "":
+		info.Warnings = append(info.Warnings, fmt.Sprintf("Koneksi aplikasi ke %s tidak bisa dibaca (%s); pastikan semua "+
+			"aplikasi sudah memakai master baru.", srv.Name, strings.TrimSuffix(conns.Unreadable, ".")))
+	case conns.Total > 0:
+		info.Warnings = append(info.Warnings, fmt.Sprintf("Masih ada %d koneksi aplikasi ke %s: aplikasi itu belum dialihkan "+
+			"dan tulisannya ke server ini akan hilang.", conns.Total, srv.Name))
+	}
+	prom, err := a.Store.PromotionByOldMaster(id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	check, checked := orchestrator.LeftoverOf(prom)
+	switch {
+	case !checked:
+		info.Warnings = append(info.Warnings, "Data tertinggal belum diperiksa: transaksi yang tidak sampai ke master baru "+
+			"akan hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu bila ragu.")
+	case check.Transactions > 0:
+		info.Warnings = append(info.Warnings, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
+			"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
+	}
+	info.ConfirmText = fmt.Sprintf("Bangun ulang %s sebagai replika %s: semua data MySQL di %s diganti salinan dari master baru.",
+		srv.Name, master.Name, srv.Name)
+	if len(info.Warnings) > 0 {
+		info.ConfirmText += " " + strings.Join(info.Warnings, " ")
+	}
+	return info, nil
+}
+
+// repointReplica is "Arahkan sekarang" of a replica waiting to be pointed
+// at the new master (no token, spec 5.7). A replica that holds
+// transactions the new master lacks is information with the way out
+// (Resync ulang), not a failure page.
+func (a *app) repointReplica(w http.ResponseWriter, r *http.Request) {
+	srv, rep, ok := a.replicaFromPath(w, r)
+	if !ok {
+		return
+	}
+	err := a.Orchestrator.RepointNow(r.Context(), srv.ID)
+	a.audit(r, "replica_repoint", auditReplica, srv.ID, nil, outcomeOf(err))
+	switch {
+	case err == nil:
+		a.Logger.Info("replica repointed", "server", srv.ID, "by", a.page(r).Username)
+		http.Redirect(w, r, replicaURL(srv.ID)+"?pesan=diarahkan", http.StatusSeeOther)
+	case errors.Is(err, orchestrator.ErrNeedsRebuild):
+		if fresh, rerr := a.Store.GetReplicaByServer(srv.ID); rerr == nil {
+			rep = fresh
+		}
+		p := replicaPage{Page: a.page(r), Server: srv, Replica: rep}
+		p.RepointInfo = "Replika tidak diarahkan: " + err.Error() + "."
+		a.renderReplica(w, r, http.StatusOK, p)
+	default:
+		a.Logger.Warn("repoint refused", "server", srv.ID, "err", err)
+		a.replicaError(w, r, srv, rep, err.Error())
+	}
+}

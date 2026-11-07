@@ -398,6 +398,12 @@
             }
             this.$refs.password.value = "";
             form.submit();
+            // Unduhan (formulir GET) tidak berpindah halaman: tutup dialog
+            // agar tombolnya bisa dipakai lagi (dengan token baru).
+            if (form.method === "get") {
+              this.busy = false;
+              this.close();
+            }
           })
           .catch((err) => {
             this.error = err.message;
@@ -479,6 +485,44 @@
             })
             .catch(() => {}); // angka lama tetap tampil; event berikutnya mencoba lagi
         });
+      },
+    }));
+
+    // Fragmen yang dimuat ulang berkala (layar pengalihan: koneksi
+    // aplikasi tiap 15 detik): elemen x-data="pollFragment" dengan
+    // data-url (fragmen HTML dari panel) dan data-every (milidetik) diisi
+    // ulang dengan jawaban GET data-url. Tidak memuat saat tab tersembunyi;
+    // jawaban yang datang setelah jawaban permintaan berikutnya dibuang.
+    window.Alpine.data("pollFragment", () => ({
+      timer: null,
+      init() {
+        const el = this.$el;
+        const url = el.dataset.url;
+        const every = Math.max(Number(el.dataset.every) || 15000, 5000);
+        if (!url) {
+          return;
+        }
+        let nomor = 0;
+        const muat = () => {
+          if (document.hidden) {
+            return;
+          }
+          const ini = ++nomor;
+          fetch(url, { credentials: "same-origin", headers: { Accept: "text/html" } })
+            // Sesi habis: fetch mengikuti redirect ke /login; halaman login
+            // tidak boleh masuk ke fragmen.
+            .then((r) => (r.ok && !r.redirected ? r.text() : Promise.reject(new Error(String(r.status)))))
+            .then((html) => {
+              if (ini === nomor) {
+                el.innerHTML = html;
+              }
+            })
+            .catch(() => {}); // isi lama tetap tampil; giliran berikutnya mencoba lagi
+        };
+        this.timer = setInterval(muat, every);
+      },
+      destroy() {
+        clearInterval(this.timer);
       },
     }));
 

@@ -53,6 +53,10 @@ const (
 	// The promotion of a replica to master (promote.go).
 	KindPromotePlanned   = "promote_planned"
 	KindPromoteEmergency = "promote_emergency"
+	// The quarantined old master's short jobs (oldmaster.go): "Periksa
+	// data tertinggal" and "Amankan data tertinggal".
+	KindLeftover = "leftover"
+	KindSalvage  = "salvage"
 )
 
 // isPromote reports whether kind is a promotion job.
@@ -121,6 +125,10 @@ type Deps struct {
 	// Version is the panel's version. An agent of another version may not
 	// take part in a promotion (SEC-62); "" skips that check.
 	Version string
+	// SendText sends a message through Telegram with the saved settings
+	// (the result of "Periksa data tertinggal", spec 5.4); nil sends
+	// nothing.
+	SendText func(ctx context.Context, text string) error
 }
 
 // Alerts is told when a job fails (step is the title of the step that
@@ -1003,6 +1011,10 @@ type jobState struct {
 	Repointed []int64 `json:"repointed,omitempty"`
 	Deferred  []int   `json:"deferred,omitempty"`
 
+	// salvage: the leftover transactions to extract, from the check the
+	// job was started on.
+	SalvageGTIDSet string `json:"salvage_gtid_set,omitempty"`
+
 	// The agent job the current step waits for.
 	AgentServerID int64  `json:"agent_server_id,omitempty"`
 	AgentJobID    string `json:"agent_job_id,omitempty"`
@@ -1094,6 +1106,10 @@ func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun
 		jr.steps = jr.promotePlannedSteps()
 	case KindPromoteEmergency:
 		jr.steps = jr.promoteEmergencySteps()
+	case KindLeftover:
+		jr.steps = jr.leftoverSteps()
+	case KindSalvage:
+		jr.steps = jr.salvageSteps()
 	default:
 		return nil, fmt.Errorf("jenis pekerjaan tidak dikenal: %q", j.Kind)
 	}

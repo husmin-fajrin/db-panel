@@ -1,6 +1,13 @@
 {{define "title"}}Dashboard{{end}}
 {{define "content"}}
 <h1 class="text-2xl font-bold mb-4">Dashboard</h1>
+{{range .Cutover}}
+<div role="alert" class="alert alert-warning mb-4 flex flex-col items-start gap-2" data-promote-cutover>
+  <h2 class="font-bold">Promote menunggu pengalihan aplikasi</h2>
+  <p class="text-sm">Master sekarang {{.Name}}. Arahkan aplikasi ke master baru, lalu tekan "Sudah saya alihkan" di layar pengalihan.</p>
+  <a class="btn btn-sm" href="/masters/{{.ID}}/cutover">Buka layar pengalihan</a>
+</div>
+{{end}}
 {{range .PromotePartial}}
 <div role="alert" class="alert alert-error mb-4 flex flex-col items-start gap-2" data-promote-partial>
   <h2 class="font-bold">Promote belum tuntas</h2>
