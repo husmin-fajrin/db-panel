@@ -754,19 +754,13 @@ func (e *e2ePromoteTopology) confirmCutover(t *testing.T, newMaster *e2eNode) {
 	}
 }
 
-// rebuildOldMaster refreshes the new master's inventory ("Segarkan") and
-// runs "Bangun ulang sebagai replika" of old; old then follows the new
-// master as a replica. The refresh is a user step here: the new master's
-// stored inventory is the one taken while it was an empty replica target
-// (create_replica re-reads it after the copy only when the copy replaced
-// its accounts), so without it the form offers no database. The load runs
-// with read-only lifted (the quarantine guard defers to it) and old is
-// read-only again afterwards.
+// rebuildOldMaster runs "Bangun ulang sebagai replika" of old right after
+// the promote, with no "Segarkan": the promote's swap step re-read the new
+// master's inventory, so the form offers its databases. old then follows
+// the new master as a replica. The load runs with read-only lifted (the
+// quarantine guard defers to it) and old is read-only again afterwards.
 func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eNode, row int) {
 	t.Helper()
-	if loc := e.ui.postRedirect(serverPath(newMaster.srv())+"/mysql/refresh", nil); !strings.HasSuffix(loc, "?pesan=disegarkan") {
-		t.Fatalf("refresh of %s redirected to %q", newMaster.name, loc)
-	}
 	// The old master refuses to become a replica while replicas read its
 	// binlog. After a planned promote the old replicas' dump threads on it
 	// end only at their next heartbeat (nothing is written to a quarantined

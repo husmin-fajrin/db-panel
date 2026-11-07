@@ -588,8 +588,9 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 // transaction (store.SwapMaster) and marks the new master's inventory
 // MasterReady: it was prepared as a replica of a prepared master and the
 // promote created dbpanel_repl on it, so "Buat replika" and the old
-// master's rebuild may start from it without "Siapkan master". Running it
-// again changes nothing.
+// master's rebuild may start from it without "Siapkan master"; it then
+// re-reads the new master's inventory (a failure is only logged). Running
+// it again changes nothing.
 func (jr *jobRun) promoteSwap(ctx context.Context, _ bool) (outcome, error) {
 	host, port, err := jr.newMasterAddr(ctx)
 	if err != nil {
@@ -602,6 +603,14 @@ func (jr *jobRun) promoteSwap(ctx context.Context, _ bool) (outcome, error) {
 		return outcome{}, err
 	}
 	jr.r.d.Publish("mysql_inventory", map[string]any{"id": jr.candidate()})
+	// The stored inventory is the one taken while the new master was an
+	// empty replica target: read it again so "Buat replika" and the old
+	// master's rebuild offer its databases. A failure leaves "Segarkan" to
+	// the user and does not fail the step.
+	if _, err := jr.r.RefreshInventory(ctx, jr.candidate()); err != nil {
+		jr.logf("warn", "Inventaris MySQL %s belum diperbarui: %v. Tekan Segarkan di halaman servernya.",
+			jr.serverName(jr.candidate()), err)
+	}
 	jr.r.replicaChanged(jr.candidate())
 	jr.r.d.Publish("topology_update", map[string]any{"id": jr.job.TopologyID, "master_server_id": jr.candidate()})
 	jr.logf("info", "Data panel diperbarui: %s master baru di %s:%d, %s dikarantina.",

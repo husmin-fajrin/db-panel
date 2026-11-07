@@ -118,6 +118,8 @@ func newPromoteRig(t *testing.T) *promoteRig {
 	g.c.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: true, Executed: masterGTID,
 		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
 	g.c.reply("mysql.createReplUser", nil)
+	// The swap step re-reads the new master's inventory.
+	g.c.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs})
 	g.c.job("mysql.promote", func(j *jobs.Job, raw json.RawMessage) (any, error) {
 		var p proto.PromoteParams
 		json.Unmarshal(raw, &p)
@@ -187,7 +189,7 @@ func TestPromotePlannedStepsAndCommands(t *testing.T) {
 	}
 	e.seqMu.Unlock()
 	wantCmds(t, "all agents", seq, []string{"cand mysql.status", "db-master mysql.lockForPromote", "cand mysql.waitSynced",
-		"cand mysql.promote", "db-master mysql.quarantine", "rep-b mysql.repoint"})
+		"cand mysql.promote", "db-master mysql.quarantine", "cand mysql.inventory", "rep-b mysql.repoint"})
 
 	var lock proto.LockForPromoteParams
 	g.m.params("mysql.lockForPromote", &lock)
@@ -862,15 +864,17 @@ func TestPromoteStartRefusedFails(t *testing.T) {
 }
 
 // TestPromoteNewMasterReadyForReplicas: the swap marks the new master's
-// inventory MasterReady, so "Buat replika" and the old master's rebuild
-// start from it without "Siapkan master". The candidate's inventory is what
-// connecting it as a replica left: connected, never prepared.
+// inventory MasterReady and re-reads it (its databases, copied after its
+// inventory was taken), so "Buat replika" and the old master's rebuild
+// start from it without "Siapkan master" or "Segarkan".
 func TestPromoteNewMasterReadyForReplicas(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
 	ctx := context.Background()
+	// The candidate's inventory as connecting it as an empty replica
+	// target left it: connected, never prepared, no database yet.
 	if err := e.st.SetInventory(store.Inventory{ServerID: g.c.id, Connected: true, Version: "8.4.3", Series: "8.4",
-		Databases: masterDBs, UpdatedAt: time.Now()}); err != nil {
+		UpdatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	fresh := e.replicaAgent("replica-new", "clone")
@@ -908,4 +912,24 @@ func TestPromoteNewMasterReadyForReplicas(t *testing.T) {
 		t.Fatalf("rebuild of the old master from the new master: %v", err)
 	}
 	finished(rebuildID)
+}
+
+// TestPromoteSwapInventoryRefreshFailureOnlyLogged: when the new master's
+// inventory cannot be re-read, the swap step still succeeds (MasterReady
+// set) and the job log tells the user to press Segarkan.
+func TestPromoteSwapInventoryRefreshFailureOnlyLogged(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.c.on("mysql.inventory", func(json.RawMessage) (any, error) { return nil, errors.New("inventaris gagal dibaca") })
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if inv, err := e.st.GetInventory(g.c.id); err != nil || !inv.MasterReady {
+		t.Fatalf("new master's inventory = %+v, %v; want MasterReady", inv, err)
+	}
+	if log := e.jobLog(id); !strings.Contains(log, "Tekan Segarkan") {
+		t.Fatalf("job log lacks the Segarkan advice:\n%s", log)
+	}
 }
