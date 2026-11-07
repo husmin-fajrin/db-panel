@@ -249,12 +249,19 @@ dari luar panel (dipakai pada kasus M3 di 5.2 butir 3).
 - `emergency`: master tidak menjawab dari replika ini: tiga percobaan
   sambung TCP dan membaca salam MySQL, masing-masing tenggat 5 detik,
   berjarak 10 detik (sekitar 30 detik); semuanya gagal; dan IO thread
-  replika tidak sedang tersambung. Bila master ternyata menjawab dan
-  terkunci, agent melanjutkan sebagai `planned`. Bila master menjawab
-  dan bisa ditulis, agent menolak dengan pesan "master masih menjawab
-  dari replika ini; gunakan promote terencana, atau kunci master dari
-  servernya dengan `sudo dbpanel agent lock-master` bila agent-nya tidak
-  bisa dipulihkan".
+  replika tidak sedang tersambung. Bila master ternyata menjawab, baik
+  terkunci maupun bisa ditulis, agent menolak dengan pesan "master masih
+  menjawab dari replika ini, jadi ini bukan darurat; gunakan promote
+  terencana, atau buka kuncinya dari servernya dengan `sudo dbpanel
+  agent unlock-master` bila kunci lama tertinggal". *(Amandemen setelah
+  audit akhir 4b, SEC-66: peralihan darurat→terencana dihapus karena
+  kunci terencana yang tertinggal dari promote gagal bisa membuat
+  promote darurat ke kandidat lain berujung dua master bisa-tulis.
+  Pelengkapnya: penjaga master, sebelum membuka kunci pada tenggat,
+  memeriksa replika yang pernah dilihatnya dan mengarantina diri bila
+  ada yang bisa ditulis dan memuat transaksinya; panel menolak promote
+  darurat selama kunci promote terakhir belum dipastikan terbuka dan
+  tenggat + 60 detik belum lewat.)*
 
 Lalu, pada kedua mode: `STOP REPLICA IO_THREAD`, tunggu relay log yang
 sudah diterima diterapkan (`WAIT_FOR_EXECUTED_GTID_SET(retrieved)`,
