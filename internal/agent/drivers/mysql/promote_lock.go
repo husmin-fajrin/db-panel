@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,9 +19,13 @@ import (
 // at its deadline, and mysql.unlockPromote cancels it before then. The
 // guard never opens writes while the candidate may already be a master:
 // it opens them only after reading the candidate read-only twice, a grace
-// apart; it quarantines this server once the candidate is writable and
-// holds this server's transactions; otherwise the lock stays. A lock set
-// by the local CLI (CLILockCandidate) is never touched.
+// apart, and then reading every replica of the replicas-seen file with the
+// same account: one that is writable and holds this server's transactions
+// was promoted instead of the candidate (an emergency promotion while the
+// lock stood), and the guard quarantines this server under it rather than
+// open it. It quarantines this server too once the candidate is writable
+// and holds this server's transactions; otherwise the lock stays. A lock
+// set by the local CLI (CLILockCandidate) is never touched.
 
 const (
 	// minLockSec and maxLockSec bound mysql.lockForPromote's timeout.
@@ -29,7 +34,7 @@ const (
 	// lockGrace is how long the guard waits, after reading the candidate
 	// read-only at or past the deadline, before reading it again and
 	// opening the master.
-	lockGrace = 60 * time.Second
+	lockGrace = proto.PromoteLockGrace
 	// lockRecheck is how often the guard reads a candidate that is
 	// unreachable (or writable without this server's transactions).
 	lockRecheck = time.Minute
@@ -301,7 +306,15 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return nil
 	}
-	d.promoteMu.Lock()
+	// A promote command (a repoint probes for up to a minute) holds the
+	// lock: this tick is skipped rather than stall the health loop; the
+	// next check runs the guard again.
+	if !d.promoteMu.TryLock() {
+		if d.Logger != nil {
+			d.Logger.Debug("promote guard tick skipped: a promote command is running")
+		}
+		return nil
+	}
 	defer d.promoteMu.Unlock()
 	// A quarantined server is read-only before anything else, lock or
 	// not.
@@ -379,9 +392,9 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
 		d.keepLock(now, key, "kandidat tidak terjangkau: "+st.Err)
 	case !st.SuperReadOnly:
-		var uuid string
-		if err := db.QueryRowContext(ctx, "SELECT @@global.server_uuid").Scan(&uuid); err != nil {
-			return fmt.Errorf("baca server_uuid: %w", err)
+		uuid, err := serverUUID(ctx, db)
+		if err != nil {
+			return err
 		}
 		if gtidHasUUID(st.GTIDExecuted, uuid) {
 			return d.selfQuarantine(ctx, key, addr)
@@ -392,8 +405,25 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		// Read-only: still a replica. Read again after the grace.
 		g.graceAt, g.nextRead = now, now.Add(lockGrace)
 	default:
-		// Read-only at both reads, a grace apart: the promotion did not
-		// happen.
+		// Read-only at both reads, a grace apart: the promotion to the
+		// candidate did not happen. Another replica may have been
+		// promoted instead (emergency, with this server out of the
+		// panel's reach): checked before writes open here.
+		uuid, err := serverUUID(ctx, db)
+		if err != nil {
+			return err
+		}
+		other, found, err := writableSeenReplica(ctx, d.seenPath(), *g.cred, addr, uuid)
+		switch {
+		case err != nil:
+			g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
+			d.keepLock(now, key, "replika yang pernah tersambung tidak bisa diperiksa: "+err.Error())
+			return nil
+		case found:
+			d.warn("promote lock expired but another replica is a writable master with this server's transactions; quarantining",
+				"candidate", key, "new_source", other)
+			return d.selfQuarantine(ctx, other, "")
+		}
 		if err := unlockMaster(ctx, db); err != nil {
 			return err
 		}
@@ -405,6 +435,48 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "unlocked", Candidate: key})
 	}
 	return nil
+}
+
+// serverUUID is db's @@global.server_uuid.
+func serverUUID(ctx context.Context, db *sql.DB) (string, error) {
+	var uuid string
+	if err := db.QueryRowContext(ctx, "SELECT @@global.server_uuid").Scan(&uuid); err != nil {
+		return "", fmt.Errorf("baca server_uuid: %w", err)
+	}
+	return uuid, nil
+}
+
+// writableSeenReplica reads every host of the replicas-seen file at path
+// (as a Binlog Dump thread showed it) with the lock's account cred, at
+// cred's port, skipping the candidate's verified address candAddr (just
+// read). It returns the first, as host:port, that is writable
+// (super_read_only off) and whose gtid_executed holds a transaction of
+// uuid, this server's: a replica of this server promoted to master. One
+// that cannot be read is passed over (the candidate's account may not log
+// in there, or it is down); only a writable master that holds this
+// server's data stops the unlock. With certificate verification the
+// replica's host as recorded is the name verified.
+func writableSeenReplica(ctx context.Context, path string, cred proto.PeerCred, candAddr, uuid string) (string, bool, error) {
+	seen, err := readSeen(path)
+	if err != nil {
+		return "", false, err
+	}
+	hosts := make([]string, 0, len(seen))
+	for h := range seen {
+		if !strings.EqualFold(h, candAddr) {
+			hosts = append(hosts, h)
+		}
+	}
+	slices.Sort(hosts)
+	for _, h := range hosts {
+		c := cred
+		c.Host, c.ServerName = h, ""
+		st := readPeer(ctx, c, peerTimeout)
+		if st.Reachable && !st.SuperReadOnly && gtidHasUUID(st.GTIDExecuted, uuid) {
+			return peerKey(c), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // keepLock records that the lock stays past its deadline, reporting it

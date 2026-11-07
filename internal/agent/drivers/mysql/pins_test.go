@@ -66,7 +66,10 @@ type pinRig struct {
 func newPinRig(t *testing.T, h mysql.Host, dir string) *pinRig {
 	t.Helper()
 	reg := commands.NewRegistry()
-	d := &mysql.Driver{PinDir: dir}
+	// Files the driver keeps beside the pins stay in the test's own
+	// directories, never the system's.
+	d := &mysql.Driver{PinDir: dir, SeenPath: filepath.Join(t.TempDir(), "replicas-seen"),
+		SalvageDir: filepath.Join(t.TempDir(), "salvage")}
 	if h != nil {
 		d.Host = h
 	}

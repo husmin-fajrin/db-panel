@@ -20,17 +20,24 @@ import (
 // connectionsTimeout bounds one reading.
 const connectionsTimeout = 10 * time.Second
 
+// agentUserExpr is the user the agent logs in as: USER() without its
+// last @host, the name processlist shows.
+const agentUserExpr = `LEFT(USER(), CHAR_LENGTH(USER()) - CHAR_LENGTH(SUBSTRING_INDEX(USER(), '@', -1)) - 1)`
+
 // connectionsQuery lists the client threads: foreground threads serving
 // a client connection (NAME thread/sql/one_connection; a replica's
 // receiver, applier and workers, the event scheduler and MySQL's other
 // threads have other names) with a user, but the panel's accounts
 // (dbpanel_*), the event scheduler, MySQL's 'system user', replicas
-// reading the binary log, this very connection, and every session of the
-// user the agent itself logs in as (its monitoring and command sessions;
-// USER() without its last @host is the name processlist shows). That
-// account is the panel's admin account; people who share it are not an
-// application the cutover waits for.
-const connectionsQuery = `SELECT IFNULL(PROCESSLIST_HOST, ''), PROCESSLIST_USER, IFNULL(PROCESSLIST_DB, '')
+// reading the binary log, this very connection, and the sessions of the
+// user the agent itself logs in as that come from this server itself
+// (socket, localhost, 127.0.0.1 or ::1: the agent's monitoring and
+// command sessions, and anyone logged in on the server). That account's
+// sessions from any other host are listed, marked as the panel's admin
+// account (the last column): people or applications that share it still
+// write to this server.
+const connectionsQuery = `SELECT IFNULL(PROCESSLIST_HOST, ''), PROCESSLIST_USER, IFNULL(PROCESSLIST_DB, ''),
+		PROCESSLIST_USER = ` + agentUserExpr + `
 	FROM performance_schema.threads
 	WHERE TYPE = 'FOREGROUND'
 	  AND NAME = 'thread/sql/one_connection'
@@ -38,7 +45,8 @@ const connectionsQuery = `SELECT IFNULL(PROCESSLIST_HOST, ''), PROCESSLIST_USER,
 	  AND PROCESSLIST_USER <> 'system user'
 	  AND PROCESSLIST_USER NOT LIKE 'dbpanel\_%'
 	  AND PROCESSLIST_USER <> 'event_scheduler'
-	  AND PROCESSLIST_USER <> LEFT(USER(), CHAR_LENGTH(USER()) - CHAR_LENGTH(SUBSTRING_INDEX(USER(), '@', -1)) - 1)
+	  AND NOT (PROCESSLIST_USER = ` + agentUserExpr + `
+	           AND IFNULL(PROCESSLIST_HOST, '') IN ('', 'localhost', '127.0.0.1', '::1', '::ffff:127.0.0.1'))
 	  AND IFNULL(PROCESSLIST_COMMAND, '') NOT LIKE 'Binlog Dump%'
 	  AND IFNULL(PROCESSLIST_ID, 0) <> CONNECTION_ID()`
 
@@ -72,11 +80,14 @@ func readConnections(ctx context.Context, db *sql.DB) ([]proto.ConnectionRow, er
 		return nil, err
 	}
 	defer rs.Close()
-	type key struct{ host, user, db string }
+	type key struct {
+		host, user, db string
+		admin          bool
+	}
 	counts := map[key]int{}
 	for rs.Next() {
 		var k key
-		if err := rs.Scan(&k.host, &k.user, &k.db); err != nil {
+		if err := rs.Scan(&k.host, &k.user, &k.db, &k.admin); err != nil {
 			return nil, err
 		}
 		k.host = clientHost(k.host)
@@ -87,7 +98,7 @@ func readConnections(ctx context.Context, db *sql.DB) ([]proto.ConnectionRow, er
 	}
 	out := make([]proto.ConnectionRow, 0, len(counts))
 	for k, n := range counts {
-		out = append(out, proto.ConnectionRow{Host: k.host, User: k.user, DB: k.db, Count: n})
+		out = append(out, proto.ConnectionRow{Host: k.host, User: k.user, DB: k.db, Count: n, AdminAccount: k.admin})
 	}
 	slices.SortFunc(out, func(a, b proto.ConnectionRow) int {
 		return cmp.Or(cmp.Compare(b.Count, a.Count), cmp.Compare(a.Host, b.Host), cmp.Compare(a.User, b.User), cmp.Compare(a.DB, b.DB))

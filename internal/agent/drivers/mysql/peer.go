@@ -46,8 +46,10 @@ var (
 // ReadPeer logs in to c's server and reads @@global.super_read_only,
 // read_only, gtid_executed and server_uuid, which need no privilege, all
 // within timeout. With c.Verify the server's certificate is verified
-// against c.SSLCA (chain and host name); otherwise TLS is used when the
-// server offers it, without verification, as the replication channel does.
+// against c.SSLCA (chain and host name); otherwise TLS is still required,
+// without verification (as the replication channel's SOURCE_SSL=1): a
+// server, or someone in between, that offers no TLS is refused rather
+// than read in the clear.
 func ReadPeer(ctx context.Context, c proto.PeerCred, timeout time.Duration) PeerState {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -73,7 +75,7 @@ func ReadPeer(ctx context.Context, c proto.PeerCred, timeout time.Duration) Peer
 		}
 		cfg.TLS = &tls.Config{RootCAs: pool, ServerName: name, MinVersion: tls.VersionTLS12}
 	} else {
-		cfg.TLSConfig = "preferred"
+		cfg.TLSConfig = "skip-verify"
 	}
 	conn, err := drv.NewConnector(cfg)
 	if err != nil {

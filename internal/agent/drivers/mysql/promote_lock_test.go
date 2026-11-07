@@ -645,3 +645,122 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 		t.Errorf("quarantine again = %+v, want already", res)
 	}
 }
+
+// TestGuardChecksSeenReplicasBeforeUnlock (SEC-66): with the candidate
+// read-only at both reads, the guard reads every replica of the
+// replicas-seen file with the lock's account before it opens the master.
+// A writable replica without this server's transactions does not stop the
+// unlock; one that is writable and holds them (a replica promoted in an
+// emergency while the lock stood) quarantines this server under it.
+func TestGuardChecksSeenReplicasBeforeUnlock(t *testing.T) {
+	// The other replica, a real MySQL; the seen file names it by the
+	// address its Binlog Dump thread would show, and the guard reads it at
+	// the candidate's port, so the candidate's account names its port.
+	other := testmysql.Start(t, testmysql.Options{})
+	replUser(t, other)
+	odb := rootDB(t, other)
+	key := "10.9.9.9:" + strconv.Itoa(other.Port)
+	cand := guardCandidate
+	cand.Port = other.Port
+	r := newLockRig(t, key)
+	r.d.ArmGuard(cand)
+	seen := filepath.Join(t.TempDir(), "replicas-seen")
+	if err := mysql.RecordReplicasSeen(seen, []string{"127.0.0.1"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r.d.SeenPath = seen
+	// The candidate (fake) stays a read-only replica; anything else is
+	// read for real.
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true, GTIDExecuted: r.uuid + ":1-3"})
+	var mu sync.Mutex
+	var otherReads []mysql.PeerState
+	t.Cleanup(mysql.SetReadPeer(func(ctx context.Context, c proto.PeerCred, timeout time.Duration) mysql.PeerState {
+		if c.Host == "10.9.9.9" {
+			return r.peer.read(ctx, c, timeout)
+		}
+		st := mysql.ReadPeer(ctx, c, timeout)
+		mu.Lock()
+		otherReads = append(otherReads, st)
+		mu.Unlock()
+		return st
+	}))
+	reads := func() []mysql.PeerState {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]mysql.PeerState(nil), otherReads...)
+	}
+
+	// Writable, but none of this server's transactions: unlocked.
+	r.tick(0)
+	if n := len(reads()); n != 0 {
+		t.Fatalf("other replica read %d times at the first read of the candidate, want 0", n)
+	}
+	r.tick(time.Minute)
+	if got := reads(); len(got) != 1 || !got[0].Reachable || got[0].SuperReadOnly {
+		t.Fatalf("other replica reads = %+v, want one writable", got)
+	}
+	if sro, ro := readOnly(t, r.db); sro || ro {
+		t.Errorf("other replica writable without this server's transactions: super_read_only=%v read_only=%v, want unlocked", sro, ro)
+	}
+	r.wantEvents(proto.EventLockExpired)
+	if a := r.ev.payload(t, 0)["action"]; a != "unlocked" {
+		t.Errorf("lockExpired action = %q, want unlocked", a)
+	}
+
+	// Lock again; the other replica now holds this server's transactions
+	// and takes writes: quarantined under it, never opened.
+	execAll(t, r.db, "SET PERSIST super_read_only = ON")
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: key, Deadline: r.deadline}); err != nil {
+		t.Fatal(err)
+	}
+	r.d.ArmGuard(cand)
+	execAll(t, odb, "RESET MASTER", "SET GLOBAL gtid_purged = '"+r.uuid+":1-3'")
+	r.tick(0)
+	r.tick(time.Minute)
+	if sro, ro := readOnly(t, r.db); !sro || !ro {
+		t.Errorf("quarantined: super_read_only=%v read_only=%v", sro, ro)
+	}
+	if persisted(t, r.db, "super_read_only") != "ON" || persisted(t, r.db, "read_only") != "ON" {
+		t.Errorf("quarantined: persisted super_read_only=%q read_only=%q",
+			persisted(t, r.db, "super_read_only"), persisted(t, r.db, "read_only"))
+	}
+	want := "127.0.0.1:" + strconv.Itoa(other.Port)
+	if role, src := pinFile(t, r.dir, mysql.RoleFile), pinFile(t, r.dir, mysql.SourceFile); role != "quarantined" || src != want {
+		t.Errorf("pins = %q, %q; want quarantined, %s", role, src, want)
+	}
+	if got := pinFile(t, r.dir, mysql.LockFile); got != "" {
+		t.Errorf("lock file after quarantine = %q", got)
+	}
+	r.wantEvents(proto.EventLockExpired, proto.EventQuarantined)
+	if src := r.ev.payload(t, 1)["new_source"]; src != want {
+		t.Errorf("quarantined event new_source = %q, want %s", src, want)
+	}
+}
+
+// TestGuardTickSkipsWhileBusy (SEC-69): while a promote command holds the
+// lock (a repoint probing its old source), the guard's tick returns at
+// once without reading anything; the next tick does its work.
+func TestGuardTickSkipsWhileBusy(t *testing.T) {
+	r := newLockRig(t, guardCandidateKey)
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true, GTIDExecuted: r.uuid + ":1-3"})
+	release := r.d.HoldPromoteMu()
+	done := make(chan error, 1)
+	go func() { done <- r.d.GuardTick(context.Background(), r.deadline) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("GuardTick while busy: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		release()
+		t.Fatal("GuardTick waited for the promote lock")
+	}
+	release()
+	if n := r.peer.count(); n != 0 {
+		t.Errorf("busy tick read the candidate %d times", n)
+	}
+	r.tick(0)
+	if n := r.peer.count(); n != 1 {
+		t.Errorf("tick after the command read the candidate %d times, want 1", n)
+	}
+}

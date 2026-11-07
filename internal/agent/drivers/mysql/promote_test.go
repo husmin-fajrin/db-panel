@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -419,11 +420,23 @@ func TestPromoteEmergencyGivesUpIncomplete(t *testing.T) {
 }
 
 // TestPromoteEmergencyRefusedWhenMasterReturns: the old master is down
-// for the three probes but answers, writable, before writes would open:
-// the promotion is refused and replication restarted.
+// for the three probes but answers before writes would open, writable or
+// read-only (locked): either way it is alive, so the promotion is refused
+// and replication restarted (SEC-66: never continued as planned).
 func TestPromoteEmergencyRefusedWhenMasterReturns(t *testing.T) {
+	for _, locked := range []bool{false, true} {
+		t.Run(map[bool]string{false: "writable", true: "locked"}[locked], func(t *testing.T) {
+			promoteRefusedWhenMasterReturns(t, locked)
+		})
+	}
+}
+
+func promoteRefusedWhenMasterReturns(t *testing.T, locked bool) {
 	r := newPromoteRig(t)
 	t.Cleanup(mysql.SetProbeSpacing(50 * time.Millisecond))
+	if locked {
+		execAll(t, r.mdb, "SET GLOBAL super_read_only = ON")
+	}
 	execAll(t, r.rdb, "STOP REPLICA IO_THREAD")
 	probes := 0
 	t.Cleanup(mysql.SetProbePeer(func(ctx context.Context, host string, port int, timeout time.Duration) error {
@@ -432,7 +445,7 @@ func TestPromoteEmergencyRefusedWhenMasterReturns(t *testing.T) {
 		}
 		return mysql.ProbePeer(ctx, host, port, timeout)
 	}))
-	r.wantFailed(r.run(r.params(proto.PromoteEmergency)), "sudo dbpanel agent lock-master")
+	r.wantFailed(r.run(r.params(proto.PromoteEmergency)), "bukan keadaan darurat")
 	if probes != 4 {
 		t.Errorf("%d probes, want 4", probes)
 	}
@@ -460,10 +473,28 @@ func subset(db *sql.DB, a, b string) (bool, error) {
 }
 
 // TestPromoteEmergencyRefusedWhenMasterAnswers: an emergency promotion
-// while the master answers writable is refused, pointing at lock-master.
+// while the master answers is refused, writable or locked read-only
+// (SEC-66: a locked master's guard may open it again at the deadline),
+// pointing at planned promotion and unlock-master; the replica is left
+// as it was and the old master is not read.
 func TestPromoteEmergencyRefusedWhenMasterAnswers(t *testing.T) {
 	r := newPromoteRig(t)
-	r.wantFailed(r.run(r.params(proto.PromoteEmergency)), "sudo dbpanel agent lock-master")
+	r.wantFailed(r.run(r.params(proto.PromoteEmergency)), "bukan keadaan darurat")
+	execAll(t, r.mdb, "SET GLOBAL super_read_only = ON")
+	t.Cleanup(mysql.SetReadPeer(func(context.Context, proto.PeerCred, time.Duration) mysql.PeerState {
+		t.Error("emergency promote read the old master")
+		return mysql.PeerState{}
+	}))
+	d := r.run(r.params(proto.PromoteEmergency))
+	r.wantFailed(d, "masih hidup")
+	for _, part := range []string{"terkunci atau tidak", "promote terencana", "sudo dbpanel agent unlock-master"} {
+		if !strings.Contains(d.Error, part) {
+			t.Errorf("refusal %q lacks %q", d.Error, part)
+		}
+	}
+	if r.ev.logged("dilanjutkan sebagai promote terencana") {
+		t.Error("emergency promote continued as planned")
+	}
 }
 
 // TestPromoteRefusesWritableReplicaWithoutMarker: a replica made
@@ -677,6 +708,68 @@ func TestPromoteStallRuleWaitsForBusyWorker(t *testing.T) {
 		t.Errorf("rows = %d, want 3", n)
 	}
 	r.wantPromoted(res, proto.PromoteEmergency)
+}
+
+// TestPromoteLockMarginOnOwnClock (SEC-73): the lock's margin is the
+// seconds the panel said were left, less what passed on this server's
+// clock since the request; LockDeadline (the master's clock) is not used
+// for it. A deadline far off on a skewed clock does not hide a lock about
+// to end, and a deadline already past on a clock running behind does not
+// refuse a lock with time left.
+func TestPromoteLockMarginOnOwnClock(t *testing.T) {
+	r := newPromoteRig(t)
+	execAll(t, r.mdb, "SET GLOBAL super_read_only = ON")
+	// 150 s left at the request; a minute passes on this server before
+	// the margin is checked: 90 s < 2 minutes.
+	var mu sync.Mutex
+	base, calls := time.Now(), 0
+	r.d.Now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return base
+		}
+		return base.Add(time.Minute)
+	}
+	p := r.params(proto.PromotePlanned)
+	farOff := time.Now().Add(time.Hour)
+	remaining := 150
+	p.LockDeadline, p.LockRemainingSec = &farOff, &remaining
+	r.wantFailed(r.run(p), "tenggat kunci master hampir habis; ulangi promote")
+
+	// Ten minutes left at the request, the master's deadline already past
+	// on its own clock: promoted.
+	r.d.Now = nil
+	past := time.Now().Add(-time.Hour)
+	remaining = 600
+	p.LockDeadline = &past
+	r.wantPromoted(promoteResult(t, r.run(p)), proto.PromotePlanned)
+}
+
+// TestPromoteResumeStopsRestartedReplication (C-1): a MySQL restart
+// between opening writes and RESET REPLICA ALL starts replication again;
+// with a valid marker the resume stops it and completes instead of
+// refusing.
+func TestPromoteResumeStopsRestartedReplication(t *testing.T) {
+	r := newPromoteRig(t)
+	execAll(t, r.rdb, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+	if n := count(t, r.rdb, "SELECT COUNT(*) FROM performance_schema.replication_applier_status WHERE SERVICE_STATE = 'ON'"); n != 1 {
+		t.Fatalf("applier running = %d, want replication running", n)
+	}
+	at := time.Now().UTC().Truncate(time.Second)
+	if err := r.d.Pins().WritePromoting(mysql.Promoting{Mode: proto.PromotePlanned, OldSource: r.source, At: at}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mysql.SetReadPeer(func(context.Context, proto.PeerCred, time.Duration) mysql.PeerState {
+		t.Error("resume read the old master")
+		return mysql.PeerState{}
+	}))
+	res := promoteResult(t, r.run(r.params(proto.PromotePlanned)))
+	if !res.Resumed || res.Mode != proto.PromotePlanned {
+		t.Errorf("result = %+v; want resumed", res)
+	}
+	r.wantPromoted(res, proto.PromotePlanned)
 }
 
 // TestPromoteRefusesNearLockDeadline: less than two minutes left on the

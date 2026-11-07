@@ -3,6 +3,7 @@ package mysql_test
 import (
 	"database/sql"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -92,15 +93,20 @@ func TestConnectionsHidesPanelAndReplicationThreads(t *testing.T) {
 
 // TestConnectionsHidesAgentAccount: the agent's own sessions (its
 // monitoring session included) and every other session of the account it
-// logs in as are not application connections; another admin account's
-// are.
+// logs in as that comes from the server itself (socket or loopback) are
+// not application connections; that account's sessions from another host
+// are listed, marked as the panel's admin account; another admin
+// account's are listed unmarked.
 func TestConnectionsHidesAgentAccount(t *testing.T) {
-	inst := testmysql.Start(t, testmysql.Options{})
+	ip := nonLoopbackIPv4(t)
+	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: []string{"bind-address=0.0.0.0", "skip-name-resolve=ON"}})
 	db := rootDB(t, inst)
 	execAll(t, db, "CREATE DATABASE toko",
-		"CREATE USER 'ops'@'%' IDENTIFIED BY 'Ops-pw-1'", "GRANT ALL ON *.* TO 'ops'@'%'")
+		"CREATE USER 'ops'@'%' IDENTIFIED BY 'Ops-pw-1'", "GRANT ALL ON *.* TO 'ops'@'%'",
+		"CREATE USER 'root'@'%' IDENTIFIED BY 'Root-pw-1'", "GRANT ALL ON *.* TO 'root'@'%'")
 	// The agent's account (root, what Host() logs in as): a long-lived
-	// session like the agent's monitor, plus a person's on it.
+	// session over the socket like the agent's monitor, plus a person's on
+	// it over TCP from the server itself.
 	for i := 0; i < 2; i++ {
 		c, err := db.Conn(t.Context())
 		if err != nil {
@@ -111,12 +117,47 @@ func TestConnectionsHidesAgentAccount(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	openAs(t, inst, "root", "Root-pw-1", "toko", 1)
 	openAs(t, inst, "ops", "Ops-pw-1", "toko", 2)
+	// The same account from another host: an application sharing it.
+	pool, err := sql.Open("mysql", fmt.Sprintf("root:Root-pw-1@tcp(%s:%d)/toko?tls=preferred", ip, inst.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pool.Close() })
+	for i := 0; i < 3; i++ {
+		c, err := pool.Conn(t.Context())
+		if err != nil {
+			t.Fatalf("connect as root from %s: %v", ip, err)
+		}
+		t.Cleanup(func() { c.Close() })
+	}
 
 	reg := commands.NewRegistry()
 	(&mysql.Driver{Host: inst.Host()}).Register(reg)
 	res := decode[proto.ConnectionsResult](t, reg.Dispatch(t.Context(), proto.Request{ID: "1", Cmd: "mysql.connections"}))
-	if len(res.Rows) != 1 || res.Rows[0].User != "ops" || res.Rows[0].DB != "toko" || res.Rows[0].Count != 2 {
-		t.Fatalf("rows = %+v, want only ops x2 on toko", res.Rows)
+	want := []proto.ConnectionRow{
+		{Host: ip, User: "root", DB: "toko", Count: 3, AdminAccount: true},
+		{Host: "127.0.0.1", User: "ops", DB: "toko", Count: 2},
 	}
+	if len(res.Rows) != len(want) || res.Rows[0] != want[0] || res.Rows[1] != want[1] {
+		t.Fatalf("rows = %+v, want %+v", res.Rows, want)
+	}
+}
+
+// nonLoopbackIPv4 is an IPv4 address of this host other than loopback;
+// the test is skipped without one.
+func nonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.IP.To4() != nil {
+			return n.IP.String()
+		}
+	}
+	t.Skip("no non-loopback IPv4 address to connect from")
+	return ""
 }

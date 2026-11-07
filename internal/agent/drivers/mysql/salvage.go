@@ -26,6 +26,15 @@ import (
 // downloads through the panel and replays by hand. The file is the only
 // place their data lives: logs and events carry its name and size only.
 // Files are kept 7 days (SweepSalvage, from the health monitor).
+//
+// What a salvage may extract is bounded, so that a compromised panel
+// cannot read this server's binary log history through it: the set must
+// be a subset of the one the last mysql.leftover found (the transactions
+// the new master lacks), kept in memory and in leftoverSetFile under the
+// salvage directory (0600) across agent restarts. One salvage runs at a
+// time, and the directory holds at most salvageDirMax bytes: a salvage is
+// refused before it writes once the directory is full, and stopped (its
+// file removed) when it would pass the cap.
 
 const (
 	// DefaultSalvageDir is where salvage files are written (0700 root)
@@ -36,6 +45,15 @@ const (
 	// salvageMaxSize is the largest salvage file written; a larger one is
 	// abandoned and removed.
 	salvageMaxSize = 2 << 30
+	// salvageDirMax is the most the salvage directory holds, all files
+	// together.
+	salvageDirMax = 8 << 30
+	// leftoverSetFile, in the salvage directory, keeps the GTID set the
+	// last mysql.leftover found; its name is neither a salvage file's nor
+	// a temporary one's, so the list and the sweep leave it alone.
+	leftoverSetFile = "leftover-gtid"
+	// maxLeftoverSetFile bounds what is read of it.
+	maxLeftoverSetFile = 1 << 20
 	// salvageChunk is the most mysql.salvageRead returns at once.
 	salvageChunk = 512 << 10
 	// salvageTimeout bounds one mysqlbinlog run of mysql.salvage.
@@ -53,6 +71,11 @@ var salvageNameRe = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9]+\.sql$`)
 
 // errSalvageTooLarge stops a salvage past salvageMaxSize.
 var errSalvageTooLarge = fmt.Errorf("berkas salvage melebihi %d GiB; dibatalkan dan dihapus", salvageMaxSize>>30)
+
+// errSalvageDirFull stops a salvage that would take the directory past
+// salvageDirMax.
+var errSalvageDirFull error = &commands.ParamError{Msg: fmt.Sprintf("direktori salvage akan melebihi batas %d GiB; "+
+	"salvage dibatalkan dan berkasnya dihapus. Unduh lalu hapus berkas salvage lama dulu", salvageDirMax>>30)}
 
 func (d *Driver) registerSalvage(reg *commands.Registry) {
 	reg.Register("mysql.salvage", func(ctx context.Context, params json.RawMessage) (any, error) {
@@ -74,6 +97,10 @@ func (d *Driver) registerSalvage(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
+		if !d.salvageRun.TryLock() {
+			return nil, &commands.ParamError{Msg: "salvage lain sedang berjalan di server ini; tunggu sampai selesai lalu ulangi"}
+		}
+		defer d.salvageRun.Unlock()
 		f, err := d.salvage(ctx, h, set)
 		if err != nil {
 			return nil, err
@@ -195,12 +222,25 @@ func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.Salvag
 	}
 	defer db.Close()
 	s := set.String()
-	var sub bool
-	if err := db.QueryRowContext(qctx, "SELECT GTID_SUBSET(?, @@global.gtid_executed)", s).Scan(&sub); err != nil {
+	allowed, ok, err := d.lastLeftover()
+	if err != nil {
+		return f, err
+	}
+	if !ok {
+		return f, &commands.ParamError{Msg: "Periksa data tertinggal (mysql.leftover) belum menemukan transaksi di agent ini; " +
+			"salvage hanya mengambil transaksi yang ditemukan pemeriksaan terakhir. Jalankan Periksa data tertinggal dulu"}
+	}
+	var sub, found bool
+	if err := db.QueryRowContext(qctx, "SELECT GTID_SUBSET(?, @@global.gtid_executed), GTID_SUBSET(?, ?)", s, s, allowed).
+		Scan(&sub, &found); err != nil {
 		return f, fmt.Errorf("periksa set GTID: %w", err)
 	}
 	if !sub {
 		return f, &commands.ParamError{Msg: "set GTID memuat transaksi yang tidak dijalankan server ini; salvage ditolak"}
+	}
+	if !found {
+		return f, &commands.ParamError{Msg: "set GTID memuat transaksi di luar hasil Periksa data tertinggal terakhir; salvage ditolak. " +
+			"Jalankan Periksa data tertinggal lagi lalu amankan hasilnya"}
 	}
 	paths, _, err := binlogFilesFor(qctx, db, s)
 	if err != nil {
@@ -217,6 +257,18 @@ func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.Salvag
 		return f, err
 	}
 	defer root.Close()
+	used, err := salvageDirSize(root)
+	if err != nil {
+		return f, err
+	}
+	if used >= salvageDirMax {
+		return f, &commands.ParamError{Msg: fmt.Sprintf("direktori salvage sudah memuat %.1f GiB (batas %d GiB); salvage ditolak. "+
+			"Unduh lalu hapus berkas salvage lama dulu", float64(used)/(1<<30), salvageDirMax>>30)}
+	}
+	limit, overErr := int64(salvageMaxSize), errSalvageTooLarge
+	if room := int64(salvageDirMax) - used; room < limit {
+		limit, overErr = room, errSalvageDirFull
+	}
 	created := d.now().UTC().Truncate(time.Second)
 	name := created.Format(salvageTimeLayout) + "-" + strconv.FormatInt(d.Cfg.ServerID, 10) + ".sql"
 	taken := func() error {
@@ -242,12 +294,12 @@ func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.Salvag
 	}()
 	rctx, stop := context.WithTimeout(ctx, salvageTimeout)
 	defer stop()
-	lw := &limitWriter{w: out, max: salvageMaxSize, stop: stop}
+	lw := &limitWriter{w: out, max: limit, stop: stop}
 	args := append([]string{"--no-defaults", "--include-gtids=" + s, "--skip-gtids", "--verbose"}, paths...)
 	err = h.Exec(rctx, nil, lw, bin, args...)
 	switch {
 	case lw.over:
-		return f, errSalvageTooLarge
+		return f, overErr
 	case rctx.Err() == context.DeadlineExceeded:
 		return f, fmt.Errorf("mysqlbinlog tidak selesai dalam %v; salvage dibatalkan", salvageTimeout)
 	case err != nil:
@@ -268,6 +320,123 @@ func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.Salvag
 		return f, fmt.Errorf("simpan berkas salvage: %w", err)
 	}
 	return proto.SalvageFile{Name: name, Size: lw.n, CreatedAt: created, ExpiresAt: created.Add(SalvageMaxAge)}, nil
+}
+
+// salvageDirSize is the size of every regular file in root, salvage
+// files, temporary ones and the leftover set alike.
+func salvageDirSize(root *os.Root) (int64, error) {
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return 0, fmt.Errorf("baca direktori salvage: %w", err)
+	}
+	var n int64
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if fi, err := e.Info(); err == nil {
+			n += fi.Size()
+		}
+	}
+	return n, nil
+}
+
+// recordLeftover keeps set, what the last mysql.leftover found ("" for
+// nothing), as the bound of later salvages: in memory, and in
+// leftoverSetFile (0600, written to a temporary name and renamed) for
+// after an agent restart. A file that cannot be written is logged; the
+// memory still holds the set.
+func (d *Driver) recordLeftover(set string) {
+	d.leftoverMu.Lock()
+	defer d.leftoverMu.Unlock()
+	d.leftoverSet, d.leftoverKnown = set, true
+	if err := d.writeLeftoverSet(set); err != nil && d.Logger != nil {
+		d.Logger.Warn("leftover set not saved; salvage is bounded by it until the agent restarts", "err", err)
+	}
+}
+
+func (d *Driver) writeLeftoverSet(set string) error {
+	root, err := d.openSalvageDir()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	tmp := leftoverSetFile + ".tmp"
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("tulis set data tertinggal: %w", err)
+	}
+	_, werr := f.Write([]byte(set + "\n"))
+	if werr == nil {
+		werr = f.Chmod(0o600)
+	}
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = root.Rename(tmp, leftoverSetFile)
+	}
+	if werr != nil {
+		root.Remove(tmp)
+		return fmt.Errorf("tulis set data tertinggal: %w", werr)
+	}
+	return syncDir(d.salvageDir())
+}
+
+// lastLeftover is the set the last mysql.leftover found: from memory, or
+// after an agent restart from leftoverSetFile. ok is false when no
+// mysql.leftover result is known, or it found nothing.
+func (d *Driver) lastLeftover() (string, bool, error) {
+	d.leftoverMu.Lock()
+	defer d.leftoverMu.Unlock()
+	if !d.leftoverKnown {
+		set, ok, err := d.readLeftoverSet()
+		if err != nil {
+			return "", false, err
+		}
+		if !ok {
+			return "", false, nil
+		}
+		d.leftoverSet, d.leftoverKnown = set, true
+	}
+	return d.leftoverSet, d.leftoverSet != "", nil
+}
+
+// readLeftoverSet reads leftoverSetFile; ok is false when it is missing.
+// It must be a regular file (not a link) and hold a GTID set.
+func (d *Driver) readLeftoverSet() (string, bool, error) {
+	if _, err := os.Lstat(d.salvageDir()); errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	root, err := d.openSalvageDir()
+	if err != nil {
+		return "", false, err
+	}
+	defer root.Close()
+	f, err := root.OpenFile(leftoverSetFile, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("baca set data tertinggal: %w", err)
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return "", false, fmt.Errorf("set data tertinggal %s bukan berkas biasa", leftoverSetFile)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxLeftoverSetFile))
+	if err != nil {
+		return "", false, fmt.Errorf("baca set data tertinggal: %w", err)
+	}
+	set := strings.TrimSpace(string(b))
+	g, err := parseGTIDSet(set)
+	if err != nil {
+		return "", false, fmt.Errorf("set data tertinggal di %s tidak valid: %w", leftoverSetFile, err)
+	}
+	return g.String(), true, nil
 }
 
 // publishSalvage renames tmp to name under salvageMu, unless taken says

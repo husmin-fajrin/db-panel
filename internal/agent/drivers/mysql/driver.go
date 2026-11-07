@@ -88,6 +88,13 @@ type Driver struct {
 	rebuild rebuildLoad
 
 	salvageMu sync.Mutex // a salvage rename, a delete or the sweep; never held across mysqlbinlog
+	// salvageRun is held by the one mysql.salvage that may run; another
+	// is refused (TryLock).
+	salvageRun sync.Mutex
+	// The set the last mysql.leftover found (salvage.go: recordLeftover).
+	leftoverMu    sync.Mutex
+	leftoverSet   string
+	leftoverKnown bool
 
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer

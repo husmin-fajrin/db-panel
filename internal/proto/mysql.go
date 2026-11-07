@@ -401,6 +401,12 @@ const (
 	PromoteEmergency = "emergency"
 )
 
+// PromoteLockGrace is how long a master's promote lock guard waits, after
+// reading the candidate read-only at or past the lock's deadline, before
+// reading it again and opening the master. The panel adds it to the
+// deadline when it decides whether the lock may still be held.
+const PromoteLockGrace = 60 * time.Second
+
 // PromoteParams are the parameters of mysql.promote, run on the replica
 // being promoted: the mode, the master it follows (OldSource, which must
 // be its pinned source), the deadline of the old master's promote lock
@@ -410,8 +416,12 @@ type PromoteParams struct {
 	Mode         string     `json:"mode"`
 	OldSource    PeerCred   `json:"old_source"`
 	LockDeadline *time.Time `json:"lock_deadline,omitempty"`
-	ReplUser     string     `json:"repl_user"`
-	ReplPassword string     `json:"repl_password"`
+	// LockRemainingSec is how many seconds were left until LockDeadline
+	// when the panel sent the request (its clock). The agent measures the
+	// lock's margin with it on its own clock; LockDeadline is only logged.
+	LockRemainingSec *int   `json:"lock_remaining_sec,omitempty"`
+	ReplUser         string `json:"repl_user"`
+	ReplPassword     string `json:"repl_password"`
 	// NotBefore is when the panel's promotion started. A server already
 	// pinned master by a promotion from OldSource recorded at or after it
 	// answers with that promotion (Resumed) instead of refusing, so a
@@ -525,8 +535,10 @@ type LockExpiredEvent struct {
 // ConnectionsResult is the answer to mysql.connections: the client
 // connections to this server grouped by host (without port), user and
 // default database, most connections first, read at TakenAt. The panel's
-// own accounts (dbpanel_*), replicas reading the binary log and MySQL's
-// own threads are left out.
+// own accounts (dbpanel_*), replicas reading the binary log, MySQL's own
+// threads, the agent's own connection and the sessions of the agent's
+// admin account from this server itself (socket, localhost, 127.0.0.1,
+// ::1) are left out.
 type ConnectionsResult struct {
 	Rows    []ConnectionRow `json:"rows"`
 	TakenAt time.Time       `json:"taken_at"`
@@ -539,6 +551,9 @@ type ConnectionRow struct {
 	User  string `json:"user"`
 	DB    string `json:"db"`
 	Count int    `json:"count"`
+	// AdminAccount: User is the account the agent logs in as (the panel's
+	// admin account), connected from another host.
+	AdminAccount bool `json:"admin_account,omitempty"`
 }
 
 // LeftoverParams are the parameters of mysql.leftover, run on a

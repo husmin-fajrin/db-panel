@@ -19,19 +19,21 @@ import (
 //
 //  1. Writes already open (read_only and super_read_only off): resumed
 //     at 6 only when the promoting marker of an earlier run from the
-//     same old master exists and replication is stopped; refused
-//     otherwise (the replica must be locked again first).
+//     same old master exists and is recent; replication a MySQL restart
+//     started again is stopped first (STOP REPLICA). Refused otherwise.
 //  2. planned: the old master answers, is super_read_only and holds no
 //     transaction this server lacks. emergency: three probes of the old
 //     master, 10 s apart, all fail and the replica's receiver is not
-//     connected; an old master that answers read-only continues as
-//     planned, a writable one refuses.
+//     connected; an old master that answers, read-only or not, refuses:
+//     a live master is no emergency (a locked one is too: its guard may
+//     open it again at the lock's deadline).
 //  3. STOP REPLICA IO_THREAD, then apply the relay log (bounded: an
 //     incomplete last transaction is given up and reported).
-//  4. emergency: one more probe; an old master that answers again is
-//     treated as in 2. planned: the lock's deadline is at least 2
-//     minutes away and the old master is still read-only with nothing
-//     this server lacks.
+//  4. emergency: one more probe; an old master that answers now restores
+//     the replica and refuses as in 2. planned: the lock has at least 2
+//     minutes left (the seconds the panel gave, LockRemainingSec, less
+//     what passed on this server's clock since the request came) and
+//     the old master is still read-only with nothing this server lacks.
 //  5. The promoting marker (synced), STOP REPLICA, then SET PERSIST
 //     read_only/super_read_only OFF: the point of no return.
 //  6. RESET REPLICA ALL, the replication account for its own replicas,
@@ -121,8 +123,9 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
+		lockBy := promoteLockBy(p, d.now())
 		id, err := d.Jobs.Start("mysql.promote", func(j *jobs.Job) (any, error) {
-			res, err := d.promote(j, h, p)
+			res, err := d.promote(j, h, p, lockBy)
 			if err != nil {
 				d.warn("mysql promote failed", "job", j.ID(), "mode", p.Mode, "old_source", old, "err", err)
 				return nil, err
@@ -156,6 +159,19 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 		}
 		return res, nil
 	})
+}
+
+// promoteLockBy is when, on this server's clock, the old master's lock
+// ends for a promotion requested at recv: recv plus the seconds the panel
+// said were left (LockRemainingSec), so clock skew between the servers
+// does not eat the margin. LockDeadline, the master's own clock, is only
+// used when the panel sent no remaining seconds. nil: no lock (emergency).
+func promoteLockBy(p proto.PromoteParams, recv time.Time) *time.Time {
+	if p.LockRemainingSec != nil {
+		t := recv.Add(time.Duration(*p.LockRemainingSec) * time.Second)
+		return &t
+	}
+	return p.LockDeadline
 }
 
 // promotedSince returns this server's promotion record when the server is
@@ -192,8 +208,9 @@ func validatePromote(p *proto.PromoteParams) error {
 	return account{User: replUserName, Host: "%", Password: p.ReplPassword}.validate("replikasi")
 }
 
-// promote runs mysql.promote's steps (see above) in job j.
-func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams) (proto.PromoteResult, error) {
+// promote runs mysql.promote's steps (see above) in job j; lockBy is
+// when the old master's lock ends on this server's clock (promoteLockBy).
+func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams, lockBy *time.Time) (proto.PromoteResult, error) {
 	var res proto.PromoteResult
 	ctx := j.Context()
 	db, err := openAdmin(ctx, h)
@@ -218,7 +235,7 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams) (proto.Prom
 			m.Mode, m.At.UTC().Format(time.RFC3339))
 		res.Resumed, mode = true, m.Mode
 	} else {
-		applied, unapplied, err := d.openWrites(j, db, p)
+		applied, unapplied, err := d.openWrites(j, db, p, lockBy)
 		if err != nil {
 			return res, err
 		}
@@ -232,9 +249,14 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams) (proto.Prom
 
 // checkResume allows step 1's resume only for a promotion of this replica
 // from the same old master that wrote the promoting marker (so passed its
-// verification) and stopped replication: a replica writable for any
-// other reason (a load interrupted by a crash, a manual SET GLOBAL) is
-// never promoted unverified.
+// verification) within markerMaxAge: a replica writable for any other
+// reason (a load interrupted by a crash, a manual SET GLOBAL) is never
+// promoted unverified. Replication running under a valid marker was
+// started again by a MySQL restart between opening writes and RESET
+// REPLICA ALL (the replica's channel starts with MySQL): it is stopped
+// and the promotion resumed, since the old master may already have
+// quarantined itself under this server and only finishing it leaves a
+// writable master.
 func (d *Driver) checkResume(ctx context.Context, db *sql.DB, p proto.PromoteParams) (Promoting, error) {
 	key := peerKey(p.OldSource)
 	m, ok, err := d.pins.ReadPromoting()
@@ -244,13 +266,14 @@ func (d *Driver) checkResume(ctx context.Context, db *sql.DB, p proto.PromotePar
 	if !ok || !strings.EqualFold(m.OldSource, key) {
 		return m, &commands.ParamError{Msg: fmt.Sprintf(
 			"server ini bisa ditulis (read_only=OFF) tanpa catatan promote dari %s yang sedang berjalan; promote ditolak. "+
-				"Kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", key)}
+				"Bila tidak ada aplikasi yang menulis ke server ini, kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", key)}
 	}
 	// A marker left by a run that never opened writes (a crash before
 	// them) must not let a much later unlock pass for its resume.
 	if age := d.now().Sub(m.At); age > markerMaxAge || age < -markerMaxAge {
 		msg := fmt.Sprintf("catatan promote dari %s sudah kedaluwarsa (%s); promote ditolak dan catatannya dihapus. "+
-			"Kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", key, m.At.UTC().Format(time.RFC3339))
+			"Bila tidak ada aplikasi yang menulis ke server ini, kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote",
+			key, m.At.UTC().Format(time.RFC3339))
 		if err := d.pins.ClearPromoting(); err != nil {
 			msg += fmt.Sprintf(" (catatan gagal dihapus: %v)", err)
 		}
@@ -261,9 +284,14 @@ func (d *Driver) checkResume(ctx context.Context, db *sql.DB, p proto.PromotePar
 		return m, err
 	}
 	if rs != nil && (rs.IORunning == "Yes" || rs.IORunning == "Connecting" || rs.SQLRunning == "Yes") {
-		return m, &commands.ParamError{Msg: fmt.Sprintf(
-			"server ini bisa ditulis tetapi replikasi masih berjalan (IO: %s, SQL: %s); promote tidak dilanjutkan. "+
-				"Kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", rs.IORunning, rs.SQLRunning)}
+		if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
+			return m, fmt.Errorf("server ini sudah bisa ditulis oleh promote sebelumnya, tetapi replikasinya berjalan lagi "+
+				"(IO: %s, SQL: %s) dan gagal dihentikan (STOP REPLICA: %w); jalankan promote lagi", rs.IORunning, rs.SQLRunning, err)
+		}
+		if d.Logger != nil {
+			d.Logger.Warn("promote resume: replication was running again (MySQL restarted); stopped",
+				"io", rs.IORunning, "sql", rs.SQLRunning)
+		}
 	}
 	return m, nil
 }
@@ -282,7 +310,7 @@ func crashPoint(stage string) {
 // openWrites runs steps 2 to 5 and returns how many relay log
 // transactions were applied and the incomplete ones left unapplied.
 // Writes are open when it returns nil.
-func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (int, string, error) {
+func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams, lockBy *time.Time) (int, string, error) {
 	ctx := j.Context()
 	key := peerKey(p.OldSource)
 	rs, err := currentStatus(ctx, db)
@@ -317,23 +345,15 @@ func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (int
 	if err != nil {
 		return 0, "", restore(err)
 	}
-	if !planned {
-		// The old master may have come back while the relay log was
-		// applied: probe it once more.
-		if perr := probePeer(ctx, p.OldSource.Host, p.OldSource.Port, peerTimeout); perr == nil {
-			st := readPeer(ctx, p.OldSource, peerTimeout)
-			if !st.Reachable || !st.SuperReadOnly {
-				return 0, "", restore(&commands.ParamError{Msg: "master masih menjawab dari replika ini; gunakan promote terencana, atau kunci master dari " +
-					"servernya dengan `sudo dbpanel agent lock-master` bila agent-nya tidak bisa dipulihkan"})
-			}
-			j.Logf("info", "master lama %s menjawab lagi dan read-only: dilanjutkan sebagai promote terencana", key)
-			planned = true
-		}
-	}
 	if planned {
-		if err := d.recheckOldSource(j, db, p); err != nil {
+		if err := d.recheckOldSource(j, db, p, lockBy); err != nil {
 			return 0, "", restore(err)
 		}
+	} else if perr := probePeer(ctx, p.OldSource.Host, p.OldSource.Port, peerTimeout); perr == nil {
+		// The old master came back while the relay log was applied: alive,
+		// locked or not, so no emergency.
+		j.Logf("warn", "master lama %s menjawab lagi sebelum tulis dibuka", key)
+		return 0, "", restore(oldMasterAlive(key))
 	}
 	if err := d.pins.WritePromoting(Promoting{Mode: p.Mode, OldSource: key, At: d.now()}); err != nil {
 		return 0, "", restore(fmt.Errorf("catatan promote gagal ditulis: %w", err))
@@ -355,9 +375,9 @@ func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (int
 	return applied, unapplied, nil
 }
 
-// verifyOldSource is step 2. planned reports whether the old master
-// answered read-only (planned, or an emergency whose master answered),
-// which step 4 checks again.
+// verifyOldSource is step 2. planned reports whether this is a planned
+// promotion, whose old master step 4 reads again; an emergency one
+// whose old master answers is refused.
 func (d *Driver) verifyOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (planned bool, err error) {
 	ctx := j.Context()
 	old := p.OldSource
@@ -392,18 +412,7 @@ func (d *Driver) verifyOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams)
 			j.Logf("warn", "master lama %s tidak terjangkau dan thread IO replika tidak tersambung (%s): promote darurat dilanjutkan", key, rs.IORunning)
 			return false, nil
 		}
-		st := readPeer(ctx, old, peerTimeout)
-		switch {
-		case !st.Reachable:
-			return false, &commands.ParamError{Msg: fmt.Sprintf("master lama %s masih menjawab dari replika ini tetapi tidak bisa dibaca (%s); "+
-				"promote darurat ditolak. Gunakan promote terencana, atau kunci master dari servernya dengan `sudo dbpanel agent lock-master` "+
-				"bila agent-nya tidak bisa dipulihkan", key, st.Err)}
-		case !st.SuperReadOnly:
-			return false, &commands.ParamError{Msg: "master masih menjawab dari replika ini; gunakan promote terencana, atau kunci master dari " +
-				"servernya dengan `sudo dbpanel agent lock-master` bila agent-nya tidak bisa dipulihkan"}
-		}
-		j.Logf("info", "master lama %s masih menjawab dan read-only: dilanjutkan sebagai promote terencana", key)
-		return true, caughtUp(ctx, db, key, st.GTIDExecuted)
+		return false, oldMasterAlive(key)
 	}
 	st := readPeer(ctx, old, peerTimeout)
 	switch {
@@ -417,6 +426,17 @@ func (d *Driver) verifyOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams)
 	}
 	j.Logf("info", "master lama %s menjawab dan read-only", key)
 	return true, caughtUp(ctx, db, key, st.GTIDExecuted)
+}
+
+// oldMasterAlive refuses an emergency promotion whose old master
+// answered. A live master is no emergency, locked or not: a promote lock's
+// guard opens the master again at its deadline, and a lock-master lock is
+// opened by hand, either way beside this server opening writes.
+func oldMasterAlive(key string) error {
+	return &commands.ParamError{Msg: fmt.Sprintf(
+		"master lama %s masih hidup: MySQL-nya menjawab dari replika ini (terkunci atau tidak), jadi ini bukan keadaan darurat; "+
+			"promote darurat ditolak dan replika ini dibiarkan seperti semula. Gunakan promote terencana; bila master itu "+
+			"terkunci dan harus dipakai lagi, buka kuncinya di server master dengan: sudo dbpanel agent unlock-master", key)}
 }
 
 // caughtUp refuses unless this server executed every transaction of
@@ -433,12 +453,17 @@ func caughtUp(ctx context.Context, db *sql.DB, key, oldExecuted string) error {
 	return nil
 }
 
-// recheckOldSource is step 4: the lock's deadline is not too close and
-// the old master is still read-only with nothing this server lacks.
-func (d *Driver) recheckOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams) error {
+// recheckOldSource is step 4: the lock's end (lockBy, this server's
+// clock) is not too close and the old master is still read-only with
+// nothing this server lacks.
+func (d *Driver) recheckOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams, lockBy *time.Time) error {
 	ctx := j.Context()
 	key := peerKey(p.OldSource)
-	if p.LockDeadline != nil && p.LockDeadline.Sub(d.now()) < promoteLockMargin {
+	if lockBy != nil && lockBy.Sub(d.now()) < promoteLockMargin {
+		if d.Logger != nil {
+			d.Logger.Warn("promote refused: lock margin", "lock_deadline", p.LockDeadline, "lock_remaining_sec", p.LockRemainingSec,
+				"lock_ends_local", lockBy)
+		}
 		return &commands.ParamError{Msg: "tenggat kunci master hampir habis; ulangi promote"}
 	}
 	st := readPeer(ctx, p.OldSource, peerTimeout)

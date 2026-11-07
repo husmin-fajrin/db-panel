@@ -120,3 +120,24 @@ func TestGTIDHasUUID(t *testing.T) {
 		}
 	}
 }
+
+// TestReadPeerRequiresTLS (SEC-68): without certificate verification
+// ReadPeer still requires TLS: a server that offers none (as someone in
+// between stripping it would look) is not read.
+func TestReadPeerRequiresTLS(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{ExtraArgs: []string{"tls-version=", "admin-tls-version="}})
+	db := rootDB(t, inst)
+	execAll(t, db, "CREATE USER 'peer'@'%' IDENTIFIED WITH mysql_native_password BY "+sqlLiteral(replPassword))
+	var ssl string
+	if err := db.QueryRow("SELECT @@global.have_ssl").Scan(&ssl); err != nil {
+		t.Fatal(err)
+	}
+	if ssl == "YES" {
+		t.Fatalf("server still offers TLS (have_ssl=%s)", ssl)
+	}
+	c := proto.PeerCred{Host: "127.0.0.1", Port: inst.Port, User: "peer", Password: replPassword}
+	st := mysql.ReadPeer(context.Background(), c, 5*time.Second)
+	if st.Reachable || !strings.Contains(strings.ToLower(st.Err), "tls") && !strings.Contains(strings.ToLower(st.Err), "ssl") {
+		t.Errorf("ReadPeer of a server without TLS = %+v; want unreachable, a TLS error", st)
+	}
+}

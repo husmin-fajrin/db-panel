@@ -56,6 +56,13 @@ func (r *salvageRig) put(name string, data []byte) {
 	}
 }
 
+// allow records set as what the last mysql.leftover found, the file an
+// agent reads it back from after a restart.
+func (r *salvageRig) allow(set string) {
+	r.t.Helper()
+	r.put(mysql.LeftoverSetFile, []byte(set+"\n"))
+}
+
 func fileName(at time.Time) string { return at.UTC().Format("20060102T150405Z") + "-42.sql" }
 
 var salvageNameRe = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-42\.sql$`)
@@ -82,6 +89,7 @@ func TestSalvageWritesRunnableSQL(t *testing.T) {
 
 	at := time.Date(2026, 11, 7, 8, 9, 10, 0, time.UTC)
 	r := newSalvageRig(t, old.Host(), func() time.Time { return at })
+	r.allow(set)
 	f := decode[proto.SalvageFile](t, r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}))
 	if f.Name != "20261107T080910Z-42.sql" || !f.CreatedAt.Equal(at) || !f.ExpiresAt.Equal(at.Add(7*24*time.Hour)) || f.Size == 0 {
 		t.Errorf("salvage file = %+v", f)
@@ -98,8 +106,8 @@ func TestSalvageWritesRunnableSQL(t *testing.T) {
 		t.Errorf("salvage directory: %v %v, want 0700", di.Mode(), err)
 	}
 	entries, _ := os.ReadDir(r.dir)
-	if len(entries) != 1 {
-		t.Errorf("salvage directory holds %d entries, want only the file", len(entries))
+	if len(entries) != 2 {
+		t.Errorf("salvage directory holds %d entries, want only the file and the leftover set", len(entries))
 	}
 
 	sqlText, err := os.ReadFile(path)
@@ -326,6 +334,7 @@ func TestSalvageRunDoesNotBlockListOrSweep(t *testing.T) {
 	now := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
 	h := &slowHost{Host: old.Host(), entered: make(chan struct{}), release: make(chan struct{})}
 	r := newSalvageRig(t, h, func() time.Time { return now })
+	r.allow(set)
 	expired, kept := fileName(now.Add(-8*24*time.Hour)), fileName(now.Add(-time.Hour))
 	r.put(expired, []byte("x"))
 	r.put(kept, []byte("x"))
@@ -355,4 +364,127 @@ func TestSalvageRunDoesNotBlockListOrSweep(t *testing.T) {
 	if f.Name != fileName(now) || f.Size != int64(len("SELECT 1;\n")) {
 		t.Errorf("salvage after the wait = %+v", f)
 	}
+}
+
+// TestSalvageBoundedByLeftover (SEC-70): mysql.salvage extracts only
+// transactions the last mysql.leftover found: before one ran it is
+// refused, a set beyond its result is refused, the result itself is
+// written; the result is kept (0600) under the salvage directory and
+// still bounds a salvage after an agent restart.
+func TestSalvageBoundedByLeftover(t *testing.T) {
+	r := newLeftoverRig(t)
+	mdb := rootDB(t, r.master)
+	before := gtidExecuted(t, mdb)
+	execAll(t, mdb, "INSERT INTO toko.t VALUES (10, 'sisa')")
+	var left string
+	if err := mdb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	all := gtidExecuted(t, mdb)
+	wantRefused(t, "salvage before any leftover", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}),
+		"Jalankan Periksa data tertinggal dulu")
+
+	if res := r.leftover(); res.GTIDSet != left {
+		t.Fatalf("leftover set = %q, want %q", res.GTIDSet, left)
+	}
+	wantRefused(t, "salvage of the whole history", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: all}),
+		"di luar hasil Periksa data tertinggal")
+	f := decode[proto.SalvageFile](t, r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}))
+	if f.Size == 0 {
+		t.Errorf("salvage of the leftover set = %+v", f)
+	}
+	path := filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("leftover set file: %v %v, want 0600", fi, err)
+	}
+	if b, _ := os.ReadFile(path); strings.TrimSpace(string(b)) != left {
+		t.Errorf("leftover set file = %q, want %q", b, left)
+	}
+	// A new agent run reads the set back from the file.
+	again := &mysql.Driver{Host: r.master.Host(), PinDir: r.d.PinDir, SalvageDir: r.d.SalvageDir,
+		Now: func() time.Time { return time.Now().Add(time.Hour) }}
+	reg := commands.NewRegistry()
+	again.Register(reg)
+	rr := &pinRig{t: t, reg: reg, d: again}
+	wantRefused(t, "salvage of the whole history after a restart", rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: all}),
+		"di luar hasil Periksa data tertinggal")
+	decode[proto.SalvageFile](t, rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}))
+}
+
+// TestSalvageOneAtATime (SEC-70): a second mysql.salvage while one runs
+// is refused.
+func TestSalvageOneAtATime(t *testing.T) {
+	old := testmysql.Start(t, testmysql.Options{})
+	odb := rootDB(t, old)
+	before := gtidExecuted(t, odb)
+	execAll(t, odb, "CREATE DATABASE toko")
+	var set string
+	if err := odb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&set); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+	h := &slowHost{Host: old.Host(), entered: make(chan struct{}), release: make(chan struct{})}
+	r := newSalvageRig(t, h, func() time.Time { return now })
+	r.allow(set)
+	done := make(chan proto.Response, 1)
+	go func() { done <- r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}) }()
+	select {
+	case <-h.entered:
+	case <-time.After(time.Minute):
+		t.Fatal("salvage never started mysqlbinlog")
+	}
+	wantRefused(t, "second salvage", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}), "salvage lain sedang berjalan")
+	close(h.release)
+	decode[proto.SalvageFile](t, <-done)
+}
+
+// TestSalvageDirectoryCap (SEC-70): with the salvage directory at its
+// 8 GiB cap a salvage is refused before anything is written; with less
+// room left than the salvage writes, it is stopped and its file removed.
+func TestSalvageDirectoryCap(t *testing.T) {
+	old := testmysql.Start(t, testmysql.Options{})
+	odb := rootDB(t, old)
+	before := gtidExecuted(t, odb)
+	execAll(t, odb, "CREATE DATABASE toko")
+	var set string
+	if err := odb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&set); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+	r := newSalvageRig(t, old.Host(), func() time.Time { return now })
+	r.allow(set)
+	// An old salvage file, sparse, filling the directory.
+	big := filepath.Join(r.dir, fileName(now.Add(-time.Hour)))
+	fill := func(size int64) {
+		t.Helper()
+		f, err := os.OpenFile(big, os.O_WRONLY|os.O_CREATE, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	setFile, err := os.Stat(filepath.Join(r.dir, mysql.LeftoverSetFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fill(8<<30 - setFile.Size())
+	wantRefused(t, "salvage into a full directory", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}), "batas 8 GiB")
+	if entries, _ := os.ReadDir(r.dir); len(entries) != 2 {
+		t.Errorf("refused salvage left %d entries, want the old file and the leftover set", len(entries))
+	}
+	// Ten bytes of room: the salvage writes more and is stopped.
+	fill(8<<30 - setFile.Size() - 10)
+	wantRefused(t, "salvage past the cap", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}), "akan melebihi batas 8 GiB")
+	if entries, _ := os.ReadDir(r.dir); len(entries) != 2 {
+		t.Errorf("stopped salvage left %d entries, want the old file and the leftover set", len(entries))
+	}
+	// Room again: written.
+	if err := os.Remove(big); err != nil {
+		t.Fatal(err)
+	}
+	decode[proto.SalvageFile](t, r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}))
 }

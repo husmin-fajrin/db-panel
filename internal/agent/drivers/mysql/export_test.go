@@ -304,3 +304,14 @@ func (d *Driver) MarkRebuildLoaded(host string, port int) bool {
 	m.done()
 	return m != nil
 }
+
+// HoldPromoteMu takes the lock promote commands and the guard share, as
+// a running repoint does; release gives it back.
+func (d *Driver) HoldPromoteMu() (release func()) {
+	d.promoteMu.Lock()
+	return d.promoteMu.Unlock
+}
+
+// LeftoverSetFile is the file under the salvage directory that keeps the
+// last mysql.leftover set.
+const LeftoverSetFile = leftoverSetFile
