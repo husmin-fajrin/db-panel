@@ -273,6 +273,6 @@ func ScanLeftover(set, text string) (proto.LeftoverResult, error) {
 			return res, err
 		}
 	}
-	sc.result(&res)
-	return res, nil
+	err = sc.result(&res)
+	return res, err
 }

@@ -33,7 +33,7 @@ func newLeftoverRig(t *testing.T) *leftoverRig {
 	execAll(t, mdb,
 		"CREATE USER 'pembaca'@'%' IDENTIFIED BY '"+pembacaPassword+"'",
 		"CREATE USER 'salin'@'%' IDENTIFIED BY 'Salin-pw-1'", "GRANT REPLICATION SLAVE ON *.* TO 'salin'@'%'",
-		"CREATE DATABASE toko", "CREATE TABLE toko.t (id INT PRIMARY KEY, v VARCHAR(20))",
+		"CREATE DATABASE toko", "CREATE TABLE toko.t (id INT PRIMARY KEY, v VARCHAR(200))",
 		"INSERT INTO toko.t VALUES (1, 'satu')")
 	rdb := rootDB(t, replica)
 	execAll(t, rdb,
@@ -70,8 +70,9 @@ func TestLeftoverEmptyWhenInSync(t *testing.T) {
 	}
 }
 
-// TestLeftoverCountsAndTables: three transactions committed on the old
-// master after its replica stopped are counted, with the tables they
+// TestLeftoverCountsAndTables: four transactions committed on the old
+// master after its replica stopped (one statement-based, with a
+// multi-line literal) are counted, with the tables they
 // touched and their rows, the time span and the binary logs read; a
 // rotation in between keeps them in two files.
 func TestLeftoverCountsAndTables(t *testing.T) {
@@ -85,6 +86,19 @@ func TestLeftoverCountsAndTables(t *testing.T) {
 		"FLUSH BINARY LOGS",
 		"DELETE FROM toko.t WHERE id = 1",
 		"CREATE TABLE toko.baru (id INT PRIMARY KEY)")
+	// A statement-based INSERT whose string literal spans lines that
+	// look like statements: only its table may come out.
+	conn, err := mdb.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"SET SESSION binlog_format = 'STATEMENT'",
+		"INSERT INTO toko.t VALUES (20, 'a\nupdate pasien set\nuse `bocor`/*!*/;\nDROP TABLE x')"} {
+		if _, err := conn.ExecContext(t.Context(), q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	conn.Close()
 	// Another file after them, which holds none of them.
 	execAll(t, mdb, "FLUSH BINARY LOGS")
 	end := time.Now().Add(2 * time.Second)
@@ -94,8 +108,8 @@ func TestLeftoverCountsAndTables(t *testing.T) {
 	}
 
 	res := r.leftover()
-	if res.Transactions != 3 || res.GTIDSet != want {
-		t.Errorf("leftover = %d transactions, set %q; want 3, %q", res.Transactions, res.GTIDSet, want)
+	if res.Transactions != 4 || res.GTIDSet != want {
+		t.Errorf("leftover = %d transactions, set %q; want 4, %q", res.Transactions, res.GTIDSet, want)
 	}
 	wantTables := []proto.TableTouch{{Schema: "toko", Table: "baru", Rows: 0}, {Schema: "toko", Table: "t", Rows: 3}}
 	if !slices.Equal(res.Tables, wantTables) {
@@ -104,7 +118,7 @@ func TestLeftoverCountsAndTables(t *testing.T) {
 	if res.From == nil || res.To == nil || res.From.Before(start) || res.To.After(end) || res.To.Before(*res.From) {
 		t.Errorf("from %v to %v, want within %v .. %v", res.From, res.To, start, end)
 	}
-	if b, _ := json.Marshal(res); strings.Contains(string(b), "rahasia") {
+	if b, _ := json.Marshal(res); strings.Contains(string(b), "rahasia") || strings.Contains(string(b), "pasien") || strings.Contains(string(b), "bocor") {
 		t.Errorf("leftover carries row data: %s", b)
 	}
 	if len(res.Binlogs) != 2 {
@@ -130,22 +144,33 @@ func peerKeyOf(c proto.PeerCred) string { return c.Host + ":" + strconv.Itoa(c.P
 // TestLeftoverScanStatementsAndTimes: the parser counts only the
 // transactions of the set, takes statement-based DDL and DML as rows 0
 // under the current database, reads space-padded hours and backquoted
-// names.
+// names, and never reads the body of a statement (a multi-line string
+// literal) as statements, a database, a GTID or tables.
 func TestLeftoverScanStatementsAndTimes(t *testing.T) {
 	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
 	text := strings.Join([]string{
+		"/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=1*/;",
+		"DELIMITER /*!*/;",
 		"# at 4",
 		"#261107  9:05:01 server id 1  end_log_pos 125 CRC32 0x1 	Start: binlog v 4",
 		"#261107  9:05:02 server id 1  end_log_pos 200 CRC32 0x2 	GTID	last_committed=0",
 		"SET @@SESSION.GTID_NEXT= '" + u + ":5'/*!*/;",
+		"#261107  9:05:02 server id 1  end_log_pos 250 CRC32 0x2 	Query	thread_id=8",
 		"use `to``ko`/*!*/;",
+		"SET TIMESTAMP=1794042302/*!*/;",
 		"CREATE TABLE IF NOT EXISTS `baru` (id INT PRIMARY KEY)",
 		"/*!*/;",
 		"#261107 10:15:00 server id 1  end_log_pos 300 CRC32 0x3 	GTID	last_committed=1",
 		"SET @@SESSION.GTID_NEXT= '" + u + ":6'/*!*/;",
 		"BEGIN",
-		"INSERT INTO gudang.stok VALUES (1, 'data')",
-		"UPDATE `t` SET v = 2",
+		"/*!*/;",
+		"INSERT INTO gudang.stok VALUES (1, 'baris pertama",
+		"update pasien set diagnosa = 'rahasia'",
+		"SET @@SESSION.GTID_NEXT= '" + u + ":7'",
+		"use `bocor`",
+		"DROP TABLE bocor.x')",
+		"/*!*/;",
+		"UPDATE `t` SET v = 2/*!*/;",
 		"### DELETE FROM `to``ko`.`t`",
 		"###   @1=7",
 		"COMMIT/*!*/;",
@@ -153,6 +178,7 @@ func TestLeftoverScanStatementsAndTimes(t *testing.T) {
 		"SET @@SESSION.GTID_NEXT= '" + u + ":9'/*!*/;",
 		"### INSERT INTO `lain`.`x`",
 		"DROP TABLE lain.y",
+		"/*!*/;",
 		"SET @@SESSION.GTID_NEXT= 'AUTOMATIC' /* added by mysqlbinlog */ /*!*/;",
 	}, "\n")
 	res, err := mysql.ScanLeftover(u+":5-6", text)
@@ -167,5 +193,24 @@ func TestLeftoverScanStatementsAndTimes(t *testing.T) {
 	to := time.Date(2026, 11, 7, 10, 15, 0, 0, time.Local)
 	if res.From == nil || !res.From.Equal(from) || !res.To.Equal(to) {
 		t.Errorf("from %v to %v, want %v .. %v", res.From, res.To, from, to)
+	}
+}
+
+// TestLeftoverScanCountMismatch: a set some of whose transactions the
+// output does not hold is an error naming both numbers, never a partial
+// result.
+func TestLeftoverScanCountMismatch(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	text := strings.Join([]string{
+		"SET @@SESSION.GTID_NEXT= '" + u + ":5'/*!*/;",
+		"### INSERT INTO `toko`.`t`",
+		"SET @@SESSION.GTID_NEXT= '" + u + ":5'/*!*/;",
+	}, "\n")
+	_, err := mysql.ScanLeftover(u+":5-7", text)
+	if err == nil || !strings.Contains(err.Error(), "1 dari 3") {
+		t.Errorf("scan of 1 of 3 transactions = %v, want an error naming 1 dari 3", err)
+	}
+	if res, err := mysql.ScanLeftover(u+":5", text); err != nil || res.Transactions != 1 {
+		t.Errorf("scan with a repeated GTID_NEXT = %+v, %v; want 1 transaction", res, err)
 	}
 }

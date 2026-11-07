@@ -20,14 +20,18 @@ import (
 // connectionsTimeout bounds one reading.
 const connectionsTimeout = 10 * time.Second
 
-// connectionsQuery lists the client threads: foreground threads with a
-// user (MySQL's own threads have none), but the panel's accounts
-// (dbpanel_*), the event scheduler, replicas reading the binary log and
-// this very connection.
+// connectionsQuery lists the client threads: foreground threads serving
+// a client connection (NAME thread/sql/one_connection; a replica's
+// receiver, applier and workers, the event scheduler and MySQL's other
+// threads have other names) with a user, but the panel's accounts
+// (dbpanel_*), the event scheduler, MySQL's 'system user', replicas
+// reading the binary log and this very connection.
 const connectionsQuery = `SELECT IFNULL(PROCESSLIST_HOST, ''), PROCESSLIST_USER, IFNULL(PROCESSLIST_DB, '')
 	FROM performance_schema.threads
 	WHERE TYPE = 'FOREGROUND'
+	  AND NAME = 'thread/sql/one_connection'
 	  AND PROCESSLIST_USER IS NOT NULL
+	  AND PROCESSLIST_USER <> 'system user'
 	  AND PROCESSLIST_USER NOT LIKE 'dbpanel\_%'
 	  AND PROCESSLIST_USER <> 'event_scheduler'
 	  AND IFNULL(PROCESSLIST_COMMAND, '') NOT LIKE 'Binlog Dump%'

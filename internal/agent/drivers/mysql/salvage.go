@@ -74,8 +74,6 @@ func (d *Driver) registerSalvage(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		d.salvageMu.Lock()
-		defer d.salvageMu.Unlock()
 		f, err := d.salvage(ctx, h, set)
 		if err != nil {
 			return nil, err
@@ -87,8 +85,6 @@ func (d *Driver) registerSalvage(reg *commands.Registry) {
 		if err := d.allowSalvage("mysql.salvageList", nil); err != nil {
 			return nil, err
 		}
-		d.salvageMu.Lock()
-		defer d.salvageMu.Unlock()
 		files, err := d.salvageFiles()
 		if err != nil {
 			return nil, err
@@ -186,7 +182,9 @@ func (d *Driver) openSalvageDir() (*os.Root, error) {
 }
 
 // salvage writes the transactions of set to a new salvage file. The
-// caller holds salvageMu.
+// mysqlbinlog run writes a temporary file of its own without any lock;
+// salvageMu is held only to check the final name is free and rename to
+// it, so the list, a delete and the monitor's sweep never wait for it.
 func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.SalvageFile, error) {
 	var f proto.SalvageFile
 	qctx, cancel := context.WithTimeout(ctx, leftoverQueryTimeout)
@@ -221,8 +219,14 @@ func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.Salvag
 	defer root.Close()
 	created := d.now().UTC().Truncate(time.Second)
 	name := created.Format(salvageTimeLayout) + "-" + strconv.FormatInt(d.Cfg.ServerID, 10) + ".sql"
-	if _, err := root.Lstat(name); err == nil {
-		return f, &commands.ParamError{Msg: fmt.Sprintf("berkas salvage %s sudah ada; coba lagi sebentar lagi", name)}
+	taken := func() error {
+		if _, err := root.Lstat(name); err == nil {
+			return &commands.ParamError{Msg: fmt.Sprintf("berkas salvage %s sudah ada; coba lagi sebentar lagi", name)}
+		}
+		return nil
+	}
+	if err := taken(); err != nil {
+		return f, err
 	}
 	tmp := salvageTempPrefix + strconv.FormatInt(time.Now().UnixNano(), 36) + ".tmp"
 	out, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
@@ -256,14 +260,28 @@ func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.Salvag
 		return f, fmt.Errorf("tulis berkas salvage: %w", err)
 	}
 	keep = true
-	if err := root.Rename(tmp, name); err != nil {
+	if err := d.publishSalvage(root, tmp, name, taken); err != nil {
 		root.Remove(tmp)
-		return f, fmt.Errorf("simpan berkas salvage: %w", err)
+		return f, err
 	}
 	if err := syncDir(d.salvageDir()); err != nil {
 		return f, fmt.Errorf("simpan berkas salvage: %w", err)
 	}
 	return proto.SalvageFile{Name: name, Size: lw.n, CreatedAt: created, ExpiresAt: created.Add(SalvageMaxAge)}, nil
+}
+
+// publishSalvage renames tmp to name under salvageMu, unless taken says
+// the name is in use by now (another salvage in the same second).
+func (d *Driver) publishSalvage(root *os.Root, tmp, name string, taken func() error) error {
+	d.salvageMu.Lock()
+	defer d.salvageMu.Unlock()
+	if err := taken(); err != nil {
+		return err
+	}
+	if err := root.Rename(tmp, name); err != nil {
+		return fmt.Errorf("simpan berkas salvage: %w", err)
+	}
+	return nil
 }
 
 // limitWriter writes to w until more than max bytes would be written; it
@@ -415,8 +433,13 @@ func (d *Driver) deleteSalvage(name string) error {
 // or earlier, and temporary files of a salvage that died, a day old. It
 // reports how many it removed. The health monitor runs it daily
 // (monitor.SalvageSweeper).
+//
+// It never waits: while a delete or a salvage's rename holds salvageMu it
+// skips this round (0, nil).
 func (d *Driver) SweepSalvage(now time.Time) (int, error) {
-	d.salvageMu.Lock()
+	if !d.salvageMu.TryLock() {
+		return 0, nil
+	}
 	defer d.salvageMu.Unlock()
 	if _, err := os.Lstat(d.salvageDir()); errors.Is(err, os.ErrNotExist) {
 		return 0, nil

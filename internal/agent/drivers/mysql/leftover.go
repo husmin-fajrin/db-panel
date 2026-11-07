@@ -136,7 +136,9 @@ func leftover(ctx context.Context, h Host, nm proto.PeerCred) (proto.LeftoverRes
 	if err := streamBinlog(ctx, h, bin, args, leftoverTimeout, sc.line); err != nil {
 		return res, err
 	}
-	sc.result(&res)
+	if err := sc.result(&res); err != nil {
+		return proto.LeftoverResult{}, err
+	}
 	res.Binlogs = names
 	return res, nil
 }
@@ -345,48 +347,67 @@ var (
 )
 
 // leftoverScan reads mysqlbinlog's output (--verbose, rows decoded) of
-// the transactions of set: it counts the GTID_NEXT lines of set, the rows
-// of each table and the commit times.
+// the transactions of set: it collects the GTIDs of set its GTID_NEXT
+// lines name, the rows of each table and the commit times.
+//
+// Only the start of a statement is looked at: mysqlbinlog ends every
+// statement with the delimiter "/*!*/;", so a line not ending in it opens
+// a statement body (inStmt) that lasts up to the line that does, and
+// nothing in a body (a multi-line string literal of a statement-based
+// INSERT, say) is taken for a statement, a "use", a GTID_NEXT or a table.
+// An event header closes a body too, in case a delimiter was missed.
 type leftoverScan struct {
 	set      gtidSet
-	txs      int
+	seen     gtidSet // the GTIDs of set read
 	inTx     bool
+	inStmt   bool
 	db       string     // the current default database ("use")
 	header   *time.Time // time of the last event header
 	from, to *time.Time
 	tables   map[[2]string]int
 }
 
+// binlogDelimiter ends each statement in mysqlbinlog's output.
+const binlogDelimiter = "/*!*/;"
+
 func newLeftoverScan(set gtidSet) *leftoverScan {
-	return &leftoverScan{set: set, tables: map[[2]string]int{}}
+	return &leftoverScan{set: set, seen: gtidSet{}, tables: map[[2]string]int{}}
 }
 
 func (s *leftoverScan) line(l string) error {
+	if m := binlogHeaderRe.FindStringSubmatch(l); m != nil {
+		s.inStmt = false
+		hour := m[2]
+		if len(hour) == 1 {
+			hour = "0" + hour
+		}
+		// mysqlbinlog prints local time, the agent's (same TZ).
+		if t, err := time.ParseInLocation("060102 15:04:05", m[1]+" "+hour+":"+m[3]+":"+m[4], time.Local); err == nil {
+			s.header = &t
+		}
+		return nil
+	}
+	ended := strings.HasSuffix(strings.TrimRight(l, " \t"), binlogDelimiter)
+	if s.inStmt {
+		s.inStmt = !ended
+		return nil
+	}
 	switch {
 	case strings.HasPrefix(l, "#"):
-		if strings.HasPrefix(l, "### ") {
-			if s.inTx {
-				s.rowLine(l)
-			}
-			return nil
+		if strings.HasPrefix(l, "### ") && s.inTx {
+			s.rowLine(l)
 		}
-		if m := binlogHeaderRe.FindStringSubmatch(l); m != nil {
-			hour := m[2]
-			if len(hour) == 1 {
-				hour = "0" + hour
-			}
-			// mysqlbinlog prints local time, the agent's (same TZ).
-			if t, err := time.ParseInLocation("060102 15:04:05", m[1]+" "+hour+":"+m[3]+":"+m[4], time.Local); err == nil {
-				s.header = &t
-			}
-		}
+		return nil
+	case strings.HasPrefix(l, "/*!"):
+		// A versioned comment of mysqlbinlog's own ("/*!50530 SET ...*/;").
+		return nil
 	case strings.HasPrefix(l, "SET @@SESSION.GTID_NEXT="):
 		_, rest, _ := strings.Cut(l, "'")
 		gtid, _, _ := strings.Cut(rest, "'")
 		key, n, ok := parseGTID(gtid)
 		s.inTx = ok && s.set.has(key, n)
 		if s.inTx {
-			s.txs++
+			s.seen.add(key, n, n)
 			if t := s.header; t != nil {
 				if s.from == nil || t.Before(*s.from) {
 					s.from = t
@@ -409,6 +430,7 @@ func (s *leftoverScan) line(l string) error {
 			}
 		}
 	}
+	s.inStmt = !ended
 	return nil
 }
 
@@ -430,9 +452,14 @@ func (s *leftoverScan) touch(schema, table string, rows int) {
 }
 
 // result fills res with what was read, the tables sorted by schema and
-// name; times are UTC.
-func (s *leftoverScan) result(res *proto.LeftoverResult) {
-	res.Transactions = s.txs
+// name; times are UTC. Every transaction of the set must have been read:
+// otherwise (a file left out, a GTID_NEXT not recognised, transactions
+// missing from the binary log) it is an error, never a partial count.
+func (s *leftoverScan) result(res *proto.LeftoverResult) error {
+	if got, want := s.seen.count(), s.set.count(); got != want {
+		return fmt.Errorf("binary log memuat %d dari %d transaksi sisa; ringkasan tidak lengkap dan tidak ditampilkan", got, want)
+	}
+	res.Transactions = int(s.set.count())
 	for k, n := range s.tables {
 		res.Tables = append(res.Tables, proto.TableTouch{Schema: k[0], Table: k[1], Rows: n})
 	}
@@ -443,6 +470,7 @@ func (s *leftoverScan) result(res *proto.LeftoverResult) {
 		f, t := s.from.UTC(), s.to.UTC()
 		res.From, res.To = &f, &t
 	}
+	return nil
 }
 
 // parseTableName reads the table name that starts s: `db`.`t`, `t`,

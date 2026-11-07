@@ -34,7 +34,8 @@ func openAs(t *testing.T, inst *testmysql.Instance, user, password, db string, n
 // TestConnectionsHidesPanelAndReplicationThreads: mysql.connections groups
 // the client connections by host, user and database, most first, and
 // leaves out the panel's accounts, a replica reading the binary log under
-// an account of its own name, the event scheduler and MySQL's own threads.
+// an account of its own name, the event scheduler and MySQL's own threads;
+// on the replica, its replication threads.
 func TestConnectionsHidesPanelAndReplicationThreads(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{})
 	replica := testmysql.Start(t, testmysql.Options{})
@@ -74,6 +75,16 @@ func TestConnectionsHidesPanelAndReplicationThreads(t *testing.T) {
 		}
 		if i > 0 && (res.Rows[i-1].Count < r.Count || (res.Rows[i-1].Count == r.Count && res.Rows[i-1].Host > r.Host)) {
 			t.Errorf("rows not sorted by count desc then host: %+v", res.Rows)
+		}
+	}
+	// On the replica, its receiver, applier and workers are not
+	// connections: only the test's own root session is.
+	rreg := commands.NewRegistry()
+	(&mysql.Driver{Host: replica.Host()}).Register(rreg)
+	rres := decode[proto.ConnectionsResult](t, rreg.Dispatch(t.Context(), proto.Request{ID: "1", Cmd: "mysql.connections"}))
+	for _, r := range rres.Rows {
+		if r.User != "root" {
+			t.Errorf("replica row %+v, want only root's sessions", r)
 		}
 	}
 	if len(app) != 2 || app[0].DB != "toko" || app[0].Count != 3 || app[1].DB != "gudang" || app[1].Count != 1 || app[0].Host != app[1].Host {

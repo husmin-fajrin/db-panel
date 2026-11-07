@@ -84,7 +84,7 @@ type Driver struct {
 	qUptime   int64
 	qUptimeAt time.Time
 
-	salvageMu sync.Mutex // one salvage file operation at a time
+	salvageMu sync.Mutex // a salvage rename, a delete or the sweep; never held across mysqlbinlog
 
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer

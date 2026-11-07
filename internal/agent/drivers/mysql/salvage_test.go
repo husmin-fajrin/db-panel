@@ -2,8 +2,10 @@ package mysql_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -263,5 +265,84 @@ func TestSalvageAndLeftoverOnlyWhenQuarantined(t *testing.T) {
 		if c.cmd == "mysql.leftover" || c.cmd == "mysql.salvage" {
 			wantPastPins(t, "quarantined "+c.cmd, r.dispatch(c.cmd, c.params))
 		}
+	}
+}
+
+// slowHost is a Host whose commands (mysqlbinlog) wait for release
+// before writing out; entered is closed when one starts.
+type slowHost struct {
+	mysql.Host
+	entered, release chan struct{}
+}
+
+func (h *slowHost) Exec(ctx context.Context, _ io.Reader, stdout io.Writer, _ string, _ ...string) error {
+	close(h.entered)
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	_, err := io.WriteString(stdout, "SELECT 1;\n")
+	return err
+}
+
+// within fails the test unless f returns within 5 seconds.
+func within(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		f()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s blocked while a salvage was running", what)
+	}
+}
+
+// TestSalvageRunDoesNotBlockListOrSweep: while mysqlbinlog of a salvage
+// runs, the list, a delete and the monitor's sweep go ahead; the
+// salvage then finishes with what mysqlbinlog wrote.
+func TestSalvageRunDoesNotBlockListOrSweep(t *testing.T) {
+	old := testmysql.Start(t, testmysql.Options{})
+	odb := rootDB(t, old)
+	before := gtidExecuted(t, odb)
+	execAll(t, odb, "CREATE DATABASE toko")
+	var set string
+	if err := odb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&set); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+	h := &slowHost{Host: old.Host(), entered: make(chan struct{}), release: make(chan struct{})}
+	r := newSalvageRig(t, h, func() time.Time { return now })
+	expired, kept := fileName(now.Add(-8*24*time.Hour)), fileName(now.Add(-time.Hour))
+	r.put(expired, []byte("x"))
+	r.put(kept, []byte("x"))
+
+	done := make(chan proto.Response, 1)
+	go func() { done <- r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}) }()
+	select {
+	case <-h.entered:
+	case <-time.After(time.Minute):
+		t.Fatal("salvage never started mysqlbinlog")
+	}
+	within(t, "salvageList", func() {
+		if l := decode[proto.SalvageListResult](t, r.dispatch("mysql.salvageList", nil)); len(l.Files) != 2 {
+			t.Errorf("list during a salvage = %+v", l.Files)
+		}
+	})
+	within(t, "SweepSalvage", func() {
+		if n, err := r.d.SweepSalvage(now); n != 1 || err != nil {
+			t.Errorf("sweep during a salvage = %d, %v; want 1", n, err)
+		}
+	})
+	within(t, "salvageDelete", func() {
+		decode[struct{}](t, r.dispatch("mysql.salvageDelete", proto.SalvageDeleteParams{Name: kept}))
+	})
+	close(h.release)
+	f := decode[proto.SalvageFile](t, <-done)
+	if f.Name != fileName(now) || f.Size != int64(len("SELECT 1;\n")) {
+		t.Errorf("salvage after the wait = %+v", f)
 	}
 }
