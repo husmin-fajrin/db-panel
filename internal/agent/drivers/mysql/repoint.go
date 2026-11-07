@@ -111,7 +111,10 @@ func (d *Driver) repoint(ctx context.Context, h Host, p proto.RepointParams, caP
 	var res proto.RepointResult
 	nm := p.NewMaster
 	key := peerKey(nm)
-	srcHost, srcPort, ok := d.pins.Source()
+	srcHost, srcPort, srcDial, ok, err := d.pins.SourceDial()
+	if err != nil {
+		return res, &commands.ParamError{Msg: fmt.Sprintf("pin sumber tidak bisa dibaca, repoint ditolak: %v", err)}
+	}
 	if !ok {
 		return res, &commands.ParamError{Msg: "server ini tidak punya sumber replikasi yang dipin; repoint ditolak"}
 	}
@@ -153,8 +156,10 @@ func (d *Driver) repoint(ctx context.Context, h Host, p proto.RepointParams, caP
 		return res, &commands.ParamError{Msg: "replikasi tidak dikonfigurasi di server ini; tidak ada yang diarahkan ulang"}
 	}
 
+	// The pinned source, read at its recorded verified address if any.
 	old := nm
-	old.Host, old.Port = srcHost, srcPort
+	old.Host, old.Port, old.ServerName = srcHost, srcPort, ""
+	old = dialAt(old, srcDial)
 	oldUUID, err := sourceGone(ctx, db, old)
 	if err != nil {
 		return res, err

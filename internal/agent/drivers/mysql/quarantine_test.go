@@ -449,8 +449,8 @@ func TestQuarantineSeenHostForms(t *testing.T) {
 
 // TestQuarantineReadsNewMasterAtSeenAddress: without a lock the new
 // master named by a host with several addresses is read at the address
-// the replicas-seen file matched, with its name kept for TLS, and that
-// address is pinned as the source.
+// the replicas-seen file matched, with its name kept for TLS; the pin
+// keeps the name and source-addr the address, which later reads dial.
 func TestQuarantineReadsNewMasterAtSeenAddress(t *testing.T) {
 	r := newQuarantineRig(t)
 	dns := fakeDNS{fwd: map[string][]string{"db2.example": {"6.6.6.6", "10.9.9.9"}}}
@@ -464,13 +464,37 @@ func TestQuarantineReadsNewMasterAtSeenAddress(t *testing.T) {
 	if c.Host != "10.9.9.9" || c.ServerName != "db2.example" {
 		t.Errorf("new master read at %q (name %q), want 10.9.9.9 (db2.example)", c.Host, c.ServerName)
 	}
-	// The pin is the verified address; the event names the new master.
-	wantQuarantined(t, r.db, r.dir, "10.9.9.9:3306")
+	// The pin keeps the name; the verified address is recorded beside it.
+	wantQuarantined(t, r.db, r.dir, "db2.example:3306")
+	if got := pinFile(t, r.dir, mysql.SourceAddrFile); got != "10.9.9.9" {
+		t.Errorf("source-addr = %q, want 10.9.9.9", got)
+	}
 	if src := r.ev.payload(t, 0)["new_source"]; src != "db2.example:3306" {
 		t.Errorf("quarantined event new_source = %q", src)
 	}
 	if res := decode[proto.QuarantineResult](t, r.quarantine(p)); !res.Already {
 		t.Errorf("quarantine again under the name = %+v, want already", res)
+	}
+	// The agent's own later reads of the pinned source dial that address.
+	var probed []string
+	t.Cleanup(mysql.SetProbePeer(func(_ context.Context, host string, _ int, _ time.Duration) error {
+		probed = append(probed, host)
+		return nil
+	}))
+	ps := decode[proto.ProbeSourceResult](t, r.dispatch("mysql.probeSource", nil))
+	if ps.Host != "db2.example" || len(probed) != 1 || probed[0] != "10.9.9.9" {
+		t.Errorf("probeSource = %+v, probed %v; want db2.example probed at 10.9.9.9", ps, probed)
+	}
+	// A rebuild from the new master is matched by its name.
+	if err := r.d.Pins().Allow("mysql.dumpFrom", proto.SnapshotParams{Host: "db2.example", Port: 3306}); err != nil {
+		t.Errorf("dumpFrom the pinned name refused: %v", err)
+	}
+	// set-source (root) moves the pin and drops the recorded address.
+	if err := r.d.Pins().SetSource("10.0.0.7", 3306); err != nil {
+		t.Fatal(err)
+	}
+	if got := pinFile(t, r.dir, mysql.SourceAddrFile); got != "" {
+		t.Errorf("source-addr after set-source = %q", got)
 	}
 }
 

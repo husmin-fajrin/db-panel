@@ -111,15 +111,19 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 	})
 
 	reg.Register("mysql.probeSource", func(ctx context.Context, _ json.RawMessage) (any, error) {
-		host, port, ok := "", 0, false
+		host, port, dial, ok := "", 0, "", false
 		if d.pins != nil {
-			host, port, ok = d.pins.Source()
+			var err error
+			if host, port, dial, ok, err = d.pins.SourceDial(); err != nil {
+				return nil, &commands.ParamError{Msg: fmt.Sprintf("pin sumber tidak bisa dibaca: %v", err)}
+			}
 		}
 		if !ok {
 			return nil, &commands.ParamError{Msg: "server ini tidak punya sumber replikasi yang dipin"}
 		}
+		// The verified address of the pinned name, when one is recorded.
 		res := proto.ProbeSourceResult{Host: host, Port: port, Reachable: true}
-		if err := probePeer(ctx, host, port, peerTimeout); err != nil {
+		if err := probePeer(ctx, dial, port, peerTimeout); err != nil {
 			res.Reachable, res.Err = false, err.Error()
 		}
 		return res, nil

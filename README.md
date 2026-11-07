@@ -1076,6 +1076,10 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   lalu menunjuk MySQL milik penyerang yang memalsukan gtid_executed. Yang
   terdampak hanya replika itu (ia bisa diarahkan, lalu dibangun ulang, dari
   server penyerang); master tidak.
+- Topologi tanpa verifikasi sertifikat ("Perketat" belum dijalankan) tetap
+  rentan terhadap pemalsuan DNS nama sumber yang dipin bila panel disusupi:
+  pin sumber menyimpan nama, dan pembangunan ulang menyambung ke nama itu.
+  Dengan verifikasi, sertifikat master yang menjaga identitasnya.
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
   tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan
   setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum

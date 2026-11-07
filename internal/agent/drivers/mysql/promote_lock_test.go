@@ -534,7 +534,7 @@ func TestLockReappliedAfterRestart(t *testing.T) {
 // addresses is locked for the one a Binlog Dump thread comes from; the
 // lock records it, and the guard, unlockPromote and quarantine read the
 // candidate at that address only (the name kept for TLS), never at the
-// other one. A quarantine pins the address, not the name.
+// other one. A quarantine pins the name and records the address.
 func TestLockRecordsMatchedAddress(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{})
 	replica := testmysql.Start(t, testmysql.Options{})
@@ -569,7 +569,6 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 	r.d.Now = func() time.Time { return lockedAt }
 	cand := proto.PeerCred{Host: "cand.example", Port: replica.Port, User: "dbpanel_repl", Password: replPassword}
 	key := "cand.example:" + strconv.Itoa(replica.Port)
-	addrKey := "127.0.0.1:" + strconv.Itoa(replica.Port)
 
 	// A name whose only address is not a replica's (its PTR is a lie).
 	other := cand
@@ -619,8 +618,8 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 		t.Errorf("quarantine = %+v", res)
 	}
 	wantAt("quarantine")
-	if role, src := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "quarantined" || src != addrKey {
-		t.Errorf("pins = %q, %q; want quarantined, %s", role, src, addrKey)
+	if role, src, addr := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile), pinFile(t, dir, mysql.SourceAddrFile); role != "quarantined" || src != key || addr != "127.0.0.1" {
+		t.Errorf("pins = %q, %q, addr %q; want quarantined, %s at 127.0.0.1", role, src, addr, key)
 	}
 	evs := ev.all()
 	if len(evs) == 0 || evs[len(evs)-1].Type != proto.EventQuarantined || ev.payload(t, len(evs)-1)["new_source"] != key {

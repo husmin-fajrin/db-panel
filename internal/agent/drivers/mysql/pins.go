@@ -31,6 +31,11 @@ const (
 	RoleFile = "role"
 	// SourceFile holds the host:port a replica follows; no file is no pin.
 	SourceFile = "source"
+	// SourceAddrFile, beside a source pin whose host is a name, holds the
+	// address that name was verified at when the agent pinned it (a
+	// quarantine): the agent's own reads of the pinned source dial it
+	// (Pins.SourceDial). Rebuild commands match the pin by name.
+	SourceAddrFile = "source-addr"
 )
 
 const (
@@ -387,21 +392,41 @@ func (p *Pins) SetSource(host string, port int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	defer p.forget()
+	// The verified address belonged to the old source.
+	if err := removeFile(p.path(SourceAddrFile)); err != nil {
+		return err
+	}
 	return writePin(p.path(SourceFile), src)
 }
 
 // SetQuarantined pins this server as quarantined following newSource
 // (host:port), from a master or a replica: the old master after a
 // promotion, which only the new master (newSource) may rebuild.
-func (p *Pins) SetQuarantined(newSource string) error {
+func (p *Pins) SetQuarantined(newSource string) error { return p.SetQuarantinedAt(newSource, "") }
+
+// SetQuarantinedAt is SetQuarantined that also records addr, the address
+// the new master's name was verified at, in SourceAddrFile ("" removes
+// it). The address is written before the source and the role.
+func (p *Pins) SetQuarantinedAt(newSource, addr string) error {
 	host, port, err := ParseSource(newSource)
 	if err != nil {
 		return err
+	}
+	if addr != "" && net.ParseIP(addr) == nil {
+		return fmt.Errorf("alamat sumber tidak valid: %q", addr)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	defer p.forget()
 	p.settled = true
+	if addr == "" || strings.EqualFold(addr, host) {
+		err = removeFile(p.path(SourceAddrFile))
+	} else {
+		err = writePin(p.path(SourceAddrFile), addr)
+	}
+	if err != nil {
+		return err
+	}
 	// The source first: a failure in between leaves the old role with a
 	// source pin (harmless on a master, which refuses every command that
 	// names a source), never a quarantined server without one.
@@ -421,8 +446,40 @@ func (p *Pins) PromoteToMaster() error {
 	if err := writePin(p.path(RoleFile), roleMaster); err != nil {
 		return err
 	}
-	if err := os.Remove(p.path(SourceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("hapus %s: %w", p.path(SourceFile), err)
+	for _, name := range []string{SourceFile, SourceAddrFile} {
+		if err := removeFile(p.path(name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SourceDial is the pinned source as the agent itself reads it: the host
+// and port of the pin, and the address to dial, the recorded verified
+// address (SourceAddrFile) when there is one, else the host. ok is false
+// without a source pin.
+func (p *Pins) SourceDial() (host string, port int, dial string, ok bool, err error) {
+	host, port, ok = p.Source()
+	if !ok {
+		return "", 0, "", false, nil
+	}
+	addr, has, err := readPinFile(p.path(SourceAddrFile))
+	if err != nil {
+		return "", 0, "", false, err
+	}
+	if !has {
+		return host, port, host, true, nil
+	}
+	if net.ParseIP(addr) == nil {
+		return "", 0, "", false, fmt.Errorf("%s tidak valid: %q; perbaiki dengan: sudo dbpanel agent set-source <host:port>", p.path(SourceAddrFile), addr)
+	}
+	return host, port, addr, true, nil
+}
+
+// removeFile removes path; none is not an error.
+func removeFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("hapus %s: %w", path, err)
 	}
 	return nil
 }
@@ -751,7 +808,7 @@ func (p *Pins) forget() { p.loaded = false }
 
 // removePins removes the role and the source pin.
 func (p *Pins) removePins() error {
-	for _, name := range []string{RoleFile, SourceFile} {
+	for _, name := range []string{RoleFile, SourceFile, SourceAddrFile} {
 		if err := os.Remove(p.path(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("hapus %s: %w", p.path(name), err)
 		}

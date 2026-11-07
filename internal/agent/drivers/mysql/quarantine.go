@@ -29,9 +29,10 @@ import (
 //     down, which leaves the GTID check out, this is required whatever
 //     the lock.
 //
-// The new master is read at the address that check matched, and the
-// source pin holds that address (address:port), not the name: the
-// rebuild from the pinned source connects to the verified server.
+// The new master is read at the address that check matched. The source
+// pin keeps the name (host:port, what the panel sends and certificates
+// carry; rebuild commands match it), and that address is recorded beside
+// it (SourceAddrFile) for the agent's own later reads of the source.
 //
 // With MySQL up it then runs selfQuarantine (PERSIST read_only and
 // super_read_only ON, pin quarantined, remove the lock, monitor.
@@ -114,7 +115,12 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 		}
 		dial = dialAt(nm, ip)
 	}
-	pinSrc := peerKey(dial)
+	// The pin keeps the name (what the panel and certificates know); the
+	// verified address is recorded beside it for the agent's own reads.
+	addr := ""
+	if dial.Host != nm.Host {
+		addr = dial.Host
+	}
 
 	st := readPeer(ctx, dial, peerTimeout)
 	switch {
@@ -136,7 +142,7 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	}
 
 	if up {
-		if err := d.selfQuarantine(ctx, pinSrc, key); err != nil {
+		if err := d.selfQuarantine(ctx, key, addr); err != nil {
 			return res, err
 		}
 		res.Applied = true
@@ -144,7 +150,7 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	}
 	// MySQL is down: the pins now, read-only once MySQL answers again
 	// (guardQuarantined).
-	if err := d.pins.SetQuarantined(pinSrc); err != nil {
+	if err := d.pins.SetQuarantinedAt(key, addr); err != nil {
 		return res, fmt.Errorf("pin quarantined gagal ditulis: %w", err)
 	}
 	if err := d.pins.ClearLock(); err != nil {
@@ -152,7 +158,7 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	}
 	d.guard.reset(nil)
 	d.guard.up, d.quarantinePending = false, true
-	d.warn("server pinned quarantined while MySQL is down; read-only follows once MySQL answers", "new_master", key, "pinned_source", pinSrc)
+	d.warn("server pinned quarantined while MySQL is down; read-only follows once MySQL answers", "new_source", key, "verified_addr", addr)
 	return res, nil
 }
 
@@ -162,7 +168,7 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 func (d *Driver) requarantine(ctx context.Context, h Host, nm proto.PeerCred, up bool) (proto.QuarantineResult, error) {
 	res := proto.QuarantineResult{Already: true}
 	host, port, ok := d.pins.Source()
-	if !ok || port != nm.Port || !sameHost(ctx, host, nm.Host) {
+	if !ok || port != nm.Port || !strings.EqualFold(host, nm.Host) {
 		pinned := "(tidak ada)"
 		if ok {
 			pinned = net.JoinHostPort(host, fmt.Sprint(port))
@@ -184,28 +190,6 @@ func (d *Driver) requarantine(ctx context.Context, h Host, nm proto.PeerCred, up
 	}
 	res.Applied = true
 	return res, nil
-}
-
-// sameHost reports whether name is pinned, the pinned host: equal, or
-// pinned is one of the addresses name resolves to (a quarantine pins the
-// verified address of the name the panel gave).
-func sameHost(ctx context.Context, pinned, name string) bool {
-	if strings.EqualFold(pinned, name) {
-		return true
-	}
-	ip := net.ParseIP(pinned)
-	if ip == nil || net.ParseIP(name) != nil {
-		return false
-	}
-	rctx, cancel := context.WithTimeout(ctx, peerTimeout)
-	defer cancel()
-	ips, _ := lookupIP(rctx, name)
-	for _, a := range ips {
-		if a.Equal(ip) {
-			return true
-		}
-	}
-	return false
 }
 
 // persistReadOnly turns read_only and super_read_only on for good.

@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"time"
 
@@ -377,7 +375,7 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 			return fmt.Errorf("baca server_uuid: %w", err)
 		}
 		if gtidHasUUID(st.GTIDExecuted, uuid) {
-			return d.selfQuarantine(ctx, net.JoinHostPort(addr, strconv.Itoa(g.cred.Port)), key)
+			return d.selfQuarantine(ctx, key, addr)
 		}
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
 		d.keepLock(now, key, "kandidat bisa ditulis tetapi gtid_executed-nya tidak memuat transaksi server ini")
@@ -414,12 +412,12 @@ func (d *Driver) keepLock(now time.Time, key, reason string) {
 }
 
 // selfQuarantine makes this server read-only for good (PERSIST, both
-// flags) and pins it quarantined under newSource (address:port: the
-// verified address of its new master, which the rebuild then connects
-// to), removing the promote lock. name is the new master as the panel
-// named it (host:port), for the log and monitor.quarantined. The caller
-// holds promoteMu.
-func (d *Driver) selfQuarantine(ctx context.Context, newSource, name string) error {
+// flags) and pins it quarantined under newSource (host:port, as the
+// panel names its new master, which rebuild commands match), recording
+// addr, the address that host was verified at, for the agent's own reads
+// of it (Pins.SourceDial); it removes the promote lock. The caller holds
+// promoteMu.
+func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) error {
 	if d.pins == nil {
 		return fmt.Errorf("karantina butuh pin peran")
 	}
@@ -435,15 +433,15 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource, name string) err
 	if err := persistReadOnly(ctx, db); err != nil {
 		return err
 	}
-	if err := d.pins.SetQuarantined(newSource); err != nil {
+	if err := d.pins.SetQuarantinedAt(newSource, addr); err != nil {
 		return fmt.Errorf("MySQL sudah read-only, tetapi pin quarantined gagal ditulis: %w", err)
 	}
 	if err := d.pins.ClearLock(); err != nil {
 		return fmt.Errorf("server sudah dikarantina, tetapi kunci promosi gagal dihapus: %w", err)
 	}
 	d.guard.reset(nil)
-	d.warn("server quarantined under its new master", "new_master", name, "pinned_source", newSource)
-	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: name})
+	d.warn("server quarantined under its new master", "new_source", newSource, "verified_addr", addr)
+	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: newSource})
 	return nil
 }
 
