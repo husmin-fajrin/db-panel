@@ -698,3 +698,61 @@ func TestClosedWithReasonIsNoRecovery(t *testing.T) {
 		t.Fatalf("alert after the closing note = %+v", a)
 	}
 }
+
+// TestPromoteCutoverRemindsEvery6Hours: the promote message goes out
+// again with the usual repeat while the cutover waits.
+func TestPromoteCutoverRemindsEvery6Hours(t *testing.T) {
+	r := newRig(t)
+	r.configure()
+	srv := r.server("DB-2")
+	r.open(monitor.KindPromoteCutover, srv, "Alamat master baru: 10.0.0.2:3306.")
+	r.pass()
+	r.clk.Add(6 * time.Hour)
+	r.pass()
+	got := r.texts()
+	if len(got) != 2 || got[1] != got[0] || !strings.Contains(got[0], "http://panel.local/masters/"+itoa(srv)+"/cutover") {
+		t.Fatalf("messages = %q, want the promote message twice", got)
+	}
+}
+
+// TestNoticeKindsSendOnceAndCloseQuietly: master_quarantined is sent once
+// and master_lock_expired at most every 24 h; their closing after 24 h
+// sends nothing.
+func TestNoticeKindsSendOnceAndCloseQuietly(t *testing.T) {
+	r := newRig(t)
+	r.configure()
+	srv := r.server("DB-1")
+	q := r.open(monitor.KindMasterQuarantined, srv, "Master lama dikarantina.")
+	l := r.open(monitor.KindMasterLockExpired, srv, "Kunci tetap dikunci.")
+	r.pass()
+	if got := r.texts(); len(got) != 2 {
+		t.Fatalf("first pass = %q", got)
+	}
+	for range 3 {
+		r.clk.Add(6 * time.Hour)
+		r.pass()
+	}
+	r.snooze(srv, true)
+	r.pass()
+	r.snooze(srv, false)
+	r.pass() // a snooze ending re-sends open alerts, but not a one-time notice
+	if got := r.texts(); len(got) != 3 || !strings.Contains(got[2], "Kunci tetap dikunci.") {
+		t.Fatalf("after 18 h = %q, want only the lock alert again after its snooze", got)
+	}
+	r.clk.Add(6 * time.Hour)
+	for _, id := range []int64{q, l} {
+		if err := r.st.CloseAlertWithReason(id, r.clk.Now(), "24 jam berlalu"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.clk.Add(2 * time.Minute)
+	r.pass()
+	if got := r.texts(); len(got) != 3 {
+		t.Fatalf("closing sent %q", got[3:])
+	}
+	for _, id := range []int64{q, l} {
+		if a := r.alert(id); a.TelegramState != store.TelegramRecovered {
+			t.Fatalf("alert %d state = %q", id, a.TelegramState)
+		}
+	}
+}

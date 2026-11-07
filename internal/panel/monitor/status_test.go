@@ -1,10 +1,12 @@
 package monitor
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -506,3 +508,109 @@ func TestLockLostOnlyForJudgedReplicas(t *testing.T) {
 		})
 	}
 }
+
+func TestQuarantinedStatusAndExplain(t *testing.T) {
+	if StatusQuarantined != "Master lama (dikarantina)" {
+		t.Fatalf("StatusQuarantined = %q", StatusQuarantined)
+	}
+	done := DeriveQuarantined(false)
+	if done.Code != StatusQuarantined || done.Severity != SevNeutral || !strings.Contains(done.Detail, "dikarantina") {
+		t.Fatalf("quarantined = %+v", done)
+	}
+	pending := DeriveQuarantined(true)
+	if pending.Code != StatusQuarantined || pending.Severity != SevWarn || !strings.Contains(pending.Detail, "belum dikarantina") {
+		t.Fatalf("quarantine pending = %+v", pending)
+	}
+	exp, ok := ExplainStatus(StatusQuarantined)
+	if !ok || exp.Text == "" || exp.Advice == "" || !strings.Contains(exp.Text, "master lama") {
+		t.Fatalf("ExplainStatus(quarantined) = %+v, %v", exp, ok)
+	}
+	if _, ok := ExplainStatus(StatusSynced); ok {
+		t.Fatal("ExplainStatus(Sinkron) explains, want nothing")
+	}
+
+	// The Monitor reads the role from the store: after a promotion the old
+	// master is quarantined, whatever its agent reports, and its master
+	// alerts close without a recovery.
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = false })
+	for range 3 {
+		ma.send()
+		r.clk.Add(20 * time.Second)
+		r.m.tick()
+	}
+	if !r.isOpen(mID, KindMasterDown) {
+		t.Fatal("master_down not open before the promotion")
+	}
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "emergency", OldMasterServerID: mID,
+		NewMasterServerID: rID, StartedAt: r.clk.Now(), Status: "done",
+		ReplicasJSON: `[{"server_id":` + itoa(mID) + `,"role":"old_master","state":"quarantined"}]`}); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	v := r.view(mID)
+	if v.Role != store.RoleQuarantined || v.Status.Code != StatusQuarantined || v.Status.Severity != SevNeutral {
+		t.Fatalf("old master view = role %q status %+v", v.Role, v.Status)
+	}
+	as := r.alerts(mID, KindMasterDown)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+		t.Fatalf("master_down after the promotion = %+v, want closed with a reason", as)
+	}
+	if v := r.view(rID); v.Role != store.RoleMaster {
+		t.Fatalf("new master role = %q", v.Role)
+	}
+
+	// A quarantine still pending (the agent was away) is a warning.
+	if _, err := r.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "emergency", OldMasterServerID: mID,
+		NewMasterServerID: rID, StartedAt: r.clk.Now(), Status: "done",
+		ReplicasJSON: `[{"server_id":` + itoa(mID) + `,"role":"old_master","state":"quarantine_pending"}]`}); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	if v := r.view(mID); v.Status.Severity != SevWarn || !strings.Contains(v.Status.Detail, "belum dikarantina") {
+		t.Fatalf("pending quarantine status = %+v", v.Status)
+	}
+}
+
+func TestNeedsRepointRebuildStatus(t *testing.T) {
+	if StatusNeedsRepoint != "Perlu diarahkan ulang" || StatusNeedsRebuild != "Perlu dibangun ulang" {
+		t.Fatalf("codes = %q, %q", StatusNeedsRepoint, StatusNeedsRebuild)
+	}
+	cases := []struct {
+		state, code, detail string
+		sev                 Severity
+		primary             string
+	}{
+		{"needs_repoint", StatusNeedsRepoint, "akan dilakukan saat tersambung", SevWarn, "repoint"},
+		{"needs_rebuild", StatusNeedsRebuild, "transaksi yang tidak ada di master baru", SevCrit, "resync"},
+	}
+	for _, c := range cases {
+		in := healthyReplica()
+		in.State = c.state
+		got := DeriveReplica(in, th)
+		if got.Code != c.code || got.Severity != c.sev || !strings.Contains(got.Detail, c.detail) || got.LockLost {
+			t.Errorf("%s: status = %+v", c.state, got)
+		}
+		// The state wins over an absent agent: waiting for it is the point.
+		in.AgentOnline, in.OfflineSince = false, now.Add(-time.Hour)
+		if got := DeriveReplica(in, th); got.Code != c.code {
+			t.Errorf("%s offline: code = %q", c.state, got.Code)
+		}
+		if SeverityOf(c.code) != c.sev {
+			t.Errorf("SeverityOf(%q) = %v", c.code, SeverityOf(c.code))
+		}
+		exp, ok := ExplainStatus(c.code)
+		if !ok || exp.Text == "" || exp.Advice == "" || exp.Primary != c.primary {
+			t.Errorf("ExplainStatus(%q) = %+v, %v", c.code, exp, ok)
+		}
+	}
+}
+
+func itoa(v int64) string { return strconv.FormatInt(v, 10) }

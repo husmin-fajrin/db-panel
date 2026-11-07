@@ -21,21 +21,27 @@ const (
 	iconWarn      = "⚠️"
 	iconRecovered = "✅"
 	iconClosed    = "ℹ️"
+	iconInfo      = "ℹ️"
 	sep           = " · "
 )
 
 // critKinds are the alerts that need action now; the others are warnings.
 var critKinds = map[string]bool{
-	monitor.KindReplicaStopped:   true,
-	monitor.KindReplicaUnlocked:  true,
-	monitor.KindMasterLocked:     true,
-	monitor.KindMasterDown:       true,
-	monitor.KindDiskCrit:         true,
-	monitor.KindAgentOffline:     true,
-	monitor.KindMySQLUnreachable: true,
-	monitor.KindBinlogDeadline:   true,
-	monitor.KindJobFailed:        true,
+	monitor.KindReplicaStopped:      true,
+	monitor.KindReplicaUnlocked:     true,
+	monitor.KindMasterLocked:        true,
+	monitor.KindMasterDown:          true,
+	monitor.KindDiskCrit:            true,
+	monitor.KindAgentOffline:        true,
+	monitor.KindMySQLUnreachable:    true,
+	monitor.KindBinlogDeadline:      true,
+	monitor.KindJobFailed:           true,
+	monitor.KindPromotePartial:      true,
+	monitor.KindReplicaNeedsRebuild: true,
 }
+
+// infoKinds only inform: nothing is wrong (spec 5.14, "Info").
+var infoKinds = map[string]bool{monitor.KindMasterQuarantined: true}
 
 // kindNames name each kind of alert in plain words, for the recovery
 // message.
@@ -55,21 +61,33 @@ var kindNames = map[string]string{
 	monitor.KindJobFailed:           "pekerjaan gagal",
 	monitor.KindTLSExpiring:         "sertifikat MySQL hampir kedaluwarsa",
 	monitor.KindWebTLSExpiring:      "sertifikat HTTPS panel hampir kedaluwarsa",
+	monitor.KindPromoteCutover:      "pengalihan aplikasi setelah promote",
+	monitor.KindPromotePartial:      "promote selesai sebagian",
+	monitor.KindReplicaNeedsRepoint: "replika perlu diarahkan ulang",
+	monitor.KindReplicaNeedsRebuild: "replika perlu dibangun ulang",
+	monitor.KindMasterQuarantined:   "master lama dikarantina",
+	monitor.KindMasterLockExpired:   "batas waktu kunci promote",
 }
 
 // masterKinds and replicaKinds link to the master's or the replica's page;
-// the other kinds link to the server's page.
+// promote_cutover links to the new master's cutover page (spec 5.5); the
+// other kinds link to the server's page.
 var (
-	masterKinds  = map[string]bool{monitor.KindMasterLocked: true, monitor.KindMasterDown: true}
+	masterKinds = map[string]bool{monitor.KindMasterLocked: true, monitor.KindMasterDown: true,
+		monitor.KindMasterLockExpired: true}
 	replicaKinds = map[string]bool{
 		monitor.KindReplicaStopped: true, monitor.KindReplicaDisconnected: true, monitor.KindReplicaLagging: true,
 		monitor.KindReplicaUnlocked: true, monitor.KindMySQLUnreachable: true, monitor.KindBinlogDeadline: true,
+		monitor.KindReplicaNeedsRepoint: true, monitor.KindReplicaNeedsRebuild: true,
 	}
 )
 
 func icon(kind string) string {
-	if critKinds[kind] {
+	switch {
+	case critKinds[kind]:
 		return iconCrit
+	case infoKinds[kind]:
+		return iconInfo
 	}
 	return iconWarn
 }
@@ -153,6 +171,8 @@ func alertLink(a store.Alert, baseURL string) string {
 	}
 	page := "servers"
 	switch {
+	case a.Kind == monitor.KindPromoteCutover:
+		return fmt.Sprintf("%s/masters/%d/cutover", baseURL, a.ServerID)
 	case masterKinds[a.Kind]:
 		page = "masters"
 	case replicaKinds[a.Kind]:

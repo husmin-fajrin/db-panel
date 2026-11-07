@@ -27,6 +27,11 @@ const (
 	StatusDown           = "Diduga tumbang"
 	StatusLocked         = "Terkunci"
 	StatusHealthy        = "Sehat"
+	// After a promotion (spec 5.4, 5.6): the old master, held out of
+	// service, and the other replicas still to be moved to the new master.
+	StatusQuarantined  = "Master lama (dikarantina)"
+	StatusNeedsRepoint = "Perlu diarahkan ulang"
+	StatusNeedsRebuild = "Perlu dibangun ulang"
 )
 
 type Severity int
@@ -42,9 +47,10 @@ const (
 // here; DeriveReplica raises it to SevCrit after Thresholds.DisconnectAlert.
 func SeverityOf(code string) Severity {
 	switch code {
-	case StatusAgentOffline, StatusUnreachable, StatusStopped, StatusStoppedOutside, StatusDown, StatusLocked:
+	case StatusAgentOffline, StatusUnreachable, StatusStopped, StatusStoppedOutside, StatusDown, StatusLocked,
+		StatusNeedsRebuild:
 		return SevCrit
-	case StatusPaused, StatusDisconnected, StatusLagging:
+	case StatusPaused, StatusDisconnected, StatusLagging, StatusNeedsRepoint:
 		return SevWarn
 	case StatusSynced, StatusHealthy:
 		return SevOK
@@ -80,8 +86,10 @@ type Thresholds struct {
 // Replica lifecycle states of store.Replica.State that the monitor judges.
 // Kept as literals so this package does not depend on the store.
 const (
-	replicaReady     = "ready"
-	replicaAttention = "attention"
+	replicaReady        = "ready"
+	replicaAttention    = "attention"
+	replicaNeedsRepoint = "needs_repoint"
+	replicaNeedsRebuild = "needs_rebuild"
 )
 
 // downAgentOffline starts the detail of a master presumed down because its
@@ -132,7 +140,16 @@ func DeriveReplica(in ReplicaInput, th Thresholds) Status {
 		return st
 	}
 
-	if in.State != replicaReady && in.State != replicaAttention {
+	// After a promotion the store's state is the status, whatever the
+	// agent reports: the replica still follows the old master, and an
+	// absent agent is what a repoint waits for.
+	switch in.State {
+	case replicaNeedsRepoint:
+		return set(StatusNeedsRepoint, "Perlu diarahkan ulang ke master baru; akan dilakukan saat tersambung")
+	case replicaNeedsRebuild:
+		return set(StatusNeedsRebuild, "Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru")
+	case replicaReady, replicaAttention:
+	default:
 		return set(StatusNotReady, "Replika belum siap dipantau")
 	}
 	if detail, off := agentOffline(in.AgentOnline, in.OfflineSince, in.ReceivedAt, in.Now, th.StaleAfter); off {
@@ -244,6 +261,20 @@ func DeriveMaster(in MasterInput, th Thresholds) Status {
 		return set(StatusLocked, "Master dikunci (super_read_only aktif); aplikasi tidak bisa menulis")
 	}
 	return set(StatusHealthy, "Master menjawab dan bisa ditulisi")
+}
+
+// DeriveQuarantined is the status of an old master after a promotion
+// (servers.role quarantined): it comes from the store, not from the
+// agent's reports. pending: the quarantine was not delivered yet (its
+// agent was unreachable), which needs care before MySQL there starts.
+func DeriveQuarantined(pending bool) Status {
+	if pending {
+		return Status{Code: StatusQuarantined, Severity: SevWarn,
+			Detail: "Master lama setelah promote, tetapi belum dikarantina karena agent-nya belum terjangkau; " +
+				"jangan hidupkan MySQL-nya sebelum agent tersambung"}
+	}
+	return Status{Code: StatusQuarantined, Severity: SevNeutral,
+		Detail: "Master lama setelah promote; dikarantina (hanya-baca) agar aplikasi tidak menulis ke sini"}
 }
 
 // agentOffline reports whether the agent counts as offline: the hub has

@@ -32,6 +32,12 @@ var alertKindLabels = map[string]string{
 	monitor.KindJobFailed:           "Pekerjaan gagal",
 	monitor.KindTLSExpiring:         "Sertifikat MySQL hampir kedaluwarsa",
 	monitor.KindWebTLSExpiring:      "Sertifikat HTTPS panel hampir kedaluwarsa",
+	monitor.KindPromoteCutover:      "Promote menunggu pengalihan aplikasi",
+	monitor.KindPromotePartial:      "Promote selesai sebagian",
+	monitor.KindReplicaNeedsRepoint: "Replika perlu diarahkan ulang",
+	monitor.KindReplicaNeedsRebuild: "Replika perlu dibangun ulang",
+	monitor.KindMasterQuarantined:   "Master lama dikarantina",
+	monitor.KindMasterLockExpired:   "Batas waktu kunci promote",
 }
 
 func alertKindLabel(kind string) string {

@@ -61,6 +61,37 @@ var explanations = map[int]Explanation{
 	2013: expNoMaster, // connection lost (IO)
 }
 
+// statusExplanations read the statuses a promotion leaves behind (spec
+// 5.4, 5.6). Primary "repoint" is "Arahkan sekarang", "rebuild" the old
+// master's rebuild.
+var statusExplanations = map[string]Explanation{
+	StatusQuarantined: {
+		Text: "Server ini master lama dari sebuah promote. Panel mengunci MySQL-nya (hanya-baca) agar aplikasi yang " +
+			"belum dialihkan tidak menulis ke sana.",
+		Advice:  "Periksa transaksi yang tertinggal di sini, lalu bangun ulang server ini sebagai replika atau hapus dari panel",
+		Primary: "rebuild",
+	},
+	StatusNeedsRepoint: {
+		Text: "Setelah promote, replika ini masih mengikuti master lama. Panel mengarahkannya ke master baru sendiri " +
+			"begitu agent-nya tersambung.",
+		Advice:  "Arahkan sekarang",
+		Primary: "repoint",
+	},
+	StatusNeedsRebuild: {
+		Text: "Replika ini punya transaksi yang tidak ada di master baru, jadi tidak bisa sekadar diarahkan ulang. " +
+			"Panel tidak membangunnya ulang sendiri.",
+		Advice:  "Resync ulang dari master baru",
+		Primary: "resync",
+	},
+}
+
+// ExplainStatus reads a status code that needs explaining by itself (the
+// statuses a promotion leaves); false for any other code.
+func ExplainStatus(code string) (Explanation, bool) {
+	e, ok := statusExplanations[code]
+	return e, ok
+}
+
 // Explain translates the replica's last errors into plain language. The
 // SQL thread's errno is looked up first, then the IO thread's.
 func Explain(sqlErrno, ioErrno int) Explanation {

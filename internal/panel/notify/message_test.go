@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +109,40 @@ func TestFormatRecovered(t *testing.T) {
 		got := FormatRecovered(a, "RS-2", opened.Add(c.d))
 		if want := "✅ RS-2 pulih: replika berhenti selesai setelah " + c.want; got != want {
 			t.Errorf("FormatRecovered(%v) = %q, want %q", c.d, got, want)
+		}
+	}
+}
+
+// TestPromoteMessageHasNewAddress: the promote message names the new
+// master's address and links to its cutover page.
+func TestPromoteMessageHasNewAddress(t *testing.T) {
+	now := at(5, 10, 0)
+	a := store.Alert{Kind: monitor.KindPromoteCutover, ServerID: 7, TopologyID: 2, OpenedAt: at(5, 9, 30),
+		Message: "Promote terencana selesai: DB-2 kini master, menggantikan DB-1. Alamat master baru: 10.0.0.2:3306. " +
+			"Replika ikut: 1. Arahkan semua aplikasi yang menulis ke database ke alamat baru, lalu tekan \"Sudah saya alihkan\"."}
+	got := Format(a, "DB-2", "", "http://panel.local/", now)
+	want := "⚠️ " + a.Message + "\nServer: DB-2 · Sejak: 09:30 · http://panel.local/masters/7/cutover"
+	if got != want {
+		t.Fatalf("Format =\n%s\nwant\n%s", got, want)
+	}
+	if !strings.Contains(got, "10.0.0.2:3306") {
+		t.Fatal("no new address")
+	}
+	if got := FormatRecovered(a, "DB-2", at(5, 12, 0)); got != "✅ DB-2 pulih: pengalihan aplikasi setelah promote selesai setelah 2 jam 30 menit" {
+		t.Fatalf("FormatRecovered = %q", got)
+	}
+
+	cases := []struct{ kind, want string }{
+		{monitor.KindPromotePartial, "⛔ x\nServer: DB-2 · Sejak: 09:30 · http://p/servers/7"},
+		{monitor.KindReplicaNeedsRepoint, "⚠️ x\nServer: DB-2 · Sejak: 09:30 · http://p/replicas/7"},
+		{monitor.KindReplicaNeedsRebuild, "⛔ x\nServer: DB-2 · Sejak: 09:30 · http://p/replicas/7"},
+		{monitor.KindMasterQuarantined, "ℹ️ x\nServer: DB-2 · Sejak: 09:30 · http://p/servers/7"},
+		{monitor.KindMasterLockExpired, "⚠️ x\nServer: DB-2 · Sejak: 09:30 · http://p/masters/7"},
+	}
+	for _, c := range cases {
+		a := store.Alert{Kind: c.kind, ServerID: 7, OpenedAt: at(5, 9, 30), Message: "x"}
+		if got := Format(a, "DB-2", "", "http://p", now); got != c.want {
+			t.Errorf("%s: Format =\n%s\nwant\n%s", c.kind, got, c.want)
 		}
 	}
 }

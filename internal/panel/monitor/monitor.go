@@ -210,9 +210,14 @@ func (m *Monitor) Run(ctx context.Context) {
 	}
 }
 
-// HandleEvent takes an agent's health report. It reports whether ev was a
-// health event (handled, possibly by ignoring it).
+// HandleEvent takes an agent's health report and the promote lock
+// guard's events (monitor.quarantined, monitor.lockExpired: one-time
+// notices). It reports whether ev was one of them (handled, possibly by
+// ignoring it).
 func (m *Monitor) HandleEvent(serverID int64, ev proto.Event) bool {
+	if m.handlePromoteEvent(serverID, ev) {
+		return true
+	}
 	if ev.Type != proto.EventHealth {
 		return false
 	}
@@ -440,7 +445,8 @@ func (m *Monitor) markNeedsUpgrade(id int64) {
 // with time alone (agent offline, presumed down, stale reports,
 // disconnected for long, lagging by a GTID gap) do; it publishes what
 // changed and the end of backlog batches, evaluates the alerts (with
-// tls_expiring), and prunes old events daily.
+// tls_expiring, the promotions' alerts and the notices' 24 h), and prunes
+// old events daily.
 func (m *Monitor) tick() {
 	now := m.now()
 	servers, err := m.st.ListServers()
@@ -472,6 +478,8 @@ func (m *Monitor) tick() {
 	}
 	alerts := m.evaluate(now)
 	alerts = append(alerts, m.checkTLSExpiry(now)...)
+	alerts = append(alerts, m.checkPromotions(now)...)
+	alerts = append(alerts, m.closeNotices(now)...)
 	prune := now.Sub(m.lastPrune) >= pruneEvery
 	if prune {
 		m.lastPrune = now

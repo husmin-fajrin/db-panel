@@ -31,8 +31,9 @@ type statusView struct {
 	Lag      string    // "tertinggal 12 dtk" / "tertinggal 3 transaksi"; "" when unknown
 	Received time.Time // when the last report was taken; zero when none
 	Now      time.Time
-	// Explain reads a stopped replica's error in plain language; nil
-	// otherwise.
+	// Explain reads a stopped replica's error, or a status a promotion
+	// left (old master, replica to repoint or rebuild), in plain
+	// language; nil otherwise.
 	Explain *monitor.Explanation
 	// DownGuide: a master presumed down shows the manual steps.
 	DownGuide bool
@@ -81,6 +82,9 @@ func newStatusView(id int64, role string, v monitor.View, ok bool, now time.Time
 	}
 	if role == store.RoleReplica && st.Code == monitor.StatusStopped && v.Snap != nil && v.Snap.Replica != nil {
 		e := monitor.Explain(v.Snap.Replica.LastSQLErrno, v.Snap.Replica.LastIOErrno)
+		sv.Explain = &e
+	}
+	if e, ok := monitor.ExplainStatus(st.Code); ok { // the statuses a promotion leaves
 		sv.Explain = &e
 	}
 	sv.DownGuide = role == store.RoleMaster && st.Code == monitor.StatusDown

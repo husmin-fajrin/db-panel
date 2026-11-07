@@ -84,7 +84,8 @@ func running(s *proto.HealthSnapshot) {
 
 func TestAllKinds(t *testing.T) {
 	want := "replica_stopped replica_disconnected replica_lagging replica_unlocked master_locked master_down " +
-		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring web_tls_expiring"
+		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring web_tls_expiring " +
+		"promote_cutover promote_partial replica_needs_repoint replica_needs_rebuild master_quarantined master_lock_expired"
 	if got := strings.Join(AllKinds(), " "); got != want {
 		t.Fatalf("AllKinds = %s", got)
 	}
@@ -833,5 +834,289 @@ func TestWebCertExpiringAlert(t *testing.T) {
 	r.m.CheckTLSExpiry(r.clk.Now())
 	if r.isOpen(local, KindWebTLSExpiring) || !r.isOpen(local, KindTLSExpiring) {
 		t.Fatal("after the new web certificate: want only the MySQL alert open")
+	}
+}
+
+// promoted swaps the topology's master to newID at 10.0.0.2:3306, as a
+// finished promotion does, and records the promotion with status.
+func (r *rig) promoted(topo store.Topology, oldID, newID int64, status, replicasJSON string) int64 {
+	r.t.Helper()
+	if err := r.st.SwapMaster(topo.ID, oldID, newID, "10.0.0.2", 3306); err != nil {
+		r.t.Fatal(err)
+	}
+	return r.promotion(topo, oldID, newID, status, replicasJSON)
+}
+
+func (r *rig) promotion(topo store.Topology, oldID, newID int64, status, replicasJSON string) int64 {
+	r.t.Helper()
+	id, err := r.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "planned", OldMasterServerID: oldID,
+		NewMasterServerID: newID, StartedAt: r.clk.Now(), Status: status, ReplicasJSON: replicasJSON})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return id
+}
+
+func (r *rig) setPromotionStatus(id int64, status string) {
+	r.t.Helper()
+	p, err := r.st.GetPromotion(id)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	p.Status = status
+	if err := r.st.UpdatePromotion(p); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+func TestPromoteCutoverAlertLifecycle(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	oID := r.replica("db-lain", topo)
+	r.m.tick()
+	if r.isOpen(rID, KindPromoteCutover) {
+		t.Fatal("promote_cutover open before any promotion")
+	}
+
+	if err := r.st.SetReplicaState(oID, store.ReplicaNeedsRepoint, ""); err != nil {
+		t.Fatal(err)
+	}
+	r.promoted(topo, mID, rID, "done", `[{"server_id":`+itoa(mID)+`,"role":"old_master","state":"quarantined"},`+
+		`{"server_id":`+itoa(oID)+`,"role":"replica","state":"needs_repoint"}]`)
+	r.m.tick()
+	a := r.openAlert(rID, KindPromoteCutover)
+	if a.TopologyID != topo.ID {
+		t.Fatalf("promote_cutover topology = %d, want %d", a.TopologyID, topo.ID)
+	}
+	for _, want := range []string{"db-baru", "db-lama", "10.0.0.2:3306", "Sudah saya alihkan", "perlu diarahkan ulang: 1"} {
+		if !strings.Contains(a.Message, want) {
+			t.Errorf("promote_cutover message %q lacks %q", a.Message, want)
+		}
+	}
+
+	// It stays one open alert for as long as the cutover waits: the
+	// notifier repeats it every 6 hours (alert_repeat_hours).
+	for range 14 {
+		r.clk.Add(30 * time.Minute)
+		r.m.tick()
+	}
+	if as := r.alerts(rID, KindPromoteCutover); len(as) != 1 || as[0].ClosedAt != nil {
+		t.Fatalf("promote_cutover after 7 h = %+v, want the same one open", as)
+	}
+
+	// "Sudah saya alihkan" (ConfirmCutover) clears cutover_pending: the
+	// alert closes as resolved.
+	if err := r.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	as := r.alerts(rID, KindPromoteCutover)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "" {
+		t.Fatalf("promote_cutover after confirm = %+v, want closed as resolved", as)
+	}
+	if ups := r.alertUpdates(rID, KindPromoteCutover); len(ups) != 2 || ups[1]["open"] != false {
+		t.Fatalf("alert_update = %v", ups)
+	}
+	r.m.tick()
+	if len(r.alerts(rID, KindPromoteCutover)) != 1 {
+		t.Fatal("promote_cutover reopened after confirm")
+	}
+}
+
+func TestPromotePartialAlert(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+
+	// Partial before the swap: the alert belongs to the candidate.
+	pid := r.promotion(topo, mID, rID, "partial", "")
+	r.m.tick()
+	a := r.openAlert(rID, KindPromotePartial)
+	if a.TopologyID != topo.ID || !strings.Contains(a.Message, "sebagian") || !strings.Contains(a.Message, "Ulangi") {
+		t.Fatalf("promote_partial = %+v", a)
+	}
+
+	// A retry runs it again: the alert stays open, through the swap.
+	r.setPromotionStatus(pid, "running")
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	r.setPromotionStatus(pid, "partial")
+	r.m.tick()
+	if as := r.alerts(rID, KindPromotePartial); len(as) != 1 || as[0].ClosedAt != nil {
+		t.Fatalf("promote_partial during the retry = %+v, want the same one open", as)
+	}
+
+	// Every remaining step done: resolved.
+	r.setPromotionStatus(pid, "done")
+	r.m.tick()
+	as := r.alerts(rID, KindPromotePartial)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "" {
+		t.Fatalf("promote_partial after done = %+v, want closed as resolved", as)
+	}
+
+	// A newer promotion replaces a partial one: closed, not resolved.
+	pid = r.promotion(topo, rID, mID, "partial", "")
+	r.m.tick()
+	r.openAlert(mID, KindPromotePartial)
+	r.promotion(topo, rID, mID, "failed", "")
+	r.m.tick()
+	as = r.alerts(mID, KindPromotePartial)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+		t.Fatalf("promote_partial after a newer promotion = %+v, want closed with a reason", as)
+	}
+}
+
+func lockExpired(t *testing.T, action, reason string) proto.Event {
+	t.Helper()
+	b, err := json.Marshal(proto.LockExpiredEvent{Action: action, Candidate: "10.0.0.2:3306", Reason: reason})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proto.Event{Type: proto.EventLockExpired, Payload: b}
+}
+
+func TestMasterLockExpiredFromEvent(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	var changed atomic.Int32
+	r.m.onAlertsChanged = func() { changed.Add(1) }
+
+	if !r.m.HandleEvent(mID, lockExpired(t, "kept", "kandidat tidak terjangkau: Access denied for user 'x'@'h'")) {
+		t.Fatal("HandleEvent did not take monitor.lockExpired")
+	}
+	a := r.openAlert(mID, KindMasterLockExpired)
+	if a.TopologyID != topo.ID || !strings.Contains(a.Message, "tetap dikunci") || !strings.Contains(a.Message, "10.0.0.2:3306") ||
+		strings.Contains(a.Message, "Access denied") {
+		t.Fatalf("kept alert = %+v", a)
+	}
+	if changed.Load() != 1 {
+		t.Fatalf("OnAlertsChanged called %d times, want 1", changed.Load())
+	}
+
+	// The agent repeats "kept" hourly: still the one alert.
+	r.clk.Add(time.Hour)
+	r.m.HandleEvent(mID, lockExpired(t, "kept", "kandidat tidak terjangkau"))
+	if as := r.alerts(mID, KindMasterLockExpired); len(as) != 1 {
+		t.Fatalf("alerts after a second kept = %+v", as)
+	}
+
+	// The guard unlocked the master: the message says so, as a new alert.
+	r.m.HandleEvent(mID, lockExpired(t, "unlocked", ""))
+	as := r.alerts(mID, KindMasterLockExpired)
+	if len(as) != 2 || as[0].ClosedAt == nil || as[0].CloseReason == "" || as[1].ClosedAt != nil ||
+		!strings.Contains(as[1].Message, "membuka kunci") {
+		t.Fatalf("alerts after unlocked = %+v", as)
+	}
+
+	// It closes on its own after 24 hours.
+	r.clk.Add(23 * time.Hour)
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterLockExpired) {
+		t.Fatal("master_lock_expired closed before 24 h")
+	}
+	r.clk.Add(time.Hour)
+	r.m.tick()
+	as = r.alerts(mID, KindMasterLockExpired)
+	if len(as) != 2 || as[1].ClosedAt == nil || as[1].CloseReason == "" {
+		t.Fatalf("alerts after 24 h = %+v", as)
+	}
+
+	// An unreadable payload is taken (ignored), never passed on.
+	if !r.m.HandleEvent(mID, proto.Event{Type: proto.EventLockExpired, Payload: []byte("{")}) {
+		t.Fatal("unreadable monitor.lockExpired not taken")
+	}
+	if len(r.alerts(mID, KindMasterLockExpired)) != 2 {
+		t.Fatal("unreadable payload opened an alert")
+	}
+}
+
+func TestMasterQuarantinedFromEvent(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	r.promoted(topo, mID, rID, "done", "")
+	r.m.tick()
+
+	ev := proto.Event{Type: proto.EventQuarantined, Payload: []byte(`{"new_source":"10.0.0.2:3306"}`)}
+	if !r.m.HandleEvent(mID, ev) {
+		t.Fatal("HandleEvent did not take monitor.quarantined")
+	}
+	a := r.openAlert(mID, KindMasterQuarantined)
+	if a.TopologyID != topo.ID || !strings.Contains(a.Message, "dikarantina") || !strings.Contains(a.Message, "10.0.0.2:3306") {
+		t.Fatalf("master_quarantined = %+v", a)
+	}
+	// Once per 24 hours.
+	r.clk.Add(time.Hour)
+	r.m.HandleEvent(mID, ev)
+	if as := r.alerts(mID, KindMasterQuarantined); len(as) != 1 {
+		t.Fatalf("alerts after a second event = %+v", as)
+	}
+	r.clk.Add(23 * time.Hour)
+	r.m.tick()
+	as := r.alerts(mID, KindMasterQuarantined)
+	if len(as) != 1 || as[0].ClosedAt == nil {
+		t.Fatalf("master_quarantined after 24 h = %+v", as)
+	}
+}
+
+func TestReplicaNeedsAlerts(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ra.setSnap(stoppedBy(1062, "Duplicate entry"))
+	ra.send()
+	if !r.isOpen(rID, KindReplicaStopped) {
+		t.Fatal("replica_stopped not open")
+	}
+	state := func(s string) {
+		t.Helper()
+		if err := r.st.SetReplicaState(rID, s, ""); err != nil {
+			t.Fatal(err)
+		}
+		r.m.ReplicaChanged(rID)
+		r.settle()
+	}
+
+	state(store.ReplicaNeedsRepoint)
+	if v := r.view(rID); v.Status.Code != StatusNeedsRepoint {
+		t.Fatalf("status = %+v", v.Status)
+	}
+	a := r.openAlert(rID, KindReplicaNeedsRepoint)
+	if !strings.Contains(a.Message, "diarahkan ulang") {
+		t.Fatalf("replica_needs_repoint = %+v", a)
+	}
+	// What the replica did under the old master is no longer judged.
+	if as := r.alerts(rID, KindReplicaStopped); len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+		t.Fatalf("replica_stopped = %+v, want closed with a reason", as)
+	}
+
+	// The repoint found transactions the new master lacks.
+	state(store.ReplicaNeedsRebuild)
+	as := r.alerts(rID, KindReplicaNeedsRepoint)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+		t.Fatalf("replica_needs_repoint = %+v, want closed with a reason", as)
+	}
+	r.openAlert(rID, KindReplicaNeedsRebuild)
+
+	// It stays open through the resync, also a failed one, and closes as
+	// resolved when the replica is ready again.
+	state(store.ReplicaResyncing)
+	r.m.tick()
+	state(store.ReplicaFailed)
+	r.m.tick()
+	state(store.ReplicaResyncing)
+	ra.setSnap(running)
+	state(store.ReplicaReady)
+	ra.send()
+	as = r.alerts(rID, KindReplicaNeedsRebuild)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "" {
+		t.Fatalf("replica_needs_rebuild = %+v, want one closed as resolved", as)
+	}
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("status after the resync = %+v", v.Status)
 	}
 }

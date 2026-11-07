@@ -32,6 +32,18 @@ const (
 	minWait = time.Second
 )
 
+// kindRepeat overrides Config.Repeat for one-time notices (spec 5.14):
+// master_quarantined is sent once, master_lock_expired at most every 24 h
+// (the agent repeats a lock kept). Both close after 24 h without a
+// message: closing them is no recovery (quietKinds).
+var (
+	kindRepeat = map[string]time.Duration{
+		monitor.KindMasterQuarantined: 0, // never repeated, not even after a snooze
+		monitor.KindMasterLockExpired: 24 * time.Hour,
+	}
+	quietKinds = map[string]bool{monitor.KindMasterQuarantined: true, monitor.KindMasterLockExpired: true}
+)
+
 // flapKey is one server's alert kind.
 type flapKey struct {
 	serverID int64
@@ -329,8 +341,15 @@ func (n *Notifier) notify(ctx context.Context, cfg Config, a store.Alert, snooze
 	if snoozed {
 		return
 	}
-	if !snoozeEnded && a.TelegramState == store.TelegramSent && a.LastNotifiedAt != nil &&
-		n.now().Before(a.LastNotifiedAt.Add(cfg.Repeat)) {
+	repeat, fixed := kindRepeat[a.Kind]
+	if !fixed {
+		repeat = cfg.Repeat
+	}
+	sent := a.TelegramState == store.TelegramSent && a.LastNotifiedAt != nil
+	if sent && repeat == 0 {
+		return // a one-time notice
+	}
+	if !snoozeEnded && sent && n.now().Before(a.LastNotifiedAt.Add(repeat)) {
 		return
 	}
 	if a.NotifyCount == 0 && n.flapping(ctx, cfg, a) {
@@ -388,9 +407,9 @@ func (n *Notifier) flapping(ctx context.Context, cfg Config, a store.Alert) bool
 func (n *Notifier) notifyRecovered(ctx context.Context, cfg Config, a store.Alert, snoozed bool) {
 	key := flapKey{a.ServerID, a.Kind}
 	flapAt, flapped := n.flapSent[key]
-	if !cfg.enabled(a.Kind) || (a.NotifyCount == 0 && !flapped) {
-		// Never delivered (still pending, failed, or a switched-off kind):
-		// there is nothing to recover from.
+	if !cfg.enabled(a.Kind) || (a.NotifyCount == 0 && !flapped) || quietKinds[a.Kind] {
+		// Never delivered (still pending, failed, or a switched-off kind),
+		// or a notice that expired: there is nothing to recover from.
 		n.setState(a, store.TelegramRecovered)
 		return
 	}

@@ -30,6 +30,9 @@ type serverState struct {
 	repPaused  bool
 	snooze     *time.Time
 	resolvedOK bool // role fields hold a successful resolve
+	// quarantinePending: an old master (role store.RoleQuarantined) whose
+	// quarantine was not delivered yet, by its latest promotion's record.
+	quarantinePending bool
 	// awaitFresh is when the store last changed how this replica is
 	// judged (its state became ready or attention, or paused flipped):
 	// until a report taken at or after it arrives, or freshBound passes,
@@ -185,8 +188,9 @@ func firstTime(cur, at time.Time) time.Time {
 }
 
 // resolve reads the server's role from the store: a master when a
-// topology names it, a replica when it has a replica row, otherwise not
-// monitored. On error s keeps what it had. The caller holds mu.
+// topology names it, a replica when it has a replica row, an old master
+// when the server's role is quarantined, otherwise not monitored. On
+// error s keeps what it had. The caller holds mu.
 //
 // When a replica already resolved changes how it is judged (its state
 // becomes ready or attention, or its paused flag flips: a job or a
@@ -206,7 +210,17 @@ func (m *Monitor) resolve(id int64, s *serverState, reportAt time.Time) error {
 	}
 	rep, err := m.st.GetReplicaByServer(id)
 	if errors.Is(err, store.ErrNotFound) {
+		srv, err := m.st.GetServer(id)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
 		s.role, s.topoID, s.masterID, s.repState, s.repPaused = "", 0, 0, "", false
+		s.quarantinePending = false
+		if err == nil && srv.Role == store.RoleQuarantined {
+			if err := m.resolveQuarantined(id, s); err != nil {
+				return err
+			}
+		}
 		s.resolvedOK, s.awaitFresh = true, time.Time{}
 		return nil
 	}
@@ -229,6 +243,28 @@ func (m *Monitor) resolve(id int64, s *serverState, reportAt time.Time) error {
 		if reportAt.IsZero() || reportAt.Before(now) {
 			m.fetchFreshLocked(id)
 		}
+	}
+	return nil
+}
+
+// resolveQuarantined fills s for the old master id: its topology, if one
+// still names it as the previous master, and whether its latest promotion
+// still has its quarantine pending. The caller holds mu.
+func (m *Monitor) resolveQuarantined(id int64, s *serverState) error {
+	s.role = store.RoleQuarantined
+	topo, err := m.st.GetTopologyByOldMaster(id)
+	switch {
+	case err == nil:
+		s.topoID, s.masterID = topo.ID, topo.MasterServerID
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+	p, err := m.st.PromotionByOldMaster(id)
+	switch {
+	case err == nil:
+		s.quarantinePending = oldMasterState(p) == quarantineStatePending
+	case !errors.Is(err, store.ErrNotFound):
+		return err
 	}
 	return nil
 }
@@ -262,10 +298,14 @@ func heldThrough(code string) bool {
 // change; fromReport means a report taken at now is being ingested, so
 // the agent was online then. The caller holds mu.
 func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport bool) {
-	if s.role == "" {
+	switch s.role {
+	case "":
 		if s.status != (Status{}) {
 			s.status, s.since, s.dirty = Status{}, time.Time{}, true
 		}
+		return
+	case store.RoleQuarantined:
+		m.apply(id, s, DeriveQuarantined(s.quarantinePending), now)
 		return
 	}
 	online := s.online || fromReport

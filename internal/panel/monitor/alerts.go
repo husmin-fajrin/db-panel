@@ -32,13 +32,27 @@ const (
 	// soon (spec 5.14, "sertifikat MySQL/web"); a kind of its own, on the
 	// panel's host, since a host has one open alert per kind.
 	KindWebTLSExpiring = "web_tls_expiring"
+
+	// After a promotion (spec 5.14). promote_cutover and promote_partial
+	// belong to a topology and sit on its new master (CheckPromotions);
+	// the replica kinds follow the replica's state (rules);
+	// master_quarantined and master_lock_expired are one-time notices
+	// from the agent's events (HandleEvent), closed after noticeFor.
+	KindPromoteCutover      = "promote_cutover"
+	KindPromotePartial      = "promote_partial"
+	KindReplicaNeedsRepoint = "replica_needs_repoint"
+	KindReplicaNeedsRebuild = "replica_needs_rebuild"
+	KindMasterQuarantined   = "master_quarantined"
+	KindMasterLockExpired   = "master_lock_expired"
 )
 
 // AllKinds returns every alert kind, in the order of spec 5.3.
 func AllKinds() []string {
 	return []string{KindReplicaStopped, KindReplicaDisconnected, KindReplicaLagging, KindReplicaUnlocked,
 		KindMasterLocked, KindMasterDown, KindMySQLUnreachable, KindAgentOffline, KindDiskWarn, KindDiskCrit,
-		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed, KindTLSExpiring, KindWebTLSExpiring}
+		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed, KindTLSExpiring, KindWebTLSExpiring,
+		KindPromoteCutover, KindPromotePartial, KindReplicaNeedsRepoint, KindReplicaNeedsRebuild,
+		KindMasterQuarantined, KindMasterLockExpired}
 }
 
 // Fixed delays and hysteresis of the rules (plan 3, Global Constraints);
@@ -67,6 +81,8 @@ type ruleCtx struct {
 	connHighSince time.Time // connections at or over ConnPct
 	syncedSince   time.Time // status Sinkron
 	outSince      time.Time // not following the master (Terputus, Berhenti, Dihentikan)
+	// repState is a replica's store.Replica.State; "" for a master.
+	repState string
 }
 
 // alertRule opens an alert of kind when open holds (with its message) and
@@ -75,6 +91,12 @@ type alertRule struct {
 	kind  string
 	open  func(v View, ctx ruleCtx) (bool, string /* pesan */)
 	close func(v View, ctx ruleCtx) bool
+	// closeReason, when set, words why a closing is no recovery ("" for
+	// one).
+	closeReason func(v View, ctx ruleCtx) string
+	// judgedWhile, when set, keeps the rule judged while the server is
+	// not (a replica being resynced), so its alert stays open through it.
+	judgedWhile func(v View, ctx ruleCtx) bool
 }
 
 // alertRules are the status rules, in AllKinds order; job_failed is
@@ -230,6 +252,37 @@ var alertRules = []alertRule{
 		},
 	},
 	{
+		kind: KindReplicaNeedsRepoint,
+		open: func(v View, ctx ruleCtx) (bool, string) {
+			if !isReplica(v) || ctx.repState != store.ReplicaNeedsRepoint {
+				return false, ""
+			}
+			return true, "Setelah promote, replika masih mengikuti master lama dan perlu diarahkan ulang ke master baru; " +
+				"panel melakukannya saat agent-nya tersambung."
+		},
+		close: func(v View, ctx ruleCtx) bool { return !isReplica(v) || ctx.repState != store.ReplicaNeedsRepoint },
+		closeReason: func(_ View, ctx ruleCtx) string {
+			if ctx.repState == store.ReplicaNeedsRebuild {
+				return "replika ternyata perlu dibangun ulang"
+			}
+			return ""
+		},
+	},
+	{
+		kind: KindReplicaNeedsRebuild,
+		open: func(v View, ctx ruleCtx) (bool, string) {
+			if !isReplica(v) || ctx.repState != store.ReplicaNeedsRebuild {
+				return false, ""
+			}
+			return true, "Replika punya transaksi yang tidak ada di master baru, jadi tidak bisa diarahkan ulang. " +
+				"Saran: Resync ulang dari master baru."
+		},
+		close: func(v View, ctx ruleCtx) bool { return !isReplica(v) || !rebuildPending(ctx.repState) },
+		// Open through the resync, and after a failed one: it closes when
+		// the replica is ready again.
+		judgedWhile: func(v View, ctx ruleCtx) bool { return isReplica(v) && rebuildPending(ctx.repState) },
+	},
+	{
 		kind: KindBinlogDeadline,
 		open: func(v View, ctx ruleCtx) (bool, string) {
 			if !isReplica(v) || !notFollowing(v.Status.Code) || ctx.outSince.IsZero() ||
@@ -260,6 +313,35 @@ func diskCritActive(snap *proto.HealthSnapshot, set Settings, open bool) bool {
 		return open
 	}
 	return pct >= set.DiskCrit || (open && pct >= set.DiskCrit-diskCloseMargin)
+}
+
+// rebuildPending: a needs_rebuild replica not rebuilt yet (its resync
+// runs or failed).
+func rebuildPending(state string) bool {
+	return state == store.ReplicaNeedsRebuild || state == store.ReplicaResyncing || state == store.ReplicaFailed
+}
+
+// afterPromotion: a replica's status says only that a promotion left it
+// to be moved; what it does under the old master is not judged.
+func afterPromotion(code string) bool {
+	return code == StatusNeedsRepoint || code == StatusNeedsRebuild
+}
+
+// ruleApplies reports whether a judged server's rule of kind is judged:
+// an old master keeps no status alert; a replica left by a promotion
+// keeps its own kinds and the host's disk and connections.
+func ruleApplies(kind string, v View) bool {
+	switch {
+	case v.Role == store.RoleQuarantined:
+		return false
+	case afterPromotion(v.Status.Code):
+		switch kind {
+		case KindReplicaNeedsRepoint, KindReplicaNeedsRebuild, KindDiskWarn, KindDiskCrit, KindConnectionsHigh:
+			return true
+		}
+		return false
+	}
+	return true
 }
 
 func isReplica(v View) bool { return v.Role == store.RoleReplica }
@@ -315,13 +397,15 @@ func stoppedMessage(v View) string {
 
 // jobKindNames are the job kinds in words for people.
 var jobKindNames = map[string]string{
-	"prepare_master":   "Siapkan master",
-	"create_replica":   "Buat replika",
-	"add_databases":    "Tambah database",
-	"remove_databases": "Lepas database",
-	"resync_replica":   "Resync ulang",
-	"mysql_tls":        "Pasang sertifikat MySQL",
-	"tighten_tls":      "Perketat sambungan replikasi",
+	"prepare_master":    "Siapkan master",
+	"create_replica":    "Buat replika",
+	"add_databases":     "Tambah database",
+	"remove_databases":  "Lepas database",
+	"resync_replica":    "Resync ulang",
+	"mysql_tls":         "Pasang sertifikat MySQL",
+	"tighten_tls":       "Perketat sambungan replikasi",
+	"promote_planned":   "Promote terencana",
+	"promote_emergency": "Promote darurat",
 }
 
 // alertUpdate is one alert_update to publish once the lock is released.
@@ -388,18 +472,22 @@ func (m *Monitor) evaluate(now time.Time) []alertUpdate {
 		ctx.diskCrit = diskCritActive(v.Snap, m.settings, critOpen)
 		for _, r := range alertRules {
 			a, isOpen := byKey[key{r.kind, id}]
+			judged := (active && ruleApplies(r.kind, v)) || (r.judgedWhile != nil && r.judgedWhile(v, ctx))
 			switch {
-			case isOpen && (!active || r.close(v, ctx)):
+			case isOpen && (!judged || r.close(v, ctx)):
 				reason := ""
-				if !active {
+				switch {
+				case !judged:
 					reason = inactiveReason(v, s.repState)
+				case r.closeReason != nil:
+					reason = r.closeReason(v, ctx)
 				}
 				if err := m.st.CloseAlertWithReason(a.ID, now, reason); err != nil {
 					m.log.Warn("close alert", "server_id", id, "kind", r.kind, "err", err)
 					continue
 				}
 				ups = append(ups, alertUpdate{a.ID, r.kind, id, false})
-			case !active:
+			case !judged:
 			case isOpen:
 				if ok, msg := r.open(v, ctx); ok && msg != a.Message {
 					if err := m.st.SetAlertMessage(a.ID, msg); err != nil {
@@ -429,6 +517,12 @@ func inactiveReason(v View, repState string) string {
 	switch {
 	case v.Role == "":
 		return "replika dilepas dari panel"
+	case v.Role == store.RoleQuarantined:
+		return "server menjadi master lama (dikarantina) setelah promote"
+	case repState == store.ReplicaNeedsRepoint:
+		return "replika perlu diarahkan ulang ke master baru setelah promote"
+	case repState == store.ReplicaNeedsRebuild:
+		return "replika perlu dibangun ulang setelah promote"
 	case repState == store.ReplicaResyncing:
 		return "Resync ulang dimulai"
 	case repState == store.ReplicaCreating:
@@ -459,7 +553,7 @@ func (m *Monitor) ruleCtx(id int64, s *serverState, v View, now time.Time) ruleC
 	} // otherwise (agent offline, MySQL not answering) unknown: the clock runs on
 
 	ctx := ruleCtx{now: now, set: m.settings,
-		connHighSince: s.connHighSince, syncedSince: s.syncedSince, outSince: s.outSince}
+		connHighSince: s.connHighSince, syncedSince: s.syncedSince, outSince: s.outSince, repState: s.repState}
 	if v.Role == store.RoleReplica {
 		if ms, ok := m.servers[s.masterID]; ok && s.masterID != id {
 			mv := ms.view(s.masterID)
