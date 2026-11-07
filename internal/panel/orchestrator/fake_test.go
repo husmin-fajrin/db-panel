@@ -580,6 +580,13 @@ func (e *env) readyMaster(name string) (*fakeAgent, store.Topology) {
 // answers method, and whose every later step succeeds.
 func (e *env) replicaAgent(name, method string) *fakeAgent {
 	fa := e.agent(name, "10.0.0.2")
+	scriptReplicaTarget(fa, name, method)
+	return fa
+}
+
+// scriptReplicaTarget scripts fa's agent to answer a Buat replika onto it
+// by method (clone or dump).
+func scriptReplicaTarget(fa *fakeAgent, name, method string) {
 	fa.reply("probe", proto.ProbeResult{Hostname: name, MySQL: proto.MySQLInfo{Installed: true, Version: "8.4.3"}})
 	fa.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckOK, Method: method,
 		Checks: []proto.Check{{ID: "dedicated", Status: proto.CheckOK, Title: "Server replika khusus"}}})
@@ -612,7 +619,6 @@ func (e *env) replicaAgent(name, method string) *fakeAgent {
 		json.Unmarshal(raw, &p)
 		return proto.DropDatabasesResult{Dropped: p.Databases}, nil
 	})
-	return fa
 }
 
 // waitJob waits until the job reaches status and returns it with its steps.

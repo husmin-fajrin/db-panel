@@ -933,3 +933,203 @@ func TestPromoteSwapInventoryRefreshFailureOnlyLogged(t *testing.T) {
 		t.Fatalf("job log lacks the Segarkan advice:\n%s", log)
 	}
 }
+
+// emergencyAfterFailedPlanned runs a planned promotion to the candidate
+// that fails in "Replika mengejar" with unlockPromote answering unlock,
+// then takes the master's agent away (its replicas cannot reach it
+// either), so that the master's status allows only an emergency.
+func (g *promoteRig) emergencyAfterFailedPlanned(unlock func(json.RawMessage) (any, error)) {
+	e := g.e
+	e.r.promoteCatchUp = 100 * time.Millisecond
+	g.c.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: false, Executed: lagUUIDs,
+		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
+	g.m.on("mysql.unlockPromote", unlock)
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		e.t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitFor("unlockPromote", func() bool { return g.m.count("mysql.unlockPromote") == 1 })
+	if p := g.promotion(); p.Status != promotionFailed {
+		e.t.Fatalf("promotion status = %s, want failed", p.Status)
+	}
+	g.offline(g.m)
+	for _, fa := range []*fakeAgent{g.c, g.b, g.d} {
+		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
+	}
+}
+
+// TestPromoteEmergencyRefusedWhileLockMayStand (SEC-66): a planned
+// promotion to X fails before the point of no return and its unlock fails
+// (the master's agent dropped off); the master now only allows an
+// emergency. An emergency promotion of Y is refused, saying from when it
+// is possible and naming unlock-master, until the lock's deadline plus
+// the guard's grace has passed.
+func TestPromoteEmergencyRefusedWhileLockMayStand(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.emergencyAfterFailedPlanned(func(json.RawMessage) (any, error) {
+		return nil, &proto.Error{Code: proto.CodeOffline, Message: "agent offline"}
+	})
+	deadline := *g.promotion().LockAt // the rig's lock: LockedAt + 30 min
+	deadline = deadline.Add(30 * time.Minute)
+	ctx := context.Background()
+	_, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id})
+	if err == nil {
+		t.Fatal("emergency promote while the earlier lock may stand was accepted")
+	}
+	until := deadline.Add(proto.PromoteLockGrace).Local().Format("02-01-2006 15:04:05")
+	for _, part := range []string{"mungkin masih terkunci", "mulai " + until, "sudo dbpanel agent unlock-master"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("refusal %q lacks %q", err, part)
+		}
+	}
+	if g.b.count("mysql.promote") != 0 {
+		t.Fatal("candidate Y was asked to promote")
+	}
+	// Past the deadline but within the grace: still refused.
+	e.r.now = func() time.Time { return deadline.Add(30 * time.Second) }
+	if _, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id}); err == nil ||
+		!strings.Contains(err.Error(), "mungkin masih terkunci") {
+		t.Fatalf("emergency promote within the grace = %v, want refused", err)
+	}
+	// Past the deadline and the grace: the guard has decided; allowed.
+	later := deadline.Add(proto.PromoteLockGrace + time.Second)
+	e.r.now = func() time.Time { return later }
+	for _, fa := range []*fakeAgent{g.c, g.b, g.d} {
+		v := replicaView(masterGTID, masterGTID)
+		v.ReceivedAt = later
+		g.h.set(fa.id, v)
+	}
+	g.b.job("mysql.promote", func(*jobs.Job, json.RawMessage) (any, error) {
+		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Mode: proto.PromoteEmergency}, nil
+	})
+	g.b.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs})
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id})
+	if err != nil {
+		t.Fatalf("emergency promote after the deadline and grace: %v", err)
+	}
+	if j, _ := e.waitJob(id, store.JobSucceeded); j.Kind != KindPromoteEmergency {
+		t.Fatalf("kind = %s", j.Kind)
+	}
+}
+
+// TestPromoteEmergencyAllowedAfterConfirmedUnlock: the same failed planned
+// promotion whose unlock the master's agent confirmed records it, and an
+// emergency promotion is not held back by the old lock.
+func TestPromoteEmergencyAllowedAfterConfirmedUnlock(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.emergencyAfterFailedPlanned(func(json.RawMessage) (any, error) { return nil, nil })
+	j, _, err := e.st.GetJob(g.promotion().JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.LockUnlocked || st.LockTried || st.LockTriedAt == nil {
+		t.Fatalf("job state after a confirmed unlock = %+v", st)
+	}
+	g.b.job("mysql.promote", func(*jobs.Job, json.RawMessage) (any, error) {
+		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Mode: proto.PromoteEmergency}, nil
+	})
+	g.b.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id})
+	if err != nil {
+		t.Fatalf("emergency promote after a confirmed unlock: %v", err)
+	}
+	if j, _ := e.waitJob(id, store.JobSucceeded); j.Kind != KindPromoteEmergency {
+		t.Fatalf("kind = %s", j.Kind)
+	}
+}
+
+// TestPromoteSendsLockRemaining (SEC-73): a planned mysql.promote carries
+// the seconds left on the lock, counted on the panel when it is sent, with
+// the deadline.
+func TestPromoteSendsLockRemaining(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	var pp proto.PromoteParams
+	g.c.params("mysql.promote", &pp)
+	if pp.LockDeadline == nil || pp.LockRemainingSec == nil {
+		t.Fatalf("promote params = %+v; want the deadline and the seconds left", pp)
+	}
+	if left := *pp.LockRemainingSec; left < 29*60 || left > 30*60 {
+		t.Fatalf("lock_remaining_sec = %d, want about 1800", left)
+	}
+}
+
+// TestRebuiltOldMasterIsNoLongerOldMaster (C-2): a completed rebuild of
+// the old master clears it as the topology's old master, so a later
+// failed attempt on that server is not taken for a failed rebuild and the
+// server is not quarantined again; deleting an old master clears it too.
+func TestRebuiltOldMasterIsNoLongerOldMaster(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	ctx := context.Background()
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if topo, err := e.st.GetTopologyByOldMaster(g.m.id); err != nil || topo.ID != g.topo.ID {
+		t.Fatalf("old master before the rebuild: %+v, %v", topo, err)
+	}
+	// The old master's agent answers a rebuild like an empty target.
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	g.c.reply("mysql.status", masterStatus())
+	g.c.reply("mysql.createDumpUser", nil)
+	g.c.reply("mysql.dropUser", nil)
+	g.c.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})
+	rebuildID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+		RebuildOldMaster: true, ConfirmWipe: true})
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	e.waitJob(rebuildID, store.JobSucceeded)
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old master after the rebuild: %v, want none", err)
+	}
+	if srv, _ := e.st.GetServer(g.m.id); srv.Role != store.RoleReplica {
+		t.Fatalf("rebuilt server role = %s, want replica", srv.Role)
+	}
+	// A later attempt on it that failed, then another: not quarantined.
+	if err := e.st.SetReplicaState(g.m.id, store.ReplicaFailed, "uji"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id}); err != nil {
+		t.Fatalf("new attempt on the rebuilt server: %v", err)
+	}
+	if srv, _ := e.st.GetServer(g.m.id); srv.Role == store.RoleQuarantined {
+		t.Fatal("rebuilt server quarantined again by a later attempt")
+	}
+}
+
+// TestDeleteServerClearsOldMaster (C-2): deleting the old master leaves
+// no topology naming it.
+func TestDeleteServerClearsOldMaster(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if err := e.st.DeleteServer(g.m.id); err != nil {
+		t.Fatal(err)
+	}
+	topo, err := e.st.GetTopology(g.topo.ID)
+	if err != nil || topo.OldMasterServerID != 0 {
+		t.Fatalf("topology after deleting the old master = %+v, %v", topo, err)
+	}
+}

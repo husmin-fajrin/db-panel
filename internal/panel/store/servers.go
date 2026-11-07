@@ -236,6 +236,10 @@ func (s *Store) DeleteServer(id int64) error {
 		WHERE t.master_server_id = ?)`, RoleUnassigned, id); err != nil {
 		return fmt.Errorf("unassign replicas: %w", err)
 	}
+	// A deleted old master is no topology's previous master any more.
+	if _, err := tx.Exec(`UPDATE topologies SET old_master_server_id = 0 WHERE old_master_server_id = ?`, id); err != nil {
+		return fmt.Errorf("clear old master: %w", err)
+	}
 	res, err := tx.Exec(`DELETE FROM servers WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete server: %w", err)

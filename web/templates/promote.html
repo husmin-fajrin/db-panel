@@ -40,7 +40,7 @@
 <div role="alert" class="alert alert-warning flex flex-col items-start gap-2 mb-6" data-split-network>
   {{with .ProbeSilent}}<p>Master tidak menjawab dari replika {{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}.</p>{{end}}
   {{range .ProbeAnswered}}
-  <p><strong>Master menjawab dari replika {{.}}; masalahnya mungkin di jaringan panel atau agent master, bukan MySQL-nya. Promote darurat akan ditolak agent.</strong> Pulihkan agent master (<code>systemctl restart dbpanel-agent</code> di server master) lalu jalankan promote terencana; bila agent tidak bisa dipulihkan tetapi server bisa diakses, kunci master dengan <code>sudo dbpanel agent lock-master</code>, lalu promote darurat akan berjalan sebagai terencana.</p>
+  <p><strong>Master menjawab dari replika {{.}}; masalahnya mungkin di jaringan panel atau agent master, bukan MySQL-nya. Promote darurat akan ditolak agent.</strong> Pulihkan agent master (<code>systemctl restart dbpanel-agent</code> di server master) lalu jalankan promote terencana. Master yang masih menjawab, terkunci atau tidak, bukan keadaan darurat: agent replika menolak promote darurat selama MySQL master menjawab. Bila master terkunci dan harus dipakai lagi, buka kuncinya di server master dengan <code>sudo dbpanel agent unlock-master</code>.</p>
   {{end}}
   <p><strong>Pastikan master benar-benar mati atau tidak lagi dipakai aplikasi; bila ia hidup di jaringan lain, tulisan di sana akan tertinggal.</strong></p>
 </div>

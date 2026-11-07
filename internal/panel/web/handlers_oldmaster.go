@@ -43,6 +43,11 @@ const (
 	msgSalvageRead     = "Berkas data tertinggal tidak bisa dibaca; rinciannya ada di log panel."
 	msgSalvageList     = "Daftar berkas data tertinggal tidak bisa dibaca; rinciannya ada di log panel."
 	msgSalvageDeleteKO = "Berkas data tertinggal tidak bisa dihapus; rinciannya ada di log panel."
+	// msgRepointFailed and msgRepointOffline are "Arahkan sekarang" that
+	// did not happen (the error itself is for the panel's log).
+	msgRepointFailed = "Replika tidak bisa diarahkan ke master baru sekarang; rinciannya ada di log panel. " +
+		"Coba lagi, atau biarkan: replika diarahkan otomatis saat agent-nya tersambung lagi."
+	msgRepointOffline = "Agent replika offline; replika diarahkan otomatis saat agent-nya tersambung lagi."
 
 	// pageCallTimeout bounds an agent call made while rendering a page.
 	pageCallTimeout = 5 * time.Second
@@ -66,7 +71,10 @@ type connectionsView struct {
 	Name     string
 	Rows     []proto.ConnectionRow
 	Total    int
-	TakenAt  time.Time
+	// AdminTotal is how many of Total are sessions of the panel's admin
+	// account (the one the agent logs in as) from other hosts.
+	AdminTotal int
+	TakenAt    time.Time
 	// Unreadable says why the connections could not be read ("" when
 	// they were); Empty what to say when there are none.
 	Unreadable string
@@ -102,6 +110,9 @@ func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsVi
 	v.Rows, v.TakenAt = res.Rows, res.TakenAt
 	for _, row := range res.Rows {
 		v.Total += row.Count
+		if row.AdminAccount {
+			v.AdminTotal += row.Count
+		}
 	}
 	return v
 }
@@ -370,9 +381,15 @@ func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []str
 // server) as they are, else the fixed generic. The error itself, which may
 // carry the agent's text, is for the panel's log only.
 func agentFailure(err error, generic string) string {
+	return agentFailureAs(err, generic, msgSalvageOffline)
+}
+
+// agentFailureAs is agentFailure with offline, the sentence for an
+// offline agent.
+func agentFailureAs(err error, generic, offline string) string {
 	switch {
 	case errors.Is(err, proto.ErrOffline):
-		return msgSalvageOffline
+		return offline
 	case errors.Is(err, orchestrator.ErrAgentOutdated), errors.Is(err, orchestrator.ErrBusy):
 		return err.Error()
 	}
@@ -571,8 +588,13 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) 
 		info.Warnings = append(info.Warnings, fmt.Sprintf("Koneksi aplikasi ke %s tidak bisa dibaca (%s); pastikan semua "+
 			"aplikasi sudah memakai master baru.", srv.Name, strings.TrimSuffix(conns.Unreadable, ".")))
 	case conns.Total > 0:
-		info.Warnings = append(info.Warnings, fmt.Sprintf("Masih ada %d koneksi aplikasi ke %s: aplikasi itu belum dialihkan "+
-			"dan tulisannya ke server ini akan hilang.", conns.Total, srv.Name))
+		admin := ""
+		if conns.AdminTotal > 0 {
+			admin = fmt.Sprintf(" (%d di antaranya sesi akun admin panel dari host lain: orang atau aplikasi yang memakai akun itu)",
+				conns.AdminTotal)
+		}
+		info.Warnings = append(info.Warnings, fmt.Sprintf("Masih ada %d koneksi aplikasi ke %s%s: aplikasi itu belum dialihkan "+
+			"dan tulisannya ke server ini akan hilang.", conns.Total, srv.Name, admin))
 	}
 	prom, err := a.Store.PromotionByOldMaster(id)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -605,7 +627,14 @@ func (a *app) repointReplica(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := a.Orchestrator.RepointNow(r.Context(), srv.ID)
-	a.audit(r, "replica_repoint", auditReplica, srv.ID, nil, outcomeOf(err))
+	outcome := auditOK
+	switch {
+	case errors.Is(err, orchestrator.ErrNeedsRebuild):
+		outcome = err.Error()
+	case err != nil:
+		outcome = agentFailureAs(err, msgRepointFailed, msgRepointOffline)
+	}
+	a.audit(r, "replica_repoint", auditReplica, srv.ID, nil, outcome)
 	switch {
 	case err == nil:
 		a.Logger.Info("replica repointed", "server", srv.ID, "by", a.page(r).Username)
@@ -619,6 +648,6 @@ func (a *app) repointReplica(w http.ResponseWriter, r *http.Request) {
 		a.renderReplica(w, r, http.StatusOK, p)
 	default:
 		a.Logger.Warn("repoint refused", "server", srv.ID, "err", err)
-		a.replicaError(w, r, srv, rep, err.Error())
+		a.replicaError(w, r, srv, rep, outcome)
 	}
 }

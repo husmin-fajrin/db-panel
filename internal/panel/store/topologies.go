@@ -376,6 +376,16 @@ func (s *Store) GetTopologyByOldMaster(serverID int64) (Topology, error) {
 	return t, nil
 }
 
+// ClearOldMaster forgets serverID as the previous master of whichever
+// topology names it: its rebuild as a replica completed, or it is being
+// deleted. No topology naming it is not an error.
+func (s *Store) ClearOldMaster(serverID int64) error {
+	if _, err := s.db.Exec(`UPDATE topologies SET old_master_server_id = 0 WHERE old_master_server_id = ?`, serverID); err != nil {
+		return fmt.Errorf("clear old master: %w", err)
+	}
+	return nil
+}
+
 // SetCutoverPending records whether clients still have to be cut over to
 // the topology's master after a promotion.
 func (s *Store) SetCutoverPending(topologyID int64, pending bool) error {

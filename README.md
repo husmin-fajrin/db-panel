@@ -250,15 +250,29 @@ menunggu tombol Anda dan menjelaskan akibatnya.
 
 ### Hubungkan MySQL
 
-Di halaman server, masukkan akun admin MySQL di server itu (biasanya
-`root`). Kosongkan host agar agent memakai socket lokal (disarankan; juga
-bekerja untuk `root` dengan `auth_socket`). Agent menyimpan akun itu
-tersegel di `/etc/dbpanel/mysql.cred` di server itu; panel tidak
-menyimpannya dan tidak menampilkannya lagi. Bila akun kurang hak, panel
-menampilkan perintah `GRANT` yang perlu dijalankan.
+Di halaman server, masukkan akun admin MySQL di server itu. Pakai akun
+admin khusus untuk panel (misalnya `panel_admin`; jangan diawali
+`dbpanel_`, yang dipakai akun buatan panel), bukan `root` atau akun yang
+juga dipakai orang atau aplikasi: layar pengalihan aplikasi
+(lihat "Pengalihan aplikasi") tidak menampilkan sesi akun yang dipakai
+agent bila sesi itu tersambung dari server itu sendiri (socket,
+`localhost`, `127.0.0.1`, `::1`), dan sesinya dari host lain hanya
+ditandai "akun admin panel". Kosongkan host agar agent memakai socket
+lokal (disarankan). Agent menyimpan akun itu tersegel di
+`/etc/dbpanel/mysql.cred` di server itu; panel tidak menyimpannya dan
+tidak menampilkannya lagi. Bila akun kurang hak, panel menampilkan
+perintah `GRANT` yang perlu dijalankan.
 
-Hak global (`ON *.*`) yang diperiksa untuk akun admin (`root` sudah
-memegang semuanya):
+Contoh akun khusus (jalankan sebagai `root` di MySQL server itu, sesuaikan
+sandinya; hak di bawah adalah daftar yang diperiksa panel):
+
+```sql
+CREATE USER 'panel_admin'@'localhost' IDENTIFIED BY '<sandi>';
+GRANT ALL ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;
+```
+
+Hak global (`ON *.*`) yang diperiksa untuk akun admin (`ALL ... WITH GRANT
+OPTION` di atas sudah memegang semuanya):
 
 - `CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER,
   EVENT, REPLICATION CLIENT, REPLICATION SLAVE` dengan `WITH GRANT OPTION`;
@@ -557,8 +571,12 @@ mati (misalnya sesudah MySQL restart). Pada tenggat agent membaca kandidat
 dengan akun replikasi yang dikirim panel (hanya disimpan di memori): bila
 kandidat bisa ditulis dan `gtid_executed`-nya memuat UUID server ini,
 master mengkarantina dirinya (`quarantined`, sumber = kandidat); bila
-kandidat masih read-only, agent menunggu 60 detik, membaca lagi, dan bila
-masih read-only membuka kunci; selain itu (kandidat tidak terjangkau, atau
+kandidat masih read-only, agent menunggu 60 detik dan membaca lagi; bila masih
+read-only, agent membaca juga setiap replika di berkas replika yang pernah
+tersambung (di port kandidat, dengan akun yang sama): bila salah satunya
+bisa ditulis dan `gtid_executed`-nya memuat UUID server ini (replika lain
+yang dipromosikan darurat selama kunci berdiri), master mengkarantina
+dirinya di bawah replika itu; bila tidak ada, kunci dibuka. Selain itu (kandidat tidak terjangkau, atau
 agent dimulai ulang sehingga akunnya hilang) kunci tetap dan dicoba lagi
 tiap menit, dilaporkan ke panel paling sering sejam sekali, sampai
 `unlock-master`. `mysql.unlockPromote` membatalkan kunci sebelum tenggat
@@ -865,18 +883,27 @@ di salah satu replika, dan replika itu boleh dipilih menjadi master baru.
   dengan transaksi yang sudah diterimanya: relay log yang sudah sampai
   diterapkan dulu (paling lama 10 menit), jadi tidak dibuang. Agent
   replika memeriksa sendiri bahwa master memang tidak menjawab (tiga kali
-  coba dalam sekitar 30 detik); bila master ternyata menjawab dan bisa
-  ditulis, promote ditolak. Konfirmasi meminta kata sandi dan nama master
-  lama.
+  coba dalam sekitar 30 detik, dan sekali lagi tepat sebelum tulis
+  dibuka); bila master ternyata menjawab, terkunci atau tidak, promote
+  ditolak dan replika dibiarkan seperti semula: master yang hidup bukan
+  keadaan darurat. Konfirmasi meminta kata sandi dan nama master lama.
 
 Bila master menjawab dari replika tetapi agent master tidak bisa dipulihkan,
-kunci master langsung di servernya dengan `sudo dbpanel agent lock-master`;
-promote darurat lalu berjalan sebagai terencana. Kunci yang dipasang
-dengan `lock-master` hanya dibuka dengan `sudo dbpanel agent unlock-master`
-(lihat "Peran dan sumber yang dipin"). Perintah yang sama, dijalankan di
-server master, membuka kunci promote terencana yang tertinggal bila
-kandidatnya hilang untuk waktu lama (peringatan **Master terkunci** tetap
-terbuka selama itu).
+promote darurat tidak bisa dipakai: pulihkan agent master lalu jalankan
+promote terencana. Master yang terkunci (oleh promote terencana yang
+gagal, atau dengan `sudo dbpanel agent lock-master`) dibuka dengan
+`sudo dbpanel agent unlock-master` di server master (lihat "Peran dan
+sumber yang dipin"); perintah yang sama membuka kunci promote terencana
+yang tertinggal bila kandidatnya hilang untuk waktu lama (peringatan
+**Master terkunci** tetap terbuka selama itu).
+
+Setelah promote terencana gagal sebelum kandidat membuka tulis dan panel
+tidak bisa memastikan kunci master sudah dibuka (agent master terputus),
+panel menolak promote darurat topologi itu sampai tenggat kunci itu lewat
+ditambah tenggang 60 detik penjaga kunci; pesannya menyebut jam mulai
+bisanya. Sebelum itu tekan **Ulangi** pada promote terencana itu bila agent
+master tersambung lagi, atau buka kuncinya dengan `sudo dbpanel agent
+unlock-master` di server master.
 
 ### Layar pertimbangan
 
@@ -922,9 +949,14 @@ dan mengirim ringkasan ke Telegram dengan alamat master baru. Layar itu
 menampilkan alamat master baru (dengan tombol salin) dan alamat lama,
 lalu dua tabel yang diperbarui tiap 15 detik: koneksi yang masih ke master
 lama dan koneksi yang sudah ke master baru (per host asal, akun, dan
-database; akun `dbpanel_*` dan thread MySQL sendiri tidak ditampilkan).
-Sesi akun MySQL yang dipakai panel juga tidak ditampilkan, jadi pakai akun
-khusus untuk panel, bukan akun admin yang juga dipakai orang atau aplikasi.
+database). Yang tidak ditampilkan: akun `dbpanel_*`, replika yang membaca
+binlog, thread MySQL sendiri, koneksi agent sendiri, dan sesi akun admin
+MySQL yang dipakai agent bila tersambung dari server itu sendiri (socket,
+`localhost`, `127.0.0.1`, `::1`). Sesi akun admin itu dari host lain
+ditampilkan dengan tanda "akun admin panel" dan ikut dihitung di
+konfirmasi bangun ulang. Karena itu pakai akun admin khusus untuk panel
+(lihat "Hubungkan MySQL"), bukan `root` atau akun yang juga dipakai orang
+atau aplikasi di server itu.
 Arahkan semua aplikasi yang menulis ke database ke alamat baru, restart
 aplikasinya, lalu tekan **Sudah saya alihkan**. Selama belum ditekan,
 Telegram mengingatkan dengan jarak pengulangan peringatan (bawaan 6 jam),
@@ -956,7 +988,13 @@ memuat kotak **Master lama** dengan:
 - **Amankan data tertinggal** (bila ada): menulis transaksi itu sebagai
   berkas SQL di `/var/lib/dbpanel/salvage` di server master lama, yang bisa
   dijalankan dengan `mysql` dan berisi komentar yang bisa dibaca untuk tiap
-  baris. Berkas disimpan 7 hari. Daftar berkas di halaman yang sama punya
+  baris. Agent hanya menulis transaksi yang ditemukan **Periksa data
+  tertinggal** terakhir di server itu (set GTID-nya disimpan agent di
+  memori dan di `/var/lib/dbpanel/salvage/leftover-gtid`, 0600), satu
+  salvage sekaligus, dan direktori itu paling banyak 8 GiB (salvage
+  ditolak bila sudah penuh, dan dihentikan lalu berkasnya dihapus bila
+  akan melewatinya; satu berkas paling besar 2 GiB). Berkas disimpan 7
+  hari. Daftar berkas di halaman yang sama punya
   tombol **Unduh** (lewat HTTPS, dialirkan dari agent tanpa disimpan di
   panel) dan **Hapus**; keduanya meminta kata sandi panel untuk berkas itu
   saja, karena berkas itu bisa jadi satu-satunya salinan data tertinggal.
@@ -1247,6 +1285,33 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   lalu menunjuk MySQL milik penyerang yang memalsukan gtid_executed. Yang
   terdampak hanya replika itu (ia bisa diarahkan, lalu dibangun ulang, dari
   server penyerang); master tidak.
+- Panel yang disusupi bisa, dengan menyebut replika yang sedang tersambung
+  sebagai kandidat, mengunci master dan memicu promote terencana yang
+  tidak diinginkan: data utuh, tetapi aplikasi tidak bisa menulis sampai
+  dialihkan; semuanya tercatat di audit dan Telegram. Bila kandidat lalu
+  dibuat tidak terjangkau, kunci bertahan sampai `sudo dbpanel agent
+  unlock-master` dijalankan di server master (membuka otomatis berisiko
+  dua master).
+- Pin `replica` menerima `createReplUser` ketat, jadi panel yang disusupi
+  bisa membuat akun replikasi di replika (juga replika sebagian); replika
+  lengkap sudah memilikinya sejak dump. Akun itu bisa membaca binlog
+  replika dan menjadi donor CLONE, bukan menulis ke master.
+- Panel yang disusupi bisa menghapus data tertinggal di master lama yang
+  dikarantina: lewat bangun ulang sebagai replika (seluruh data MySQL
+  diganti salinan master baru) atau `dropDatabases`. Amankan data
+  tertinggal (dan unduh berkasnya) sebelum menyetujui bangun ulang;
+  berkas salvage yang sudah ditulis tidak ikut terhapus.
+- Salvage di master lama hanya mengambil transaksi yang ditemukan
+  pemeriksaan data tertinggal terakhir, satu run sekaligus, dengan batas
+  8 GiB untuk direktorinya, jadi panel yang disusupi tidak bisa mengambil
+  riwayat binlog lain lewat salvage.
+- Agent membaca server lain (kandidat, master lama, replika) dengan TLS
+  wajib; tanpa verifikasi sertifikat ("Perketat" belum dijalankan)
+  sertifikatnya tidak diperiksa, tetapi koneksi tanpa TLS ditolak.
+- Penjaga kunci promosi membaca replika di berkas replika yang pernah
+  tersambung pada port kandidat. Replika di port lain, atau yang menolak
+  akun replikasi kandidat, dilewati; master tetap dibuka bila tidak ada
+  replika terbaca yang bisa ditulis dan memuat transaksi master itu.
 - Topologi tanpa verifikasi sertifikat ("Perketat" belum dijalankan) tetap
   rentan terhadap pemalsuan DNS nama sumber yang dipin bila panel disusupi:
   pin sumber menyimpan nama, dan pembangunan ulang menyambung ke nama itu.

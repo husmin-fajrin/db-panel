@@ -1003,8 +1003,16 @@ type jobState struct {
 	// partial, so no other promotion of the topology can start.
 	PromoteSent bool `json:"promote_sent,omitempty"`
 	// LockTried: mysql.lockForPromote was sent; an undo then always asks
-	// for unlockPromote ("not locked" is harmless).
-	LockTried bool `json:"lock_tried,omitempty"`
+	// for unlockPromote ("not locked" is harmless). LockTriedAt is when it
+	// was last sent.
+	LockTried   bool       `json:"lock_tried,omitempty"`
+	LockTriedAt *time.Time `json:"lock_tried_at,omitempty"`
+	// LockUnlocked: the master's agent confirmed the lock is gone
+	// (unlockPromote succeeded, or answered that nothing is locked). A
+	// failed promotion whose lock was tried without it may still have the
+	// master locked until the guard's deadline (StartPromote refuses an
+	// emergency promotion meanwhile, SEC-66).
+	LockUnlocked bool `json:"lock_unlocked,omitempty"`
 	// Repointed: replicas "Arahkan replika lain" has finished with
 	// (repointed, or marked for a rebuild); Deferred: steps that ended
 	// with work left (the job ends partial at the first of them).

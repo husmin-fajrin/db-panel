@@ -52,7 +52,7 @@
     </div>
   </div>
 </div>
-<p class="text-sm text-base-content/70 mb-6">Kedua tabel diperbarui tiap 15 detik. Akun panel (dbpanel_*), replika, dan thread MySQL sendiri tidak ditampilkan.</p>
+<p class="text-sm text-base-content/70 mb-6">Kedua tabel diperbarui tiap 15 detik. Tidak ditampilkan: akun panel (dbpanel_*), replika yang membaca binlog, thread MySQL sendiri, koneksi agent sendiri, dan sesi akun admin MySQL yang dipakai agent bila tersambung dari server itu sendiri (socket, localhost, 127.0.0.1 atau ::1). Sesi akun admin itu dari host lain ditampilkan dengan tanda "akun admin panel": itu orang atau aplikasi yang memakai akun yang sama, dan tulisannya ikut hilang bila belum dialihkan.</p>
 
 {{if .Topology.CutoverPending}}
 <div class="card bg-base-100 shadow mb-6">

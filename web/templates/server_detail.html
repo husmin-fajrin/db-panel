@@ -251,7 +251,7 @@
 </details>
 {{else}}
 <h3 class="font-semibold">Hubungkan MySQL</h3>
-<p class="text-sm text-base-content/70">Masukkan akun admin MySQL di server ini (misalnya <code>root</code>). Agent menyimpannya di server itu sendiri untuk menyiapkan replikasi; panel tidak menampilkannya lagi.</p>
+<p class="text-sm text-base-content/70">Masukkan akun admin MySQL di server ini, sebaiknya akun khusus untuk panel (bukan <code>root</code> atau akun yang juga dipakai orang atau aplikasi: sesinya dari server ini sendiri tidak tampil di layar pengalihan aplikasi). Agent menyimpannya di server itu sendiri untuk menyiapkan replikasi; panel tidak menampilkannya lagi.</p>
 {{template "mysql-connect-form" .}}
 {{end}}
 {{end}}

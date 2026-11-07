@@ -120,19 +120,33 @@ func TestPromotePageShowsModeAndCandidates(t *testing.T) {
 		"tertinggal 4 transaksi dari laporan terakhir master",
 		"Master tidak menjawab dari replika db-replika",
 		"Master menjawab dari replika db-sebagian; masalahnya mungkin di jaringan panel atau agent master, bukan MySQL-nya. Promote darurat akan ditolak agent.",
-		"sudo dbpanel agent lock-master",
+		"sudo dbpanel agent unlock-master",
 		"Pastikan master benar-benar mati atau tidak lagi dipakai aplikasi; bila ia hidup di jaringan lain, tulisan di sana akan tertinggal",
 		"Transaksi yang belum sampai ke replika terpilih akan hilang dari master baru. Bila master lama hidup kembali, panel bisa memeriksa dan mengamankannya.",
 		"Aplikasi sudah tidak bisa menulis sejak master hilang",
 		`data-name="db-master"`)
 
-	// An orchestrator failure is a message on the master's page.
+	// An orchestrator failure is a fixed message on the master's page; the
+	// error's text (which may carry an agent's) goes to the log only
+	// (SEC-72), in the audit of a refused start too.
 	f.mu.Lock()
-	f.err = errors.New("server ini bukan master")
+	f.err = errors.New("agent: /var/lib/mysql/rahasia tidak terbaca")
 	f.mu.Unlock()
 	rec = e.do("GET", "/masters/1/promote", nil, c)
 	wantCode(t, rec, http.StatusServiceUnavailable)
-	wantBody(t, rec, "Data pertimbangan promote tidak bisa dikumpulkan: server ini bukan master", "Master db-master")
+	wantBody(t, rec, "Data pertimbangan promote tidak bisa dikumpulkan; rinciannya ada di log panel.", "Master db-master")
+	wantNoBody(t, rec, "rahasia")
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "planned"), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusServiceUnavailable)
+	wantNoBody(t, rec, "rahasia")
+	entries, err := e.st.ListAudit(0, time.Time{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Action != "promote" || strings.Contains(entries[0].Outcome, "rahasia") ||
+		!strings.Contains(entries[0].Outcome, "rinciannya ada di log panel") {
+		t.Errorf("audit of a promote whose view failed = %+v", entries)
+	}
 }
 
 // promoteForm is a POST of the consideration form for candidate.

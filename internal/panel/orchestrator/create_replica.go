@@ -849,6 +849,14 @@ func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 	if err := jr.r.d.Store.SetServerRole(jr.target(), store.RoleReplica); err != nil {
 		return outcome{}, err
 	}
+	if jr.st.RebuildOldMaster {
+		// Rebuilt: no longer the topology's old master, so a later failed
+		// attempt on it is not taken for a failed rebuild (which would
+		// quarantine it again).
+		if err := jr.r.d.Store.ClearOldMaster(jr.target()); err != nil {
+			return outcome{}, err
+		}
+	}
 	if jr.st.Resync {
 		// Replication runs again: a stop from before the resync is over.
 		if err := jr.r.d.Store.SetReplicaPaused(jr.target(), false); err != nil {

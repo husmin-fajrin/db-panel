@@ -194,6 +194,11 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return "", err
 	}
+	if mode == proto.PromoteEmergency {
+		if err := r.refuseWhileLockMayStand(topo.ID, p.MasterServerID); err != nil {
+			return "", err
+		}
+	}
 	if !cand.Eligible {
 		return "", fmt.Errorf("%s tidak bisa dipromosikan: %s", cand.Name, cand.Reason)
 	}
@@ -257,6 +262,69 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	r.updatePromotion(promID, func(pr *store.Promotion) { pr.JobID = id })
 	r.log.Info("promote started", "job", id, "mode", mode, "master", p.MasterServerID, "candidate", p.CandidateServerID)
 	return id, nil
+}
+
+// lockCallSlack is how long after LockTriedAt a lock whose answer was lost
+// may have been taken (the call's bound), so its deadline is at most
+// LockTriedAt + promoteLockSec + lockCallSlack.
+const lockCallSlack = 5 * time.Minute
+
+// refuseWhileLockMayStand refuses an emergency promotion of masterID while
+// the latest promotion of topology topoID, a failed planned one of that
+// master, asked for the master's promote lock and its unlock was never
+// confirmed, until the lock's deadline plus the guard's grace
+// (proto.PromoteLockGrace) has passed (SEC-66). Before then the master
+// may be locked for the earlier candidate: an emergency promotion of
+// another replica would see it alive (and the agent refuses it then), or
+// it would reopen beside the new master once its guard unlocks it.
+func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64) error {
+	prev, err := r.d.Store.LatestPromotion(topoID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if prev.Status != promotionFailed || prev.OldMasterServerID != masterID || prev.JobID == "" {
+		return nil
+	}
+	j, _, err := r.d.Store.GetJob(prev.JobID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if j.Kind != KindPromotePlanned {
+		return nil
+	}
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		return fmt.Errorf("catatan promote sebelumnya tidak terbaca: %w", err)
+	}
+	if st.LockUnlocked || (!st.LockTried && st.LockDeadline == nil) {
+		return nil
+	}
+	var deadline time.Time
+	switch {
+	case st.LockDeadline != nil:
+		deadline = *st.LockDeadline
+	case st.LockTriedAt != nil:
+		deadline = st.LockTriedAt.Add(promoteLockSec*time.Second + lockCallSlack)
+	case prev.FinishedAt != nil:
+		deadline = prev.FinishedAt.Add(promoteLockSec * time.Second)
+	default:
+		deadline = prev.StartedAt.Add(promoteLockSec*time.Second + defaultPromoteCatchUp + lockCallSlack)
+	}
+	until := deadline.Add(proto.PromoteLockGrace)
+	if !r.now().Before(until) {
+		return nil
+	}
+	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka. "+
+		"Promote darurat baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
+		"masih replika. Sebelum itu, tekan Ulangi pada promote terencana itu bila agent master tersambung lagi, atau buka "+
+		"kuncinya di server master dengan: sudo dbpanel agent unlock-master",
+		r.nameOf(masterID), until.Local().Format("02-01-2006 15:04:05"))
 }
 
 var errCutoverStillPending = errors.New("promote sebelumnya masih menunggu pengalihan aplikasi; tekan \"Sudah saya alihkan\" dulu")
@@ -389,7 +457,8 @@ func (jr *jobRun) promoteLock(ctx context.Context, _ bool) (outcome, error) {
 		return outcome{}, err
 	}
 	var res proto.LockForPromoteResult
-	jr.st.LockTried = true
+	tried := jr.r.now()
+	jr.st.LockTried, jr.st.LockTriedAt, jr.st.LockUnlocked = true, &tried, false
 	jr.save()
 	if err := jr.promoteCall(ctx, jr.master(), "mysql.lockForPromote",
 		proto.LockForPromoteParams{Candidate: cred, TimeoutSec: promoteLockSec}, &res); err != nil {
@@ -499,7 +568,14 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 				return outcome{}, err
 			}
 		}
+		// The deadline is the master's clock; the seconds left, counted
+		// here now, are what the candidate measures its margin with on
+		// its own clock (SEC-73).
 		params.LockDeadline = jr.st.LockDeadline
+		if d := jr.st.LockDeadline; d != nil {
+			left := max(int(d.Sub(jr.r.now())/time.Second), 0)
+			params.LockRemainingSec = &left
+		}
 	}
 	if prom, err := jr.r.d.Store.GetPromotion(jr.st.PromotionID); err == nil {
 		params.NotBefore = prom.StartedAt.Add(-promoteClockSkew)
@@ -854,7 +930,7 @@ func (jr *jobRun) promoteUndo(ctx context.Context) {
 		err = r.d.Hub.Call(ctx, jr.master(), "mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: cred}, nil)
 	}
 	if err != nil && strings.Contains(err.Error(), "tidak dikunci untuk promosi") {
-		jr.st.LockDeadline, jr.st.LockTried = nil, false
+		jr.st.LockDeadline, jr.st.LockTried, jr.st.LockUnlocked = nil, false, true
 		jr.save()
 		jr.logf("info", "Master tidak sedang dikunci untuk promote; tidak ada yang dibuka.")
 		return
@@ -864,7 +940,7 @@ func (jr *jobRun) promoteUndo(ctx context.Context) {
 		jr.logf("error", "Kunci master tidak bisa dibuka (%v); agent master membukanya sendiri saat tenggat kunci.", err)
 		return
 	}
-	jr.st.LockDeadline, jr.st.LockTried = nil, false
+	jr.st.LockDeadline, jr.st.LockTried, jr.st.LockUnlocked = nil, false, true
 	jr.save()
 	jr.logf("info", "Kunci master dibuka; master tidak berubah.")
 }
@@ -1181,7 +1257,12 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 			return
 		}
 		topo, err := r.d.Store.GetTopology(rep.TopologyID)
-		if err != nil || topo.OldMasterServerID == 0 {
+		if err != nil {
+			return
+		}
+		// Only after a promotion (the old master may since have been
+		// rebuilt or deleted, which clears OldMasterServerID).
+		if _, err := r.d.Store.LatestPromotion(topo.ID); err != nil {
 			return
 		}
 		// A promotion still running repoints its replicas itself.

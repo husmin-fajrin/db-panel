@@ -26,7 +26,10 @@ const (
 	// about to be) the master.
 	msgLocalMaster = "Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel"
 
-	msgPromoteView       = "Data pertimbangan promote tidak bisa dikumpulkan: "
+	// msgPromoteView and msgPromoteViewOff: the consideration data could
+	// not be gathered (the error itself is for the panel's log).
+	msgPromoteView       = "Data pertimbangan promote tidak bisa dikumpulkan; rinciannya ada di log panel. Muat ulang halaman ini sebentar lagi."
+	msgPromoteViewOff    = "Agent server ini offline; data pertimbangan promote tidak bisa dikumpulkan sekarang."
 	msgPromotePick       = "Pilih replika yang akan dijadikan master baru."
 	msgPromoteModeGone   = "Formulir promote tidak lengkap; muat ulang halaman ini lalu pilih ulang."
 	msgPromoteModeMoved  = "Status master berubah sejak halaman dibuka: sekarang hanya promote %s yang tersedia. Periksa layar ini lagi lalu pilih ulang."
@@ -155,7 +158,7 @@ func (a *app) promoteForm(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) promoteViewFailed(w http.ResponseWriter, r *http.Request, srv store.Server, err error) {
 	a.Logger.Warn("promote view", "master", srv.ID, "err", err)
-	a.showError(w, r, srv, http.StatusServiceUnavailable, msgPromoteView+err.Error())
+	a.showError(w, r, srv, http.StatusServiceUnavailable, agentFailureAs(err, msgPromoteView, msgPromoteViewOff))
 }
 
 // startPromote starts the promotion of the chosen replica of master {id}.
@@ -167,7 +170,8 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	choice := parsePromoteChoice(r)
 	view, err := a.Orchestrator.PromoteView(r.Context(), srv.ID)
 	if err != nil {
-		a.audit(r, "promote", auditMaster, srv.ID, map[string]any{"candidate": choice.Candidate}, msgPromoteView+err.Error())
+		a.audit(r, "promote", auditMaster, srv.ID, map[string]any{"candidate": choice.Candidate},
+			agentFailureAs(err, msgPromoteView, msgPromoteViewOff))
 		a.promoteViewFailed(w, r, srv, err)
 		return
 	}

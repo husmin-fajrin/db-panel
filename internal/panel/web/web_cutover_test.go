@@ -14,11 +14,17 @@ import (
 func TestCutoverPageListsConnectionsBothSides(t *testing.T) {
 	e, f, _ := promotedEnv(t)
 	c := e.cookie()
-	f.setConnections(1, proto.ConnectionRow{Host: "10.0.0.50", User: "app_lama", DB: "simrs", Count: 3})
+	f.setConnections(1, proto.ConnectionRow{Host: "10.0.0.50", User: "app_lama", DB: "simrs", Count: 3},
+		proto.ConnectionRow{Host: "10.0.0.52", User: "root", DB: "simrs", Count: 2, AdminAccount: true})
 	f.setConnections(2, proto.ConnectionRow{Host: "10.0.0.51", User: "app_baru", DB: "simrs", Count: 5})
 
 	rec := e.do("GET", "/masters/2/cutover", nil, c)
 	wantCode(t, rec, http.StatusOK)
+	// The admin account's sessions from other hosts are shown, marked;
+	// the page says exactly what is hidden (SEC-67).
+	wantBody(t, rec, "10.0.0.52", "akun admin panel", "Jumlah koneksi: <strong>5</strong>",
+		"Tidak ditampilkan: akun panel (dbpanel_*), replika yang membaca binlog, thread MySQL sendiri, koneksi agent sendiri, "+
+			"dan sesi akun admin MySQL yang dipakai agent bila tersambung dari server itu sendiri (socket, localhost, 127.0.0.1 atau ::1).")
 	wantBody(t, rec, "10.0.0.2:3306", "Arahkan semua aplikasi yang menulis ke database ke alamat ini, lalu restart aplikasinya.",
 		"Koneksi yang masih ke master lama", "10.0.0.50", "app_lama",
 		"Koneksi yang sudah ke master baru", "10.0.0.51", "app_baru",

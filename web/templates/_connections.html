@@ -13,7 +13,7 @@
     <thead><tr><th>Dari host</th><th>Akun</th><th>Database</th><th>Jumlah</th></tr></thead>
     <tbody>
       {{range .Rows}}
-      <tr><td>{{.Host}}</td><td>{{.User}}</td><td>{{or .DB "-"}}</td><td>{{.Count}}</td></tr>
+      <tr><td>{{.Host}}</td><td>{{.User}}{{if .AdminAccount}} <span class="badge badge-warning badge-sm">akun admin panel</span>{{end}}</td><td>{{or .DB "-"}}</td><td>{{.Count}}</td></tr>
       {{end}}
     </tbody>
   </table>

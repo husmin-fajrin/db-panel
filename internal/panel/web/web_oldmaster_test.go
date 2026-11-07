@@ -310,14 +310,17 @@ func TestRebuildWarnsOnLeftoverAndConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.setConnections(1, proto.ConnectionRow{Host: "10.0.0.50", User: "app", DB: "simrs", Count: 3},
-		proto.ConnectionRow{Host: "10.0.0.51", User: "laporan", DB: "simrs", Count: 1})
+		proto.ConnectionRow{Host: "10.0.0.51", User: "laporan", DB: "simrs", Count: 1},
+		proto.ConnectionRow{Host: "10.0.0.52", User: "root", DB: "simrs", Count: 2, AdminAccount: true})
 
 	rec := e.do("GET", "/servers/1", nil, c)
 	wantBody(t, rec, `href="/masters/2/replicas/new?bangun-ulang=1"`)
 
+	// The admin account's sessions from another host count, and are said
+	// (SEC-67).
 	rec = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Bangun ulang db-master sebagai replika", "4 koneksi aplikasi", "belum diperiksa",
+	wantBody(t, rec, "Bangun ulang db-master sebagai replika", "6 koneksi aplikasi", "2 di antaranya sesi akun admin panel", "belum diperiksa",
 		`data-confirm-action="rebuild_old_master"`, `data-confirm-name="db-master"`, `name="rebuild" value="1"`)
 
 	setLeftover(t, e, topo, threeLeftover())
@@ -422,6 +425,25 @@ func TestReplicaNeedsRepointButtons(t *testing.T) {
 	wantBody(t, rec, "Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru",
 		`action="/replicas/3/resync/prepare"`, "Resync ulang")
 	wantNoBody(t, rec, `action="/replicas/3/repoint"`)
+
+	// Any other failure is the panel's fixed sentence, on the page and in
+	// the audit; the error's text is for the log only (SEC-72).
+	if err := e.st.SetReplicaState(3, store.ReplicaNeedsRepoint, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.repointErr = errors.New("mysql.repoint: dial tcp 10.9.9.9:3306: sandi-bocor")
+	rec = e.do("POST", "/replicas/3/repoint", noForm, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Replika tidak bisa diarahkan ke master baru sekarang; rinciannya ada di log panel.")
+	wantNoBody(t, rec, "sandi-bocor")
+	entries, err := e.st.ListAudit(0, time.Time{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Action != "replica_repoint" || strings.Contains(entries[0].Outcome, "sandi-bocor") ||
+		!strings.Contains(entries[0].Outcome, "rinciannya ada di log panel") {
+		t.Errorf("audit of a failed repoint = %+v", entries)
+	}
 }
 
 // Deleting an old master after the cutover warns, in the modal and in the
