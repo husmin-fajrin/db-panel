@@ -135,6 +135,10 @@ var (
 func (p *Pins) ClaimRole(role string) error             { return p.claimRole(role) }
 func (p *Pins) ClaimSource(host string, port int) error { return p.claimSource(host, port) }
 
+// SettleRebuilt is what mysql.configureReplication does to the role pin
+// after it succeeded toward host:port.
+func (p *Pins) SettleRebuilt(host string, port int) (bool, error) { return p.settleRebuilt(host, port) }
+
 // HostWithoutPort is a processlist HOST without its port.
 var HostWithoutPort = hostWithoutPort
 

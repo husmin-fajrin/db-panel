@@ -860,3 +860,52 @@ func TestPromoteStartRefusedFails(t *testing.T) {
 		t.Fatalf("failed at %d; master %v", j.CurrentStep, g.m.cmds(0))
 	}
 }
+
+// TestPromoteNewMasterReadyForReplicas: the swap marks the new master's
+// inventory MasterReady, so "Buat replika" and the old master's rebuild
+// start from it without "Siapkan master". The candidate's inventory is what
+// connecting it as a replica left: connected, never prepared.
+func TestPromoteNewMasterReadyForReplicas(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	ctx := context.Background()
+	if err := e.st.SetInventory(store.Inventory{ServerID: g.c.id, Connected: true, Version: "8.4.3", Series: "8.4",
+		Databases: masterDBs, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := e.replicaAgent("replica-new", "clone")
+	if _, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: fresh.id}); err == nil {
+		t.Fatal("Buat replika from a replica accepted")
+	}
+
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if inv, err := e.st.GetInventory(g.c.id); err != nil || !inv.MasterReady || !inv.Connected || len(inv.Databases) != 2 {
+		t.Fatalf("new master's inventory = %+v, %v", inv, err)
+	}
+
+	finished := func(id string) {
+		e.waitFor("job "+id+" to end", func() bool {
+			j, _, err := e.st.GetJob(id)
+			return err == nil && (j.Status == store.JobSucceeded || j.Status == store.JobFailed)
+		})
+	}
+	newID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: fresh.id})
+	if err != nil {
+		t.Fatalf("Buat replika from the new master: %v", err)
+	}
+	finished(newID)
+
+	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	rebuildID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+		RebuildOldMaster: true})
+	if err != nil {
+		t.Fatalf("rebuild of the old master from the new master: %v", err)
+	}
+	finished(rebuildID)
+}

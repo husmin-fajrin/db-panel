@@ -25,7 +25,11 @@ const connectionsTimeout = 10 * time.Second
 // receiver, applier and workers, the event scheduler and MySQL's other
 // threads have other names) with a user, but the panel's accounts
 // (dbpanel_*), the event scheduler, MySQL's 'system user', replicas
-// reading the binary log and this very connection.
+// reading the binary log, this very connection, and every session of the
+// user the agent itself logs in as (its monitoring and command sessions;
+// USER() without its last @host is the name processlist shows). That
+// account is the panel's admin account; people who share it are not an
+// application the cutover waits for.
 const connectionsQuery = `SELECT IFNULL(PROCESSLIST_HOST, ''), PROCESSLIST_USER, IFNULL(PROCESSLIST_DB, '')
 	FROM performance_schema.threads
 	WHERE TYPE = 'FOREGROUND'
@@ -34,6 +38,7 @@ const connectionsQuery = `SELECT IFNULL(PROCESSLIST_HOST, ''), PROCESSLIST_USER,
 	  AND PROCESSLIST_USER <> 'system user'
 	  AND PROCESSLIST_USER NOT LIKE 'dbpanel\_%'
 	  AND PROCESSLIST_USER <> 'event_scheduler'
+	  AND PROCESSLIST_USER <> LEFT(USER(), CHAR_LENGTH(USER()) - CHAR_LENGTH(SUBSTRING_INDEX(USER(), '@', -1)) - 1)
 	  AND IFNULL(PROCESSLIST_COMMAND, '') NOT LIKE 'Binlog Dump%'
 	  AND IFNULL(PROCESSLIST_ID, 0) <> CONNECTION_ID()`
 

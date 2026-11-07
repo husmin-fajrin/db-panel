@@ -504,7 +504,8 @@ func TestStatusAlertsOpenAndClose(t *testing.T) {
 	}
 
 	step(ma, func(s *proto.HealthSnapshot) { s.SuperReadOnly = true })
-	if a := r.openAlert(mID, KindMasterLocked); !strings.Contains(a.Message, "super_read_only") {
+	if a := r.openAlert(mID, KindMasterLocked); !strings.Contains(a.Message, "super_read_only") ||
+		!strings.Contains(a.Message, "sudo dbpanel agent unlock-master") {
 		t.Fatalf("master_locked message = %q", a.Message)
 	}
 	step(ma, func(s *proto.HealthSnapshot) { s.SuperReadOnly = false })

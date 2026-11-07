@@ -59,13 +59,13 @@ const (
 	e2eResyncQuietFixed = true
 )
 
-// Known defect of Plan 4b found by the promote end-to-end tests: the
-// promote's swap never marks the new master's inventory MasterReady (only
-// prepare_master sets it), so "Bangun ulang sebagai replika" (and "Buat
-// replika") from the new master is refused with "master belum disiapkan;
-// jalankan Siapkan master dulu". Until the fix the tests log the step as
-// pending instead of running it; set this to true with the fix.
-const e2ePromoteRebuildFixed = false
+// Defects of Plan 4b found by the promote end-to-end tests, both fixed:
+// D1, the promote's swap never marked the new master's inventory
+// MasterReady, so "Bangun ulang sebagai replika" (and "Buat replika") from
+// the new master was refused with "master belum disiapkan; jalankan
+// Siapkan master dulu"; D2, a successful rebuild left the old master's
+// role pin quarantined.
+const e2ePromoteRebuildFixed = true
 
 // skipWithoutE2E skips the test in -short mode and without mysqld.
 func skipWithoutE2E(t *testing.T) {
@@ -799,6 +799,9 @@ func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eN
 	}
 	if v := globalVar(t, old.db, "super_read_only"); v != "ON" {
 		t.Fatalf("super_read_only on the rebuilt old master = %s", v)
+	}
+	if want := fmt.Sprintf(`msg="role pinned" agent=%s role=replica`, old.agent.name); !strings.Contains(e.logs.String(), want) {
+		t.Fatalf("the agent log of %s does not show %s", old.name, want)
 	}
 	execSQL(t, newMaster.db, fmt.Sprintf("INSERT INTO a.t VALUES (%d, 'setelah-bangun-ulang')", row))
 	waitRow(t, old.db, "a", row, "setelah-bangun-ulang")

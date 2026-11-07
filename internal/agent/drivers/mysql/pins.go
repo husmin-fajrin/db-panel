@@ -369,7 +369,8 @@ func (p *Pins) Source() (host string, port int, ok bool) {
 
 // SetRole writes role, whatever is pinned now; unassigned removes the role
 // and the source pin. It is the local CLI's: panel commands only ever pin
-// an unassigned server (claimRole). It does not need the current files to
+// an unassigned server (claimRole) or a rebuilt quarantined one
+// (settleRebuilt). It does not need the current files to
 // be valid, so it also repairs them.
 func (p *Pins) SetRole(role string) error {
 	if !validRole(role) {
@@ -563,8 +564,9 @@ func (p *Pins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
 
 // claimRole pins role after a successful mysql.configure when no role is
 // pinned. An existing pin is never changed: claiming it again is a no-op,
-// as is claiming replica on a quarantined server (its rebuild), and
-// claiming another role is an ErrRolePinned error.
+// as is claiming replica on a quarantined server (its rebuild, which
+// settleRebuilt completes once replication points at the pinned source),
+// and claiming another role is an ErrRolePinned error.
 func (p *Pins) claimRole(role string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -587,6 +589,38 @@ func (p *Pins) claimRole(role string) error {
 		p.logger.Info("role pinned", "role", role, "file", p.path(RoleFile))
 	}
 	return nil
+}
+
+// settleRebuilt ends the quarantine of a rebuilt old master (spec 5.1: a
+// successful rebuild turns the pin into replica): after a successful
+// mysql.configureReplication toward host:port on a server pinned
+// quarantined whose source pin is host:port (matched like Allow matches
+// the rebuild commands, by name), it rewrites the role pin to replica and
+// reports true. It changes nothing on any other role (a master included),
+// without a source pin, or toward any other source. Beside releaseRole it
+// is the only way out of quarantined a panel command takes. The source
+// pin and its verified address (SourceAddrFile) stay: the replica follows
+// the same new master and the agent's own reads of it (repoint, promote)
+// keep dialing that address.
+func (p *Pins) settleRebuilt(host string, port int) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.reload(); err != nil {
+		return false, err
+	}
+	if p.role != roleQuarantined || !p.hasSrc || !p.sameSource(host, port) {
+		return false, nil
+	}
+	defer p.forget()
+	p.settled = true
+	if err := writePin(p.path(RoleFile), roleReplica); err != nil {
+		return false, err
+	}
+	if p.logger != nil {
+		p.logger.Info("role pinned", "role", roleReplica, "file", p.path(RoleFile), "was", roleQuarantined,
+			"source", net.JoinHostPort(host, strconv.Itoa(port)))
+	}
+	return true, nil
 }
 
 // claimSource pins host:port after a successful configureReplication,

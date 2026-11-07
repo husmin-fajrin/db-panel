@@ -1,6 +1,7 @@
 package mysql_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -985,5 +986,107 @@ func TestQuarantinedWithoutSourceFailsClosed(t *testing.T) {
 	}
 	if src := pinFile(t, bdir, mysql.SourceFile); src != "10.0.0.2:3306" {
 		t.Errorf("source pin after a failed role write = %q, want 10.0.0.2:3306", src)
+	}
+}
+
+// TestQuarantinedRebuiltPinsReplica: replication configured toward the
+// pinned source turns a quarantined pin into replica (spec 5.1); toward
+// any other source, without a source pin, or on any other role, nothing
+// changes.
+func TestQuarantinedRebuiltPinsReplica(t *testing.T) {
+	const src = "db-baru.example:3306"
+	for _, c := range []struct {
+		role, source, host string
+		port               int
+		want               string
+	}{
+		{"quarantined", src, "db-baru.example", 3306, "replica"},
+		{"quarantined", src, "DB-BARU.example", 3306, "replica"}, // matched like Allow: by name, any case
+		{"quarantined", src, "10.0.0.9", 3306, "quarantined"},
+		{"quarantined", src, "db-baru.example", 3307, "quarantined"},
+		{"quarantined", "", "db-baru.example", 3306, "quarantined"},
+		{"master", src, "db-baru.example", 3306, "master"},
+		{"replica", src, "db-baru.example", 3306, "replica"},
+		{"unassigned", src, "db-baru.example", 3306, "unassigned"},
+	} {
+		dir := pinDir(t, c.role, c.source)
+		if c.source != "" {
+			addr := filepath.Join(dir, mysql.SourceAddrFile)
+			if err := os.WriteFile(addr, []byte("10.0.0.2\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p := mustPins(t, dir)
+		settled, err := p.SettleRebuilt(c.host, c.port)
+		if err != nil {
+			t.Fatalf("%s/%s toward %s:%d: %v", c.role, c.source, c.host, c.port, err)
+		}
+		what := c.role + " toward " + c.host + ":" + strconv.Itoa(c.port)
+		if got := pinFile(t, dir, mysql.RoleFile); got != c.want || p.Role() != c.want || settled != (c.role != c.want) {
+			t.Errorf("%s: role pin %q, Role() %q, settled %v; want %q", what, got, p.Role(), settled, c.want)
+		}
+		if got := pinFile(t, dir, mysql.SourceFile); got != c.source {
+			t.Errorf("%s: source pin %q, want %q unchanged", what, got, c.source)
+		}
+		if c.want == "replica" && c.role == "quarantined" {
+			// The verified address of the same source stays for the
+			// agent's own reads; the promotion commands are no longer
+			// refused by the role, the old master's commands are.
+			if _, _, dial, ok, err := p.SourceDial(); err != nil || !ok || dial != "10.0.0.2" {
+				t.Errorf("%s: SourceDial = %q, %v, %v", what, dial, ok, err)
+			}
+			if err := p.Allow("mysql.lockForPromote", nil); err != nil {
+				t.Errorf("%s: lockForPromote after the rebuild = %v", what, err)
+			}
+			if err := p.Allow("mysql.leftover", nil); !errors.Is(err, mysql.ErrRolePinned) {
+				t.Errorf("%s: leftover after the rebuild = %v, want ErrRolePinned", what, err)
+			}
+		}
+	}
+}
+
+// TestConfigureReplicationEndsQuarantine: on a quarantined old master,
+// mysql.configureReplication toward another host is refused as before; a
+// successful one toward the pinned source (the new master) pins replica
+// and logs it. A master refuses configureReplication and keeps its pin.
+func TestConfigureReplicationEndsQuarantine(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	const src = "10.0.0.1:3306" // validSource's
+	dir := pinDir(t, "quarantined", src)
+	var logBuf bytes.Buffer
+	reg := commands.NewRegistry()
+	d := &mysql.Driver{Host: inst.Host(), PinDir: dir, Logger: slog.New(slog.NewTextHandler(&logBuf, nil))}
+	d.Register(reg)
+	r := &pinRig{t: t, reg: reg, d: d}
+
+	other := validSource
+	other.Host = "10.0.0.2"
+	wantRefused(t, "configureReplication to another host", r.dispatch("mysql.configureReplication", other),
+		"server ini dipin mengikuti sumber "+src)
+	if got := pinFile(t, dir, mysql.RoleFile); got != "quarantined" {
+		t.Fatalf("role pin after a refused configureReplication = %q", got)
+	}
+
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", validSource))
+	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "replica" || s != src {
+		t.Fatalf("pins after configureReplication toward the pinned source = %q, %q; want replica, %s", role, s, src)
+	}
+	if out := logBuf.String(); !strings.Contains(out, `msg="role pinned" role=replica`) {
+		t.Errorf("agent log does not show the replica pin:\n%s", out)
+	}
+	// The replica's rules now: the quarantined server's commands are
+	// refused, and another source still is.
+	wantRefused(t, "leftover on the rebuilt server", r.dispatch("mysql.leftover", proto.LeftoverParams{NewMaster: proto.PeerCred{Host: "10.0.0.1", Port: 3306, User: "dbpanel_repl", Password: "rahasia"}}),
+		"server ini dipin sebagai replica")
+	wantRefused(t, "configureReplication to another host after the rebuild", r.dispatch("mysql.configureReplication", other),
+		"server ini dipin mengikuti sumber "+src)
+
+	// A master never takes this path.
+	mdir := pinDir(t, "master", "")
+	m := newPinRig(t, inst.Host(), mdir)
+	wantRefused(t, "configureReplication on a master", m.dispatch("mysql.configureReplication", validSource),
+		"server ini dipin sebagai master")
+	if got := pinFile(t, mdir, mysql.RoleFile); got != "master" {
+		t.Errorf("master's role pin = %q", got)
 	}
 }

@@ -585,7 +585,11 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 }
 
 // promoteSwap records the new master in the panel's data in one
-// transaction (store.SwapMaster); running it again changes nothing.
+// transaction (store.SwapMaster) and marks the new master's inventory
+// MasterReady: it was prepared as a replica of a prepared master and the
+// promote created dbpanel_repl on it, so "Buat replika" and the old
+// master's rebuild may start from it without "Siapkan master". Running it
+// again changes nothing.
 func (jr *jobRun) promoteSwap(ctx context.Context, _ bool) (outcome, error) {
 	host, port, err := jr.newMasterAddr(ctx)
 	if err != nil {
@@ -594,6 +598,10 @@ func (jr *jobRun) promoteSwap(ctx context.Context, _ bool) (outcome, error) {
 	if err := jr.r.d.Store.SwapMaster(jr.job.TopologyID, jr.master(), jr.candidate(), host, port); err != nil {
 		return outcome{}, err
 	}
+	if err := jr.r.updateInventory(jr.candidate(), func(inv *store.Inventory) { inv.MasterReady = true }); err != nil {
+		return outcome{}, err
+	}
+	jr.r.d.Publish("mysql_inventory", map[string]any{"id": jr.candidate()})
 	jr.r.replicaChanged(jr.candidate())
 	jr.r.d.Publish("topology_update", map[string]any{"id": jr.job.TopologyID, "master_server_id": jr.candidate()})
 	jr.logf("info", "Data panel diperbarui: %s master baru di %s:%d, %s dikarantina.",

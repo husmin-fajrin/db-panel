@@ -40,6 +40,9 @@ func promotedEnv(t *testing.T, mods ...func(*web.Deps)) (*env, *fakeOrch, store.
 	if err := e.st.SwapMaster(topo.ID, 1, 2, "10.0.0.2", 3306); err != nil {
 		t.Fatal(err)
 	}
+	// The inventory the promote leaves on the new master: connected as a
+	// replica, then marked MasterReady by the swap step (the orchestrator's
+	// TestPromoteNewMasterReadyForReplicas goes through that swap).
 	if err := e.st.SetInventory(store.Inventory{ServerID: 2, Connected: true, Version: "8.0.39", Series: "8.0",
 		Databases: shopDatabases, MasterReady: true, UpdatedAt: time.Now()}); err != nil {
 		t.Fatal(err)

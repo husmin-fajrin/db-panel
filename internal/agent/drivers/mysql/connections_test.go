@@ -78,16 +78,45 @@ func TestConnectionsHidesPanelAndReplicationThreads(t *testing.T) {
 		}
 	}
 	// On the replica, its receiver, applier and workers are not
-	// connections: only the test's own root session is.
+	// connections, and the test's root session is the agent's account.
 	rreg := commands.NewRegistry()
 	(&mysql.Driver{Host: replica.Host()}).Register(rreg)
 	rres := decode[proto.ConnectionsResult](t, rreg.Dispatch(t.Context(), proto.Request{ID: "1", Cmd: "mysql.connections"}))
-	for _, r := range rres.Rows {
-		if r.User != "root" {
-			t.Errorf("replica row %+v, want only root's sessions", r)
-		}
+	if len(rres.Rows) != 0 {
+		t.Errorf("replica rows = %+v, want none", rres.Rows)
 	}
 	if len(app) != 2 || app[0].DB != "toko" || app[0].Count != 3 || app[1].DB != "gudang" || app[1].Count != 1 || app[0].Host != app[1].Host {
 		t.Errorf("app rows = %+v, want toko x3 then gudang x1 from one host", app)
+	}
+}
+
+// TestConnectionsHidesAgentAccount: the agent's own sessions (its
+// monitoring session included) and every other session of the account it
+// logs in as are not application connections; another admin account's
+// are.
+func TestConnectionsHidesAgentAccount(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	execAll(t, db, "CREATE DATABASE toko",
+		"CREATE USER 'ops'@'%' IDENTIFIED BY 'Ops-pw-1'", "GRANT ALL ON *.* TO 'ops'@'%'")
+	// The agent's account (root, what Host() logs in as): a long-lived
+	// session like the agent's monitor, plus a person's on it.
+	for i := 0; i < 2; i++ {
+		c, err := db.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		if _, err := c.ExecContext(t.Context(), "USE toko"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	openAs(t, inst, "ops", "Ops-pw-1", "toko", 2)
+
+	reg := commands.NewRegistry()
+	(&mysql.Driver{Host: inst.Host()}).Register(reg)
+	res := decode[proto.ConnectionsResult](t, reg.Dispatch(t.Context(), proto.Request{ID: "1", Cmd: "mysql.connections"}))
+	if len(res.Rows) != 1 || res.Rows[0].User != "ops" || res.Rows[0].DB != "toko" || res.Rows[0].Count != 2 {
+		t.Fatalf("rows = %+v, want only ops x2 on toko", res.Rows)
 	}
 }

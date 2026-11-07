@@ -375,3 +375,21 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 	}
 	return out
 }
+
+// settleRebuilt is Pins.settleRebuilt under promoteMu (the guard reads the
+// role under it): after a successful mysql.configureReplication toward the
+// pinned source, a quarantined server becomes a replica. From then on the
+// guard's quarantine branch (read-only put back on every MySQL restart)
+// stops applying and the replica's rules do; a quarantine report still
+// waiting for MySQL is dropped.
+func (d *Driver) settleRebuilt(host string, port int) error {
+	d.promoteMu.Lock()
+	defer d.promoteMu.Unlock()
+	settled, err := d.pins.settleRebuilt(host, port)
+	if err != nil || !settled {
+		return err
+	}
+	d.quarantinePending = false
+	d.log("quarantine ended: rebuilt as a replica of its pinned source", "source", net.JoinHostPort(host, fmt.Sprint(port)))
+	return nil
+}

@@ -160,7 +160,7 @@ var alertRules = []alertRule{
 			if !isMaster(v) || v.Status.Code != StatusLocked {
 				return false, ""
 			}
-			return true, v.Status.Detail + "."
+			return true, v.Status.Detail + ". " + masterLockedAdvice
 		},
 		close: func(v View, _ ruleCtx) bool {
 			return !isMaster(v) || v.Status.Code == StatusHealthy
@@ -790,3 +790,9 @@ func tlsExpiringMessage(server string, left time.Duration) string {
 	}
 	return fmt.Sprintf("Sertifikat MySQL %s kedaluwarsa dalam %d hari.", server, days)
 }
+
+// masterLockedAdvice ends the master_locked alert (spec 5.1): a master
+// left under the promote lock (its candidate gone, or lock-master) is
+// opened only by root on the master itself.
+const masterLockedAdvice = "Bila master dikunci untuk promosi dan kandidatnya hilang, atau dikunci dengan lock-master, " +
+	"buka kuncinya dengan menjalankan di server master: sudo dbpanel agent unlock-master"
