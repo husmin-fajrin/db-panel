@@ -1167,11 +1167,28 @@ func TestPromotePartialMessageSaysWhatStopped(t *testing.T) {
 		}
 	}
 
+	// An emergency promote stopped before the swap took no lock.
+	p, _ := r.st.GetPromotion(pid)
+	p.Mode = "emergency"
+	if err := r.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	msg = r.openAlert(rID, KindPromotePartial).Message
+	if strings.Contains(msg, "dikunci") || !strings.Contains(msg, "aplikasi tidak bisa menulis") ||
+		!strings.Contains(msg, `"Ulangi dari tahap ini"`) {
+		t.Errorf("emergency before the swap: %q", msg)
+	}
+	p.Mode = "planned"
+	if err := r.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+
 	// Swapped, the old master not quarantined yet.
 	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := r.st.GetPromotion(pid)
+	p, _ = r.st.GetPromotion(pid)
 	p.ReplicasJSON = `[{"server_id":` + itoa(mID) + `,"role":"old_master","state":"quarantine_pending"},` +
 		`{"server_id":` + itoa(oID) + `,"role":"replica","state":"needs_repoint"}]`
 	if err := r.st.UpdatePromotion(p); err != nil {
@@ -1210,8 +1227,8 @@ func TestLockKeptClosesWhenOver(t *testing.T) {
 	}
 	r.m.HandleEvent(mID, quarantinedEv)
 	as := r.alerts(mID, KindMasterLockExpired)
-	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
-		t.Fatalf("kept after quarantine = %+v, want closed with a reason", as)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "master sudah dikarantina sebagai master lama" {
+		t.Fatalf("kept after quarantine = %+v, want closed as quarantined", as)
 	}
 
 	// Unlocked from the panel: the next report shows the master writable.
@@ -1245,7 +1262,8 @@ func TestLockKeptClosesWhenOver(t *testing.T) {
 	r.promoted(topo, mID, rID, "done", `[{"server_id":`+itoa(mID)+`,"role":"old_master","state":"quarantine_pending"}]`)
 	r.m.tick()
 	as = r.alerts(mID, KindMasterLockExpired)
-	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+	// Its quarantine is still pending: the reason does not claim it.
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "promote selesai; server kini master lama" {
 		t.Fatalf("kept after the promote finished = %+v", as)
 	}
 }

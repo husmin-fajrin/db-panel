@@ -250,6 +250,10 @@ func (m *Monitor) partialMessage(topo store.Topology, p store.Promotion) string 
 	head := fmt.Sprintf("Promote %s dari %s ke %s selesai sebagian: ", modeWord(p.Mode),
 		m.serverName(p.OldMasterServerID), m.serverName(p.NewMasterServerID))
 	switch {
+	case topo.MasterServerID == p.OldMasterServerID && p.Mode == promotionModeEmergency:
+		// An emergency promote takes no lock: the master is down.
+		return head + fmt.Sprintf("%s belum menjadi master dan master %s tidak bisa dipakai, jadi aplikasi tidak bisa menulis. ",
+			m.serverName(p.NewMasterServerID), m.serverName(p.OldMasterServerID)) + retryAdvice
 	case topo.MasterServerID == p.OldMasterServerID:
 		return head + fmt.Sprintf("%s belum menjadi master dan master %s masih dikunci, jadi aplikasi tidak bisa menulis. ",
 			m.serverName(p.NewMasterServerID), m.serverName(p.OldMasterServerID)) + retryAdvice
@@ -465,8 +469,11 @@ func (m *Monitor) closeNotices(now time.Time) []alertUpdate {
 func (m *Monitor) lockKeptOver(a store.Alert, quarantined bool) string {
 	s, ok := m.servers[a.ServerID]
 	switch {
-	case quarantined || (ok && s.role == store.RoleQuarantined):
+	case quarantined:
 		return "master sudah dikarantina sebagai master lama"
+	case ok && s.role == store.RoleQuarantined:
+		// Its quarantine may still be pending: say only what is known.
+		return "promote selesai; server kini master lama"
 	case !ok:
 		return ""
 	case s.role == store.RoleMaster && s.status.Code == StatusHealthy && !s.receivedAt.Before(a.OpenedAt):
