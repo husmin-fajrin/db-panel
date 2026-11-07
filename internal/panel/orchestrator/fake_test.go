@@ -69,12 +69,14 @@ type fakeAgent struct {
 	jobs *jobs.Runner
 	conn hub.Conn
 
-	mu       sync.Mutex
-	calls    []call
-	script   map[string]handler
-	unknown  map[string]bool // commands answered as an older agent does
-	attached bool
-	started  []string // agent job ids, oldest first
+	mu      sync.Mutex
+	calls   []call
+	script  map[string]handler
+	unknown map[string]bool // commands answered as an older agent does
+	// dropReply: commands the agent runs whose answer is lost on the way.
+	dropReply map[string]bool
+	attached  bool
+	started   []string // agent job ids, oldest first
 	// forgetJobs: that many job.status calls answer "job tidak dikenal"
 	// (as an agent that restarted), whatever the job's state.
 	forgetJobs atomic.Int32
@@ -129,8 +131,13 @@ type fakeConn struct {
 
 func (c fakeConn) Call(ctx context.Context, cmd string, params, result any) error {
 	c.fa.mu.Lock()
-	unknown := c.fa.unknown[cmd]
+	unknown, drop := c.fa.unknown[cmd], c.fa.dropReply[cmd]
 	c.fa.mu.Unlock()
+	if drop {
+		// The agent runs it, but its answer never arrives.
+		c.Conn.Call(ctx, cmd, params, result)
+		return context.DeadlineExceeded
+	}
 	if unknown {
 		c.fa.record(cmd, nil)
 		return &proto.Error{Code: proto.CodeUnknownCommand, Message: "perintah tidak dikenal: " + cmd}

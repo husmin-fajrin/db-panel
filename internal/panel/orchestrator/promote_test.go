@@ -823,3 +823,40 @@ func TestPromoteWaitEndsWhileAgentJobRuns(t *testing.T) {
 		t.Fatalf("log:\n%s", e.jobLog(id))
 	}
 }
+
+// The start call of mysql.promote fails without an answer from the agent
+// (it may have started the job): partial and the lock kept. Refused by
+// the agent (a definite answer): failed and unlocked, as before.
+func TestPromoteStartCallLostEndsPartial(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.c.blockingJob("mysql.promote")
+	g.c.mu.Lock()
+	g.c.dropReply = map[string]bool{"mysql.promote": true}
+	g.c.mu.Unlock()
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	j, _ := e.waitJob(id, store.JobPartial)
+	if j.CurrentStep != 3 || g.m.count("mysql.unlockPromote") != 0 {
+		t.Fatalf("partial at %d; master %v", j.CurrentStep, g.m.cmds(0))
+	}
+	if p := g.promotion(); p.Status != "partial" {
+		t.Fatalf("promotion = %s", p.Status)
+	}
+}
+
+func TestPromoteStartRefusedFails(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.c.fail("mysql.promote", "master lama: password wajib diisi")
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != 3 || g.m.count("mysql.unlockPromote") != 1 {
+		t.Fatalf("failed at %d; master %v", j.CurrentStep, g.m.cmds(0))
+	}
+}

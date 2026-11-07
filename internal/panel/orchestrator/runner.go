@@ -1061,6 +1061,13 @@ type jobRun struct {
 	// connect is the index of stepConnectName in the job's stored steps,
 	// -1 when it has none (create_replica, resync_replica).
 	connect int
+	// agentStarted: the last runAgentJob had an agent job (started, or
+	// one from an earlier attempt); false when its start call failed.
+	agentStarted bool
+	// promoteStartUnknown: the start call of mysql.promote failed without
+	// an answer from the agent (a timeout, a dropped link), so the agent
+	// may have started the job anyway.
+	promoteStartUnknown bool
 }
 
 func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun, error) {

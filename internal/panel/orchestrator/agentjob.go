@@ -20,14 +20,17 @@ import (
 func (jr *jobRun) runAgentJob(ctx context.Context, serverID int64, cmd string, params, result any) error {
 	r := jr.r
 	agentID := ""
+	jr.agentStarted = false
 	if jr.st.AgentJobID != "" && jr.st.AgentServerID == serverID && jr.st.AgentCmd == cmd {
 		var s proto.JobStatus
 		err := jr.call(ctx, serverID, "job.status", proto.JobIDParams{JobID: jr.st.AgentJobID}, &s)
 		switch {
 		case err == nil && s.State == "running":
 			agentID = jr.st.AgentJobID
+			jr.agentStarted = true
 			jr.logf("info", "Melanjutkan pekerjaan agent yang masih berjalan.")
 		case err == nil && s.State == "succeeded":
+			jr.agentStarted = true
 			return jr.agentJobEnded(proto.JobDone{JobID: s.ID, OK: true, Result: s.Result}, result)
 		}
 	}
@@ -48,6 +51,7 @@ func (jr *jobRun) runAgentJob(ctx context.Context, serverID int64, cmd string, p
 			return err
 		}
 		agentID = started.JobID
+		jr.agentStarted = true
 		r.mu.Lock()
 		jr.lj.watchJob = agentID
 		r.mu.Unlock()

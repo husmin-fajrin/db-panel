@@ -507,7 +507,13 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	jr.st.PromoteSent = true
 	jr.save()
 	var res proto.PromoteResult
+	jr.promoteStartUnknown = false
 	if err := jr.runAgentJob(ctx, jr.candidate(), "mysql.promote", params, &res); err != nil {
+		// A start call the agent answered with an error (a refusal) is
+		// definite; any other failure of it (a timeout, a dropped link)
+		// may have started the job unseen.
+		var pe *proto.Error
+		jr.promoteStartUnknown = !jr.agentStarted && !errors.As(err, &pe)
 		return outcome{}, jr.r.promoteCmdErr(jr.candidate(), err)
 	}
 	jr.st.PastPoint = true
@@ -735,6 +741,12 @@ func (jr *jobRun) promoteFailed() string {
 			// (the wait ended while it was away, and it came back): it
 			// could open writes later. Only a job known to be over lets
 			// the job fail.
+			if jr.promoteStartUnknown {
+				jr.logf("warn", "Perintah promote mungkin sudah diterima kandidat tanpa jawaban; kunci master tidak dibuka. "+
+					"Tekan Ulangi untuk melanjutkan promote.")
+				jr.setPromotionStatus(promotionPartial)
+				return store.JobPartial
+			}
 			if running, why := jr.promoteJobMayRun(ctx); running {
 				jr.logf("warn", "Pekerjaan promote di kandidat %s; kunci master tidak dibuka. Tekan Ulangi untuk melanjutkan promote.", why)
 				jr.setPromotionStatus(promotionPartial)
