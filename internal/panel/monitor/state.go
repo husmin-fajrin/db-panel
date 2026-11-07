@@ -90,7 +90,7 @@ func (m *Monitor) state(id int64) *serverState {
 
 func (s *serverState) view(id int64) View {
 	v := View{ServerID: id, Role: s.role, Status: s.status, Since: s.since, ReceivedAt: s.receivedAt,
-		Snap: s.snap, NeedsUpgrade: s.needsUpgrade}
+		Snap: s.snap, NeedsUpgrade: s.needsUpgrade, QuarantinePending: s.quarantinePending}
 	if s.snooze != nil {
 		t := *s.snooze
 		v.SnoozeUntil = &t

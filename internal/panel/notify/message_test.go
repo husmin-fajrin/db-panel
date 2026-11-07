@@ -128,7 +128,7 @@ func TestPromoteMessageHasNewAddress(t *testing.T) {
 	if !strings.Contains(got, "10.0.0.2:3306") {
 		t.Fatal("no new address")
 	}
-	if got := FormatRecovered(a, "DB-2", at(5, 12, 0)); got != "✅ DB-2 pulih: pengalihan aplikasi setelah promote selesai setelah 2 jam 30 menit" {
+	if got := FormatRecovered(a, "DB-2", at(5, 12, 0)); got != "✅ DB-2: pengalihan aplikasi dikonfirmasi setelah 2 jam 30 menit" {
 		t.Fatalf("FormatRecovered = %q", got)
 	}
 

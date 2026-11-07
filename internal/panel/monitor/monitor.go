@@ -61,6 +61,9 @@ type View struct {
 	Snap         *proto.HealthSnapshot // shared with the Monitor: read only
 	NeedsUpgrade bool                  // the agent does not know monitor.*
 	SnoozeUntil  *time.Time
+	// QuarantinePending: an old master (Role store.RoleQuarantined) whose
+	// quarantine was not delivered yet.
+	QuarantinePending bool
 }
 
 // Monitor ingests the agents' health reports, derives each server's status,

@@ -539,3 +539,17 @@ func TestMasterPageSetSourceGuidance(t *testing.T) {
 	following("192.168.5.9", 3307)
 	wantNoBody(t, e.do("GET", "/masters/1", nil, c), "data-set-source", "dbpanel agent set-source")
 }
+
+// TestQuarantinePendingExplanation: an old master not yet quarantined is
+// explained as unprotected, a quarantined one as locked.
+func TestQuarantinePendingExplanation(t *testing.T) {
+	v := monitor.View{ServerID: 4, Role: store.RoleQuarantined, Status: monitor.DeriveQuarantined(true), QuarantinePending: true}
+	e := web.StatusExplain(4, store.RoleQuarantined, v)
+	if e == nil || strings.Contains(e.Text, "Panel mengunci") || !strings.Contains(e.Advice, "Jangan hidupkan") {
+		t.Fatalf("pending explanation = %+v", e)
+	}
+	v.Status, v.QuarantinePending = monitor.DeriveQuarantined(false), false
+	if e := web.StatusExplain(4, store.RoleQuarantined, v); e == nil || !strings.Contains(e.Text, "Panel mengunci") {
+		t.Fatalf("quarantined explanation = %+v", e)
+	}
+}

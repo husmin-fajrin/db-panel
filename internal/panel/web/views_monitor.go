@@ -84,7 +84,7 @@ func newStatusView(id int64, role string, v monitor.View, ok bool, now time.Time
 		e := monitor.Explain(v.Snap.Replica.LastSQLErrno, v.Snap.Replica.LastIOErrno)
 		sv.Explain = &e
 	}
-	if e, ok := monitor.ExplainStatus(st.Code); ok { // the statuses a promotion leaves
+	if e, ok := monitor.ExplainStatus(st.Code, v.QuarantinePending); ok { // the statuses a promotion leaves
 		sv.Explain = &e
 	}
 	sv.DownGuide = role == store.RoleMaster && st.Code == monitor.StatusDown

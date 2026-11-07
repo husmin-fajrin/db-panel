@@ -521,11 +521,11 @@ func TestQuarantinedStatusAndExplain(t *testing.T) {
 	if pending.Code != StatusQuarantined || pending.Severity != SevWarn || !strings.Contains(pending.Detail, "belum dikarantina") {
 		t.Fatalf("quarantine pending = %+v", pending)
 	}
-	exp, ok := ExplainStatus(StatusQuarantined)
+	exp, ok := ExplainStatus(StatusQuarantined, false)
 	if !ok || exp.Text == "" || exp.Advice == "" || !strings.Contains(exp.Text, "master lama") {
 		t.Fatalf("ExplainStatus(quarantined) = %+v, %v", exp, ok)
 	}
-	if _, ok := ExplainStatus(StatusSynced); ok {
+	if _, ok := ExplainStatus(StatusSynced, false); ok {
 		t.Fatal("ExplainStatus(Sinkron) explains, want nothing")
 	}
 
@@ -574,8 +574,19 @@ func TestQuarantinedStatusAndExplain(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.m.tick()
-	if v := r.view(mID); v.Status.Severity != SevWarn || !strings.Contains(v.Status.Detail, "belum dikarantina") {
-		t.Fatalf("pending quarantine status = %+v", v.Status)
+	v = r.view(mID)
+	if v.Status.Severity != SevWarn || !strings.Contains(v.Status.Detail, "belum dikarantina") || !v.QuarantinePending {
+		t.Fatalf("pending quarantine view = %+v", v)
+	}
+	// Its explanation says it is not protected, never that it is locked.
+	exp, ok = ExplainStatus(v.Status.Code, v.QuarantinePending)
+	if !ok || !strings.Contains(exp.Text, "belum bisa mengarantinanya") || strings.Contains(exp.Text, "Panel mengunci") ||
+		!strings.Contains(exp.Advice, "Jangan hidupkan") || exp.Primary != "" {
+		t.Fatalf("pending quarantine explanation = %+v", exp)
+	}
+	if exp, _ := ExplainStatus(StatusQuarantined, false); !strings.Contains(exp.Advice, `"Periksa data tertinggal"`) ||
+		!strings.Contains(exp.Advice, `"Bangun ulang sebagai replika"`) || !strings.Contains(exp.Advice, `"Sudah saya alihkan"`) {
+		t.Fatalf("quarantined advice = %q", exp.Advice)
 	}
 }
 
@@ -598,16 +609,21 @@ func TestNeedsRepointRebuildStatus(t *testing.T) {
 		if got.Code != c.code || got.Severity != c.sev || !strings.Contains(got.Detail, c.detail) || got.LockLost {
 			t.Errorf("%s: status = %+v", c.state, got)
 		}
-		// The state wins over an absent agent: waiting for it is the point.
+		// The state wins over an absent agent (waiting for it is the
+		// point), and the detail says it is away.
 		in.AgentOnline, in.OfflineSince = false, now.Add(-time.Hour)
-		if got := DeriveReplica(in, th); got.Code != c.code {
-			t.Errorf("%s offline: code = %q", c.state, got.Code)
+		if got := DeriveReplica(in, th); got.Code != c.code || !strings.HasSuffix(got.Detail, "(agent offline sejak 60 menit lalu)") {
+			t.Errorf("%s offline: status = %+v", c.state, got)
+		}
+		in.AgentOnline, in.ReceivedAt = true, now.Add(-10*time.Minute)
+		if got := DeriveReplica(in, th); !strings.HasSuffix(got.Detail, "(agent tidak melapor sejak 10 menit lalu)") {
+			t.Errorf("%s stale: detail = %q", c.state, got.Detail)
 		}
 		if SeverityOf(c.code) != c.sev {
 			t.Errorf("SeverityOf(%q) = %v", c.code, SeverityOf(c.code))
 		}
-		exp, ok := ExplainStatus(c.code)
-		if !ok || exp.Text == "" || exp.Advice == "" || exp.Primary != c.primary {
+		exp, ok := ExplainStatus(c.code, false)
+		if !ok || exp.Text == "" || !strings.HasPrefix(exp.Advice, "Tekan ") || exp.Primary != c.primary {
 			t.Errorf("ExplainStatus(%q) = %+v, %v", c.code, exp, ok)
 		}
 	}

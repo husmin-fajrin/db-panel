@@ -1,5 +1,11 @@
 package web
 
+import (
+	"time"
+
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+)
+
 // SubscriberCount exposes the broker's subscriber count to web_test.
 func SubscriberCount(b *Broker) int {
 	b.mu.Lock()
@@ -33,3 +39,8 @@ var (
 	FmtPct      = fmtPct
 	Ago         = ago
 )
+
+// StatusExplain exposes the explanation newStatusView gives a view.
+func StatusExplain(id int64, role string, v monitor.View) *monitor.Explanation {
+	return newStatusView(id, role, v, true, time.Time{}).Explain
+}

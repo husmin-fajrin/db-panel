@@ -1120,3 +1120,173 @@ func TestReplicaNeedsAlerts(t *testing.T) {
 		t.Fatalf("status after the resync = %+v", v.Status)
 	}
 }
+
+func TestPromoteCutoverClosedBySecondPromotion(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-a")
+	rID := r.replica("db-b", topo)
+	r.promoted(topo, mID, rID, "done", `[{"server_id":`+itoa(mID)+`,"role":"old_master","state":"quarantine_pending"}]`)
+	r.m.tick()
+	if a := r.openAlert(rID, KindPromoteCutover); !strings.Contains(a.Message, "Master lama belum dikarantina; jangan hidupkan") {
+		t.Fatalf("cutover message lacks the pending quarantine warning: %q", a.Message)
+	}
+
+	// The old master comes back as a replica and is promoted again before
+	// anyone confirmed the first cutover.
+	if err := r.st.SetServerRole(mID, store.RoleUnassigned); err != nil {
+		t.Fatal(err)
+	}
+	topo, _ = r.st.GetTopology(topo.ID)
+	if _, err := r.st.AddReplica(topo.ID, mID, nil); err != nil {
+		t.Fatal(err)
+	}
+	r.promoted(topo, rID, mID, "done", "")
+	r.m.tick()
+	as := r.alerts(rID, KindPromoteCutover)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "master berganti oleh promote lain" {
+		t.Fatalf("first promote_cutover = %+v, want closed by the second promotion", as)
+	}
+	if a := r.openAlert(mID, KindPromoteCutover); strings.Contains(a.Message, "belum dikarantina") {
+		t.Fatalf("second promote_cutover = %q", a.Message)
+	}
+}
+
+func TestPromotePartialMessageSaysWhatStopped(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	oID := r.replica("db-lain", topo)
+
+	// Stopped before the swap: the master is still locked.
+	pid := r.promotion(topo, mID, rID, "partial", "")
+	r.m.tick()
+	msg := r.openAlert(rID, KindPromotePartial).Message
+	for _, want := range []string{"masih dikunci", "aplikasi tidak bisa menulis", `"Ulangi dari tahap ini"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("before the swap: %q lacks %q", msg, want)
+		}
+	}
+
+	// Swapped, the old master not quarantined yet.
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := r.st.GetPromotion(pid)
+	p.ReplicasJSON = `[{"server_id":` + itoa(mID) + `,"role":"old_master","state":"quarantine_pending"},` +
+		`{"server_id":` + itoa(oID) + `,"role":"replica","state":"needs_repoint"}]`
+	if err := r.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	msg = r.openAlert(rID, KindPromotePartial).Message
+	if !strings.Contains(msg, "belum dikarantina") || !strings.Contains(msg, "jangan hidupkan") || strings.Contains(msg, "masih dikunci") {
+		t.Errorf("pending quarantine: %q", msg)
+	}
+
+	// Quarantined; a replica still to repoint.
+	p.ReplicasJSON = strings.Replace(p.ReplicasJSON, "quarantine_pending", "quarantined", 1)
+	if err := r.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	msg = r.openAlert(rID, KindPromotePartial).Message
+	if !strings.Contains(msg, "belum diarahkan ulang: 1") || !strings.Contains(msg, `"Ulangi dari tahap ini"`) {
+		t.Errorf("repoint left: %q", msg)
+	}
+	if as := r.alerts(rID, KindPromotePartial); len(as) != 1 {
+		t.Fatalf("promote_partial alerts = %+v, want one", as)
+	}
+}
+
+func TestLockKeptClosesWhenOver(t *testing.T) {
+	quarantinedEv := proto.Event{Type: proto.EventQuarantined, Payload: []byte(`{"new_source":"10.0.0.2:3306"}`)}
+
+	// The guard quarantines the master itself.
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	r.m.HandleEvent(mID, lockExpired(t, "kept", ""))
+	if a := r.openAlert(mID, KindMasterLockExpired); !strings.Contains(a.Message, `"Buka kunci master"`) {
+		t.Fatalf("kept advice = %q", a.Message)
+	}
+	r.m.HandleEvent(mID, quarantinedEv)
+	as := r.alerts(mID, KindMasterLockExpired)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+		t.Fatalf("kept after quarantine = %+v, want closed with a reason", as)
+	}
+
+	// Unlocked from the panel: the next report shows the master writable.
+	r = newRig(t)
+	mID, _ = r.master("db-master")
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.SuperReadOnly, s.ReadOnly = true, true })
+	ma.send()
+	r.clk.Add(time.Second)
+	r.m.HandleEvent(mID, lockExpired(t, "kept", ""))
+	r.clk.Add(time.Second)
+	ma.send()
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterLockExpired) {
+		t.Fatal("kept closed while the master is still locked")
+	}
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.SuperReadOnly, s.ReadOnly = false, false })
+	r.clk.Add(time.Second)
+	ma.send()
+	r.m.tick()
+	as = r.alerts(mID, KindMasterLockExpired)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "master sudah bisa ditulisi lagi" {
+		t.Fatalf("kept after unlock = %+v", as)
+	}
+
+	// Ulangi finished the promote: the server is now the old master.
+	r = newRig(t)
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	r.m.HandleEvent(mID, lockExpired(t, "kept", ""))
+	r.promoted(topo, mID, rID, "done", `[{"server_id":`+itoa(mID)+`,"role":"old_master","state":"quarantine_pending"}]`)
+	r.m.tick()
+	as = r.alerts(mID, KindMasterLockExpired)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+		t.Fatalf("kept after the promote finished = %+v", as)
+	}
+}
+
+// TestMasterQuarantinedFromStore: a planned promote quarantines through
+// the panel's own mysql.quarantine, which sends no event: the store's
+// record opens master_quarantined, once.
+func TestMasterQuarantinedFromStore(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	r.promoted(topo, mID, rID, "done", `[{"server_id":`+itoa(mID)+`,"role":"old_master","state":"quarantined"}]`)
+	r.m.tick()
+	a := r.openAlert(mID, KindMasterQuarantined)
+	if a.TopologyID != topo.ID || !strings.Contains(a.Message, "10.0.0.2:3306") {
+		t.Fatalf("master_quarantined = %+v", a)
+	}
+	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantined, Payload: []byte(`{"new_source":"db-baru:3306"}`)})
+	for range 3 {
+		r.clk.Add(10 * time.Hour)
+		r.m.tick()
+	}
+	as := r.alerts(mID, KindMasterQuarantined)
+	if len(as) != 1 || as[0].ClosedAt == nil {
+		t.Fatalf("master_quarantined after the event and 30 h = %+v, want the one, closed", as)
+	}
+
+	// A pending quarantine opens nothing until it is delivered.
+	r2 := newRig(t)
+	mID, topo = r2.master("db-lama")
+	rID = r2.replica("db-baru", topo)
+	pid := r2.promoted(topo, mID, rID, "done", `[{"server_id":`+itoa(mID)+`,"role":"old_master","state":"quarantine_pending"}]`)
+	r2.m.tick()
+	if r2.isOpen(mID, KindMasterQuarantined) {
+		t.Fatal("master_quarantined open while the quarantine is pending")
+	}
+	p, _ := r2.st.GetPromotion(pid)
+	p.ReplicasJSON = strings.Replace(p.ReplicasJSON, "quarantine_pending", "quarantined", 1)
+	if err := r2.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+	r2.m.tick()
+	r2.openAlert(mID, KindMasterQuarantined)
+}

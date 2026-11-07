@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -103,7 +106,7 @@ func (m *Monitor) checkPromotions(now time.Time) []alertUpdate {
 			want[KindPromoteCutover][topo.MasterServerID] = promoteWant{topo.ID, m.cutoverMessage(topo, prom)}
 		}
 		if prom != nil && prom.Status == promotionPartial {
-			want[KindPromotePartial][prom.NewMasterServerID] = promoteWant{topo.ID, m.partialMessage(*prom)}
+			want[KindPromotePartial][prom.NewMasterServerID] = promoteWant{topo.ID, m.partialMessage(topo, *prom)}
 		}
 	}
 	var ups []alertUpdate
@@ -131,6 +134,7 @@ func (m *Monitor) checkPromotions(now time.Time) []alertUpdate {
 		}
 		ups = append(ups, alertUpdate{a.ID, a.Kind, a.ServerID, false})
 	}
+	ups = append(ups, m.quarantinedFromStore(now)...)
 	for _, kind := range []string{KindPromoteCutover, KindPromotePartial} {
 		for serverID, w := range want[kind] {
 			id, err := m.st.OpenAlert(store.Alert{Kind: kind, ServerID: serverID, TopologyID: w.topoID, OpenedAt: now, Message: w.msg})
@@ -228,15 +232,99 @@ func (m *Monitor) cutoverMessage(topo store.Topology, prom *store.Promotion) str
 			msg += fmt.Sprintf("; perlu dibangun ulang: %d", rebuild)
 		}
 		msg += "."
+		if oldMasterState(*prom) == quarantineStatePending {
+			msg += " Master lama belum dikarantina; jangan hidupkan sebelum agent-nya tersambung."
+		}
 	}
 	return msg + ` Arahkan semua aplikasi yang menulis ke database ke alamat baru, lalu tekan "Sudah saya alihkan".`
 }
 
-// partialMessage words promote_partial.
-func (m *Monitor) partialMessage(p store.Promotion) string {
-	return fmt.Sprintf("Promote %s dari %s ke %s selesai sebagian: ada langkah yang belum tuntas. "+
-		"Buka job promote di halaman Pekerjaan dan tekan Ulangi.", modeWord(p.Mode),
+// retryAdvice names the job page's button that resumes a partial promote.
+const retryAdvice = `Buka job promote di halaman Pekerjaan dan tekan "Ulangi dari tahap ini".`
+
+// partialMessage words promote_partial by what stopped: the swap not
+// made (the master stays locked: an outage), the old master not yet
+// quarantined, or replicas not yet moved. topo is the promotion's
+// topology.
+func (m *Monitor) partialMessage(topo store.Topology, p store.Promotion) string {
+	head := fmt.Sprintf("Promote %s dari %s ke %s selesai sebagian: ", modeWord(p.Mode),
 		m.serverName(p.OldMasterServerID), m.serverName(p.NewMasterServerID))
+	switch {
+	case topo.MasterServerID == p.OldMasterServerID:
+		return head + fmt.Sprintf("%s belum menjadi master dan master %s masih dikunci, jadi aplikasi tidak bisa menulis. ",
+			m.serverName(p.NewMasterServerID), m.serverName(p.OldMasterServerID)) + retryAdvice
+	case oldMasterState(p) == quarantineStatePending:
+		return head + fmt.Sprintf("master lama %s belum dikarantina karena agent-nya belum terjangkau; jangan hidupkan "+
+			"MySQL-nya sebelum agent tersambung. ", m.serverName(p.OldMasterServerID)) + retryAdvice
+	}
+	var repoint, rebuild int
+	for _, s := range promotionServers(p) {
+		switch {
+		case s.Role != promotionReplica:
+		case s.State == store.ReplicaNeedsRepoint:
+			repoint++
+		case s.State == store.ReplicaNeedsRebuild:
+			rebuild++
+		}
+	}
+	return head + fmt.Sprintf("%s sudah menjadi master; replika yang belum diarahkan ulang: %d, perlu dibangun ulang: %d. ",
+		m.serverName(p.NewMasterServerID), repoint, rebuild) + retryAdvice
+}
+
+// quarantinedMessage words master_quarantined; newSource ("" unknown) is
+// the new master's host:port.
+func quarantinedMessage(newSource string) string {
+	msg := "Master lama dikarantina: MySQL-nya kini hanya-baca, aplikasi tidak bisa menulis ke sana."
+	if newSource != "" {
+		msg += " Master baru: " + newSource + "."
+	}
+	return msg
+}
+
+// quarantinedFromStore opens master_quarantined, once per promotion, for
+// an old master the store holds quarantined (not pending): the panel's
+// own mysql.quarantine (a planned promote) sends no monitor.quarantined;
+// the event remains the trigger of a deferred quarantine. The caller
+// holds mu.
+func (m *Monitor) quarantinedFromStore(now time.Time) []alertUpdate {
+	var ups []alertUpdate
+	for _, id := range slices.Sorted(maps.Keys(m.servers)) {
+		s := m.servers[id]
+		if s.role != store.RoleQuarantined || s.quarantinePending {
+			continue
+		}
+		p, err := m.st.PromotionByOldMaster(id)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				m.log.Warn("master_quarantined: promotion", "server_id", id, "err", err)
+			}
+			continue
+		}
+		n, err := m.st.CountAlertsOpenedSince(KindMasterQuarantined, id, p.StartedAt)
+		if err != nil {
+			m.log.Warn("master_quarantined: count alerts", "server_id", id, "err", err)
+			continue
+		}
+		if n > 0 {
+			continue
+		}
+		src := ""
+		if s.topoID != 0 {
+			if topo, err := m.st.GetTopology(s.topoID); err == nil {
+				src = fmt.Sprintf("%s:%d", topo.SourceHost, topo.SourcePort)
+			}
+		}
+		aid, err := m.st.OpenAlert(store.Alert{Kind: KindMasterQuarantined, ServerID: id, TopologyID: s.topoID,
+			OpenedAt: now, Message: quarantinedMessage(src)})
+		if err != nil {
+			if !errors.Is(err, store.ErrAlertOpen) {
+				m.log.Warn("open alert", "server_id", id, "kind", KindMasterQuarantined, "err", err)
+			}
+			continue
+		}
+		ups = append(ups, alertUpdate{aid, KindMasterQuarantined, id, true})
+	}
+	return ups
 }
 
 // handlePromoteEvent takes the promote lock guard's events (proto
@@ -257,10 +345,7 @@ func (m *Monitor) handlePromoteEvent(serverID int64, ev proto.Event) bool {
 			m.log.Warn("monitor.quarantined unreadable; ignored", "server_id", serverID, "err", err)
 			return true
 		}
-		kind, msg = KindMasterQuarantined, "Master lama dikarantina: MySQL-nya kini hanya-baca, aplikasi tidak bisa menulis ke sana."
-		if qe.NewSource != "" {
-			msg += " Master baru: " + qe.NewSource + "."
-		}
+		kind, msg = KindMasterQuarantined, quarantinedMessage(qe.NewSource)
 	default:
 		var le proto.LockExpiredEvent
 		if err := json.Unmarshal(ev.Payload, &le); err != nil {
@@ -284,20 +369,24 @@ func lockExpiredMessage(le proto.LockExpiredEvent) string {
 		return "Batas waktu kunci promote di master habis dan " + cand + " masih replika: promote tidak terjadi, " +
 			"master membuka kunci sendiri dan bisa ditulisi lagi."
 	}
-	return "Batas waktu kunci promote di master habis, tetapi master tetap dikunci karena " + cand +
-		" belum bisa dipastikan; aplikasi belum bisa menulis. Periksa job promote di halaman Pekerjaan."
+	return lockKeptPrefix + cand + " belum bisa dipastikan; aplikasi belum bisa menulis. Periksa job promote di " +
+		`halaman Pekerjaan; bila promote tidak dilanjutkan, tekan "Buka kunci master" di halaman master.`
 }
 
+// lockKeptPrefix starts the message of a lock the guard kept.
+const lockKeptPrefix = "Batas waktu kunci promote di master habis, tetapi master tetap dikunci karena "
+
 // notice opens a one-time notice of kind on serverID with msg. One open
-// already says the same: nothing changes (once per noticeFor); one that
-// says otherwise (the lock guard kept, then unlocked) is replaced.
+// already says the same (any master_quarantined does): nothing changes
+// (once per noticeFor); a master_lock_expired that says otherwise (kept,
+// then unlocked) is replaced.
 func (m *Monitor) notice(serverID int64, kind, msg string) {
 	now := m.now()
 	var ups []alertUpdate
 	m.mu.Lock()
 	a, err := m.st.GetOpenAlert(kind, serverID)
 	switch {
-	case err == nil && a.Message == msg:
+	case err == nil && (a.Message == msg || kind == KindMasterQuarantined):
 		m.mu.Unlock()
 		return
 	case err == nil:
@@ -323,29 +412,67 @@ func (m *Monitor) notice(serverID int64, kind, msg string) {
 		m.log.Warn("open alert", "server_id", serverID, "kind", kind, "err", err)
 	} else {
 		ups = append(ups, alertUpdate{id, kind, serverID, true})
+		if kind == KindMasterQuarantined {
+			ups = append(ups, m.closeNotices(now)...) // a lock kept is over
+		}
 	}
 	m.mu.Unlock()
 	m.emitAlerts(ups)
 }
 
-// closeNotices closes the one-time notices open for noticeFor. The caller
-// holds mu.
+// closeNotices closes the one-time notices open for noticeFor, and a lock
+// kept (master_lock_expired) once it is over: the server was quarantined
+// or the master can be written again. The caller holds mu.
 func (m *Monitor) closeNotices(now time.Time) []alertUpdate {
 	open, err := m.st.ListOpenAlerts()
 	if err != nil {
 		m.log.Warn("close notices: list open alerts", "err", err)
 		return nil
 	}
+	quarantined := map[int64]bool{}
+	for _, a := range open {
+		if a.Kind == KindMasterQuarantined {
+			quarantined[a.ServerID] = true
+		}
+	}
 	var ups []alertUpdate
 	for _, a := range open {
-		if (a.Kind != KindMasterQuarantined && a.Kind != KindMasterLockExpired) || now.Sub(a.OpenedAt) < noticeFor {
+		if a.Kind != KindMasterQuarantined && a.Kind != KindMasterLockExpired {
 			continue
 		}
-		if err := m.st.CloseAlertWithReason(a.ID, now, noticeExpiredReason); err != nil {
+		reason := ""
+		switch {
+		case now.Sub(a.OpenedAt) >= noticeFor:
+			reason = noticeExpiredReason
+		case a.Kind == KindMasterLockExpired && strings.HasPrefix(a.Message, lockKeptPrefix):
+			reason = m.lockKeptOver(a, quarantined[a.ServerID])
+		}
+		if reason == "" {
+			continue
+		}
+		if err := m.st.CloseAlertWithReason(a.ID, now, reason); err != nil {
 			m.log.Warn("close alert", "server_id", a.ServerID, "kind", a.Kind, "err", err)
 			continue
 		}
 		ups = append(ups, alertUpdate{a.ID, a.Kind, a.ServerID, false})
 	}
 	return ups
+}
+
+// lockKeptOver says why the lock kept that a (master_lock_expired) reports
+// is over; "" while it may still hold. quarantined: master_quarantined is
+// open for the server. The caller holds mu.
+func (m *Monitor) lockKeptOver(a store.Alert, quarantined bool) string {
+	s, ok := m.servers[a.ServerID]
+	switch {
+	case quarantined || (ok && s.role == store.RoleQuarantined):
+		return "master sudah dikarantina sebagai master lama"
+	case !ok:
+		return ""
+	case s.role == store.RoleMaster && s.status.Code == StatusHealthy && !s.receivedAt.Before(a.OpenedAt):
+		// Judged on a report taken after the notice: the lock was lifted
+		// (unlocked from the panel, or the promote did not happen).
+		return "master sudah bisa ditulisi lagi"
+	}
+	return ""
 }

@@ -68,26 +68,42 @@ var statusExplanations = map[string]Explanation{
 	StatusQuarantined: {
 		Text: "Server ini master lama dari sebuah promote. Panel mengunci MySQL-nya (hanya-baca) agar aplikasi yang " +
 			"belum dialihkan tidak menulis ke sana.",
-		Advice:  "Periksa transaksi yang tertinggal di sini, lalu bangun ulang server ini sebagai replika atau hapus dari panel",
+		Advice: `Tekan "Periksa data tertinggal" untuk melihat transaksi yang belum sampai ke master baru, lalu ` +
+			`"Bangun ulang sebagai replika" atau hapus server ini dari panel; kedua tombol itu baru aktif setelah ` +
+			`"Sudah saya alihkan" di layar pengalihan aplikasi`,
 		Primary: "rebuild",
 	},
 	StatusNeedsRepoint: {
 		Text: "Setelah promote, replika ini masih mengikuti master lama. Panel mengarahkannya ke master baru sendiri " +
 			"begitu agent-nya tersambung.",
-		Advice:  "Arahkan sekarang",
+		Advice:  `Tekan "Arahkan sekarang" untuk mengarahkannya ke master baru tanpa menunggu`,
 		Primary: "repoint",
 	},
 	StatusNeedsRebuild: {
 		Text: "Replika ini punya transaksi yang tidak ada di master baru, jadi tidak bisa sekadar diarahkan ulang. " +
 			"Panel tidak membangunnya ulang sendiri.",
-		Advice:  "Resync ulang dari master baru",
+		Advice:  `Tekan "Resync ulang" untuk membangunnya ulang dari master baru`,
 		Primary: "resync",
 	},
 }
 
+// expQuarantinePending reads an old master whose quarantine is not
+// delivered yet: nothing protects it, unlike a quarantined one.
+var expQuarantinePending = Explanation{
+	Text: "Server ini master lama dari sebuah promote, tetapi panel belum bisa mengarantinanya karena agent-nya belum " +
+		"terjangkau. MySQL-nya belum dikunci: bila hidup, aplikasi yang belum dialihkan bisa menulis ke sana.",
+	Advice: "Jangan hidupkan MySQL server ini sebelum agent-nya tersambung; panel mengirim karantina begitu agent " +
+		"tersambung",
+}
+
 // ExplainStatus reads a status code that needs explaining by itself (the
 // statuses a promotion leaves); false for any other code.
-func ExplainStatus(code string) (Explanation, bool) {
+// quarantinePending (View.QuarantinePending) picks the explanation of an
+// old master not yet quarantined.
+func ExplainStatus(code string, quarantinePending bool) (Explanation, bool) {
+	if code == StatusQuarantined && quarantinePending {
+		return expQuarantinePending, true
+	}
 	e, ok := statusExplanations[code]
 	return e, ok
 }

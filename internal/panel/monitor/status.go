@@ -145,9 +145,10 @@ func DeriveReplica(in ReplicaInput, th Thresholds) Status {
 	// absent agent is what a repoint waits for.
 	switch in.State {
 	case replicaNeedsRepoint:
-		return set(StatusNeedsRepoint, "Perlu diarahkan ulang ke master baru; akan dilakukan saat tersambung")
+		return set(StatusNeedsRepoint, "Perlu diarahkan ulang ke master baru; akan dilakukan saat tersambung"+offlineNote(in, th))
 	case replicaNeedsRebuild:
-		return set(StatusNeedsRebuild, "Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru")
+		return set(StatusNeedsRebuild, "Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru"+
+			offlineNote(in, th))
 	case replicaReady, replicaAttention:
 	default:
 		return set(StatusNotReady, "Replika belum siap dipantau")
@@ -261,6 +262,21 @@ func DeriveMaster(in MasterInput, th Thresholds) Status {
 		return set(StatusLocked, "Master dikunci (super_read_only aktif); aplikasi tidak bisa menulis")
 	}
 	return set(StatusHealthy, "Master menjawab dan bisa ditulisi")
+}
+
+// offlineNote tells, on a status the store's state decides, that the
+// agent is away (why a repoint has not happened yet); "" when it is not.
+func offlineNote(in ReplicaInput, th Thresholds) string {
+	if _, off := agentOffline(in.AgentOnline, in.OfflineSince, in.ReceivedAt, in.Now, th.StaleAfter); !off {
+		return ""
+	}
+	switch {
+	case !in.AgentOnline && !in.OfflineSince.IsZero():
+		return " (agent offline sejak " + formatDuration(in.Now.Sub(in.OfflineSince)) + " lalu)"
+	case in.AgentOnline && !in.ReceivedAt.IsZero():
+		return " (agent tidak melapor sejak " + formatDuration(in.Now.Sub(in.ReceivedAt)) + " lalu)"
+	}
+	return " (agent offline)"
 }
 
 // DeriveQuarantined is the status of an old master after a promotion

@@ -191,9 +191,22 @@ func clock(t, now time.Time) string {
 	return t.Format("02-01 15:04")
 }
 
+// resolvedLines word the closing of the promote kinds, where nothing
+// broken recovered: an operator's step or a job finished.
+var resolvedLines = map[string]string{
+	monitor.KindPromoteCutover:      "pengalihan aplikasi dikonfirmasi",
+	monitor.KindPromotePartial:      "promote kini tuntas",
+	monitor.KindReplicaNeedsRepoint: "replika sudah diarahkan ulang ke master baru",
+	monitor.KindReplicaNeedsRebuild: "replika sudah dibangun ulang dari master baru",
+}
+
 // FormatRecovered is the message of a closed alert: "✅ <server> pulih:
-// <kind in words> selesai setelah <duration>".
+// <kind in words> selesai setelah <duration>"; for the promote kinds
+// "✅ <server>: <what was done> setelah <duration>".
 func FormatRecovered(a store.Alert, serverName string, closedAt time.Time) string {
+	if line, ok := resolvedLines[a.Kind]; ok {
+		return fmt.Sprintf("%s %s: %s setelah %s", iconRecovered, serverName, line, duration(closedAt.Sub(a.OpenedAt)))
+	}
 	return fmt.Sprintf("%s %s pulih: %s selesai setelah %s", iconRecovered, serverName, kindName(a.Kind),
 		duration(closedAt.Sub(a.OpenedAt)))
 }
