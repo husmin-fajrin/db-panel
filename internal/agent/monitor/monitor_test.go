@@ -796,3 +796,48 @@ func TestMonitorRunsPromoteGuardEveryCheck(t *testing.T) {
 		t.Errorf("guard ticks after four checks = %v", got)
 	}
 }
+
+// salvageSource is a fakeSource that also sweeps salvage files
+// (SalvageSweeper), recording the time of each call.
+type salvageSource struct {
+	*fakeSource
+	mu    sync.Mutex
+	calls []time.Time
+}
+
+func (s *salvageSource) SweepSalvage(now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, now)
+	return 0, nil
+}
+
+func (s *salvageSource) sweeps() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
+}
+
+// TestMonitorSweepsSalvageDaily: a source that keeps salvage files is
+// swept at the first check and then once a day, at the monitor's clock.
+func TestMonitorSweepsSalvageDaily(t *testing.T) {
+	src := &salvageSource{fakeSource: &fakeSource{snap: base()}}
+	r := startRig(t, src.fakeSource, src, nil)
+	if n := src.sweeps(); n != 1 {
+		t.Fatalf("salvage sweeps after the first check = %d, want 1", n)
+	}
+	if !src.calls[0].Equal(r.clock.Now()) {
+		t.Errorf("swept at %v, want the monitor's clock %v", src.calls[0], r.clock.Now())
+	}
+	r.tick(SalvageSweepEvery - time.Minute)
+	if n := src.sweeps(); n != 1 {
+		t.Fatalf("salvage sweeps before a day passed = %d, want 1", n)
+	}
+	r.tick(time.Minute)
+	if n := src.sweeps(); n != 2 {
+		t.Errorf("salvage sweeps after a day = %d, want 2", n)
+	}
+	if SalvageSweepEvery != 24*time.Hour {
+		t.Errorf("SalvageSweepEvery = %v, want 24h", SalvageSweepEvery)
+	}
+}

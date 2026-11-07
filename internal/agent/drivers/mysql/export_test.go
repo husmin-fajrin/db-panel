@@ -258,3 +258,21 @@ func SetRepointIOWait(d time.Duration) (restore func()) {
 	repointIOWait = d
 	return func() { repointIOWait = old }
 }
+
+// ScanLeftover runs mysql.leftover's parser over mysqlbinlog output text
+// for the transactions of set.
+func ScanLeftover(set, text string) (proto.LeftoverResult, error) {
+	var res proto.LeftoverResult
+	g, err := parseGTIDSet(set)
+	if err != nil {
+		return res, err
+	}
+	sc := newLeftoverScan(g)
+	for _, l := range strings.Split(text, "\n") {
+		if err := sc.line(l); err != nil {
+			return res, err
+		}
+	}
+	sc.result(&res)
+	return res, nil
+}

@@ -184,3 +184,13 @@ func gtidCount(s string) (int64, error) {
 	}
 	return g.count(), nil
 }
+
+// has reports whether the transaction n of source key is in the set.
+func (g gtidSet) has(key string, n int64) bool {
+	for _, iv := range g[key] {
+		if n >= iv.lo && n <= iv.hi {
+			return true
+		}
+	}
+	return false
+}

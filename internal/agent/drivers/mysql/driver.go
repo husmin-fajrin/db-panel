@@ -45,6 +45,9 @@ type Driver struct {
 	// Now is the driver's clock (the promote lock's time); nil means
 	// time.Now. Tests replace it.
 	Now func() time.Time
+	// SalvageDir holds the salvage files (salvage.go); empty means
+	// DefaultSalvageDir. Tests point it elsewhere.
+	SalvageDir string
 
 	mu sync.RWMutex // guards Host once Register has run
 
@@ -81,6 +84,8 @@ type Driver struct {
 	qUptime   int64
 	qUptimeAt time.Time
 
+	salvageMu sync.Mutex // one salvage file operation at a time
+
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
 	newHost hostFactory
@@ -112,6 +117,9 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerQuarantine(reg)
 	d.registerRepoint(reg)
 	d.registerBinlog(reg)
+	d.registerConnections(reg)
+	d.registerLeftover(reg)
+	d.registerSalvage(reg)
 }
 
 // Pins is the driver's pinned role and source; nil without PinDir. The

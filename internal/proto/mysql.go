@@ -515,3 +515,91 @@ type LockExpiredEvent struct {
 	Candidate string `json:"candidate"` // host:port
 	Reason    string `json:"reason,omitempty"`
 }
+
+// ConnectionsResult is the answer to mysql.connections: the client
+// connections to this server grouped by host (without port), user and
+// default database, most connections first, read at TakenAt. The panel's
+// own accounts (dbpanel_*), replicas reading the binary log and MySQL's
+// own threads are left out.
+type ConnectionsResult struct {
+	Rows    []ConnectionRow `json:"rows"`
+	TakenAt time.Time       `json:"taken_at"`
+}
+
+// ConnectionRow is one group of mysql.connections: Count connections of
+// User from Host with DB as default database ("" for none).
+type ConnectionRow struct {
+	Host  string `json:"host"`
+	User  string `json:"user"`
+	DB    string `json:"db"`
+	Count int    `json:"count"`
+}
+
+// LeftoverParams are the parameters of mysql.leftover, run on a
+// quarantined old master: the new master, whose gtid_executed is
+// subtracted from this server's.
+type LeftoverParams struct {
+	NewMaster PeerCred `json:"new_master"`
+}
+
+// LeftoverResult is the answer to mysql.leftover: the transactions this
+// server executed that the new master lacks (GTIDSet; Transactions 0 when
+// none), the tables they touched with their row counts (row events; a
+// statement counts 0 rows), when the first and last of them were
+// committed, and the binary log files they were read from. Row data never
+// leaves the server here.
+type LeftoverResult struct {
+	GTIDSet      string       `json:"gtid_set"`
+	Transactions int          `json:"transactions"`
+	Tables       []TableTouch `json:"tables,omitempty"`
+	From         *time.Time   `json:"from,omitempty"`
+	To           *time.Time   `json:"to,omitempty"`
+	Binlogs      []string     `json:"binlogs,omitempty"`
+}
+
+// TableTouch is one table a set of transactions changed and how many rows.
+type TableTouch struct {
+	Schema string `json:"schema"`
+	Table  string `json:"table"`
+	Rows   int    `json:"rows"`
+}
+
+// SalvageParams are the parameters of mysql.salvage: the transactions to
+// extract from this server's binary log into a SQL file.
+type SalvageParams struct {
+	GTIDSet string `json:"gtid_set"`
+}
+
+// SalvageFile is one SQL file mysql.salvage wrote; it is removed at
+// ExpiresAt (CreatedAt plus 7 days).
+type SalvageFile struct {
+	Name      string    `json:"name"`
+	Size      int64     `json:"size"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// SalvageListResult is the answer to mysql.salvageList, newest first.
+type SalvageListResult struct {
+	Files []SalvageFile `json:"files"`
+}
+
+// SalvageReadParams are the parameters of mysql.salvageRead: a file of
+// mysql.salvageList and where to read from.
+type SalvageReadParams struct {
+	Name   string `json:"name"`
+	Offset int64  `json:"offset"`
+}
+
+// SalvageReadResult is one chunk of a salvage file (at most 512 KiB,
+// base64 in JSON); EOF is true when it reaches the end of the file.
+type SalvageReadResult struct {
+	Data []byte `json:"data"`
+	EOF  bool   `json:"eof"`
+	Size int64  `json:"size"`
+}
+
+// SalvageDeleteParams are the parameters of mysql.salvageDelete.
+type SalvageDeleteParams struct {
+	Name string `json:"name"`
+}

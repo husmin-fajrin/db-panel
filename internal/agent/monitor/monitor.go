@@ -32,6 +32,13 @@ type DumpSweeper interface {
 	SweepDumpUsers(ctx context.Context, olderThan time.Duration) (dropped int, err error)
 }
 
+// SalvageSweeper is a Source that can also remove the salvage files
+// older than their 7 days (mysql.Driver.SweepSalvage), judged at now. The
+// monitor sweeps every SalvageSweepEvery when its Source is one.
+type SalvageSweeper interface {
+	SweepSalvage(now time.Time) (removed int, err error)
+}
+
 // DumpLockGuard is a Source that can also end the session of a per-job
 // dump account that has held the global read lock (FLUSH TABLES WITH READ
 // LOCK, which stops every write) for maxHold or longer
@@ -81,6 +88,8 @@ const (
 	lockGuardTimeout = 10 * time.Second
 	// recordTimeout bounds one RecordReplicas.
 	recordTimeout = 10 * time.Second
+	// SalvageSweepEvery paces the salvage sweep.
+	SalvageSweepEvery = 24 * time.Hour
 	// promoteGuardTimeout bounds one GuardTick (a 5 s read of the
 	// candidate plus statements on MySQL).
 	promoteGuardTimeout = 30 * time.Second
@@ -136,7 +145,8 @@ type Monitor struct {
 	lastSent time.Time            // when the last fresh report reached the panel
 	buf      ring
 
-	lastSweep time.Time // loop goroutine only
+	lastSweep        time.Time // loop goroutine only
+	lastSalvageSweep time.Time // loop goroutine only
 }
 
 // New returns a Monitor reading src and reporting through em.
@@ -247,8 +257,9 @@ func (m *Monitor) options() Options {
 
 // Run checks at once, then every CheckEvery, until ctx is done. After a
 // check it guards against dump locks, guards the promote lock, records
-// the replicas seen, and sweeps the dump accounts when SweepEvery has
-// passed since the last sweep (the first one at once).
+// the replicas seen, sweeps the dump accounts when SweepEvery has passed
+// since the last sweep and the salvage files when SalvageSweepEvery has
+// (the first sweeps at once).
 func (m *Monitor) Run(ctx context.Context) {
 	for {
 		m.tick(ctx)
@@ -256,6 +267,7 @@ func (m *Monitor) Run(ctx context.Context) {
 		m.guardPromote(ctx)
 		m.recordReplicas(ctx)
 		m.sweep(ctx)
+		m.sweepSalvage(ctx)
 		if !m.pause(ctx) {
 			return
 		}
@@ -282,6 +294,27 @@ func (m *Monitor) sweep(ctx context.Context) {
 		m.logger.Warn("stale dump users not swept", "err", err)
 	case n > 0:
 		m.logger.Info("stale dump users swept", "dropped", n)
+	}
+}
+
+// sweepSalvage removes the expired salvage files when the Source is a
+// SalvageSweeper and a sweep is due; a failed one is tried a day later.
+func (m *Monitor) sweepSalvage(ctx context.Context) {
+	sw, ok := m.src.(SalvageSweeper)
+	if !ok || ctx.Err() != nil {
+		return
+	}
+	now := m.now()
+	if !m.lastSalvageSweep.IsZero() && now.Sub(m.lastSalvageSweep) < SalvageSweepEvery {
+		return
+	}
+	m.lastSalvageSweep = now
+	n, err := sw.SweepSalvage(now)
+	switch {
+	case err != nil:
+		m.logger.Warn("salvage files not swept", "err", err)
+	case n > 0:
+		m.logger.Info("expired salvage files removed", "removed", n)
 	}
 }
 
