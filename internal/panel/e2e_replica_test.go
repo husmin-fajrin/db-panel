@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -946,6 +947,7 @@ func TestE2EPromotePlanned(t *testing.T) {
 	t.Logf("planned promote succeeded: %s from the screen, the job itself %s", time.Since(promoteStart).Round(time.Millisecond),
 		jobTook(job))
 	e.wantPromoted(t, ra, m, rb, 3)
+	e.wantQuarantined(t, m)
 	if prom, err := p.Store.PromotionByOldMaster(m.srv()); err != nil || prom.Mode != proto.PromotePlanned || prom.LockAt == nil {
 		t.Fatalf("promotion record = %+v, %v; want planned with its lock time", prom, err)
 	}
@@ -982,4 +984,202 @@ func TestE2EPromotePlanned(t *testing.T) {
 		waitRow(t, rb.db, "a", 4, "setelah-bangun-ulang")
 	}
 	t.Logf("planned promote flow took %s after the topology was ready", time.Since(start).Round(time.Second))
+}
+
+// TestE2EPromoteEmergency drives an emergency promotion (spec 5.1–5.6)
+// with three real mysqld instances, a real panel and three agents, over
+// the UI: two transactions reach replika-a's relay log but are held
+// unapplied, then master-e2e's mysqld is killed while its agent stays
+// online. The consideration screen reads the master's binlog on disk
+// (exact numbers) and shows the relay backlog; the promotion (token and
+// the old master's typed name) applies the backlog on replika-a before
+// opening writes; replika-b follows the new master. The old master comes
+// back with a write that slipped in before its agent locked it (agent
+// stopped, mysqld restarted, row written, agent started); the agent
+// quarantines it on start; "Periksa data tertinggal" finds that one
+// transaction on a.t; "Amankan" writes a file that downloads over HTTPS
+// with a token and holds the INSERT; the file is deleted with a token; the
+// old master is rebuilt as a replica of the new one.
+func TestE2EPromoteEmergency(t *testing.T) {
+	skipWithoutE2E(t)
+	e := startE2EPromoteTopology(t)
+	p, ui, m, ra, rb := e.p, e.ui, e.master, e.ra, e.rb
+	start := time.Now()
+	ctx := context.Background()
+
+	// Two transactions reach A's relay log (SQL thread stopped a moment),
+	// then a READ lock on a.t holds A's applier back with its threads
+	// running, so A stays a choosable candidate with a backlog of two.
+	execSQL(t, ra.db, "STOP REPLICA SQL_THREAD")
+	execSQL(t, m.db, "INSERT INTO a.t VALUES (2, 'relay-1')", "INSERT INTO a.t VALUES (3, 'relay-2')")
+	var masterGTID string
+	if err := m.db.QueryRow("SELECT @@GLOBAL.gtid_executed").Scan(&masterGTID); err != nil {
+		t.Fatal(err)
+	}
+	waitForWithin(t, e2eWait, "replika-a to receive the two transactions", func() bool {
+		var ok int
+		err := ra.db.QueryRow("SELECT GTID_SUBSET(GTID_SUBTRACT(?, @@GLOBAL.gtid_executed), RECEIVED_TRANSACTION_SET) "+
+			"FROM performance_schema.replication_connection_status", masterGTID).Scan(&ok)
+		return err == nil && ok == 1
+	})
+	waitRow(t, rb.db, "a", 3, "relay-2")
+	lock, err := ra.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if _, err := lock.ExecContext(ctx, "LOCK TABLES a.t READ"); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, ra.db, "START REPLICA SQL_THREAD")
+	countRelayRows := func() int {
+		var n int
+		if err := ra.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id IN (2, 3)").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := countRelayRows(); n != 0 {
+		t.Fatalf("replika-a applied %d of the held transactions before the promote", n)
+	}
+
+	// The master's MySQL crashes; its agent stays online.
+	killMySQL(t, m.inst)
+	waitForWithin(t, e2eWait, "the master's report of MySQL down", func() bool {
+		v, ok := p.Monitor.View(m.srv())
+		return ok && v.Snap != nil && !v.Snap.MySQLOK
+	})
+	if !p.Hub.IsOnline(m.srv()) {
+		t.Fatal("the master's agent went offline with its MySQL")
+	}
+	for _, n := range []*e2eNode{ra, rb} {
+		waitStatus(t, p, n.srv(), healthmon.StatusDisconnected)
+	}
+
+	// The consideration screen: emergency, the binlog read on the
+	// master's disk, exact numbers, A's backlog, the replicas' probes.
+	tgMark := len(e.tg.messages())
+	promoteStart := time.Now()
+	id, page := e.startPromote(t, ra, proto.PromoteEmergency, url.Values{"confirm_name": {m.name}})
+	for _, want := range []string{
+		"Darurat (master tidak terjangkau)",
+		"(dari binlog di disk master)",
+		"Panel membaca binlog terakhir di disk master: semua transaksi di binlog master sudah sampai ke replika paling mutakhir",
+		"sudah menerima semua transaksi di binlog master",
+		"semua diterima, 2 belum diterapkan; akan diterapkan sebelum promote",
+		"Master tidak menjawab dari replika",
+		"Pastikan master benar-benar mati atau tidak lagi dipakai aplikasi",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("emergency promote screen lacks %q:\n%s", want, textOf(page))
+		}
+	}
+	// The promote applies A's relay log before opening writes: it waits
+	// for the held transactions, and the job is still running.
+	const applying = "menerapkan 2 transaksi relay log yang tersisa"
+	waitForWithin(t, 2*time.Minute, "the promote to apply the relay log", func() bool {
+		return strings.Contains(jobLogText(t, p, id), applying)
+	})
+	if j, _, err := p.Store.GetJob(id); err != nil || j.Status != store.JobRunning {
+		t.Fatalf("promote job while the relay log waits = %+v, %v; want running", j, err)
+	}
+	if v := globalVar(t, ra.db, "super_read_only"); v != "ON" {
+		t.Fatalf("replika-a opened writes (super_read_only %s) before applying its relay log", v)
+	}
+	if _, err := lock.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
+		t.Fatal(err)
+	}
+	job := waitJob(t, p, id, e2ePromoteTimeout, nil)
+	if job.Kind != orchestrator.KindPromoteEmergency || job.Status != store.JobSucceeded {
+		t.Fatalf("promote job %s ended %s: %s\n%s", job.Kind, job.Status, job.Error, jobLogText(t, p, id))
+	}
+	t.Logf("emergency promote succeeded: %s from the screen, the job itself %s", time.Since(promoteStart).Round(time.Millisecond),
+		jobTook(job))
+	// The relay log was applied, not dropped.
+	waitRow(t, ra.db, "a", 2, "relay-1")
+	waitRow(t, ra.db, "a", 3, "relay-2")
+	// The old master's agent was online: the quarantine went in at once
+	// (pins only, its MySQL is down).
+	e.wantPromoted(t, ra, m, rb, 4)
+	if prom, err := p.Store.PromotionByOldMaster(m.srv()); err != nil || prom.Mode != proto.PromoteEmergency {
+		t.Fatalf("promotion record = %+v, %v; want emergency", prom, err)
+	}
+	e.wantPromoteMessage(t, tgMark, ra)
+
+	// The old master returns with a write that slipped in before its agent
+	// locked it: agent stopped, mysqld restarted (writable: the quarantine
+	// found it down), a row written, then the agent starts and locks.
+	m.agent.stop(t)
+	restartMySQL(t, m.inst)
+	if v := globalVar(t, m.db, "super_read_only"); v != "OFF" {
+		t.Fatalf("super_read_only on the old master restarted without its agent = %s, want OFF", v)
+	}
+	const secret = "isi-baris-tertinggal"
+	execSQL(t, m.db, "INSERT INTO a.t VALUES (100, '"+secret+"')")
+	m.agent.start(t)
+	e.wantQuarantined(t, m)
+	if n := 0; ra.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id = 100").Scan(&n) != nil || n != 0 {
+		t.Fatal("the old master's late row reached the new master")
+	}
+
+	cut := ui.get(fmt.Sprintf("/masters/%d/cutover", ra.srv()))
+	if !strings.Contains(cut, ra.addr()) {
+		t.Fatalf("cutover screen lacks the new address %s:\n%s", ra.addr(), textOf(cut))
+	}
+	e.confirmCutover(t, ra)
+
+	// Periksa data tertinggal: that one transaction, on a.t, without the
+	// row's content.
+	c, srvPage := e.leftoverCheck(t, m)
+	if c.Transactions != 1 || len(c.Tables) != 1 || c.Tables[0].Schema != "a" || c.Tables[0].Table != "t" ||
+		c.Tables[0].Rows != 1 {
+		t.Fatalf("leftover = %+v; want 1 transaction, 1 row of a.t", c)
+	}
+	if want := "Ada 1 transaksi yang tidak sampai ke master baru, menyentuh a.t (1 baris)"; !strings.Contains(srvPage, want) {
+		t.Fatalf("old master's page lacks %q:\n%s", want, textOf(srvPage))
+	}
+	if strings.Contains(srvPage, secret) {
+		t.Fatal("the old master's page shows the leftover row's content")
+	}
+
+	// Amankan data tertinggal: a salvage file, listed on the page.
+	salvageID := ui.postJob(serverPath(m.srv())+"/salvage", nil)
+	if job := waitJob(t, p, salvageID, e2eWait, nil); job.Status != store.JobSucceeded {
+		t.Fatalf("salvage ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, p, salvageID))
+	}
+	fileRe := regexp.MustCompile(`/servers/` + strconv.FormatInt(m.srv(), 10) + `/salvage/([^/"]+)/delete`)
+	match := fileRe.FindStringSubmatch(ui.get(serverPath(m.srv())))
+	if match == nil {
+		t.Fatalf("no salvage file listed on the old master's page:\n%s", textOf(ui.get(serverPath(m.srv()))))
+	}
+	name := match[1]
+	// Unduh: over HTTPS with a token issued for that file; the body is the
+	// SQL with the INSERT.
+	tok := ui.confirmToken(web.ActSalvageDownload+":"+name, "server", m.srv())
+	body := ui.get(serverPath(m.srv()) + "/salvage/" + name + "?confirm_token=" + url.QueryEscape(tok))
+	if !strings.Contains(body, "INSERT INTO `a`.`t`") || !strings.Contains(body, secret) {
+		t.Fatalf("salvage file %s lacks the INSERT of the late row:\n%s", name, tail(body, 60))
+	}
+	// Hapus with its own token: gone from the agent and the page.
+	tok = ui.confirmToken(web.ActSalvageDelete+":"+name, "server", m.srv())
+	if loc := ui.postRedirect(serverPath(m.srv())+"/salvage/"+name+"/delete", url.Values{"confirm_token": {tok}}); loc !=
+		serverPath(m.srv())+"?pesan=berkas-dihapus" {
+		t.Fatalf("salvage delete redirected to %q", loc)
+	}
+	if strings.Contains(ui.get(serverPath(m.srv())), name) {
+		t.Fatalf("salvage file %s still listed after the delete", name)
+	}
+	if _, err := os.Stat(filepath.Join(m.agent.dir, "salvage", name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("salvage file %s on the agent after the delete: %v", name, err)
+	}
+
+	// Bangun ulang sebagai replika: the late row is gone, A's rows are there.
+	if e.rebuildOldMaster(t, ra, m, 5) {
+		waitRow(t, rb.db, "a", 5, "setelah-bangun-ulang")
+		waitRow(t, m.db, "a", 3, "relay-2")
+		if n := 0; m.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id = 100").Scan(&n) != nil || n != 0 {
+			t.Fatal("the late row survived the rebuild of the old master")
+		}
+	}
+	t.Logf("emergency promote flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }

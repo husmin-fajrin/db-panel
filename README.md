@@ -1322,6 +1322,23 @@ agent dan `mysqld` sungguhan, lalu lewat UI:
 - `TestE2EPinnedRole`: agent master menolak `mysql.dropDatabases` karena
   perannya dipin, dan panel menolak menghapus master yang masih punya
   replika.
+- `TestE2EPromotePlanned`: tiga `mysqld` (master dan dua replika), promote
+  terencana lewat layar pertimbangan dengan token konfirmasi; master baru
+  bisa ditulis, replika lain mengikutinya, master lama `quarantined` dan
+  `super_read_only=ON`; layar pengalihan menampilkan koneksi aplikasi uji
+  ke master lama; **Sudah saya alihkan**; **Periksa data tertinggal**
+  kosong; **Bangun ulang sebagai replika**; pesan Telegram memuat alamat
+  master baru;
+- `TestE2EPromoteEmergency`: dua transaksi tertahan di relay log replika A,
+  `mysqld` master dimatikan paksa (agent-nya tetap hidup): layar
+  pertimbangan membaca binlog di disk master (angka pasti) dan antrean
+  terapan A; promote darurat (token dan nama master) menerapkan relay log
+  dulu; replika B diarahkan ke A. Master lama dihidupkan dengan satu baris
+  yang masuk sebelum agent-nya mengunci; agent mengkarantinanya saat
+  start, **Periksa data tertinggal** menemukan 1 transaksi di `a.t`,
+  **Amankan** menulis berkas yang diunduh lewat HTTPS dengan token dan
+  memuat `INSERT`-nya, berkas dihapus dengan token, lalu master lama
+  dibangun ulang sebagai replika.
 
 Test ini dilewati dengan `-short`.
 

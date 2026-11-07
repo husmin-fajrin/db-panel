@@ -775,7 +775,20 @@ func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eN
 	if loc := e.ui.postRedirect(serverPath(newMaster.srv())+"/mysql/refresh", nil); !strings.HasSuffix(loc, "?pesan=disegarkan") {
 		t.Fatalf("refresh of %s redirected to %q", newMaster.name, loc)
 	}
+	// The old master refuses to become a replica while replicas read its
+	// binlog. After a planned promote the old replicas' dump threads on it
+	// end only at their next heartbeat (nothing is written to a quarantined
+	// server), a moment a user taking the screens at a human pace never
+	// sees; the test waits for them like that user.
 	start := time.Now()
+	waitForWithin(t, 2*time.Minute, "no replica reading the old master's binlog", func() bool {
+		var n int
+		return old.db.QueryRow("SELECT COUNT(*) FROM performance_schema.threads WHERE PROCESSLIST_COMMAND LIKE 'Binlog Dump%'").
+			Scan(&n) == nil && n == 0
+	})
+	if d := time.Since(start); d > time.Second {
+		t.Logf("waited %s for the old replicas' dump threads on %s to end", d.Round(time.Second), old.name)
+	}
 	e.createReplica(t, newMaster, old, true)
 	if srv, err := e.p.Store.GetServer(old.srv()); err != nil || srv.Role != store.RoleReplica {
 		t.Fatalf("old master after the rebuild = %+v, %v; want a replica", srv, err)
@@ -794,9 +807,10 @@ func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eN
 }
 
 // wantPromoted checks the swap after a promotion of newMaster: it is the
-// topology's master at its address, writable and pinned master; old is
-// quarantined (pin, store, monitor status, super_read_only), pinned to
-// follow newMaster, and refuses writes; other follows newMaster.
+// topology's master at its address, writable and pinned master, with old
+// as the topology's old master, quarantined in the panel and pinned
+// quarantined (the old master's MySQL may be down: wantQuarantined checks
+// it); other follows newMaster.
 func (e *e2ePromoteTopology) wantPromoted(t *testing.T, newMaster, old, other *e2eNode, row int) {
 	t.Helper()
 	topo, err := e.p.Store.GetTopologyByMaster(newMaster.srv())
@@ -815,17 +829,12 @@ func (e *e2ePromoteTopology) wantPromoted(t *testing.T, newMaster, old, other *e
 	if role := readPin(t, newMaster.agent.dir, mysql.RoleFile); role != "master" {
 		t.Fatalf("new master's role pin = %q", role)
 	}
-	waitVar(t, old.db, "super_read_only", "ON")
 	if role, src := readPin(t, old.agent.dir, mysql.RoleFile), readPin(t, old.agent.dir, mysql.SourceFile); role != "quarantined" ||
 		src != newMaster.addr() {
 		t.Fatalf("old master's pins = %q, %q; want quarantined, %s", role, src, newMaster.addr())
 	}
 	if srv, err := e.p.Store.GetServer(old.srv()); err != nil || srv.Role != store.RoleQuarantined {
 		t.Fatalf("old master in the panel = %+v, %v; want quarantined", srv, err)
-	}
-	waitStatus(t, e.p, old.srv(), healthmon.StatusQuarantined)
-	if _, err := old.db.Exec("INSERT INTO a.t VALUES (999, 'tidak-boleh')"); err == nil || !strings.Contains(err.Error(), "1290") {
-		t.Fatalf("a write to the quarantined old master = %v, want refused (1290, super-read-only)", err)
 	}
 	// The other replica follows the new master.
 	execSQL(t, newMaster.db, fmt.Sprintf("INSERT INTO a.t VALUES (%d, 'di-master-baru')", row))
@@ -838,6 +847,17 @@ func (e *e2ePromoteTopology) wantPromoted(t *testing.T, newMaster, old, other *e
 	}
 	if _, err := e.p.Store.GetReplicaByServer(newMaster.srv()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("the new master still has a replica row: %v", err)
+	}
+}
+
+// wantQuarantined checks the running old master: super_read_only on, a
+// write refused, and the monitored status of a quarantined old master.
+func (e *e2ePromoteTopology) wantQuarantined(t *testing.T, old *e2eNode) {
+	t.Helper()
+	waitVar(t, old.db, "super_read_only", "ON")
+	waitStatus(t, e.p, old.srv(), healthmon.StatusQuarantined)
+	if _, err := old.db.Exec("INSERT INTO a.t VALUES (999, 'tidak-boleh')"); err == nil || !strings.Contains(err.Error(), "1290") {
+		t.Fatalf("a write to the quarantined old master = %v, want refused (1290, super-read-only)", err)
 	}
 }
 
