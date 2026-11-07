@@ -307,7 +307,10 @@
     window.Alpine.data("confirmModal", () => ({
       text: "",
       name: "",
+      nameLabel: "Ketik nama server",
       typed: "",
+      replicaName: "",
+      typedReplica: "",
       error: "",
       busy: false,
       tombol: null,
@@ -328,16 +331,21 @@
         this.tombol = btn;
         this.text = btn.dataset.confirmText || "";
         this.name = btn.dataset.confirmName || "";
+        this.nameLabel = btn.dataset.confirmNameLabel || "Ketik nama server";
+        this.replicaName = btn.dataset.confirmReplicaName || "";
         this.typed = "";
+        this.typedReplica = "";
+        this.$refs.typedReplica.value = "";
         this.error = "";
         this.busy = false;
         this.$refs.typed.value = "";
         this.$refs.password.value = "";
         this.$root.showModal();
-        (this.name ? this.$refs.typed : this.$refs.password).focus();
+        (this.name ? this.$refs.typed : this.replicaName ? this.$refs.typedReplica : this.$refs.password).focus();
       },
       input() {
         this.typed = this.$refs.typed.value;
+        this.typedReplica = this.$refs.typedReplica.value;
       },
       close() {
         this.$refs.password.value = "";
@@ -346,8 +354,12 @@
       get nameClass() {
         return { hidden: this.name === "" };
       },
+      get replicaNameClass() {
+        return { hidden: this.replicaName === "" };
+      },
       get blocked() {
-        return this.busy || (this.name !== "" && this.typed !== this.name);
+        return this.busy || (this.name !== "" && this.typed !== this.name) ||
+          (this.replicaName !== "" && this.typedReplica !== this.replicaName);
       },
       submit() {
         if (this.blocked || !this.tombol) {
@@ -381,6 +393,9 @@
             if (this.name !== "") {
               isiTersembunyi(form, "confirm_name", this.typed);
             }
+            if (this.replicaName !== "") {
+              isiTersembunyi(form, "confirm_replica_name", this.typedReplica);
+            }
             this.$refs.password.value = "";
             form.submit();
           })
@@ -395,8 +410,10 @@
     // memilih replika menampilkan kotak merahnya (data-promote-box: replika
     // sebagian atau yang tidak menjawab pemeriksaan) dan menyembunyikan
     // kotak replika lain, lalu memindahkan nama yang harus diketik
-    // (data-name) dan kalimat konfirmasi (data-text) radio itu ke tombol
-    // Promote yang membuka dialog konfirmasi.
+    // (data-name: master lama, data-replica-name: replika) dan kalimat
+    // konfirmasi (data-text) radio itu ke tombol Promote yang membuka
+    // dialog konfirmasi. Kotak "tidak terjangkau" replika terpilih
+    // disembunyikan.
     window.Alpine.data("promotePicker", () => ({
       init() {
         const form = this.$el;
@@ -406,9 +423,15 @@
           form.querySelectorAll("[data-promote-box]").forEach((el) => {
             el.classList.toggle("hidden", el.dataset.promoteBox !== id);
           });
+          // Kotak "tidak terjangkau" replika yang sedang dipilih tidak
+          // berlaku: replika itu tidak akan diarahkan ulang.
+          form.querySelectorAll("[data-unreachable]").forEach((el) => {
+            el.classList.toggle("hidden", el.dataset.unreachable === id);
+          });
           const tombol = form.querySelector("[data-confirm-action]");
           if (tombol && pilih) {
             tombol.dataset.confirmName = pilih.dataset.name || "";
+            tombol.dataset.confirmReplicaName = pilih.dataset.replicaName || "";
             tombol.dataset.confirmText = pilih.dataset.text || "";
           }
         };

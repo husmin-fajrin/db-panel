@@ -28,6 +28,7 @@ const (
 
 	msgPromoteView       = "Data pertimbangan promote tidak bisa dikumpulkan: "
 	msgPromotePick       = "Pilih replika yang akan dijadikan master baru."
+	msgPromoteModeGone   = "Formulir promote tidak lengkap; muat ulang halaman ini lalu pilih ulang."
 	msgPromoteModeMoved  = "Status master berubah sejak halaman dibuka: sekarang hanya promote %s yang tersedia. Periksa layar ini lagi lalu pilih ulang."
 	msgPromoteNotPick    = "%s tidak bisa dipilih: %s"
 	msgPromoteBranched   = "Replika bercabang: masing-masing punya transaksi yang tidak dimiliki yang lain. Centang persetujuan bahwa replika lain yang bercabang dibangun ulang dari master baru untuk melanjutkan."
@@ -48,25 +49,38 @@ const (
 
 // promoteChoice is what the user posted.
 type promoteChoice struct {
-	Candidate         int64
-	Mode              string
-	AcceptPartial     int64 // the candidate whose partial coverage was accepted
+	Candidate int64
+	Mode      string
+	// AcceptPartial are the candidates whose partial coverage was
+	// accepted (boxes of other candidates stay posted when hidden).
+	AcceptPartial     []int64
 	AcceptUnreachable []int64
 	AcceptBranched    bool
-	ConfirmName       string
+	// ConfirmName is the typed old master's name, ConfirmReplicaName the
+	// typed candidate's name, both trimmed.
+	ConfirmName        string
+	ConfirmReplicaName string
 }
 
 func parsePromoteChoice(r *http.Request) promoteChoice {
 	c := promoteChoice{Mode: r.PostFormValue("mode"), AcceptBranched: r.PostFormValue("accept_branched") == "1",
-		ConfirmName: strings.TrimSpace(r.PostFormValue("confirm_name"))}
+		ConfirmName:        strings.TrimSpace(r.PostFormValue("confirm_name")),
+		ConfirmReplicaName: strings.TrimSpace(r.PostFormValue("confirm_replica_name"))}
 	c.Candidate, _ = strconv.ParseInt(r.PostFormValue("candidate"), 10, 64)
-	c.AcceptPartial, _ = strconv.ParseInt(r.PostFormValue("accept_partial"), 10, 64)
-	for _, s := range r.PostForm["accept_unreachable"] {
-		if id, err := strconv.ParseInt(s, 10, 64); err == nil && !slices.Contains(c.AcceptUnreachable, id) {
-			c.AcceptUnreachable = append(c.AcceptUnreachable, id)
+	c.AcceptPartial = formIDs(r, "accept_partial")
+	c.AcceptUnreachable = formIDs(r, "accept_unreachable")
+	return c
+}
+
+// formIDs are the distinct ids posted under name, in order.
+func formIDs(r *http.Request, name string) []int64 {
+	var ids []int64
+	for _, s := range r.PostForm[name] {
+		if id, err := strconv.ParseInt(s, 10, 64); err == nil && !slices.Contains(ids, id) {
+			ids = append(ids, id)
 		}
 	}
-	return c
+	return ids
 }
 
 // promoteRow is one replica of the candidate table.
@@ -77,9 +91,11 @@ type promoteRow struct {
 	Selectable    bool
 	NotSelectable string
 	Unreachable   bool
-	// NameToType is the name the confirmation asks for when this replica
-	// is chosen ("" for none); ConfirmText the confirmation's sentence.
-	NameToType  string
+	// MasterName / ReplicaName are the names the confirmation asks to type
+	// when this replica is chosen ("" for none); ConfirmText the
+	// confirmation's sentence.
+	MasterName  string
+	ReplicaName string
 	ConfirmText string
 	Checked     bool
 	// AcceptPartial / AcceptUnreachable: the boxes as posted.
@@ -110,10 +126,11 @@ type promotePage struct {
 	Blocked, BlockedJob string
 	Local               bool
 	AcceptBranched      bool
-	// Selected is the checked candidate (0: none); its NameToType and
+	// Selected is the checked candidate (0: none); its names and
 	// ConfirmText are the button's until the user picks another.
 	Selected            int64
-	SelectedName        string
+	SelectedMasterName  string
+	SelectedReplicaName string
 	SelectedConfirmText string
 }
 
@@ -185,7 +202,10 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 // the orchestrator's parameters, or why the choice is refused.
 func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrator.PromoteParams, string) {
 	params := orchestrator.PromoteParams{MasterServerID: v.Master.ID, CandidateServerID: choice.Candidate, Mode: v.Mode}
-	if choice.Mode != "" && choice.Mode != v.Mode {
+	if choice.Mode == "" {
+		return params, msgPromoteModeGone
+	}
+	if choice.Mode != v.Mode {
 		return params, fmt.Sprintf(msgPromoteModeMoved, modeWord(v.Mode))
 	}
 	i := slices.IndexFunc(v.Candidates, func(c orchestrator.Candidate) bool { return c.ServerID == choice.Candidate })
@@ -208,7 +228,7 @@ func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrato
 		params.AcceptBranched = true
 	}
 	if cand.Partial {
-		if choice.AcceptPartial != cand.ServerID {
+		if !slices.Contains(choice.AcceptPartial, cand.ServerID) {
 			return params, fmt.Sprintf(msgPromotePartial, cand.Name, missingText(cand))
 		}
 		params.AcceptPartial = true
@@ -227,10 +247,10 @@ func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrato
 	if len(missing) > 0 {
 		return params, fmt.Sprintf(msgPromoteReach, strings.Join(missing, ", "))
 	}
-	if want := nameToType(v, cand); want != "" && choice.ConfirmName != want {
-		if v.Mode == proto.PromoteEmergency {
-			return params, fmt.Sprintf(msgPromoteTypeMaster, want)
-		}
+	if want := masterNameToType(v); want != "" && choice.ConfirmName != want {
+		return params, fmt.Sprintf(msgPromoteTypeMaster, want)
+	}
+	if want := replicaNameToType(v, cand); want != "" && choice.ConfirmReplicaName != want {
 		return params, fmt.Sprintf(msgPromoteTypeRep, want)
 	}
 	return params, ""
@@ -243,14 +263,20 @@ func unreachable(c orchestrator.Candidate) bool {
 	return c.Reason == reasonAgentOffline || c.ProbeErr != ""
 }
 
-// nameToType is the name the confirmation asks for when cand is chosen:
-// the old master's in an emergency, else the replica's when it is partial
-// or the replicas are branched; "" when none.
-func nameToType(v orchestrator.PromoteView, cand orchestrator.Candidate) string {
-	switch {
-	case v.Mode == proto.PromoteEmergency:
+// masterNameToType is the old master's name, which an emergency promote
+// asks to type (confirm_name); "" for a planned one.
+func masterNameToType(v orchestrator.PromoteView) string {
+	if v.Mode == proto.PromoteEmergency {
 		return v.Master.Name
-	case cand.Partial, v.Branched:
+	}
+	return ""
+}
+
+// replicaNameToType is the candidate's name, which the confirmation asks
+// to type (confirm_replica_name) when it is partial or the replicas are
+// branched; "" otherwise. In an emergency both names are typed (spec 5.2).
+func replicaNameToType(v orchestrator.PromoteView, cand orchestrator.Candidate) string {
+	if cand.Partial || v.Branched {
 		return cand.Name
 	}
 	return ""
@@ -258,9 +284,10 @@ func nameToType(v orchestrator.PromoteView, cand orchestrator.Candidate) string 
 
 func confirmText(v orchestrator.PromoteView, cand orchestrator.Candidate) string {
 	s := fmt.Sprintf("Promote %s %s menjadi master baru menggantikan %s.", modeWord(v.Mode), cand.Name, v.Master.Name)
-	switch {
-	case v.Mode == proto.PromoteEmergency:
+	if v.Mode == proto.PromoteEmergency {
 		s += " Ketik nama master lama untuk menyatakan bahwa master itu memang sudah tidak dipakai aplikasi."
+	}
+	switch {
 	case cand.Partial:
 		s += " Ketik nama replika: database yang tidak diikutinya tidak akan ada di master baru."
 	case v.Branched:
@@ -303,7 +330,7 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 	writable := ""
 	for _, c := range v.Candidates {
 		row := promoteRow{Candidate: c, Lag: "-", Freshness: "belum ada laporan", Unreachable: unreachable(c),
-			NameToType: nameToType(v, c), ConfirmText: confirmText(v, c)}
+			MasterName: masterNameToType(v), ReplicaName: replicaNameToType(v, c), ConfirmText: confirmText(v, c)}
 		if c.LagSec != nil {
 			row.Lag = fmt.Sprintf("%d detik", *c.LagSec)
 		}
@@ -323,7 +350,7 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 			row.Selectable = true
 		}
 		if choice != nil {
-			row.AcceptPartial = choice.AcceptPartial == c.ServerID
+			row.AcceptPartial = slices.Contains(choice.AcceptPartial, c.ServerID)
 			row.AcceptUnreachable = slices.Contains(choice.AcceptUnreachable, c.ServerID)
 		}
 		if p.Emergency && c.ProbeOK != nil {
@@ -350,7 +377,7 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		row := &p.Rows[i]
 		row.Checked = row.ServerID == p.Selected
 		if row.Checked {
-			p.SelectedName, p.SelectedConfirmText = row.NameToType, row.ConfirmText
+			p.SelectedMasterName, p.SelectedReplicaName, p.SelectedConfirmText = row.MasterName, row.ReplicaName, row.ConfirmText
 		}
 		if row.Unreachable {
 			p.Unreachable = append(p.Unreachable, *row)
@@ -376,8 +403,9 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 }
 
 // defaultCandidate is the choice the screen starts with: the most current
-// complete replica, else the complete one closest to the master; none
-// when the replicas are branched or none is complete (the user decides).
+// complete replica, else the complete one closest to the master; never
+// one that did not answer (Unreachable); none when the replicas are
+// branched or no such replica exists (the user decides).
 func defaultCandidate(v orchestrator.PromoteView, rows []promoteRow) int64 {
 	if v.Branched {
 		return 0
@@ -385,7 +413,7 @@ func defaultCandidate(v orchestrator.PromoteView, rows []promoteRow) int64 {
 	var best *promoteRow
 	for i := range rows {
 		row := &rows[i]
-		if !row.Selectable || row.Partial {
+		if !row.Selectable || row.Partial || row.Unreachable {
 			continue
 		}
 		if best == nil || (row.MostCurrent && !best.MostCurrent) ||

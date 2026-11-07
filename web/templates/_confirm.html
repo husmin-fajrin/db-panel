@@ -2,14 +2,20 @@
 {{/* Konfirmasi kata sandi untuk tombol destruktif (spec 5.7). Tombol
      dengan data-confirm-action membukanya; komponen confirmModal di
      app.js meminta token ke POST /confirm lalu mengirim formulir tombol
-     itu dengan confirm_token (dan confirm_name). */}}
+     itu dengan confirm_token (dan confirm_name). Tombol promote juga bisa
+     meminta nama replika (data-confirm-replica-name -> confirm_replica_name)
+     dan mengganti label nama pertama (data-confirm-name-label). */}}
 <dialog id="modal-konfirmasi" class="modal" x-data="confirmModal">
   <form class="modal-box flex flex-col gap-2" @submit.prevent="submit">
     <h3 class="text-lg font-bold">Konfirmasi dengan kata sandi</h3>
     <p x-text="text"></p>
     <label class="flex flex-col gap-1 hidden" :class="nameClass">
-      <span>Ketik nama server <strong x-text="name"></strong> untuk melanjutkan:</span>
+      <span><span x-text="nameLabel">Ketik nama server</span> <strong x-text="name"></strong> untuk melanjutkan:</span>
       <input class="input input-sm w-full" type="text" x-ref="typed" @input="input" autocomplete="off">
+    </label>
+    <label class="flex flex-col gap-1 hidden" :class="replicaNameClass">
+      <span>Ketik nama replika <strong x-text="replicaName"></strong> untuk melanjutkan:</span>
+      <input class="input input-sm w-full" type="text" x-ref="typedReplica" @input="input" autocomplete="off">
     </label>
     <label class="flex flex-col gap-1">
       <span>Kata sandi panel Anda:</span>

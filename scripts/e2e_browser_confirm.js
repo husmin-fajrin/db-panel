@@ -63,7 +63,8 @@ async function main() {
     const confirm = page.locator("#modal-konfirmasi");
     await confirm.waitFor({ state: "visible" });
     const ok = confirm.getByRole("button", { name: "Konfirmasi" });
-    await confirm.locator('input[type="text"]').fill(name);
+    // The dialog has a second name field (promote's replica name), hidden here.
+    await confirm.locator('input[x-ref="typed"]').fill(name);
     await confirm.locator('input[type="password"]').fill(password + "-salah");
     await ok.click();
     await confirm.locator("p.text-error").filter({ hasText: /\S/ }).waitFor();
