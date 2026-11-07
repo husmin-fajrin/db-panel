@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -139,16 +141,19 @@ func TestLeftoverAndSalvageButtons(t *testing.T) {
 	f.salvageFiles = []proto.SalvageFile{{Name: salvageName, Size: 4096, CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(6*24*time.Hour + time.Hour)}}
 	rec = e.do("GET", "/servers/1", nil, c)
-	wantBody(t, rec, salvageName, `action="/servers/1/salvage/`+salvageName+`"`, `data-confirm-action="salvage_download"`,
-		`action="/servers/1/salvage/`+salvageName+`/delete"`, `data-confirm-action="salvage_delete"`, "6 hari")
+	wantBody(t, rec, salvageName, `action="/servers/1/salvage/`+salvageName+`"`, `data-confirm-action="salvage_download:`+salvageName+`"`,
+		`action="/servers/1/salvage/`+salvageName+`/delete"`, `data-confirm-action="salvage_delete:`+salvageName+`"`, "6 hari")
 
 	// Delete needs the token; with it the file goes.
 	wantCode(t, e.do("POST", "/servers/1/salvage/"+salvageName+"/delete", noForm, c), http.StatusForbidden)
-	form := withToken(t, e, noForm, web.ActSalvageDelete, "server", 1)
+	form := withToken(t, e, noForm, salvageAct(web.ActSalvageDelete, salvageName), "server", 1)
 	rec = e.do("POST", "/servers/1/salvage/"+salvageName+"/delete", form, c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantCalls(t, f, "leftover 1", "salvage 1", "leftover 1", "salvage-delete 1 "+salvageName)
 }
+
+// salvageAct is the confirmation action of act for salvage file name.
+func salvageAct(act, name string) string { return act + ":" + name }
 
 func downloadURL(name, token string) string {
 	u := "/servers/1/salvage/" + name
@@ -170,17 +175,17 @@ func TestSalvageDownloadStreamsWithToken(t *testing.T) {
 		t.Fatalf("%d reads without a token", f.reads)
 	}
 
-	// A bad name is refused before the agent.
+	// A bad name is refused before the token and the agent (no token can
+	// be issued for it).
 	for _, name := range []string{"..sql", "a%2F..%2Fb.sql", "20261105T094500Z-1.sh"} {
-		tok := confirmToken(t, e, web.ActSalvageDownload, "server", 1)
-		rec := e.do("GET", downloadURL(name, tok), nil, c)
+		rec := e.do("GET", downloadURL(name, "x"), nil, c)
 		wantCode(t, rec, http.StatusBadRequest)
 	}
 	if f.reads != 0 {
 		t.Fatalf("%d reads for bad names", f.reads)
 	}
 
-	tok := confirmToken(t, e, web.ActSalvageDownload, "server", 1)
+	tok := confirmToken(t, e, salvageAct(web.ActSalvageDownload, salvageName), "server", 1)
 	rec = e.do("GET", downloadURL(salvageName, tok), nil, c)
 	wantCode(t, rec, http.StatusOK)
 	want := string(bytes.Join(f.chunks, nil))
@@ -230,7 +235,7 @@ func TestSalvageDownloadStopsWhenClientGone(t *testing.T) {
 			cancel() // the browser went away after the first chunk
 		}
 	}
-	tok := confirmToken(t, e, web.ActSalvageDownload, "server", 1)
+	tok := confirmToken(t, e, salvageAct(web.ActSalvageDownload, salvageName), "server", 1)
 	req := httptest.NewRequest("GET", downloadURL(salvageName, tok), nil).WithContext(ctx)
 	req.AddCookie(e.cookie())
 	rec := httptest.NewRecorder()
@@ -414,4 +419,144 @@ func TestReplicaNeedsRepointButtons(t *testing.T) {
 	wantBody(t, rec, "Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru",
 		`action="/replicas/3/resync/prepare"`, "Resync ulang")
 	wantNoBody(t, rec, `action="/replicas/3/repoint"`)
+}
+
+// Deleting an old master after the cutover warns, in the modal and in the
+// confirmation, about what the panel can no longer reach once the server
+// is gone: a leftover check never run, transactions found, salvage files.
+func TestDeleteOldMasterWarnsOnLeftover(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	const confirm = `data-confirm-text="Hapus server db-master dari panel. `
+
+	// Never checked.
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `data-open-modal="modal-hapus"`, "Perhatikan sebelum menghapus",
+		"<li>Data tertinggal di db-master belum diperiksa", confirm+"Data tertinggal di db-master belum diperiksa")
+
+	// Nothing left over and no files: no warning.
+	setLeftover(t, e, topo, proto.LeftoverResult{})
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, `data-confirm-text="Hapus server db-master dari panel.">`)
+	wantNoBody(t, rec, "Perhatikan sebelum menghapus", "belum diperiksa:")
+
+	// Three transactions found and two salvage files never downloaded.
+	setLeftover(t, e, topo, threeLeftover())
+	exp := time.Now().Add(6 * 24 * time.Hour)
+	f.salvageFiles = []proto.SalvageFile{{Name: salvageName, Size: 10, CreatedAt: time.Now(), ExpiresAt: exp},
+		{Name: "20261105T100000Z-2.sql", Size: 10, CreatedAt: time.Now(), ExpiresAt: exp}}
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, "<li>Pemeriksaan terakhir menemukan 3 transaksi di db-master",
+		confirm+"Pemeriksaan terakhir menemukan 3 transaksi di db-master",
+		"Ada 2 berkas data tertinggal di db-master yang tidak bisa diunduh lewat panel lagi")
+
+	// The salvage list cannot be read: said too.
+	f.salvageFiles = nil
+	f.err = errors.New("agent gagal")
+	rec = e.do("GET", "/servers/1", nil, c)
+	f.err = nil
+	wantBody(t, rec, "Daftar berkas data tertinggal di db-master tidak bisa dibaca sekarang")
+}
+
+// A salvage token is issued for one file: it does not open another one,
+// and /confirm issues none for an invalid name or without a name.
+func TestSalvageTokenBoundToFile(t *testing.T) {
+	e, f, _ := promotedEnv(t)
+	c := e.cookie()
+	f.chunks = [][]byte{[]byte("-- isi\n")}
+	const other = "20261105T100000Z-2.sql"
+
+	tok := confirmToken(t, e, salvageAct(web.ActSalvageDownload, salvageName), "server", 1)
+	wantCode(t, e.do("GET", downloadURL(other, tok), nil, c), http.StatusForbidden)
+	form := withToken(t, e, noForm, salvageAct(web.ActSalvageDelete, salvageName), "server", 1)
+	wantCode(t, e.do("POST", "/servers/1/salvage/"+other+"/delete", form, c), http.StatusForbidden)
+	// A download token does not delete, even the same file.
+	form = withToken(t, e, noForm, salvageAct(web.ActSalvageDownload, salvageName), "server", 1)
+	wantCode(t, e.do("POST", "/servers/1/salvage/"+salvageName+"/delete", form, c), http.StatusForbidden)
+	wantCalls(t, f)
+	if f.reads != 0 {
+		t.Fatalf("%d reads with a token for another file", f.reads)
+	}
+
+	for _, action := range []string{web.ActSalvageDownload, web.ActSalvageDelete,
+		web.ActSalvageDownload + ":", web.ActSalvageDownload + ":../etc/passwd", web.ActSalvageDelete + ":x.sql",
+		web.ActSalvageDownload + ":" + salvageName + "/..", web.ActResync + ":" + salvageName} {
+		if code, _ := e.postConfirm(action, "server", 1, testPassword, c); code != http.StatusBadRequest {
+			t.Errorf("POST /confirm %q: status %d, want 400", action, code)
+		}
+	}
+	// The other actions are unchanged.
+	confirmToken(t, e, web.ActDeleteServer, "server", 1)
+}
+
+// An agent's error text (paths, mysqlbinlog output) never reaches the
+// page or the audit; it is in the panel's log.
+func TestSalvageAgentErrorTextNotShown(t *testing.T) {
+	logs := &syncBuffer{}
+	e, f, _ := promotedEnv(t, func(d *web.Deps) {
+		d.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	})
+	c := e.cookie()
+	const secret = "/var/lib/mysql/binlog.000007"
+	agentErr := errors.New("mysqlbinlog: " + secret + ": Permission denied")
+
+	f.setConnErr(1, agentErr)
+	rec := e.do("GET", "/masters/2/cutover", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Koneksi tidak bisa dibaca; rinciannya ada di log panel.")
+	wantNoBody(t, rec, secret)
+
+	f.err = agentErr
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, "Daftar berkas data tertinggal tidak bisa dibaca; rinciannya ada di log panel.")
+	wantNoBody(t, rec, secret)
+
+	tok := confirmToken(t, e, salvageAct(web.ActSalvageDownload, salvageName), "server", 1)
+	rec = e.do("GET", downloadURL(salvageName, tok), nil, c)
+	wantCode(t, rec, http.StatusBadGateway)
+	wantBody(t, rec, "Berkas data tertinggal tidak bisa dibaca; rinciannya ada di log panel.")
+	wantNoBody(t, rec, secret)
+
+	form := withToken(t, e, noForm, salvageAct(web.ActSalvageDelete, salvageName), "server", 1)
+	rec = e.do("POST", "/servers/1/salvage/"+salvageName+"/delete", form, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Berkas data tertinggal tidak bisa dihapus; rinciannya ada di log panel.")
+	wantNoBody(t, rec, secret)
+
+	// A download that fails after its first chunk.
+	f.err = nil
+	f.chunks = [][]byte{[]byte("-- satu\n"), []byte("-- dua\n")}
+	f.onRead = func(offset int64) {
+		if offset > 0 {
+			f.mu.Lock()
+			f.err = agentErr
+			f.mu.Unlock()
+		}
+	}
+	tok = confirmToken(t, e, salvageAct(web.ActSalvageDownload, salvageName), "server", 1)
+	e.do("GET", downloadURL(salvageName, tok), nil, c)
+
+	entries, err := e.st.ListAudit(0, time.Time{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, a := range entries {
+		if strings.Contains(a.Outcome, secret) || strings.Contains(a.DetailJSON, secret) {
+			t.Errorf("agent text in the audit: %+v", a)
+		}
+		if a.Action == "salvage_download" || a.Action == "salvage_delete" {
+			n++
+		}
+	}
+	if n != 3 {
+		t.Fatalf("%d salvage audit entries, want 3", n)
+	}
+	if !strings.Contains(logs.String(), secret) {
+		t.Fatal("the agent's text is not in the panel's log")
+	}
 }

@@ -237,9 +237,19 @@ func (r *Runner) oldAgentErr(serverID int64, err error) error {
 	if r.d.Alerts != nil {
 		r.d.Alerts.AgentNeedsUpgrade(serverID)
 	}
-	return stepError(fmt.Sprintf("Agent di %s versi lama dan belum mengenal perintah ini. "+
-		"Klik Pasang ulang agent di halaman server itu, jalankan perintahnya, lalu ulangi.", r.nameOf(serverID)))
+	return outdatedAgentError{stepError(fmt.Sprintf("Agent di %s versi lama dan belum mengenal perintah ini. "+
+		"Klik Pasang ulang agent di halaman server itu, jalankan perintahnya, lalu ulangi.", r.nameOf(serverID)))}
 }
+
+// ErrAgentOutdated matches oldAgentErr's error: its text is the panel's
+// own sentence (no agent output), so the web layer may show it.
+var ErrAgentOutdated = errors.New("agent versi lama")
+
+// outdatedAgentError unwraps to a stepError, so a job shows it as it is.
+type outdatedAgentError struct{ stepError }
+
+func (e outdatedAgentError) Unwrap() error        { return e.stepError }
+func (e outdatedAgentError) Is(target error) bool { return target == ErrAgentOutdated }
 
 // directRead runs a short read-only agent command outside a job; an
 // offline agent answers proto.ErrOffline.

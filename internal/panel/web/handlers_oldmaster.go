@@ -26,7 +26,7 @@ const (
 	msgNewUnreachable = "Master baru tidak terjangkau, tidak bisa membaca koneksinya"
 	msgOldNoConns     = "Tidak ada koneksi aplikasi tersisa"
 	msgNewNoConns     = "Belum ada koneksi aplikasi ke master baru"
-	msgConnsFailed    = "Koneksi tidak bisa dibaca: "
+	msgConnsFailed    = "Koneksi tidak bisa dibaca; rinciannya ada di log panel."
 	msgNotOldMaster   = "Server ini bukan master lama yang dikarantina."
 
 	// msgRebuildCutover is spec 5.4's reason the rebuild waits.
@@ -38,8 +38,11 @@ const (
 
 	msgSalvageName    = "Nama berkas data tertinggal tidak valid."
 	msgSalvageOffline = "Agent server ini offline; berkas data tertinggal tidak bisa dibaca sekarang."
-	msgSalvageRead    = "Berkas data tertinggal tidak bisa dibaca: "
-	msgSalvageList    = "Daftar berkas data tertinggal tidak bisa dibaca: "
+	// Failed agent calls are worded by the panel: the agent's own text
+	// (file paths, mysqlbinlog output) goes to the panel's log only.
+	msgSalvageRead     = "Berkas data tertinggal tidak bisa dibaca; rinciannya ada di log panel."
+	msgSalvageList     = "Daftar berkas data tertinggal tidak bisa dibaca; rinciannya ada di log panel."
+	msgSalvageDeleteKO = "Berkas data tertinggal tidak bisa dihapus; rinciannya ada di log panel."
 
 	// pageCallTimeout bounds an agent call made while rendering a page.
 	pageCallTimeout = 5 * time.Second
@@ -91,7 +94,7 @@ func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsVi
 		v.Unreadable = unreachable
 	case err != nil:
 		a.Logger.Warn("read connections", "server", srv.ID, "err", err)
-		v.Unreadable = msgConnsFailed + err.Error()
+		v.Unreadable = agentFailure(err, msgConnsFailed)
 	}
 	if err != nil {
 		return v
@@ -282,7 +285,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		cancel()
 		if err != nil {
 			a.Logger.Warn("list salvage files", "server", srv.ID, "err", err)
-			sf.Unreadable = msgSalvageList + err.Error()
+			sf.Unreadable = agentFailure(err, msgSalvageList)
 		}
 		now := a.Now()
 		for _, f := range files {
@@ -297,6 +300,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		if len(p.Salvage.Files) == 0 {
 			p.Salvage = nil
 		}
+		p.DeleteWarnings = deleteWarnings(srv, nil, p.Salvage)
 		return nil
 	}
 	box := &oldMasterBox{Promotion: prom, Planned: prom.Mode == proto.PromotePlanned, Online: p.Online,
@@ -317,6 +321,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		box.LeftoverSummary = orchestrator.LeftoverSummary(c.LeftoverResult)
 	}
 	p.OldMaster = box
+	p.DeleteWarnings = deleteWarnings(srv, box, p.Salvage)
 	switch {
 	case box.CutoverPending:
 		p.DeleteBlocked = msgDeleteCutover
@@ -324,6 +329,54 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		p.DeleteUnquarantined = true
 	}
 	return nil
+}
+
+// deleteWarnings words what deleting srv from the panel loses: its agent
+// lifts the read-only guard, the panel can no longer check or salvage the
+// old master's leftover data, and its salvage files can no longer be
+// downloaded (the agent removes them after 7 days). box is nil for a
+// server that is no longer a quarantined old master; sf for one without
+// salvage files.
+func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []string {
+	var out []string
+	if box != nil {
+		switch {
+		case box.Leftover == nil:
+			out = append(out, fmt.Sprintf("Data tertinggal di %s belum diperiksa: setelah server ini dihapus dari panel, "+
+				"transaksi yang tidak sampai ke master baru tidak bisa diperiksa atau diamankan lagi lewat panel.", srv.Name))
+		case box.Leftover.Transactions > 0:
+			out = append(out, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi di %s yang tidak sampai ke master baru; "+
+				"setelah server ini dihapus dari panel, data itu tidak bisa diamankan lagi lewat panel.",
+				box.Leftover.Transactions, srv.Name))
+		}
+	}
+	if sf == nil {
+		return out
+	}
+	switch {
+	case len(sf.Files) > 0:
+		out = append(out, fmt.Sprintf("Ada %d berkas data tertinggal di %s yang tidak bisa diunduh lewat panel lagi setelah "+
+			"server ini dihapus (agent menghapusnya sendiri setelah 7 hari); unduh dulu bila masih diperlukan.",
+			len(sf.Files), srv.Name))
+	case sf.Unreadable != "" && box != nil:
+		out = append(out, fmt.Sprintf("Daftar berkas data tertinggal di %s tidak bisa dibaca sekarang; bila ada berkas, "+
+			"berkas itu tidak bisa diunduh lewat panel lagi setelah server ini dihapus.", srv.Name))
+	}
+	return out
+}
+
+// agentFailure is what the page and the audit say about a failed agent
+// call: the panel's own sentences (offline, an agent too old, a busy
+// server) as they are, else the fixed generic. The error itself, which may
+// carry the agent's text, is for the panel's log only.
+func agentFailure(err error, generic string) string {
+	switch {
+	case errors.Is(err, proto.ErrOffline):
+		return msgSalvageOffline
+	case errors.Is(err, orchestrator.ErrAgentOutdated), errors.Is(err, orchestrator.ErrBusy):
+		return err.Error()
+	}
+	return generic
 }
 
 // oldMasterFromPath loads {id} and refuses (400 on its page) a server
@@ -374,11 +427,12 @@ func (a *app) startOldMasterJob(w http.ResponseWriter, r *http.Request, action s
 
 // salvageDownload streams a salvage file to the browser a chunk at a time
 // (nothing is kept on the panel), behind a confirmation token in the
-// query. The name is checked against the agent's pattern before anything
-// is sent to the agent; the transfer stops when the browser goes away.
+// query issued for that file (spec 5.4). The name is checked against the
+// agent's pattern before anything is sent to the agent; the transfer
+// stops when the browser goes away.
 func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
-	if !ok || !a.requireConfirmToken(w, r, r.URL.Query().Get("confirm_token"), ActSalvageDownload, auditServer, srv.ID) {
+	if !ok {
 		return
 	}
 	name := r.PathValue("name")
@@ -387,15 +441,16 @@ func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msgSalvageName, http.StatusBadRequest)
 		return
 	}
+	if !a.requireConfirmToken(w, r, r.URL.Query().Get("confirm_token"), salvageAction(ActSalvageDownload, name),
+		auditServer, srv.ID) {
+		return
+	}
 	detail := map[string]any{auditSalvageFile: name}
 	ctx := r.Context()
 	chunk, err := a.Orchestrator.SalvageRead(ctx, srv.ID, name, 0)
 	if err != nil {
-		a.audit(r, "salvage_download", auditServer, srv.ID, detail, outcomeOf(err))
-		msg := msgSalvageRead + err.Error()
-		if errors.Is(err, proto.ErrOffline) {
-			msg = msgSalvageOffline
-		}
+		msg := agentFailure(err, msgSalvageRead)
+		a.audit(r, "salvage_download", auditServer, srv.ID, detail, msg)
 		a.Logger.Warn("salvage download failed", "server", srv.ID, "file", name, "err", err)
 		a.showError(w, r, srv, http.StatusBadGateway, msg)
 		return
@@ -434,10 +489,11 @@ func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if chunk, err = a.Orchestrator.SalvageRead(ctx, srv.ID, name, sent); err != nil {
-			outcome = msgSalvageRead + err.Error()
+			outcome = agentFailure(err, msgSalvageRead)
 			if ctx.Err() != nil {
 				outcome = outcomeDownloadGone
 			}
+			a.Logger.Warn("salvage download interrupted", "server", srv.ID, "file", name, "sent", sent, "err", err)
 			break
 		}
 	}
@@ -447,11 +503,11 @@ func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
 		"by", a.page(r).Username)
 }
 
-// salvageDelete deletes a salvage file (token: it may be the only copy of
-// the leftover data).
+// salvageDelete deletes a salvage file (token for that file: it may be the
+// only copy of the leftover data).
 func (a *app) salvageDelete(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
-	if !ok || !a.requireConfirm(w, r, ActSalvageDelete, auditServer, srv.ID) {
+	if !ok {
 		return
 	}
 	name := r.PathValue("name")
@@ -460,13 +516,16 @@ func (a *app) salvageDelete(w http.ResponseWriter, r *http.Request) {
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msgSalvageName})
 		return
 	}
+	if !a.requireConfirm(w, r, salvageAction(ActSalvageDelete, name), auditServer, srv.ID) {
+		return
+	}
 	err := a.Orchestrator.SalvageDelete(r.Context(), srv.ID, name)
-	a.audit(r, "salvage_delete", auditServer, srv.ID, map[string]any{auditSalvageFile: name}, outcomeOf(err))
+	msg := auditOK
 	if err != nil {
-		msg := err.Error()
-		if errors.Is(err, proto.ErrOffline) {
-			msg = msgSalvageOffline
-		}
+		msg = agentFailure(err, msgSalvageDeleteKO)
+	}
+	a.audit(r, "salvage_delete", auditServer, srv.ID, map[string]any{auditSalvageFile: name}, msg)
+	if err != nil {
 		a.Logger.Warn("salvage delete failed", "server", srv.ID, "file", name, "err", err)
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msg})
 		return

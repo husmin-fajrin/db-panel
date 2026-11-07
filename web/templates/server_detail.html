@@ -161,9 +161,15 @@
     <h3 class="text-lg font-bold">Hapus server {{.Server.Name}}?</h3>
     <p>Server akan dihapus dari panel, koneksi agent-nya langsung diputus, dan sertifikatnya tidak diterima lagi. Panel menolak menghapus master yang masih punya replika dan replika yang belum dilepas. Service <code>dbpanel-agent</code> di server itu tetap terpasang dan terus mencoba terhubung sampai dimatikan (<code>sudo systemctl disable --now dbpanel-agent</code>). Data di server itu sendiri tidak disentuh. Untuk memakainya lagi, tambahkan ulang server ini dan jalankan perintah pemasangan yang baru.</p>
     {{end}}
+    {{with .DeleteWarnings}}
+    <div role="alert" class="alert alert-warning flex flex-col items-start gap-2">
+      <span>Perhatikan sebelum menghapus:</span>
+      <ul class="list-disc ml-6">{{range .}}<li>{{.}}</li>{{end}}</ul>
+    </div>
+    {{end}}
     <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" data-confirm-action="delete_server" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="{{if .DeleteUnquarantined}}Hapus {{.Server.Name}} tanpa karantina: server ini tidak pernah dikarantina dan tidak boleh dihidupkan lagi.{{else}}Hapus server {{.Server.Name}} dari panel.{{end}}">Ya, hapus</button>
+      <button type="submit" class="btn btn-error" data-confirm-action="delete_server" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="{{if .DeleteUnquarantined}}Hapus {{.Server.Name}} tanpa karantina: server ini tidak pernah dikarantina dan tidak boleh dihidupkan lagi.{{else}}Hapus server {{.Server.Name}} dari panel.{{end}}{{range .DeleteWarnings}} {{.}}{{end}}">Ya, hapus</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
   </form>
@@ -354,10 +360,10 @@
             <td>{{.DaysLeft}}</td>
             <td class="flex flex-wrap gap-2">
               <form method="get" action="/servers/{{$s.ID}}/salvage/{{.Name}}">
-                <button type="submit" class="btn btn-xs" data-confirm-action="salvage_download" data-confirm-kind="server" data-confirm-id="{{$s.ID}}" data-confirm-text="Unduh berkas data tertinggal {{.Name}} dari {{$s.Name}}. Berkas ini berisi data aplikasi; simpan di tempat yang aman.">Unduh</button>
+                <button type="submit" class="btn btn-xs" data-confirm-action="salvage_download:{{.Name}}" data-confirm-kind="server" data-confirm-id="{{$s.ID}}" data-confirm-text="Unduh berkas data tertinggal {{.Name}} dari {{$s.Name}}. Berkas ini berisi data aplikasi; simpan di tempat yang aman.">Unduh</button>
               </form>
               <form method="post" action="/servers/{{$s.ID}}/salvage/{{.Name}}/delete">
-                <button type="submit" class="btn btn-xs btn-error btn-outline" data-confirm-action="salvage_delete" data-confirm-kind="server" data-confirm-id="{{$s.ID}}" data-confirm-text="Hapus berkas data tertinggal {{.Name}} dari {{$s.Name}}. Bila belum diunduh, ini satu-satunya salinan data itu.">Hapus</button>
+                <button type="submit" class="btn btn-xs btn-error btn-outline" data-confirm-action="salvage_delete:{{.Name}}" data-confirm-kind="server" data-confirm-id="{{$s.ID}}" data-confirm-text="Hapus berkas data tertinggal {{.Name}} dari {{$s.Name}}. Bila belum diunduh, ini satu-satunya salinan data itu.">Hapus</button>
               </form>
             </td>
           </tr>

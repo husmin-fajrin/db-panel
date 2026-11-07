@@ -126,6 +126,10 @@ type serverDetailPage struct {
 	// is); DeleteUnquarantined: the delete is "Hapus tanpa karantina".
 	DeleteBlocked       string
 	DeleteUnquarantined bool
+	// DeleteWarnings: what deleting the server from the panel loses (an
+	// old master's leftover data, its salvage files); shown in the modal
+	// and the confirmation.
+	DeleteWarnings []string
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -474,7 +478,8 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, orchestrator.ErrServerIsMaster), errors.Is(err, orchestrator.ErrServerIsReplica),
 		errors.Is(err, orchestrator.ErrLocalServer), errors.Is(err, orchestrator.ErrBusy),
-		errors.Is(err, orchestrator.ErrCutoverPending), errors.Is(err, orchestrator.ErrQuarantinePending):
+		errors.Is(err, orchestrator.ErrCutoverPending), errors.Is(err, orchestrator.ErrQuarantinePending),
+		errors.Is(err, orchestrator.ErrNotQuarantinePending):
 		// The orchestrator's refusals are written for the user.
 		a.Logger.Warn("delete server refused", "id", srv.ID, "err", err)
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})

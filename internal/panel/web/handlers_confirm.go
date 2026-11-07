@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
@@ -31,7 +33,9 @@ const (
 	ActPromote = "promote"
 	// The quarantined old master after a promotion (spec 5.4): rebuild it
 	// as a replica of the new master, download or delete a salvage file
-	// (the only copy of its leftover data). Bound to the old master.
+	// (the only copy of its leftover data). Bound to the old master; a
+	// salvage token is also issued for one file: its action is
+	// salvageAction(ActSalvageDownload or ActSalvageDelete, name).
 	ActRebuildOldMaster = "rebuild_old_master"
 	ActSalvageDownload  = "salvage_download"
 	ActSalvageDelete    = "salvage_delete"
@@ -46,6 +50,23 @@ const (
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,
 	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActPromote, ActCertUpload, ActCertRevert, ActCertNames,
 	ActRebuildOldMaster, ActSalvageDownload, ActSalvageDelete}
+
+// fileActions are the confirmActions issued only for one salvage file,
+// as "<action>:<name>" (spec 5.4: the token is issued for that file).
+var fileActions = []string{ActSalvageDownload, ActSalvageDelete}
+
+// salvageAction is the confirmation action of act on salvage file name.
+func salvageAction(act, name string) string { return act + ":" + name }
+
+// confirmAction checks an action posted to /confirm: one of
+// confirmActions, a fileActions one only with a valid salvage file name.
+func confirmAction(action string) bool {
+	base, name, perFile := strings.Cut(action, ":")
+	if slices.Contains(fileActions, base) {
+		return perFile && orchestrator.ValidSalvageName(name)
+	}
+	return !perFile && slices.Contains(confirmActions, action)
+}
 
 // settingsActions are the actions bound to the settings (target id 0)
 // rather than to a server.
@@ -99,7 +120,7 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	action, kind := r.PostFormValue("action"), r.PostFormValue("target_kind")
 	id, err := strconv.ParseInt(r.PostFormValue("target_id"), 10, 64)
 	settings := slices.Contains(settingsActions, action)
-	if err != nil || !slices.Contains(confirmActions, action) || !slices.Contains(confirmKinds, kind) ||
+	if err != nil || !confirmAction(action) || !slices.Contains(confirmKinds, kind) ||
 		settings != (kind == auditSettings) || (settings && id != 0) || (!settings && id <= 0) {
 		writeJSONError(w, http.StatusBadRequest, msgConfirmBadInput)
 		return

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -136,5 +137,20 @@ func TestSalvageDirectCallsValidateName(t *testing.T) {
 	c, err := e.r.Connections(ctx, g.m.id)
 	if err != nil || len(c.Rows) != 1 || c.Rows[0].Count != 4 {
 		t.Fatalf("Connections = %+v, %v", c, err)
+	}
+}
+
+// An agent that does not know a salvage command answers ErrAgentOutdated,
+// whose text is the panel's own sentence, still shown as it is by a job.
+func TestSalvageOldAgentIsErrAgentOutdated(t *testing.T) {
+	g := newPromoteRig(t)
+	g.m.oldAgent("mysql.salvageList")
+	_, err := g.e.r.SalvageList(context.Background(), g.m.id)
+	if !errors.Is(err, ErrAgentOutdated) || !strings.Contains(err.Error(), "versi lama") {
+		t.Fatalf("SalvageList on an old agent: %v", err)
+	}
+	var se stepError
+	if !errors.As(err, &se) {
+		t.Fatalf("not a stepError: %T", err)
 	}
 }

@@ -303,3 +303,42 @@ func TestDeleteOldMasterWhileQuarantinePending(t *testing.T) {
 		t.Fatalf("old master still stored: %v", err)
 	}
 }
+
+// DeleteUnquarantined refuses a server whose quarantine is not pending: a
+// plain server, and a quarantined old master whose quarantine reached it.
+// Nothing is sent to the agent and the server stays.
+func TestDeleteUnquarantinedRefusedWhenQuarantineNotPending(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	m.reply("mysql.releaseRole", nil)
+	c := e.agent("cand", "10.0.0.2")
+	if _, err := e.st.AddReplica(topo.ID, c.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := e.r.DeleteUnquarantined(ctx, c.id); !errors.Is(err, ErrNotQuarantinePending) {
+		t.Fatalf("DeleteUnquarantined of a replica: %v", err)
+	}
+	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: proto.PromotePlanned, OldMasterServerID: m.id,
+		NewMasterServerID: c.id, StartedAt: time.Now(), Status: "done",
+		ReplicasJSON: `[{"server_id":` + fmt.Sprint(m.id) + `,"role":"old_master","state":"quarantined"}]`}); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := e.r.ConfirmCutover(topo.ID); err != nil || warn != "" {
+		t.Fatalf("ConfirmCutover = %q, %v", warn, err)
+	}
+	err := e.r.DeleteUnquarantined(ctx, m.id)
+	if !errors.Is(err, ErrNotQuarantinePending) || err.Error() != "karantina tidak tertunda; gunakan Hapus biasa" {
+		t.Fatalf("DeleteUnquarantined of a quarantined old master: %v", err)
+	}
+	wantCmds(t, "old master", m.cmds(0), nil)
+	if _, err := e.st.GetServer(m.id); err != nil {
+		t.Fatalf("old master deleted: %v", err)
+	}
+	if err := e.r.DeleteServer(ctx, m.id); err != nil {
+		t.Fatalf("DeleteServer of the quarantined old master: %v", err)
+	}
+}

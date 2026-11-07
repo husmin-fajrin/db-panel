@@ -163,7 +163,9 @@ func (r *Runner) DeleteServer(ctx context.Context, serverID int64) error {
 
 // DeleteUnquarantined deletes a quarantined old master whose quarantine is
 // still pending (a dead server that will not come back), as DeleteServer
-// does otherwise; the web layer guards it with a typed confirmation.
+// does otherwise; the web layer guards it with a typed confirmation. Any
+// other server is refused with ErrNotQuarantinePending: its delete is the
+// plain DeleteServer.
 func (r *Runner) DeleteUnquarantined(ctx context.Context, serverID int64) error {
 	return r.deleteServer(ctx, serverID, true)
 }
@@ -206,7 +208,11 @@ var (
 	// DeleteUnquarantined deletes a dead one anyway.
 	ErrQuarantinePending = errors.New("master lama ini belum dikarantina karena agent-nya belum terjangkau; " +
 		"hapus hanya bila server itu sudah mati dan tidak akan dihidupkan lagi (Hapus tanpa karantina)")
-	ErrCutoverPending = errors.New("server ini master lama yang dikarantina dan aplikasi belum dinyatakan dialihkan; " +
+	// ErrNotQuarantinePending: DeleteUnquarantined of a server whose
+	// quarantine is not pending (not a quarantined old master, or one
+	// whose quarantine reached it).
+	ErrNotQuarantinePending = errors.New("karantina tidak tertunda; gunakan Hapus biasa")
+	ErrCutoverPending       = errors.New("server ini master lama yang dikarantina dan aplikasi belum dinyatakan dialihkan; " +
 		"tekan \"Sudah saya alihkan\" di layar pengalihan dulu")
 )
 
@@ -226,16 +232,25 @@ func (r *Runner) deletableLocked(serverID int64, unquarantined bool) error {
 	// A quarantined old master is deleted like a detached server (its
 	// agent releases the quarantined pin first, in DeleteServer), but not
 	// while applications may still write to it.
+	if unquarantined && srv.Role != store.RoleQuarantined {
+		return ErrNotQuarantinePending
+	}
 	if srv.Role == store.RoleQuarantined {
 		if topo, err := r.d.Store.GetTopologyByOldMaster(serverID); err == nil && topo.CutoverPending {
 			return ErrCutoverPending
 		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		if prom, err := r.d.Store.PromotionByOldMaster(serverID); err == nil && QuarantinePending(prom) && !unquarantined {
-			return ErrQuarantinePending
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		prom, err := r.d.Store.PromotionByOldMaster(serverID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
+		}
+		pending := err == nil && QuarantinePending(prom)
+		switch {
+		case pending && !unquarantined:
+			return ErrQuarantinePending
+		case !pending && unquarantined:
+			return ErrNotQuarantinePending
 		}
 	}
 	if r.d.LocalServerID != 0 && serverID == r.d.LocalServerID {
