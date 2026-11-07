@@ -83,6 +83,9 @@ type Driver struct {
 	// qUptimeAt.
 	qUptime   int64
 	qUptimeAt time.Time
+	// rebuild is the mark of a rebuild load in progress on a quarantined
+	// server (rebuild_load.go); it has its own lock, never promoteMu.
+	rebuild rebuildLoad
 
 	salvageMu sync.Mutex // a salvage rename, a delete or the sweep; never held across mysqlbinlog
 

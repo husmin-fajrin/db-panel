@@ -623,6 +623,14 @@ func (p *Pins) settleRebuilt(host string, port int) (bool, error) {
 	return true, nil
 }
 
+// quarantinedUnder reports whether the role pin is quarantined and
+// host:port is its source pin.
+func (p *Pins) quarantinedUnder(host string, port int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reload() == nil && p.role == roleQuarantined && p.hasSrc && p.sameSource(host, port)
+}
+
 // claimSource pins host:port after a successful configureReplication,
 // dumpFrom or cloneFrom when no source is pinned. An existing pin is never
 // changed: claiming it again is a no-op, claiming another source an

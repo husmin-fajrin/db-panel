@@ -32,13 +32,14 @@ var systemDatabases = map[string]bool{"mysql": true, "sys": true, "information_s
 // the same data.
 var errReplicaRunning = errors.New("replikasi masih berjalan; hentikan dulu")
 
-// snapshotFunc runs one snapshot job against h.
-type snapshotFunc func(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResult, error)
+// snapshotFunc runs one snapshot job against h; mark, when not nil, is
+// set while its load runs with read-only lifted.
+type snapshotFunc func(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error)
 
 func (d *Driver) registerSnapshot(reg *commands.Registry) {
-	d.registerSnapshotJob(reg, "mysql.cloneFrom", methodClone, CloneFrom)
-	d.registerSnapshotJob(reg, "mysql.dumpFrom", methodDump, func(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResult, error) {
-		return DumpFrom(j, h, d.Creds, p)
+	d.registerSnapshotJob(reg, "mysql.cloneFrom", methodClone, cloneFrom)
+	d.registerSnapshotJob(reg, "mysql.dumpFrom", methodDump, func(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error) {
+		return dumpFrom(j, h, d.Creds, p, mark)
 	})
 }
 
@@ -65,7 +66,13 @@ func (d *Driver) registerSnapshotJob(reg *commands.Registry, cmd, method string,
 		}
 		source := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 		id, err := d.Jobs.Start(cmd, func(j *jobs.Job) (any, error) {
-			res, err := run(j, h, p)
+			// A rebuild of a quarantined server from its pinned source
+			// marks its load, so the quarantine guard does not lock the
+			// server again under it; the mark ends with the job at the
+			// latest.
+			mark := d.rebuildMark(p.Host, p.Port)
+			defer mark.clear()
+			res, err := run(j, h, p, mark)
 			if d.Logger != nil {
 				if err != nil {
 					d.Logger.Warn("mysql snapshot failed", "method", method, "job", j.ID(), "source", source, "err", err)

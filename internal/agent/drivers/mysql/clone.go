@@ -41,6 +41,13 @@ const (
 // shuts down. Both mean the data phase is over: the server is started (a
 // no-op when systemd already did) and clone_status must read Completed.
 func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResult, error) {
+	return cloneFrom(j, h, p, nil)
+}
+
+// cloneFrom is CloneFrom with the rebuild mark of the load (nil: none).
+// After the data phase the restart puts the lock back; the mark is then
+// cleared when the job ends (registerSnapshotJob).
+func cloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error) {
 	ctx := j.Context()
 	start := time.Now()
 	res := proto.SnapshotResult{Method: methodClone}
@@ -77,7 +84,7 @@ func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResul
 	// put back only when CLONE fails before its data phase; after it, the
 	// old server is gone and the restart applies the persisted and my.cnf
 	// lock again.
-	restore, err := liftReadOnly(ctx, j.Logf, db)
+	restore, err := liftReadOnly(ctx, j.Logf, db, mark)
 	if err != nil {
 		return res, err
 	}

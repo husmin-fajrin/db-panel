@@ -1,6 +1,7 @@
 package mysql_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"log/slog"
@@ -279,6 +280,9 @@ func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
 	if len(ev.all()) != 0 {
 		t.Errorf("guard reported %d events during the rebuild", len(ev.all()))
 	}
+	if d.RebuildLoadMarked() {
+		t.Error("the rebuild-load mark outlived the dump job")
+	}
 	t.Logf("guard ticked %d times during the load", n)
 }
 
@@ -506,5 +510,88 @@ func (r *quarantineRig) wantEvents(types ...string) {
 	}
 	if strings.Join(got, ",") != strings.Join(types, ",") {
 		r.t.Errorf("events = %v, want %v", got, types)
+	}
+}
+
+// TestQuarantineGuardDefersToRebuildLoad: while a rebuild load from the
+// pinned source is marked, the guard does not put read-only back after a
+// restart (it logs its deferral once); once the mark is cleared, the next
+// tick and the next restart put it back. A mark whose source is no longer
+// the source pin is not honoured, and none is set toward another source.
+func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	execAll(t, db, "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+	const src = "10.0.0.1:3306"
+	dir := pinDir(t, "quarantined", src)
+	var logs bytes.Buffer
+	ev := &eventLog{}
+	d := &mysql.Driver{Host: inst.Host(), PinDir: dir, Events: ev, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	d.Register(commands.NewRegistry())
+	tick := func() {
+		t.Helper()
+		if err := d.GuardTick(context.Background(), time.Now()); err != nil {
+			t.Fatalf("GuardTick: %v", err)
+		}
+	}
+	// What the load does after its restart: read-only off by SET GLOBAL.
+	restartAndLift := func() {
+		t.Helper()
+		inst.Restart(t)
+		execAll(t, db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+	}
+	tick()
+
+	if _, ok := d.MarkRebuildLoad("10.0.0.2", 3306); ok {
+		t.Fatal("a rebuild mark toward another source was set")
+	}
+	if d.RebuildLoadMarked() {
+		t.Fatal("marked after a refused mark")
+	}
+	clear, ok := d.MarkRebuildLoad("10.0.0.1", 3306)
+	if !ok {
+		t.Fatal("no rebuild mark toward the pinned source")
+	}
+	restartAndLift()
+	tick()
+	tick()
+	if sro, ro := readOnly(t, db); sro || ro {
+		t.Fatalf("guard put read-only back during the load: super_read_only=%v read_only=%v", sro, ro)
+	}
+	if n := strings.Count(logs.String(), "quarantine guard deferring: a rebuild load from the pinned source is running"); n != 1 {
+		t.Errorf("deferral logged %d times, want once:\n%s", n, logs.String())
+	}
+	if len(ev.all()) != 0 {
+		t.Errorf("guard reported %d events during the load", len(ev.all()))
+	}
+
+	// The load is over (its restore failed to put read-only back here):
+	// the next tick does.
+	clear()
+	clear()
+	tick()
+	if sro, ro := readOnly(t, db); !sro || !ro {
+		t.Fatalf("guard after the load: super_read_only=%v read_only=%v, want both on", sro, ro)
+	}
+	// And the next restart is a transition again.
+	restartAndLift()
+	tick()
+	if sro, ro := readOnly(t, db); !sro || !ro {
+		t.Fatalf("guard after a restart without a load: super_read_only=%v read_only=%v", sro, ro)
+	}
+
+	// A mark is honoured only while its source is the source pin.
+	clear, ok = d.MarkRebuildLoad("10.0.0.1", 3306)
+	if !ok {
+		t.Fatal("no second rebuild mark")
+	}
+	defer clear()
+	if err := d.Pins().SetSource("10.0.0.7", 3306); err != nil {
+		t.Fatal(err)
+	}
+	restartAndLift()
+	tick()
+	if sro, ro := readOnly(t, db); !sro || !ro {
+		t.Fatalf("guard honoured a mark for a source no longer pinned: super_read_only=%v read_only=%v", sro, ro)
 	}
 }

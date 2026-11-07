@@ -308,7 +308,7 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 		if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
 			return fmt.Errorf("SET sql_log_bin: %w", err)
 		}
-		restore, lerr := liftReadOnly(ctx, m.local, db)
+		restore, lerr := liftReadOnly(ctx, m.local, db, nil)
 		if lerr != nil {
 			return lerr
 		}

@@ -240,6 +240,15 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 		return nil
 	}
 	defer db.Close()
+	// A rebuild load from the pinned source runs with read-only lifted:
+	// the guard leaves it be, and checks again once the load is over.
+	if src, first, ok := d.deferringToRebuild(); ok {
+		if first {
+			d.log("quarantine guard deferring: a rebuild load from the pinned source is running", "source", src)
+		}
+		d.guard.up = false
+		return nil
+	}
 	// A restart between two ticks is a transition too.
 	var name string
 	var uptime int64

@@ -923,6 +923,8 @@ menampilkan alamat master baru (dengan tombol salin) dan alamat lama,
 lalu dua tabel yang diperbarui tiap 15 detik: koneksi yang masih ke master
 lama dan koneksi yang sudah ke master baru (per host asal, akun, dan
 database; akun `dbpanel_*` dan thread MySQL sendiri tidak ditampilkan).
+Sesi akun MySQL yang dipakai panel juga tidak ditampilkan, jadi pakai akun
+khusus untuk panel, bukan akun admin yang juga dipakai orang atau aplikasi.
 Arahkan semua aplikasi yang menulis ke database ke alamat baru, restart
 aplikasinya, lalu tekan **Sudah saya alihkan**. Selama belum ditekan,
 Telegram mengingatkan dengan jarak pengulangan peringatan (bawaan 6 jam),
@@ -963,7 +965,10 @@ memuat kotak **Master lama** dengan:
   diganti salinan dari master baru; konfirmasi menyebut koneksi aplikasi
   yang masih ada dan data tertinggal yang belum diperiksa atau belum
   diamankan, lalu meminta kata sandi dan nama server. Berkas yang sudah
-  diamankan tidak ikut dihapus.
+  diamankan tidak ikut dihapus. Selama panel memuat salinan itu, master
+  lama tidak baca-saja agar pemuatan bisa menulis (penjaga karantina
+  menunda pemasangan baca-saja);
+  sesudahnya ia kembali baca-saja dan menjadi replika master baru.
 - **Hapus server:** melepas pin `quarantined` (agent tidak lagi menjaga
   baca-saja saat start). Seperti bangun ulang, baru tersedia setelah
   **Sudah saya alihkan**.

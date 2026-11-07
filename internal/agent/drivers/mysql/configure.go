@@ -397,7 +397,7 @@ func installClonePlugin(ctx context.Context, db *sql.DB, logf func(level, format
 	if err != nil || status == "ACTIVE" {
 		return false, err
 	}
-	restore, err := liftReadOnly(ctx, logf, db)
+	restore, err := liftReadOnly(ctx, logf, db, nil)
 	if err != nil {
 		return false, err
 	}

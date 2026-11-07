@@ -58,6 +58,11 @@ var errLoadEnded = errors.New("mysql load ended")
 // COMMENTED mode (see dumpGTIDMode) the set in the dump's commented header,
 // as this server keeps its own history.
 func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams) (proto.SnapshotResult, error) {
+	return dumpFrom(j, h, creds, p, nil)
+}
+
+// dumpFrom is DumpFrom with the rebuild mark of the load (nil: none).
+func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error) {
 	ctx := j.Context()
 	start := time.Now()
 	res := proto.SnapshotResult{Method: methodDump}
@@ -119,7 +124,7 @@ func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 			return res, fmt.Errorf("STOP REPLICA: %w", err)
 		}
 	}
-	restore, err := liftReadOnly(ctx, j.Logf, db)
+	restore, err := liftReadOnly(ctx, j.Logf, db, mark)
 	if err != nil {
 		return res, err
 	}
@@ -402,14 +407,18 @@ func writeDefaultsFile(h Host, p proto.ConnectParams, socket string, port int, t
 // admin account needs neither SUPER nor CONNECTION_ADMIN) and returns the
 // function that turns back on what was on. SET GLOBAL, not PERSIST: a
 // restart restores the configured values whatever happens here. logf
-// receives what it did (a job's Logf).
-func liftReadOnly(ctx context.Context, logf func(level, format string, args ...any), db *sql.DB) (restore func() error, err error) {
+// receives what it did (a job's Logf). A non-nil mark (a rebuild load from
+// the pinned source on a quarantined server) is set once read-only is
+// off, so the quarantine guard defers, and cleared by restore after
+// read-only is back on.
+func liftReadOnly(ctx context.Context, logf func(level, format string, args ...any), db *sql.DB, mark *loadMark) (restore func() error, err error) {
 	var ro, sro bool
 	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only").Scan(&ro, &sro); err != nil {
 		return nil, fmt.Errorf("baca read_only: %w", err)
 	}
 	// restore puts both back; it logs each failure and returns the first.
 	restore = func() error {
+		defer mark.clear()
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancel()
 		var stmts []string
@@ -436,6 +445,7 @@ func liftReadOnly(ctx context.Context, logf func(level, format string, args ...a
 			return nil, fmt.Errorf("%s: %w", q, err)
 		}
 	}
+	mark.set()
 	if ro || sro {
 		logf("info", "read_only lifted for the load")
 	}

@@ -98,7 +98,7 @@ func DropDatabases(ctx context.Context, h Host, databases []string, logf func(le
 	if err := rows.Err(); err != nil {
 		return res, fmt.Errorf("baca daftar database: %w", err)
 	}
-	restore, err := liftReadOnly(ctx, logf, db)
+	restore, err := liftReadOnly(ctx, logf, db, nil)
 	if err != nil {
 		return res, err
 	}

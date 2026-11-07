@@ -280,3 +280,19 @@ func ScanLeftover(set, text string) (proto.LeftoverResult, error) {
 	err = sc.result(&res)
 	return res, err
 }
+
+// MarkRebuildLoad sets the rebuild-load mark as a snapshot from host:port
+// does once read-only is lifted; ok is false when the pins do not allow
+// one (not quarantined under host:port). clear ends it.
+func (d *Driver) MarkRebuildLoad(host string, port int) (clear func(), ok bool) {
+	m := d.rebuildMark(host, port)
+	m.set()
+	return m.clear, m != nil
+}
+
+// RebuildLoadMarked reports whether a rebuild-load mark is set.
+func (d *Driver) RebuildLoadMarked() bool {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	return d.rebuild.active
+}
