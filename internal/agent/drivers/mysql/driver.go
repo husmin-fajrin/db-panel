@@ -69,8 +69,8 @@ type Driver struct {
 	seenHosts []string
 	seenAt    time.Time
 
-	// The promote lock (promote_lock.go): lockForPromote, unlockPromote
-	// and the guard run one at a time.
+	// The promote lock (promote_lock.go): lockForPromote, unlockPromote,
+	// quarantine, repoint and the guard run one at a time.
 	promoteMu sync.Mutex
 	guard     promoteGuard
 
@@ -102,6 +102,8 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerTLS(reg)
 	d.registerPromote(reg)
 	d.registerPromoteJob(reg)
+	d.registerQuarantine(reg)
+	d.registerRepoint(reg)
 	d.registerBinlog(reg)
 }
 

@@ -761,15 +761,16 @@ func TestQuarantinedRefusalTable(t *testing.T) {
 			t.Errorf("Allow(%s) on quarantined = %v, want ErrRolePinned", cmd, err)
 		}
 	}
-	// Elsewhere these commands are not the role table's business yet,
-	// but mysql.promote (TestPromotePinRules).
+	// Elsewhere these commands are not the role table's business, but
+	// mysql.promote (TestPromotePinRules) and mysql.repoint
+	// (TestRepointPinRules), which only a replica takes.
 	for _, role := range []string{"master", "replica", ""} {
 		q, err := mysql.LoadPins(pinDir(t, role, ""))
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, cmd := range promoteCommands {
-			if cmd == "mysql.promote" {
+			if cmd == "mysql.promote" || cmd == "mysql.repoint" {
 				continue
 			}
 			if err := q.Allow(cmd, nil); err != nil {

@@ -295,9 +295,10 @@ func resolveHost(ctx context.Context, host string) []net.IP {
 }
 
 // GuardTick is the promote lock's guard, run by the health monitor after
-// every check (monitor.PromoteGuard) at now. While the lock exists on a
-// pinned master it first makes sure super_read_only is on (again after a
-// MySQL restart, before anything else). At or past the deadline of a lock
+// every check (monitor.PromoteGuard) at now. On a quarantined server it
+// only keeps read_only and super_read_only on (guardQuarantined). While
+// the lock exists on a pinned master it first makes sure super_read_only
+// is on (again after a MySQL restart, before anything else). At or past the deadline of a lock
 // with a candidate it reads the candidate (see the package comment above);
 // it never acts on a lock-master lock.
 func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
@@ -310,6 +311,11 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	}
 	d.promoteMu.Lock()
 	defer d.promoteMu.Unlock()
+	// A quarantined server is read-only before anything else, lock or
+	// not.
+	if d.pins.Role() == roleQuarantined {
+		return d.guardQuarantined(ctx, h)
+	}
 	l, locked, err := d.pins.ReadLock()
 	if err != nil {
 		return err
@@ -430,10 +436,8 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource string) error {
 		return err
 	}
 	defer db.Close()
-	for _, q := range []string{"SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON"} {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			return fmt.Errorf("karantina (%s): %w", q, err)
-		}
+	if err := persistReadOnly(ctx, db); err != nil {
+		return err
 	}
 	if err := d.pins.SetQuarantined(newSource); err != nil {
 		return fmt.Errorf("MySQL sudah read-only, tetapi pin quarantined gagal ditulis: %w", err)

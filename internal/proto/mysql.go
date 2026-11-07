@@ -428,6 +428,46 @@ type PromoteResult struct {
 	Mode string `json:"mode"`
 }
 
+// QuarantineParams are the parameters of mysql.quarantine, run on the old
+// master after a promotion: the new master, which must be writable and
+// hold this server's transactions.
+type QuarantineParams struct {
+	NewMaster PeerCred `json:"new_master"`
+}
+
+// QuarantineResult is the answer to mysql.quarantine. Applied is false
+// when MySQL was down: the pins are written and read-only is put on once
+// MySQL answers again (monitor.quarantined then). Already is true when the
+// server was quarantined before.
+type QuarantineResult struct {
+	Applied bool `json:"applied"`
+	Already bool `json:"already"`
+}
+
+// RepointParams are the parameters of mysql.repoint, run on a replica of
+// a master that was replaced: the new master (a promoted replica of the
+// pinned source; its account is also used to read the pinned source),
+// whether the replication channel verifies its certificate, the CA to
+// store for that when this server has none (CAPEM), and the databases to
+// replicate (none = every database).
+type RepointParams struct {
+	NewMaster PeerCred `json:"new_master"`
+	Verify    bool     `json:"verify"`
+	CAPEM     string   `json:"ca_pem,omitempty"`
+	Databases []string `json:"databases,omitempty"`
+}
+
+// RepointResult is the answer to mysql.repoint. NeedsRebuild: this
+// replica holds transactions the new master lacks (Errant); its source
+// pin moved to the new master, replication was left as it was, and it
+// must be rebuilt from the new master. Otherwise it replicates from the
+// new master and IORunning says whether its receiver connected in time.
+type RepointResult struct {
+	NeedsRebuild bool   `json:"needs_rebuild"`
+	Errant       string `json:"errant,omitempty"`
+	IORunning    bool   `json:"io_running"`
+}
+
 // ProbeSourceResult is the answer to mysql.probeSource: whether a MySQL
 // server answers at the pinned source (Host:Port), and why not.
 type ProbeSourceResult struct {

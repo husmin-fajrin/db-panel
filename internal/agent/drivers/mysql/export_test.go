@@ -233,3 +233,7 @@ func SetRelayLogEvery(d time.Duration) (restore func()) {
 	relayLogEvery = d
 	return func() { relayLogEvery = old }
 }
+
+// ReplicaSeenAs reports whether a host is in the replicas-seen file in a
+// form the processlist shows it in.
+var ReplicaSeenAs = replicaSeenAs

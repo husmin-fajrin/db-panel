@@ -59,15 +59,7 @@ func (d *Driver) registerBinlog(reg *commands.Registry) {
 func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 	var res proto.BinlogTailResult
 	l := h.Layout()
-	network, addr := "unix", l.Socket
-	if addr == "" {
-		port := l.Port
-		if port == 0 {
-			port = 3306
-		}
-		network, addr = "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	}
-	if perr := probeGreeting(ctx, network, addr, binlogAliveTimeout); perr == nil {
+	if perr := localGreeting(ctx, l); perr == nil {
 		set, idx, err := liveExecuted(ctx, h)
 		if err != nil {
 			return res, fmt.Errorf("MySQL di server ini menjawab tetapi gtid_executed tidak bisa dibaca: %w", err)
@@ -96,6 +88,21 @@ func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 	}
 	res.GTIDExecuted, res.File = logged.String(), file
 	return res, nil
+}
+
+// localGreeting reads the greeting of the MySQL server of l (its socket,
+// else 127.0.0.1 at its port) within binlogAliveTimeout: nil when a MySQL
+// server answers, whatever it would make of a login.
+func localGreeting(ctx context.Context, l Layout) error {
+	network, addr := "unix", l.Socket
+	if addr == "" {
+		port := l.Port
+		if port == 0 {
+			port = 3306
+		}
+		network, addr = "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	}
+	return probeGreeting(ctx, network, addr, binlogAliveTimeout)
 }
 
 // liveExecuted asks MySQL for gtid_executed (one line) and the binary log

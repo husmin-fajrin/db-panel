@@ -70,8 +70,9 @@ var dumpAccountRe = regexp.MustCompile(`^dbpanel_dump_[0-9a-f]{8}$`)
 // master every dropUser but a per-job dump account's and every
 // createDumpUser but a per-job dump account from one IP address, and on a
 // master, replica or quarantined server every createReplUser but the
-// replication account's, and mysql.promote anywhere but on a replica,
-// which Allow also refuses without a source pin). On a master, an existing account is never
+// replication account's, mysql.promote and mysql.repoint anywhere but on
+// a replica, which Allow also refuses without a source pin, and
+// mysql.quarantine anywhere but on a master or a quarantined server). On a master, an existing account is never
 // changed (createAccount), mysql.restart needs a configure that asked for
 // it (Pins.AllowRestart), and setReadOnly{off} is refused while the
 // promote lock exists (Pins.Allow). A quarantined server refuses what a
@@ -593,8 +594,9 @@ func (p *Pins) Allow(cmd string, params any) error {
 	if p.role == roleQuarantined && !p.hasSrc && (names || cmd == "mysql.dropDatabases") {
 		return unsourcedQuarantineRefusal(cmd)
 	}
-	// A replica is promoted only from the source it is pinned to follow.
-	if cmd == "mysql.promote" && !p.hasSrc {
+	// A replica is promoted, or pointed at the promoted replica of its
+	// source, only from the source it is pinned to follow.
+	if (cmd == "mysql.promote" || cmd == "mysql.repoint") && !p.hasSrc {
 		return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
 			"server ini dipin sebagai replica tanpa sumber yang dipin; perintah %s ditolak. Pin sumbernya dulu di server ini: sudo dbpanel agent set-source <host:port>",
 			cmd)}}
@@ -646,9 +648,14 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 		return true, nil
 	}
 	switch cmd {
-	case "mysql.promote":
-		// Only a replica is promoted (a quarantined one is refused above).
+	case "mysql.promote", "mysql.repoint":
+		// Only a replica is promoted or pointed at a new master (a
+		// quarantined one is refused above).
 		return role != roleReplica, nil
+	case "mysql.quarantine":
+		// The old master quarantines itself; a quarantined server answers
+		// it again (idempotent).
+		return role != roleMaster && role != roleQuarantined, nil
 	case "mysql.configure":
 		c, ok := params.(proto.ConfigureParams)
 		if !ok {
