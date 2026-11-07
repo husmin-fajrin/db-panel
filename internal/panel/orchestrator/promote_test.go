@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -743,5 +744,82 @@ func TestPromoteRetrySupersededByTopologyChange(t *testing.T) {
 	}
 	if reason := e.r.Superseded(id); reason == "" {
 		t.Fatal("Superseded is empty")
+	}
+}
+
+// A planned promotion whose promote was sent, with an unknown outcome,
+// retried after the lock's deadline: mysql.promote goes again directly
+// (the candidate's agent verifies), not after a relock the quarantined
+// old master would refuse; the swap follows.
+func TestPromoteRetryAfterDeadlineSkipsRelock(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	var statusFails atomic.Bool
+	g.c.on("mysql.status", func(json.RawMessage) (any, error) {
+		if statusFails.Load() {
+			return nil, errors.New("MySQL tidak menjawab")
+		}
+		return proto.MySQLStatus{Port: 3306, ReadOnly: true, SuperReadOnly: true}, nil
+	})
+	g.c.job("mysql.promote", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		statusFails.Store(true)
+		return nil, errors.New("koneksi ke MySQL terputus")
+	})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	j, _ := e.waitJob(id, store.JobPartial)
+	if j.CurrentStep != 3 {
+		t.Fatalf("partial at %d", j.CurrentStep)
+	}
+
+	// Past the lock's deadline; the guard quarantined the master, which
+	// refuses a lock now. The candidate answers from its promotion record.
+	e.r.now = func() time.Time { return time.Now().Add(time.Hour) }
+	g.m.fail("mysql.lockForPromote", "perintah mysql.lockForPromote hanya untuk server yang dipin sebagai master; server ini dipin sebagai quarantined")
+	g.c.job("mysql.promote", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Resumed: true, Mode: proto.PromotePlanned}, nil
+	})
+	if err := e.r.Retry(id); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if n := g.m.count("mysql.lockForPromote"); n != 1 {
+		t.Fatalf("lockForPromote sent %d times, want 1 (no relock)", n)
+	}
+	if g.c.count("mysql.promote") != 2 {
+		t.Fatalf("promote sent %d times", g.c.count("mysql.promote"))
+	}
+	if topo, _ := e.st.GetTopology(g.topo.ID); topo.MasterServerID != g.c.id {
+		t.Fatalf("not swapped: %+v", topo)
+	}
+}
+
+// The wait for the promote ends (the agent seemed to have lost the job)
+// while the job is in fact still running: the candidate still reads
+// read-only, but the job ends partial, not failed, and the lock stays.
+func TestPromoteWaitEndsWhileAgentJobRuns(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.c.blockingJob("mysql.promote")
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitFor("promote agent job", func() bool { return g.c.startedJobs() == 1 })
+	g.c.forgetJobs.Store(1) // the next poll: "job tidak dikenal"; then running again
+	j, _ := e.waitJob(id, store.JobPartial)
+	if j.CurrentStep != 3 {
+		t.Fatalf("partial at %d", j.CurrentStep)
+	}
+	if g.m.count("mysql.unlockPromote") != 0 {
+		t.Fatal("master unlocked while the promote may still run")
+	}
+	if p := g.promotion(); p.Status != "partial" {
+		t.Fatalf("promotion = %s", p.Status)
+	}
+	if !strings.Contains(e.jobLog(id), "masih berjalan") {
+		t.Fatalf("log:\n%s", e.jobLog(id))
 	}
 }

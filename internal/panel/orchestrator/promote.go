@@ -489,8 +489,12 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	params := proto.PromoteParams{Mode: mode, OldSource: old, ReplUser: topo.ReplUser, ReplPassword: password}
 	if mode == proto.PromotePlanned {
 		// A retry after a failure that lifted the lock takes it again and
-		// lets the candidate catch up first.
-		if !jr.locked() {
+		// lets the candidate catch up first. Not while an earlier
+		// mysql.promote may have opened writes (PromoteSent): the master
+		// may be quarantined by its guard by now and refuse a lock, and the
+		// candidate's agent verifies the request itself (it answers from
+		// its promotion record, resumes, or refuses).
+		if !jr.locked() && !jr.st.PromoteSent {
 			if _, err := jr.promoteCatchUp(ctx, false); err != nil {
 				return outcome{}, err
 			}
@@ -727,8 +731,17 @@ func (jr *jobRun) promoteFailed() string {
 			jr.save()
 			jr.logf("warn", "Kandidat sudah menerima tulisan: promote tidak dibatalkan. Tekan Ulangi untuk melanjutkan.")
 		default:
-			// Still read-only: the agent restored it; the next attempt
-			// sends mysql.promote anew.
+			// Still read-only, but the agent job may still be running
+			// (the wait ended while it was away, and it came back): it
+			// could open writes later. Only a job known to be over lets
+			// the job fail.
+			if running, why := jr.promoteJobMayRun(ctx); running {
+				jr.logf("warn", "Pekerjaan promote di kandidat %s; kunci master tidak dibuka. Tekan Ulangi untuk melanjutkan promote.", why)
+				jr.setPromotionStatus(promotionPartial)
+				return store.JobPartial
+			}
+			// The agent restored it; the next attempt sends
+			// mysql.promote anew.
 			jr.st.PromoteSent = false
 			jr.save()
 		}
@@ -739,6 +752,29 @@ func (jr *jobRun) promoteFailed() string {
 	}
 	jr.promoteUndo(ctx)
 	return store.JobFailed
+}
+
+// promoteJobMayRun reports whether the candidate's mysql.promote agent job
+// the step waited for may still be running, and why: a job still known to
+// the agent as running, or whose state cannot be read. A job the agent no
+// longer knows (it restarted; its jobs ended with it) or that ended is
+// over.
+func (jr *jobRun) promoteJobMayRun(ctx context.Context) (bool, string) {
+	if jr.st.AgentJobID == "" || jr.st.AgentCmd != "mysql.promote" {
+		return false, "" // ended: agentJobEnded forgot it
+	}
+	var s proto.JobStatus
+	err := jr.r.d.Hub.Call(ctx, jr.st.AgentServerID, "job.status", proto.JobIDParams{JobID: jr.st.AgentJobID}, &s)
+	var pe *proto.Error
+	switch {
+	case errors.As(err, &pe) && pe.Code == proto.CodeBadParams:
+		return false, ""
+	case err != nil:
+		return true, "tidak bisa diperiksa (" + err.Error() + ")"
+	case s.State == "running":
+		return true, "masih berjalan"
+	}
+	return false, ""
 }
 
 // promoteUndo lifts the master's promote lock of a promotion that did not

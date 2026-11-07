@@ -75,6 +75,9 @@ type fakeAgent struct {
 	unknown  map[string]bool // commands answered as an older agent does
 	attached bool
 	started  []string // agent job ids, oldest first
+	// forgetJobs: that many job.status calls answer "job tidak dikenal"
+	// (as an agent that restarted), whatever the job's state.
+	forgetJobs atomic.Int32
 }
 
 func newFakeAgent(t *testing.T, e *env, id int64, name string) *fakeAgent {
@@ -98,6 +101,10 @@ func newFakeAgent(t *testing.T, e *env, id int64, name string) *fakeAgent {
 		var p proto.JobIDParams
 		json.Unmarshal(params, &p)
 		st, ok := fa.jobs.Status(p.JobID)
+		if fa.forgetJobs.Load() > 0 {
+			fa.forgetJobs.Add(-1)
+			ok = false
+		}
 		if !ok {
 			return nil, &commands.ParamError{Msg: "job tidak dikenal"}
 		}
