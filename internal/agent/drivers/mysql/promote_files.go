@@ -118,7 +118,13 @@ func (p *Pins) ReadPromoting() (Promoting, bool, error) {
 
 // ClearPromoting removes the marker; none is not an error.
 func (p *Pins) ClearPromoting() error {
-	if err := os.Remove(p.path(PromotingFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(p.path(PromotingFile)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("hapus %s: %w", p.path(PromotingFile), err)
+	}
+	if err := syncDir(p.dir); err != nil {
 		return fmt.Errorf("hapus %s: %w", p.path(PromotingFile), err)
 	}
 	return nil

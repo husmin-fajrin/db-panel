@@ -382,7 +382,7 @@ func TestPromoteEmergencyGivesUpIncomplete(t *testing.T) {
 	// the lock goes once the promotion has given the transactions up.
 	unlocked := make(chan error, 1)
 	go func() {
-		for !r.ev.logged("transaksi tidak lengkap dari master lama diabaikan") {
+		for !r.ev.logged("transaksi yang belum diterapkan diabaikan") {
 			time.Sleep(50 * time.Millisecond)
 		}
 		_, err := conn.ExecContext(context.Background(), "UNLOCK TABLES")
@@ -398,7 +398,7 @@ func TestPromoteEmergencyGivesUpIncomplete(t *testing.T) {
 	if n, err := mysql.GTIDCount(res.Unapplied); err != nil || n != 2 {
 		t.Errorf("unapplied %q: %d transactions (%v), want 2", res.Unapplied, n, err)
 	}
-	if !r.ev.logged("transaksi tidak lengkap dari master lama diabaikan: " + res.Unapplied) {
+	if !r.ev.logged("transaksi yang belum diterapkan diabaikan (batas waktu 3 detik habis): " + res.Unapplied) {
 		t.Errorf("logs = %q", r.ev.logs)
 	}
 	r.wantPromoted(res, proto.PromoteEmergency)
@@ -554,10 +554,115 @@ func TestPromoteResumesAfterOpenWrites(t *testing.T) {
 		return nil
 	}))
 	res := promoteResult(t, r.run(r.params(proto.PromotePlanned)))
-	if !res.Resumed || res.Applied != 0 {
+	if !res.Resumed || res.Applied != 0 || res.Mode != proto.PromotePlanned {
 		t.Errorf("result = %+v; want resumed", res)
 	}
 	r.wantPromoted(res, proto.PromotePlanned)
+}
+
+// TestPromoteResumeUsesMarker: a resume records the mode of the run that
+// opened writes, whatever is asked, and only within an hour of its
+// marker; an older marker is refused and removed.
+func TestPromoteResumeUsesMarker(t *testing.T) {
+	r := newPromoteRig(t)
+	execAll(t, r.rdb, "STOP REPLICA", "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+	at := time.Now().UTC().Truncate(time.Second)
+	marker := mysql.Promoting{Mode: proto.PromoteEmergency, OldSource: r.source, At: at}
+	if err := r.d.Pins().WritePromoting(marker); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mysql.SetReadPeer(func(context.Context, proto.PeerCred, time.Duration) mysql.PeerState {
+		t.Error("resume read the old master")
+		return mysql.PeerState{}
+	}))
+
+	r.d.Now = func() time.Time { return at.Add(61 * time.Minute) }
+	if d := r.run(r.params(proto.PromotePlanned)); d.OK || !strings.Contains(d.Error, "kedaluwarsa") || !strings.Contains(d.Error, "setReadOnly on") {
+		t.Fatalf("resume with a stale marker = ok %v, %q", d.OK, d.Error)
+	}
+	if got := pinFile(t, r.dir, mysql.PromotingFile); got != "" {
+		t.Errorf("stale marker kept: %s", got)
+	}
+	if got := pinFile(t, r.dir, mysql.RoleFile); got != "replica" {
+		t.Errorf("role pin = %q, want replica", got)
+	}
+
+	if err := r.d.Pins().WritePromoting(marker); err != nil {
+		t.Fatal(err)
+	}
+	r.d.Now = func() time.Time { return at.Add(59 * time.Minute) }
+	res := promoteResult(t, r.run(r.params(proto.PromotePlanned)))
+	if !res.Resumed || res.Mode != proto.PromoteEmergency {
+		t.Errorf("result = %+v; want resumed as emergency", res)
+	}
+	r.d.Now = nil
+	r.wantPromoted(res, proto.PromoteEmergency)
+}
+
+// TestPromoteStallRuleWaitsForBusyWorker: in an emergency promotion with
+// a multi-threaded applier whose worker is held by a table lock, gtid_executed stands still past
+// the stall time, but a busy worker keeps the rest from being given up;
+// once the lock goes, everything is applied.
+func TestPromoteStallRuleWaitsForBusyWorker(t *testing.T) {
+	r := newPromoteRig(t)
+	t.Cleanup(mysql.SetRelayWait(120, time.Second))
+	t.Cleanup(mysql.SetRelayLogEvery(300 * time.Millisecond))
+	if n := count(t, r.rdb, "SELECT @@global.replica_parallel_workers"); n < 1 {
+		execAll(t, r.rdb, "STOP REPLICA SQL_THREAD", "SET GLOBAL replica_parallel_workers = 4", "START REPLICA SQL_THREAD")
+	}
+	t.Cleanup(mysql.SetProbeSpacing(50 * time.Millisecond))
+	r.receivedNotApplied(3)
+	r.masterDown()
+	conn, err := r.rdb.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "LOCK TABLES toko.t READ"); err != nil {
+		t.Fatal(err)
+	}
+	decode[proto.StartedJob](t, r.dispatch("mysql.promote", r.params(proto.PromoteEmergency)))
+	deadline := time.Now().Add(time.Minute)
+	for count(t, r.rdb, `SELECT COUNT(*) FROM performance_schema.threads
+		WHERE NAME = 'thread/sql/replica_worker' AND PROCESSLIST_STATE = 'Waiting for table metadata lock'`) == 0 {
+		if time.Now().After(deadline) {
+			rows, _ := r.rdb.Query("SELECT NAME, COALESCE(PROCESSLIST_STATE, '') FROM performance_schema.threads WHERE NAME LIKE '%replica%' OR NAME LIKE '%slave%'")
+			var got []string
+			for rows != nil && rows.Next() {
+				var n, st string
+				_ = rows.Scan(&n, &st)
+				got = append(got, n+": "+st)
+			}
+			t.Fatalf("no worker waits for the lock: %q; logs %q", got, r.ev.logs)
+		}
+		select {
+		case d := <-r.ev.done:
+			t.Fatalf("promote ended before the lock was released: ok %v, %q", d.OK, d.Error)
+		default:
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	time.Sleep(4 * time.Second) // several stall periods
+	if _, err := conn.ExecContext(context.Background(), "UNLOCK TABLES"); err != nil {
+		t.Fatal(err)
+	}
+	var d proto.JobDone
+	select {
+	case d = <-r.ev.done:
+	case <-time.After(5 * time.Minute):
+		t.Fatal("promote did not finish")
+	}
+	res := promoteResult(t, d)
+	if res.Applied != 3 || res.Unapplied != "" {
+		t.Errorf("result = %+v; want 3 applied, none given up", res)
+	}
+	if r.ev.logged("diabaikan") {
+		t.Errorf("transactions given up while a worker was busy: %q", r.ev.logs)
+	}
+	if n := count(t, r.rdb, "SELECT COUNT(*) FROM toko.t"); n != 3 {
+		t.Errorf("rows = %d, want 3", n)
+	}
+	r.wantPromoted(res, proto.PromoteEmergency)
 }
 
 // TestPromoteRefusesNearLockDeadline: less than two minutes left on the

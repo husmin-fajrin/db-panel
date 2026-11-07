@@ -780,5 +780,19 @@ func writePin(path, value string) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return fail(err)
 	}
+	// The rename survives a crash only once the directory is synced.
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fail(err)
+	}
 	return nil
+}
+
+// syncDir fsyncs dir, so a rename or removal in it is on disk.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

@@ -8,13 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
-
-	drv "github.com/go-sql-driver/mysql"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -49,26 +49,36 @@ func (d *Driver) registerBinlog(reg *commands.Registry) {
 }
 
 // BinlogTail is @@global.gtid_executed when MySQL answers (MySQLRunning);
-// when nothing answers (no socket, connection refused, timeout), the set
-// the binary log records: the last file's Previous-GTIDs plus every GTID
-// in that file. A server that answers but refuses the account or the
-// query is an error, never a snapshot of a live server's files. File is
+// when nothing answers (its greeting cannot be read: no socket,
+// connection refused, timeout), the set the binary log records: the last
+// file's Previous-GTIDs plus every GTID in that file. A server that sends
+// its greeting but then cannot be read (refused login, TLS, a query that
+// hangs) is an error, never a snapshot of a live server's files. File is
 // the last binary log file either way ("" when MySQL answers but its
 // index cannot be read).
 func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 	var res proto.BinlogTailResult
-	set, index, err := liveExecuted(ctx, h)
-	if err == nil {
+	l := h.Layout()
+	network, addr := "unix", l.Socket
+	if addr == "" {
+		port := l.Port
+		if port == 0 {
+			port = 3306
+		}
+		network, addr = "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	}
+	if perr := probeGreeting(ctx, network, addr, binlogAliveTimeout); perr == nil {
+		set, idx, err := liveExecuted(ctx, h)
+		if err != nil {
+			return res, fmt.Errorf("MySQL di server ini menjawab tetapi gtid_executed tidak bisa dibaca: %w", err)
+		}
 		res.GTIDExecuted, res.MySQLRunning = set, true
-		if index != "" {
-			res.File, _ = lastBinlogFile(index, h.Layout().DataDir)
+		if idx != "" {
+			res.File, _ = lastBinlogFile(idx, l.DataDir)
 		}
 		return res, nil
 	}
-	if answered(err) {
-		return res, fmt.Errorf("MySQL di server ini menjawab tetapi gtid_executed tidak bisa dibaca: %w", err)
-	}
-	index, err = binlogIndexPath(h.Layout())
+	index, err := binlogIndexPath(l)
 	if err != nil {
 		return res, err
 	}
@@ -103,14 +113,6 @@ func liveExecuted(ctx context.Context, h Host) (set, index string, err error) {
 		return "", "", err
 	}
 	return strings.ReplaceAll(set, "\n", ""), idx.String, nil
-}
-
-// answered reports whether err came from a MySQL server that answered
-// (a server error such as a refused login or too many connections), not
-// from reaching none.
-func answered(err error) bool {
-	var me *drv.MySQLError
-	return errors.As(err, &me)
 }
 
 // binlogIndexPath finds the binary log index from the option files

@@ -102,10 +102,14 @@ const (
 // connection, means a MySQL server answered: nil. Anything else, or no
 // packet in time, is an error.
 func ProbePeer(ctx context.Context, host string, port int, timeout time.Duration) error {
+	return probeGreeting(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout)
+}
+
+// probeGreeting is ProbePeer over network ("tcp" or "unix") to addr.
+func probeGreeting(ctx context.Context, network, addr string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
 	if err != nil {
 		return err
 	}

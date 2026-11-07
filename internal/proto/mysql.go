@@ -423,6 +423,9 @@ type PromoteResult struct {
 	// up on (a master that died sending one); "" when none.
 	Unapplied string `json:"unapplied,omitempty"`
 	Resumed   bool   `json:"resumed"`
+	// Mode is the promotion's mode as recorded: on a resume, the mode of
+	// the run that opened writes (its marker), whatever was asked.
+	Mode string `json:"mode"`
 }
 
 // ProbeSourceResult is the answer to mysql.probeSource: whether a MySQL

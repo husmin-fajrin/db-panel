@@ -47,8 +47,8 @@ const (
 	promoteLockMargin = 2 * time.Minute
 	// emergencyProbes is how many probes of the old master must all fail.
 	emergencyProbes = 3
-	// relayLogEvery is how often applying the relay log is reported.
-	relayLogEvery = 5 * time.Second
+	// markerMaxAge is how long a promoting marker allows a resume.
+	markerMaxAge = time.Hour
 )
 
 // probeSpacing is the pause between two emergency probes; tests shorten
@@ -59,9 +59,12 @@ var (
 	// relayWaitSec is the WAIT_FOR_EXECUTED_GTID_SET timeout, the bound
 	// of step 3; tests shorten it.
 	relayWaitSec = 600
-	// relayStall is how long step 3 waits without progress before it
-	// asks whether the applier has read all the relay log.
+	// relayStall is how long gtid_executed must stay unchanged, with
+	// the applier idle, before step 3 gives up the rest.
 	relayStall = 60 * time.Second
+	// relayLogEvery is how often applying the relay log is checked and
+	// reported.
+	relayLogEvery = 5 * time.Second
 )
 
 // errRelayWaitTimeout is WAIT_FOR_EXECUTED_GTID_SET returning 1.
@@ -193,6 +196,16 @@ func (d *Driver) checkResume(ctx context.Context, db *sql.DB, p proto.PromotePar
 		return m, &commands.ParamError{Msg: fmt.Sprintf(
 			"server ini bisa ditulis (read_only=OFF) tanpa catatan promote dari %s yang sedang berjalan; promote ditolak. "+
 				"Kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", key)}
+	}
+	// A marker left by a run that never opened writes (a crash before
+	// them) must not let a much later unlock pass for its resume.
+	if age := d.now().Sub(m.At); age > markerMaxAge || age < -markerMaxAge {
+		msg := fmt.Sprintf("catatan promote dari %s sudah kedaluwarsa (%s); promote ditolak dan catatannya dihapus. "+
+			"Kunci kembali replika ini (mysql.setReadOnly on) lalu ulangi promote", key, m.At.UTC().Format(time.RFC3339))
+		if err := d.pins.ClearPromoting(); err != nil {
+			msg += fmt.Sprintf(" (catatan gagal dihapus: %v)", err)
+		}
+		return m, &commands.ParamError{Msg: msg}
 	}
 	rs, err := currentStatus(ctx, db)
 	if err != nil {
@@ -392,10 +405,10 @@ func (d *Driver) recheckOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams
 // applyRelayLog is step 3: it stops the receiver and waits until this
 // server executed every transaction it retrieved, reporting every
 // relayLogEvery. It returns how many transactions were applied, and the
-// ones it gave up on: at the WAIT_FOR_EXECUTED_GTID_SET timeout, or after
-// relayStall without progress while the applier has read all the relay
-// log (an incomplete transaction from a master that died sending it,
-// which RESET REPLICA ALL discards).
+// ones it gave up on: at the WAIT_FOR_EXECUTED_GTID_SET timeout, or once
+// gtid_executed stood still for relayStall with the whole applier idle
+// (an incomplete transaction from a master that died sending it, which
+// RESET REPLICA ALL discards). An applier error fails it first.
 func applyRelayLog(j *jobs.Job, db *sql.DB) (int, string, error) {
 	ctx := j.Context()
 	if _, err := db.ExecContext(ctx, "STOP REPLICA IO_THREAD"); err != nil {
@@ -449,14 +462,14 @@ func applyRelayLog(j *jobs.Job, db *sql.DB) (int, string, error) {
 		}
 		waited <- err
 	}()
-	giveUp := func(left string, n int64) (int, string, error) {
-		j.Logf("warn", "transaksi tidak lengkap dari master lama diabaikan: %s", left)
+	giveUp := func(why, left string, n int64) (int, string, error) {
+		j.Logf("warn", "transaksi yang belum diterapkan diabaikan (%s): %s", why, left)
 		return int(before - n), left, nil
 	}
 	tick := time.NewTicker(relayLogEvery)
 	defer tick.Stop()
 	start := time.Now()
-	lastLeft, lastChange := before, start
+	lastExec, lastChange := "", start
 	for {
 		timedOut := false
 		select {
@@ -480,13 +493,6 @@ func applyRelayLog(j *jobs.Job, db *sql.DB) (int, string, error) {
 			j.Logf("info", "relay log diterapkan: %d transaksi", before)
 			return int(before), "", nil
 		}
-		if timedOut || time.Since(start) > time.Duration(relayWaitSec)*time.Second {
-			j.Logf("warn", "relay log belum selesai diterapkan setelah %d detik", relayWaitSec)
-			return giveUp(left, n)
-		}
-		if n != lastLeft {
-			lastLeft, lastChange = n, time.Now()
-		}
 		rs, err := currentStatus(ctx, db)
 		if err != nil {
 			return 0, "", err
@@ -499,13 +505,25 @@ func applyRelayLog(j *jobs.Job, db *sql.DB) (int, string, error) {
 		case rs.SQLRunning != "Yes":
 			return 0, "", errors.New("thread SQL replika berhenti sebelum relay log selesai diterapkan")
 		}
-		if time.Since(lastChange) >= relayStall {
+		if timedOut || time.Since(start) > time.Duration(relayWaitSec)*time.Second {
+			return giveUp(fmt.Sprintf("batas waktu %d detik habis", relayWaitSec), left, n)
+		}
+		// Progress is any change of gtid_executed; the rest is given up
+		// only once it stood still for relayStall with the coordinator
+		// and every worker idle.
+		exec, err := executedSet(ctx, db)
+		if err != nil {
+			return 0, "", err
+		}
+		if exec != lastExec {
+			lastExec, lastChange = exec, time.Now()
+		} else if time.Since(lastChange) >= relayStall {
 			idle, err := applierIdle(ctx, db)
 			if err != nil {
 				return 0, "", err
 			}
 			if idle {
-				return giveUp(left, n)
+				return giveUp("relay log sudah habis dibaca", left, n)
 			}
 		}
 		msg := fmt.Sprintf("menerapkan relay log: %d dari %d transaksi, %d tersisa", before-n, before, n)
@@ -514,16 +532,20 @@ func applyRelayLog(j *jobs.Job, db *sql.DB) (int, string, error) {
 	}
 }
 
-// applierIdle reports whether the applier says it has read all the relay
-// log and waits for more.
+// applierIdle reports whether the applier is idle: the coordinator (or
+// the single applier thread) says it has read all the relay log and
+// every worker of a multi-threaded applier waits for the coordinator.
 func applierIdle(ctx context.Context, db *sql.DB) (bool, error) {
-	var n int
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM performance_schema.threads
-		WHERE NAME IN ('thread/sql/replica_sql', 'thread/sql/slave_sql') AND PROCESSLIST_STATE LIKE '%has read all relay log%'`).Scan(&n)
+	var coordIdle, busyWorkers int
+	err := db.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(NAME IN ('thread/sql/replica_sql', 'thread/sql/slave_sql') AND PROCESSLIST_STATE LIKE '%has read all relay log%'), 0),
+		COALESCE(SUM(NAME IN ('thread/sql/replica_worker', 'thread/sql/slave_worker')
+			AND COALESCE(PROCESSLIST_STATE, '') <> 'Waiting for an event from Coordinator'), 0)
+		FROM performance_schema.threads`).Scan(&coordIdle, &busyWorkers)
 	if err != nil {
 		return false, fmt.Errorf("baca keadaan thread SQL replika: %w", err)
 	}
-	return n > 0, nil
+	return coordIdle > 0 && busyWorkers == 0, nil
 }
 
 // finishPromote is step 6, run with writes open.
@@ -556,7 +578,8 @@ func (d *Driver) finishPromote(j *jobs.Job, h Host, db *sql.DB, p proto.PromoteP
 	if err := d.pins.PromoteToMaster(); err != nil {
 		return fmt.Errorf("server ini sudah bisa ditulis, tetapi pin master gagal ditulis: %w", err)
 	}
-	pr := Promoted{At: d.now().UTC(), Mode: p.Mode, OldSource: peerKey(p.OldSource), GTIDExecuted: res.GTIDExecuted}
+	pr := Promoted{At: d.now().UTC(), Mode: mode, OldSource: peerKey(p.OldSource), GTIDExecuted: res.GTIDExecuted}
+	res.Mode = mode
 	if err := d.pins.WritePromoted(pr); err != nil {
 		return fmt.Errorf("server ini sudah dipin master, tetapi catatan promosi gagal ditulis: %w", err)
 	}

@@ -226,3 +226,10 @@ func SetRelayWait(sec int, stall time.Duration) (restore func()) {
 	relayWaitSec, relayStall = sec, stall
 	return func() { relayWaitSec, relayStall = oldSec, oldStall }
 }
+
+// SetRelayLogEvery changes how often step 3 checks the relay log.
+func SetRelayLogEvery(d time.Duration) (restore func()) {
+	old := relayLogEvery
+	relayLogEvery = d
+	return func() { relayLogEvery = old }
+}
