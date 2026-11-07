@@ -35,6 +35,11 @@ func (p *Panel) setOnline(id int64, online bool) {
 			p.Monitor.OnOffline(id)
 		}
 	}
+	// After the Monitor's: a pending quarantine or repoint is sent to the
+	// agent that just connected (in the background).
+	if online && p.Orchestrator != nil {
+		p.Orchestrator.OnOnline(id)
+	}
 	if online {
 		p.goProbe(id)
 	}

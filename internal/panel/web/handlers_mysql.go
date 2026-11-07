@@ -43,6 +43,13 @@ type Orchestrator interface {
 	Cancel(jobID string) error
 	// Superseded says why a job may no longer be approved or retried; "".
 	Superseded(jobID string) string
+	// Promotion of a replica to master: the consideration data, the job,
+	// "Sudah saya alihkan", and "Arahkan sekarang" for a replica waiting
+	// to be pointed at the new master.
+	PromoteView(ctx context.Context, masterServerID int64) (orchestrator.PromoteView, error)
+	StartPromote(ctx context.Context, p orchestrator.PromoteParams) (string, error)
+	ConfirmCutover(topologyID int64) error
+	RepointNow(ctx context.Context, replicaServerID int64) error
 }
 
 const (

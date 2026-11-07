@@ -170,6 +170,10 @@ func replicaStateText(state string) string {
 		return "sedang dibuat"
 	case store.ReplicaResyncing:
 		return "sedang disync ulang"
+	case store.ReplicaNeedsRepoint:
+		return "perlu diarahkan ulang"
+	case store.ReplicaNeedsRebuild:
+		return "perlu dibangun ulang"
 	}
 	return state
 }

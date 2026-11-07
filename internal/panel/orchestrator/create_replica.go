@@ -28,7 +28,16 @@ type CreateReplicaParams struct {
 	// target. It only pre-approves the CLONE wait; databases left on the
 	// target are confirmed in the job, against the list it shows.
 	ConfirmWipe bool
+	// RebuildOldMaster: the target is the quarantined old master of this
+	// topology, rebuilt as a replica of the new master ("Bangun ulang
+	// sebagai replika", spec 5.4). Refused while the cutover is pending.
+	RebuildOldMaster bool
 }
+
+// errRebuildCutoverPending refuses rebuilding the old master before the
+// applications are confirmed on the new one.
+var errRebuildCutoverPending = errors.New("tekan \"Sudah saya alihkan\" dulu: membangun ulang membuka kunci tulis sebentar " +
+	"saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini")
 
 func createReplicaStepNames() []string {
 	return []string{"Periksa master", "Periksa server tujuan", "Pasang MySQL", "Siapkan replika",
@@ -100,11 +109,35 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 			return "", err
 		}
 		target.Role = store.RoleUnassigned
+		// A failed rebuild of an old master leaves it quarantined.
+		if _, err := r.d.Store.GetTopologyByOldMaster(target.ID); err == nil {
+			if err := r.d.Store.SetServerRole(target.ID, store.RoleQuarantined); err != nil {
+				return "", err
+			}
+			target.Role = store.RoleQuarantined
+		}
 		r.log.Info("failed replica attempt removed for a new one", "server_id", target.ID)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return "", err
 	}
-	if target.Role != store.RoleUnassigned {
+	switch {
+	case target.Role == store.RoleQuarantined:
+		if !p.RebuildOldMaster {
+			return "", errors.New("server tujuan adalah master lama yang dikarantina; pakai Bangun ulang sebagai replika")
+		}
+		old, err := r.d.Store.GetTopologyByOldMaster(target.ID)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && old.ID != topo.ID) {
+			return "", errors.New("server tujuan bukan master lama topologi ini")
+		}
+		if err != nil {
+			return "", err
+		}
+		if old.CutoverPending {
+			return "", errRebuildCutoverPending
+		}
+	case p.RebuildOldMaster:
+		return "", errors.New("server tujuan bukan master lama yang dikarantina")
+	case target.Role != store.RoleUnassigned:
 		return "", fmt.Errorf("server tujuan sudah berperan sebagai %s", target.Role)
 	}
 	dbs, err := selectDatabases(p.Databases, inv.Databases)
@@ -114,15 +147,28 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	if _, err := r.d.Store.AddReplica(topo.ID, target.ID, dbs); err != nil {
 		return "", err
 	}
-	st := jobState{MasterServerID: p.MasterServerID, Databases: dbs, ForceDump: p.ForceDump, ConfirmWipe: p.ConfirmWipe}
+	st := jobState{MasterServerID: p.MasterServerID, Databases: dbs, ForceDump: p.ForceDump, ConfirmWipe: p.ConfirmWipe,
+		RebuildOldMaster: p.RebuildOldMaster}
 	id, err := r.createJob(KindCreateReplica, target.ID, topo.ID, st, createReplicaStepNames())
 	if err != nil {
 		if rerr := r.d.Store.RemoveReplica(target.ID); rerr != nil {
 			r.log.Warn("undo replica registration", "server_id", target.ID, "err", rerr)
 		}
+		r.keepQuarantined(target.ID, p.RebuildOldMaster)
 		return "", err
 	}
 	return id, nil
+}
+
+// keepQuarantined puts the quarantined role back on an old master whose
+// rebuild was undone (RemoveReplica made it unassigned).
+func (r *Runner) keepQuarantined(serverID int64, rebuild bool) {
+	if !rebuild {
+		return
+	}
+	if err := r.d.Store.SetServerRole(serverID, store.RoleQuarantined); err != nil {
+		r.log.Warn("restore quarantined role", "server_id", serverID, "err", err)
+	}
 }
 
 // ErrTargetNotConnected refuses a target whose MySQL is installed but not

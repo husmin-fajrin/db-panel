@@ -151,8 +151,9 @@ func (r *Runner) detachable(serverID int64) error {
 }
 
 // DeleteServer removes a server that is not the panel's own, neither the
-// master of a topology with replicas nor a registered replica, and has no
-// unfinished job: its agent releases its
+// master of a topology with replicas nor a registered replica, nor a
+// quarantined old master whose cutover is pending, and has no unfinished
+// job: its agent releases its
 // pinned role first (best effort; the agent may be offline), then the
 // server is deleted and its connection dropped. It answers
 // store.ErrNotFound for an unknown server.
@@ -185,6 +186,11 @@ var (
 	ErrLocalServer     = errors.New("server panel sendiri tidak bisa dihapus")
 	ErrServerIsMaster  = errors.New("server ini masih menjadi master; lepas atau hapus semua replikanya dulu")
 	ErrServerIsReplica = errors.New("server ini masih terdaftar sebagai replika; lepas replika dulu")
+	// ErrCutoverPending: the quarantined old master of a promotion whose
+	// applications are not confirmed on the new master yet. Releasing its
+	// pin would drop its read-only guard at start (spec 5.4).
+	ErrCutoverPending = errors.New("server ini master lama yang dikarantina dan aplikasi belum dinyatakan dialihkan; " +
+		"tekan \"Sudah saya alihkan\" di layar pengalihan dulu")
 )
 
 func (r *Runner) deletable(serverID int64) error {
@@ -195,8 +201,19 @@ func (r *Runner) deletable(serverID int64) error {
 
 // deletableLocked is DeleteServer's check. Callers hold startMu.
 func (r *Runner) deletableLocked(serverID int64) error {
-	if _, err := r.d.Store.GetServer(serverID); err != nil {
+	srv, err := r.d.Store.GetServer(serverID)
+	if err != nil {
 		return err
+	}
+	// A quarantined old master is deleted like a detached server (its
+	// agent releases the quarantined pin first, in DeleteServer), but not
+	// while applications may still write to it.
+	if srv.Role == store.RoleQuarantined {
+		if topo, err := r.d.Store.GetTopologyByOldMaster(serverID); err == nil && topo.CutoverPending {
+			return ErrCutoverPending
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
 	}
 	if r.d.LocalServerID != 0 && serverID == r.d.LocalServerID {
 		return ErrLocalServer

@@ -226,6 +226,10 @@ func New(o Options) (*Panel, error) {
 		// cancel closes it.
 		Alerts:  p.Monitor,
 		MySQLCA: p.MySQLCA,
+		// Promotion: the consideration data reads and refreshes the
+		// Monitor's views; agents of another version are refused.
+		Health:  p.Monitor,
+		Version: p.opts.Version,
 	})
 	p.Orchestrator.Resume(context.Background())
 	return p, nil

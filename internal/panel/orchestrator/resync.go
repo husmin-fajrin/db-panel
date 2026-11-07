@@ -41,7 +41,10 @@ func (jr *jobRun) resyncReplicaSteps() []step {
 
 // StartResync starts the resync_replica job for the replica on p.ServerID.
 // It refuses a server that is not a replica, a replica that is not ready,
-// in attention or failed, and a server with an unfinished job.
+// in attention, failed or needs_rebuild, and a server with an unfinished
+// job. The copy comes from the topology's current master: after a
+// promotion, the new one (a needs_rebuild replica's source pin already
+// moved there with mysql.repoint).
 func (r *Runner) StartResync(ctx context.Context, p ResyncParams) (string, error) {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -53,9 +56,9 @@ func (r *Runner) StartResync(ctx context.Context, p ResyncParams) (string, error
 		return "", err
 	}
 	switch rep.State {
-	case store.ReplicaReady, store.ReplicaAttention, store.ReplicaFailed:
+	case store.ReplicaReady, store.ReplicaAttention, store.ReplicaFailed, store.ReplicaNeedsRebuild:
 	default:
-		return "", fmt.Errorf("replika %s; Resync ulang hanya bisa saat replika siap, perlu perhatian, atau gagal",
+		return "", fmt.Errorf("replika %s; Resync ulang hanya bisa saat replika siap, perlu perhatian, gagal, atau perlu dibangun ulang",
 			replicaStateText(rep.State))
 	}
 	if err := r.refuseBusy(p.ServerID, "server ini"); err != nil {

@@ -2,7 +2,9 @@
 // (prepare_master), "Buat replika" (create_replica), "Resync ulang"
 // (resync_replica), adding or removing databases on a running replica
 // (add_databases, remove_databases), and the MySQL certificates
-// (mysql_tls, tighten_tls; see tls.go). It also runs the direct controls
+// (mysql_tls, tighten_tls; see tls.go), and the promotion of a replica to
+// master (promote_planned, promote_emergency; see promote.go). It also runs
+// the direct controls
 // (stop, start, lock, detach, delete), which are single agent commands
 // refused while the server has a job. A job
 // is a list of steps, each of which calls agent commands through the hub;
@@ -48,7 +50,15 @@ const (
 	KindResyncReplica   = "resync_replica"
 	KindMySQLTLS        = "mysql_tls"   // "Pasang sertifikat MySQL"
 	KindTightenTLS      = "tighten_tls" // "Perketat sambungan replikasi"
+	// The promotion of a replica to master (promote.go).
+	KindPromotePlanned   = "promote_planned"
+	KindPromoteEmergency = "promote_emergency"
 )
+
+// isPromote reports whether kind is a promotion job.
+func isPromote(kind string) bool {
+	return kind == KindPromotePlanned || kind == KindPromoteEmergency
+}
 
 // seedsReplica reports whether kind is a job that copies the master's data
 // to a replica and connects it: create_replica and resync_replica.
@@ -104,6 +114,13 @@ type Deps struct {
 	Alerts Alerts
 	// MySQLCA signs the MySQL servers' certificates (tls.go).
 	MySQLCA MySQLCA
+	// Health is the panel's Monitor: the consideration data of a promotion
+	// reads its views and asks it for fresh reports. nil: none (promote
+	// then sees every server without a report).
+	Health Health
+	// Version is the panel's version. An agent of another version may not
+	// take part in a promotion (SEC-62); "" skips that check.
+	Version string
 }
 
 // Alerts is told when a job fails (step is the title of the step that
@@ -132,6 +149,9 @@ type Runner struct {
 	// catchUpMax bounds a verify while the replica makes progress; tests
 	// shorten it.
 	catchUpMax time.Duration
+	// promoteCatchUp bounds "Replika mengejar" (ruling R2: 10 minutes);
+	// tests shorten it.
+	promoteCatchUp time.Duration
 	// afterReopen, when set (tests), runs in Retry between ReopenJob and
 	// launch.
 	afterReopen func(jobID string)
@@ -142,6 +162,10 @@ type Runner struct {
 
 	startMu sync.Mutex // serialises the checks and creation of new jobs
 	invMu   sync.Mutex // serialises read-modify-write of inventories
+	promoMu sync.Mutex // serialises read-modify-write of promotions
+	// repointMu serialises mysql.repoint and mysql.quarantine sent outside
+	// a job step (OnOnline, RepointNow) with each other and with the job.
+	repointMu sync.Mutex
 
 	mu     sync.Mutex
 	live   map[string]*liveJob // jobs with a goroutine
@@ -163,7 +187,8 @@ func New(d Deps) *Runner {
 	return &Runner{
 		d: d, log: d.Logger, now: d.Now,
 		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery, catchUpMax: defaultCatchUpMax,
-		base: base, stop: stop, live: make(map[string]*liveJob),
+		promoteCatchUp: defaultPromoteCatchUp,
+		base:           base, stop: stop, live: make(map[string]*liveJob),
 	}
 }
 
@@ -266,14 +291,45 @@ func (r *Runner) createJob(kind string, serverID, topologyID int64, st jobState,
 // unfinished job ("server ini masih punya pekerjaan yang belum selesai").
 var ErrBusy = errors.New("masih punya pekerjaan yang belum selesai")
 
-// refuseBusy refuses a server with a queued, running or waiting job.
+// refuseBusy refuses a server with a queued, running or waiting job, and
+// any server of a topology whose promotion is running.
 func (r *Runner) refuseBusy(serverID int64, who string) error {
 	if _, busy, err := r.d.Store.ActiveJobForServer(serverID); err != nil {
 		return err
 	} else if busy {
 		return fmt.Errorf("%s %w", who, ErrBusy)
 	}
+	topoID, err := r.topologyOf(serverID)
+	if err != nil || topoID == 0 {
+		return err
+	}
+	if _, busy, err := r.d.Store.ActiveJobForTopology(topoID, KindPromotePlanned, KindPromoteEmergency); err != nil {
+		return err
+	} else if busy {
+		return fmt.Errorf("%s %w (promote sedang berjalan di topologinya)", who, ErrBusy)
+	}
 	return nil
+}
+
+// topologyOf is the topology serverID is the master, a replica or the
+// quarantined old master of; 0 when none.
+func (r *Runner) topologyOf(serverID int64) (int64, error) {
+	if t, err := r.d.Store.GetTopologyByMaster(serverID); err == nil {
+		return t.ID, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	if rep, err := r.d.Store.GetReplicaByServer(serverID); err == nil {
+		return rep.TopologyID, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	if t, err := r.d.Store.GetTopologyByOldMaster(serverID); err == nil {
+		return t.ID, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	return 0, nil
 }
 
 // jobFailed and jobEnded tell Deps.Alerts how a job ended.
@@ -504,7 +560,7 @@ func (r *Runner) Retry(jobID string) error {
 		return err
 	}
 	switch j.Status {
-	case store.JobFailed, store.JobWaiting:
+	case store.JobFailed, store.JobPartial, store.JobWaiting:
 		if other, busy, err := r.d.Store.ActiveJobForServer(j.ServerID); err != nil {
 			return err
 		} else if busy && other.ID != jobID {
@@ -513,10 +569,11 @@ func (r *Runner) Retry(jobID string) error {
 		if err := r.refuseSuperseded(j); err != nil {
 			return err
 		}
-		// A failed job is reopened before startMu is released, so a new
-		// job for its server is refused from now on, not only once the
-		// goroutine runs.
-		if j.Status == store.JobFailed {
+		// A failed (or partial) job is reopened before startMu is
+		// released, so a new job for its server is refused from now on,
+		// not only once the goroutine runs.
+		reopened := j.Status == store.JobFailed || j.Status == store.JobPartial
+		if reopened {
 			if err := r.d.Store.ReopenJob(jobID, r.now()); err != nil {
 				return err
 			}
@@ -527,9 +584,9 @@ func (r *Runner) Retry(jobID string) error {
 		if err := r.launch(jobID, action{kind: actRetry, step: j.CurrentStep}); err != nil {
 			// A Cancel that came after the reopen is queued and cancels
 			// the reopened job; failing it again would undo that (M2).
-			if j.Status == store.JobFailed && !errors.Is(err, errCanceling) {
+			if reopened && !errors.Is(err, errCanceling) {
 				// No goroutine will run it: fail it again, as it was.
-				if uerr := r.d.Store.UpdateJob(jobID, store.JobFailed, j.CurrentStep, j.Error, r.now()); uerr != nil {
+				if uerr := r.d.Store.UpdateJob(jobID, j.Status, j.CurrentStep, j.Error, r.now()); uerr != nil {
 					r.log.Warn("re-fail unlaunched retry", "job", jobID, "err", uerr)
 				}
 			}
@@ -634,8 +691,14 @@ func (r *Runner) Cancel(jobID string) error {
 		return err
 	}
 	switch j.Status {
-	case store.JobSucceeded, store.JobFailed, store.JobCanceled:
+	case store.JobSucceeded, store.JobFailed, store.JobPartial, store.JobCanceled:
 		return store.ErrJobFinished
+	}
+	if isPromote(j.Kind) {
+		var st jobState
+		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err == nil && st.PastPoint {
+			return errors.New("promote sudah membuka penulisan di master baru dan tidak bisa dibatalkan; tunggu sampai selesai")
+		}
 	}
 	return r.launch(jobID, action{kind: actCancel})
 }
@@ -673,7 +736,11 @@ func (r *Runner) Resume(ctx context.Context) {
 		if err := r.d.Store.SetStep(j.ID, j.CurrentStep, store.StepFailed, resumeError, now); err != nil {
 			r.log.Warn("fail step on resume", "job", j.ID, "err", err)
 		}
-		if err := r.d.Store.UpdateJob(j.ID, store.JobFailed, j.CurrentStep, resumeError, now); err != nil &&
+		status := store.JobFailed
+		if isPromote(j.Kind) {
+			status = r.resumePromote(j)
+		}
+		if err := r.d.Store.UpdateJob(j.ID, status, j.CurrentStep, resumeError, now); err != nil &&
 			!errors.Is(err, store.ErrJobFinished) {
 			r.log.Warn("fail job on resume", "job", j.ID, "err", err)
 		}
@@ -788,6 +855,9 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 		if err := r.d.Store.RemoveReplica(j.ServerID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			r.log.Warn("remove replica on cancel", "job", j.ID, "err", err)
 		}
+		// A canceled rebuild of an old master leaves it quarantined, pin
+		// included (releaseRole below is skipped for it).
+		r.keepQuarantined(j.ServerID, st.RebuildOldMaster)
 		// The target is unassigned again: it must not keep following the
 		// master, and its agent should not stay pinned as a replica. Once
 		// the connect step ran, replication (stopped above) is reset first,
@@ -797,6 +867,9 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 			if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.resetReplica", nil, nil); err != nil {
 				r.log.Warn("reset replication on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
 			}
+		}
+		if st.RebuildOldMaster {
+			break
 		}
 		if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.releaseRole", nil, nil); err != nil {
 			r.log.Warn("release role on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
@@ -815,6 +888,9 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 		if id, repoint, ok := st.tightenReplicaAt(j.CurrentStep); ok && repoint {
 			jr.restartReplica(ctx, id)
 		}
+	case isPromote(j.Kind):
+		// Cancel refuses a promotion past its point of no return.
+		jr.promoteUndo(ctx)
 	}
 	jr.setStep(store.StepFailed, msg)
 	if jr.setJob(store.JobCanceled, msg) {
@@ -830,6 +906,8 @@ type jobState struct {
 	Databases      []string `json:"databases,omitempty"` // empty = all
 	ForceDump      bool     `json:"force_dump,omitempty"`
 	ConfirmWipe    bool     `json:"confirm_wipe,omitempty"` // the form's; pre-approves the CLONE wait only
+	// RebuildOldMaster: create_replica of a quarantined old master.
+	RebuildOldMaster bool `json:"rebuild_old_master,omitempty"`
 	// Resync: a resync_replica job. Its WipeList starts as the replica's
 	// databases the user agreed to drop when starting it.
 	Resync bool `json:"resync,omitempty"`
@@ -892,6 +970,28 @@ type jobState struct {
 	// TightenPaused is the replica the redirect marked paused while its
 	// replication is stopped (0: none); cleared once it runs again.
 	TightenPaused int64 `json:"tighten_paused,omitempty"`
+
+	// promote_planned and promote_emergency (promote.go); MasterServerID
+	// is the old master.
+	PromotionID       int64  `json:"promotion_id,omitempty"`
+	CandidateServerID int64  `json:"candidate_server_id,omitempty"`
+	PartialCandidate  bool   `json:"partial_candidate,omitempty"`
+	OldSourceHost     string `json:"old_source_host,omitempty"` // the old master as its replicas reach it
+	OldSourcePort     int    `json:"old_source_port,omitempty"`
+	// Learned: the candidate's MySQL port, the master's promote lock (its
+	// deadline; nil until locked), its last gtid_executed.
+	CandidatePort  int        `json:"candidate_port,omitempty"`
+	LockDeadline   *time.Time `json:"lock_deadline,omitempty"`
+	LastMasterGTID string     `json:"last_master_gtid,omitempty"`
+	// PastPoint: the candidate opened writes (mysql.promote succeeded, or
+	// it answered writable after a failure). From here the job never
+	// undoes anything and ends partial instead of failed.
+	PastPoint bool `json:"past_point,omitempty"`
+	// Repointed: replicas "Arahkan replika lain" has finished with
+	// (repointed, or marked for a rebuild); Deferred: steps that ended
+	// with work left (the job ends partial at the first of them).
+	Repointed []int64 `json:"repointed,omitempty"`
+	Deferred  []int   `json:"deferred,omitempty"`
 
 	// The agent job the current step waits for.
 	AgentServerID int64  `json:"agent_server_id,omitempty"`
@@ -973,6 +1073,10 @@ func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun
 		jr.steps = jr.mysqlTLSSteps()
 	case KindTightenTLS:
 		jr.steps = jr.tightenTLSSteps(rows)
+	case KindPromotePlanned:
+		jr.steps = jr.promotePlannedSteps()
+	case KindPromoteEmergency:
+		jr.steps = jr.promoteEmergencySteps()
 	default:
 		return nil, fmt.Errorf("jenis pekerjaan tidak dikenal: %q", j.Kind)
 	}
@@ -1008,6 +1112,8 @@ func (jr *jobRun) run(from int, approved bool) {
 		jr.setReplicaState(store.ReplicaResyncing, "")
 	case changesDatabases(jr.job.Kind):
 		jr.setReplicaState(store.ReplicaChanging, "")
+	case isPromote(jr.job.Kind):
+		jr.setPromotionStatus(promotionRunning)
 	}
 	for i := from; i < len(jr.steps); i++ {
 		jr.idx = i
@@ -1031,6 +1137,10 @@ func (jr *jobRun) run(from int, approved bool) {
 			jr.setJob(store.JobWaiting, "")
 			return
 		}
+	}
+	if isPromote(jr.job.Kind) && len(jr.st.Deferred) > 0 {
+		jr.endPartial()
+		return
 	}
 	if jr.setJob(store.JobSucceeded, "") {
 		jr.r.jobEnded(jr.job.ServerID, jr.job.ID)
@@ -1066,7 +1176,11 @@ func (jr *jobRun) fail(err error) {
 		jr.logChangeFailure()
 		jr.setReplicaState(store.ReplicaAttention, truncate(failedAt(jr.job.Kind, jr.idx, err.Error()), maxLogLine))
 	}
-	if jr.setJob(store.JobFailed, msg) {
+	status := store.JobFailed
+	if isPromote(jr.job.Kind) {
+		status = jr.promoteFailed()
+	}
+	if jr.setJob(status, msg) {
 		jr.r.jobFailed(jr.job.ServerID, jr.job.ID, jr.job.Kind, jr.steps[jr.idx].title, msg)
 	}
 }

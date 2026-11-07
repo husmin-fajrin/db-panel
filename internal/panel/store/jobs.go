@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,11 @@ const (
 	JobSucceeded = "succeeded"
 	JobFailed    = "failed"
 	JobCanceled  = "canceled"
+	// JobPartial: a promotion that passed its point of no return and then
+	// stopped with steps left (quarantine, repointing a replica). It is
+	// finished like a failed job and, like one, can be retried from the
+	// step it stopped at.
+	JobPartial = "partial"
 )
 
 // Job step statuses.
@@ -223,6 +229,28 @@ func (s *Store) ActiveJobForServer(serverID int64) (Job, bool, error) {
 	return j, true, nil
 }
 
+// ActiveJobForTopology returns the newest running, waiting or queued job
+// of the topology whose kind is one of kinds (any kind when none is
+// given), if any.
+func (s *Store) ActiveJobForTopology(topologyID int64, kinds ...string) (Job, bool, error) {
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE topology_id = ? AND status IN (?, ?, ?)`
+	args := []any{topologyID, JobRunning, JobWaiting, JobQueued}
+	if len(kinds) > 0 {
+		q += ` AND kind IN (?` + strings.Repeat(`, ?`, len(kinds)-1) + `)`
+		for _, k := range kinds {
+			args = append(args, k)
+		}
+	}
+	j, err := scanJob(s.db.QueryRow(q+` ORDER BY created_at DESC, id DESC LIMIT 1`, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, false, nil
+	}
+	if err != nil {
+		return Job{}, false, fmt.Errorf("active job: %w", err)
+	}
+	return j, true, nil
+}
+
 // NewerJobExists reports whether the server has a job created after the
 // job jobID (in insertion order, which created_at's one-second precision
 // cannot give).
@@ -242,14 +270,14 @@ var ErrJobFinished = errors.New("pekerjaan sudah selesai")
 
 // UpdateJob sets a job's status, current step and error. started_at is set
 // the first time the status becomes running, finished_at when it becomes
-// succeeded, failed or canceled. A job that is already in one of those
-// terminal states is left untouched and ErrJobFinished is returned.
+// succeeded, failed, partial or canceled. A job that is already in one of
+// those terminal states is left untouched and ErrJobFinished is returned.
 func (s *Store) UpdateJob(id, status string, currentStep int, errMsg string, now time.Time) error {
 	ts := formatTime(now)
 	res, err := s.db.Exec(`UPDATE jobs SET status = ?, current_step = ?, error = ?,
 		started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN ? ELSE started_at END,
-		finished_at = CASE WHEN ? IN ('succeeded', 'failed', 'canceled') THEN ? ELSE finished_at END
-		WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'canceled')`,
+		finished_at = CASE WHEN ? IN ('succeeded', 'failed', 'partial', 'canceled') THEN ? ELSE finished_at END
+		WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'partial', 'canceled')`,
 		status, currentStep, errMsg, status, ts, status, ts, id)
 	if err != nil {
 		return fmt.Errorf("update job: %w", err)
@@ -344,14 +372,14 @@ func (s *Store) SetJobParams(id, paramsJSON string) error {
 	return s.execOne(`UPDATE jobs SET params_json = ? WHERE id = ?`, paramsJSON, id)
 }
 
-// ReopenJob moves a failed job back to running at its current step, for
+// ReopenJob moves a failed (or partial) job back to running at its current step, for
 // "retry from this step": its error and finished_at are cleared. Any other
 // status is left alone and ErrJobFinished (succeeded, canceled) or an error
 // naming the status is returned; ErrNotFound for an unknown id.
 func (s *Store) ReopenJob(id string, now time.Time) error {
 	res, err := s.db.Exec(`UPDATE jobs SET status = ?, error = '', finished_at = NULL,
-		started_at = COALESCE(started_at, ?) WHERE id = ? AND status = ?`,
-		JobRunning, formatTime(now), id, JobFailed)
+		started_at = COALESCE(started_at, ?) WHERE id = ? AND status IN (?, ?)`,
+		JobRunning, formatTime(now), id, JobFailed, JobPartial)
 	if err != nil {
 		return fmt.Errorf("reopen job: %w", err)
 	}

@@ -173,6 +173,29 @@ func (f *fakeOrch) StartTightenTLS(_ context.Context, masterServerID int64) (str
 func (f *fakeOrch) Approve(id string) error { f.record("approve " + id); return f.err }
 func (f *fakeOrch) Retry(id string) error   { f.record("retry " + id); return f.err }
 func (f *fakeOrch) Cancel(id string) error  { f.record("cancel " + id); return f.err }
+func (f *fakeOrch) PromoteView(_ context.Context, masterServerID int64) (orchestrator.PromoteView, error) {
+	f.record(fmt.Sprintf("promote-view %d", masterServerID))
+	return orchestrator.PromoteView{}, f.err
+}
+
+func (f *fakeOrch) StartPromote(_ context.Context, p orchestrator.PromoteParams) (string, error) {
+	f.record(fmt.Sprintf("promote %d %d %s", p.MasterServerID, p.CandidateServerID, p.Mode))
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.nextID, nil
+}
+
+func (f *fakeOrch) ConfirmCutover(topologyID int64) error {
+	f.record(fmt.Sprintf("confirm-cutover %d", topologyID))
+	return f.err
+}
+
+func (f *fakeOrch) RepointNow(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("repoint %d", id))
+	return f.err
+}
+
 func (f *fakeOrch) Superseded(id string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

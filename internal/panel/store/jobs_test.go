@@ -374,3 +374,43 @@ func TestNewerJobExists(t *testing.T) {
 		t.Errorf("NewerJobExists(a-other) = %v, %v", got, err)
 	}
 }
+
+func TestPartialJobIsFinishedAndReopens(t *testing.T) {
+	s := openTemp(t)
+	srv, err := s.CreateServer("db1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := Job{ID: "p1", Kind: "promote_planned", ServerID: srv.ID, TopologyID: 7, ParamsJSON: "{}", CreatedAt: time.Now()}
+	if err := s.CreateJob(j, []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, busy, err := s.ActiveJobForTopology(7, "promote_planned"); err != nil || !busy {
+		t.Fatalf("ActiveJobForTopology = %v, %v", busy, err)
+	}
+	if _, busy, _ := s.ActiveJobForTopology(7, "create_replica"); busy {
+		t.Fatal("ActiveJobForTopology matched another kind")
+	}
+	if _, busy, _ := s.ActiveJobForTopology(7); !busy {
+		t.Fatal("ActiveJobForTopology without kinds missed the job")
+	}
+	if err := s.UpdateJob(j.ID, JobPartial, 1, "sebagian", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateJob(j.ID, JobRunning, 1, "", time.Now()); !errors.Is(err, ErrJobFinished) {
+		t.Fatalf("UpdateJob of a partial job: %v", err)
+	}
+	got, _, _ := s.GetJob(j.ID)
+	if got.FinishedAt == nil {
+		t.Fatal("partial job has no finished_at")
+	}
+	if _, busy, _ := s.ActiveJobForTopology(7); busy {
+		t.Fatal("a partial job counts as active")
+	}
+	if err := s.ReopenJob(j.ID, time.Now()); err != nil {
+		t.Fatalf("ReopenJob of a partial job: %v", err)
+	}
+	if got, _, _ := s.GetJob(j.ID); got.Status != JobRunning || got.CurrentStep != 1 {
+		t.Fatalf("reopened = %+v", got)
+	}
+}

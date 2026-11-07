@@ -49,6 +49,8 @@ var agentCommands = []string{
 	"mysql.stopReplica", "mysql.resetReplica", "mysql.waitSynced", "mysql.startUntil", "mysql.dropDatabases",
 	"mysql.createDumpUser", "mysql.dropUser", "mysql.sweepDumpUsers", "mysql.releaseRole",
 	"mysql.tlsRequest", "mysql.tlsInstall", "mysql.tlsTrust",
+	"mysql.lockForPromote", "mysql.unlockPromote", "mysql.promote", "mysql.probeSource", "mysql.binlogTail",
+	"mysql.quarantine", "mysql.repoint",
 }
 
 type call struct {
@@ -145,6 +147,11 @@ func (fa *fakeAgent) record(cmd string, params json.RawMessage) {
 	fa.mu.Lock()
 	fa.calls = append(fa.calls, call{cmd, append(json.RawMessage(nil), params...)})
 	fa.mu.Unlock()
+	if cmd != "job.status" {
+		fa.e.seqMu.Lock()
+		fa.e.seq = append(fa.e.seq, fa.name+" "+cmd)
+		fa.e.seqMu.Unlock()
+	}
 }
 
 // Emit is the agent's emitter: events reach the panel only while attached.
@@ -350,6 +357,10 @@ type env struct {
 	alerts  *fakeAlerts
 	pubMu   sync.Mutex
 	pubs    []published
+	// seq is every command the fake agents received, as "name cmd", in
+	// order (job.status polls left out).
+	seqMu sync.Mutex
+	seq   []string
 
 	agents []*fakeAgent
 }
