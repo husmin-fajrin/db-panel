@@ -134,9 +134,10 @@ func (c fakeConn) Call(ctx context.Context, cmd string, params, result any) erro
 	unknown, drop := c.fa.unknown[cmd], c.fa.dropReply[cmd]
 	c.fa.mu.Unlock()
 	if drop {
-		// The agent runs it, but its answer never arrives.
+		// The agent runs it, but its answer never arrives: the hub then
+		// reports the timeout it synthesizes without an agent reply.
 		c.Conn.Call(ctx, cmd, params, result)
-		return context.DeadlineExceeded
+		return &proto.Error{Code: proto.CodeTimeout, Message: "batas waktu perintah habis"}
 	}
 	if unknown {
 		c.fa.record(cmd, nil)

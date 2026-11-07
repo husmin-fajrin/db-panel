@@ -511,9 +511,10 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	if err := jr.runAgentJob(ctx, jr.candidate(), "mysql.promote", params, &res); err != nil {
 		// A start call the agent answered with an error (a refusal) is
 		// definite; any other failure of it (a timeout, a dropped link)
-		// may have started the job unseen.
-		var pe *proto.Error
-		jr.promoteStartUnknown = !jr.agentStarted && !errors.As(err, &pe)
+		// may have started the job unseen. The hub reports a timeout or
+		// a lost link as a *proto.Error it makes itself, without an agent
+		// reply, so those codes are no answer too.
+		jr.promoteStartUnknown = !jr.agentStarted && !promoteStartRefused(err)
 		return outcome{}, jr.r.promoteCmdErr(jr.candidate(), err)
 	}
 	jr.st.PastPoint = true
@@ -531,6 +532,19 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	name := jr.serverName(jr.candidate())
 	jr.logf("info", "%s sekarang menerima tulisan sebagai master baru (%d transaksi relay log diterapkan).", name, res.Applied)
 	return done("%s menjadi master baru", name), nil
+}
+
+// promoteStartRefused reports whether err from the mysql.promote start call
+// is an answer from the agent (a refusal), as opposed to no answer at all.
+// The hub synthesizes CodeTimeout (the call's deadline passed) and
+// CodeOffline (the link was closed or the write failed) locally without a
+// reply, so those say nothing about whether the agent started the job.
+func promoteStartRefused(err error) bool {
+	var pe *proto.Error
+	if !errors.As(err, &pe) {
+		return false
+	}
+	return pe.Code != proto.CodeTimeout && pe.Code != proto.CodeOffline
 }
 
 // promoteQuarantine quarantines the old master under the new one. An
