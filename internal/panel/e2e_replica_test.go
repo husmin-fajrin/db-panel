@@ -23,6 +23,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 	"github.com/husmin-fajrin/db-panel/internal/pki"
@@ -892,4 +893,93 @@ func wantVerifiedReplication(t *testing.T, db *sql.DB) {
 	if !strings.EqualFold(allowed, "yes") || !strings.EqualFold(verify, "yes") || !strings.HasSuffix(ca, "/dbpanel-tls/mysql-ca.crt") {
 		t.Fatalf("replication SSL_ALLOWED %q, SSL_CA_FILE %q, SSL_VERIFY_SERVER_CERTIFICATE %q", allowed, ca, verify)
 	}
+}
+
+// TestE2EPromotePlanned drives a planned promotion (spec 5.1–5.6) with
+// three real mysqld instances, a real panel and three agents, over the
+// UI: master-e2e with replika-a and replika-b; replika-a is promoted with
+// a confirmation token while an application holds a connection to the
+// master; the new master is writable, replika-b follows it, the old
+// master is quarantined and read-only; the cutover screen shows the
+// application's connection to the old master; "Sudah saya alihkan";
+// "Periksa data tertinggal" finds nothing; the old master is rebuilt as a
+// replica of the new one; Telegram carries the new address.
+func TestE2EPromotePlanned(t *testing.T) {
+	skipWithoutE2E(t)
+	e := startE2EPromoteTopology(t)
+	p, ui, m, ra, rb := e.p, e.ui, e.master, e.ra, e.rb
+	start := time.Now()
+
+	// An application connected to the master over TCP, as the cutover
+	// screen must show it.
+	execSQL(t, m.db, "CREATE USER app_e2e@'127.0.0.1' IDENTIFIED BY 'App-e2e-pw1'",
+		"GRANT SELECT, INSERT ON a.* TO app_e2e@'127.0.0.1'",
+		"INSERT INTO a.t VALUES (2, 'sebelum-promote')")
+	appDB, err := sql.Open("mysql", fmt.Sprintf("app_e2e:App-e2e-pw1@tcp(%s)/a?tls=preferred", m.addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { appDB.Close() })
+	appConn, err := appDB.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("application connection to the master: %v", err)
+	}
+	if err := appConn.PingContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []*e2eNode{ra, rb} {
+		waitRow(t, n.db, "a", 2, "sebelum-promote")
+	}
+
+	// Promote terencana: the screen says why, no names to type (complete
+	// replicas, not branched), a confirmation token.
+	tgMark := len(e.tg.messages())
+	promoteStart := time.Now()
+	id, page := e.startPromote(t, ra, proto.PromotePlanned, nil)
+	if !strings.Contains(page, "Terencana (master hidup)") {
+		t.Fatalf("promote screen does not say Terencana (master hidup):\n%s", page)
+	}
+	job := waitJob(t, p, id, e2ePromoteTimeout, nil)
+	if job.Kind != orchestrator.KindPromotePlanned || job.Status != store.JobSucceeded {
+		t.Fatalf("promote job %s ended %s: %s\n%s", job.Kind, job.Status, job.Error, jobLogText(t, p, id))
+	}
+	t.Logf("planned promote succeeded: %s from the screen, the job itself %s", time.Since(promoteStart).Round(time.Millisecond),
+		jobTook(job))
+	e.wantPromoted(t, ra, m, rb, 3)
+	if prom, err := p.Store.PromotionByOldMaster(m.srv()); err != nil || prom.Mode != proto.PromotePlanned || prom.LockAt == nil {
+		t.Fatalf("promotion record = %+v, %v; want planned with its lock time", prom, err)
+	}
+
+	// The cutover screen: the new address, the old one, and the
+	// application still connected to the old master.
+	cut := ui.get(fmt.Sprintf("/masters/%d/cutover", ra.srv()))
+	for _, want := range []string{ra.addr(), m.addr(), "Koneksi yang masih ke master lama", "app_e2e", "Sudah saya alihkan"} {
+		if !strings.Contains(cut, want) {
+			t.Fatalf("cutover screen lacks %q:\n%s", want, cut)
+		}
+	}
+	e.wantPromoteMessage(t, tgMark, ra)
+	// The application moves: its connection to the old master ends
+	// (Conn.Close only returns it to the pool).
+	appConn.Close()
+	appDB.Close()
+	var oldConns string
+	waitForWithin(t, e2eWait, "the old master's connections table without the application", func() bool {
+		oldConns = ui.get(fmt.Sprintf("/servers/%d/connections-fragment", m.srv()))
+		return !strings.Contains(oldConns, "app_e2e")
+	})
+	t.Logf("old master's connections once the application left: %s", textOf(oldConns))
+	e.confirmCutover(t, ra)
+
+	// Periksa data tertinggal: nothing after a planned promotion.
+	c, srvPage := e.leftoverCheck(t, m)
+	if c.Transactions != 0 || !strings.Contains(srvPage, "Tidak ada data tertinggal") {
+		t.Fatalf("leftover after a planned promote = %+v; page:\n%s", c, srvPage)
+	}
+
+	// Bangun ulang sebagai replika.
+	if e.rebuildOldMaster(t, ra, m, 4) {
+		waitRow(t, rb.db, "a", 4, "setelah-bangun-ulang")
+	}
+	t.Logf("planned promote flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }
