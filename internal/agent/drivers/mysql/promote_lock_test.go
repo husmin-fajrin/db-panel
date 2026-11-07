@@ -188,6 +188,9 @@ func TestLockRequiresConnectedCandidate(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{})
 	replica := testmysql.Start(t, testmysql.Options{})
 	replUser(t, master)
+	// The candidate takes the replication account too (the lock logs in
+	// to it before locking).
+	replUser(t, replica)
 	mdb := rootDB(t, master)
 	dir := pinDir(t, "master", "")
 	r := newPinRig(t, master.Host(), dir)
@@ -576,11 +579,6 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 	wantRefused(t, "lock for a name with no replica address", r.dispatch("mysql.lockForPromote",
 		proto.LockForPromoteParams{Candidate: other, TimeoutSec: 600}), "tidak sedang tersambung")
 
-	decode[proto.LockForPromoteResult](t, r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600}))
-	l, ok, err := r.d.Pins().ReadLock()
-	if err != nil || !ok || l.Candidate != key || l.Addr != "127.0.0.1" {
-		t.Fatalf("lock = %+v, %v, %v; want candidate %s at 127.0.0.1", l, ok, err, key)
-	}
 	wantAt := func(what string) {
 		t.Helper()
 		for _, c := range peer.creds {
@@ -588,6 +586,22 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 				t.Errorf("%s: candidate read at %q (name %q), want 127.0.0.1 (cand.example)", what, c.Host, c.ServerName)
 			}
 		}
+	}
+	// The candidate does not take the credential (another password):
+	// refused before anything is locked.
+	peer.set(mysql.PeerState{Err: "Error 1045: Access denied for user 'dbpanel_repl'"})
+	wantRefused(t, "lock with a credential the candidate refuses", r.dispatch("mysql.lockForPromote",
+		proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600}), "tidak bisa dibaca dengan akun replikasi")
+	if sro, _ := readOnly(t, mdb); sro || pinFile(t, dir, mysql.LockFile) != "" {
+		t.Fatalf("refused lock left super_read_only=%v, lock file %q", sro, pinFile(t, dir, mysql.LockFile))
+	}
+	peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true})
+	decode[proto.LockForPromoteResult](t, r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600}))
+	wantAt("lockForPromote")
+	peer.creds, peer.reads = nil, 0
+	l, ok, err := r.d.Pins().ReadLock()
+	if err != nil || !ok || l.Candidate != key || l.Addr != "127.0.0.1" {
+		t.Fatalf("lock = %+v, %v, %v; want candidate %s at 127.0.0.1", l, ok, err, key)
 	}
 
 	// unlockPromote: writable candidate, refused; read at the address.

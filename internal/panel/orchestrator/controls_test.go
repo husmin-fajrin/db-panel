@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -253,16 +254,51 @@ func TestDeleteQuarantinedRefusedWhileCutoverPending(t *testing.T) {
 		t.Fatalf("DeleteServer of the quarantined old master while cutover is pending: %v", err)
 	}
 	wantCmds(t, "old master", m.cmds(0), nil)
-	if err := e.r.ConfirmCutover(topo.ID); err != nil {
-		t.Fatalf("ConfirmCutover: %v", err)
+	if warn, err := e.r.ConfirmCutover(topo.ID); err != nil || warn != "" {
+		t.Fatalf("ConfirmCutover = %q, %v", warn, err)
 	}
-	if err := e.r.ConfirmCutover(topo.ID); err == nil {
+	if _, err := e.r.ConfirmCutover(topo.ID); err == nil {
 		t.Fatal("ConfirmCutover with nothing pending accepted")
 	}
 	if err := e.r.DeleteServer(ctx, m.id); err != nil {
 		t.Fatalf("DeleteServer of the quarantined old master after cutover: %v", err)
 	}
 	wantCmds(t, "old master", m.cmds(0), []string{"mysql.releaseRole"})
+	if _, err := e.st.GetServer(m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old master still stored: %v", err)
+	}
+}
+
+func TestDeleteOldMasterWhileQuarantinePending(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	m.reply("mysql.releaseRole", nil)
+	c := e.agent("cand", "10.0.0.2")
+	if _, err := e.st.AddReplica(topo.ID, c.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306); err != nil {
+		t.Fatal(err)
+	}
+	// An emergency promotion whose quarantine never reached the old master.
+	if _, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: proto.PromoteEmergency, OldMasterServerID: m.id,
+		NewMasterServerID: c.id, StartedAt: time.Now(), Status: "done",
+		ReplicasJSON: `[{"server_id":` + fmt.Sprint(m.id) + `,"role":"old_master","state":"quarantine_pending"}]`}); err != nil {
+		t.Fatal(err)
+	}
+	// The cutover may be confirmed, with a warning.
+	warn, err := e.r.ConfirmCutover(topo.ID)
+	if err != nil || !strings.Contains(warn, "belum dikarantina") || !strings.Contains(warn, "db-master") {
+		t.Fatalf("ConfirmCutover = %q, %v", warn, err)
+	}
+	ctx := context.Background()
+	if err := e.r.DeleteServer(ctx, m.id); !errors.Is(err, ErrQuarantinePending) {
+		t.Fatalf("DeleteServer of an unquarantined old master: %v", err)
+	}
+	wantCmds(t, "old master", m.cmds(0), nil)
+	if err := e.r.DeleteUnquarantined(ctx, m.id); err != nil {
+		t.Fatalf("DeleteUnquarantined: %v", err)
+	}
 	if _, err := e.st.GetServer(m.id); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("old master still stored: %v", err)
 	}

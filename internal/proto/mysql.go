@@ -412,6 +412,12 @@ type PromoteParams struct {
 	LockDeadline *time.Time `json:"lock_deadline,omitempty"`
 	ReplUser     string     `json:"repl_user"`
 	ReplPassword string     `json:"repl_password"`
+	// NotBefore is when the panel's promotion started. A server already
+	// pinned master by a promotion from OldSource recorded at or after it
+	// answers with that promotion (Resumed) instead of refusing, so a
+	// retry after the agent's own job or resume marker is gone still
+	// completes. Zero: never.
+	NotBefore time.Time `json:"not_before,omitzero"`
 }
 
 // PromoteResult is the result of the mysql.promote job: this server's

@@ -82,6 +82,38 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 		if d.pins == nil {
 			return nil, &commands.ParamError{Msg: "agent ini tidak punya pin peran; promote ditolak"}
 		}
+		if d.Jobs == nil {
+			return nil, errors.New("agent tidak bisa menjalankan pekerjaan latar")
+		}
+		old := peerKey(p.OldSource)
+		// Already promoted by this promotion: answered from its record.
+		if pr, ok, err := d.promotedSince(p); err != nil {
+			return nil, err
+		} else if ok {
+			h, err := d.host()
+			if err != nil {
+				return nil, err
+			}
+			id, err := d.Jobs.Start("mysql.promote", func(j *jobs.Job) (any, error) {
+				res := proto.PromoteResult{GTIDExecuted: pr.GTIDExecuted, Mode: pr.Mode, Resumed: true}
+				db, err := openAdmin(j.Context(), h)
+				if err != nil {
+					return nil, err
+				}
+				defer db.Close()
+				if err := db.QueryRowContext(j.Context(), "SELECT @@global.server_uuid").Scan(&res.ServerUUID); err != nil {
+					return nil, fmt.Errorf("baca server_uuid: %w", err)
+				}
+				j.Logf("info", "server ini sudah dipromosikan dari %s pada %s; tidak ada yang diulang",
+					old, pr.At.UTC().Format(time.RFC3339))
+				return res, nil
+			})
+			if err != nil {
+				return nil, err
+			}
+			d.log("mysql promote already done", "job", id, "old_source", old, "at", pr.At)
+			return proto.StartedJob{JobID: id}, nil
+		}
 		if err := d.allow("mysql.promote", p); err != nil {
 			return nil, err
 		}
@@ -89,10 +121,6 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		if d.Jobs == nil {
-			return nil, errors.New("agent tidak bisa menjalankan pekerjaan latar")
-		}
-		old := peerKey(p.OldSource)
 		id, err := d.Jobs.Start("mysql.promote", func(j *jobs.Job) (any, error) {
 			res, err := d.promote(j, h, p)
 			if err != nil {
@@ -128,6 +156,23 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 		}
 		return res, nil
 	})
+}
+
+// promotedSince returns this server's promotion record when the server is
+// pinned master by a promotion from p.OldSource recorded at or after
+// p.NotBefore (never for a zero NotBefore).
+func (d *Driver) promotedSince(p proto.PromoteParams) (Promoted, bool, error) {
+	if p.NotBefore.IsZero() || d.pins.Role() != roleMaster {
+		return Promoted{}, false, nil
+	}
+	pr, ok, err := d.pins.ReadPromoted()
+	if err != nil {
+		return pr, false, &commands.ParamError{Msg: fmt.Sprintf("catatan promosi tidak bisa dibaca: %v", err)}
+	}
+	if !ok || !strings.EqualFold(pr.OldSource, peerKey(p.OldSource)) || pr.At.Before(p.NotBefore) {
+		return pr, false, nil
+	}
+	return pr, true, nil
 }
 
 // validatePromote checks p; the passwords never reach an error.

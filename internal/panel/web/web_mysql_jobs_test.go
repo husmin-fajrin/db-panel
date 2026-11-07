@@ -186,8 +186,13 @@ func (f *fakeOrch) StartPromote(_ context.Context, p orchestrator.PromoteParams)
 	return f.nextID, nil
 }
 
-func (f *fakeOrch) ConfirmCutover(topologyID int64) error {
+func (f *fakeOrch) ConfirmCutover(topologyID int64) (string, error) {
 	f.record(fmt.Sprintf("confirm-cutover %d", topologyID))
+	return "", f.err
+}
+
+func (f *fakeOrch) DeleteUnquarantined(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("delete-unquarantined %d", id))
 	return f.err
 }
 

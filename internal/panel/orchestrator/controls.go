@@ -158,7 +158,18 @@ func (r *Runner) detachable(serverID int64) error {
 // server is deleted and its connection dropped. It answers
 // store.ErrNotFound for an unknown server.
 func (r *Runner) DeleteServer(ctx context.Context, serverID int64) error {
-	if err := r.deletable(serverID); err != nil {
+	return r.deleteServer(ctx, serverID, false)
+}
+
+// DeleteUnquarantined deletes a quarantined old master whose quarantine is
+// still pending (a dead server that will not come back), as DeleteServer
+// does otherwise; the web layer guards it with a typed confirmation.
+func (r *Runner) DeleteUnquarantined(ctx context.Context, serverID int64) error {
+	return r.deleteServer(ctx, serverID, true)
+}
+
+func (r *Runner) deleteServer(ctx context.Context, serverID int64, unquarantined bool) error {
+	if err := r.deletable(serverID, unquarantined); err != nil {
 		return err
 	}
 	rctx, cancel := context.WithTimeout(ctx, cancelTimeout)
@@ -168,7 +179,7 @@ func (r *Runner) DeleteServer(ctx context.Context, serverID int64) error {
 	cancel()
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
-	if err := r.deletableLocked(serverID); err != nil {
+	if err := r.deletableLocked(serverID, unquarantined); err != nil {
 		return err
 	}
 	if err := r.d.Store.DeleteServer(serverID); err != nil {
@@ -189,18 +200,25 @@ var (
 	// ErrCutoverPending: the quarantined old master of a promotion whose
 	// applications are not confirmed on the new master yet. Releasing its
 	// pin would drop its read-only guard at start (spec 5.4).
+	// ErrQuarantinePending: the quarantined old master never received its
+	// quarantine (its agent was unreachable). Releasing its pin, which a
+	// delete tries, would let it come back as a writable master;
+	// DeleteUnquarantined deletes a dead one anyway.
+	ErrQuarantinePending = errors.New("master lama ini belum dikarantina karena agent-nya belum terjangkau; " +
+		"hapus hanya bila server itu sudah mati dan tidak akan dihidupkan lagi (Hapus tanpa karantina)")
 	ErrCutoverPending = errors.New("server ini master lama yang dikarantina dan aplikasi belum dinyatakan dialihkan; " +
 		"tekan \"Sudah saya alihkan\" di layar pengalihan dulu")
 )
 
-func (r *Runner) deletable(serverID int64) error {
+func (r *Runner) deletable(serverID int64, unquarantined bool) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
-	return r.deletableLocked(serverID)
+	return r.deletableLocked(serverID, unquarantined)
 }
 
-// deletableLocked is DeleteServer's check. Callers hold startMu.
-func (r *Runner) deletableLocked(serverID int64) error {
+// deletableLocked is DeleteServer's check; unquarantined lets a pending
+// quarantine pass (DeleteUnquarantined). Callers hold startMu.
+func (r *Runner) deletableLocked(serverID int64, unquarantined bool) error {
 	srv, err := r.d.Store.GetServer(serverID)
 	if err != nil {
 		return err
@@ -211,6 +229,11 @@ func (r *Runner) deletableLocked(serverID int64) error {
 	if srv.Role == store.RoleQuarantined {
 		if topo, err := r.d.Store.GetTopologyByOldMaster(serverID); err == nil && topo.CutoverPending {
 			return ErrCutoverPending
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if prom, err := r.d.Store.PromotionByOldMaster(serverID); err == nil && QuarantinePending(prom) && !unquarantined {
+			return ErrQuarantinePending
 		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}

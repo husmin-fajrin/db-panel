@@ -145,7 +145,8 @@ func (d *Driver) requireMaster(cmd string) error {
 }
 
 // lockForPromote locks the master for p's candidate, which must have a
-// Binlog Dump thread on it now. The caller holds promoteMu.
+// Binlog Dump thread on it now and accept p's credential (read with
+// ReadPeer at the matched address). The caller holds promoteMu.
 func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForPromoteParams) (proto.LockForPromoteResult, error) {
 	var res proto.LockForPromoteResult
 	key := peerKey(p.Candidate)
@@ -167,6 +168,14 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 	if !ok {
 		return res, &commands.ParamError{Msg: fmt.Sprintf(
 			"kandidat %s tidak sedang tersambung ke master ini sebagai replika (tidak ada thread Binlog Dump dari alamatnya); master tidak dikunci", key)}
+	}
+	// The credential must log in to the candidate now: unlockPromote, the
+	// guard, the quarantine and the repoints all read it with this
+	// account, and a wrong one would only show after writes moved.
+	if st := readPeer(ctx, dialAt(p.Candidate, addr), peerTimeout); !st.Reachable {
+		return res, &commands.ParamError{Msg: fmt.Sprintf(
+			"kandidat %s tidak bisa dibaca dengan akun replikasi (%s); periksa akun %s dan sandinya di kandidat. Master tidak dikunci",
+			key, st.Err, p.Candidate.User)}
 	}
 	// The lock file first: a failure or a crash after it leaves a lock
 	// the guard turns into super_read_only on its next tick, never a

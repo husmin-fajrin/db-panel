@@ -644,6 +644,8 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 		return "", err
 	}
 	switch {
+	case isPromote(j.Kind):
+		return r.promoteSupersededBy(j)
 	case j.Kind == KindPrepareMaster:
 		if srv.Role == store.RoleReplica {
 			return "server ini sekarang menjadi replika", nil
@@ -696,8 +698,8 @@ func (r *Runner) Cancel(jobID string) error {
 	}
 	if isPromote(j.Kind) {
 		var st jobState
-		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err == nil && st.PastPoint {
-			return errors.New("promote sudah membuka penulisan di master baru dan tidak bisa dibatalkan; tunggu sampai selesai")
+		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err == nil && (st.PastPoint || st.PromoteSent) {
+			return errors.New("promote sudah dikirim ke kandidat dan tidak bisa dibatalkan; tunggu sampai selesai")
 		}
 	}
 	return r.launch(jobID, action{kind: actCancel})
@@ -987,6 +989,14 @@ type jobState struct {
 	// it answered writable after a failure). From here the job never
 	// undoes anything and ends partial instead of failed.
 	PastPoint bool `json:"past_point,omitempty"`
+	// PromoteSent: mysql.promote was sent at least once; until PastPoint
+	// or a read-only candidate says otherwise, its outcome is unknown and
+	// the job is never failed (finding 1 of the Task 7 review): it ends
+	// partial, so no other promotion of the topology can start.
+	PromoteSent bool `json:"promote_sent,omitempty"`
+	// LockTried: mysql.lockForPromote was sent; an undo then always asks
+	// for unlockPromote ("not locked" is harmless).
+	LockTried bool `json:"lock_tried,omitempty"`
 	// Repointed: replicas "Arahkan replika lain" has finished with
 	// (repointed, or marked for a rebuild); Deferred: steps that ended
 	// with work left (the job ends partial at the first of them).

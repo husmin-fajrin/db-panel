@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -198,6 +199,10 @@ func TestPromotePlannedStepsAndCommands(t *testing.T) {
 	if pp.Mode != proto.PromotePlanned || pp.OldSource.Host != "10.0.0.1" || pp.OldSource.Port != 3306 ||
 		pp.LockDeadline == nil || pp.ReplUser != replUser || pp.ReplPassword != replPW {
 		t.Fatalf("promote params = %+v", pp)
+	}
+	// NotBefore lets a retry find this promotion in the candidate's record.
+	if started := g.promotion().StartedAt; pp.NotBefore.IsZero() || pp.NotBefore.After(started) || started.Sub(pp.NotBefore) > 10*time.Minute {
+		t.Fatalf("promote NotBefore = %v, promotion started %v", pp.NotBefore, started)
 	}
 	var w proto.WaitSyncedParams
 	g.c.params("mysql.waitSynced", &w)
@@ -467,16 +472,16 @@ func TestPromoteViewMarksPartialAndMostCurrent(t *testing.T) {
 	}
 }
 
-func TestPromoteViewBranchedRefuses(t *testing.T) {
+func TestPromoteViewBranchedNeedsAcceptance(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
 	// The master is gone with no report kept; c and b each hold
 	// transactions the other lacks.
 	g.offline(g.m)
-	g.h.set(g.m.id, monitor.View{Status: monitor.Status{Code: monitor.StatusAgentOffline}})
+	g.offline(g.d)
 	g.h.set(g.c.id, replicaView(masterUUID+":1-120,"+otherUUID+":1-2", masterUUID+":1-120"))
 	g.h.set(g.b.id, replicaView(masterUUID+":1-121", masterUUID+":1-121"))
-	for _, fa := range []*fakeAgent{g.c, g.b, g.d} {
+	for _, fa := range []*fakeAgent{g.c, g.b} {
 		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "timeout"})
 	}
 	v, err := e.r.PromoteView(context.Background(), g.m.id)
@@ -490,13 +495,148 @@ func TestPromoteViewBranchedRefuses(t *testing.T) {
 		if c.MostCurrent {
 			t.Fatalf("most current marked although branched: %+v", c)
 		}
+		if want := c.ServerID != g.d.id; c.Branched != want {
+			t.Fatalf("candidate %s branched = %v, want %v", c.Name, c.Branched, want)
+		}
 	}
-	if _, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id}); err == nil ||
-		!strings.Contains(err.Error(), "bercabang") {
+	accept := PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}}
+	if _, err := e.r.StartPromote(context.Background(), accept); err == nil || !strings.Contains(err.Error(), "bercabang") {
 		t.Fatalf("StartPromote on branched replicas: %v", err)
 	}
-	if g.b.count("mysql.promote") != 0 {
+	if g.c.count("mysql.promote") != 0 {
 		t.Fatal("promote sent")
+	}
+
+	// Chosen with the acceptance: b, holding what c lacks, is rebuilt.
+	g.b.reply("mysql.repoint", proto.RepointResult{NeedsRebuild: true, Errant: masterUUID + ":121"})
+	accept.AcceptBranched = true
+	id, err := e.r.StartPromote(context.Background(), accept)
+	if err != nil {
+		t.Fatalf("StartPromote with AcceptBranched: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if st := e.replica(g.b.id).State; st != store.ReplicaNeedsRebuild {
+		t.Fatalf("b = %s, want needs_rebuild", st)
+	}
+}
+
+func TestPromoteRefusesWritableReplica(t *testing.T) {
+	g := newPromoteRig(t)
+	v := replicaView(masterGTID, masterGTID)
+	v.Snap.SuperReadOnly = false
+	g.h.set(g.b.id, v)
+	if _, err := g.e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id}); err == nil ||
+		!strings.Contains(err.Error(), "rep-b bisa ditulis") {
+		t.Fatalf("StartPromote with a writable replica: %v", err)
+	}
+}
+
+// failedPromoteJob stores a running promote job cut off at step idx with
+// st (a restart), and its promotion.
+func (g *promoteRig) cutOffPromote(st jobState, idx int) (string, int64) {
+	e := g.e
+	e.t.Helper()
+	promID, err := e.st.AddPromotion(store.Promotion{TopologyID: g.topo.ID, Mode: proto.PromotePlanned, OldMasterServerID: g.m.id,
+		NewMasterServerID: g.c.id, StartedAt: time.Now(), Status: "running"})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	st.PromotionID, st.MasterServerID, st.CandidateServerID = promID, g.m.id, g.c.id
+	id := fmt.Sprintf("%032x", promID+100)
+	e.storeOldJob(id, KindPromotePlanned, g.m.id, g.topo.ID, plannedSteps(), st, idx, store.JobRunning)
+	return id, promID
+}
+
+func TestPromoteResumeAfterRestart(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	// Cut off while mysql.promote ran: the outcome is unknown, so partial.
+	sent, sentProm := g.cutOffPromote(jobState{PromoteSent: true, LockTried: true}, 3)
+	e.r.Resume(context.Background())
+	if j, _, _ := e.st.GetJob(sent); j.Status != store.JobPartial {
+		t.Fatalf("job cut off during the promote = %s, want partial", j.Status)
+	}
+	if p, _ := e.st.GetPromotion(sentProm); p.Status != "partial" {
+		t.Fatalf("its promotion = %s", p.Status)
+	}
+	// A partial promotion blocks a new one.
+	if _, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id}); err == nil ||
+		!strings.Contains(err.Error(), "belum tuntas") {
+		t.Fatalf("StartPromote after an unfinished promote: %v", err)
+	}
+}
+
+func TestPromoteResumeBeforePromoteFails(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id, prom := g.cutOffPromote(jobState{LockTried: true}, 2)
+	e.r.Resume(context.Background())
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+		t.Fatalf("job cut off while catching up = %s, want failed", j.Status)
+	}
+	if p, _ := e.st.GetPromotion(prom); p.Status != "failed" {
+		t.Fatalf("its promotion = %s", p.Status)
+	}
+}
+
+func TestPromoteCancelRefusedOncePromoteSent(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.c.blockingJob("mysql.promote")
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitFor("promote agent job", func() bool { return g.c.startedJobs() == 1 })
+	if err := e.r.Cancel(id); err == nil || !strings.Contains(err.Error(), "tidak bisa dibatalkan") {
+		t.Fatalf("Cancel during the promote: %v", err)
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobRunning {
+		t.Fatalf("job = %s", j.Status)
+	}
+	if g.m.count("mysql.unlockPromote") != 0 {
+		t.Fatal("master unlocked during the promote")
+	}
+}
+
+func TestPromoteLockFailureStillUnlocks(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.m.fail("mysql.lockForPromote", "master sudah dikunci, tetapi server_uuid/gtid_executed gagal dibaca")
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != 1 || g.m.count("mysql.unlockPromote") != 1 {
+		t.Fatalf("failed at %d; master %v", j.CurrentStep, g.m.cmds(0))
+	}
+}
+
+func TestPromoteExpiredLockIsTakenAgain(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	// The first lock's deadline is already past (its guard may have lifted
+	// it); the job does not trust it and locks again before the promote.
+	var n int
+	future := time.Now().Add(30 * time.Minute).Truncate(time.Second)
+	g.m.on("mysql.lockForPromote", func(json.RawMessage) (any, error) {
+		n++
+		deadline := time.Now().Add(-time.Minute)
+		if n > 1 {
+			deadline = future
+		}
+		return proto.LockForPromoteResult{LockedAt: time.Now(), Deadline: deadline, GTIDExecuted: masterGTID}, nil
+	})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	var pp proto.PromoteParams
+	g.c.params("mysql.promote", &pp)
+	if g.m.count("mysql.lockForPromote") != 2 || pp.LockDeadline == nil || !pp.LockDeadline.Equal(future) {
+		t.Fatalf("locks %d, promote deadline %v; want 2 and %v", g.m.count("mysql.lockForPromote"), pp.LockDeadline, future)
 	}
 }
 
@@ -581,5 +721,27 @@ func TestPromoteFailureAtNewMasterUnlocksOrGoesPartial(t *testing.T) {
 	}
 	if p := g.promotion(); p.Status != "done" {
 		t.Fatalf("promotion = %s", p.Status)
+	}
+}
+
+func TestPromoteRetrySupersededByTopologyChange(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	e.r.promoteCatchUp = 50 * time.Millisecond
+	g.c.reply("mysql.waitSynced", proto.WaitSyncedResult{Executed: lagUUIDs, Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobFailed)
+	// Another promotion made b the master since.
+	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.r.Retry(id); err == nil || !strings.Contains(err.Error(), "sudah berganti") {
+		t.Fatalf("Retry after the master changed: %v", err)
+	}
+	if reason := e.r.Superseded(id); reason == "" {
+		t.Fatal("Superseded is empty")
 	}
 }

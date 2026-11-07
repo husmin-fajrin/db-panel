@@ -43,6 +43,10 @@ const (
 	repointTimeout = 3 * time.Minute
 	// onlineHookTimeout bounds the work OnOnline starts.
 	onlineHookTimeout = 5 * time.Minute
+	// promoteClockSkew is how much earlier than the promotion's start (the
+	// panel's clock) the candidate's own record of it (its clock) may be
+	// and still be taken as this promotion (PromoteParams.NotBefore).
+	promoteClockSkew = 5 * time.Minute
 )
 
 // Promotion statuses (promotions.status).
@@ -110,6 +114,11 @@ type PromoteParams struct {
 	// AcceptUnreachable are the replicas the user agreed to repoint later
 	// (agent offline or its probe failed): they become needs_repoint.
 	AcceptUnreachable []int64
+	// AcceptBranched: the replicas are branched (PromoteView.Branched) and
+	// the user chose this candidate, accepting that the others holding
+	// transactions it lacks are rebuilt (repoint finds them needs_rebuild;
+	// spec 5.2).
+	AcceptBranched bool
 }
 
 // StartPromote starts the promotion of p.CandidateServerID to master of
@@ -167,9 +176,23 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		return "", errors.New("kandidat bukan replika master ini")
 	}
 	cand := view.Candidates[i]
-	if view.Branched {
+	if view.Branched && !p.AcceptBranched {
 		return "", errors.New("replika bercabang: masing-masing punya transaksi yang tidak dimiliki yang lain, " +
-			"sehingga tidak ada replika yang memuat semuanya; promote ditolak")
+			"sehingga tidak ada replika yang memuat semuanya. Pilih satu dan setujui bahwa replika lain yang bercabang " +
+			"dibangun ulang dari master baru")
+	}
+	// A replica that already takes writes may be a master the panel does
+	// not know about (an earlier promotion whose outcome was lost).
+	for _, c := range view.Candidates {
+		if c.Writable {
+			return "", fmt.Errorf("replika %s bisa ditulis (super_read_only mati) dan mungkin sudah menjadi master; "+
+				"promote ditolak. Periksa server itu dulu", c.Name)
+		}
+	}
+	if prev, err := r.d.Store.LatestPromotion(topo.ID); err == nil && (prev.Status == promotionRunning || prev.Status == promotionPartial) {
+		return "", errors.New("promote sebelumnya di topologi ini belum tuntas; buka pekerjaannya dan tekan Ulangi")
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", err
 	}
 	if !cand.Eligible {
 		return "", fmt.Errorf("%s tidak bisa dipromosikan: %s", cand.Name, cand.Reason)
@@ -366,6 +389,8 @@ func (jr *jobRun) promoteLock(ctx context.Context, _ bool) (outcome, error) {
 		return outcome{}, err
 	}
 	var res proto.LockForPromoteResult
+	jr.st.LockTried = true
+	jr.save()
 	if err := jr.promoteCall(ctx, jr.master(), "mysql.lockForPromote",
 		proto.LockForPromoteParams{Candidate: cred, TimeoutSec: promoteLockSec}, &res); err != nil {
 		return outcome{}, err
@@ -385,10 +410,17 @@ func (jr *jobRun) promoteLock(ctx context.Context, _ bool) (outcome, error) {
 	return done("dikunci pukul %s", lockedAt.Local().Format("15:04:05")), nil
 }
 
+// locked reports whether the master's promote lock is held as far as the
+// job knows: taken and its deadline not passed (past it the master's guard
+// may already have lifted it).
+func (jr *jobRun) locked() bool {
+	return jr.st.LockDeadline != nil && jr.r.now().Before(*jr.st.LockDeadline)
+}
+
 // relock takes the master's promote lock again when a failure lifted it
 // (a retry of "Replika mengejar" or "Jadikan master baru").
 func (jr *jobRun) relock(ctx context.Context) error {
-	if jr.job.Kind != KindPromotePlanned || jr.st.LockDeadline != nil {
+	if jr.job.Kind != KindPromotePlanned || jr.locked() {
 		return nil
 	}
 	jr.logf("info", "Kunci master sudah dibuka oleh percobaan sebelumnya; master dikunci lagi.")
@@ -458,13 +490,18 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	if mode == proto.PromotePlanned {
 		// A retry after a failure that lifted the lock takes it again and
 		// lets the candidate catch up first.
-		if jr.st.LockDeadline == nil {
+		if !jr.locked() {
 			if _, err := jr.promoteCatchUp(ctx, false); err != nil {
 				return outcome{}, err
 			}
 		}
 		params.LockDeadline = jr.st.LockDeadline
 	}
+	if prom, err := jr.r.d.Store.GetPromotion(jr.st.PromotionID); err == nil {
+		params.NotBefore = prom.StartedAt.Add(-promoteClockSkew)
+	}
+	jr.st.PromoteSent = true
+	jr.save()
 	var res proto.PromoteResult
 	if err := jr.runAgentJob(ctx, jr.candidate(), "mysql.promote", params, &res); err != nil {
 		return outcome{}, jr.r.promoteCmdErr(jr.candidate(), err)
@@ -673,18 +710,27 @@ func (jr *jobRun) setPromotionStatus(status string) {
 func (jr *jobRun) promoteFailed() string {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(jr.lj.ctx), cancelTimeout)
 	defer cancel()
-	if !jr.st.PastPoint && jr.steps[jr.idx].title == stepPromoteNewMaster {
+	if !jr.st.PastPoint && jr.st.PromoteSent {
 		var cs proto.MySQLStatus
 		err := jr.r.d.Hub.Call(ctx, jr.candidate(), "mysql.status", nil, &cs)
 		switch {
 		case err != nil:
-			jr.logf("warn", "Keadaan kandidat tidak bisa dibaca (%v); kunci master tidak dibuka. Tekan Ulangi untuk melanjutkan promote.", err)
-			jr.setPromotionStatus(promotionFailed)
-			return store.JobFailed
+			// Unknown: the candidate may have opened writes. Nothing is
+			// undone and the job is partial, which blocks any other
+			// promotion of the topology until a retry settles it.
+			jr.logf("warn", "Keadaan kandidat tidak bisa dibaca (%v); kandidat mungkin sudah menerima tulisan, jadi kunci master "+
+				"tidak dibuka. Tekan Ulangi untuk melanjutkan promote.", err)
+			jr.setPromotionStatus(promotionPartial)
+			return store.JobPartial
 		case !cs.ReadOnly && !cs.SuperReadOnly:
 			jr.st.PastPoint = true
 			jr.save()
 			jr.logf("warn", "Kandidat sudah menerima tulisan: promote tidak dibatalkan. Tekan Ulangi untuk melanjutkan.")
+		default:
+			// Still read-only: the agent restored it; the next attempt
+			// sends mysql.promote anew.
+			jr.st.PromoteSent = false
+			jr.save()
 		}
 	}
 	if jr.st.PastPoint {
@@ -697,14 +743,16 @@ func (jr *jobRun) promoteFailed() string {
 
 // promoteUndo lifts the master's promote lock of a promotion that did not
 // reach its point of no return, and marks the promotion failed (best
-// effort; the master's guard lifts it at the deadline otherwise). It does
-// not use the job's steps: cancelJob calls it too.
+// effort; the master's guard lifts it at the deadline otherwise). Once the
+// lock was asked for, unlockPromote is always tried: a lock taken by a
+// call whose answer was lost is lifted too, and "not locked" is harmless.
+// It does not use the job's steps: cancelJob calls it too.
 func (jr *jobRun) promoteUndo(ctx context.Context) {
-	if jr.st.PastPoint {
+	if jr.st.PastPoint || jr.st.PromoteSent {
 		return
 	}
 	jr.setPromotionStatus(promotionFailed)
-	if jr.job.Kind != KindPromotePlanned || jr.st.LockDeadline == nil {
+	if jr.job.Kind != KindPromotePlanned || !jr.st.LockTried {
 		return
 	}
 	r := jr.r
@@ -726,31 +774,78 @@ func (jr *jobRun) promoteUndo(ctx context.Context) {
 	if err == nil {
 		err = r.d.Hub.Call(ctx, jr.master(), "mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: cred}, nil)
 	}
+	if err != nil && strings.Contains(err.Error(), "tidak dikunci untuk promosi") {
+		jr.st.LockDeadline, jr.st.LockTried = nil, false
+		jr.save()
+		jr.logf("info", "Master tidak sedang dikunci untuk promote; tidak ada yang dibuka.")
+		return
+	}
 	if err != nil {
 		r.log.Warn("unlock promote", "job", jr.job.ID, "err", err)
 		jr.logf("error", "Kunci master tidak bisa dibuka (%v); agent master membukanya sendiri saat tenggat kunci.", err)
 		return
 	}
-	jr.st.LockDeadline = nil
+	jr.st.LockDeadline, jr.st.LockTried = nil, false
 	jr.save()
 	jr.logf("info", "Kunci master dibuka; master tidak berubah.")
 }
 
 // resumePromote is how Resume ends a promotion cut off by a restart: partial
-// past its point of no return, failed before it (the master's lock, if
-// any, is lifted by its agent's guard at the deadline).
+// once mysql.promote was sent, failed before (the master's lock, if any,
+// is lifted by its agent's guard at the deadline; at startup the agents
+// have rarely reconnected to ask for an unlock).
 func (r *Runner) resumePromote(j store.Job) string {
 	var st jobState
 	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
 		r.log.Warn("job params unreadable", "job", j.ID, "err", err)
 		return store.JobFailed
 	}
-	if st.PastPoint {
+	// After mysql.promote was sent its outcome is unknown here: partial,
+	// never failed (a retry settles it).
+	if st.PastPoint || st.PromoteSent {
 		r.updatePromotion(st.PromotionID, func(p *store.Promotion) { p.Status = promotionPartial })
 		return store.JobPartial
 	}
 	r.updatePromotion(st.PromotionID, func(p *store.Promotion) { p.Status = promotionFailed })
 	return store.JobFailed
+}
+
+// promoteSupersededBy says why a failed or partial promotion must not run
+// again: a newer promotion of its topology, or a topology changed since
+// (before the point of no return its master must still be the old one and
+// the candidate its replica; after it, the master is the old one or the
+// candidate).
+func (r *Runner) promoteSupersededBy(j store.Job) (string, error) {
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		return "", err
+	}
+	if prom, err := r.d.Store.LatestPromotion(j.TopologyID); err == nil && prom.ID != st.PromotionID {
+		return "topologi ini sudah punya promote yang lebih baru", nil
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	topo, err := r.d.Store.GetTopology(j.TopologyID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "topologi ini sudah dihapus", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if st.PastPoint {
+		if topo.MasterServerID != st.MasterServerID && topo.MasterServerID != st.CandidateServerID {
+			return "master topologi ini sudah berganti", nil
+		}
+		return "", nil
+	}
+	if topo.MasterServerID != st.MasterServerID {
+		return "master topologi ini sudah berganti", nil
+	}
+	rep, err := r.d.Store.GetReplicaByServer(st.CandidateServerID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && rep.TopologyID != topo.ID) {
+		return "kandidat tidak lagi replika topologi ini", nil
+	}
+	return "", err
 }
 
 // ---- credentials ----
@@ -1021,33 +1116,44 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 
 // ConfirmCutover records that the applications now write to the new
 // master ("Sudah saya alihkan"): cutover_pending is cleared and the
-// promotion marked confirmed.
-func (r *Runner) ConfirmCutover(topologyID int64) error {
+// promotion marked confirmed. warning, when not "", is what the user must
+// still be told: the old master has not been quarantined yet (its agent
+// was unreachable), so it must not be started again before it is.
+func (r *Runner) ConfirmCutover(topologyID int64) (warning string, err error) {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	topo, err := r.d.Store.GetTopology(topologyID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !topo.CutoverPending {
-		return errors.New("tidak ada promote yang menunggu pengalihan aplikasi di topologi ini")
+		return "", errors.New("tidak ada promote yang menunggu pengalihan aplikasi di topologi ini")
 	}
 	if _, busy, err := r.d.Store.ActiveJobForTopology(topologyID, KindPromotePlanned, KindPromoteEmergency); err != nil {
-		return err
+		return "", err
 	} else if busy {
-		return errors.New("promote masih berjalan; tunggu sampai selesai")
+		return "", errors.New("promote masih berjalan; tunggu sampai selesai")
 	}
 	if err := r.d.Store.SetCutoverPending(topologyID, false); err != nil {
-		return err
+		return "", err
 	}
-	if prom, err := r.d.Store.LatestPromotion(topologyID); err == nil && prom.CutoverConfirmedAt == nil {
-		now := r.now()
-		r.updatePromotion(prom.ID, func(p *store.Promotion) { p.CutoverConfirmedAt = &now })
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return err
+	prom, err := r.d.Store.LatestPromotion(topologyID)
+	switch {
+	case err == nil:
+		if prom.CutoverConfirmedAt == nil {
+			now := r.now()
+			r.updatePromotion(prom.ID, func(p *store.Promotion) { p.CutoverConfirmedAt = &now })
+		}
+		if QuarantinePending(prom) {
+			warning = fmt.Sprintf("Master lama %s belum dikarantina karena agent-nya belum terjangkau. Jangan hidupkan "+
+				"server itu sebelum agent-nya tersambung dan karantina terkirim; aplikasi yang belum dialihkan bisa menulis ke sana.",
+				r.nameOf(prom.OldMasterServerID))
+		}
+	case !errors.Is(err, store.ErrNotFound):
+		return "", err
 	}
 	r.d.Publish("promotion_update", map[string]any{"topology_id": topologyID, "cutover_pending": false})
-	return nil
+	return warning, nil
 }
 
 // ---- the promotion record ----

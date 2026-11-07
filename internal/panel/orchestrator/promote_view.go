@@ -43,6 +43,13 @@ type Candidate struct {
 	Eligible         bool
 	Reason           string // why it cannot be chosen, in Indonesian; "" when Eligible
 	MostCurrent      bool   // holds every transaction any other eligible replica holds
+	// Branched: the replicas are branched (PromoteView.Branched) and this
+	// one holds transactions no other eligible replica covers; choosing
+	// one of them needs PromoteParams.AcceptBranched.
+	Branched bool
+	// Writable: its last report shows super_read_only off; it may already
+	// be a master the panel does not know about, and StartPromote refuses.
+	Writable bool
 	// ProbeOK is whether the master answered the replica's probe of its
 	// pinned source (mysql.probeSource); nil when not asked (agent
 	// offline) or when the probe itself failed (ProbeErr).
@@ -225,6 +232,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 			}
 			e, ok1 := parseGTIDSet(exec)
 			rs, ok2 := parseGTIDSet(retr)
+			c.Writable = !rv.Snap.SuperReadOnly
 			if ok1 && ok2 && exec != "" {
 				executed, held, setsOK = e, e.union(rs), true
 				c.ApplyBacklog = rs.minusCount(e, "")
@@ -298,6 +306,19 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 		found = found || superset
 	}
 	v.Branched = !found && len(eligible) > 1
+	if v.Branched {
+		// The maximal ones: no other eligible replica holds all of theirs.
+		for _, i := range eligible {
+			maximal := true
+			for _, j := range eligible {
+				if i != j && sets[i].minusCount(sets[j], "") == 0 && sets[j].minusCount(sets[i], "") > 0 {
+					maximal = false
+					break
+				}
+			}
+			v.Candidates[i].Branched = maximal
+		}
+	}
 
 	v.WritePause = r.writePause(v)
 	return v, nil

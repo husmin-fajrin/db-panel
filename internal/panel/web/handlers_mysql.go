@@ -38,6 +38,10 @@ type Orchestrator interface {
 	UnlockMaster(ctx context.Context, serverID int64) error
 	DetachReplica(ctx context.Context, serverID int64, stop bool) error
 	DeleteServer(ctx context.Context, serverID int64) error
+	// DeleteUnquarantined deletes a quarantined old master whose
+	// quarantine never arrived (a dead server); guard it with a typed
+	// confirmation.
+	DeleteUnquarantined(ctx context.Context, serverID int64) error
 	Approve(jobID string) error
 	Retry(jobID string) error
 	Cancel(jobID string) error
@@ -48,7 +52,9 @@ type Orchestrator interface {
 	// to be pointed at the new master.
 	PromoteView(ctx context.Context, masterServerID int64) (orchestrator.PromoteView, error)
 	StartPromote(ctx context.Context, p orchestrator.PromoteParams) (string, error)
-	ConfirmCutover(topologyID int64) error
+	// ConfirmCutover's warning, when not "", must be shown: the old master
+	// is not quarantined yet.
+	ConfirmCutover(topologyID int64) (warning string, err error)
 	RepointNow(ctx context.Context, replicaServerID int64) error
 }
 

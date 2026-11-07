@@ -265,6 +265,20 @@ func TestPromotePlannedHappyPath(t *testing.T) {
 	}
 	// Done: a second promote is refused by the pins.
 	wantRefused(t, "promote of the new master", r.dispatch("mysql.promote", p), "server ini dipin sebagai master")
+	// The same promotion asked again (NotBefore at or before the record)
+	// is answered from the record; a later one is refused.
+	again := p
+	again.NotBefore = time.Now().Add(-time.Hour)
+	res2 := promoteResult(t, r.run(again))
+	if !res2.Resumed || res2.GTIDExecuted != res.GTIDExecuted || res2.ServerUUID != res.ServerUUID || res2.Mode != proto.PromotePlanned {
+		t.Errorf("promote of the promoted server = %+v; want the record of %+v", res2, res)
+	}
+	later := p
+	later.NotBefore = time.Now().Add(time.Hour)
+	wantRefused(t, "promote with a later NotBefore", r.dispatch("mysql.promote", later), "server ini dipin sebagai master")
+	other := again
+	other.OldSource.Port++
+	wantRefused(t, "promote from another old source", r.dispatch("mysql.promote", other), "server ini dipin sebagai master")
 }
 
 // TestPromotePlannedRefusedWhenMasterWritable: a planned promotion of a
