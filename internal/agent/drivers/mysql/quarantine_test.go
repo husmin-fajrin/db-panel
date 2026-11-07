@@ -449,7 +449,8 @@ func TestQuarantineSeenHostForms(t *testing.T) {
 
 // TestQuarantineReadsNewMasterAtSeenAddress: without a lock the new
 // master named by a host with several addresses is read at the address
-// the replicas-seen file matched, with its name kept for TLS.
+// the replicas-seen file matched, with its name kept for TLS, and that
+// address is pinned as the source.
 func TestQuarantineReadsNewMasterAtSeenAddress(t *testing.T) {
 	r := newQuarantineRig(t)
 	dns := fakeDNS{fwd: map[string][]string{"db2.example": {"6.6.6.6", "10.9.9.9"}}}
@@ -463,7 +464,14 @@ func TestQuarantineReadsNewMasterAtSeenAddress(t *testing.T) {
 	if c.Host != "10.9.9.9" || c.ServerName != "db2.example" {
 		t.Errorf("new master read at %q (name %q), want 10.9.9.9 (db2.example)", c.Host, c.ServerName)
 	}
-	wantQuarantined(t, r.db, r.dir, "db2.example:3306")
+	// The pin is the verified address; the event names the new master.
+	wantQuarantined(t, r.db, r.dir, "10.9.9.9:3306")
+	if src := r.ev.payload(t, 0)["new_source"]; src != "db2.example:3306" {
+		t.Errorf("quarantined event new_source = %q", src)
+	}
+	if res := decode[proto.QuarantineResult](t, r.quarantine(p)); !res.Already {
+		t.Errorf("quarantine again under the name = %+v, want already", res)
+	}
 }
 
 func (r *quarantineRig) wantEvents(types ...string) {

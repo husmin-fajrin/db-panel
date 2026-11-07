@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -527,4 +528,107 @@ func TestLockReappliedAfterRestart(t *testing.T) {
 		t.Errorf("peer read %d times before the deadline", n)
 	}
 	r.wantEvents()
+}
+
+// TestLockRecordsMatchedAddress: a candidate named by a host with several
+// addresses is locked for the one a Binlog Dump thread comes from; the
+// lock records it, and the guard, unlockPromote and quarantine read the
+// candidate at that address only (the name kept for TLS), never at the
+// other one. A quarantine pins the address, not the name.
+func TestLockRecordsMatchedAddress(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	replUser(t, master)
+	mdb := rootDB(t, master)
+	execAll(t, mdb, "CREATE DATABASE toko")
+	follow(t, master, replica)
+	deadline := time.Now().Add(time.Minute)
+	for count(t, mdb, "SELECT COUNT(*) FROM information_schema.processlist WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("replica never connected")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	dns := fakeDNS{
+		fwd: map[string][]string{
+			"cand.example":  {"6.6.6.6", "127.0.0.1"},
+			"other.example": {"6.6.6.6"},
+			"localhost":     {"127.0.0.1"},
+		},
+		rev: map[string][]string{"127.0.0.1": {"localhost"}, "6.6.6.6": {"localhost"}},
+	}
+	t.Cleanup(mysql.SetResolver(dns.ip, dns.addr))
+	peer := &fakePeer{}
+	t.Cleanup(mysql.SetReadPeer(peer.read))
+	dir := pinDir(t, "master", "")
+	r := newPinRig(t, master.Host(), dir)
+	ev := &eventLog{}
+	r.d.Events = ev
+	r.d.SeenPath = filepath.Join(t.TempDir(), "replicas-seen") // none: the lock is what counts
+	lockedAt := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	r.d.Now = func() time.Time { return lockedAt }
+	cand := proto.PeerCred{Host: "cand.example", Port: replica.Port, User: "dbpanel_repl", Password: replPassword}
+	key := "cand.example:" + strconv.Itoa(replica.Port)
+	addrKey := "127.0.0.1:" + strconv.Itoa(replica.Port)
+
+	// A name whose only address is not a replica's (its PTR is a lie).
+	other := cand
+	other.Host = "other.example"
+	wantRefused(t, "lock for a name with no replica address", r.dispatch("mysql.lockForPromote",
+		proto.LockForPromoteParams{Candidate: other, TimeoutSec: 600}), "tidak sedang tersambung")
+
+	decode[proto.LockForPromoteResult](t, r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600}))
+	l, ok, err := r.d.Pins().ReadLock()
+	if err != nil || !ok || l.Candidate != key || l.Addr != "127.0.0.1" {
+		t.Fatalf("lock = %+v, %v, %v; want candidate %s at 127.0.0.1", l, ok, err, key)
+	}
+	wantAt := func(what string) {
+		t.Helper()
+		for _, c := range peer.creds {
+			if c.Host != "127.0.0.1" || c.ServerName != "cand.example" {
+				t.Errorf("%s: candidate read at %q (name %q), want 127.0.0.1 (cand.example)", what, c.Host, c.ServerName)
+			}
+		}
+	}
+
+	// unlockPromote: writable candidate, refused; read at the address.
+	var uuid string
+	if err := mdb.QueryRow("SELECT @@global.server_uuid").Scan(&uuid); err != nil {
+		t.Fatal(err)
+	}
+	peer.set(mysql.PeerState{Reachable: true, GTIDExecuted: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1"})
+	if resp := r.dispatch("mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: cand}); resp.OK {
+		t.Error("unlockPromote with a writable candidate accepted")
+	}
+	wantAt("unlockPromote")
+
+	// The guard past the deadline: writable without this server's
+	// transactions, kept; read at the address.
+	if err := r.d.GuardTick(context.Background(), lockedAt.Add(11*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if peer.count() != 2 {
+		t.Errorf("candidate read %d times, want 2", peer.count())
+	}
+	wantAt("guard")
+
+	// Quarantine on the lock's path: read at the address, pinned at it.
+	peer.set(mysql.PeerState{Reachable: true, GTIDExecuted: uuid + ":1-5"})
+	res := decode[proto.QuarantineResult](t, r.dispatch("mysql.quarantine", proto.QuarantineParams{NewMaster: cand}))
+	if !res.Applied {
+		t.Errorf("quarantine = %+v", res)
+	}
+	wantAt("quarantine")
+	if role, src := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "quarantined" || src != addrKey {
+		t.Errorf("pins = %q, %q; want quarantined, %s", role, src, addrKey)
+	}
+	evs := ev.all()
+	if len(evs) == 0 || evs[len(evs)-1].Type != proto.EventQuarantined || ev.payload(t, len(evs)-1)["new_source"] != key {
+		t.Errorf("events = %+v; want monitor.quarantined naming %s", evs, key)
+	}
+	// Asked again under the name: the same server (the name resolves to
+	// the pinned address).
+	if res := decode[proto.QuarantineResult](t, r.dispatch("mysql.quarantine", proto.QuarantineParams{NewMaster: cand})); !res.Already {
+		t.Errorf("quarantine again = %+v, want already", res)
+	}
 }

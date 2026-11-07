@@ -1072,9 +1072,10 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
 - Repoint replika setelah promosi: agent replika hanya mau pindah ke master
   baru bila sumber yang dipin mati atau read-only, dan master baru memuat
   transaksi sumber itu. Panel yang disusupi bisa membuat sumber read-only
-  sendiri (kunci promosi) lalu menunjuk MySQL milik penyerang yang memalsukan
-  gtid_executed. Yang terdampak hanya replika itu (ia bisa diarahkan, lalu
-  dibangun ulang, dari server penyerang); master tidak.
+  sendiri (kunci promosi; master hanya terkunci sampai batas waktu kunci)
+  lalu menunjuk MySQL milik penyerang yang memalsukan gtid_executed. Yang
+  terdampak hanya replika itu (ia bisa diarahkan, lalu dibangun ulang, dari
+  server penyerang); master tidak.
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
   tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan
   setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum

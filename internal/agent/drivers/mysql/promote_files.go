@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -53,9 +54,28 @@ const (
 // automatic (the guard that ends an expired promotion included) ever
 // unlocks or quarantines a server under such a lock; only "dbpanel agent
 // unlock-master" removes it.
+//
+// Addr is the candidate's address that lockForPromote matched against a
+// Binlog Dump thread: every later read of the candidate (the guard,
+// mysql.unlockPromote, mysql.quarantine) dials it, never the name in
+// Candidate again (lockAddr).
 type PromoteLock struct {
 	Candidate string
+	Addr      string
 	Deadline  time.Time
+}
+
+// lockAddr is the address the candidate of l is read at: Addr, else the
+// host of Candidate when it is an IP address, else "" (no verified
+// address: nothing reads the candidate).
+func lockAddr(l PromoteLock) string {
+	if l.Addr != "" {
+		return l.Addr
+	}
+	if h, _, err := net.SplitHostPort(l.Candidate); err == nil && net.ParseIP(h) != nil {
+		return h
+	}
+	return ""
 }
 
 // CLILockCandidate is the Candidate of a lock set by the local CLI.
@@ -63,6 +83,7 @@ const CLILockCandidate = "cli"
 
 type lockJSON struct {
 	Candidate string `json:"candidate"`
+	Addr      string `json:"addr,omitempty"`
 	Deadline  string `json:"deadline"`
 }
 
@@ -135,7 +156,7 @@ func (p *Pins) WriteLock(l PromoteLock) error {
 	if l.Candidate == "" || l.Deadline.IsZero() {
 		return errors.New("kunci promosi butuh kandidat dan tenggat")
 	}
-	return writeJSON(p.path(LockFile), lockJSON{Candidate: l.Candidate, Deadline: l.Deadline.UTC().Format(time.RFC3339)})
+	return writeJSON(p.path(LockFile), lockJSON{Candidate: l.Candidate, Addr: l.Addr, Deadline: l.Deadline.UTC().Format(time.RFC3339)})
 }
 
 // ReadLock reads the promote lock; ok is false when there is none. A lock
@@ -147,10 +168,10 @@ func (p *Pins) ReadLock() (PromoteLock, bool, error) {
 		return PromoteLock{}, false, err
 	}
 	d, err := time.Parse(time.RFC3339, v.Deadline)
-	if err != nil || v.Candidate == "" {
+	if err != nil || v.Candidate == "" || (v.Addr != "" && net.ParseIP(v.Addr) == nil) {
 		return PromoteLock{}, false, fmt.Errorf("%s tidak valid; hapus dengan: sudo dbpanel agent unlock-master", p.path(LockFile))
 	}
-	return PromoteLock{Candidate: v.Candidate, Deadline: d}, true, nil
+	return PromoteLock{Candidate: v.Candidate, Addr: v.Addr, Deadline: d}, true, nil
 }
 
 // ClearLock removes the promote lock; no lock is not an error.

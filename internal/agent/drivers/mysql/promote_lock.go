@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,7 +162,7 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 		return res, err
 	}
 	defer db.Close()
-	ok, err := candidateConnected(ctx, db, p.Candidate.Host)
+	addr, ok, err := candidateConnected(ctx, db, p.Candidate.Host)
 	if err != nil {
 		return res, err
 	}
@@ -176,7 +176,7 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 	// lock file keeps whole seconds.
 	res.LockedAt = d.now().UTC().Truncate(time.Second)
 	res.Deadline = res.LockedAt.Add(time.Duration(p.TimeoutSec) * time.Second)
-	if err := writeLock(d.pins, PromoteLock{Candidate: key, Deadline: res.Deadline}); err != nil {
+	if err := writeLock(d.pins, PromoteLock{Candidate: key, Addr: addr, Deadline: res.Deadline}); err != nil {
 		return res, fmt.Errorf("kunci promosi gagal ditulis, master tidak dikunci: %w", err)
 	}
 	d.guard.reset(&p.Candidate)
@@ -221,7 +221,12 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 	case !strings.EqualFold(l.Candidate, key):
 		return &commands.ParamError{Msg: fmt.Sprintf("kunci promosi ini untuk kandidat %s, bukan %s; kunci tidak dibuka", l.Candidate, key)}
 	}
-	st := readPeer(ctx, c, peerTimeout)
+	addr := lockAddr(l)
+	if addr == "" {
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"alamat kandidat %s tidak tercatat di kunci promosi, kandidat tidak bisa diperiksa; buka kunci di server ini dengan: sudo dbpanel agent unlock-master", key)}
+	}
+	st := readPeer(ctx, dialAt(c, addr), peerTimeout)
 	if !st.Reachable {
 		return &commands.ParamError{Msg: fmt.Sprintf("kandidat %s tidak bisa dibaca (%s); kunci tidak dibuka", key, st.Err)}
 	}
@@ -257,41 +262,21 @@ func unlockMaster(ctx context.Context, db *sql.DB) error {
 }
 
 // candidateConnected reports whether a Binlog Dump thread on this server
-// comes from host: some address host resolves to (or host itself, an IP)
-// is an address of the thread's processlist host (resolved too when it is
-// a name, which it is unless skip_name_resolve is on).
-func candidateConnected(ctx context.Context, db *sql.DB, host string) (bool, error) {
-	want := resolveHost(ctx, host)
-	if len(want) == 0 {
-		return false, nil
-	}
+// comes from host, and from which of its addresses: host is resolved once
+// (an IP address is itself) and one of its addresses must be a thread's
+// processlist host, or have a forward-confirmed reverse name that is
+// (MySQL shows a name unless skip_name_resolve is on); see matchAddr.
+// That address is what the candidate is read at from then on.
+func candidateConnected(ctx context.Context, db *sql.DB, host string) (string, bool, error) {
 	hosts, err := binlogDumpHosts(ctx, db)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	for _, h := range hosts {
-		for _, ip := range resolveHost(ctx, h) {
-			if slices.ContainsFunc(want, ip.Equal) {
-				return true, nil
-			}
-		}
+	if len(hosts) == 0 {
+		return "", false, nil
 	}
-	return false, nil
-}
-
-// resolveHost is host's addresses: host itself when it is an IP address,
-// else what it resolves to (none when it does not).
-func resolveHost(ctx context.Context, host string) []net.IP {
-	if ip := net.ParseIP(host); ip != nil {
-		return []net.IP{ip}
-	}
-	ctx, cancel := context.WithTimeout(ctx, peerTimeout)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		return nil
-	}
-	return ips
+	addr, ok := matchAddr(ctx, host, hosts)
+	return addr, ok, nil
 }
 
 // GuardTick is the promote lock's guard, run by the health monitor after
@@ -341,7 +326,7 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	if l.Candidate == CLILockCandidate || now.Before(l.Deadline) || now.Before(d.guard.nextRead) {
 		return nil
 	}
-	return d.guardExpired(ctx, db, l.Candidate, now)
+	return d.guardExpired(ctx, db, l, now)
 }
 
 // ensureLocked turns super_read_only on (PERSIST) when MySQL was not seen
@@ -364,16 +349,24 @@ func (d *Driver) ensureLocked(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// guardExpired handles a lock for candidate key past its deadline when a
-// read is due. The caller holds promoteMu.
-func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, key string, now time.Time) error {
+// guardExpired handles lock l past its deadline when a read is due. The
+// candidate is read at the lock's recorded address (lockAddr) only. The
+// caller holds promoteMu.
+func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, now time.Time) error {
 	g := &d.guard
+	key := l.Candidate
 	if g.cred == nil || !strings.EqualFold(peerKey(*g.cred), key) {
 		g.nextRead = now.Add(lockRecheck)
 		d.keepLock(now, key, "akun kandidat tidak ada di agent ini (agent dimulai ulang setelah kunci dipasang), kandidat tidak bisa diperiksa")
 		return nil
 	}
-	st := readPeer(ctx, *g.cred, peerTimeout)
+	addr := lockAddr(l)
+	if addr == "" {
+		g.nextRead = now.Add(lockRecheck)
+		d.keepLock(now, key, "alamat kandidat tidak tercatat di kunci promosi, kandidat tidak bisa diperiksa")
+		return nil
+	}
+	st := readPeer(ctx, dialAt(*g.cred, addr), peerTimeout)
 	switch {
 	case !st.Reachable:
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
@@ -384,7 +377,7 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, key string, now t
 			return fmt.Errorf("baca server_uuid: %w", err)
 		}
 		if gtidHasUUID(st.GTIDExecuted, uuid) {
-			return d.selfQuarantine(ctx, key)
+			return d.selfQuarantine(ctx, net.JoinHostPort(addr, strconv.Itoa(g.cred.Port)), key)
 		}
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
 		d.keepLock(now, key, "kandidat bisa ditulis tetapi gtid_executed-nya tidak memuat transaksi server ini")
@@ -421,9 +414,12 @@ func (d *Driver) keepLock(now time.Time, key, reason string) {
 }
 
 // selfQuarantine makes this server read-only for good (PERSIST, both
-// flags) and pins it quarantined under newSource (host:port), its new
-// master, removing the promote lock. The caller holds promoteMu.
-func (d *Driver) selfQuarantine(ctx context.Context, newSource string) error {
+// flags) and pins it quarantined under newSource (address:port: the
+// verified address of its new master, which the rebuild then connects
+// to), removing the promote lock. name is the new master as the panel
+// named it (host:port), for the log and monitor.quarantined. The caller
+// holds promoteMu.
+func (d *Driver) selfQuarantine(ctx context.Context, newSource, name string) error {
 	if d.pins == nil {
 		return fmt.Errorf("karantina butuh pin peran")
 	}
@@ -446,8 +442,8 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource string) error {
 		return fmt.Errorf("server sudah dikarantina, tetapi kunci promosi gagal dihapus: %w", err)
 	}
 	d.guard.reset(nil)
-	d.warn("server quarantined under its new master", "new_source", newSource)
-	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: newSource})
+	d.warn("server quarantined under its new master", "new_master", name, "pinned_source", newSource)
+	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: name})
 	return nil
 }
 
