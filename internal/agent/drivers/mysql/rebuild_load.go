@@ -19,6 +19,12 @@ type rebuildLoad struct {
 	active   bool
 	source   string // host:port the load copies from
 	deferred bool   // the guard logged its deferral for this load
+	// recheck: a load ended; the guard's next tick reads the flags again
+	// whether or not it deferred during the load.
+	recheck bool
+	// loaded is the source (host:port) a snapshot job in this agent run
+	// copied the data from successfully; settleRebuilt requires it.
+	loaded string
 }
 
 // loadMark is the handle of one snapshot job on the driver's mark; nil
@@ -55,9 +61,38 @@ func (m *loadMark) clear() {
 	}
 	m.r.mu.Lock()
 	defer m.r.mu.Unlock()
-	if m.r.source == m.source {
-		m.r.active, m.r.source, m.r.deferred = false, "", false
+	if m.r.source == m.source && m.r.active {
+		m.r.active, m.r.source, m.r.deferred, m.r.recheck = false, "", false, true
 	}
+}
+
+// done records that the snapshot job copied the data from the mark's
+// source (the job succeeded).
+func (m *loadMark) done() {
+	if m == nil {
+		return
+	}
+	m.r.mu.Lock()
+	defer m.r.mu.Unlock()
+	m.r.loaded = m.source
+}
+
+// takeRecheck reports, once, that a load ended since the guard's last
+// tick.
+func (d *Driver) takeRecheck() bool {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	r := d.rebuild.recheck
+	d.rebuild.recheck = false
+	return r
+}
+
+// loadedFrom reports whether a snapshot job in this agent run copied the
+// data from host:port.
+func (d *Driver) loadedFrom(host string, port int) bool {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	return d.rebuild.loaded != "" && d.rebuild.loaded == net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // deferringToRebuild reports whether the guard defers: a load is marked, its source

@@ -164,6 +164,15 @@ func cloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (pro
 		return res, fmt.Errorf("CLONE selesai, tetapi login ke MySQL gagal: %w", err)
 	}
 	defer after.Close()
+	// A rebuild of a quarantined server: read-only is put back for good
+	// while the mark still holds the guard off, whatever CLONE did to
+	// mysqld-auto.cnf.
+	if mark != nil {
+		if err := persistReadOnly(vctx, after); err != nil {
+			return res, fmt.Errorf("CLONE selesai, tetapi read-only tidak bisa dipasang lagi: %w", err)
+		}
+		j.Logf("info", "read_only and super_read_only persisted again after the clone restart")
+	}
 	st, err := readCloneStatus(vctx, after)
 	if err != nil {
 		return res, err

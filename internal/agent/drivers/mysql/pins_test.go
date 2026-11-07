@@ -1038,8 +1038,42 @@ func TestQuarantinedRebuiltPinsReplica(t *testing.T) {
 			if err := p.Allow("mysql.lockForPromote", nil); err != nil {
 				t.Errorf("%s: lockForPromote after the rebuild = %v", what, err)
 			}
-			if err := p.Allow("mysql.leftover", nil); !errors.Is(err, mysql.ErrRolePinned) {
-				t.Errorf("%s: leftover after the rebuild = %v, want ErrRolePinned", what, err)
+			for _, cmd := range []string{"mysql.leftover", "mysql.salvage"} {
+				if err := p.Allow(cmd, nil); !errors.Is(err, mysql.ErrRolePinned) {
+					t.Errorf("%s: %s after the rebuild = %v, want ErrRolePinned", what, cmd, err)
+				}
+			}
+			// The files already salvaged stay reachable.
+			for _, cmd := range salvageFileCommands {
+				if err := p.Allow(cmd, nil); err != nil {
+					t.Errorf("%s: %s after the rebuild = %v", what, cmd, err)
+				}
+			}
+		}
+	}
+}
+
+// salvageFileCommands reach the salvage files already written.
+var salvageFileCommands = []string{"mysql.salvageList", "mysql.salvageRead", "mysql.salvageDelete"}
+
+// TestSalvageFileCommandsByRole: the salvage files are listed, read and
+// deleted on a quarantined server and on a replica (a rebuilt old master
+// keeps its files), never on a master or an unassigned server; leftover
+// and salvage (which read the binlog) stay quarantined-only.
+func TestSalvageFileCommandsByRole(t *testing.T) {
+	for role, allowed := range map[string]bool{"quarantined": true, "replica": true, "master": false, "": false} {
+		p, err := mysql.LoadPins(pinDir(t, role, "10.0.0.1:3306"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cmd := range salvageFileCommands {
+			if err := p.Allow(cmd, nil); (err == nil) != allowed {
+				t.Errorf("Allow(%s) on %q = %v, want allowed %v", cmd, role, err, allowed)
+			}
+		}
+		for _, cmd := range []string{"mysql.leftover", "mysql.salvage"} {
+			if err := p.Allow(cmd, nil); (err == nil) != (role == "quarantined") {
+				t.Errorf("Allow(%s) on %q = %v", cmd, role, err)
 			}
 		}
 	}
@@ -1048,7 +1082,7 @@ func TestQuarantinedRebuiltPinsReplica(t *testing.T) {
 // TestConfigureReplicationEndsQuarantine: on a quarantined old master,
 // mysql.configureReplication toward another host is refused as before; a
 // successful one toward the pinned source (the new master) pins replica
-// and logs it. A master refuses configureReplication and keeps its pin.
+// and logs it, once a load from that source succeeded in this agent run. A master refuses configureReplication and keeps its pin.
 func TestConfigureReplicationEndsQuarantine(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	const src = "10.0.0.1:3306" // validSource's
@@ -1067,6 +1101,19 @@ func TestConfigureReplicationEndsQuarantine(t *testing.T) {
 		t.Fatalf("role pin after a refused configureReplication = %q", got)
 	}
 
+	// Without a load from the pinned source in this agent run the pin
+	// stays quarantined, and the agent says why.
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", validSource))
+	if role := pinFile(t, dir, mysql.RoleFile); role != "quarantined" {
+		t.Fatalf("role pin after configureReplication without a load = %q, want quarantined", role)
+	}
+	if out := logBuf.String(); !strings.Contains(out, "quarantine kept") || strings.Contains(out, `msg="role pinned"`) {
+		t.Errorf("agent log after configureReplication without a load:\n%s", out)
+	}
+
+	if !d.MarkRebuildLoaded("10.0.0.1", 3306) {
+		t.Fatal("no load mark toward the pinned source")
+	}
 	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", validSource))
 	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "replica" || s != src {
 		t.Fatalf("pins after configureReplication toward the pinned source = %q, %q; want replica, %s", role, s, src)

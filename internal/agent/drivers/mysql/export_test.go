@@ -296,3 +296,11 @@ func (d *Driver) RebuildLoadMarked() bool {
 	defer d.rebuild.mu.Unlock()
 	return d.rebuild.active
 }
+
+// MarkRebuildLoaded records a successful snapshot job from host:port, as
+// dumpFrom and cloneFrom do on a quarantined server under that source.
+func (d *Driver) MarkRebuildLoaded(host string, port int) bool {
+	m := d.rebuildMark(host, port)
+	m.done()
+	return m != nil
+}

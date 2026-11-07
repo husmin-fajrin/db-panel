@@ -249,6 +249,11 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 		d.guard.up = false
 		return nil
 	}
+	// A load just ended: read the flags again (its restore may have
+	// failed), whether or not a tick deferred during it.
+	if d.takeRecheck() {
+		d.guard.up = false
+	}
 	// A restart between two ticks is a transition too.
 	var name string
 	var uptime int64
@@ -390,10 +395,24 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // pinned source, a quarantined server becomes a replica. From then on the
 // guard's quarantine branch (read-only put back on every MySQL restart)
 // stops applying and the replica's rules do; a quarantine report still
-// waiting for MySQL is dropped.
+// waiting for MySQL is dropped. The data must have been replaced first: a
+// dumpFrom or cloneFrom from that source succeeded in this agent run
+// (loadedFrom); without it the pin stays quarantined and the agent logs
+// why, so a configureReplication alone never ends a quarantine with the
+// leftover data unchecked.
 func (d *Driver) settleRebuilt(host string, port int) error {
 	d.promoteMu.Lock()
 	defer d.promoteMu.Unlock()
+	if !d.pins.quarantinedUnder(host, port) {
+		return nil
+	}
+	if !d.loadedFrom(host, port) {
+		if d.Logger != nil {
+			d.Logger.Warn("quarantine kept: replication points at the pinned source, but no dump or clone from it "+
+				"succeeded in this agent run", "source", net.JoinHostPort(host, fmt.Sprint(port)))
+		}
+		return nil
+	}
 	settled, err := d.pins.settleRebuilt(host, port)
 	if err != nil || !settled {
 		return err

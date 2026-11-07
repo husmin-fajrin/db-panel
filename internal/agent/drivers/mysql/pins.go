@@ -78,8 +78,9 @@ var dumpAccountRe = regexp.MustCompile(`^dbpanel_dump_[0-9a-f]{8}$`)
 // replication account's, mysql.promote and mysql.repoint anywhere but on
 // a replica, which Allow also refuses without a source pin,
 // mysql.quarantine anywhere but on a master or a quarantined server, and
-// mysql.leftover and the salvage commands anywhere but on a quarantined
-// server). On a master, an existing account is never
+// mysql.leftover and mysql.salvage anywhere but on a quarantined server,
+// and the salvage file commands anywhere but on a quarantined server or a
+// replica, which a rebuilt old master is). On a master, an existing account is never
 // changed (createAccount), mysql.restart needs a configure that asked for
 // it (Pins.AllowRestart), and setReadOnly{off} is refused while the
 // promote lock exists (Pins.Allow). A quarantined server refuses what a
@@ -753,10 +754,15 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 		// Only a replica is promoted or pointed at a new master (a
 		// quarantined one is refused above).
 		return role != roleReplica, nil
-	case "mysql.leftover", "mysql.salvage", "mysql.salvageList", "mysql.salvageRead", "mysql.salvageDelete":
+	case "mysql.leftover", "mysql.salvage":
 		// What the old master holds that its new master lacks is read
 		// and extracted only on the old master.
 		return role != roleQuarantined, nil
+	case "mysql.salvageList", "mysql.salvageRead", "mysql.salvageDelete":
+		// The files already extracted live in this agent's own salvage
+		// directory; they stay reachable once the old master is rebuilt
+		// as a replica (they may be the only copy of the leftover data).
+		return role != roleQuarantined && role != roleReplica, nil
 	case "mysql.quarantine":
 		// The old master quarantines itself; a quarantined server answers
 		// it again (idempotent).

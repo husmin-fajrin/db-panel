@@ -239,9 +239,11 @@ func TestSweepSalvageSevenDays(t *testing.T) {
 	}
 }
 
-// TestSalvageAndLeftoverOnlyWhenQuarantined: mysql.leftover and the
-// salvage commands are refused on a master, a replica and an unassigned
-// server; mysql.connections is allowed everywhere.
+// TestSalvageAndLeftoverOnlyWhenQuarantined: mysql.leftover and
+// mysql.salvage are refused on a master, a replica and an unassigned
+// server; the salvage file commands are refused on a master and an
+// unassigned server but allowed on a replica (a rebuilt old master keeps
+// its files); mysql.connections is allowed everywhere.
 func TestSalvageAndLeftoverOnlyWhenQuarantined(t *testing.T) {
 	cmds := []struct {
 		cmd    string
@@ -253,16 +255,24 @@ func TestSalvageAndLeftoverOnlyWhenQuarantined(t *testing.T) {
 		{"mysql.salvageRead", proto.SalvageReadParams{Name: "20261107T080910Z-42.sql"}},
 		{"mysql.salvageDelete", proto.SalvageDeleteParams{Name: "20261107T080910Z-42.sql"}},
 	}
+	fileCmd := func(cmd string) bool { return cmd != "mysql.leftover" && cmd != "mysql.salvage" }
 	for _, role := range []string{"master", "replica", ""} {
 		r := newPinRig(t, nil, pinDir(t, role, "10.0.0.1:3306"))
 		for _, c := range cmds {
-			wantRefused(t, role+" "+c.cmd, r.dispatch(c.cmd, c.params), "perintah "+c.cmd+" ditolak")
+			resp := r.dispatch(c.cmd, c.params)
+			if role == "replica" && fileCmd(c.cmd) {
+				if !resp.OK && resp.Error != nil && strings.Contains(resp.Error.Message, "ditolak") {
+					t.Errorf("replica %s refused: %s", c.cmd, resp.Error.Message)
+				}
+				continue
+			}
+			wantRefused(t, role+" "+c.cmd, resp, "perintah "+c.cmd+" ditolak")
 		}
 		wantPastPins(t, role+" mysql.connections", r.dispatch("mysql.connections", nil))
 	}
 	r := newPinRig(t, nil, pinDir(t, "quarantined", "10.0.0.1:3306"))
 	for _, c := range cmds {
-		if c.cmd == "mysql.leftover" || c.cmd == "mysql.salvage" {
+		if !fileCmd(c.cmd) {
 			wantPastPins(t, "quarantined "+c.cmd, r.dispatch(c.cmd, c.params))
 		}
 	}

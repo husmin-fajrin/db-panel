@@ -59,14 +59,6 @@ const (
 	e2eResyncQuietFixed = true
 )
 
-// Defects of Plan 4b found by the promote end-to-end tests, both fixed:
-// D1, the promote's swap never marked the new master's inventory
-// MasterReady, so "Bangun ulang sebagai replika" (and "Buat replika") from
-// the new master was refused with "master belum disiapkan; jalankan
-// Siapkan master dulu"; D2, a successful rebuild left the old master's
-// role pin quarantined.
-const e2ePromoteRebuildFixed = true
-
 // skipWithoutE2E skips the test in -short mode and without mysqld.
 func skipWithoutE2E(t *testing.T) {
 	t.Helper()
@@ -762,16 +754,16 @@ func (e *e2ePromoteTopology) confirmCutover(t *testing.T, newMaster *e2eNode) {
 	}
 }
 
-// rebuildOldMaster refreshes the new master's inventory (it was taken when
-// the new master was still an empty replica) and runs "Bangun ulang
-// sebagai replika" of old; old then follows the new master as a replica.
-func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eNode, row int) bool {
+// rebuildOldMaster refreshes the new master's inventory ("Segarkan") and
+// runs "Bangun ulang sebagai replika" of old; old then follows the new
+// master as a replica. The refresh is a user step here: the new master's
+// stored inventory is the one taken while it was an empty replica target
+// (create_replica re-reads it after the copy only when the copy replaced
+// its accounts), so without it the form offers no database. The load runs
+// with read-only lifted (the quarantine guard defers to it) and old is
+// read-only again afterwards.
+func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eNode, row int) {
 	t.Helper()
-	if !e2ePromoteRebuildFixed {
-		t.Logf("Bangun ulang sebagai replika of %s skipped: pending the fix of the new master's MasterReady "+
-			"(e2ePromoteRebuildFixed)", old.name)
-		return false
-	}
 	if loc := e.ui.postRedirect(serverPath(newMaster.srv())+"/mysql/refresh", nil); !strings.HasSuffix(loc, "?pesan=disegarkan") {
 		t.Fatalf("refresh of %s redirected to %q", newMaster.name, loc)
 	}
@@ -805,8 +797,17 @@ func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eN
 	}
 	execSQL(t, newMaster.db, fmt.Sprintf("INSERT INTO a.t VALUES (%d, 'setelah-bangun-ulang')", row))
 	waitRow(t, old.db, "a", row, "setelah-bangun-ulang")
+	// The load was observable: read-only lifted for it on old (D3), and
+	// back on above. The guard's deferral shows only when one of its ticks
+	// lands inside the load.
+	logs := e.logs.String()
+	if want := fmt.Sprintf(`msg="read_only lifted for the load" agent=%s`, old.agent.name); !strings.Contains(logs, want) {
+		t.Fatalf("the agent log of %s does not show %s", old.name, want)
+	}
+	if strings.Contains(logs, fmt.Sprintf(`msg="quarantine guard deferring: a rebuild load from the pinned source is running" agent=%s`, old.agent.name)) {
+		t.Logf("the quarantine guard of %s deferred to the load", old.name)
+	}
 	t.Logf("old master rebuilt as a replica of %s in %s", newMaster.name, time.Since(start).Round(time.Second))
-	return true
 }
 
 // wantPromoted checks the swap after a promotion of newMaster: it is the

@@ -283,6 +283,12 @@ func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
 	if d.RebuildLoadMarked() {
 		t.Error("the rebuild-load mark outlived the dump job")
 	}
+	// The load from the pinned source lets replication toward it end the
+	// quarantine.
+	decode[proto.ReplicaStatus](t, (&pinRig{t: t, reg: rig.reg}).dispatch("mysql.configureReplication", sourceParams(master)))
+	if role := pinFile(t, dir, mysql.RoleFile); role != "replica" {
+		t.Errorf("role pin after the dump and configureReplication = %q, want replica", role)
+	}
 	t.Logf("guard ticked %d times during the load", n)
 }
 
@@ -580,6 +586,19 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 		t.Fatalf("guard after a restart without a load: super_read_only=%v read_only=%v", sro, ro)
 	}
 
+	// A load the guard never saw (no tick while marked) whose restore
+	// failed: the tick after it reads the flags again.
+	clear, ok = d.MarkRebuildLoad("10.0.0.1", 3306)
+	if !ok {
+		t.Fatal("no rebuild mark for the unseen load")
+	}
+	execAll(t, db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+	clear()
+	tick()
+	if sro, ro := readOnly(t, db); !sro || !ro {
+		t.Fatalf("guard after an unseen load: super_read_only=%v read_only=%v, want both on", sro, ro)
+	}
+
 	// A mark is honoured only while its source is the source pin.
 	clear, ok = d.MarkRebuildLoad("10.0.0.1", 3306)
 	if !ok {
@@ -593,5 +612,57 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	tick()
 	if sro, ro := readOnly(t, db); !sro || !ro {
 		t.Fatalf("guard honoured a mark for a source no longer pinned: super_read_only=%v read_only=%v", sro, ro)
+	}
+}
+
+// TestRebuildConfigureAndCloneKeepReadOnly: the rebuild of a quarantined
+// server keeps it read-only across its configure{replica} restart, and a
+// clone from the pinned source PERSISTs read-only again after its own
+// restart (here with the persisted values gone, as if CLONE had dropped
+// mysqld-auto.cnf). The clone then lets replication toward the source end
+// the quarantine.
+func TestRebuildConfigureAndCloneKeepReadOnly(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	target := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
+	mdb := rootDB(t, master)
+	fillMaster(t, mdb)
+	replUser(t, master)
+	execAll(t, rootDB(t, target), "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+
+	dir := pinDir(t, "quarantined", "127.0.0.1:"+strconv.Itoa(master.Port))
+	creds := &memCreds{p: proto.ConnectParams{User: "root"}}
+	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
+	runner := jobs.NewRunner(jev, slog.New(slog.DiscardHandler))
+	rig := &snapshotRig{reg: commands.NewRegistry(), runner: runner, events: jev}
+	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir}
+	d.Register(rig.reg)
+	r := &pinRig{t: t, reg: rig.reg, d: d}
+	locked := func(when string) {
+		t.Helper()
+		if sro, ro := readOnly(t, rootDB(t, target)); !sro || !ro {
+			t.Fatalf("%s: super_read_only=%v read_only=%v, want both ON", when, sro, ro)
+		}
+	}
+
+	decode[proto.ConfigureResult](t, r.dispatch("mysql.configure", proto.ConfigureParams{Role: "replica"}))
+	decode[proto.RestartResult](t, r.dispatch("mysql.restart", nil))
+	locked("after the rebuild's configure{replica} restart")
+
+	execAll(t, rootDB(t, target), "RESET PERSIST read_only", "RESET PERSIST super_read_only")
+	res := snapshotResult(t, rig.run(t, "mysql.cloneFrom", cloneParams(master)))
+	if res.Method != "clone" {
+		t.Fatalf("clone result = %+v", res)
+	}
+	tdb := rootDB(t, target)
+	locked("after the clone")
+	if s, ro := persisted(t, tdb, "super_read_only"), persisted(t, tdb, "read_only"); s != "ON" || ro != "ON" {
+		t.Errorf("after the clone: persisted super_read_only=%q read_only=%q, want ON", s, ro)
+	}
+	if d.RebuildLoadMarked() {
+		t.Error("the rebuild-load mark outlived the clone job")
+	}
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(master)))
+	if role := pinFile(t, dir, mysql.RoleFile); role != "replica" {
+		t.Errorf("role pin after the clone and configureReplication = %q, want replica", role)
 	}
 }

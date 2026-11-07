@@ -563,3 +563,28 @@ func TestSalvageAgentErrorTextNotShown(t *testing.T) {
 		t.Fatal("the agent's text is not in the panel's log")
 	}
 }
+
+// TestRebuiltOldMasterKeepsSalvageFiles: an old master rebuilt as a
+// replica has no old-master box, but its salvage files, while there are
+// any, are still listed with Unduh and Hapus.
+func TestRebuiltOldMasterKeepsSalvageFiles(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetServerRole(1, store.RoleReplica); err != nil {
+		t.Fatal(err)
+	}
+	f.salvageFiles = []proto.SalvageFile{{Name: salvageName, Size: 4096, CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(5 * 24 * time.Hour)}}
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Berkas data tertinggal", salvageName, `action="/servers/1/salvage/`+salvageName+`"`,
+		`action="/servers/1/salvage/`+salvageName+`/delete"`, "Unduh", "Hapus")
+	wantNoBody(t, rec, "Periksa data tertinggal", `action="/servers/1/salvage"`)
+
+	f.salvageFiles = nil
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantNoBody(t, rec, "Berkas data tertinggal")
+}

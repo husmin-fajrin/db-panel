@@ -970,7 +970,11 @@ func TestE2EPromotePlanned(t *testing.T) {
 		oldConns = ui.get(fmt.Sprintf("/servers/%d/connections-fragment", m.srv()))
 		return !strings.Contains(oldConns, "app_e2e")
 	})
-	t.Logf("old master's connections once the application left: %s", textOf(oldConns))
+	// The agent's own sessions (the panel's account, root here) are not
+	// application connections (O1).
+	if !strings.Contains(oldConns, "Tidak ada koneksi aplikasi tersisa") {
+		t.Fatalf("old master's connections once the application left: %s; want none", textOf(oldConns))
+	}
 	e.confirmCutover(t, ra)
 
 	// Periksa data tertinggal: nothing after a planned promotion.
@@ -980,9 +984,8 @@ func TestE2EPromotePlanned(t *testing.T) {
 	}
 
 	// Bangun ulang sebagai replika.
-	if e.rebuildOldMaster(t, ra, m, 4) {
-		waitRow(t, rb.db, "a", 4, "setelah-bangun-ulang")
-	}
+	e.rebuildOldMaster(t, ra, m, 4)
+	waitRow(t, rb.db, "a", 4, "setelah-bangun-ulang")
 	t.Logf("planned promote flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }
 
@@ -1160,6 +1163,25 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	if !strings.Contains(body, "INSERT INTO `a`.`t`") || !strings.Contains(body, secret) {
 		t.Fatalf("salvage file %s lacks the INSERT of the late row:\n%s", name, tail(body, 60))
 	}
+
+	// Bangun ulang sebagai replika: the late row is gone, A's rows are there.
+	e.rebuildOldMaster(t, ra, m, 5)
+	waitRow(t, rb.db, "a", 5, "setelah-bangun-ulang")
+	waitRow(t, m.db, "a", 3, "relay-2")
+	if n := 0; m.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id = 100").Scan(&n) != nil || n != 0 {
+		t.Fatal("the late row survived the rebuild of the old master")
+	}
+
+	// The salvage file survives the rebuild: still listed on the rebuilt
+	// server's page and downloadable with a new token.
+	if !strings.Contains(ui.get(serverPath(m.srv())), "/salvage/"+name+"/delete") {
+		t.Fatalf("salvage file %s not listed after the rebuild:\n%s", name, textOf(ui.get(serverPath(m.srv()))))
+	}
+	tok = ui.confirmToken(web.ActSalvageDownload+":"+name, "server", m.srv())
+	body = ui.get(serverPath(m.srv()) + "/salvage/" + name + "?confirm_token=" + url.QueryEscape(tok))
+	if !strings.Contains(body, "INSERT INTO `a`.`t`") || !strings.Contains(body, secret) {
+		t.Fatalf("salvage file %s after the rebuild lacks the INSERT of the late row:\n%s", name, tail(body, 60))
+	}
 	// Hapus with its own token: gone from the agent and the page.
 	tok = ui.confirmToken(web.ActSalvageDelete+":"+name, "server", m.srv())
 	if loc := ui.postRedirect(serverPath(m.srv())+"/salvage/"+name+"/delete", url.Values{"confirm_token": {tok}}); loc !=
@@ -1171,15 +1193,6 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(m.agent.dir, "salvage", name)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("salvage file %s on the agent after the delete: %v", name, err)
-	}
-
-	// Bangun ulang sebagai replika: the late row is gone, A's rows are there.
-	if e.rebuildOldMaster(t, ra, m, 5) {
-		waitRow(t, rb.db, "a", 5, "setelah-bangun-ulang")
-		waitRow(t, m.db, "a", 3, "relay-2")
-		if n := 0; m.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id = 100").Scan(&n) != nil || n != 0 {
-			t.Fatal("the late row survived the rebuild of the old master")
-		}
 	}
 	t.Logf("emergency promote flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }

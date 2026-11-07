@@ -965,10 +965,18 @@ memuat kotak **Master lama** dengan:
   diganti salinan dari master baru; konfirmasi menyebut koneksi aplikasi
   yang masih ada dan data tertinggal yang belum diperiksa atau belum
   diamankan, lalu meminta kata sandi dan nama server. Berkas yang sudah
-  diamankan tidak ikut dihapus. Selama panel memuat salinan itu, master
-  lama tidak baca-saja agar pemuatan bisa menulis (penjaga karantina
-  menunda pemasangan baca-saja);
-  sesudahnya ia kembali baca-saja dan menjadi replika master baru.
+  diamankan tidak ikut dihapus: setelah bangun ulang daftarnya tetap
+  tampil di halaman server itu, dengan **Unduh** dan **Hapus**, sampai
+  berkasnya habis masa simpan 7 hari. Selama seluruh pemuatan salinan
+  (bukan hanya sesaat) master lama tidak baca-saja agar pemuatan bisa
+  menulis; penjaga karantina menunda pemasangan baca-saja sampai pemuatan
+  selesai. Sesi akun MySQL panel atau aplikasi yang belum dialihkan bisa
+  menulis ke server itu selama waktu tersebut, dan tulisannya menjadi
+  transaksi GTID asing di replika hasil bangun ulang; karena itu alihkan
+  semua aplikasi dan jangan memakai akun panel selama bangun ulang.
+  Sesudahnya ia kembali baca-saja dan menjadi replika master baru. Pin
+  peran agent baru menjadi `replica` bila salinan dari master baru
+  berhasil di agent yang sama.
 - **Hapus server:** melepas pin `quarantined` (agent tidak lagi menjaga
   baca-saja saat start). Seperti bangun ulang, baru tersedia setelah
   **Sudah saya alihkan**.
