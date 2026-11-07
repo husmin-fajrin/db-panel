@@ -803,13 +803,18 @@ type salvageSource struct {
 	*fakeSource
 	mu    sync.Mutex
 	calls []time.Time
+	busy  int // how many of the next calls report busy
 }
 
-func (s *salvageSource) SweepSalvage(now time.Time) (int, error) {
+func (s *salvageSource) SweepSalvage(now time.Time) (int, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, now)
-	return 0, nil
+	if s.busy > 0 {
+		s.busy--
+		return 0, true, nil
+	}
+	return 0, false, nil
 }
 
 func (s *salvageSource) sweeps() int {
@@ -839,5 +844,29 @@ func TestMonitorSweepsSalvageDaily(t *testing.T) {
 	}
 	if SalvageSweepEvery != 24*time.Hour {
 		t.Errorf("SalvageSweepEvery = %v, want 24h", SalvageSweepEvery)
+	}
+}
+
+// TestMonitorRetriesBusySalvageSweep: a sweep that reports busy is tried
+// again at the next check, not a day later; once it ran, the day counts
+// from then.
+func TestMonitorRetriesBusySalvageSweep(t *testing.T) {
+	src := &salvageSource{fakeSource: &fakeSource{snap: base()}, busy: 2}
+	r := startRig(t, src.fakeSource, src, nil)
+	r.tick(15 * time.Second)
+	r.tick(15 * time.Second)
+	if n := src.sweeps(); n != 3 {
+		t.Fatalf("sweeps after two busy rounds and one more check = %d, want 3", n)
+	}
+	ran := r.clock.Now()
+	r.tick(SalvageSweepEvery - 30*time.Second)
+	if n := src.sweeps(); n != 3 {
+		t.Fatalf("sweeps before a day after the one that ran = %d, want 3", n)
+	}
+	r.tick(30 * time.Second)
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if n := len(src.calls); n != 4 || !src.calls[3].Equal(ran.Add(SalvageSweepEvery)) {
+		t.Errorf("sweeps a day after the one that ran = %d (%v), want 4", n, src.calls)
 	}
 }

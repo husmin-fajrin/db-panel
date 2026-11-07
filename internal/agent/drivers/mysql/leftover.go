@@ -356,6 +356,13 @@ var (
 // nothing in a body (a multi-line string literal of a statement-based
 // INSERT, say) is taken for a statement, a "use", a GTID_NEXT or a table.
 // An event header closes a body too, in case a delimiter was missed.
+//
+// Limit: under STATEMENT or MIXED binlog format, a string literal holding
+// a line that ends in "/*!*/;" ends the body early, and the lines after it
+// can then be taken for statements: the summary (tables, counts, time
+// span) can be wrong, and a fake GTID_NEXT makes the count check fail.
+// Row-based logging, which the panel sets, prints row data only as "###"
+// lines and is unaffected.
 type leftoverScan struct {
 	set      gtidSet
 	seen     gtidSet // the GTIDs of set read

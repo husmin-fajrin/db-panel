@@ -435,25 +435,25 @@ func (d *Driver) deleteSalvage(name string) error {
 // (monitor.SalvageSweeper).
 //
 // It never waits: while a delete or a salvage's rename holds salvageMu it
-// skips this round (0, nil).
-func (d *Driver) SweepSalvage(now time.Time) (int, error) {
+// sweeps nothing and reports busy, and the monitor tries again at its
+// next check.
+func (d *Driver) SweepSalvage(now time.Time) (removed int, busy bool, err error) {
 	if !d.salvageMu.TryLock() {
-		return 0, nil
+		return 0, true, nil
 	}
 	defer d.salvageMu.Unlock()
 	if _, err := os.Lstat(d.salvageDir()); errors.Is(err, os.ErrNotExist) {
-		return 0, nil
+		return 0, false, nil
 	}
 	root, err := d.openSalvageDir()
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer root.Close()
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
-		return 0, fmt.Errorf("baca direktori salvage: %w", err)
+		return 0, false, fmt.Errorf("baca direktori salvage: %w", err)
 	}
-	removed := 0
 	var errs []error
 	for _, e := range entries {
 		expired := false
@@ -473,5 +473,5 @@ func (d *Driver) SweepSalvage(now time.Time) (int, error) {
 		}
 		removed++
 	}
-	return removed, errors.Join(errs...)
+	return removed, false, errors.Join(errs...)
 }

@@ -34,9 +34,11 @@ type DumpSweeper interface {
 
 // SalvageSweeper is a Source that can also remove the salvage files
 // older than their 7 days (mysql.Driver.SweepSalvage), judged at now. The
-// monitor sweeps every SalvageSweepEvery when its Source is one.
+// monitor sweeps every SalvageSweepEvery when its Source is one; busy
+// means the sweep could not run yet (a salvage is being written) and is
+// tried again at the next check.
 type SalvageSweeper interface {
-	SweepSalvage(now time.Time) (removed int, err error)
+	SweepSalvage(now time.Time) (removed int, busy bool, err error)
 }
 
 // DumpLockGuard is a Source that can also end the session of a per-job
@@ -298,7 +300,8 @@ func (m *Monitor) sweep(ctx context.Context) {
 }
 
 // sweepSalvage removes the expired salvage files when the Source is a
-// SalvageSweeper and a sweep is due; a failed one is tried a day later.
+// SalvageSweeper and a sweep is due; a failed one is tried a day later, a
+// busy one at the next check.
 func (m *Monitor) sweepSalvage(ctx context.Context) {
 	sw, ok := m.src.(SalvageSweeper)
 	if !ok || ctx.Err() != nil {
@@ -308,8 +311,12 @@ func (m *Monitor) sweepSalvage(ctx context.Context) {
 	if !m.lastSalvageSweep.IsZero() && now.Sub(m.lastSalvageSweep) < SalvageSweepEvery {
 		return
 	}
+	n, busy, err := sw.SweepSalvage(now)
+	if busy {
+		m.logger.Info("sapuan salvage ditunda: sedang ada ekstraksi")
+		return
+	}
 	m.lastSalvageSweep = now
-	n, err := sw.SweepSalvage(now)
 	switch {
 	case err != nil:
 		m.logger.Warn("salvage files not swept", "err", err)

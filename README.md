@@ -496,6 +496,17 @@ replika, replikasi) dari sumber yang dipin, yaitu master barunya, atau
 dilepas seperti replika. Agent tidak pernah menurunkan pin `quarantined`
 (atau pin lain) berdasarkan keadaan MySQL.
 
+Hanya di server `quarantined`, panel bisa melihat transaksi master lama
+yang tidak dimiliki master barunya (`mysql.leftover`: jumlah transaksi,
+tabel dan jumlah baris, rentang waktu, tanpa isi data) dan mengekstraknya
+ke berkas SQL (`mysql.salvage`) di `/var/lib/dbpanel/salvage`
+(direktori 0700, berkas 0600, paling besar 2 GiB, dihapus otomatis
+setelah 7 hari) untuk diunduh dan dijalankan ulang secara manual. Pada
+format binlog STATEMENT atau MIXED, literal string yang memuat baris
+berakhiran `/*!*/;` bisa mengacaukan ringkasan `mysql.leftover` (jumlah dan
+rentang waktu); logging berbasis baris (ROW), yang diwajibkan panel, tidak
+terpengaruh.
+
 Pin **master** tidak bisa diubah dari panel. Peran **replika** bisa
 dilepas panel sendiri, setelah replikasinya dihentikan dan direset, lewat
 **Lepas dan hentikan replikasi**, **Hapus server**, atau saat pekerjaan

@@ -222,9 +222,9 @@ func TestSweepSalvageSevenDays(t *testing.T) {
 		r.put(fileName(at), []byte("x"))
 	}
 	r.put("catatan.txt", []byte("bukan salvage"))
-	n, err := r.d.SweepSalvage(now)
-	if err != nil || n != 2 {
-		t.Errorf("SweepSalvage = %d, %v; want 2", n, err)
+	n, busy, err := r.d.SweepSalvage(now)
+	if err != nil || busy || n != 2 {
+		t.Errorf("SweepSalvage = %d, %v, %v; want 2", n, busy, err)
 	}
 	var left []string
 	entries, _ := os.ReadDir(r.dir)
@@ -333,8 +333,8 @@ func TestSalvageRunDoesNotBlockListOrSweep(t *testing.T) {
 		}
 	})
 	within(t, "SweepSalvage", func() {
-		if n, err := r.d.SweepSalvage(now); n != 1 || err != nil {
-			t.Errorf("sweep during a salvage = %d, %v; want 1", n, err)
+		if n, busy, err := r.d.SweepSalvage(now); n != 1 || busy || err != nil {
+			t.Errorf("sweep during a salvage = %d, %v, %v; want 1", n, busy, err)
 		}
 	})
 	within(t, "salvageDelete", func() {
