@@ -934,6 +934,9 @@ func TestE2EPromotePlanned(t *testing.T) {
 
 	// Promote terencana: the screen says why, no names to type (complete
 	// replicas, not branched), a confirmation token.
+	// The old master's quarantine needs replika-a's host in its
+	// replicas-seen file; wait for its monitor to record both replicas.
+	e.waitReplicasSeen(t)
 	tgMark := len(e.tg.messages())
 	promoteStart := time.Now()
 	id, page := e.startPromote(t, ra, proto.PromotePlanned, nil)
@@ -1045,6 +1048,11 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	if n := countRelayRows(); n != 0 {
 		t.Fatalf("replika-a applied %d of the held transactions before the promote", n)
 	}
+
+	// The old master's quarantine (MySQL down) requires replika-a's host
+	// in its replicas-seen file; wait for its monitor to record both
+	// replicas before MySQL goes.
+	e.waitReplicasSeen(t)
 
 	// The master's MySQL crashes; its agent stays online.
 	killMySQL(t, m.inst)

@@ -1357,7 +1357,7 @@ agar panel dapat melayani agent berarsitektur lain tanpa internet.
 ## Menjalankan test
 
 ```sh
-make test       # go vet, semua test (batas waktu 30 menit), dan pemeriksaan skrip instalasi
+make test       # go vet, semua test (batas waktu 60 menit; paket driver MySQL saja sekitar 35 menit), dan pemeriksaan skrip instalasi
 make test-e2e   # hanya test end-to-end
 go test -short ./...   # cepat: tanpa test end-to-end
 ```

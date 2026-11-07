@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -541,6 +542,60 @@ func (n *e2eNode) srv() int64 { return n.agent.srv }
 
 // addr is the node's MySQL address as the topology knows it.
 func (n *e2eNode) addr() string { return "127.0.0.1:" + strconv.Itoa(n.inst.Port) }
+
+// waitReplicasSeen waits until both replicas read the master's binary log
+// (two Binlog Dump threads in its processlist) and the master agent's
+// monitor has recorded each of their processlist hosts in its
+// replicas-seen file: the old master's quarantine refuses a new master
+// whose host it never saw as a replica (fail-closed), so a promotion must
+// not start before the file lists them.
+func (e *e2ePromoteTopology) waitReplicasSeen(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(e.master.agent.dir, "replicas-seen")
+	var hosts []string
+	var missing string
+	what := func() string {
+		content, _ := os.ReadFile(path)
+		return fmt.Sprintf("%s: dump threads' hosts %q, missing %q; file: %q", path, hosts, missing, content)
+	}
+	cond := func() bool {
+		hosts, missing = nil, ""
+		rows, err := e.master.db.Query("SELECT HOST FROM information_schema.PROCESSLIST " +
+			"WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')")
+		if err != nil {
+			return false
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var h string
+			if rows.Scan(&h) != nil {
+				return false
+			}
+			if host, _, err := net.SplitHostPort(h); err == nil {
+				h = host
+			}
+			hosts = append(hosts, h)
+		}
+		if rows.Err() != nil || len(hosts) < 2 {
+			return false
+		}
+		for _, h := range hosts {
+			if ok, err := mysql.ReplicaSeen(path, h); err != nil || !ok {
+				missing = h
+				return false
+			}
+		}
+		return true
+	}
+	done := false
+	defer func() {
+		if !done {
+			t.Logf("last seen: %s", what())
+		}
+	}()
+	waitForWithin(t, e2eWait, "the master agent's replicas-seen file to list the hosts of both replicas", cond)
+	done = true
+}
 
 // e2ePromoteTopology is a running panel with a master of database a and two
 // replicas (A and B) following every database, made through the UI, with
