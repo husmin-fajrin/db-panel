@@ -209,6 +209,9 @@
   </form>
   {{end}}
 </div>
+{{if and .CanPrepare .Local}}
+<div role="alert" class="alert alert-warning alert-soft text-sm mt-2" data-local-master>Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel</div>
+{{end}}
 <div class="divider my-1"></div>
 <h3 class="font-semibold">Sertifikat MySQL</h3>
 {{with .MySQLCert}}

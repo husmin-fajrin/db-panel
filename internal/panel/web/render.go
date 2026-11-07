@@ -39,7 +39,7 @@ type Page struct {
 // "title" and "content".
 var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
 	"master_detail", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail",
-	"alerts", "settings", "audit", "cert"}
+	"alerts", "settings", "audit", "cert", "promote"}
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {

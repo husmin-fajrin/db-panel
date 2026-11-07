@@ -41,6 +41,11 @@ type fakeOrch struct {
 	nextID string
 	// superseded answers Superseded per job id.
 	superseded map[string]string
+	// view is what PromoteView answers; promoteErr what StartPromote
+	// refuses with; promotes the parameters StartPromote received.
+	view       orchestrator.PromoteView
+	promoteErr error
+	promotes   []orchestrator.PromoteParams
 }
 
 func (f *fakeOrch) record(call string) {
@@ -175,13 +180,21 @@ func (f *fakeOrch) Retry(id string) error   { f.record("retry " + id); return f.
 func (f *fakeOrch) Cancel(id string) error  { f.record("cancel " + id); return f.err }
 func (f *fakeOrch) PromoteView(_ context.Context, masterServerID int64) (orchestrator.PromoteView, error) {
 	f.record(fmt.Sprintf("promote-view %d", masterServerID))
-	return orchestrator.PromoteView{}, f.err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.view, f.err
 }
 
 func (f *fakeOrch) StartPromote(_ context.Context, p orchestrator.PromoteParams) (string, error) {
 	f.record(fmt.Sprintf("promote %d %d %s", p.MasterServerID, p.CandidateServerID, p.Mode))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.promotes = append(f.promotes, p)
 	if f.err != nil {
 		return "", f.err
+	}
+	if f.promoteErr != nil {
+		return "", f.promoteErr
 	}
 	return f.nextID, nil
 }

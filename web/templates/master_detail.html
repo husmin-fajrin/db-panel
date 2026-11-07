@@ -121,6 +121,22 @@
   </div>
 </div>
 
+<div class="card bg-base-100 shadow mb-6" data-promote>
+  <div class="card-body gap-3">
+    <h2 class="card-title">Ganti master</h2>
+    <p class="text-sm">Jadikan salah satu replika sebagai master baru. Layar berikutnya menampilkan keadaan tiap replika dan akibat promote; promote baru berjalan setelah Anda memilih replika dan mengonfirmasi dengan kata sandi.</p>
+    <div><a class="btn btn-warning btn-sm" href="/masters/{{.Server.ID}}/promote">Promote…</a></div>
+    {{if .PromoteEmergency}}
+    <p class="text-sm"><strong>Promote darurat</strong>: master tidak terjangkau atau MySQL-nya tidak menjawab, jadi replika terpilih dijadikan master dengan transaksi yang sudah diterimanya.</p>
+    {{else}}
+    <p class="text-sm"><strong>Promote terencana</strong>: master hidup, jadi panel mengunci master, menunggu replika terpilih menerapkan semua transaksinya, lalu menjadikannya master baru.</p>
+    {{end}}
+    {{if .Local}}
+    <div role="alert" class="alert alert-warning alert-soft text-sm" data-local-master>Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel</div>
+    {{end}}
+  </div>
+</div>
+
 {{if .Tighten}}
 <div role="alert" class="alert alert-warning alert-soft flex flex-col items-start gap-2 mb-6" data-tighten>
   <h3 class="font-bold">Perketat sambungan replikasi</h3>

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -30,6 +31,16 @@ type dashboardPage struct {
 	Masters, Replicas        int
 	ActiveJobs, ActiveAlerts int
 	Topologies               []topologyCard
+	// PromotePartial are the open promote_partial alerts, each with the
+	// job of its promotion.
+	PromotePartial []promoteBanner
+}
+
+// promoteBanner is a promotion that stopped partway (spec 5.3): its
+// alert's message and the job to retry it from ("" when unknown).
+type promoteBanner struct {
+	Message string
+	JobID   string
 }
 
 // topologyCard is a master and its replicas on the dashboard.
@@ -134,6 +145,19 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		case store.RoleReplica:
 			p.Replicas++
 		}
+	}
+	for _, al := range alerts {
+		if al.Kind != monitor.KindPromotePartial {
+			continue
+		}
+		b := promoteBanner{Message: al.Message}
+		if prom, err := a.Store.LatestPromotion(al.TopologyID); err == nil {
+			b.JobID = prom.JobID
+		} else if !errors.Is(err, store.ErrNotFound) {
+			a.internalError(w, "latest promotion", err)
+			return
+		}
+		p.PromotePartial = append(p.PromotePartial, b)
 	}
 	if p.Topologies, err = a.topologyCards(servers); err != nil {
 		a.internalError(w, "topology cards", err)

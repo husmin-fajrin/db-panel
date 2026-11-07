@@ -391,6 +391,36 @@
       },
     }));
 
+    // Pemilih kandidat di layar pertimbangan promote (promote.html):
+    // memilih replika menampilkan kotak merahnya (data-promote-box: replika
+    // sebagian atau yang tidak menjawab pemeriksaan) dan menyembunyikan
+    // kotak replika lain, lalu memindahkan nama yang harus diketik
+    // (data-name) dan kalimat konfirmasi (data-text) radio itu ke tombol
+    // Promote yang membuka dialog konfirmasi.
+    window.Alpine.data("promotePicker", () => ({
+      init() {
+        const form = this.$el;
+        const perbarui = () => {
+          const pilih = form.querySelector('input[name="candidate"]:checked');
+          const id = pilih ? pilih.value : "";
+          form.querySelectorAll("[data-promote-box]").forEach((el) => {
+            el.classList.toggle("hidden", el.dataset.promoteBox !== id);
+          });
+          const tombol = form.querySelector("[data-confirm-action]");
+          if (tombol && pilih) {
+            tombol.dataset.confirmName = pilih.dataset.name || "";
+            tombol.dataset.confirmText = pilih.dataset.text || "";
+          }
+        };
+        form.addEventListener("change", (e) => {
+          if (e.target.name === "candidate") {
+            perbarui();
+          }
+        });
+        perbarui();
+      },
+    }));
+
     // Dialog yang dibuka saat halaman dimuat bila data-open="true" (Resync
     // ulang: setelah panel membaca ulang daftar database replika).
     window.Alpine.data("openDialog", () => ({

@@ -257,6 +257,7 @@ var auditActions = map[string]string{
 	"tighten_tls":      "Perketat sambungan replikasi",
 	"master_source":    "Ubah alamat untuk replika",
 	"master_unlock":    "Buka kunci master",
+	"promote":          "Promote replika",
 	"create_replica":   "Buat replika",
 	"replica_stop":     "Stop replika",
 	"replica_start":    "Start replika",

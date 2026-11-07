@@ -1,6 +1,13 @@
 {{define "title"}}Dashboard{{end}}
 {{define "content"}}
 <h1 class="text-2xl font-bold mb-4">Dashboard</h1>
+{{range .PromotePartial}}
+<div role="alert" class="alert alert-error mb-4 flex flex-col items-start gap-2" data-promote-partial>
+  <h2 class="font-bold">Promote belum tuntas</h2>
+  <p class="text-sm">{{.Message}}</p>
+  {{if .JobID}}<a class="btn btn-sm" href="/jobs/{{.JobID}}">Buka pekerjaan promote</a>{{else}}<a class="btn btn-sm" href="/alerts">Lihat peringatan</a>{{end}}
+</div>
+{{end}}
 <div class="stats stats-vertical md:stats-horizontal bg-base-100 shadow w-full">
   <div class="stat">
     <div class="stat-title">Jumlah server</div>

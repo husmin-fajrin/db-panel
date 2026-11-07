@@ -90,6 +90,10 @@ func kindLabel(kind string) string {
 		return "Pasang sertifikat MySQL"
 	case orchestrator.KindTightenTLS:
 		return "Perketat sambungan replikasi"
+	case orchestrator.KindPromotePlanned:
+		return "Promote terencana"
+	case orchestrator.KindPromoteEmergency:
+		return "Promote darurat"
 	}
 	return kind
 }

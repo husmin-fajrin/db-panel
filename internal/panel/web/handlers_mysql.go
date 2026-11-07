@@ -326,6 +326,10 @@ type masterPage struct {
 	// replica is Unverified (Tighten).
 	NoCert  bool
 	Tighten bool
+	// PromoteEmergency: a promotion now would run as an emergency (the
+	// master is gone); Local: the master is the panel's own server.
+	PromoteEmergency bool
+	Local            bool
 }
 
 // setSourceRow is a replica whose agent's pinned source must be changed
@@ -416,6 +420,8 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 	v, monitored := a.Monitor.View(srv.ID)
 	p.Locked = monitored && v.Status.Code == monitor.StatusLocked
 	p.Status = newStatusView(srv.ID, srv.Role, v, monitored, a.Now())
+	p.PromoteEmergency = promoteEmergency(p.Online, v, monitored)
+	p.Local = a.isLocal(srv)
 	var err error
 	if p.Inventory, err = a.inventory(srv.ID); err != nil {
 		a.internalError(w, "get inventory", err)

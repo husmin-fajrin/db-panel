@@ -27,6 +27,8 @@ const (
 	ActPrepareMasterAgain = "prepare_master_again"
 	ActMySQLTLS           = "mysql_tls"
 	ActTightenTLS         = "tighten_tls"
+	// ActPromote starts the promotion of a replica of the master.
+	ActPromote = "promote"
 	// The panel's HTTPS certificate (target kind settings, id 0): a session
 	// alone must not swap the key the panel serves or widen its web CA.
 	ActCertUpload = "cert_upload"
@@ -36,7 +38,7 @@ const (
 
 // confirmActions are the actions POST /confirm issues tokens for.
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,
-	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActCertUpload, ActCertRevert, ActCertNames}
+	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActPromote, ActCertUpload, ActCertRevert, ActCertNames}
 
 // settingsActions are the actions bound to the settings (target id 0)
 // rather than to a server.

@@ -198,6 +198,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /masters/{id}/source", authedPost(a.setMasterSource))
 	mux.Handle("POST /masters/{id}/unlock", authedPost(a.unlockMaster))
 	mux.Handle("POST /masters/{id}/tighten-tls", authedPost(a.tightenTLS))
+	mux.Handle("GET /masters/{id}/promote", authed(a.promoteForm))
+	mux.Handle("POST /masters/{id}/promote", authedPost(a.startPromote))
 	mux.Handle("GET /masters/{id}/replicas/new", authed(a.newReplicaForm))
 	mux.Handle("POST /masters/{id}/replicas", authedPost(a.createReplica))
 	mux.Handle("GET /replicas/{id}", authed(a.replicaDetail))
