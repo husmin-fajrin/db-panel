@@ -73,3 +73,4 @@ Rulings:
 - Final review: fix wave dispatched (opus, one agent).
 - Final fix wave: commits dd45c41..48b8c09 (0a31ef8 panel, 48b8c09 audit/docs), pushed; panel -race -short ok, agent -short ok (mysql 1684 s). Accepted: templates censor to the end of the message for cut-off values / near '…' / Truncated incorrect (diagnostic text after a value lost — fail-safe); double-quoted template values matched for the fixed point; two test hooks in non-test code (auditLockHook, backlogOf). Scoped re-review (opus) dispatched.
 - Final re-review (opus): all addressed; Final verdict: mergeable. Spec §8 amended with the 4c residual risks (C2). Ledger, final review and fix report archived to docs/superpowers/ledgers/.
+- Final evidence at d74e8b6: make test exit 0 (24 packages ok), make test-e2e exit 0 (492 s). Plan 4c done.
