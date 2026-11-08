@@ -240,7 +240,7 @@ func (d *Driver) repoint(ctx context.Context, h Host, p proto.RepointParams, caP
 	if err := d.pins.SetSource(nm.Host, nm.Port); err != nil {
 		return res, fmt.Errorf("replikasi sudah diarahkan ke %s, tetapi pin sumber gagal dipindah: %w", key, err)
 	}
-	res.IORunning, res.IOError, err = awaitReceiver(ctx, db)
+	res.IORunning, res.SSLVerifyServerCert, res.IOError, err = awaitReceiver(ctx, db)
 	if err != nil {
 		return res, fmt.Errorf("replikasi sudah diarahkan ke %s dan pin sumber dipindah, tetapi: %w", key, err)
 	}
@@ -327,28 +327,29 @@ var retryableIOErrnos = map[int]bool{1045: true, 2003: true, 2005: true, 2013: t
 // awaitReceiver watches the receiver for up to repointIOWait: running
 // once it runs; still connecting at the end, or failing with a retryable
 // error (ioErr, its text), not running; any other receiver error is
-// returned.
-func awaitReceiver(ctx context.Context, db *sql.DB) (running bool, ioErr string, err error) {
+// returned. verified is the source's SOURCE_SSL_VERIFY_SERVER_CERT on a
+// running receiver.
+func awaitReceiver(ctx context.Context, db *sql.DB) (running, verified bool, ioErr string, err error) {
 	deadline := time.Now().Add(repointIOWait)
 	for {
 		rs, err := currentStatus(ctx, db)
 		switch {
 		case err != nil:
-			return false, "", err
+			return false, false, "", err
 		case rs == nil:
-			return false, "", errNotReplica
+			return false, false, "", errNotReplica
 		case rs.IORunning == "Yes" && rs.LastIOErrno == 0:
-			return true, "", nil
+			return true, rs.SSLVerifyServerCert, "", nil
 		case rs.LastIOErrno != 0 && !retryableIOErrnos[rs.LastIOErrno]:
-			return false, "", ioError(rs)
+			return false, false, "", ioError(rs)
 		case time.Now().After(deadline):
 			if rs.LastIOErrno != 0 {
-				return false, ioError(rs).Error(), nil
+				return false, false, ioError(rs).Error(), nil
 			}
-			return false, "", nil
+			return false, false, "", nil
 		}
 		if err := pause(ctx, ReadyPollInterval); err != nil {
-			return false, "", err
+			return false, false, "", err
 		}
 	}
 }

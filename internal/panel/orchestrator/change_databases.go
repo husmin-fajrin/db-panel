@@ -79,6 +79,10 @@ func (r *Runner) StartAddDatabases(ctx context.Context, replicaServerID int64, d
 	if err != nil {
 		return "", err
 	}
+	// The dump load makes the replica writable for a while.
+	if err := r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, "Tambah database"); err != nil {
+		return "", err
+	}
 	add, err := pickDatabases(databases)
 	if err != nil {
 		return "", err

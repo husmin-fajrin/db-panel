@@ -195,7 +195,7 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		return "", err
 	}
 	if mode == proto.PromoteEmergency {
-		if err := r.refuseWhileLockMayStand(topo.ID, p.MasterServerID); err != nil {
+		if err := r.refuseWhileLockMayStand(topo.ID, p.MasterServerID, "Promote darurat"); err != nil {
 			return "", err
 		}
 	}
@@ -269,15 +269,20 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 // LockTriedAt + promoteLockSec + lockCallSlack.
 const lockCallSlack = 5 * time.Minute
 
-// refuseWhileLockMayStand refuses an emergency promotion of masterID while
-// the latest promotion of topology topoID, a failed planned one of that
-// master, asked for the master's promote lock and its unlock was never
-// confirmed, until the lock's deadline plus the guard's grace
+// refuseWhileLockMayStand refuses what (an emergency promotion of
+// masterID, or a job that makes one of its replicas writable for a while)
+// while the latest promotion of topology topoID, a failed planned one of
+// that master, asked for the master's promote lock and its unlock was
+// never confirmed, until the lock's deadline plus the guard's grace
 // (proto.PromoteLockGrace) has passed (SEC-66). Before then the master
 // may be locked for the earlier candidate: an emergency promotion of
 // another replica would see it alive (and the agent refuses it then), or
-// it would reopen beside the new master once its guard unlocks it.
-func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64) error {
+// it would reopen beside the new master once its guard unlocks it. A
+// replica the guard has seen that is writable at the deadline (a resync
+// or dump load, Buat replika, Tambah database) makes the guard quarantine
+// a healthy master instead of unlocking it (4b final review). what starts
+// the message's second sentence ("Promote darurat", "Resync ulang", ...).
+func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) error {
 	prev, err := r.d.Store.LatestPromotion(topoID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
@@ -321,10 +326,10 @@ func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64) error {
 		return nil
 	}
 	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka. "+
-		"Promote darurat baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
+		"%s baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
 		"masih replika. Sebelum itu, tekan Ulangi pada promote terencana itu bila agent master tersambung lagi, atau buka "+
 		"kuncinya di server master dengan: sudo dbpanel agent unlock-master",
-		r.nameOf(masterID), until.Local().Format("02-01-2006 15:04:05"))
+		r.nameOf(masterID), what, until.Local().Format("02-01-2006 15:04:05"))
 }
 
 var errCutoverStillPending = errors.New("promote sebelumnya masih menunggu pengalihan aplikasi; tekan \"Sudah saya alihkan\" dulu")
@@ -1132,7 +1137,10 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 		return set(repointOutcome{state: store.ReplicaNeedsRebuild, errant: res.Errant},
 			truncate("Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru ("+res.Errant+")", maxLogLine))
 	}
-	if err := r.d.Store.SetReplicaTLSVerified(rep.ServerID, verify); err != nil {
+	// SEC-63c: verified only when the agent saw the receiver connected
+	// with SOURCE_SSL_VERIFY_SERVER_CERT=1; a receiver still connecting
+	// stays unverified until Perketat.
+	if err := r.d.Store.SetReplicaTLSVerified(rep.ServerID, verify && res.IORunning && res.SSLVerifyServerCert); err != nil {
 		r.log.Warn("tls_verified after repoint", "server_id", rep.ServerID, "err", err)
 	}
 	// mysql.repoint started replication on the new master.

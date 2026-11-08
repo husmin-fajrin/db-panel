@@ -241,6 +241,12 @@ func (jr *jobRun) tlsInstall(ctx context.Context, serverID int64) (outcome, erro
 	}, &res); err != nil {
 		return outcome{}, err
 	}
+	// SEC-63c: the serial the agent saw MySQL serve must be the one the
+	// panel issued; server_tls records nothing else.
+	if want := certSerial(jr.st.TLSCert); res.Serial != want {
+		return outcome{}, stepError(fmt.Sprintf("agent melaporkan sertifikat terpasang dengan nomor seri %s, bukan %s yang "+
+			"diterbitkan panel; sertifikat tidak dicatat. Periksa server itu lalu Ulangi", res.Serial, want))
+	}
 	if err := jr.r.d.Store.SetServerTLS(store.ServerTLS{ServerID: serverID, CertSerial: res.Serial, NotAfter: res.NotAfter,
 		InstalledAt: jr.r.now(), Hosts: certNames(jr.st.TLSCert)}); err != nil {
 		return outcome{}, err
@@ -249,6 +255,72 @@ func (jr *jobRun) tlsInstall(ctx context.Context, serverID int64) (outcome, erro
 	jr.save()
 	jr.logf("info", "Sertifikat MySQL terpasang di %s dan langsung dipakai, tanpa restart MySQL.", srv.Name)
 	return done("terpasang; berlaku sampai %s", res.NotAfter.Format(time.DateOnly)), nil
+}
+
+// certSerial is the serial of the PEM certificate certPEM as agents
+// report it (32 hex digits); "" when it does not parse.
+func certSerial(certPEM string) string {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return ""
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%032x", cert.SerialNumber)
+}
+
+// verifiedLink reports whether rs shows the receiver connected (IO Yes,
+// no error) with SOURCE_SSL_VERIFY_SERVER_CERT=1.
+func verifiedLink(rs *proto.ReplicaStatus) bool {
+	return rs != nil && rs.IORunning == "Yes" && rs.LastIOErrno == 0 && rs.SSLVerifyServerCert
+}
+
+// awaitVerifiedLink waits, up to verifyIOWait, until the replica on
+// serverID reports its receiver connected with verification
+// (verifiedLink), starting from rs, the status START REPLICA answered.
+// tls_verified is set only on true (SEC-63c). A receiver connected
+// without verification, or an agent that does not report it, is false at
+// once: waiting does not change it. last is the status last seen.
+func (jr *jobRun) awaitVerifiedLink(ctx context.Context, serverID int64, rs *proto.ReplicaStatus) (last *proto.ReplicaStatus, ok bool, err error) {
+	deadline := time.Now().Add(jr.r.verifyIOWait)
+	every := min(jr.r.pollEvery, time.Second)
+	for {
+		switch {
+		case verifiedLink(rs):
+			return rs, true, nil
+		case rs != nil && rs.IORunning == "Yes" && rs.LastIOErrno == 0:
+			return rs, false, nil
+		case !time.Now().Before(deadline):
+			return rs, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return rs, false, ctx.Err()
+		case <-time.After(every):
+		}
+		var st proto.MySQLStatus
+		if err := jr.call(ctx, serverID, "mysql.status", nil, &st); err != nil {
+			return rs, false, err
+		}
+		rs = st.Replica
+	}
+}
+
+// unverifiedText says why awaitVerifiedLink's last status is not a
+// verified link.
+func unverifiedText(rs *proto.ReplicaStatus) string {
+	switch {
+	case rs == nil:
+		return "status replika tidak terbaca"
+	case rs.IORunning == "Yes" && rs.LastIOErrno == 0:
+		return "thread IO tersambung, tetapi agent tidak melaporkan SOURCE_SSL_VERIFY_SERVER_CERT=1 (agent versi lama?)"
+	case rs.LastIOErrno != 0:
+		return fmt.Sprintf("thread IO %s, error %d: %s", rs.IORunning, rs.LastIOErrno, truncate(rs.LastIOError, 200))
+	default:
+		return "thread IO " + rs.IORunning
+	}
 }
 
 // certHosts are the names a server's certificate holds: its address and,
@@ -544,22 +616,39 @@ func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, appro
 			jr.restartReplica(ctx, serverID)
 			return outcome{}, err
 		}
-		if !operatorPaused {
-			if err := jr.call(ctx, serverID, "mysql.startReplica", nil, nil); err != nil {
-				// The replica cannot connect with verification (a name or
-				// chain mismatch, or an applier error it had before): the
-				// unverified source is gone, so it goes back.
-				return outcome{}, jr.revertUnverified(ctx, serverID, topo, password, rep.Databases, err)
-			}
-			jr.unpause(serverID)
+		// The verified source replaced whatever tls_verified described.
+		if err := jr.r.d.Store.SetReplicaTLSVerified(serverID, false); err != nil {
+			return outcome{}, err
+		}
+		if operatorPaused {
+			// Nothing connects while the operator's stop holds, so nothing
+			// proves the verification yet (SEC-63c).
+			jr.logf("warn", "Replikasi %s diarahkan dengan verifikasi sertifikat master %s, tetapi tetap dihentikan seperti "+
+				"sebelumnya; tanda terverifikasi diberikan setelah replikasi dijalankan lagi dan Perketat diulang.",
+				jr.serverName(serverID), topo.SourceHost)
+			return done("verifikasi diatur; replikasi tetap dihentikan, tanda terverifikasi menunggu replikasi berjalan"), nil
+		}
+		var rs proto.ReplicaStatus
+		if err := jr.call(ctx, serverID, "mysql.startReplica", nil, &rs); err != nil {
+			// The replica cannot connect with verification (a name or
+			// chain mismatch, or an applier error it had before): the
+			// unverified source is gone, so it goes back.
+			return outcome{}, jr.revertUnverified(ctx, serverID, topo, password, rep.Databases, err)
+		}
+		jr.unpause(serverID)
+		last, ok, err := jr.awaitVerifiedLink(ctx, serverID, &rs)
+		if err != nil {
+			return outcome{}, err
+		}
+		if !ok {
+			return outcome{}, stepError(fmt.Sprintf("replikasi %s belum tersambung ke master dengan verifikasi sertifikat (%s); "+
+				"tanda terverifikasi belum diberikan. Periksa replika lalu Ulangi", jr.serverName(serverID), unverifiedText(last)))
 		}
 		if err := jr.r.d.Store.SetReplicaTLSVerified(serverID, true); err != nil {
 			return outcome{}, err
 		}
-		jr.logf("info", "Replikasi %s sekarang memverifikasi sertifikat master %s.", jr.serverName(serverID), topo.SourceHost)
-		if operatorPaused {
-			return done("terverifikasi; replikasi tetap dihentikan seperti sebelumnya"), nil
-		}
+		jr.logf("info", "Replikasi %s sekarang memverifikasi sertifikat master %s (thread IO tersambung).",
+			jr.serverName(serverID), topo.SourceHost)
 		return done("terverifikasi"), nil
 	}
 }

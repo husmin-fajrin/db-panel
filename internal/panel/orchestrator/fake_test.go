@@ -608,8 +608,19 @@ func scriptReplicaTarget(fa *fakeAgent, name, method string) {
 	fa.job("mysql.cloneFrom", snapshot("clone"))
 	fa.job("mysql.dumpFrom", snapshot("dump"))
 	fa.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Series: "8.4", ServerID: 77, ServerUUID: targetUUID})
-	fa.reply("mysql.configureReplication", proto.ReplicaStatus{IORunning: "No", SQLRunning: "No"})
-	fa.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"})
+	// START REPLICA answers what the last CHANGE REPLICATION SOURCE set:
+	// the receiver connected, verifying the master's certificate when it
+	// was asked to.
+	var verify atomic.Bool
+	fa.on("mysql.configureReplication", func(raw json.RawMessage) (any, error) {
+		var p proto.ReplicationSourceParams
+		json.Unmarshal(raw, &p)
+		verify.Store(p.VerifyServerCert)
+		return proto.ReplicaStatus{IORunning: "No", SQLRunning: "No"}, nil
+	})
+	fa.on("mysql.startReplica", func(json.RawMessage) (any, error) {
+		return proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes", SSLVerifyServerCert: verify.Load()}, nil
+	})
 	fa.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: true, Executed: masterGTID,
 		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
 	fa.reply("mysql.stopReplica", nil)

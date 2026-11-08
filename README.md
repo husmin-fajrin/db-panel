@@ -392,6 +392,9 @@ datadir tidak pernah diikuti. MySQL memuat
 sertifikat baru tanpa restart (`ALTER INSTANCE RELOAD TLS`, butuh hak
 `CONNECTION_ADMIN`), lalu agent mencoba sambungan baru yang memeriksa
 sertifikat itu; bila gagal, berkas lama dikembalikan dan pekerjaan gagal.
+Agent melaporkan nomor seri sertifikat yang dilihatnya disajikan MySQL,
+dan panel hanya mencatatnya bila sama dengan yang diterbitkannya (bila
+tidak, pekerjaan gagal tanpa mencatat apa pun).
 
 - **Siapkan master**, **Buat replika**, dan **Resync ulang** memasang
   sertifikat di server yang disiapkan (tahap **Pasang sertifikat MySQL**).
@@ -409,7 +412,13 @@ sertifikat itu; bila gagal, berkas lama dikembalikan dan pekerjaan gagal.
   replika** tetap berhenti). Replika
   yang sedang tidak terjangkau atau punya pekerjaan lain dilewati
   ("replika tidak terjangkau; ulangi nanti") tanpa menggagalkan
-  pekerjaan; jalankan lagi nanti. Kotak ini tampil selama master belum
+  pekerjaan; jalankan lagi nanti. Replika baru ditandai terverifikasi
+  setelah thread IO-nya terlihat tersambung dengan
+  `SOURCE_SSL_VERIFY_SERVER_CERT=1` (panel menunggu paling lama 1 menit;
+  bila belum, tahap itu gagal dan bisa di-**Ulangi**); replika yang
+  dihentikan operator belum ditandai sampai replikasinya berjalan dan
+  Perketat diulang. **Buat replika** dan pengarahan ulang saat promote
+  memakai aturan yang sama. Kotak ini tampil selama master belum
   punya sertifikat atau ada replika dengan peringatan **Sambungan
   replikasi belum diverifikasi**.
 - **Perpanjangan otomatis:** panel memeriksa setiap hari (pertama kali 10
@@ -951,7 +960,11 @@ panel menolak promote darurat topologi itu sampai tenggat kunci itu lewat
 ditambah tenggang 60 detik penjaga kunci; pesannya menyebut jam mulai
 bisanya. Sebelum itu tekan **Ulangi** pada promote terencana itu bila agent
 master tersambung lagi, atau buka kuncinya dengan `sudo dbpanel agent
-unlock-master` di server master.
+unlock-master` di server master. Selama itu **Resync ulang**, **Buat
+replika**, dan **Tambah database** di topologi itu juga ditolak dengan
+pesan yang sama: memuat data membuat replika bisa ditulis sebentar, dan
+penjaga kunci yang melihat replika bisa ditulis pada tenggatnya
+mengkarantina master yang sehat.
 
 ### Layar pertimbangan
 
@@ -1002,7 +1015,8 @@ binlog, thread MySQL sendiri, koneksi agent sendiri, dan sesi akun admin
 MySQL yang dipakai agent bila tersambung dari server itu sendiri (socket,
 `localhost`, `127.0.0.1`, `::1`). Sesi akun admin itu dari host lain
 ditampilkan dengan tanda "akun admin panel" dan ikut dihitung di
-konfirmasi bangun ulang. Karena itu pakai akun admin khusus untuk panel
+konfirmasi bangun ulang. Tabel koneksi hanya dibaca untuk master, master
+lama, dan replika topologi yang pernah dipromosikan. Karena itu pakai akun admin khusus untuk panel
 (lihat "Hubungkan MySQL"), bukan `root` atau akun yang juga dipakai orang
 atau aplikasi di server itu.
 Arahkan semua aplikasi yang menulis ke database ke alamat baru, restart
@@ -1046,6 +1060,8 @@ memuat kotak **Master lama** dengan:
   tombol **Unduh** (lewat HTTPS, dialirkan dari agent tanpa disimpan di
   panel) dan **Hapus**; keduanya meminta kata sandi panel untuk berkas itu
   saja, karena berkas itu bisa jadi satu-satunya salinan data tertinggal.
+  Bila versi agent server itu berbeda dari panel, daftar tidak dibaca dan
+  halaman menulis "Agent perlu dimutakhirkan".
 - **Bangun ulang sebagai replika:** formulir "Buat replika" dari master
   baru dengan master lama sebagai tujuan. Semua data MySQL di master lama
   diganti salinan dari master baru; konfirmasi menyebut koneksi aplikasi
@@ -1284,7 +1300,9 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
     `mysql-ca.*`, `web*` (HTTPS), `panel.key`, `admin-initial-password`,
     dan sementara `local-pair-token` (0600: token server lokal dan pin
     HTTPS, ditulis tiap start selama agent lokal belum berpasangan,
-    dihapus begitu berpasangan);
+    dihapus begitu berpasangan; panel hanya menerimanya dari alamat
+    loopback, dan percobaan dari alamat lain ditolak tanpa memakai token
+    itu dan dicatat di log audit sebagai `agent_pair`);
   - `/var/lib/dbpanel/panel/` (0700 `dbpanel`): `panel.db`, `bin/`;
   - `/etc/dbpanel/` (0711 root): berkas agent host panel, sama seperti di
     server lain (`agent.yaml`, `agent.key`, `mysql.cred`, `role`, ...);

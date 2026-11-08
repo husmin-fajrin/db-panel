@@ -565,6 +565,7 @@ func installTLS(ctx context.Context, h Host, creds CredentialStore, in tlsInstal
 		names = append(names, tlsKeyFile)
 	}
 
+	var served string
 	err = func() error {
 		for _, name := range names {
 			if err := rot.swap(name); err != nil {
@@ -577,16 +578,20 @@ func installTLS(ctx context.Context, h Host, creds CredentialStore, in tlsInstal
 		if _, err := db.ExecContext(ctx, "ALTER INSTANCE RELOAD TLS"); err != nil {
 			return fmt.Errorf("MySQL menolak memuat sertifikat baru (ALTER INSTANCE RELOAD TLS): %w", err)
 		}
-		if err := checkServedCert(ctx, l, creds, in); err != nil {
+		serial, err := checkServedCert(ctx, l, creds, in)
+		if err != nil {
 			return err
 		}
+		served = serial
 		return setTLSVars(ctx, db, "PERSIST", installed)
 	}()
 	if err != nil {
 		return res, rollbackTLS(context.WithoutCancel(ctx), db, rot, old, err)
 	}
-	// The certificate and CA are in place; nothing is left to undo.
-	res.Serial = fmt.Sprintf("%032x", in.cert.cert.SerialNumber)
+	// The certificate and CA are in place; nothing is left to undo. The
+	// serial reported is the one MySQL was seen serving (SEC-63c), which
+	// matchServedCert found equal to the certificate the panel sent.
+	res.Serial = served
 	res.NotAfter = in.cert.cert.NotAfter
 	res.Reloaded = true
 	return res, nil
@@ -650,10 +655,29 @@ func rollbackTLS(ctx context.Context, db *sql.DB, rot *rotation, old tlsVars, ca
 	return fmt.Errorf("pasang sertifikat MySQL gagal, sertifikat lama dipakai lagi: %w", cause)
 }
 
+// matchServedCert checks the certificate MySQL served (peer, leaf first)
+// against want, the certificate the panel sent (SEC-63c): the same serial
+// number, then the same bytes. It returns the served serial as installTLS
+// reports it (32 hex digits).
+func matchServedCert(peer []*x509.Certificate, want *x509.Certificate) (string, error) {
+	if len(peer) == 0 {
+		return "", errors.New("MySQL tidak menyajikan sertifikat")
+	}
+	got := peer[0]
+	serial := fmt.Sprintf("%032x", got.SerialNumber)
+	if got.SerialNumber.Cmp(want.SerialNumber) != 0 {
+		return "", fmt.Errorf("MySQL menyajikan sertifikat bernomor seri %s, bukan %032x yang dikirim panel", serial, want.SerialNumber)
+	}
+	if !got.Equal(want) {
+		return "", fmt.Errorf("MySQL menyajikan sertifikat bernomor seri %s yang isinya berbeda dari yang dikirim panel", serial)
+	}
+	return serial, nil
+}
+
 // checkServedCert connects to the server as installTLS describes and
-// checks that it serves in's certificate, valid for in.verifyHost under in's
-// CA.
-func checkServedCert(ctx context.Context, l Layout, creds CredentialStore, in tlsInstall) error {
+// checks that it serves in's certificate (matchServedCert), valid for
+// in.verifyHost under in's CA. It returns the served serial.
+func checkServedCert(ctx context.Context, l Layout, creds CredentialStore, in tlsInstall) (string, error) {
 	pool := x509.NewCertPool()
 	pool.AddCert(in.ca.cert)
 	c := drv.NewConfig()
@@ -673,34 +697,35 @@ func checkServedCert(ctx context.Context, l Layout, creds CredentialStore, in tl
 		c.Net, c.Addr = "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	}
 	c.Timeout, c.ReadTimeout, c.WriteTimeout = tlsCheckTimeout, tlsCheckTimeout, tlsCheckTimeout
-	served := false
+	served := ""
 	c.TLS = &tls.Config{
 		RootCAs:    pool,
 		ServerName: in.verifyHost,
 		MinVersion: tls.VersionTLS12,
 		// Runs after the chain and the name are verified.
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 || !cs.PeerCertificates[0].Equal(in.cert.cert) {
-				return errors.New("MySQL masih menyajikan sertifikat lain")
+			serial, err := matchServedCert(cs.PeerCertificates, in.cert.cert)
+			if err != nil {
+				return err
 			}
-			served = true
+			served = serial
 			return nil
 		},
 	}
 	conn, err := drv.NewConnector(c)
 	if err != nil {
-		return err
+		return "", err
 	}
 	db := sql.OpenDB(conn)
 	defer db.Close()
 	cctx, cancel := context.WithTimeout(ctx, tlsCheckTimeout)
 	defer cancel()
 	err = db.PingContext(cctx)
-	if served && (err == nil || LoginRefused(err)) {
-		return nil
+	if served != "" && (err == nil || LoginRefused(err)) {
+		return served, nil
 	}
 	if err == nil {
 		err = errors.New("sambungan tidak memakai TLS")
 	}
-	return fmt.Errorf("sambungan baru dengan verifikasi sertifikat untuk %s gagal: %w", in.verifyHost, err)
+	return "", fmt.Errorf("sambungan baru dengan verifikasi sertifikat untuk %s gagal: %w", in.verifyHost, err)
 }

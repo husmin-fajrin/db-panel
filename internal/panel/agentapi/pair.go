@@ -35,7 +35,8 @@ type Deps struct {
 	// it empty.
 	WebPin func() string
 	// LocalServerID is the panel host's own server; its agent pairs from
-	// 127.0.0.1, and the server's address is PublicHost instead.
+	// loopback only (SEC-63g), and the server's address is PublicHost
+	// instead.
 	LocalServerID int64
 	PublicHost    string
 	// OnPaired, if set, is called with the server id after each pairing.
@@ -95,6 +96,19 @@ func PairHandler(d Deps) http.Handler {
 		if err != nil {
 			ip = r.RemoteAddr
 		}
+		// SEC-63g: the panel host's own server pairs with the token the
+		// panel writes to local-pair-token for its local agent, which
+		// connects over loopback. From anywhere else that token is
+		// refused before it is used, so the local agent can still pair.
+		if d.LocalServerID != 0 && !isLoopback(ip) {
+			if pt, err := d.Store.PeekPairToken(req.Token, d.now()); err == nil && pt.ServerID == d.LocalServerID {
+				log.Warn("pairing rejected: the panel host's token used from another address", "server_id", pt.ServerID,
+					"remote", ip, "hostname", req.Hostname)
+				d.auditPairRefused(pt.ServerID, ip, req.Hostname, outcomeLocalNotLoopback)
+				writeError(w, http.StatusForbidden, msgLocalNotLoopback)
+				return
+			}
+		}
 
 		pt, err := d.Store.ConsumePairToken(req.Token, d.now())
 		if errors.Is(err, store.ErrTokenInvalid) {
@@ -145,6 +159,27 @@ func PairHandler(d Deps) http.Handler {
 			AgentAddr: d.AgentAddr(),
 		})
 	})
+}
+
+const (
+	msgLocalNotLoopback     = "token ditolak: token server panel hanya berlaku dari host panel itu sendiri (127.0.0.1 atau ::1)"
+	outcomeLocalNotLoopback = "ditolak: token server panel dipakai bukan dari alamat loopback"
+)
+
+// isLoopback reports whether ip (a RemoteAddr host) is 127.0.0.0/8 or ::1.
+func isLoopback(ip string) bool {
+	a := net.ParseIP(ip)
+	return a != nil && a.IsLoopback()
+}
+
+// auditPairRefused writes a refused pairing to the audit log (the agent
+// has no panel user: the username is "agent").
+func (d Deps) auditPairRefused(serverID int64, ip, hostname, outcome string) {
+	detail, _ := json.Marshal(map[string]string{"hostname": hostname})
+	if _, err := d.Store.AddAudit(store.AuditEntry{TS: d.now(), Username: "agent", IP: ip, Action: "agent_pair",
+		TargetKind: "server", TargetID: serverID, DetailJSON: string(detail), Outcome: outcome}); err != nil {
+		d.logger().Error("write audit log", "action", "agent_pair", "server_id", serverID, "err", err)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

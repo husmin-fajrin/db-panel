@@ -75,6 +75,10 @@ type ReplicaStatus struct {
 	RetrievedGTID string   `json:"retrieved_gtid"`
 	ExecutedGTID  string   `json:"executed_gtid"`
 	Filters       []string `json:"filters"` // REPLICATE_WILD_DO_TABLE rules, e.g. "db.%"
+	// SSLVerifyServerCert: the source is configured with
+	// SOURCE_SSL_VERIFY_SERVER_CERT=1, so a connected receiver (IORunning
+	// Yes) verified the master's certificate. False from agents before it.
+	SSLVerifyServerCert bool `json:"ssl_verify_server_cert,omitempty"`
 }
 
 // PreflightParams are the parameters of mysql.preflight.
@@ -487,6 +491,9 @@ type RepointResult struct {
 	NeedsRebuild bool   `json:"needs_rebuild"`
 	Errant       string `json:"errant,omitempty"`
 	IORunning    bool   `json:"io_running"`
+	// SSLVerifyServerCert: the receiver connected (IORunning) with
+	// SOURCE_SSL_VERIFY_SERVER_CERT=1. False from agents before it.
+	SSLVerifyServerCert bool `json:"ssl_verify_server_cert,omitempty"`
 	// IOError is the receiver's last error when it was still retrying
 	// (network, login) at the end of the wait; "" otherwise.
 	IOError string `json:"io_error,omitempty"`

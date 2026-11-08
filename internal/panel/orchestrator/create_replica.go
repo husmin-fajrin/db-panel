@@ -100,6 +100,10 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	if err != nil {
 		return "", fmt.Errorf("topologi master: %w", err)
 	}
+	// The load makes the target writable for a while.
+	if err := r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, "Buat replika"); err != nil {
+		return "", err
+	}
 	if err := r.refuseBusy(target.ID, "server tujuan"); err != nil {
 		return "", err
 	}
@@ -817,22 +821,38 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 		}
 		src.SSL, src.VerifyServerCert = true, true
 	}
+	// tls_verified describes the source configured now, and is set only
+	// once its receiver is seen connected with verification (SEC-63c).
+	if err := jr.r.d.Store.SetReplicaTLSVerified(jr.target(), false); err != nil {
+		return outcome{}, err
+	}
 	var rs proto.ReplicaStatus
 	if err := jr.call(ctx, jr.target(), "mysql.configureReplication", src, &rs); err != nil {
 		return outcome{}, err
 	}
-	if err := jr.r.d.Store.SetReplicaTLSVerified(jr.target(), jr.st.TLSVerify); err != nil {
-		return outcome{}, err
-	}
-	if jr.st.TLSVerify {
-		jr.logf("info", "Replikasi memverifikasi sertifikat master %s.", topo.SourceHost)
-	} else {
+	if !jr.st.TLSVerify {
 		jr.logf("warn", "%s. Jalankan Perketat sambungan replikasi di halaman master.", msgUnverified)
 	}
 	if err := jr.call(ctx, jr.target(), "mysql.startReplica", nil, &rs); err != nil {
 		return outcome{}, err
 	}
 	jr.logf("info", "Replikasi berjalan: IO %s, SQL %s.", rs.IORunning, rs.SQLRunning)
+	if jr.st.TLSVerify {
+		last, ok, err := jr.awaitVerifiedLink(ctx, jr.target(), &rs)
+		if err != nil {
+			return outcome{}, err
+		}
+		if ok {
+			if err := jr.r.d.Store.SetReplicaTLSVerified(jr.target(), true); err != nil {
+				return outcome{}, err
+			}
+			jr.logf("info", "Replikasi memverifikasi sertifikat master %s (thread IO tersambung).", topo.SourceHost)
+		} else {
+			jr.logf("warn", "Replikasi diatur memverifikasi sertifikat master %s, tetapi belum terbukti tersambung (%s); "+
+				"tanda terverifikasi belum diberikan. Jalankan Perketat sambungan replikasi di halaman master setelah replika tersambung.",
+				topo.SourceHost, unverifiedText(last))
+		}
+	}
 	return done("IO %s, SQL %s", rs.IORunning, rs.SQLRunning), nil
 }
 

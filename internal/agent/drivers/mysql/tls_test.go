@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -447,5 +448,50 @@ func TestTLSCommandsAllowedForEveryRole(t *testing.T) {
 		wantPastPins(t, role+" tlsRequest", rig.dispatch("mysql.tlsRequest", struct{}{}))
 		wantPastPins(t, role+" tlsInstall", rig.dispatch("mysql.tlsInstall", install))
 		wantPastPins(t, role+" tlsTrust", rig.dispatch("mysql.tlsTrust", proto.TLSTrustParams{CAPEM: string(m.CAPEM())}))
+	}
+}
+
+// TestTLSInstallRefusesSerialMismatch (SEC-63c): the install reports
+// success, and the serial the panel records, only when the certificate
+// MySQL serves on a fresh connection has the serial of the certificate the
+// panel sent; another serial, or other bytes under the same serial, fail
+// the install with a message naming both serials.
+func TestTLSInstallRefusesSerialMismatch(t *testing.T) {
+	m := testMySQLCA(t)
+	parse := func(certPEM []byte) *x509.Certificate {
+		t.Helper()
+		block, _ := pem.Decode(certPEM)
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	sent, other := parse(otherKeyCert(t, m)), parse(otherKeyCert(t, m))
+	if serial, err := mysql.MatchServedCert([]*x509.Certificate{sent}, sent); err != nil || serial != fmt.Sprintf("%032x", sent.SerialNumber) {
+		t.Fatalf("the sent certificate served: %q, %v", serial, err)
+	}
+	_, err := mysql.MatchServedCert([]*x509.Certificate{other}, sent)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%032x", other.SerialNumber)) ||
+		!strings.Contains(err.Error(), fmt.Sprintf("%032x", sent.SerialNumber)) {
+		t.Fatalf("another serial served: %v", err)
+	}
+	// The same serial on other bytes (a forged certificate) is no match.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{SerialNumber: sent.SerialNumber,
+		Subject: sent.Subject, NotBefore: sent.NotBefore, NotAfter: sent.NotAfter}, &x509.Certificate{SerialNumber: sent.SerialNumber,
+		Subject: sent.Subject, NotBefore: sent.NotBefore, NotAfter: sent.NotAfter}, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, _ := x509.ParseCertificate(der)
+	if _, err := mysql.MatchServedCert([]*x509.Certificate{forged}, sent); err == nil {
+		t.Fatal("a certificate with the same serial but other bytes was accepted")
+	}
+	if _, err := mysql.MatchServedCert(nil, sent); err == nil {
+		t.Fatal("no certificate served was accepted")
 	}
 }

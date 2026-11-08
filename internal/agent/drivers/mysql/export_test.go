@@ -156,8 +156,9 @@ func SetCommandHook(seen func(*exec.Cmd)) (restore func()) {
 
 // TLS directory operations, testable without a server.
 var (
-	TrustTLS   = trustTLS
-	RequestTLS = requestTLS
+	TrustTLS        = trustTLS
+	RequestTLS      = requestTLS
+	MatchServedCert = matchServedCert
 )
 
 // SetReadPeer replaces how the driver reads another server's globals.

@@ -288,8 +288,12 @@ func TestTightenTLSKeepsPausedReplicaStopped(t *testing.T) {
 	e.waitJob(id, store.JobSucceeded)
 	wantCmds(t, "replica", r.cmds(0), []string{"mysql.tlsRequest", "mysql.tlsInstall", "mysql.stopReplica",
 		"mysql.tlsTrust", "mysql.configureReplication"})
-	if !e.replica(r.id).TLSVerified {
-		t.Fatal("tls_verified not set")
+	// Nothing connected, so nothing proves the verification (SEC-63c).
+	if e.replica(r.id).TLSVerified {
+		t.Fatal("tls_verified set on a stopped replica")
+	}
+	if log := e.jobLog(id); !strings.Contains(log, "tanda terverifikasi diberikan setelah replikasi dijalankan lagi") {
+		t.Fatalf("job log:\n%s", log)
 	}
 }
 
@@ -418,7 +422,7 @@ func TestTightenRepointMarksReplicaPaused(t *testing.T) {
 	})
 	r.on("mysql.startReplica", func(json.RawMessage) (any, error) {
 		pausedAtStart = e.replica(r.id).Paused
-		return nil, nil
+		return proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes", SSLVerifyServerCert: true}, nil
 	})
 	id, err := e.r.StartTightenTLS(context.Background(), m.id)
 	if err != nil {
@@ -661,4 +665,136 @@ func TestReplicaRefusesMasterAddressOutsideCert(t *testing.T) {
 		!CertNamesHost([]string{"::1"}, "0:0::1") {
 		t.Fatal("CertNamesHost")
 	}
+}
+
+// TestMySQLTLSRecordsOnlySentSerial (SEC-63c, the panel's side): an
+// install whose agent reports another serial than the certificate the
+// panel issued fails, and server_tls keeps nothing from it.
+func TestMySQLTLSRecordsOnlySentSerial(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	m.reply("mysql.tlsInstall", proto.TLSInstallResult{Serial: strings.Repeat("0f", 16), NotAfter: time.Now().AddDate(2, 0, 0),
+		Reloaded: true})
+	id, err := e.r.StartMySQLTLS(context.Background(), m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	cert, _ := e.installedCert(m)
+	if log := e.jobLog(id); !strings.Contains(log, "nomor seri "+strings.Repeat("0f", 16)) ||
+		!strings.Contains(log, fmt.Sprintf("%032x", cert.SerialNumber)) {
+		t.Fatalf("job log:\n%s", log)
+	}
+	if rec, err := e.st.GetServerTLS(m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("server_tls after a mismatched serial = %+v, %v", rec, err)
+	}
+}
+
+// TestTLSVerifiedAfterIOThread (SEC-63c): tls_verified is set only once
+// the replica's receiver is seen connected (IO Yes) with
+// SOURCE_SSL_VERIFY_SERVER_CERT=1, not when the verified source was merely
+// configured: on Perketat (which waits for it, and fails otherwise), on
+// Buat replika (which carries on unverified with a warning) and on a
+// promotion's repoint.
+func TestTLSVerifiedAfterIOThread(t *testing.T) {
+	status := func(io string, verify bool) proto.MySQLStatus {
+		return proto.MySQLStatus{Version: "8.4.3", Series: "8.4", Replica: &proto.ReplicaStatus{IORunning: io, SQLRunning: "Yes",
+			SSLVerifyServerCert: verify}}
+	}
+	t.Run("tighten", func(t *testing.T) {
+		e := newEnv(t)
+		e.r.verifyIOWait = 300 * time.Millisecond
+		m, topo := e.readyMaster("db-master")
+		r := e.followingReplica(topo, "a")
+		r.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Connecting", SQLRunning: "Yes", SSLVerifyServerCert: true})
+		r.reply("mysql.status", status("Connecting", true))
+		id, err := e.r.StartTightenTLS(context.Background(), m.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.waitJob(id, store.JobFailed)
+		if e.replica(r.id).TLSVerified {
+			t.Fatal("tls_verified set while the receiver was still connecting")
+		}
+		if log := e.jobLog(id); !strings.Contains(log, "belum tersambung ke master dengan verifikasi sertifikat") {
+			t.Fatalf("job log:\n%s", log)
+		}
+
+		// Connected, but the agent does not report the verification (an
+		// agent from before it): not verified either.
+		r.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"})
+		r.reply("mysql.status", status("Yes", false))
+		id, err = e.r.StartTightenTLS(context.Background(), m.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.waitJob(id, store.JobFailed)
+		if e.replica(r.id).TLSVerified {
+			t.Fatal("tls_verified set without SOURCE_SSL_VERIFY_SERVER_CERT=1")
+		}
+		if log := e.jobLog(id); !strings.Contains(log, "SOURCE_SSL_VERIFY_SERVER_CERT=1") {
+			t.Fatalf("job log:\n%s", log)
+		}
+
+		// The receiver connects while the panel waits: verified.
+		r.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Connecting", SQLRunning: "Yes", SSLVerifyServerCert: true})
+		r.reply("mysql.status", status("Yes", true))
+		mark := r.mark()
+		id, err = e.r.StartTightenTLS(context.Background(), m.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		if !e.replica(r.id).TLSVerified {
+			t.Fatal("tls_verified not set once the receiver connected with verification")
+		}
+		wantCmds(t, "replica", r.cmds(mark), []string{"mysql.tlsRequest", "mysql.tlsInstall", "mysql.stopReplica",
+			"mysql.tlsTrust", "mysql.configureReplication", "mysql.startReplica", "mysql.status"})
+	})
+	t.Run("create replica", func(t *testing.T) {
+		e := newEnv(t)
+		e.r.verifyIOWait = 300 * time.Millisecond
+		m, _ := e.readyMaster("db-master")
+		if err := e.st.SetServerTLS(store.ServerTLS{ServerID: m.id, CertSerial: "01", NotAfter: time.Now().AddDate(2, 0, 0),
+			InstalledAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		r := e.replicaAgent("replica1", "dump")
+		r.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Connecting", SQLRunning: "Yes", SSLVerifyServerCert: true})
+		id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{MasterServerID: m.id, TargetServerID: r.id,
+			Databases: []string{"a"}, ConfirmWipe: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		if e.replica(r.id).TLSVerified {
+			t.Fatal("tls_verified set before the receiver connected")
+		}
+		if log := e.jobLog(id); !strings.Contains(log, "tanda terverifikasi belum diberikan") {
+			t.Fatalf("job log:\n%s", log)
+		}
+	})
+	t.Run("repoint", func(t *testing.T) {
+		e := newEnv(t)
+		m, topo := e.readyMaster("db-master")
+		if err := e.st.SetServerTLS(store.ServerTLS{ServerID: m.id, CertSerial: "01", NotAfter: time.Now().AddDate(2, 0, 0),
+			InstalledAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		r := e.followingReplica(topo, "a")
+		for _, c := range []struct {
+			res  proto.RepointResult
+			want bool
+		}{
+			{proto.RepointResult{IORunning: true}, false},
+			{proto.RepointResult{IORunning: false, SSLVerifyServerCert: true}, false},
+			{proto.RepointResult{IORunning: true, SSLVerifyServerCert: true}, true},
+		} {
+			r.reply("mysql.repoint", c.res)
+			e.r.repointReplica(context.Background(), topo, e.replica(r.id), 0)
+			if got := e.replica(r.id).TLSVerified; got != c.want {
+				t.Errorf("repoint answering %+v: tls_verified %v, want %v", c.res, got, c.want)
+			}
+		}
+	})
 }

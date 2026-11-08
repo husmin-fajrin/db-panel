@@ -352,3 +352,86 @@ func TestJobFailedClosesOnLaterJob(t *testing.T) {
 		t.Fatal("job_failed still open after the replica was detached")
 	}
 }
+
+// TestResyncRefusedWhileLockMayStand (4b final review, parked Minor): after
+// a failed planned promotion whose unlock was never confirmed, the
+// master's guard may still hold the lock and, at its deadline, quarantine
+// the master if a replica it has seen is writable. Resync ulang, Buat
+// replika and Tambah database each make a replica writable for a while,
+// so each is refused, saying from when it is possible and naming
+// unlock-master, until the lock's deadline plus the guard's grace; then
+// each is accepted again (here it goes on to its next check).
+func TestResyncRefusedWhileLockMayStand(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.emergencyAfterFailedPlanned(func(json.RawMessage) (any, error) {
+		return nil, &proto.Error{Code: proto.CodeOffline, Message: "agent offline"}
+	})
+	deadline := g.promotion().LockAt.Add(30 * time.Minute) // the rig's lock: LockedAt + 30 min
+	until := deadline.Add(proto.PromoteLockGrace).Local().Format("02-01-2006 15:04:05")
+	// A replica following a subset, for Tambah database.
+	sub := e.agent("rep-sub", "10.0.0.5")
+	if _, err := e.st.AddReplica(g.topo.ID, sub.id, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(sub.id, store.ReplicaReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	target := e.agent("baru", "10.0.0.6")
+	ctx := context.Background()
+	starts := []struct {
+		what  string
+		start func() error
+		// after is what refuses it once the lock has decided.
+		after string
+	}{
+		{"Resync ulang", func() error {
+			_, err := e.r.StartResync(ctx, ResyncParams{ServerID: g.b.id})
+			return err
+		}, "pekerjaan"},
+		{"Buat replika", func() error {
+			_, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.m.id, TargetServerID: target.id,
+				Databases: []string{"tidak-ada"}})
+			return err
+		}, "tidak-ada"},
+		{"Tambah database", func() error {
+			_, err := e.r.StartAddDatabases(ctx, sub.id, []string{"tidak-ada"})
+			return err
+		}, "tidak ada di master"},
+	}
+	check := func(when string, now time.Time, refused bool) {
+		t.Helper()
+		e.r.now = func() time.Time { return now }
+		for _, s := range starts {
+			err := s.start()
+			if refused {
+				if err == nil {
+					t.Fatalf("%s %s: accepted while the lock may stand", s.what, when)
+				}
+				for _, part := range []string{"mungkin masih terkunci", s.what + " baru bisa dijalankan mulai " + until,
+					"sudo dbpanel agent unlock-master"} {
+					if !strings.Contains(err.Error(), part) {
+						t.Errorf("%s %s: refusal %q lacks %q", s.what, when, err, part)
+					}
+				}
+				continue
+			}
+			if err == nil || strings.Contains(err.Error(), "mungkin masih terkunci") || !strings.Contains(err.Error(), s.after) {
+				t.Errorf("%s %s: %v, want past the lock check to %q", s.what, when, err, s.after)
+			}
+		}
+	}
+	check("now", time.Now(), true)
+	// Past the deadline but within the grace: still refused.
+	check("within the grace", deadline.Add(30*time.Second), true)
+	// Past both: the guard has decided. A busy b shows the resync got past
+	// the lock check without starting a job.
+	if err := e.st.CreateJob(store.Job{ID: "busy-b", Kind: KindMySQLTLS, ServerID: g.b.id, ParamsJSON: "{}",
+		CreatedAt: time.Now()}, []string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	check("after the grace", deadline.Add(proto.PromoteLockGrace+time.Second), false)
+	if rep := e.replica(g.b.id); rep.State != store.ReplicaReady {
+		t.Fatalf("b after the refusals = %s, want ready", rep.State)
+	}
+}

@@ -155,8 +155,10 @@ func (d *Driver) registerSalvage(reg *commands.Registry) {
 	})
 }
 
-// allowSalvage checks cmd against the pins, which must exist: only a
-// quarantined server runs the salvage commands.
+// allowSalvage checks cmd against the pins, which must exist: mysql.salvage
+// runs only on a quarantined server; salvageList, salvageRead and
+// salvageDelete (its own files on disk) also on one rebuilt as a replica
+// (pins.go).
 func (d *Driver) allowSalvage(cmd string, params any) error {
 	if d.pins == nil {
 		return &commands.ParamError{Msg: "agent ini tidak punya pin peran; perintah " + cmd + " ditolak"}

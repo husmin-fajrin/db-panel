@@ -59,6 +59,11 @@ func promotedEnv(t *testing.T, mods ...func(*web.Deps)) (*env, *fakeOrch, store.
 	if topo, err = e.st.GetTopology(topo.ID); err != nil {
 		t.Fatal(err)
 	}
+	// The old master's agent is of the panel's version: its salvage
+	// files are listed (TestSalvageListSkippedForOldAgent).
+	if err := e.st.UpdateProbe(1, proto.ProbeResult{}, "v-test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	return e, f, topo
 }
 
@@ -609,4 +614,74 @@ func TestRebuiltOldMasterKeepsSalvageFiles(t *testing.T) {
 	f.salvageFiles = nil
 	rec = e.do("GET", "/servers/1", nil, c)
 	wantNoBody(t, rec, "Berkas data tertinggal")
+}
+
+func (f *fakeOrch) callsOf(m map[int64]int, id int64) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return m[id]
+}
+
+// TestConnectionsFragmentOnlyTopologyMembers (4b Task 10 Minor 4): the
+// connections fragment asks an agent only for a topology's master, an old
+// master, or a replica of a topology that has had a promotion (a rebuilt
+// old master); any other server id is refused without calling its agent.
+func TestConnectionsFragmentOnlyTopologyMembers(t *testing.T) {
+	e, f, _ := promotedEnv(t)
+	c := e.cookie()
+	// Another topology, never promoted, and a server with no role.
+	m2 := e.pairedOnline(t, "db-master-2")
+	topo2 := e.makeMaster(t, m2, shopDatabases...)
+	r2 := e.pairedOnline(t, "db-replika-2")
+	if _, err := e.st.AddReplica(topo2.ID, r2.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	loose := e.pairedOnline(t, "db-lepas")
+
+	for _, id := range []int64{1, 2, 3, m2.ID} {
+		rec := e.do("GET", fmt.Sprintf("/servers/%d/connections-fragment", id), nil, c)
+		wantCode(t, rec, http.StatusOK)
+		if n := f.callsOf(f.connCalls, id); n != 1 {
+			t.Errorf("server %d: %d Connections calls, want 1", id, n)
+		}
+	}
+	for _, id := range []int64{r2.ID, loose.ID} {
+		rec := e.do("GET", fmt.Sprintf("/servers/%d/connections-fragment", id), nil, c)
+		wantCode(t, rec, http.StatusNotFound)
+		wantBody(t, rec, "Koneksi hanya ditampilkan untuk master, master lama, atau replika topologi yang pernah dipromosikan.")
+		if n := f.callsOf(f.connCalls, id); n != 0 {
+			t.Errorf("server %d: %d Connections calls, want none", id, n)
+		}
+	}
+}
+
+// TestSalvageListSkippedForOldAgent (4b Task 10 Minor 5): the old master's
+// page does not ask an agent of another version than the panel for its
+// salvage files (each view would raise AgentNeedsUpgrade again); it says
+// the agent needs updating instead.
+func TestSalvageListSkippedForOldAgent(t *testing.T) {
+	e, f, _ := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.UpdateProbe(1, proto.ProbeResult{}, "v-lama", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.salvageFiles = []proto.SalvageFile{{Name: salvageName, Size: 4096, CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(6 * 24 * time.Hour)}}
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Agent perlu dimutakhirkan", "Master lama")
+	wantNoBody(t, rec, salvageName)
+	if n := f.callsOf(f.listCalls, 1); n != 0 {
+		t.Fatalf("%d SalvageList calls for an agent of another version, want none", n)
+	}
+
+	// Of the panel's version: listed.
+	if err := e.st.UpdateProbe(1, proto.ProbeResult{}, "v-test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, salvageName)
+	if n := f.callsOf(f.listCalls, 1); n != 1 {
+		t.Fatalf("%d SalvageList calls, want 1", n)
+	}
 }

@@ -555,7 +555,9 @@ func TestDestructiveCommandsRefusedOnSource(t *testing.T) {
 	src := sourceParams(master)
 	src.SSL = true
 	decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.configureReplication", src))
-	decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.startReplica", nil))
+	if rs := decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.startReplica", nil)); rs.SSLVerifyServerCert {
+		t.Errorf("replica without verification reports SSLVerifyServerCert: %+v", rs)
+	}
 	synced(t, master, replica)
 	var cipher string
 	if err := rootDB(t, replica).QueryRow(`SELECT COALESCE(MAX(SSL_ALLOWED), '') FROM performance_schema.replication_connection_configuration`).
@@ -617,7 +619,7 @@ func TestReplicationVerifiesSourceCert(t *testing.T) {
 	rs := decode[proto.ReplicaStatus](t, dispatch(t, replica.Host(), "mysql.startReplica", nil))
 	execAll(t, rootDB(t, master), "CREATE DATABASE verified")
 	res := synced(t, master, replica)
-	if rs.LastIOErrno != 0 || res.Status.IORunning != "Yes" {
+	if rs.LastIOErrno != 0 || res.Status.IORunning != "Yes" || !rs.SSLVerifyServerCert || !res.Status.SSLVerifyServerCert {
 		t.Errorf("verified replication: %+v, %+v", rs, res.Status)
 	}
 	var ca, verify string

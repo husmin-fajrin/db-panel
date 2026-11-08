@@ -38,6 +38,11 @@ const (
 
 	msgSalvageName    = "Nama berkas data tertinggal tidak valid."
 	msgSalvageOffline = "Agent server ini offline; berkas data tertinggal tidak bisa dibaca sekarang."
+	// msgSalvageOldAgent: the agent's version is not the panel's.
+	msgSalvageOldAgent = "Agent perlu dimutakhirkan: versinya berbeda dari panel, jadi daftar berkas data tertinggal " +
+		"baru dibaca setelah agent server ini diperbarui ke versi panel."
+	// msgConnsNotMember: the connections fragment of another server.
+	msgConnsNotMember = "Koneksi hanya ditampilkan untuk master, master lama, atau replika topologi yang pernah dipromosikan."
 	// Failed agent calls are worded by the panel: the agent's own text
 	// (file paths, mysqlbinlog output) goes to the panel's log only.
 	msgSalvageRead     = "Berkas data tertinggal tidak bisa dibaca; rinciannya ada di log panel."
@@ -120,12 +125,54 @@ func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsVi
 // connectionsFragment answers GET /servers/{id}/connections-fragment: the
 // connections table of the server; the cutover screen reloads it every
 // 15 seconds.
+// Only a server the cutover screen shows is read (4b Task 10 Minor 4): a
+// topology's master, an old master, or a replica of a topology that has
+// had a promotion (a rebuilt old master); any other id is refused without
+// an agent call.
 func (a *app) connectionsFragment(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok {
 		return
 	}
+	member, err := a.cutoverMember(srv.ID)
+	if err != nil {
+		a.internalError(w, "connections member", err)
+		return
+	}
+	if !member {
+		http.Error(w, msgConnsNotMember, http.StatusNotFound)
+		return
+	}
 	a.render.RenderFragment(w, "connections", a.connectionsOf(r.Context(), srv))
+}
+
+// cutoverMember reports whether serverID is a topology's master, the old
+// master of a promotion, or a replica of a topology that has had one.
+func (a *app) cutoverMember(serverID int64) (bool, error) {
+	notFound := func(err error) bool { return errors.Is(err, store.ErrNotFound) }
+	if _, err := a.Store.GetTopologyByMaster(serverID); err == nil {
+		return true, nil
+	} else if !notFound(err) {
+		return false, err
+	}
+	if _, err := a.Store.PromotionByOldMaster(serverID); err == nil {
+		return true, nil
+	} else if !notFound(err) {
+		return false, err
+	}
+	rep, err := a.Store.GetReplicaByServer(serverID)
+	if notFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := a.Store.LatestPromotion(rep.TopologyID); err == nil {
+		return true, nil
+	} else if !notFound(err) {
+		return false, err
+	}
+	return false, nil
 }
 
 // cutoverPage is the cutover screen of a new master (cutover.html).
@@ -289,7 +336,13 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	if err != nil {
 		return err
 	}
-	if p.Online {
+	switch {
+	case p.Online && a.Version != "" && srv.AgentVersion != a.Version:
+		// An agent of another version may not know the salvage commands;
+		// asking it on every view would raise AgentNeedsUpgrade again and
+		// again (4b Task 10 Minor 5).
+		p.Salvage = &salvageFiles{ServerID: srv.ID, Unreadable: msgSalvageOldAgent}
+	case p.Online:
 		sf := &salvageFiles{ServerID: srv.ID}
 		lctx, cancel := context.WithTimeout(ctx, pageCallTimeout)
 		files, err := a.Orchestrator.SalvageList(lctx, srv.ID)
@@ -304,7 +357,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 			sf.Files = append(sf.Files, salvageRow{SalvageFile: f, DaysLeft: fmt.Sprintf("%d hari", max(days, 0))})
 		}
 		p.Salvage = sf
-	} else {
+	default:
 		p.Salvage = &salvageFiles{ServerID: srv.ID, Unreadable: msgSalvageOffline}
 	}
 	if srv.Role != store.RoleQuarantined {

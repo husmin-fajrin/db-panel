@@ -64,6 +64,10 @@ type fakeOrch struct {
 	endless        bool
 	onRead         func(offset int64)
 	reads          int
+	// connCalls and listCalls count Connections and SalvageList per
+	// server.
+	connCalls map[int64]int
+	listCalls map[int64]int
 }
 
 func (f *fakeOrch) record(call string) {
@@ -267,6 +271,10 @@ func (f *fakeOrch) StartSalvage(_ context.Context, id int64) (string, error) {
 func (f *fakeOrch) Connections(_ context.Context, id int64) (proto.ConnectionsResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.connCalls == nil {
+		f.connCalls = map[int64]int{}
+	}
+	f.connCalls[id]++
 	if err := f.connErr[id]; err != nil {
 		return proto.ConnectionsResult{}, err
 	}
@@ -276,6 +284,10 @@ func (f *fakeOrch) Connections(_ context.Context, id int64) (proto.ConnectionsRe
 func (f *fakeOrch) SalvageList(_ context.Context, id int64) ([]proto.SalvageFile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.listCalls == nil {
+		f.listCalls = map[int64]int{}
+	}
+	f.listCalls[id]++
 	return append([]proto.SalvageFile(nil), f.salvageFiles...), f.err
 }
 

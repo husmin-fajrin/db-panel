@@ -92,6 +92,9 @@ const (
 	// defaultCatchUpMax bounds a verify whose replica keeps making progress
 	// (a large copy of a busy master can take hours to catch up).
 	defaultCatchUpMax = 2 * time.Hour
+	// defaultVerifyIOWait bounds the wait for a replica's receiver to
+	// connect with verification before tls_verified is set (SEC-63c).
+	defaultVerifyIOWait = time.Minute
 
 	// Caps on what an agent sends (SEC-34): one job.log line, one step
 	// message, one agent job result, and the databases of an inventory.
@@ -161,6 +164,8 @@ type Runner struct {
 	// promoteCatchUp bounds "Replika mengejar" (ruling R2: 10 minutes);
 	// tests shorten it.
 	promoteCatchUp time.Duration
+	// verifyIOWait bounds awaitVerifiedLink; tests shorten it.
+	verifyIOWait time.Duration
 	// afterReopen, when set (tests), runs in Retry between ReopenJob and
 	// launch.
 	afterReopen func(jobID string)
@@ -196,8 +201,8 @@ func New(d Deps) *Runner {
 	return &Runner{
 		d: d, log: d.Logger, now: d.Now,
 		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery, catchUpMax: defaultCatchUpMax,
-		promoteCatchUp: defaultPromoteCatchUp,
-		base:           base, stop: stop, live: make(map[string]*liveJob),
+		promoteCatchUp: defaultPromoteCatchUp, verifyIOWait: defaultVerifyIOWait,
+		base: base, stop: stop, live: make(map[string]*liveJob),
 	}
 }
 

@@ -175,6 +175,9 @@ func replicaStatus(ctx context.Context, db *sql.DB) (*proto.ReplicaStatus, error
 		RetrievedGTID: gtid("Retrieved_Gtid_Set"),
 		ExecutedGTID:  gtid("Executed_Gtid_Set"),
 		Filters:       []string{},
+		// SEC-63c: the panel marks a replica verified only on this and a
+		// connected receiver.
+		SSLVerifyServerCert: strings.EqualFold(row["Source_SSL_Verify_Server_Cert"].String, "Yes"),
 	}
 	if v := row["Seconds_Behind_Source"]; v.Valid {
 		if n, err := strconv.ParseInt(v.String, 10, 64); err == nil {
