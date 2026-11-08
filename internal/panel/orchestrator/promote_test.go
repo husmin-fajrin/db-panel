@@ -999,10 +999,14 @@ func TestPromoteEmergencyRefusedWhileLockMayStand(t *testing.T) {
 		t.Fatal("emergency promote while the earlier lock may stand was accepted")
 	}
 	until := deadline.Add(proto.PromoteLockGrace).Local().Format("02-01-2006 15:04:05")
-	for _, part := range []string{"mungkin masih terkunci", "mulai " + until, "sudo dbpanel agent unlock-master"} {
+	for _, part := range []string{"mungkin masih terkunci", "Promote darurat baru bisa dijalankan mulai " + until,
+		"`sudo dbpanel agent unlock-master`, lalu tekan Ulangi pada promote terencana itu (panel memastikan kunci terbuka)"} {
 		if !strings.Contains(err.Error(), part) {
 			t.Errorf("refusal %q lacks %q", err, part)
 		}
+	}
+	if strings.Contains(err.Error(), "memuat data") {
+		t.Errorf("emergency refusal %q carries the data-load reason", err)
 	}
 	if g.b.count("mysql.promote") != 0 {
 		t.Fatal("candidate Y was asked to promote")

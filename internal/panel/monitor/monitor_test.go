@@ -956,3 +956,80 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// TestHealthReportKeepsTLSVerified (SEC-63c, Task 6 fix round 1): a ready
+// replica's tls_verified follows its live reports when its agent is of the
+// panel's version: a replica whose receiver connects to the topology's
+// source with SOURCE_SSL_VERIFY_SERVER_CERT=1 (a paused one started later)
+// becomes verified, as long as the master has the panel's certificate; a
+// report showing the verification off (reconfigured outside the panel)
+// clears it; an agent of another version, a receiver still connecting or
+// another source leave it as it is.
+func TestHealthReportKeepsTLSVerified(t *testing.T) {
+	r := newRig(t)
+	r.m.version = "v-test"
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	if err := r.st.UpdateProbe(rID, proto.ProbeResult{}, "v-test", r.clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	snap := replicaSnap(srcUUID + ":1-100")
+	snap.Replica.SourceHost, snap.Replica.SourcePort = "10.0.0.1", 3306
+	a := r.agent(rID, true, snap).attach()
+	verified := func() bool {
+		t.Helper()
+		rep, err := r.st.GetReplicaByServer(rID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep.TLSVerified
+	}
+	set := func(io string, verify bool, host string) {
+		a.setSnap(func(s *proto.HealthSnapshot) {
+			s.Replica.IORunning, s.Replica.SSLVerifyServerCert, s.Replica.SourceHost = io, verify, host
+		})
+		a.send()
+	}
+
+	// Verified link, but the master has no panel certificate: unchanged.
+	set("Yes", true, "10.0.0.1")
+	if verified() {
+		t.Fatal("verified without the master's certificate")
+	}
+	if err := r.st.SetServerTLS(store.ServerTLS{ServerID: mID, CertSerial: "01", NotAfter: r.clk.Now().AddDate(2, 0, 0),
+		InstalledAt: r.clk.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	// Still connecting, or another source: unchanged.
+	set("Connecting", true, "10.0.0.1")
+	set("Yes", true, "10.9.9.9")
+	if verified() {
+		t.Fatal("verified while connecting or on another source")
+	}
+	// Connected with verification to the topology's source: verified.
+	set("Yes", true, "10.0.0.1")
+	if !verified() {
+		t.Fatal("not verified once the receiver connected with verification")
+	}
+	// Reconfigured outside the panel without verification: cleared.
+	set("Yes", false, "10.0.0.1")
+	if verified() {
+		t.Fatal("still verified with SOURCE_SSL_VERIFY_SERVER_CERT=0")
+	}
+	// An agent of another version (no such field): unchanged either way.
+	set("Yes", true, "10.0.0.1")
+	if err := r.st.UpdateProbe(rID, proto.ProbeResult{}, "v-lama", r.clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	set("Yes", false, "10.0.0.1")
+	if !verified() {
+		t.Fatal("an older agent's report cleared tls_verified")
+	}
+	if err := r.st.SetReplicaTLSVerified(rID, false); err != nil {
+		t.Fatal(err)
+	}
+	set("Yes", true, "10.0.0.1")
+	if verified() {
+		t.Fatal("an older agent's report set tls_verified")
+	}
+}

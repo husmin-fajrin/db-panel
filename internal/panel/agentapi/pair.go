@@ -100,17 +100,34 @@ func PairHandler(d Deps) http.Handler {
 		// panel writes to local-pair-token for its local agent, which
 		// connects over loopback. From anywhere else that token is
 		// refused before it is used, so the local agent can still pair.
-		if d.LocalServerID != 0 && !isLoopback(ip) {
-			if pt, err := d.Store.PeekPairToken(req.Token, d.now()); err == nil && pt.ServerID == d.LocalServerID {
-				log.Warn("pairing rejected: the panel host's token used from another address", "server_id", pt.ServerID,
-					"remote", ip, "hostname", req.Hostname)
-				d.auditPairRefused(pt.ServerID, ip, req.Hostname, outcomeLocalNotLoopback)
-				writeError(w, http.StatusForbidden, msgLocalNotLoopback)
+		remoteLocal := d.LocalServerID != 0 && !isLoopback(ip)
+		refuseLocal := func(serverID int64) {
+			log.Warn("pairing rejected: the panel host's token used from another address", "server_id", serverID,
+				"remote", ip, "hostname", req.Hostname)
+			d.auditPairRefused(serverID, ip, req.Hostname, outcomeLocalNotLoopback)
+			writeError(w, http.StatusForbidden, msgLocalNotLoopback)
+		}
+		if remoteLocal {
+			pt, err := peekPairToken(d.Store, req.Token, d.now())
+			switch {
+			case err == nil && pt.ServerID == d.LocalServerID:
+				refuseLocal(pt.ServerID)
+				return
+			case err != nil && !errors.Is(err, store.ErrTokenInvalid):
+				// Not knowing whose token it is must not let it through.
+				log.Error("pairing: peek token", "err", err)
+				writeError(w, http.StatusInternalServerError, "kesalahan internal")
 				return
 			}
 		}
 
 		pt, err := d.Store.ConsumePairToken(req.Token, d.now())
+		if err == nil && remoteLocal && pt.ServerID == d.LocalServerID {
+			// The peek missed it (a race): refused all the same, though
+			// the token is used up now.
+			refuseLocal(pt.ServerID)
+			return
+		}
 		if errors.Is(err, store.ErrTokenInvalid) {
 			log.Warn("pairing rejected: invalid token", "remote", ip, "hostname", req.Hostname)
 			writeError(w, http.StatusForbidden, "token ditolak")
@@ -165,6 +182,12 @@ const (
 	msgLocalNotLoopback     = "token ditolak: token server panel hanya berlaku dari host panel itu sendiri (127.0.0.1 atau ::1)"
 	outcomeLocalNotLoopback = "ditolak: token server panel dipakai bukan dari alamat loopback"
 )
+
+// peekPairToken is Store.PeekPairToken; tests replace it to make the
+// peek fail.
+var peekPairToken = func(st *store.Store, token string, now time.Time) (store.PairToken, error) {
+	return st.PeekPairToken(token, now)
+}
 
 // isLoopback reports whether ip (a RemoteAddr host) is 127.0.0.0/8 or ::1.
 func isLoopback(ip string) bool {

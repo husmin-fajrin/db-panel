@@ -195,7 +195,7 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		return "", err
 	}
 	if mode == proto.PromoteEmergency {
-		if err := r.refuseWhileLockMayStand(topo.ID, p.MasterServerID, "Promote darurat"); err != nil {
+		if err := r.refuseWhileLockMayStand(topo.ID, p.MasterServerID, verbEmergency); err != nil {
 			return "", err
 		}
 	}
@@ -269,6 +269,48 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 // LockTriedAt + promoteLockSec + lockCallSlack.
 const lockCallSlack = 5 * time.Minute
 
+// verbEmergency is refuseWhileLockMayStand's what for an emergency
+// promotion; any other what loads data on a replica.
+const verbEmergency = "Promote darurat"
+
+// retryLoadVerb is refuseWhileLockMayStand's what for an Ulangi of j, ""
+// when j's kind does not make a replica writable (fix round 1).
+func retryLoadVerb(j store.Job) string {
+	switch j.Kind {
+	case KindResyncReplica:
+		return "Resync ulang"
+	case KindCreateReplica:
+		return "Buat replika"
+	case KindAddDatabases:
+		return "Tambah database"
+	case KindRemoveDatabases:
+		var st jobState
+		if json.Unmarshal([]byte(j.ParamsJSON), &st) == nil && !st.DropData {
+			return ""
+		}
+		return "Lepas database"
+	}
+	return ""
+}
+
+// refuseRetryWhileLockMayStand is refuseWhileLockMayStand for an Ulangi
+// of j: a failed load retried inside the window lifts read-only as a new
+// one would.
+func (r *Runner) refuseRetryWhileLockMayStand(j store.Job) error {
+	what := retryLoadVerb(j)
+	if what == "" || j.TopologyID == 0 {
+		return nil
+	}
+	topo, err := r.d.Store.GetTopology(j.TopologyID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, what)
+}
+
 // refuseWhileLockMayStand refuses what (an emergency promotion of
 // masterID, or a job that makes one of its replicas writable for a while)
 // while the latest promotion of topology topoID, a failed planned one of
@@ -325,11 +367,20 @@ func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) er
 	if !r.now().Before(until) {
 		return nil
 	}
-	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka. "+
-		"%s baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
-		"masih replika. Sebelum itu, tekan Ulangi pada promote terencana itu bila agent master tersambung lagi, atau buka "+
-		"kuncinya di server master dengan: sudo dbpanel agent unlock-master",
-		r.nameOf(masterID), what, until.Local().Format("02-01-2006 15:04:05"))
+	// The command alone does not tell the panel: only the planned
+	// promotion's Ulangi records a confirmed unlock (LockUnlocked).
+	const howToUnlock = "Sebelum itu, bila agent master tersambung lagi, tekan Ulangi pada promote terencana itu; bila tidak, " +
+		"buka kuncinya di server master dengan `sudo dbpanel agent unlock-master`, lalu tekan Ulangi pada promote terencana " +
+		"itu (panel memastikan kunci terbuka)."
+	at := until.Local().Format("02-01-2006 15:04:05")
+	if what == verbEmergency {
+		return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka. "+
+			"%s baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
+			"masih replika. %s", r.nameOf(masterID), what, at, howToUnlock)
+	}
+	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka, "+
+		"dan memuat data membuat replika bisa ditulis sebentar dan penjaga kunci bisa mengkarantina master. "+
+		"%s baru bisa dijalankan mulai %s, saat penjaga kunci sudah memutuskan. %s", r.nameOf(masterID), what, at, howToUnlock)
 }
 
 var errCutoverStillPending = errors.New("promote sebelumnya masih menunggu pengalihan aplikasi; tekan \"Sudah saya alihkan\" dulu")

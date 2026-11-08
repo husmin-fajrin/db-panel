@@ -45,6 +45,9 @@ type Deps struct {
 	// tls_expiring alert belongs to (the panel's own host) and its expiry;
 	// ok false skips the check. nil means none.
 	WebCert func() (serverID int64, notAfter time.Time, ok bool)
+	// Version is the panel's version: tls_verified follows the health
+	// reports only of agents of this version (syncTLSVerified); "" never.
+	Version string
 }
 
 // View is what the panel knows of one server's health.
@@ -97,6 +100,7 @@ type Monitor struct {
 	onAlertsChanged func() // set once by New
 	sendWeekly      func(ctx context.Context, text string) error
 	webCert         func() (int64, time.Time, bool)
+	version         string
 }
 
 // New returns a Monitor holding the health rows the store kept from the
@@ -122,6 +126,7 @@ func New(d Deps) *Monitor {
 		onAlertsChanged: d.OnAlertsChanged,
 		sendWeekly:      d.SendWeekly,
 		webCert:         d.WebCert,
+		version:         d.Version,
 	}
 	set, err := LoadSettings(d.Store)
 	if err != nil {
@@ -450,6 +455,53 @@ func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	m.mu.Unlock()
 	m.emit(ups)
 	m.emitAlerts(alerts)
+	if !he.Backlog {
+		m.syncTLSVerified(serverID, he.Snapshot.Replica, he.Snapshot.MySQLOK)
+	}
+}
+
+// syncTLSVerified keeps a replica's tls_verified in step with what its
+// live health report shows (SEC-63c, Task 6 fix round 1), for a ready or
+// attention replica whose agent is of the panel's version: true when the
+// receiver is connected (IO Yes, no error) with
+// SOURCE_SSL_VERIFY_SERVER_CERT=1 to the topology's source and the master
+// has the panel's certificate; false whenever the report shows the
+// verification off; unchanged otherwise (no replica status, MySQL
+// unreachable, still connecting, another source).
+func (m *Monitor) syncTLSVerified(serverID int64, rs *proto.ReplicaStatus, mysqlOK bool) {
+	if m.version == "" || rs == nil || !mysqlOK {
+		return
+	}
+	srv, err := m.st.GetServer(serverID)
+	if err != nil || srv.AgentVersion != m.version {
+		return
+	}
+	rep, err := m.st.GetReplicaByServer(serverID)
+	if err != nil || (rep.State != store.ReplicaReady && rep.State != store.ReplicaAttention) {
+		return
+	}
+	want := rep.TLSVerified
+	switch {
+	case !rs.SSLVerifyServerCert:
+		want = false
+	case rs.IORunning == "Yes" && rs.LastIOErrno == 0:
+		topo, err := m.st.GetTopology(rep.TopologyID)
+		if err != nil || rs.SourceHost != topo.SourceHost || rs.SourcePort != topo.SourcePort {
+			return
+		}
+		if _, err := m.st.GetServerTLS(topo.MasterServerID); err != nil {
+			return
+		}
+		want = true
+	}
+	if want == rep.TLSVerified {
+		return
+	}
+	if err := m.st.SetReplicaTLSVerified(serverID, want); err != nil {
+		m.log.Warn("tls_verified from health report", "server_id", serverID, "err", err)
+		return
+	}
+	m.log.Info("tls_verified follows the health report", "server_id", serverID, "verified", want)
 }
 
 // AgentNeedsUpgrade flags the agent of id as needing an update: a job found

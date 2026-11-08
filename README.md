@@ -415,10 +415,14 @@ tidak, pekerjaan gagal tanpa mencatat apa pun).
   pekerjaan; jalankan lagi nanti. Replika baru ditandai terverifikasi
   setelah thread IO-nya terlihat tersambung dengan
   `SOURCE_SSL_VERIFY_SERVER_CERT=1` (panel menunggu paling lama 1 menit;
-  bila belum, tahap itu gagal dan bisa di-**Ulangi**); replika yang
-  dihentikan operator belum ditandai sampai replikasinya berjalan dan
-  Perketat diulang. **Buat replika** dan pengarahan ulang saat promote
-  memakai aturan yang sama. Kotak ini tampil selama master belum
+  bila belum, tahap itu gagal dan bisa di-**Ulangi**; bila thread IO
+  menolak sertifikat master, replikasi langsung dikembalikan tanpa
+  verifikasi). **Buat replika** dan pengarahan ulang saat promote memakai
+  aturan yang sama. Setelah itu tandanya mengikuti laporan kesehatan replika
+  siap yang agent-nya sama versinya dengan panel: ditandai saat thread IO
+  tersambung dengan verifikasi ke sumber topologi dan master punya
+  sertifikat panel (misalnya replika yang dihentikan operator lalu
+  dijalankan lagi), dan dicabut bila laporan menunjukkan verifikasi mati. Kotak ini tampil selama master belum
   punya sertifikat atau ada replika dengan peringatan **Sambungan
   replikasi belum diverifikasi**.
 - **Perpanjangan otomatis:** panel memeriksa setiap hari (pertama kali 10
@@ -960,9 +964,12 @@ panel menolak promote darurat topologi itu sampai tenggat kunci itu lewat
 ditambah tenggang 60 detik penjaga kunci; pesannya menyebut jam mulai
 bisanya. Sebelum itu tekan **Ulangi** pada promote terencana itu bila agent
 master tersambung lagi, atau buka kuncinya dengan `sudo dbpanel agent
-unlock-master` di server master. Selama itu **Resync ulang**, **Buat
-replika**, dan **Tambah database** di topologi itu juga ditolak dengan
-pesan yang sama: memuat data membuat replika bisa ditulis sebentar, dan
+unlock-master` di server master, lalu tekan **Ulangi** pada promote
+terencana itu (perintah itu sendiri tidak memberi tahu panel; Ulangi yang
+memastikan kunci terbuka). Selama itu **Resync ulang**, **Buat replika**,
+**Tambah database**, dan **Lepas database** yang menghapus datanya di
+topologi itu juga ditolak, begitu pula **Ulangi** pekerjaan-pekerjaan itu:
+memuat atau menghapus data membuat replika bisa ditulis sebentar, dan
 penjaga kunci yang melihat replika bisa ditulis pada tenggatnya
 mengkarantina master yang sehat.
 

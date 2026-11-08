@@ -575,6 +575,9 @@ func (r *Runner) Retry(jobID string) error {
 	}
 	switch j.Status {
 	case store.JobFailed, store.JobPartial, store.JobWaiting:
+		if err := r.refuseRetryWhileLockMayStand(j); err != nil {
+			return err
+		}
 		if other, busy, err := r.d.Store.ActiveJobForServer(j.ServerID); err != nil {
 			return err
 		} else if busy && other.ID != jobID {

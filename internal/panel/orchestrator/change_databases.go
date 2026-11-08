@@ -119,6 +119,13 @@ func (r *Runner) StartRemoveDatabases(ctx context.Context, replicaServerID int64
 	if err != nil {
 		return "", err
 	}
+	// Dropping the data lifts read-only on the replica for a while
+	// (mysql.dropDatabases).
+	if dropData {
+		if err := r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, "Lepas database"); err != nil {
+			return "", err
+		}
+	}
 	remove, err := pickDatabases(databases)
 	if err != nil {
 		return "", err

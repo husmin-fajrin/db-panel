@@ -243,9 +243,8 @@ func (jr *jobRun) tlsInstall(ctx context.Context, serverID int64) (outcome, erro
 	}
 	// SEC-63c: the serial the agent saw MySQL serve must be the one the
 	// panel issued; server_tls records nothing else.
-	if want := certSerial(jr.st.TLSCert); res.Serial != want {
-		return outcome{}, stepError(fmt.Sprintf("agent melaporkan sertifikat terpasang dengan nomor seri %s, bukan %s yang "+
-			"diterbitkan panel; sertifikat tidak dicatat. Periksa server itu lalu Ulangi", res.Serial, want))
+	if err := matchIssuedSerial(jr.st.TLSCert, res.Serial); err != nil {
+		return outcome{}, err
 	}
 	if err := jr.r.d.Store.SetServerTLS(store.ServerTLS{ServerID: serverID, CertSerial: res.Serial, NotAfter: res.NotAfter,
 		InstalledAt: jr.r.now(), Hosts: certNames(jr.st.TLSCert)}); err != nil {
@@ -271,6 +270,21 @@ func certSerial(certPEM string) string {
 	return fmt.Sprintf("%032x", cert.SerialNumber)
 }
 
+// matchIssuedSerial refuses got, the serial an agent reports installed,
+// unless it is the serial of certPEM, the certificate the panel issued
+// (SEC-63c); an issued certificate that does not parse matches nothing.
+func matchIssuedSerial(certPEM, got string) error {
+	want := certSerial(certPEM)
+	if want == "" {
+		return stepError("sertifikat yang diterbitkan panel tidak terbaca; sertifikat tidak dicatat. Mulai lagi dari tahap pertama")
+	}
+	if got != want {
+		return stepError(fmt.Sprintf("agent melaporkan sertifikat terpasang dengan nomor seri %s, bukan %s yang "+
+			"diterbitkan panel; sertifikat tidak dicatat. Periksa server itu lalu Ulangi", got, want))
+	}
+	return nil
+}
+
 // verifiedLink reports whether rs shows the receiver connected (IO Yes,
 // no error) with SOURCE_SSL_VERIFY_SERVER_CERT=1.
 func verifiedLink(rs *proto.ReplicaStatus) bool {
@@ -290,7 +304,7 @@ func (jr *jobRun) awaitVerifiedLink(ctx context.Context, serverID int64, rs *pro
 		switch {
 		case verifiedLink(rs):
 			return rs, true, nil
-		case rs != nil && rs.IORunning == "Yes" && rs.LastIOErrno == 0:
+		case rs != nil && rs.IORunning == "Yes" && rs.LastIOErrno == 0, ioRefused(rs):
 			return rs, false, nil
 		case !time.Now().Before(deadline):
 			return rs, false, nil
@@ -306,6 +320,18 @@ func (jr *jobRun) awaitVerifiedLink(ctx context.Context, serverID int64, rs *pro
 		}
 		rs = st.Replica
 	}
+}
+
+// retryableIOErrnos are receiver errors MySQL keeps retrying (the agent's
+// list in repoint.go): the master not reachable yet, the connection lost,
+// a login refused.
+var retryableIOErrnos = map[int]bool{1045: true, 2003: true, 2005: true, 2013: true}
+
+// ioRefused reports whether rs shows a receiver error MySQL does not
+// retry, such as 2026 (the master's certificate refused): waiting does
+// not help (fix round 1).
+func ioRefused(rs *proto.ReplicaStatus) bool {
+	return rs != nil && rs.LastIOErrno != 0 && !retryableIOErrnos[rs.LastIOErrno]
 }
 
 // unverifiedText says why awaitVerifiedLink's last status is not a
@@ -635,11 +661,19 @@ func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, appro
 			// unverified source is gone, so it goes back.
 			return outcome{}, jr.revertUnverified(ctx, serverID, topo, password, rep.Databases, err)
 		}
-		jr.unpause(serverID)
 		last, ok, err := jr.awaitVerifiedLink(ctx, serverID, &rs)
 		if err != nil {
+			jr.restartReplica(ctx, serverID)
 			return outcome{}, err
 		}
+		if ioRefused(last) {
+			// The receiver refused the verified source (a name or chain
+			// mismatch): it goes back, as when START REPLICA fails. The
+			// paused mark stays until restartReplica clears it.
+			return outcome{}, jr.revertUnverified(ctx, serverID, topo, password, rep.Databases,
+				errors.New(unverifiedText(last)))
+		}
+		jr.unpause(serverID)
 		if !ok {
 			return outcome{}, stepError(fmt.Sprintf("replikasi %s belum tersambung ke master dengan verifikasi sertifikat (%s); "+
 				"tanda terverifikasi belum diberikan. Periksa replika lalu Ulangi", jr.serverName(serverID), unverifiedText(last)))

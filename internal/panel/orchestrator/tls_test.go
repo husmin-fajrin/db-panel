@@ -736,6 +736,43 @@ func TestTLSVerifiedAfterIOThread(t *testing.T) {
 			t.Fatalf("job log:\n%s", log)
 		}
 
+		// The receiver fails the certificate check after START REPLICA
+		// answered (a name or chain mismatch): no waiting out the minute,
+		// and replication goes back to the unverified source (fix round 1).
+		e.r.verifyIOWait = time.Minute
+		r.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Connecting", SQLRunning: "Yes", SSLVerifyServerCert: true})
+		var configured []proto.ReplicationSourceParams
+		r.on("mysql.configureReplication", func(raw json.RawMessage) (any, error) {
+			var p proto.ReplicationSourceParams
+			json.Unmarshal(raw, &p)
+			configured = append(configured, p)
+			return proto.ReplicaStatus{IORunning: "No", SQLRunning: "No"}, nil
+		})
+		r.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Series: "8.4", Replica: &proto.ReplicaStatus{IORunning: "No",
+			SQLRunning: "Yes", SSLVerifyServerCert: true, LastIOErrno: 2026, LastIOError: "SSL connection error: certificate verify failed"}})
+		began := time.Now()
+		id, err = e.r.StartTightenTLS(context.Background(), m.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.waitJob(id, store.JobFailed)
+		if took := time.Since(began); took > 20*time.Second {
+			t.Fatalf("a refused certificate was waited on for %s", took)
+		}
+		if len(configured) != 2 || !configured[0].VerifyServerCert || configured[1].VerifyServerCert {
+			t.Fatalf("configureReplication calls = %+v, want the verified source then the unverified one back", configured)
+		}
+		if log := e.jobLog(id); !strings.Contains(log, "dikembalikan tanpa verifikasi") || !strings.Contains(log, "2026") {
+			t.Fatalf("job log:\n%s", log)
+		}
+		if rep := e.replica(r.id); rep.TLSVerified || rep.Paused {
+			t.Fatalf("replica after the reverted redirect = %+v", rep)
+		}
+		e.r.verifyIOWait = 300 * time.Millisecond
+		r.on("mysql.configureReplication", func(json.RawMessage) (any, error) {
+			return proto.ReplicaStatus{IORunning: "No", SQLRunning: "No"}, nil
+		})
+
 		// The receiver connects while the panel waits: verified.
 		r.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Connecting", SQLRunning: "Yes", SSLVerifyServerCert: true})
 		r.reply("mysql.status", status("Yes", true))
@@ -797,4 +834,12 @@ func TestTLSVerifiedAfterIOThread(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestIssuedSerialRequired (fix round 1): an issued certificate that does
+// not parse matches no reported serial, not even an empty one.
+func TestIssuedSerialRequired(t *testing.T) {
+	if err := matchIssuedSerial("not a certificate", ""); err == nil {
+		t.Fatal("an unparsable issued certificate matched an empty serial")
+	}
 }

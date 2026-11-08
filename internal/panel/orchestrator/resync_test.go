@@ -379,6 +379,20 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 	}
 	target := e.agent("baru", "10.0.0.6")
 	ctx := context.Background()
+	// Failed jobs of b and sub, for Ulangi.
+	failedJob := func(id, kind string, serverID int64, params string) string {
+		t.Helper()
+		if err := e.st.CreateJob(store.Job{ID: id, Kind: kind, ServerID: serverID, TopologyID: g.topo.ID, ParamsJSON: params,
+			CreatedAt: time.Now()}, []string{"x"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.st.UpdateJob(id, store.JobFailed, 0, "gagal", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	failedResync := failedJob("failed-resync", KindResyncReplica, g.b.id, "{}")
+	failedDrop := failedJob("failed-drop", KindRemoveDatabases, sub.id, `{"drop_data":true}`)
 	starts := []struct {
 		what  string
 		start func() error
@@ -398,6 +412,14 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 			_, err := e.r.StartAddDatabases(ctx, sub.id, []string{"tidak-ada"})
 			return err
 		}, "tidak ada di master"},
+		// Dropping the data lifts read-only on the replica (fix round 1).
+		{"Lepas database", func() error {
+			_, err := e.r.StartRemoveDatabases(ctx, sub.id, []string{"tidak-ada"}, true)
+			return err
+		}, "tidak diikuti replika ini"},
+		// Ulangi of a failed job of those kinds loads data the same way.
+		{"Resync ulang", func() error { return e.r.Retry(failedResync) }, "pekerjaan lain"},
+		{"Lepas database", func() error { return e.r.Retry(failedDrop) }, "pekerjaan lain"},
 	}
 	check := func(when string, now time.Time, refused bool) {
 		t.Helper()
@@ -409,7 +431,8 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 					t.Fatalf("%s %s: accepted while the lock may stand", s.what, when)
 				}
 				for _, part := range []string{"mungkin masih terkunci", s.what + " baru bisa dijalankan mulai " + until,
-					"sudo dbpanel agent unlock-master"} {
+					"memuat data membuat replika bisa ditulis sebentar dan penjaga kunci bisa mengkarantina master",
+					"`sudo dbpanel agent unlock-master`, lalu tekan Ulangi pada promote terencana itu (panel memastikan kunci terbuka)"} {
 					if !strings.Contains(err.Error(), part) {
 						t.Errorf("%s %s: refusal %q lacks %q", s.what, when, err, part)
 					}
@@ -422,14 +445,23 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 		}
 	}
 	check("now", time.Now(), true)
+	// Lepas database without dropping the data lifts nothing: not refused.
+	if _, err := e.r.StartRemoveDatabases(ctx, sub.id, []string{"tidak-ada"}, false); err == nil ||
+		!strings.Contains(err.Error(), "tidak diikuti replika ini") {
+		t.Fatalf("Lepas database without drop: %v", err)
+	}
 	// Past the deadline but within the grace: still refused.
 	check("within the grace", deadline.Add(30*time.Second), true)
 	// Past both: the guard has decided. A busy b shows the resync got past
 	// the lock check without starting a job.
-	if err := e.st.CreateJob(store.Job{ID: "busy-b", Kind: KindMySQLTLS, ServerID: g.b.id, ParamsJSON: "{}",
-		CreatedAt: time.Now()}, []string{"x"}); err != nil {
-		t.Fatal(err)
+	for _, srv := range []int64{g.b.id, sub.id} {
+		if err := e.st.CreateJob(store.Job{ID: fmt.Sprintf("busy-%d", srv), Kind: KindMySQLTLS, ServerID: srv, ParamsJSON: "{}",
+			CreatedAt: time.Now()}, []string{"x"}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	// Tambah and Lepas database now meet sub's busy job first.
+	starts[2].after, starts[3].after = "pekerjaan", "pekerjaan"
 	check("after the grace", deadline.Add(proto.PromoteLockGrace+time.Second), false)
 	if rep := e.replica(g.b.id); rep.State != store.ReplicaReady {
 		t.Fatalf("b after the refusals = %s, want ready", rep.State)

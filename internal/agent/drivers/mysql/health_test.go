@@ -129,7 +129,10 @@ func TestSnapshotReplica(t *testing.T) {
 		t.Fatal("Replica = nil on a replica")
 	}
 	if s.Replica.SQLRunning != "Yes" || (s.Replica.IORunning != "Yes" && s.Replica.IORunning != "Connecting") ||
-		s.Replica.SourcePort != master.Port {
+		s.Replica.SourcePort != master.Port || s.Replica.SourceHost == "" ||
+		// follow configures no certificate verification; the panel's
+		// tls_verified follows this field (SEC-63c).
+		s.Replica.SSLVerifyServerCert {
 		t.Errorf("Replica = %+v", s.Replica)
 	}
 
