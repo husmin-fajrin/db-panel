@@ -473,3 +473,28 @@ func TestDumpUserWarningReachesJobLog(t *testing.T) {
 		t.Errorf("job log lacks the createDumpUser warning:\n%s", e.jobLog(id))
 	}
 }
+
+// TestDumpUserWarningOtherShapeCensored: only the agent's fixed RELOAD
+// advice is logged whole; a warning of any other shape is censored like
+// any agent text.
+func TestDumpUserWarningOtherShapeCensored(t *testing.T) {
+	for _, warning := range []string{
+		"Duplicate entry 'Budi' for key 'nama'",
+		"akun dump sementara mendapat RELOAD ... Jalankan di master: GRANT FLUSH_TABLES ON *.* TO 'adm'@'%' WITH GRANT OPTION; 'Budi'",
+		"Jalankan di master: GRANT FLUSH_TABLES ON *.* TO 'Budi'@'%' WITH GRANT OPTION",
+	} {
+		e := newEnv(t)
+		m, _ := e.readyMaster("db-master")
+		m.reply("mysql.createDumpUser", proto.DumpUserResult{Warning: warning})
+		r := e.replicaAgent("replica1", "dump")
+		id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+			MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		if log := e.jobLog(id); strings.Contains(log, "Budi") || !strings.Contains(log, "'…'") {
+			t.Errorf("warning %q: job log:\n%s", warning, log)
+		}
+	}
+}

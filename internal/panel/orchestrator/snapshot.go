@@ -7,10 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
+
+// dumpGrantAdvice is the agent's warning when the dump account got RELOAD
+// (dumpGrantsHere): fixed text but for the MySQL version, ending with the
+// one GRANT to run for the admin account. Only this shape is logged
+// uncensored.
+var dumpGrantAdvice = regexp.MustCompile(`^akun dump sementara mendapat RELOAD [^'"\\]*` +
+	`Jalankan di master: GRANT FLUSH_TABLES ON \*\.\* TO '[^'"\\\n]*'@'[^'"\\\n]*' WITH GRANT OPTION$`)
 
 // dumpUserPrefix names the temporary account a replica dumps the master
 // with: dbpanel_dump_<8 hex>, one per dump (SEC-27). The replication
@@ -84,10 +92,13 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 		return fmt.Errorf("buat akun dump sementara di master: %w", err)
 	}
 	jr.logf("info", "Akun dump sementara %s@%s dibuat di master; dihapus lagi setelah salinan selesai.", user, host)
-	if created.Warning != "" {
+	switch {
+	case dumpGrantAdvice.MatchString(created.Warning):
 		// The agent's own advice, naming the admin account (from
 		// CURRENT_USER(), never row data) in a GRANT to run: kept whole.
 		jr.logLine("warn", created.Warning)
+	case created.Warning != "":
+		jr.logf("warn", "%s", created.Warning) // any other shape: censored
 	}
 	p.User, p.Password = user, password
 	return jr.runAgentJob(ctx, jr.target(), cmd, p, res)

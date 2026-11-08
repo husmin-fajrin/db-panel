@@ -1201,7 +1201,7 @@ func (jr *jobRun) fail(err error) {
 	// censoring and one cap for the step, the log line, jobs.error, the
 	// replica's last error and the alert.
 	msg = truncate(redact.Quotes(msg), maxLogLine)
-	jr.r.log.Warn("job step failed", "job", jr.job.ID, "kind", jr.job.Kind, "step", jr.idx, "err", err)
+	jr.r.log.Warn("job step failed", "job", jr.job.ID, "kind", jr.job.Kind, "step", jr.idx, "err", redact.Quotes(err.Error()))
 	jr.setStep(store.StepFailed, msg)
 	jr.logf("error", "%s", msg)
 	switch {
