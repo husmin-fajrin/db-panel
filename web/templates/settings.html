@@ -133,6 +133,25 @@
     </div>
   </section>
 
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-4">
+      <h2 class="card-title">Retensi</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
+        <fieldset class="fieldset">
+          <label class="label" for="alerts_retention">Simpan peringatan tertutup (hari)</label>
+          <input type="number" id="alerts_retention" name="alerts_retention" value="{{.Form.AlertsRetention}}" min="1" max="3650" class="input w-full" required>
+          <p class="label">1–3650. Peringatan yang sudah ditutup lebih lama dari ini dihapus. Peringatan yang masih aktif tidak pernah dihapus.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="events_retention">Simpan riwayat status (hari)</label>
+          <input type="number" id="events_retention" name="events_retention" value="{{.Form.EventsRetention}}" min="1" max="3650" class="input w-full" required>
+          <p class="label">1–3650. Riwayat perubahan status server yang lebih tua dari ini dihapus.</p>
+        </fieldset>
+      </div>
+      <p class="text-sm text-base-content/70">Pemangkasan berjalan sekali sehari. Log audit dan log pekerjaan tidak pernah dipangkas.</p>
+    </div>
+  </section>
+
   <div class="flex justify-end">
     <button type="submit" class="btn btn-primary">Simpan pengaturan</button>
   </div>

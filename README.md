@@ -703,8 +703,8 @@ Untuk master yang diduga tumbang, halamannya menampilkan langkah manual
 sendiri.
 
 Halaman master dan replika juga menampilkan versi, uptime, koneksi, disk,
-RAM, beban, lag, umur binlog, dan garis waktu kejadian 7 hari (disimpan 90
-hari). Pesan error MySQL apa adanya hanya ada di **Detail teknis** halaman
+RAM, beban, lag, umur binlog, dan garis waktu kejadian 7 hari (bisa diperluas ke
+90 hari; riwayat disimpan 180 hari, lihat Retensi di bawah). Pesan error MySQL apa adanya hanya ada di **Detail teknis** halaman
 replika.
 
 **Beban.** Setiap agent hanya membaca MySQL di servernya sendiri: beberapa
@@ -725,6 +725,21 @@ sekitar 1 menit. Interval, ambang, dan batas waktu itu bisa diubah di
 **Pengaturan > Ambang dan interval** (interval pemeriksaan 10 sampai 3600
 detik). Tombol **Periksa sekarang** di halaman server meminta laporan baru
 saat itu juga (paling sering sekali per 10 detik).
+
+**Batas dari agent.** Panel menerima paling banyak 10 laporan beruntun
+dari satu server, lalu satu tiap 2 detik; laporan yang lebih sering dari
+itu dibuang tanpa memutus sambungan, dicatat di log panel, dan jumlahnya
+tampil di **Detail teknis** halaman server ("12 laporan dibuang dalam 1 jam
+terakhir"). Agent yang sehat tidak pernah mencapai batas ini; laporan yang
+dibuang berarti agent rusak atau diubah. Satu pesan dari agent (dan dari
+panel ke agent) paling besar 1 MiB; pesan yang lebih besar memutus
+sambungan, dan agent tersambung lagi sendiri.
+
+**Retensi.** Sekali sehari panel menghapus peringatan yang sudah ditutup
+lebih dari 90 hari dan riwayat status (linimasa) yang lebih tua dari 180
+hari. Kedua angka bisa diubah di **Pengaturan > Retensi** (1 sampai 3650
+hari). Peringatan yang masih aktif tidak pernah dihapus, dan log audit
+serta log pekerjaan tidak pernah dipangkas.
 
 ## Notifikasi Telegram
 

@@ -81,6 +81,7 @@ func (p *Panel) Run(ctx context.Context) error {
 	wg.Go(func() { p.Notifier.Run(ctx) })
 	wg.Go(func() { p.certs.run(ctx.Done()) })
 	wg.Go(func() { p.renewMySQLCerts(ctx) })
+	wg.Go(func() { p.retentionLoop(ctx) })
 
 	<-ctx.Done()
 	// Stop the jobs before their agents disconnect, so none fails as

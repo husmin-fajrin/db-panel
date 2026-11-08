@@ -25,6 +25,10 @@ type Settings struct {
 	// carry no link (the settings page only suggests the panel's public
 	// URL as the field's placeholder).
 	PanelBaseURL string
+	// AlertsRetentionDays and EventsRetentionDays: alerts closed and
+	// status events older than this many days are pruned daily (spec
+	// 5.12).
+	AlertsRetentionDays, EventsRetentionDays int
 }
 
 // Defaults (plan 3, Global Constraints).
@@ -40,6 +44,12 @@ const (
 	defaultAlertRepeat     = 6 * time.Hour
 	defaultLaggingAlert    = 5 * time.Minute
 	defaultWeeklyAt        = "Mon 07:00"
+	defaultAlertsRetention = 90  // days
+	defaultEventsRetention = 180 // days
+
+	// Bounds of both retentions, in days.
+	MinRetentionDays = 1
+	MaxRetentionDays = 3650
 
 	staleFactor = 3 // a report older than staleFactor × SummaryEvery is stale
 
@@ -67,6 +77,9 @@ func DefaultSettings() Settings {
 		LaggingAlert:    defaultLaggingAlert,
 		WeeklySummary:   true,
 		WeeklySummaryAt: defaultWeeklyAt,
+
+		AlertsRetentionDays: defaultAlertsRetention,
+		EventsRetentionDays: defaultEventsRetention,
 	}
 	s.StaleAfter = staleFactor * s.SummaryEvery
 	return s
@@ -77,6 +90,7 @@ var settingKeys = []string{
 	store.SettingDisconnectAlert, store.SettingDownAfter, store.SettingDiskWarn, store.SettingDiskCrit,
 	store.SettingAlertRepeatHours, store.SettingWeeklySummary, store.SettingWeeklySummaryAt,
 	store.SettingPanelBaseURL, store.SettingConnPct, store.SettingLaggingAlert,
+	store.SettingAlertsRetentionDays, store.SettingEventsRetentionDays,
 }
 
 // LoadSettings reads the settings from s. A key that is not set, or holds a
@@ -127,6 +141,12 @@ func LoadSettings(s *store.Store) (Settings, error) {
 		st.WeeklySummaryAt = at
 	}
 	st.PanelBaseURL = kv[store.SettingPanelBaseURL]
+	if v, ok := num(store.SettingAlertsRetentionDays, MinRetentionDays, MaxRetentionDays); ok {
+		st.AlertsRetentionDays = v
+	}
+	if v, ok := num(store.SettingEventsRetentionDays, MinRetentionDays, MaxRetentionDays); ok {
+		st.EventsRetentionDays = v
+	}
 	st.StaleAfter = staleFactor * st.SummaryEvery
 	return st, nil
 }
@@ -172,6 +192,10 @@ func (st Settings) Validate() error {
 		return errors.New("pengulangan peringatan harus 1 sampai 168 jam")
 	case !validWeekly(st.WeeklySummaryAt):
 		return errors.New(`waktu ringkasan mingguan harus berbentuk hari dan jam, misalnya "Mon 07:00"`)
+	case st.AlertsRetentionDays < MinRetentionDays || st.AlertsRetentionDays > MaxRetentionDays:
+		return fmt.Errorf("retensi peringatan tertutup harus %d sampai %d hari", MinRetentionDays, MaxRetentionDays)
+	case st.EventsRetentionDays < MinRetentionDays || st.EventsRetentionDays > MaxRetentionDays:
+		return fmt.Errorf("retensi riwayat status harus %d sampai %d hari", MinRetentionDays, MaxRetentionDays)
 	}
 	return nil
 }
@@ -201,6 +225,8 @@ func SaveSettings(s *store.Store, st Settings) error {
 		{store.SettingPanelBaseURL, st.PanelBaseURL},
 		{store.SettingConnPct, strconv.Itoa(st.ConnPct)},
 		{store.SettingLaggingAlert, sec(st.LaggingAlert)},
+		{store.SettingAlertsRetentionDays, strconv.Itoa(st.AlertsRetentionDays)},
+		{store.SettingEventsRetentionDays, strconv.Itoa(st.EventsRetentionDays)},
 	}
 	for _, p := range kv {
 		if err := s.SetSetting(p[0], p[1]); err != nil {

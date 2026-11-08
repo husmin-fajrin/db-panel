@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	healthmon "github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -99,6 +100,52 @@ func (p *Panel) renewMySQLCerts(ctx context.Context) {
 		case <-t.C:
 			p.Orchestrator.RenewMySQLTLS(ctx)
 			t.Reset(tlsRenewEvery)
+		}
+	}
+}
+
+// retentionLoop prunes the rows past their retention pruneFirst after the
+// start, then daily, until ctx is done.
+func (p *Panel) retentionLoop(ctx context.Context) {
+	t := time.NewTimer(p.pruneFirst)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.pruneOld()
+			t.Reset(pruneEvery)
+		}
+	}
+}
+
+// pruneOld deletes the alerts closed more than alerts_retention_days ago,
+// the status events older than events_retention_days and the expired
+// confirmations. It is the panel's only pruning: audit_log and job_log
+// are never pruned (spec 5.12). Failures are logged only.
+func (p *Panel) pruneOld() {
+	set, err := healthmon.LoadSettings(p.Store)
+	if err != nil {
+		p.log.Warn("retention: load settings", "err", err)
+		return
+	}
+	now := p.now()
+	days := func(n int) time.Time { return now.AddDate(0, 0, -n) }
+	for _, step := range []struct {
+		what  string
+		prune func() (int64, error)
+	}{
+		{"closed alerts", func() (int64, error) { return p.Store.PruneAlertsClosedBefore(days(set.AlertsRetentionDays)) }},
+		{"status events", func() (int64, error) { return p.Store.PruneStatusEvents(days(set.EventsRetentionDays)) }},
+		{"expired confirmations", func() (int64, error) { return p.Store.PruneConfirmations(now) }},
+	} {
+		n, err := step.prune()
+		switch {
+		case err != nil:
+			p.log.Warn("retention: prune "+step.what, "err", err)
+		case n > 0:
+			p.log.Info("retention: pruned "+step.what, "deleted", n)
 		}
 	}
 }

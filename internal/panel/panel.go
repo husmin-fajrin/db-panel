@@ -64,6 +64,11 @@ const (
 	// start (agents have reconnected by then), then every day.
 	defaultTLSRenewFirst = 10 * time.Minute
 	tlsRenewEvery        = 24 * time.Hour
+
+	// Closed alerts and status events past their retention (settings) are
+	// pruned this long after the start, then every day (spec 5.12).
+	defaultPruneFirst = 5 * time.Minute
+	pruneEvery        = 24 * time.Hour
 )
 
 // Options configure a Panel. Zero fields take the defaults above.
@@ -113,6 +118,7 @@ type Panel struct {
 	localID       int64
 	probeInterval time.Duration
 	tlsRenewFirst time.Duration                // first renewal check after Run starts; tests shorten it
+	pruneFirst    time.Duration                // first retention pruning after Run starts; tests shorten it
 	readTimeout   time.Duration                // UI server ReadTimeout; tests shorten it
 	publish       func(event string, data any) // Broker.Publish; tests wrap it
 
@@ -173,11 +179,13 @@ func New(o Options) (*Panel, error) {
 		now:           time.Now,
 		probeInterval: defaultProbeInterval,
 		tlsRenewFirst: defaultTLSRenewFirst,
+		pruneFirst:    defaultPruneFirst,
 		readTimeout:   readTimeout,
 	}
 	p.ConfirmLimiter = auth.NewRateLimiter(confirmMaxAttempts, confirmWindow, func() time.Time { return p.now() })
 	p.publish = p.Broker.Publish
-	p.Hub = hub.New(&listenerImpl{p: p})
+	// The hub's report rate limit follows the panel's clock.
+	p.Hub = hub.New(&listenerImpl{p: p}, hub.WithNow(func() time.Time { return p.now() }), hub.WithLogger(p.log))
 	if err := p.init(); err != nil {
 		st.Close()
 		return nil, err

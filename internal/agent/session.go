@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	readLimit      = 4 << 20
+	readLimit      = 1 << 20 // SEC-34, as the panel's
 	writeTimeout   = 10 * time.Second
 	pingInterval   = 15 * time.Second
 	pingTimeout    = 10 * time.Second

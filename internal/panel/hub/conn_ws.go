@@ -10,8 +10,9 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// readLimit caps the size of one incoming message.
-const readLimit = 4 << 20
+// readLimit caps the size of one incoming message (SEC-34); a bigger one
+// drops the connection.
+const readLimit = 1 << 20
 
 // writeTimeout bounds writing one request. The write deliberately does not
 // use the caller's ctx: coder/websocket closes the whole connection when a

@@ -131,6 +131,8 @@ func validSettings() url.Values {
 		"weekly_day":       {"Fri"},
 		"weekly_time":      {"17:30"},
 		"base_url":         {"https://panel.example.com"},
+		"alerts_retention": {"60"},
+		"events_retention": {"120"},
 	}
 }
 
@@ -317,6 +319,7 @@ func TestSettingsSaveReconfiguresMonitor(t *testing.T) {
 	want.AlertRepeat, want.LaggingAlert = 12*time.Hour, 15*time.Minute
 	want.WeeklySummary, want.WeeklySummaryAt = true, "Fri 17:30"
 	want.PanelBaseURL = "https://panel.example.com"
+	want.AlertsRetentionDays, want.EventsRetentionDays = 60, 120
 	want.StaleAfter = 3 * want.SummaryEvery
 	if got != want {
 		t.Fatalf("settings:\n got %+v\nwant %+v", got, want)
@@ -413,6 +416,7 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 		"down_after": {"30"}, "disk_warn": {"85"}, "disk_crit": {"95"}, "conn_pct": {"80"},
 		"alert_repeat": {"6"}, "lagging_alert": {"300"}, "weekly_summary": {"on"},
 		"weekly_day": {"Mon"}, "weekly_time": {"07:00"}, "base_url": {""},
+		"alerts_retention": {"90"}, "events_retention": {"180"},
 	}
 	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
 
@@ -488,4 +492,48 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 	if !strings.Contains(last.DetailJSON, `"panel_base_url":"`+long+`"`) || strings.Contains(last.DetailJSON, "dipotong") {
 		t.Errorf("settings_update after a %d-byte base URL = %s", len(long), last.DetailJSON)
 	}
+}
+
+// TestRetentionSettingsValidation (spec 5.12): the Retensi section shows
+// 90 and 180 days by default, takes 1 to 3650 days and stores
+// alerts_retention_days and events_retention_days.
+func TestRetentionSettingsValidation(t *testing.T) {
+	e := settingsEnv(t)
+	c := e.cookie()
+	rec := e.do("GET", "/settings", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Retensi", `name="alerts_retention" value="90"`, `name="events_retention" value="180"`,
+		"Log audit dan log pekerjaan tidak pernah dipangkas")
+
+	for _, tc := range []struct{ field, value, msg string }{
+		{"alerts_retention", "0", "Retensi peringatan tertutup harus 1 sampai 3650 hari"},
+		{"alerts_retention", "3651", "Retensi peringatan tertutup harus 1 sampai 3650 hari"},
+		{"alerts_retention", "abc", "Retensi peringatan tertutup harus 1 sampai 3650 hari"},
+		{"events_retention", "0", "Retensi riwayat status harus 1 sampai 3650 hari"},
+		{"events_retention", "3651", "Retensi riwayat status harus 1 sampai 3650 hari"},
+		{"events_retention", "", "Retensi riwayat status harus 1 sampai 3650 hari"},
+	} {
+		rec := e.do("POST", "/settings", with(validSettings(), tc.field, tc.value), c)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s=%q: status %d, want 400", tc.field, tc.value, rec.Code)
+			continue
+		}
+		if flash := between(rec.Body.String(), `role="alert"`, "</div>"); !strings.Contains(flash, tc.msg) {
+			t.Errorf("%s=%q: flash %q does not mention %q", tc.field, tc.value, flash, tc.msg)
+		}
+	}
+	if saves, _ := e.set.counts(); saves != 0 {
+		t.Fatalf("refused forms saved %d times", saves)
+	}
+
+	for _, ok := range [][2]string{{"1", "3650"}, {"3650", "1"}} {
+		rec := e.do("POST", "/settings", with(validSettings(), "alerts_retention", ok[0], "events_retention", ok[1]), c)
+		wantCode(t, rec, http.StatusSeeOther)
+		kv, err := e.st.GetSettings(store.SettingAlertsRetentionDays, store.SettingEventsRetentionDays)
+		if err != nil || kv[store.SettingAlertsRetentionDays] != ok[0] || kv[store.SettingEventsRetentionDays] != ok[1] {
+			t.Fatalf("stored retention = %v, %v; want %v", kv, err, ok)
+		}
+	}
+	rec = e.do("GET", "/settings", nil, c)
+	wantBody(t, rec, `name="alerts_retention" value="3650"`, `name="events_retention" value="1"`)
 }

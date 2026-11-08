@@ -292,3 +292,59 @@ func TestWSConnCancelledCallKeepsConn(t *testing.T) {
 	default:
 	}
 }
+
+// sizedEvent encodes an event envelope of exactly size bytes (its payload
+// is a JSON string padded to fit).
+func sizedEvent(t *testing.T, size int) []byte {
+	t.Helper()
+	enc := func(pad int) []byte {
+		ev := proto.Event{Type: "job.log", JobID: "j1", Payload: json.RawMessage(`"` + strings.Repeat("x", pad) + `"`)}
+		b, err := proto.Encode(proto.Envelope{Kind: proto.KindEvent, Event: &ev})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	b := enc(size - len(enc(0)))
+	if len(b) != size {
+		t.Fatalf("event is %d bytes, want %d", len(b), size)
+	}
+	return b
+}
+
+// TestReadLimitOneMiB (SEC-34): a message of 1 MiB from an agent is read,
+// one byte more drops the connection.
+func TestReadLimitOneMiB(t *testing.T) {
+	if readLimit != 1<<20 {
+		t.Fatalf("readLimit = %d, want 1 MiB", readLimit)
+	}
+	events := make(chan proto.Event, 2)
+	fits, over := sizedEvent(t, 1<<20), sizedEvent(t, 1<<20+1)
+	c := startFakeAgent(t, func(ev proto.Event) { events <- ev }, func(ctx context.Context, ws *websocket.Conn) {
+		for _, b := range [][]byte{fits, over} {
+			if err := ws.Write(ctx, websocket.MessageText, b); err != nil {
+				return
+			}
+		}
+		drain(ctx, ws, nil)
+	})
+
+	select {
+	case ev := <-events:
+		if len(ev.Payload) < 1<<19 {
+			t.Errorf("1 MiB event payload = %d bytes", len(ev.Payload))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("1 MiB event not delivered")
+	}
+	select {
+	case <-c.Wait():
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection kept after a message over 1 MiB")
+	}
+	select {
+	case <-events:
+		t.Fatal("message over 1 MiB delivered")
+	default:
+	}
+}

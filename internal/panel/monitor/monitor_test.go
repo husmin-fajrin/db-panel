@@ -81,7 +81,12 @@ func newRig(t *testing.T, setup ...func(st *store.Store)) *rig {
 		f(r.st)
 	}
 	l := &forwarder{}
-	r.hub = hub.New(l)
+	// The tests send reports faster than an agent does; the hub's clock
+	// moves 2 s on each reading so its report rate limit never drops one.
+	var hubTicks atomic.Int64
+	r.hub = hub.New(l, hub.WithNow(func() time.Time {
+		return r.clk.Now().Add(time.Duration(hubTicks.Add(1)) * 2 * time.Second)
+	}))
 	r.m = New(Deps{Store: r.st, Hub: r.hub, Publish: r.publish,
 		Logger: slog.New(slog.NewTextHandler(r.logs, nil)), Now: r.clk.Now, TickEvery: time.Hour})
 	l.m.Store(r.m)
@@ -893,7 +898,10 @@ func TestCheckNowRateLimited(t *testing.T) {
 	}
 }
 
-func TestLoadsHealthOnStartupAndPrunes(t *testing.T) {
+// TestLoadsHealthOnStartup: the view is loaded from the store; the tick
+// no longer prunes status events (the panel's daily retention does, spec
+// 5.12).
+func TestLoadsHealthOnStartup(t *testing.T) {
 	var rID int64
 	since := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
 	r := newRig(t, func(st *store.Store) {
@@ -919,8 +927,8 @@ func TestLoadsHealthOnStartupAndPrunes(t *testing.T) {
 		t.Fatalf("loaded view = %+v", v)
 	}
 	r.m.tick()
-	if n := len(r.events(rID, "")); n != 1 {
-		t.Fatalf("events after the first tick = %d, want the 89-day-old one only", n)
+	if n := len(r.events(rID, "")); n != 2 {
+		t.Fatalf("events after the first tick = %d, want both kept", n)
 	}
 	if v := r.view(rID); v.Status.Code != StatusSynced {
 		t.Fatalf("within the offline grace the status is %q", v.Status.Code)

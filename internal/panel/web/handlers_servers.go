@@ -129,6 +129,9 @@ type serverDetailPage struct {
 	// Pins is what the agent's last report says of its pins (Detail
 	// teknis); nil before a report that carries them.
 	Pins *pinFacts
+	// ReportsDropped says how many health reports the hub dropped over its
+	// rate limit in the last hour (Detail teknis); "" when none.
+	ReportsDropped string
 	// DeleteWarnings: what deleting the server from the panel loses (an
 	// old master's leftover data, its salvage files); shown in the modal
 	// and the confirmation.
@@ -385,6 +388,7 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 		}
 		if v, ok := a.Monitor.View(srv.ID); ok {
 			p.Pins = newPinFacts(v.Snap)
+			p.ReportsDropped = reportsDroppedText(v.ReportsDropped)
 		}
 		if err := a.oldMasterViews(r.Context(), srv, &p); err != nil {
 			a.internalError(w, "old master", err)

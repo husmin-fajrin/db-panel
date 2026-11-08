@@ -77,6 +77,11 @@ const (
 	// SettingWeeklyLastSent holds (RFC3339) the weekly summary occurrence
 	// last sent, so a restart never sends one twice.
 	SettingWeeklyLastSent = "weekly_last_sent"
+	// SettingAlertsRetentionDays and SettingEventsRetentionDays: alerts
+	// closed and status events older than this many days are pruned daily
+	// (spec 5.12); audit_log and job_log never are.
+	SettingAlertsRetentionDays = "alerts_retention_days"
+	SettingEventsRetentionDays = "events_retention_days"
 )
 
 // Setting keys of the panel's HTTPS certificate.

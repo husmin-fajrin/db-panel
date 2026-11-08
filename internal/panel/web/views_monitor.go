@@ -128,8 +128,18 @@ func newMasterFacts(v monitor.View, ok bool, registered int) masterFacts {
 	return f
 }
 
-// Timeline lengths: the default and the extended one (?hari=90, the
-// events' retention).
+// reportsDroppedText is the Detail teknis line about health reports the
+// hub dropped over its rate limit in the last hour (spec 5.12); "" for
+// none.
+func reportsDroppedText(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strconv.Itoa(n) + " laporan dibuang dalam 1 jam terakhir (agent mengirim laporan terlalu sering)"
+}
+
+// Timeline lengths: the default and the extended one (?hari=90; status
+// events are kept events_retention_days, 180 by default).
 const (
 	timelineDays     = 7
 	timelineLongDays = 90

@@ -17,8 +17,6 @@ const (
 	maxPayload       = 64 << 10 // largest health report accepted
 	configureTimeout = 30 * time.Second
 	checkNowEvery    = 10 * time.Second // per server
-	eventRetention   = 90 * 24 * time.Hour
-	pruneEvery       = 24 * time.Hour
 	defaultTickEvery = 5 * time.Second
 )
 
@@ -64,6 +62,9 @@ type View struct {
 	// QuarantinePending: an old master (Role store.RoleQuarantined) whose
 	// quarantine was not delivered yet.
 	QuarantinePending bool
+	// ReportsDropped: health reports the hub dropped over its rate limit
+	// in the last hour (spec 5.12, Detail teknis).
+	ReportsDropped int
 }
 
 // Monitor ingests the agents' health reports, derives each server's status,
@@ -89,7 +90,6 @@ type Monitor struct {
 	settings  Settings
 	servers   map[int64]*serverState
 	lastCheck map[int64]time.Time // last CheckNow per server
-	lastPrune time.Time
 	// weeklyRetryAt holds back the next try of the weekly summary after a
 	// failed send.
 	weeklyRetryAt time.Time
@@ -366,23 +366,39 @@ func unknownCommand(err error) bool {
 // not know the server.
 func (m *Monitor) View(serverID int64) (View, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s, ok := m.servers[serverID]
 	if !ok {
+		m.mu.Unlock()
 		return View{}, false
 	}
-	return s.view(serverID), true
+	v := s.view(serverID)
+	m.mu.Unlock()
+	v.ReportsDropped = m.dropped(serverID)
+	return v, true
 }
 
 // Views returns the health view of every server the Monitor knows.
 func (m *Monitor) Views() map[int64]View {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	out := make(map[int64]View, len(m.servers))
 	for id, s := range m.servers {
 		out[id] = s.view(id)
 	}
+	m.mu.Unlock()
+	for id, v := range out {
+		v.ReportsDropped = m.dropped(id)
+		out[id] = v
+	}
 	return out
+}
+
+// dropped is the hub's count of serverID's reports dropped in the last
+// hour; read without the Monitor's lock.
+func (m *Monitor) dropped(serverID int64) int {
+	if m.hub == nil {
+		return 0
+	}
+	return m.hub.Dropped(serverID)
 }
 
 // String names a severity for browsers: ok, warn, crit or neutral.
@@ -495,18 +511,7 @@ func (m *Monitor) tick() {
 	alerts = append(alerts, m.checkTLSExpiry(now)...)
 	alerts = append(alerts, m.checkPromotions(now)...)
 	alerts = append(alerts, m.closeNotices(now)...)
-	prune := now.Sub(m.lastPrune) >= pruneEvery
-	if prune {
-		m.lastPrune = now
-	}
 	m.mu.Unlock()
 	m.emit(ups)
 	m.emitAlerts(alerts)
-	if prune {
-		if n, err := m.st.PruneStatusEvents(now.Add(-eventRetention)); err != nil {
-			m.log.Warn("prune status events", "err", err)
-		} else if n > 0 {
-			m.log.Info("pruned old status events", "deleted", n)
-		}
-	}
 }

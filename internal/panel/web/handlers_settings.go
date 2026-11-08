@@ -63,6 +63,9 @@ type settingsForm struct {
 	Weekly                bool
 	WeeklyDay, WeeklyTime string
 	BaseURL               string
+
+	// Days.
+	AlertsRetention, EventsRetention string
 }
 
 // readSettingsForm reads the posted form.
@@ -74,7 +77,8 @@ func readSettingsForm(r *http.Request) settingsForm {
 		DisconnectAlert: v("disconnect_alert"), DownAfter: v("down_after"), LaggingAlert: v("lagging_alert"),
 		DiskWarn: v("disk_warn"), DiskCrit: v("disk_crit"), ConnPct: v("conn_pct"), AlertRepeat: v("alert_repeat"),
 		Weekly: r.PostFormValue("weekly_summary") == "on", WeeklyDay: v("weekly_day"), WeeklyTime: v("weekly_time"),
-		BaseURL: v("base_url"),
+		BaseURL:         v("base_url"),
+		AlertsRetention: v("alerts_retention"), EventsRetention: v("events_retention"),
 	}
 	posted := r.PostForm["kinds"]
 	for _, k := range monitor.AllKinds() {
@@ -94,7 +98,8 @@ func formFromSettings(set monitor.Settings, chatID string, kinds map[string]bool
 		DiskWarn: strconv.Itoa(set.DiskWarn), DiskCrit: strconv.Itoa(set.DiskCrit), ConnPct: strconv.Itoa(set.ConnPct),
 		AlertRepeat: strconv.FormatInt(int64(set.AlertRepeat/time.Hour), 10),
 		Weekly:      set.WeeklySummary, WeeklyDay: day, WeeklyTime: at,
-		BaseURL: set.PanelBaseURL,
+		BaseURL:         set.PanelBaseURL,
+		AlertsRetention: strconv.Itoa(set.AlertsRetentionDays), EventsRetention: strconv.Itoa(set.EventsRetentionDays),
 	}
 	for _, k := range monitor.AllKinds() {
 		on, ok := kinds[k]
@@ -135,6 +140,10 @@ func (f settingsForm) validate(base monitor.Settings) (monitor.Settings, string)
 	set.ConnPct = num(f.ConnPct, 50, 99, "Ambang koneksi", "persen dari max_connections")
 	set.AlertRepeat = time.Duration(num(f.AlertRepeat, 1, 168, "Pengulangan peringatan", "jam")) * time.Hour
 	set.LaggingAlert = secs(f.LaggingAlert, 60, 86400, "Batas peringatan ketinggalan")
+	set.AlertsRetentionDays = num(f.AlertsRetention, monitor.MinRetentionDays, monitor.MaxRetentionDays,
+		"Retensi peringatan tertutup", "hari")
+	set.EventsRetentionDays = num(f.EventsRetention, monitor.MinRetentionDays, monitor.MaxRetentionDays,
+		"Retensi riwayat status", "hari")
 	switch {
 	case msg != "":
 	case !slices.ContainsFunc(weekDays, func(d weekDay) bool { return d.Value == f.WeeklyDay }):
@@ -370,6 +379,8 @@ func changedSettings(prev, cur monitor.Settings) []string {
 		{store.SettingWeeklySummary, prev.WeeklySummary == cur.WeeklySummary},
 		{store.SettingWeeklySummaryAt, prev.WeeklySummaryAt == cur.WeeklySummaryAt},
 		{store.SettingPanelBaseURL, prev.PanelBaseURL == cur.PanelBaseURL},
+		{store.SettingAlertsRetentionDays, prev.AlertsRetentionDays == cur.AlertsRetentionDays},
+		{store.SettingEventsRetentionDays, prev.EventsRetentionDays == cur.EventsRetentionDays},
 	} {
 		if !c.same {
 			out = append(out, c.key)

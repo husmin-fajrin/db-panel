@@ -222,3 +222,45 @@ func TestAlertCloseReasonAndNeighbours(t *testing.T) {
 		}
 	}
 }
+
+// TestPruneAlertsClosedBefore: only alerts closed before the cutoff go;
+// open alerts stay however old they are.
+func TestPruneAlertsClosedBefore(t *testing.T) {
+	s := openTemp(t)
+	a := mustServer(t, s, "a")
+	now := time.Date(2026, 11, 8, 3, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	add := func(kind string, opened time.Time, closed *time.Time) int64 {
+		t.Helper()
+		id, err := s.OpenAlert(Alert{Kind: kind, ServerID: a.ID, OpenedAt: opened})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if closed != nil {
+			if err := s.CloseAlert(id, *closed); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return id
+	}
+	at := func(d time.Duration) *time.Time { ts := now.Add(-d); return &ts }
+	oldClosed := add("down", now.Add(-100*day), at(91*day))
+	recentClosed := add("lag", now.Add(-100*day), at(89*day))
+	oldOpen := add("disk", now.Add(-400*day), nil)
+
+	n, err := s.PruneAlertsClosedBefore(now.Add(-90 * day))
+	if err != nil || n != 1 {
+		t.Fatalf("PruneAlertsClosedBefore = %d, %v; want 1", n, err)
+	}
+	left, err := s.ListAlerts(time.Time{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[int64]bool{}
+	for _, al := range left {
+		ids[al.ID] = true
+	}
+	if ids[oldClosed] || !ids[recentClosed] || !ids[oldOpen] || len(left) != 2 {
+		t.Fatalf("alerts left = %+v; want the recent closed and the old open one", left)
+	}
+}

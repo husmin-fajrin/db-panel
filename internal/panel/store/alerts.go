@@ -206,3 +206,17 @@ func (s *Store) SetAlertTelegramState(id int64, state, errText string) error {
 func (s *Store) SetAlertMessage(id int64, message string) error {
 	return s.execOne(`UPDATE alerts SET message = ? WHERE id = ?`, message, id)
 }
+
+// PruneAlertsClosedBefore deletes the alerts closed before t and returns how
+// many it deleted; open alerts are never touched.
+func (s *Store) PruneAlertsClosedBefore(t time.Time) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM alerts WHERE closed_at IS NOT NULL AND closed_at < ?`, formatTime(t))
+	if err != nil {
+		return 0, fmt.Errorf("prune alerts: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune alerts: %w", err)
+	}
+	return n, nil
+}

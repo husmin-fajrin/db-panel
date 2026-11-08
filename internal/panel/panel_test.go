@@ -1351,3 +1351,166 @@ func TestHealthEventRoutedToMonitor(t *testing.T) {
 		t.Fatalf("view after the event = %+v, %v", v, ok)
 	}
 }
+
+// retentionFixture fills a panel's store with rows on both sides of the
+// default retention (90 days for closed alerts, 180 for status events) as
+// of now.
+type retentionFixture struct {
+	oldClosed, recentClosed, oldOpen int64
+}
+
+func fillRetention(t *testing.T, p *Panel, now time.Time) retentionFixture {
+	t.Helper()
+	day := 24 * time.Hour
+	srv, err := p.Store.CreateServer("db-lama")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := func(kind string, opened time.Time, closedAgo time.Duration) int64 {
+		t.Helper()
+		id, err := p.Store.OpenAlert(store.Alert{Kind: kind, ServerID: srv.ID, OpenedAt: opened})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if closedAgo > 0 {
+			if err := p.Store.CloseAlert(id, now.Add(-closedAgo)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return id
+	}
+	var f retentionFixture
+	f.oldClosed = alert("down", now.Add(-200*day), 91*day)
+	f.recentClosed = alert("lag", now.Add(-200*day), 89*day)
+	f.oldOpen = alert("disk", now.Add(-500*day), 0)
+	for _, ago := range []time.Duration{181 * day, 179 * day} {
+		if _, err := p.Store.AddStatusEvent(store.StatusEvent{ServerID: srv.ID, TS: now.Add(-ago), Kind: "status", ToStatus: "synced"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, exp := range []time.Duration{-time.Hour, time.Hour} {
+		if err := p.Store.AddConfirmation(store.Confirmation{TokenHash: fmt.Sprintf("h%d", i), Username: "admin",
+			Action: "delete", TargetKind: "server", TargetID: srv.ID, ExpiresAt: now.Add(exp)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return f
+}
+
+func alertIDs(t *testing.T, p *Panel) map[int64]bool {
+	t.Helper()
+	all, err := p.Store.ListAlerts(time.Time{}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[int64]bool{}
+	for _, a := range all {
+		out[a.ID] = true
+	}
+	return out
+}
+
+func statusEventCount(t *testing.T, p *Panel) int {
+	t.Helper()
+	evs, err := p.Store.ListStatusEventsAll(time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(evs)
+}
+
+// TestDailyPruneKeepsOpenAndRecent (spec 5.12): the daily pruning removes
+// alerts closed more than alerts_retention_days ago, status events older
+// than events_retention_days and expired confirmations; open alerts and
+// newer rows stay. The settings change the cutoffs.
+func TestDailyPruneKeepsOpenAndRecent(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	now := time.Date(2026, 11, 8, 3, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	f := fillRetention(t, p, now)
+
+	// The background loop runs the first pruning after pruneFirst.
+	p.pruneFirst = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.retentionLoop(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for alertIDs(t, p)[f.oldClosed] && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	ids := alertIDs(t, p)
+	if ids[f.oldClosed] || !ids[f.recentClosed] || !ids[f.oldOpen] {
+		t.Fatalf("alerts after pruning = %v; want only the recent closed (%d) and the open (%d) one", ids, f.recentClosed, f.oldOpen)
+	}
+	if n := statusEventCount(t, p); n != 1 {
+		t.Fatalf("status events after pruning = %d, want the 179-day-old one", n)
+	}
+	if n, _ := p.Store.PruneConfirmations(now.Add(2 * time.Hour)); n != 1 {
+		t.Fatalf("confirmations left = %d, want only the unexpired one", n)
+	}
+
+	// Shorter retention from the settings.
+	if err := p.Store.SetSetting(store.SettingAlertsRetentionDays, "30"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Store.SetSetting(store.SettingEventsRetentionDays, "1"); err != nil {
+		t.Fatal(err)
+	}
+	p.pruneOld()
+	if ids := alertIDs(t, p); ids[f.recentClosed] || !ids[f.oldOpen] {
+		t.Fatalf("alerts with 30-day retention = %v; want only the open one", ids)
+	}
+	if n := statusEventCount(t, p); n != 0 {
+		t.Fatalf("status events with 1-day retention = %d, want 0", n)
+	}
+}
+
+// TestPruneNeverTouchesAudit (spec 5.12): audit_log and job_log are never
+// pruned, however old and however short the retention.
+func TestPruneNeverTouchesAudit(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	now := time.Date(2026, 11, 8, 3, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	old := now.Add(-3000 * 24 * time.Hour)
+	if _, err := p.Store.AddAudit(store.AuditEntry{TS: old, Username: "admin", Action: "login", Outcome: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	job := store.Job{ID: "job-lama", Kind: "prepare-master", ServerID: p.localID, ParamsJSON: "{}", CreatedAt: old}
+	if err := p.Store.CreateJob(job, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Store.AppendJobLog(job.ID, "info", "baris lama", old); err != nil {
+		t.Fatal(err)
+	}
+	auditBefore, err := p.Store.ListAudit(0, time.Time{}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{store.SettingAlertsRetentionDays, store.SettingEventsRetentionDays} {
+		if err := p.Store.SetSetting(k, "1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.pruneOld()
+
+	audit, err := p.Store.ListAudit(0, time.Time{}, 1000)
+	if err != nil || len(audit) != len(auditBefore) || len(audit) == 0 {
+		t.Fatalf("audit entries after pruning = %d (%v), want all %d", len(audit), err, len(auditBefore))
+	}
+	found := false
+	for _, e := range audit {
+		found = found || e.TS.Equal(old)
+	}
+	if !found {
+		t.Fatal("the 3000-day-old audit entry was pruned")
+	}
+	lines, err := p.Store.JobLog(job.ID, 0, 0)
+	if err != nil || len(lines) != 1 {
+		t.Fatalf("job log after pruning = %+v, %v; want the old line", lines, err)
+	}
+}

@@ -42,6 +42,9 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 		WeeklySummary:   true,
 		WeeklySummaryAt: "Mon 07:00",
 		PanelBaseURL:    "",
+
+		AlertsRetentionDays: 90,
+		EventsRetentionDays: 180,
 	}
 	if got != want {
 		t.Fatalf("defaults:\n got %+v\nwant %+v", got, want)
@@ -60,6 +63,7 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 	mod.WeeklySummary = false
 	mod.WeeklySummaryAt = "Fri 17:30"
 	mod.PanelBaseURL = "https://panel.example.com"
+	mod.AlertsRetentionDays, mod.EventsRetentionDays = 30, 3650
 	if err := SaveSettings(st, mod); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +108,8 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 		{"weekly time", func(s *Settings) { s.WeeklySummaryAt = "Senin pagi" }, "Mon 07:00"},
 		{"connections over 100", func(s *Settings) { s.ConnPct = 101 }, "koneksi"},
 		{"lagging alert zero", func(s *Settings) { s.LaggingAlert = 0 }, "ketinggalan"},
+		{"alerts retention zero", func(s *Settings) { s.AlertsRetentionDays = 0 }, "retensi peringatan tertutup harus 1 sampai 3650 hari"},
+		{"events retention over", func(s *Settings) { s.EventsRetentionDays = 3651 }, "retensi riwayat status harus 1 sampai 3650 hari"},
 	} {
 		s := want
 		c.mutate(&s)

@@ -357,3 +357,98 @@ func TestErrorsIsOffline(t *testing.T) {
 		t.Errorf("message = %q", during.Error())
 	}
 }
+
+// fakeClock is a settable clock for the report rate limit.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Add(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// eventCount counts the events the listener got for id, of type typ.
+func (l *fakeListener) eventCount(id int64, typ string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for i, ev := range l.events {
+		if l.eventIDs[i] == id && ev.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// TestHubRateLimitsSnapshotsPerServer (spec 5.12): a bucket of 10 health
+// reports per server, refilled with one every 2 s; reports over it are
+// dropped and counted, other events and other servers are not affected,
+// and the connection stays.
+func TestHubRateLimitsSnapshotsPerServer(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}
+	l := &fakeListener{}
+	h := New(l, WithNow(clk.Now))
+	c1, c2 := newFakeConn(0), newFakeConn(0)
+	h.Attach(1, c1)
+	h.Attach(2, c2)
+	snap := proto.Event{Type: proto.EventHealth}
+
+	for range 11 {
+		h.OnEvent(1, snap)
+	}
+	if n := l.eventCount(1, proto.EventHealth); n != 10 {
+		t.Fatalf("server 1 reports passed = %d, want 10", n)
+	}
+	if d := h.Dropped(1); d != 1 {
+		t.Fatalf("Dropped(1) = %d, want 1", d)
+	}
+	// Other events of the flooding server still pass.
+	h.OnEvent(1, proto.Event{Type: proto.EventJobLog})
+	if n := l.eventCount(1, proto.EventJobLog); n != 1 {
+		t.Fatalf("job.log events passed = %d, want 1", n)
+	}
+	// Another server has its own bucket.
+	for range 10 {
+		h.OnEvent(2, snap)
+	}
+	if n := l.eventCount(2, proto.EventHealth); n != 10 || h.Dropped(2) != 0 {
+		t.Fatalf("server 2 reports passed = %d, dropped %d; want 10 and 0", n, h.Dropped(2))
+	}
+
+	// 2 s later one token is back: one passes, the next is dropped.
+	clk.Add(2 * time.Second)
+	h.OnEvent(1, snap)
+	h.OnEvent(1, snap)
+	if n := l.eventCount(1, proto.EventHealth); n != 11 {
+		t.Fatalf("server 1 reports after 2 s = %d, want 11", n)
+	}
+	if d := h.Dropped(1); d != 2 {
+		t.Fatalf("Dropped(1) = %d, want 2", d)
+	}
+
+	// Flooding never drops the connection.
+	if !h.IsOnline(1) || c1.closeCount() != 0 {
+		t.Fatalf("flooding server: online %v, closes %d; want online and never closed", h.IsOnline(1), c1.closeCount())
+	}
+
+	// The count covers the last hour; a full bucket after a long pause.
+	clk.Add(time.Hour)
+	if d := h.Dropped(1); d != 0 {
+		t.Fatalf("Dropped(1) an hour later = %d, want 0", d)
+	}
+	for range 10 {
+		h.OnEvent(1, snap)
+	}
+	if n := l.eventCount(1, proto.EventHealth); n != 21 || h.Dropped(1) != 0 {
+		t.Fatalf("after the pause passed = %d, dropped %d; want 21 and 0", n, h.Dropped(1))
+	}
+}

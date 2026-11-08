@@ -588,3 +588,21 @@ func TestServerPageShowsPins(t *testing.T) {
 	rec = e.do("GET", "/servers/1", nil, e.cookie())
 	wantNoBody(t, rec, "Peran dipin")
 }
+
+// TestServerPageShowsDroppedReports (spec 5.12): reports the hub dropped
+// for flooding in the last hour show in the server's Detail teknis, also
+// from an agent that reports no pins.
+func TestServerPageShowsDroppedReports(t *testing.T) {
+	e, mon, _ := monitorEnv(t)
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow, Snap: masterSnap(), ReportsDropped: 12})
+	rec := e.do("GET", "/servers/1", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	tech := between(rec.Body.String(), "Detail teknis", "</details>")
+	if !strings.Contains(tech, "12 laporan dibuang dalam 1 jam terakhir") {
+		t.Fatalf("Detail teknis lacks the dropped reports:\n%s", tech)
+	}
+	wantNoBody(t, rec, "Peran dipin")
+
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow, Snap: masterSnap()})
+	wantNoBody(t, e.do("GET", "/servers/1", nil, e.cookie()), "laporan dibuang")
+}
