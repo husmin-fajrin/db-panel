@@ -717,8 +717,11 @@ sendiri.
 
 Halaman master dan replika juga menampilkan versi, uptime, koneksi, disk,
 RAM, beban, lag, umur binlog, dan garis waktu kejadian 7 hari (bisa diperluas ke
-90 hari; riwayat disimpan 180 hari, lihat Retensi di bawah). Pesan error MySQL apa adanya hanya ada di **Detail teknis** halaman
-replika.
+90 hari; riwayat disimpan 180 hari, lihat Retensi di bawah). Pesan error
+MySQL selengkapnya (dengan kutipan data disensor, lihat di bawah) hanya ada
+di **Detail teknis** halaman replika. **Detail teknis** juga menampilkan
+pin peran dan sumber server itu (lihat "Peran dan sumber yang dipin") dan
+jumlah laporan yang dibuang (lihat "Batas dari agent").
 
 **Sensor kutipan data.** Pesan error MySQL sering mengutip isi baris
 (`Duplicate entry 'Budi' for key 'nama'`). Sebelum disimpan atau
@@ -731,8 +734,18 @@ pesan pekerjaan, serta hasil di catatan audit bila berasal dari jawaban
 agent. Teks di luar kutipan tetap utuh: nomor error, nama tabel, posisi
 binlog, dan angka panjang lain. Kutipan yang tidak ditutup menyensor
 sisa barisnya; pernyataan SQL setelah `Query: '` di error replikasi
-disensor sampai akhir pesan. Teks yang tersimpan sebelum versi ini tidak diubah di
-basis data (snapshot lama disensor saat dibaca ulang).
+disensor sampai akhir pesan.
+
+Yang *tidak* disensor: nama akun buatan panel beserta host-nya
+(`'dbpanel_repl'@'10.0.0.%'`, `'dbpanel_dump_…'`) dan baris saran panel
+yang memuatnya (perintah `DROP USER`/`GRANT` yang perlu dijalankan), karena
+itu bukan data aplikasi; data yang ditulis MySQL tanpa tanda kutip; dan
+teks yang tersimpan sebelum versi ini (tidak diubah di basis data; snapshot
+lama disensor saat dibaca ulang, tetapi garis waktu, peringatan, log
+pekerjaan, dan catatan audit lama tetap seperti aslinya). Sensor terjadi di
+panel: journal agent (`journalctl -u dbpanel-agent`) dan log error MySQL di
+server database tetap memuat pesan asli, jadi batasi siapa yang bisa
+membacanya di server itu.
 
 **Beban.** Setiap agent hanya membaca MySQL di servernya sendiri: beberapa
 kueri ringan (`SHOW GLOBAL STATUS`/`VARIABLES`, `SHOW REPLICA STATUS`) tiap
@@ -760,9 +773,11 @@ tampil di **Detail teknis** halaman server ("12 laporan dibuang dalam 1 jam
 terakhir"). Laporan tertunda yang dikirim agent setelah tersambung lagi
 (paling banyak 200) mendapat jatah tersendiri, sekali per 10 menit per
 server, jadi agent yang sehat praktis tidak pernah mencapai batas ini;
-laporan yang dibuang biasanya berarti agent rusak atau diubah. Satu pesan dari agent (dan dari
-panel ke agent) paling besar 1 MiB; pesan yang lebih besar memutus
-sambungan, dan agent tersambung lagi sendiri.
+laporan yang dibuang biasanya berarti agent rusak atau diubah. Satu
+pesan dari agent (dan dari panel ke agent) paling besar 1 MiB; pesan yang
+lebih besar memutus sambungan, dan agent tersambung lagi sendiri. Pesan
+biasa jauh di bawah batas itu; hanya daftar yang sangat besar (sekitar
+10.000 database atau tabel di satu server) yang bisa melewatinya.
 
 **Retensi.** Sekali sehari panel menghapus peringatan yang sudah ditutup
 lebih dari 90 hari dan riwayat status (linimasa) yang lebih tua dari 180
@@ -1118,7 +1133,9 @@ alamat dasar panel dicatat dengan nilai barunya, utuh. Isi rincian tiap baris
 dibatasi (2 KiB); untuk tindakan yang ditolak atau gagal hanya nama isian
 dan panjang nilainya yang dicatat, dan login gagal dengan nama pengguna
 yang tidak ada dicatat sebagai `(tidak dikenal)` dengan hash pendek. Saring
-menurut server dan tanggal. Catatan tidak bisa diubah atau dihapus lewat
+menurut server dan tanggal. Bila hasil sebuah tindakan berasal dari pesan
+error agent, kutipan data di dalamnya disensor (lihat "Sensor kutipan data"
+di "Pemantauan"). Catatan tidak bisa diubah atau dihapus lewat
 panel dan tidak dipangkas; ia ikut tersimpan di `panel.db`, jadi ikut
 dicadangkan bersamanya. Penjagaannya ada di dalam `panel.db` sendiri, jadi
 catatan ini tahan ubah terhadap aplikasi, bukan terhadap root di host panel
@@ -1131,7 +1148,8 @@ cocok lagi dengan rantai. Itu bisa baris yang diubah atau disisipkan, atau
 baris sesudahnya (bila pengubah ikut menghitung ulang hash baris yang ia
 ubah, atau bila sebuah baris di tengah dihapus). Status ini diperiksa paling
 sering sekali per menit. Pemeriksaan yang sama dari baris perintah (hanya
-membaca `panel.db`; keluar 0 bila utuh, 1 bila putus):
+membaca `panel.db`; keluar 0 bila utuh, 1 bila putus; jalankan sebagai
+pengguna `dbpanel`, karena root ditolak):
 
 ```sh
 sudo -u dbpanel dbpanel panel audit-verify
@@ -1145,8 +1163,16 @@ ketahuan dengan membandingkan isi `panel.db` dengan salinan kedua: setiap
 catatan juga ditulis ke log panel (`journalctl -u dbpanel-panel`, pesan
 `audit`, dengan `stored=false` bila basis data menolak catatan itu). Log itu
 bisa dibaca anggota grup `adm` dan `systemd-journal` di host panel, lebih
-luas daripada `panel.db` (0600), jadi batasi keanggotaan grup itu. Saat
-panel versi ini pertama kali dijalankan, rantai dihitung sekali untuk
+luas daripada `panel.db` (0600), jadi batasi keanggotaan grup itu.
+
+Salinan journal itu juga punya batas: ia ada di host yang sama, jadi root
+di host panel bisa mengubah atau menghapusnya juga, dan journald membuang
+log lama sesuai batas ukuran dan umurnya (bawaan sistem, sering hanya
+beberapa minggu). Bila catatan audit perlu bertahan terhadap root di host
+panel, teruskan journal ke server log lain (misalnya lewat rsyslog atau
+`systemd-journal-remote`) dan bandingkan dari sana.
+
+Saat panel versi ini pertama kali dijalankan, rantai dihitung sekali untuk
 catatan lama (migrasi 0009; 10.000 catatan butuh kurang dari satu detik).
 
 ## Pembaruan
@@ -1414,6 +1440,45 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   rentan terhadap pemalsuan DNS nama sumber yang dipin bila panel disusupi:
   pin sumber menyimpan nama, dan pembangunan ulang menyambung ke nama itu.
   Dengan verifikasi, sertifikat master yang menjaga identitasnya.
+- **Laporan agent dibatasi.** Agent yang mengirim laporan terlalu sering
+  hanya kehilangan laporannya (sambungan tidak diputus), dan jumlahnya
+  tampil di **Detail teknis**; satu pesan paling besar 1 MiB. Lihat "Batas
+  dari agent" di "Pemantauan".
+- **Sensor kutipan data.** Nilai berkutip di pesan error MySQL (isi baris,
+  mis. nama atau NIK pasien) disensor panel sebelum disimpan, ditampilkan,
+  atau dikirim ke Telegram. Sensor ini tidak menyentuh data yang ditulis
+  MySQL tanpa kutip, teks lama di basis data, journal agent, dan log error
+  MySQL di server database. Lihat "Sensor kutipan data" di "Pemantauan".
+- **Rantai hash audit** menangkap catatan yang diubah, disisipkan, atau
+  dihapus di tengah oleh orang yang tidak menghitung ulang hash-nya. Ia
+  tidak menangkap penulisan ulang seluruh `panel.db` atau penghapusan
+  baris terakhir; untuk itu bandingkan dengan salinan di journal panel,
+  sebaiknya yang diteruskan ke server lain. Lihat "Catatan audit".
+- **Pin dilaporkan.** Setiap laporan pemantauan memuat pin peran dan sumber
+  server. Master yang tidak dipin `master` (atau berkas pinnya tidak
+  terbaca) tiga laporan berturut-turut memunculkan peringatan **Master
+  tidak dipin**: di master seperti itu agent tidak menolak perintah yang
+  bisa merusak replikasi. Lihat "Peran dan sumber yang dipin".
+- **Penolakan selama kunci promosi.** Setelah promote terencana gagal dan
+  panel tidak bisa memastikan kunci master sudah dibuka, panel menolak
+  promote darurat, **Resync ulang**, **Buat replika**, **Tambah database**,
+  **Lepas database** yang menghapus datanya, dan **Ulangi** pekerjaan itu
+  di topologi tersebut sampai tenggat kunci lewat, supaya penjaga kunci
+  tidak mengkarantina master yang sehat (lihat "Promote terencana dan
+  darurat").
+- **Pairing server lokal hanya dari loopback.** Token `local-pair-token`
+  hanya diterima dari alamat loopback (`127.0.0.0/8`, `::1`); percobaan dari alamat lain ditolak
+  tanpa memakai token dan dicatat di audit (`agent_pair`). Bila panel tidak
+  bisa memeriksa token itu, permintaan ditolak (gagal tertutup).
+- **Nomor seri sertifikat MySQL diperiksa.** Panel hanya mencatat
+  sertifikat MySQL yang dipasang bila nomor seri yang disajikan MySQL sama
+  dengan yang diterbitkan panel (lihat "Sertifikat MySQL").
+- **Tanda "terverifikasi" mengikuti laporan kesehatan.** Tanda bahwa
+  replika memverifikasi sertifikat master dicabut begitu laporan replika
+  menunjukkan verifikasi mati, misalnya replikasi diubah di luar panel.
+  Tanda itu berasal dari laporan agent replika: agent yang disusupi di
+  server replika bisa mengaku terverifikasi. Laporan dari agent yang
+  versinya berbeda dari panel tidak mengubah tanda itu.
 - Sertifikat agent dan sertifikat listener panel berlaku 2 tahun, CA 10
   tahun. Belum ada perpanjangan otomatis (belum dijadwalkan; direncanakan
   setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum
