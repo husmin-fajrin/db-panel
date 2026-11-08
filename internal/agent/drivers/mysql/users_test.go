@@ -6,12 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -785,4 +787,61 @@ func TestReplicaCreatesReplUserLocally(t *testing.T) {
 	if err := rdb.QueryRow("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'lokal_cek'").Scan(&n); err != nil || n != 1 {
 		t.Errorf("replication after createReplUser: count %d, err %v", n, err)
 	}
+}
+
+// TestCreateReplUserSerialized: concurrent mysql.createReplUser on a
+// pinned master run one at a time, so exactly one makes the account (one
+// CREATE USER, one ALTER USER for its TLS rule) and the others find it and
+// are refused: no second ALTER or GRANT reaches the account the first one
+// made, and its password stays the first one's.
+func TestCreateReplUserSerialized(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	execAll(t, db, "SET GLOBAL log_output = 'TABLE'", "SET GLOBAL general_log = 'ON'")
+	r := newPinRig(t, inst.Host(), pinDir(t, "master", ""))
+	statements := func(prefix string) int {
+		t.Helper()
+		return count(t, db, "SELECT COUNT(*) FROM mysql.general_log WHERE command_type = 'Query' AND "+
+			"CONVERT(argument USING utf8mb4) LIKE '"+prefix+"%dbpanel_repl%'")
+	}
+	const callers = 6
+	for round := range 4 {
+		execAll(t, db, "SET GLOBAL general_log = 'OFF'", "DROP USER IF EXISTS 'dbpanel_repl'@'%'",
+			"TRUNCATE TABLE mysql.general_log", "SET GLOBAL general_log = 'ON'")
+		resps := make([]proto.Response, callers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				resps[i] = r.dispatch("mysql.createReplUser",
+					proto.ReplUserParams{User: "dbpanel_repl", FromHost: "%", Password: fmt.Sprintf("sandi-%d", i)})
+			}()
+		}
+		close(start)
+		wg.Wait()
+		winner := -1
+		for i, resp := range resps {
+			switch {
+			case resp.OK && winner < 0:
+				winner = i
+			case resp.OK:
+				t.Errorf("round %d: callers %d and %d both made the account", round, winner, i)
+			case !strings.Contains(resp.Error.Message, "sudah ada di master yang dipin"):
+				t.Errorf("round %d: caller %d: %+v; want the existing-account refusal", round, i, resp.Error)
+			}
+		}
+		if winner < 0 {
+			t.Fatalf("round %d: no caller made the account: %+v", round, resps)
+		}
+		if c, a, g := statements("CREATE USER"), statements("ALTER USER"), statements("GRANT"); c != 1 || a != 1 || g != 1 {
+			t.Errorf("round %d: CREATE USER %d, ALTER USER %d, GRANT %d; want one each", round, c, a, g)
+		}
+		if err := loginTCP(t, inst, "dbpanel_repl", fmt.Sprintf("sandi-%d", winner)); err != nil {
+			t.Errorf("round %d: the account does not take the first caller's password: %v", round, err)
+		}
+	}
+	execAll(t, db, "SET GLOBAL general_log = 'OFF'")
 }

@@ -44,6 +44,10 @@ const (
 	KindReplicaNeedsRebuild = "replica_needs_rebuild"
 	KindMasterQuarantined   = "master_quarantined"
 	KindMasterLockExpired   = "master_lock_expired"
+
+	// KindMasterUnpinned: a topology's master whose agent reports a role
+	// pin other than master (spec 5.12, 5.14).
+	KindMasterUnpinned = "master_unpinned"
 )
 
 // AllKinds returns every alert kind, in the order of spec 5.3.
@@ -52,7 +56,7 @@ func AllKinds() []string {
 		KindMasterLocked, KindMasterDown, KindMySQLUnreachable, KindAgentOffline, KindDiskWarn, KindDiskCrit,
 		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed, KindTLSExpiring, KindWebTLSExpiring,
 		KindPromoteCutover, KindPromotePartial, KindReplicaNeedsRepoint, KindReplicaNeedsRebuild,
-		KindMasterQuarantined, KindMasterLockExpired}
+		KindMasterQuarantined, KindMasterLockExpired, KindMasterUnpinned}
 }
 
 // Fixed delays and hysteresis of the rules (plan 3, Global Constraints);
@@ -64,6 +68,7 @@ const (
 	diskCloseMargin       = 5                // disk alerts close under their threshold − 5
 	lagRecoveredFor       = time.Minute      // Sinkron this long closes replica_lagging
 	binlogDeadlinePct     = 80               // of the master's binlog_expire_logs_seconds
+	unpinnedAfterReports  = 2                // master_unpinned from the 3rd report in a row (spec 5.12)
 	tlsExpiringWithin     = 14 * 24 * time.Hour
 )
 
@@ -83,6 +88,9 @@ type ruleCtx struct {
 	outSince      time.Time // not following the master (Terputus, Berhenti, Dihentikan)
 	// repState is a replica's store.Replica.State; "" for a master.
 	repState string
+	// unpinnedReports: reports in a row whose role pin is not master
+	// (serverState.unpinnedReports).
+	unpinnedReports int
 }
 
 // alertRule opens an alert of kind when open holds (with its message) and
@@ -206,7 +214,7 @@ var alertRules = []alertRule{
 			return true, "Agent tidak terhubung ke panel atau laporannya terlambat."
 		},
 		// Opened and closed on the derived status only: a reconnected agent
-		// stays Agent offline until its first report or the next tick.
+		// shows Menunggu laporan pertama at once (OnOnline), which closes it.
 		close: func(v View, _ ruleCtx) bool { return v.Status.Code != StatusAgentOffline },
 	},
 	{
@@ -283,6 +291,18 @@ var alertRules = []alertRule{
 		judgedWhile: func(v View, ctx ruleCtx) bool { return isReplica(v) && rebuildPending(ctx.repState) },
 	},
 	{
+		kind: KindMasterUnpinned,
+		open: func(v View, ctx ruleCtx) (bool, string) {
+			if !isMaster(v) || ctx.unpinnedReports <= unpinnedAfterReports || v.Snap == nil {
+				return false, ""
+			}
+			return true, unpinnedMessage(v.Snap)
+		},
+		close: func(v View, _ ruleCtx) bool {
+			return !isMaster(v) || (v.Snap != nil && v.Snap.RolePin == pinMaster)
+		},
+	},
+	{
 		kind: KindBinlogDeadline,
 		open: func(v View, ctx ruleCtx) (bool, string) {
 			if !isReplica(v) || !notFollowing(v.Status.Code) || ctx.outSince.IsZero() ||
@@ -304,6 +324,23 @@ var alertRules = []alertRule{
 }
 
 func diskMessage(pct int) string { return fmt.Sprintf("Disk data terpakai %d%%.", pct) }
+
+// unpinnedMessage words master_unpinned for the master's report snap:
+// the role it is pinned as, or that its pin files cannot be read (the
+// agent's own text stays in Detail teknis).
+func unpinnedMessage(snap *proto.HealthSnapshot) string {
+	const advice = " Agent tidak menjaga server ini sebagai master (perintah yang bisa merusak replikasi tidak ditolak). "
+	if snap.RolePin == "" {
+		return "Master tidak dipin: berkas pin di server ini tidak bisa dibaca." + advice +
+			"Saran: perbaiki berkas pin (lihat Detail teknis di halaman server), lalu jalankan ulang Siapkan master."
+	}
+	role := snap.RolePin
+	if role == "unassigned" {
+		role = "belum ada"
+	}
+	return "Master tidak dipin: peran yang dipin di server ini " + role + ", bukan master." + advice +
+		"Saran: jalankan ulang Siapkan master."
+}
 
 // diskCritActive reports whether disk_crit is open after this evaluation:
 // usage at or over DiskCrit, or open and not yet under DiskCrit − 5.
@@ -555,7 +592,8 @@ func (m *Monitor) ruleCtx(id int64, s *serverState, v View, now time.Time) ruleC
 	} // otherwise (agent offline, MySQL not answering) unknown: the clock runs on
 
 	ctx := ruleCtx{now: now, set: m.settings,
-		connHighSince: s.connHighSince, syncedSince: s.syncedSince, outSince: s.outSince, repState: s.repState}
+		connHighSince: s.connHighSince, syncedSince: s.syncedSince, outSince: s.outSince, repState: s.repState,
+		unpinnedReports: s.unpinnedReports}
 	if v.Role == store.RoleReplica {
 		if ms, ok := m.servers[s.masterID]; ok && s.masterID != id {
 			mv := ms.view(s.masterID)

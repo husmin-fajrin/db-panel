@@ -87,6 +87,10 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		// it locally: read-only lifted for the statements and no binary
 		// logging, so no errant GTID blocks a later promotion.
 		a := account{User: p.User, Host: p.FromHost, Password: p.Password, RequireSSL: p.RequireSSL}
+		// One at a time (replUserMu): the check for an existing row and
+		// the statements after it, read-only's lift and restore included.
+		d.replUserMu.Lock()
+		defer d.replUserMu.Unlock()
 		role := ""
 		if d.pins != nil {
 			role = d.pins.Role()

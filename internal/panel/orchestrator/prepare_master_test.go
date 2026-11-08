@@ -135,6 +135,37 @@ func TestPrepareMasterKeepsExistingReplAccount(t *testing.T) {
 	}
 }
 
+// TestDropUserHintNamesActualHost: the DROP USER the failed job suggests
+// names the rows the agent found (its refusal lists them from
+// mysql.user), not '%' when the account lives at another host.
+func TestDropUserHintNamesActualHost(t *testing.T) {
+	cases := []struct{ refusal, want string }{
+		{"akun 'dbpanel_repl'@'10.9.9.9' sudah ada di master yang dipin; agent tidak mengubah akun yang sudah ada (sandi dan haknya tetap)",
+			"DROP USER 'dbpanel_repl'@'10.9.9.9';"},
+		{"akun 'dbpanel_repl'@'%', 'dbpanel_repl'@'10.0.0.%' sudah ada di master yang dipin; agent tidak mengubah akun yang sudah ada (sandi dan haknya tetap)",
+			"DROP USER 'dbpanel_repl'@'%', 'dbpanel_repl'@'10.0.0.%';"},
+		// An agent that names no row: the account prepare_master makes.
+		{"sudah ada di master yang dipin", "DROP USER 'dbpanel_repl'@'%';"},
+	}
+	for _, c := range cases {
+		e := newEnv(t)
+		fa := e.connectedMaster("db-master")
+		scriptPrepare(fa)
+		fa.fail("mysql.createReplUser", c.refusal)
+		id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, _ := e.waitJob(id, store.JobFailed)
+		if !strings.Contains(j.Error, "("+c.want+")") {
+			t.Errorf("job error %q lacks %q", j.Error, c.want)
+		}
+		if strings.Count(j.Error, "DROP USER") != 1 {
+			t.Errorf("job error %q: want one DROP USER", j.Error)
+		}
+	}
+}
+
 // scriptNeedsRestart makes the master's status show a loopback bind and
 // the binary log off until restarted is set; mysql.restart sets it.
 func scriptNeedsRestart(fa *fakeAgent, restarted *atomic.Bool) {

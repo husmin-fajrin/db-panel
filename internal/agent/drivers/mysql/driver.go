@@ -67,6 +67,11 @@ type Driver struct {
 
 	tlsMu sync.Mutex // one mysql.tls* command at a time
 
+	// replUserMu: one mysql.createReplUser at a time, from reading the
+	// existing rows to putting read-only back, so two concurrent calls
+	// never both see no account and both CREATE, ALTER and GRANT it.
+	replUserMu sync.Mutex
+
 	// RecordReplicas: the hosts it last wrote and when.
 	seenMu    sync.Mutex
 	seenHosts []string

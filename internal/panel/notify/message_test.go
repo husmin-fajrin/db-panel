@@ -138,6 +138,8 @@ func TestPromoteMessageHasNewAddress(t *testing.T) {
 		{monitor.KindReplicaNeedsRebuild, "⛔ x\nServer: DB-2 · Sejak: 09:30 · http://p/replicas/7"},
 		{monitor.KindMasterQuarantined, "ℹ️ x\nServer: DB-2 · Sejak: 09:30 · http://p/servers/7"},
 		{monitor.KindMasterLockExpired, "⚠️ x\nServer: DB-2 · Sejak: 09:30 · http://p/masters/7"},
+		// The server page holds Siapkan master and the pins' Detail teknis.
+		{monitor.KindMasterUnpinned, "⚠️ x\nServer: DB-2 · Sejak: 09:30 · http://p/servers/7"},
 	}
 	for _, c := range cases {
 		a := store.Alert{Kind: c.kind, ServerID: 7, OpenedAt: at(5, 9, 30), Message: "x"}

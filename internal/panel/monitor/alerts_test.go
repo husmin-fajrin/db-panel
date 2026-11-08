@@ -85,7 +85,7 @@ func running(s *proto.HealthSnapshot) {
 func TestAllKinds(t *testing.T) {
 	want := "replica_stopped replica_disconnected replica_lagging replica_unlocked master_locked master_down " +
 		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring web_tls_expiring " +
-		"promote_cutover promote_partial replica_needs_repoint replica_needs_rebuild master_quarantined master_lock_expired"
+		"promote_cutover promote_partial replica_needs_repoint replica_needs_rebuild master_quarantined master_lock_expired master_unpinned"
 	if got := strings.Join(AllKinds(), " "); got != want {
 		t.Fatalf("AllKinds = %s", got)
 	}
@@ -660,8 +660,9 @@ func TestSnoozeKeepsAlertsOpen(t *testing.T) {
 }
 
 // TestAgentOfflineAlertStableUntilReport: a reconnected agent whose first
-// report has not arrived still shows Agent offline; other servers'
-// reports must neither close nor reopen its alert.
+// report has not arrived shows Menunggu laporan pertama (spec 5.12), so
+// the first evaluation closes its agent_offline once; other servers'
+// reports and its own first one neither reopen it nor close it again.
 func TestAgentOfflineAlertStableUntilReport(t *testing.T) {
 	r := newRig(t)
 	mID, topo := r.master("db-master")
@@ -675,23 +676,21 @@ func TestAgentOfflineAlertStableUntilReport(t *testing.T) {
 	first := r.openAlert(rID, KindAgentOffline)
 
 	r.m.OnOnline(rID) // connected again, no report yet
+	if v := r.view(rID); v.Status.Code != StatusAwaitingReport {
+		t.Fatalf("status after reconnecting = %q, want %q", v.Status.Code, StatusAwaitingReport)
+	}
 	for range 2 {
 		r.clk.Add(time.Second)
 		ma.send()
 	}
 	as := r.alerts(rID, KindAgentOffline)
-	if len(as) != 1 || as[0].ID != first.ID || as[0].ClosedAt != nil {
-		t.Fatalf("agent_offline alerts after other reports = %+v, want the first still open", as)
+	if len(as) != 1 || as[0].ID != first.ID || as[0].ClosedAt == nil {
+		t.Fatalf("agent_offline alerts after other reports = %+v, want the first closed", as)
 	}
-	if ups := r.alertUpdates(rID, KindAgentOffline); len(ups) != 1 {
-		t.Fatalf("alert_update = %v, want only the opening", ups)
+	if ups := r.alertUpdates(rID, KindAgentOffline); len(ups) != 2 {
+		t.Fatalf("alert_update = %v, want the opening and one closing", ups)
 	}
-	// The tick re-derives the reconnected agent's status: closed once.
 	r.m.tick()
-	as = r.alerts(rID, KindAgentOffline)
-	if len(as) != 1 || as[0].ClosedAt == nil {
-		t.Fatalf("agent_offline alerts after the tick = %+v, want the one closed", as)
-	}
 	ra.send()
 	r.m.tick()
 	if n := len(r.alerts(rID, KindAgentOffline)); n != 1 {
@@ -1308,4 +1307,122 @@ func TestMasterQuarantinedFromStore(t *testing.T) {
 	}
 	r2.m.tick()
 	r2.openAlert(mID, KindMasterQuarantined)
+}
+
+func rolePin(role string) func(s *proto.HealthSnapshot) {
+	return func(s *proto.HealthSnapshot) { s.RolePin, s.PinError = role, "" }
+}
+
+// TestMasterUnpinnedAlertAfterThreeReports: a master whose agent reports
+// a role pin other than master for more than two reports in a row gets
+// master_unpinned (a warning, advising to prepare the master again); a
+// report with the master pin closes it. Replicas, old masters and agents
+// that report no pins never get it.
+func TestMasterUnpinnedAlertAfterThreeReports(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	unpinned := masterSnap(srcUUID + ":1-100")
+	unpinned.RolePin = "unassigned"
+	ma := r.agent(mID, true, unpinned).attach() // report 1: monitor.configure's answer
+	rsnap := replicaSnap(srcUUID + ":1-100")
+	rsnap.RolePin, rsnap.SourcePin = "replica", "10.0.0.1:3306"
+	ra := r.agent(rID, true, rsnap).attach()
+
+	ma.send() // report 2
+	for range 3 {
+		r.clk.Add(time.Minute)
+		r.m.tick() // ticks are no reports
+	}
+	if r.isOpen(mID, KindMasterUnpinned) {
+		t.Fatal("master_unpinned open after two reports")
+	}
+	ma.send() // report 3
+	a := r.openAlert(mID, KindMasterUnpinned)
+	for _, want := range []string{"tidak dipin", "belum ada", "jalankan ulang Siapkan master"} {
+		if !strings.Contains(a.Message, want) {
+			t.Errorf("message %q lacks %q", a.Message, want)
+		}
+	}
+	if a.TopologyID != topo.ID {
+		t.Errorf("alert topology = %d, want %d", a.TopologyID, topo.ID)
+	}
+
+	ma.setSnap(rolePin("master"))
+	ma.send()
+	if as := r.alerts(mID, KindMasterUnpinned); len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "" {
+		t.Fatalf("after the master pin: %+v, want the alert closed as recovered", as)
+	}
+	// The master pin starts the count again.
+	ma.setSnap(rolePin("replica"))
+	ma.send()
+	ma.send()
+	if r.isOpen(mID, KindMasterUnpinned) {
+		t.Fatal("master_unpinned open after two reports following the master pin")
+	}
+	ma.send()
+	if a := r.openAlert(mID, KindMasterUnpinned); !strings.Contains(a.Message, "replica") {
+		t.Errorf("message %q does not name the pinned role", a.Message)
+	}
+	ma.setSnap(rolePin("master"))
+	ma.send()
+
+	// A pin file the agent cannot trust counts as no master pin.
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.RolePin, s.PinError = "", "role harus milik root" })
+	for range 3 {
+		ma.send()
+	}
+	a = r.openAlert(mID, KindMasterUnpinned)
+	if !strings.Contains(a.Message, "berkas pin") || strings.Contains(a.Message, "milik root") {
+		t.Errorf("message %q: want the unreadable pin, without the agent's text", a.Message)
+	}
+	ma.setSnap(rolePin("master"))
+	ma.send()
+
+	// An agent that reports no pins at all (too old) is not judged.
+	ma.setSnap(rolePin(""))
+	for range 5 {
+		ma.send()
+	}
+	if r.isOpen(mID, KindMasterUnpinned) {
+		t.Fatal("master_unpinned open for an agent that reports no pins")
+	}
+
+	// A replica is pinned replica: never master_unpinned.
+	for range 5 {
+		ra.send()
+	}
+	if len(r.alerts(rID, KindMasterUnpinned)) != 0 {
+		t.Fatal("master_unpinned for a replica")
+	}
+
+	// An old master after a promotion is pinned quarantined: its open
+	// master_unpinned closes and none opens again.
+	ma.setSnap(rolePin("unassigned"))
+	for range 3 {
+		ma.send()
+	}
+	r.openAlert(mID, KindMasterUnpinned)
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+		t.Fatal(err)
+	}
+	ma.setSnap(rolePin("quarantined"))
+	for range 5 {
+		ma.send()
+	}
+	r.m.tick()
+	if r.view(mID).Role != store.RoleQuarantined {
+		t.Fatalf("old master role = %q", r.view(mID).Role)
+	}
+	as := r.alerts(mID, KindMasterUnpinned)
+	if last := as[len(as)-1]; last.ClosedAt == nil || r.isOpen(mID, KindMasterUnpinned) {
+		t.Fatalf("old master: master_unpinned %+v, want closed and none open", as)
+	}
+	// The new master was a replica a moment ago: its replica reports do
+	// not count towards it.
+	ra.send()
+	ra.send()
+	if r.isOpen(rID, KindMasterUnpinned) {
+		t.Fatal("the new master's reports as a replica counted towards master_unpinned")
+	}
 }

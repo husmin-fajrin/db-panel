@@ -126,6 +126,9 @@ type serverDetailPage struct {
 	// is); DeleteUnquarantined: the delete is "Hapus tanpa karantina".
 	DeleteBlocked       string
 	DeleteUnquarantined bool
+	// Pins is what the agent's last report says of its pins (Detail
+	// teknis); nil before a report that carries them.
+	Pins *pinFacts
 	// DeleteWarnings: what deleting the server from the panel loses (an
 	// old master's leftover data, its salvage files); shown in the modal
 	// and the confirmation.
@@ -297,6 +300,37 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
 }
 
+// pinFacts are the agent's pins in words (spec 5.12).
+type pinFacts struct {
+	Role   string // "master", "replica", "dikarantina", "belum ada"; "-" while unreadable
+	Source string // host:port, or "tidak ada"
+	Error  string // why the pin files cannot be read; "" when they can
+}
+
+// newPinFacts reads the pins of snap; nil without a report, or from an
+// agent that reports none.
+func newPinFacts(snap *proto.HealthSnapshot) *pinFacts {
+	if snap == nil || (snap.RolePin == "" && snap.PinError == "") {
+		return nil
+	}
+	f := &pinFacts{Role: snap.RolePin, Source: snap.SourcePin, Error: snap.PinError}
+	switch f.Role {
+	case "":
+		f.Role = "-"
+	case "quarantined":
+		f.Role = "dikarantina"
+	case "unassigned":
+		f.Role = "belum ada"
+	}
+	switch {
+	case f.Source == "" && f.Error != "":
+		f.Source = "-"
+	case f.Source == "":
+		f.Source = "tidak ada"
+	}
+	return f
+}
+
 // renderServer renders the server page with v's status and messages.
 func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView) {
 	p := serverDetailPage{Page: a.page(r), Server: srv, Local: a.isLocal(srv), Connect: v.Form}
@@ -348,6 +382,9 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 		case !errors.Is(err, store.ErrNotFound):
 			a.internalError(w, "get server tls", err)
 			return
+		}
+		if v, ok := a.Monitor.View(srv.ID); ok {
+			p.Pins = newPinFacts(v.Snap)
 		}
 		if err := a.oldMasterViews(r.Context(), srv, &p); err != nil {
 			a.internalError(w, "old master", err)

@@ -38,6 +38,7 @@ var alertKindLabels = map[string]string{
 	monitor.KindReplicaNeedsRebuild: "Replika perlu dibangun ulang",
 	monitor.KindMasterQuarantined:   "Master lama dikarantina",
 	monitor.KindMasterLockExpired:   "Batas waktu kunci promote",
+	monitor.KindMasterUnpinned:      "Master tidak dipin",
 }
 
 func alertKindLabel(kind string) string {

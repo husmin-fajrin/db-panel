@@ -368,6 +368,25 @@ func (p *Pins) Source() (host string, port int, ok bool) {
 	return p.srcHost, p.srcPort, true
 }
 
+// Report is what the health reports say of the pins (spec 5.12): the
+// pinned role and source (host:port, "" when none), or, while the files
+// cannot be trusted, no pins and why. The reason names the pin files
+// without their directory: it travels to the panel and its pages.
+func (p *Pins) Report() (role, source, pinErr string) {
+	if p == nil {
+		return "", "", ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.reload(); err != nil {
+		return "", "", strings.ReplaceAll(err.Error(), p.dir+string(filepath.Separator), "")
+	}
+	if p.hasSrc {
+		source = net.JoinHostPort(p.srcHost, strconv.Itoa(p.srcPort))
+	}
+	return p.role, source, ""
+}
+
 // SetRole writes role, whatever is pinned now; unassigned removes the role
 // and the source pin. It is the local CLI's: panel commands only ever pin
 // an unassigned server (claimRole) or a rebuilt quarantined one

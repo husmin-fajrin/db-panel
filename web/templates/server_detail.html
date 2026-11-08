@@ -99,6 +99,20 @@
     {{template "server-controls" .Controls}}
   </div>
 </div>
+{{with .Pins}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <details>
+      <summary class="cursor-pointer font-semibold">Detail teknis</summary>
+      <div class="text-sm mt-2 flex flex-col gap-1">
+        <p>Peran dipin: {{.Role}}</p>
+        <p>Sumber dipin: {{.Source}}</p>
+        {{with .Error}}<p>Berkas pin tidak bisa dibaca (di direktori agent, biasanya <code>/etc/dbpanel</code>): <code class="break-all">{{.}}</code></p>{{end}}
+      </div>
+    </details>
+  </div>
+</div>
+{{end}}
 {{with .Probe}}{{if .Disks}}
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">

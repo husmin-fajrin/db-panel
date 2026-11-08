@@ -553,3 +553,38 @@ func TestQuarantinePendingExplanation(t *testing.T) {
 		t.Fatalf("quarantined explanation = %+v", e)
 	}
 }
+
+// TestServerPageShowsPins: the server page's Detail teknis says what the
+// agent's last report says of its pins, and why a pin file cannot be
+// read; without pins in the report there is no such section.
+func TestServerPageShowsPins(t *testing.T) {
+	e, mon, _ := monitorEnv(t)
+	snap := masterSnap()
+	snap.RolePin = "master"
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow, Snap: snap,
+		Status: monitor.Status{Code: monitor.StatusHealthy, Severity: monitor.SevOK}})
+	rec := e.do("GET", "/servers/1", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	tech := between(rec.Body.String(), "Detail teknis", "</details>")
+	for _, want := range []string{"Peran dipin: master", "Sumber dipin: tidak ada"} {
+		if !strings.Contains(tech, want) {
+			t.Errorf("Detail teknis lacks %q:\n%s", want, tech)
+		}
+	}
+
+	snap = masterSnap()
+	snap.RolePin, snap.SourcePin = "quarantined", "10.0.0.2:3306"
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow, Snap: snap})
+	rec = e.do("GET", "/servers/1", nil, e.cookie())
+	wantBody(t, rec, "Peran dipin: dikarantina", "Sumber dipin: 10.0.0.2:3306")
+
+	snap = masterSnap()
+	snap.PinError = "role harus milik root; jalankan: chown root:root role"
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow, Snap: snap})
+	rec = e.do("GET", "/servers/1", nil, e.cookie())
+	wantBody(t, rec, "Peran dipin: -", "Berkas pin tidak bisa dibaca", "role harus milik root")
+
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow, Snap: masterSnap()})
+	rec = e.do("GET", "/servers/1", nil, e.cookie())
+	wantNoBody(t, rec, "Peran dipin")
+}

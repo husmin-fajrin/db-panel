@@ -238,8 +238,11 @@ func (m *Monitor) HandleEvent(serverID int64, ev proto.Event) bool {
 }
 
 // OnOnline records the agent as connected and, in the background, sends it
-// the settings with monitor.configure; the answer is its first report. It
-// runs under the hub's lifecycle lock, so it never calls the hub itself.
+// the settings with monitor.configure; the answer is its first report. A
+// server that was Agent offline shows Menunggu laporan pertama at once,
+// until a live report arrives (whether or not monitor.configure answers).
+// It runs under the hub's lifecycle lock, so it never calls the hub
+// itself.
 func (m *Monitor) OnOnline(serverID int64) {
 	now := m.now()
 	m.mu.Lock()
@@ -247,7 +250,16 @@ func (m *Monitor) OnOnline(serverID int64) {
 	s.online, s.offlineSince = true, time.Time{}
 	s.lastSeq = 0 // a restarted agent counts from 1 again
 	m.addEvent(serverID, s, now, kindAgent, "", "", "Agent terhubung")
+	var ups []healthUpdate
+	if offlineStatus(s.status) {
+		s.awaitingSince = now
+		if s.resolvedOK {
+			m.derive(serverID, s, now, false)
+			ups = m.commit(serverID, s, nil)
+		}
+	}
 	m.mu.Unlock()
+	m.emit(ups)
 	m.goBg(func(ctx context.Context) { m.configure(ctx, serverID) })
 }
 
@@ -263,7 +275,7 @@ func (m *Monitor) OnOffline(serverID int64) {
 	now := m.now()
 	m.mu.Lock()
 	s := m.state(serverID)
-	s.online, s.offlineSince = false, now
+	s.online, s.offlineSince, s.awaitingSince = false, now, time.Time{}
 	m.addEvent(serverID, s, now, kindAgent, "", "", "Agent terputus")
 	m.mu.Unlock()
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -53,6 +54,14 @@ type serverState struct {
 	// not count as stale before this time (one StaleAfter after startup);
 	// zero once a report arrives.
 	graceUntil time.Time
+	// awaitingSince: the agent connected again at this time while the
+	// server was Agent offline (offlineStatus), and no live report has
+	// arrived since; the status is Menunggu laporan pertama until one does
+	// or StaleAfter passes (awaitingReport). Zero when not waiting.
+	awaitingSince time.Time
+	// unpinnedReports counts the reports in a row, while the server is a
+	// topology's master, whose role pin is not master (master_unpinned).
+	unpinnedReports int
 
 	// Derived.
 	status   Status
@@ -157,9 +166,13 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 	s.snap, s.receivedAt, s.snapBacklog, s.graceUntil = &snap, at, he.Backlog, time.Time{}
 	s.needsUpgrade = false // only a current agent reports
 	s.dirty = true
+	if !he.Backlog {
+		s.awaitingSince = time.Time{} // a live report: fresh
+	}
 	if err := m.resolve(id, s, at); err != nil {
 		m.log.Warn("monitor: resolve role", "server_id", id, "err", err)
 	}
+	s.unpinnedReports = unpinnedCount(s.unpinnedReports, s.role, &snap)
 	m.snapshotEvents(id, s, &snap, at, true)
 	if snap.MySQLOK {
 		s.unreachableSince = time.Time{}
@@ -179,6 +192,21 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 	}
 	return m.commit(id, s, nil)
 }
+
+// unpinnedCount is the count of reports in a row whose role pin is not
+// master, after snap: only a topology's master counts; the master pin, or
+// a report that says nothing of the pins (an agent too old, or without
+// pins), starts it again. A pin file the agent cannot trust (PinError, no
+// RolePin) counts: such a master refuses every guarded command.
+func unpinnedCount(n int, role string, snap *proto.HealthSnapshot) int {
+	if role != store.RoleMaster || snap.RolePin == pinMaster || (snap.RolePin == "" && snap.PinError == "") {
+		return 0
+	}
+	return n + 1
+}
+
+// pinMaster is the role pin of a master (proto.HealthSnapshot.RolePin).
+const pinMaster = "master"
 
 func firstTime(cur, at time.Time) time.Time {
 	if cur.IsZero() {
@@ -288,10 +316,46 @@ const (
 )
 
 // heldThrough reports whether a status with code replaces a held one: the
-// agent's own condition (offline, too old, MySQL not answering) is judged
-// as usual while a replica waits for a fresh report.
+// agent's own condition (offline, too old, MySQL not answering, connected
+// again and not reported yet) is judged as usual while a replica waits for
+// a fresh report.
 func heldThrough(code string) bool {
-	return code == StatusAgentOffline || code == StatusUnreachable || code == StatusNeedsUpgrade
+	return code == StatusAgentOffline || code == StatusUnreachable || code == StatusNeedsUpgrade ||
+		code == StatusAwaitingReport
+}
+
+// offlineStatus reports whether st comes from the agent's absence: Agent
+// offline, or a master presumed down because its agent is away.
+func offlineStatus(st Status) bool {
+	return st.Code == StatusAgentOffline || (st.Code == StatusDown && strings.HasPrefix(st.Detail, downAgentOffline))
+}
+
+// storeDecided reports whether code comes from the store's state, not
+// from the agent's reports; waiting for a report does not change it.
+func storeDecided(code string) bool {
+	return code == StatusNotReady || code == StatusNeedsRepoint || code == StatusNeedsRebuild
+}
+
+// awaitingReport reports whether s, its agent connected (online), still
+// waits for its first live report since it connected again; the wait ends
+// after StaleAfter, as long as any report may be late. The caller holds
+// mu.
+func (m *Monitor) awaitingReport(s *serverState, online bool, now time.Time) bool {
+	if s.awaitingSince.IsZero() || !online || s.needsUpgrade {
+		return false
+	}
+	if now.Sub(s.awaitingSince) > m.settings.StaleAfter {
+		s.awaitingSince = time.Time{}
+		return false
+	}
+	return true
+}
+
+// awaitingStatus is the status of a server whose agent connected again
+// and has not reported since.
+func awaitingStatus() Status {
+	return Status{Code: StatusAwaitingReport, Severity: SevNeutral,
+		Detail: "Agent tersambung lagi; menunggu laporan pertamanya"}
 }
 
 // derive computes the status of a resolved server at now and records a
@@ -310,7 +374,18 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 	}
 	online := s.online || fromReport
 	if online && s.snap == nil && !s.needsUpgrade {
-		return // connected, first report not here yet
+		// Connected, first report not here yet: waiting once it went
+		// Agent offline, and Agent offline again when it stays silent
+		// longer than a report may be late.
+		connectedAt := s.awaitingSince
+		switch {
+		case m.awaitingReport(s, online, now):
+			m.apply(id, s, awaitingStatus(), now)
+		case s.status.Code == StatusAwaitingReport || (offlineStatus(s.status) && !connectedAt.IsZero()):
+			m.apply(id, s, Status{Code: StatusAgentOffline, Severity: SeverityOf(StatusAgentOffline),
+				Detail: "Agent tersambung tetapi belum mengirim laporan"}, now)
+		}
+		return
 	}
 	var offlineSince time.Time
 	if !online {
@@ -362,6 +437,11 @@ func (m *Monitor) derive(id int64, s *serverState, now time.Time, fromReport boo
 			ReceivedAt: m.staleBase(s, now), NeedsUpgrade: s.needsUpgrade, Snap: s.snap,
 			MasterGTIDExecuted: masterGTID, GapSince: s.gapSince, DisconnectedSince: s.disconnectedSince, Now: now,
 		}, th)
+	}
+	// Connected again after Agent offline: the report before says nothing
+	// of now (spec 5.12), so wait for a live one.
+	if m.awaitingReport(s, online, now) && !storeDecided(st.Code) {
+		st = awaitingStatus()
 	}
 	if held && !heldThrough(st.Code) {
 		return
@@ -440,7 +520,7 @@ func eventDetail(st Status) string {
 // code: the replica was ready, its agent current and MySQL answering.
 func lockJudged(code string) bool {
 	switch code {
-	case StatusNotReady, StatusAgentOffline, StatusNeedsUpgrade, StatusUnreachable:
+	case StatusNotReady, StatusAgentOffline, StatusNeedsUpgrade, StatusUnreachable, StatusAwaitingReport:
 		return false
 	}
 	return true

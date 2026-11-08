@@ -32,6 +32,10 @@ const (
 	StatusQuarantined  = "Master lama (dikarantina)"
 	StatusNeedsRepoint = "Perlu diarahkan ulang"
 	StatusNeedsRebuild = "Perlu dibangun ulang"
+	// StatusAwaitingReport: the agent connected again after its server
+	// went Agent offline, and no live report has arrived since (spec
+	// 5.12); neutral, nothing is judged from the report before.
+	StatusAwaitingReport = "Menunggu laporan pertama"
 )
 
 type Severity int

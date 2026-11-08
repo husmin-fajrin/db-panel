@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -119,7 +121,7 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 			// log in with what the panel stores.
 			return outcome{}, fmt.Errorf("akun replikasi %s sudah ada di master ini dari persiapan sebelumnya, dan master yang "+
 				"dipin tidak mengizinkan panel mengganti sandinya. Bila tidak ada replika lain yang memakainya, hapus akun itu di "+
-				"server ini (DROP USER '%s'@'%%';) lalu klik Ulangi. Pesan agent: %v", replUser, replUser, err)
+				"server ini (%s) lalu klik Ulangi. Pesan agent: %v", replUser, dropReplUserHint(err.Error()), err)
 		}
 		// Prepared before with the topology's password: it stays.
 		jr.logf("info", "User replikasi %s sudah ada di master; sandinya tidak diubah.", replUser)
@@ -135,6 +137,26 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 		return done("perlu restart: %s", strings.Join(res.RestartReasons, "; ")), nil
 	}
 	return done("diterapkan tanpa restart"), nil
+}
+
+// replRowRe finds the replication account's rows the agent's refusal
+// names ('dbpanel_repl'@'host', read from mysql.user).
+var replRowRe = regexp.MustCompile(`'` + regexp.QuoteMeta(replUser) + `'@'[^'\\]*'`)
+
+// dropReplUserHint is the DROP USER that clears the rows of the
+// replication account named in refusal, the agent's words; the account
+// prepare_master makes ('%') when it names none.
+func dropReplUserHint(refusal string) string {
+	var rows []string
+	for _, r := range replRowRe.FindAllString(refusal, -1) {
+		if !slices.Contains(rows, r) {
+			rows = append(rows, r)
+		}
+	}
+	if len(rows) == 0 {
+		rows = []string{"'" + replUser + "'@'%'"}
+	}
+	return "DROP USER " + strings.Join(rows, ", ") + ";"
 }
 
 // accountExistsOnPinnedMaster is the words of the agent's refusal to

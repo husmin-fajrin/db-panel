@@ -67,6 +67,7 @@ var kindNames = map[string]string{
 	monitor.KindReplicaNeedsRebuild: "replika perlu dibangun ulang",
 	monitor.KindMasterQuarantined:   "master lama dikarantina",
 	monitor.KindMasterLockExpired:   "batas waktu kunci promote",
+	monitor.KindMasterUnpinned:      "master tidak dipin",
 }
 
 // masterKinds and replicaKinds link to the master's or the replica's page;

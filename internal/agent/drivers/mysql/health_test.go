@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
@@ -364,4 +365,66 @@ func TestSystemStatsFromFakeProc(t *testing.T) {
 	if diskTotal, _, _, _, _ := mysql.SystemStats(sys, ""); diskTotal != 0 {
 		t.Errorf("DiskTotal = %d without a data directory", diskTotal)
 	}
+}
+
+// TestSnapshotReportsPins: every reading carries the pinned role and
+// source, whatever MySQL answers; an untrusted pin file is reported as
+// PinError without the pin directory, and both pins empty.
+func TestSnapshotReportsPins(t *testing.T) {
+	snap := func(d *mysql.Driver) proto.HealthSnapshot {
+		t.Helper()
+		if d.PinDir != "" {
+			d.Register(commands.NewRegistry())
+		}
+		return d.Snapshot(context.Background())
+	}
+	cases := []struct {
+		name, role, source string
+		wantRole, wantSrc  string
+	}{
+		{"master", "master", "", "master", ""},
+		{"replica", "replica", "10.0.0.1:3306", "replica", "10.0.0.1:3306"},
+		{"quarantined IPv6", "quarantined", "[fd00::1]:3307", "quarantined", "[fd00::1]:3307"},
+		{"no pin yet", "", "", "unassigned", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := snap(&mysql.Driver{PinDir: pinDir(t, c.role, c.source)})
+			if s.RolePin != c.wantRole || s.SourcePin != c.wantSrc || s.PinError != "" {
+				t.Errorf("RolePin=%q SourcePin=%q PinError=%q; want %q, %q, none", s.RolePin, s.SourcePin, s.PinError, c.wantRole, c.wantSrc)
+			}
+			if s.MySQLError != "belum terhubung" {
+				t.Errorf("MySQLError=%q: the pins are read without MySQL", s.MySQLError)
+			}
+		})
+	}
+
+	t.Run("untrusted file", func(t *testing.T) {
+		dir := pinDir(t, "master", "")
+		d := &mysql.Driver{PinDir: dir}
+		path := filepath.Join(dir, mysql.RoleFile)
+		if err := os.Chmod(path, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		s := snap(d)
+		if s.RolePin != "" || s.SourcePin != "" || s.PinError == "" {
+			t.Fatalf("RolePin=%q SourcePin=%q PinError=%q; want no pins and an error", s.RolePin, s.SourcePin, s.PinError)
+		}
+		if strings.Contains(s.PinError, dir) || !strings.Contains(s.PinError, mysql.RoleFile) || !strings.Contains(s.PinError, "0666") {
+			t.Errorf("PinError = %q; want the file's name and mode without %s", s.PinError, dir)
+		}
+		// Fixed on disk: the next reading reports the pin again.
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if s := d.Snapshot(context.Background()); s.RolePin != "master" || s.PinError != "" {
+			t.Errorf("after the fix: RolePin=%q PinError=%q", s.RolePin, s.PinError)
+		}
+	})
+
+	t.Run("no pins", func(t *testing.T) {
+		if s := snap(&mysql.Driver{}); s.RolePin != "" || s.SourcePin != "" || s.PinError != "" {
+			t.Errorf("RolePin=%q SourcePin=%q PinError=%q; want all empty", s.RolePin, s.SourcePin, s.PinError)
+		}
+	})
 }

@@ -35,6 +35,7 @@ const (
 // one connection across calls (dropped and reopened after a failure). A
 // MySQL that does not answer within 5 s yields MySQLOK=false with the error
 // text, not an error. ErrNoHost / no stored credential: MySQLError = "belum terhubung".
+// The pins are reported whatever MySQL answers (Pins.Report).
 func (d *Driver) Snapshot(ctx context.Context) proto.HealthSnapshot {
 	h, err := d.host()
 	var s proto.HealthSnapshot
@@ -44,6 +45,7 @@ func (d *Driver) Snapshot(ctx context.Context) proto.HealthSnapshot {
 		s = d.mysqlHealth(ctx, h)
 	}
 	s.AgentVersion = version.Version
+	s.RolePin, s.SourcePin, s.PinError = d.pins.Report()
 	if d.Sys != nil {
 		datadir := ""
 		if h != nil {

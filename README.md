@@ -460,7 +460,10 @@ pernah mengubah akun yang sudah ada (sandi dan haknya tetap). Bila "Siapkan
 master" dijalankan ulang untuk topologi baru sementara `dbpanel_repl` masih
 ada dari persiapan sebelumnya, pekerjaan berhenti dan menyebut perintah
 `DROP USER` yang perlu dijalankan di master (hanya bila tidak ada replika
-lain yang memakainya).
+lain yang memakainya), dengan host baris akun yang memang ada (misalnya
+`'dbpanel_repl'@'10.0.0.%'`, tidak selalu `'%'`). Dua permintaan pembuatan
+akun replikasi yang datang bersamaan dijalankan agent satu per satu, jadi
+yang kedua menemukan akun yang baru dibuat dan tidak mengubahnya.
 
 ### Kebijakan lokal agent
 
@@ -609,6 +612,18 @@ pin harus milik root dan tidak bisa ditulis grup atau pengguna lain;
 selama tidak demikian, perintah yang dijaga ditolak dengan pesan cara
 memperbaikinya.
 
+Setiap laporan pemantauan memuat pin itu. Halaman server menampilkannya di
+**Detail teknis** ("Peran dipin: master", "Sumber dipin: 10.0.0.1:3306"),
+juga alasan bila berkas pin tidak bisa dibaca (nama berkas tanpa
+direktorinya). Master topologi yang melaporkan peran dipin selain `master`
+(atau berkas pin yang tidak bisa dibaca) tiga laporan berturut-turut
+memunculkan peringatan **Master tidak dipin** (tingkat peringatan); di
+master seperti itu agent tidak menolak perintah yang bisa merusak
+replikasi. Saran: jalankan ulang **Siapkan master** (perbaiki dulu berkas
+pinnya bila tidak terbaca). Peringatan tertutup begitu laporan menyebut
+pin `master`. Replika dan master lama yang dikarantina tidak pernah
+mendapatkannya, begitu pula agent versi lama yang belum melaporkan pin.
+
 ### Cadangkan kunci panel
 
 Sandi replikasi disimpan di `panel.db` tersegel dengan
@@ -671,6 +686,7 @@ Status replika, dalam kata sederhana:
 | Berhenti | replikasi berhenti karena error; panel menyebut nomor error, artinya, dan sarannya |
 | Tidak terjangkau | MySQL di replika tidak menjawab |
 | Agent offline | agent tidak terhubung ke panel, atau laporannya terlambat |
+| Menunggu laporan pertama | agent baru tersambung lagi setelah offline; laporan lama tidak dinilai sampai laporan baru masuk (paling lama selama batas laporan terlambat, sesudah itu Agent offline lagi) |
 | Agent perlu dimutakhirkan | agent versi lama yang belum bisa memantau (lihat "Pembaruan") |
 | Belum siap | replika sedang dibuat atau disync ulang, atau pembuatannya gagal |
 
@@ -679,7 +695,8 @@ Penanda merah **Kunci terlepas** tampil di samping status apa pun bila
 replika dan isinya bisa berbeda dari master.
 
 Status master: **Sehat**, **Terkunci** (`super_read_only` menyala, aplikasi
-tidak bisa menulis), **Tidak terjangkau**, **Agent offline**, dan **Diduga
+tidak bisa menulis), **Tidak terjangkau**, **Agent offline**, **Menunggu
+laporan pertama** (seperti di replika), dan **Diduga
 tumbang** (agent atau MySQL master tidak menjawab lebih dari 30 detik).
 Untuk master yang diduga tumbang, halamannya menampilkan langkah manual
 "Yang bisa dilakukan sekarang"; panel belum bisa memindahkan peran master

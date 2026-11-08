@@ -16,7 +16,8 @@ const (
 // changed reports whether cur differs from prev, the last reported
 // snapshot, in a way the panel must hear about at once (spec 5.1 "Kapan
 // melapor"): MySQL reachability, the read-only locks, the replication
-// threads, their errors and source, lag crossing lagThreshold (an unknown
+// threads, their errors and source, the pins (spec 5.12: a master pinned
+// at last closes master_unpinned at once), lag crossing lagThreshold (an unknown
 // lag is a state of its own), the binlog dump threads, disk use crossing
 // diskWarn or diskCrit percent, connections crossing connPct percent of
 // max_connections, and a restart (uptime went down). An empty prev is
@@ -31,6 +32,8 @@ func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWar
 		prev.ReadOnly != cur.ReadOnly,
 		prev.SuperReadOnly != cur.SuperReadOnly,
 		prev.BinlogDumpThreads != cur.BinlogDumpThreads,
+		prev.RolePin != cur.RolePin, prev.SourcePin != cur.SourcePin,
+		(prev.PinError == "") != (cur.PinError == ""),
 		diskLevel(prev, diskWarn, diskCrit) != diskLevel(cur, diskWarn, diskCrit),
 		connHigh(prev, connPct) != connHigh(cur, connPct),
 		prev.MySQLOK && cur.MySQLOK && cur.UptimeSec < prev.UptimeSec:

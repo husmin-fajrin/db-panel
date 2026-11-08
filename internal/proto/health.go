@@ -35,6 +35,16 @@ type HealthSnapshot struct {
 	Load1        float64 `json:"load1"`
 
 	AgentVersion string `json:"agent_version"`
+
+	// The agent's pins (spec 5.12), read on every report whatever MySQL
+	// answers. RolePin is master, replica, quarantined or unassigned;
+	// SourcePin is the pinned replication source as host:port, "" when
+	// none. While a pin file cannot be trusted both are "" and PinError
+	// says why (without the pin directory). All three are "" from an
+	// agent that keeps no pins (or one too old to report them).
+	RolePin   string `json:"role_pin,omitempty"`
+	SourcePin string `json:"source_pin,omitempty"`
+	PinError  string `json:"pin_error,omitempty"`
 }
 
 // EventHealth is the event an agent's monitor sends with a HealthEvent
