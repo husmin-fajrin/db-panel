@@ -979,6 +979,30 @@ pengalihan.
   lalu lintas tetap terenkripsi, tetapi penyamaran di jaringan lokal
   tidak terdeteksi oleh mereka.
 
+Ditambahkan setelah audit akhir Rencana 4c (penguatan audit):
+
+- Rantai hash `audit_log` tidak berkunci rahasia: siapa pun yang bisa
+  menulis `panel.db` (root atau pengguna `dbpanel`) dapat menghitung
+  ulang rantai sehingga `audit-verify` tetap melaporkan "Rantai utuh";
+  penghapusan baris terakhir juga tidak terdeteksi. Jangkar yang
+  sesungguhnya adalah salinan journald, yang dibaca oleh anggota grup
+  `adm`/`systemd-journal` dan sebaiknya diteruskan ke host lain.
+- Sensor kutipan adalah heuristik berbasis templat pesan MySQL: data
+  yang dicetak MySQL tanpa tanda kutip (teks SIGNAL dari trigger, ekor
+  pesan yang tidak cocok templat) tidak disensor; jurnal agent dan log
+  error MySQL di server basis data tetap memuat teks mentah.
+- `tls_verified` dan versi agent berasal dari laporan agent itu sendiri;
+  agent replika yang dibobol dapat menyembunyikan peringatannya sendiri
+  (gagal-aman: hanya peringatan, bukan izin).
+- Penolakan pekerjaan selama kunci promote mengandalkan catatan panel:
+  `unlock-master` yang dijalankan manual baru diketahui panel saat
+  "Ulangi" ditekan pada promote terencana itu.
+- Reverse proxy di depan panel tidak didukung: pemeriksaan loopback
+  pairing lokal, batas login per IP, dan IP audit mengandalkan alamat
+  koneksi asli.
+- Admin dapat menyetel retensi ke 1 hari (tercatat di audit), yang
+  menghapus riwayat peringatan dan kejadian.
+
 ## 9. Keputusan dari builder check (ditetapkan penulis dokumen)
 
 Pertanyaan builder yang bisa diputuskan tanpa mengubah apa yang
