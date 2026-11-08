@@ -83,6 +83,10 @@ func newRig(t *testing.T, setup ...func(st *store.Store)) *rig {
 	l := &forwarder{}
 	// The tests send reports faster than an agent does; the hub's clock
 	// moves 2 s on each reading so its report rate limit never drops one.
+	// This hides the limiter from every test on this rig: Dropped (read
+	// by View) is always 0 here, and a report is never refused. The limit
+	// is tested in the hub package (TestHubRateLimitsSnapshotsPerServer,
+	// TestHubBacklogAllowance) and its display in the web package.
 	var hubTicks atomic.Int64
 	r.hub = hub.New(l, hub.WithNow(func() time.Time {
 		return r.clk.Now().Add(time.Duration(hubTicks.Add(1)) * 2 * time.Second)

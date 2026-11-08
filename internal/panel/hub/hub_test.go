@@ -452,3 +452,115 @@ func TestHubRateLimitsSnapshotsPerServer(t *testing.T) {
 		t.Fatalf("after the pause passed = %d, dropped %d; want 21 and 0", n, h.Dropped(1))
 	}
 }
+
+// healthEvent is a health report event, marked as backlog or not.
+func healthEvent(t *testing.T, backlog bool) proto.Event {
+	t.Helper()
+	b, err := json.Marshal(proto.HealthEvent{Seq: 1, Backlog: backlog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proto.Event{Type: proto.EventHealth, Payload: b}
+}
+
+// TestHubBacklogAllowance: the backlog a sound agent flushes after a
+// reconnect (up to 200 reports) passes whole; past the bucket's 10 tokens
+// and the 200 of the allowance a report is dropped, a re-Attach within 10 min grants nothing new, and live
+// reports still obey the bucket. After 10 min a new connection gets a
+// fresh allowance.
+func TestHubBacklogAllowance(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}
+	l := &fakeListener{}
+	h := New(l, WithNow(clk.Now))
+	h.Attach(1, newFakeConn(0))
+	backlog, live := healthEvent(t, true), healthEvent(t, false)
+
+	// A full ring (200 reports) passes whole.
+	for range 200 {
+		h.OnEvent(1, backlog)
+	}
+	if n := l.eventCount(1, proto.EventHealth); n != 200 || h.Dropped(1) != 0 {
+		t.Fatalf("full backlog: passed %d, dropped %d; want 200 and 0", n, h.Dropped(1))
+	}
+	// The bucket's 10 tokens went first, so 10 more backlog reports fit;
+	// the 211th is dropped.
+	for range 11 {
+		h.OnEvent(1, backlog)
+	}
+	if n := l.eventCount(1, proto.EventHealth); n != 210 || h.Dropped(1) != 1 {
+		t.Fatalf("past the allowance: passed %d, dropped %d; want 210 and 1", n, h.Dropped(1))
+	}
+	// Live reports still obey the empty bucket.
+	h.OnEvent(1, live)
+	if n := l.eventCount(1, proto.EventHealth); n != 210 || h.Dropped(1) != 2 {
+		t.Fatalf("live report with an empty bucket: passed %d, dropped %d; want 210 and 2", n, h.Dropped(1))
+	}
+
+	// Reconnecting within 10 min mints no new allowance.
+	clk.Add(5 * time.Minute) // refills the bucket: 10 tokens
+	h.Attach(1, newFakeConn(0))
+	for range 11 {
+		h.OnEvent(1, backlog)
+	}
+	if n := l.eventCount(1, proto.EventHealth); n != 220 || h.Dropped(1) != 3 {
+		t.Fatalf("re-Attach within 10 min: passed %d, dropped %d; want 220 and 3", n, h.Dropped(1))
+	}
+
+	// 10 min after the grant a new connection gets a fresh allowance.
+	clk.Add(5 * time.Minute)
+	h.Attach(1, newFakeConn(0))
+	for range 211 {
+		h.OnEvent(1, backlog)
+	}
+	if n := l.eventCount(1, proto.EventHealth); n != 430 {
+		t.Fatalf("after 10 min: passed %d, want 430 (10 tokens + 200 allowance)", n)
+	}
+}
+
+// TestHubRateLimitConcurrent: reports racing in from many goroutines on
+// two servers with a frozen clock let exactly 10 through per server.
+func TestHubRateLimitConcurrent(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}
+	l := &fakeListener{}
+	h := New(l, WithNow(clk.Now))
+	snap := proto.Event{Type: proto.EventHealth}
+	var wg sync.WaitGroup
+	for i := range 40 {
+		id := int64(1 + i%2)
+		wg.Go(func() {
+			for range 25 {
+				h.OnEvent(id, snap)
+				h.Dropped(id)
+			}
+		})
+	}
+	wg.Wait()
+	for _, id := range []int64{1, 2} {
+		if n := l.eventCount(id, proto.EventHealth); n != 10 {
+			t.Errorf("server %d: %d reports passed, want 10", id, n)
+		}
+		if d := h.Dropped(id); d != 490 {
+			t.Errorf("server %d: Dropped = %d, want 490", id, d)
+		}
+	}
+}
+
+// TestDisconnectForgetsOfflineBucket: deleting a server that is offline
+// also forgets its rate limit state.
+func TestDisconnectForgetsOfflineBucket(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}
+	h := New(&fakeListener{}, WithNow(clk.Now))
+	for range 11 {
+		h.OnEvent(5, proto.Event{Type: proto.EventHealth})
+	}
+	if h.Dropped(5) != 1 {
+		t.Fatalf("Dropped = %d, want 1", h.Dropped(5))
+	}
+	h.Disconnect(5)
+	h.rateMu.Lock()
+	_, kept := h.buckets[5]
+	h.rateMu.Unlock()
+	if kept || h.Dropped(5) != 0 {
+		t.Fatal("bucket of a server deleted while offline kept")
+	}
+}

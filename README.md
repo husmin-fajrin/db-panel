@@ -730,8 +730,10 @@ saat itu juga (paling sering sekali per 10 detik).
 dari satu server, lalu satu tiap 2 detik; laporan yang lebih sering dari
 itu dibuang tanpa memutus sambungan, dicatat di log panel, dan jumlahnya
 tampil di **Detail teknis** halaman server ("12 laporan dibuang dalam 1 jam
-terakhir"). Agent yang sehat tidak pernah mencapai batas ini; laporan yang
-dibuang berarti agent rusak atau diubah. Satu pesan dari agent (dan dari
+terakhir"). Laporan tertunda yang dikirim agent setelah tersambung lagi
+(paling banyak 200) mendapat jatah tersendiri, sekali per 10 menit per
+server, jadi agent yang sehat praktis tidak pernah mencapai batas ini;
+laporan yang dibuang biasanya berarti agent rusak atau diubah. Satu pesan dari agent (dan dari
 panel ke agent) paling besar 1 MiB; pesan yang lebih besar memutus
 sambungan, dan agent tersambung lagi sendiri.
 

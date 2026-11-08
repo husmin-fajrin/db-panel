@@ -48,13 +48,18 @@ type Listener interface {
 // bucket of reportBurst tokens refilled with one every reportRefill (spec
 // 5.12); a report finding it empty is dropped and counted. The connection
 // is never closed for it. A sound agent reports once per check interval
-// (10 s or more); only the backlog it flushes after a reconnect can come
-// faster, and of that, entries past the tenth are dropped (the fresh
-// report monitor.configure answers with is a reply, not an event, and is
-// not limited).
+// (10 s or more); only the backlog it flushes after a reconnect (its ring
+// holds 200 reports) comes faster. So each connection also gets a backlog
+// allowance: once the bucket is empty, a report marked backlog still
+// passes while the allowance lasts. Attach grants it at most once per
+// server per backlogGrantEvery, so reconnecting does not mint more.
 const (
 	reportBurst  = 10
 	reportRefill = 2 * time.Second
+	// backlogAllowance matches the agent's backlog ring
+	// (internal/agent/monitor ringCapacity).
+	backlogAllowance  = 200
+	backlogGrantEvery = 10 * time.Minute
 	// droppedWindow is how far back Dropped counts.
 	droppedWindow = time.Hour
 	// dropLogEvery is the minimum time between two log lines about one
@@ -86,6 +91,10 @@ type reportBucket struct {
 	last     time.Time // when tokens was last refilled
 	drops    []dropMinute
 	loggedAt time.Time // last log line about drops
+	// backlogLeft is what remains of the backlog allowance granted at
+	// grantedAt.
+	backlogLeft int
+	grantedAt   time.Time
 }
 
 type dropMinute struct {
@@ -130,8 +139,32 @@ func (h *Hub) Attach(serverID int64, c Conn) (replaced bool) {
 	if replaced {
 		go old.Close()
 	}
+	h.grantBacklog(serverID)
 	h.l.OnOnline(serverID)
 	return replaced
+}
+
+// grantBacklog gives serverID's new connection the backlog allowance,
+// unless one was granted within backlogGrantEvery.
+func (h *Hub) grantBacklog(serverID int64) {
+	now := h.now()
+	h.rateMu.Lock()
+	defer h.rateMu.Unlock()
+	b := h.bucket(serverID, now)
+	if b.grantedAt.IsZero() || now.Sub(b.grantedAt) >= backlogGrantEvery {
+		b.backlogLeft, b.grantedAt = backlogAllowance, now
+	}
+}
+
+// bucket returns serverID's bucket, a full new one when it has none. The
+// caller holds rateMu.
+func (h *Hub) bucket(serverID int64, now time.Time) *reportBucket {
+	b, ok := h.buckets[serverID]
+	if !ok {
+		b = &reportBucket{tokens: reportBurst, last: now}
+		h.buckets[serverID] = b
+	}
+	return b
 }
 
 // Disconnect removes the active connection of serverID, if any, closes it in
@@ -144,13 +177,14 @@ func (h *Hub) Disconnect(serverID int64) {
 	c, ok := h.conns[serverID]
 	delete(h.conns, serverID)
 	h.mu.Unlock()
+	// Also for a server deleted while offline.
+	h.rateMu.Lock()
+	delete(h.buckets, serverID)
+	h.rateMu.Unlock()
 	if !ok {
 		return
 	}
 	go c.Close()
-	h.rateMu.Lock()
-	delete(h.buckets, serverID)
-	h.rateMu.Unlock()
 	h.l.OnOffline(serverID)
 }
 
@@ -190,28 +224,30 @@ func (h *Hub) Call(ctx context.Context, serverID int64, cmd string, params any, 
 // rate limit, which is dropped and counted (Dropped). It runs on the
 // sending connection's goroutine, so the listener's OnEvent must not block.
 func (h *Hub) OnEvent(serverID int64, ev proto.Event) {
-	if ev.Type == proto.EventHealth && !h.allowReport(serverID) {
+	if ev.Type == proto.EventHealth && !h.allowReport(serverID, ev.Payload) {
 		return
 	}
 	h.l.OnEvent(serverID, ev)
 }
 
-// allowReport takes a token from serverID's bucket; without one it records
-// the drop and logs it, at most once per dropLogEvery.
-func (h *Hub) allowReport(serverID int64) bool {
+// allowReport takes a token from serverID's bucket; without one, a backlog
+// report takes from the backlog allowance. Otherwise it records the drop
+// and logs it, at most once per dropLogEvery.
+func (h *Hub) allowReport(serverID int64, payload json.RawMessage) bool {
 	now := h.now()
 	h.rateMu.Lock()
-	b, ok := h.buckets[serverID]
-	if !ok {
-		b = &reportBucket{tokens: reportBurst, last: now}
-		h.buckets[serverID] = b
-	}
+	b := h.bucket(serverID, now)
 	if elapsed := now.Sub(b.last); elapsed > 0 {
 		b.tokens = min(reportBurst, b.tokens+float64(elapsed)/float64(reportRefill))
 		b.last = now
 	}
 	if b.tokens >= 1 {
 		b.tokens--
+		h.rateMu.Unlock()
+		return true
+	}
+	if b.backlogLeft > 0 && isBacklog(payload) {
+		b.backlogLeft--
 		h.rateMu.Unlock()
 		return true
 	}
@@ -234,6 +270,15 @@ func (h *Hub) allowReport(serverID int64) bool {
 			"dropped_last_hour", dropped)
 	}
 	return false
+}
+
+// isBacklog reports whether a health report payload is marked as backlog
+// (proto.HealthEvent.Backlog); read only once the bucket is empty.
+func isBacklog(payload json.RawMessage) bool {
+	var he struct {
+		Backlog bool `json:"backlog"`
+	}
+	return json.Unmarshal(payload, &he) == nil && he.Backlog
 }
 
 // prune forgets the minutes outside droppedWindow.
