@@ -1087,24 +1087,30 @@ dicadangkan bersamanya. Penjagaannya ada di dalam `panel.db` sendiri, jadi
 catatan ini tahan ubah terhadap aplikasi, bukan terhadap root di host panel
 (yang bisa mengubah berkasnya).
 
-Supaya perubahan langsung pada berkas itu tetap ketahuan, setiap baris
-membawa hash SHA-256 atas isinya dan hash baris sebelumnya (rantai hash).
-Bagian atas halaman **Audit** menunjukkan "Rantai utuh sampai #4521" atau,
-bila ada baris yang diubah, disisipkan, atau dihapus di tengah, "Rantai
-putus di #3100" (baris pertama yang tidak cocok); status ini diperiksa
-paling sering sekali per menit. Pemeriksaan yang sama dari baris perintah
-(hanya membaca `panel.db`; keluar 0 bila utuh, 1 bila putus):
+Setiap baris juga membawa hash SHA-256 atas isinya dan hash baris
+sebelumnya (rantai hash). Bagian atas halaman **Audit** menunjukkan "Rantai
+utuh sampai #4521" atau "Rantai putus di #3100": baris pertama yang tidak
+cocok lagi dengan rantai. Itu bisa baris yang diubah atau disisipkan, atau
+baris sesudahnya (bila pengubah ikut menghitung ulang hash baris yang ia
+ubah, atau bila sebuah baris di tengah dihapus). Status ini diperiksa paling
+sering sekali per menit. Pemeriksaan yang sama dari baris perintah (hanya
+membaca `panel.db`; keluar 0 bila utuh, 1 bila putus):
 
 ```sh
 sudo -u dbpanel dbpanel panel audit-verify
 ```
 
-Setiap catatan juga ditulis ke log panel (`journalctl -u dbpanel-panel`,
-pesan `audit`) dengan isi yang sama, sebagai salinan kedua di luar
-`panel.db`. Rantai tidak bisa membuktikan bahwa baris *terakhir* tidak
-dihapus; untuk itu bandingkan dengan salinan di journald. Saat panel versi
-ini pertama kali dijalankan, rantai dihitung untuk catatan lama sekali
-(migrasi 0009; 10.000 catatan butuh kurang dari satu detik).
+Batas rantai ini perlu dipahami. Hash-nya tidak memakai kunci rahasia: siapa
+pun yang bisa menulis `panel.db` bisa menghitung ulang semua hash dari baris
+yang ia ubah sampai akhir, dan hasilnya tetap "Rantai utuh". Menghapus
+baris-baris *terakhir* juga tidak memutus rantai. Kedua hal itu hanya
+ketahuan dengan membandingkan isi `panel.db` dengan salinan kedua: setiap
+catatan juga ditulis ke log panel (`journalctl -u dbpanel-panel`, pesan
+`audit`, dengan `stored=false` bila basis data menolak catatan itu). Log itu
+bisa dibaca anggota grup `adm` dan `systemd-journal` di host panel, lebih
+luas daripada `panel.db` (0600), jadi batasi keanggotaan grup itu. Saat
+panel versi ini pertama kali dijalankan, rantai dihitung sekali untuk
+catatan lama (migrasi 0009; 10.000 catatan butuh kurang dari satu detik).
 
 ## Pembaruan
 

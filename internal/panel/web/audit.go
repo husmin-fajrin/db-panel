@@ -77,6 +77,10 @@ func (a *app) audit(r *http.Request, action, targetKind string, targetID int64, 
 // auditAs is audit for a request whose user is not (yet, or any longer)
 // in its context: login and logout.
 func (a *app) auditAs(r *http.Request, username, action, targetKind string, targetID int64, detail any, outcome string) {
+	// The hash joins fields with "\n" (SEC-45): no stored field may hold
+	// one. An error text can span lines; usernames should not, but are
+	// typed.
+	outcome, username = oneLine(outcome), oneLine(username)
 	if runes := []rune(outcome); len(runes) > maxAuditOutcome {
 		outcome = string(runes[:maxAuditOutcome])
 	}
@@ -90,10 +94,16 @@ func (a *app) auditAs(r *http.Request, username, action, targetKind string, targ
 	}
 	// The second copy (SEC-45): the panel's log goes to journald, out of
 	// reach of whoever can edit panel.db. It carries exactly the stored
-	// fields (already scrubbed), also when the database write failed (id 0).
-	a.Logger.Info("audit", "id", id, "ts", e.TS.UTC().Format(time.RFC3339), "username", e.Username, "ip", e.IP,
+	// fields (already scrubbed), also when the database write failed
+	// (stored=false, id 0).
+	a.Logger.Info("audit", "stored", err == nil, "id", id, "ts", e.TS.UTC().Format(time.RFC3339), "username", e.Username, "ip", e.IP,
 		"action", e.Action, "target_kind", e.TargetKind, "target_id", e.TargetID,
 		"detail_json", e.DetailJSON, "outcome", e.Outcome)
+}
+
+// oneLine replaces line breaks with spaces.
+func oneLine(s string) string {
+	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
 }
 
 // outcomeOf is auditOK for nil, else the error's text.

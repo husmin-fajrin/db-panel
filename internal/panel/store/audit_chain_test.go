@@ -1,8 +1,10 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -196,5 +198,64 @@ func TestVerifyEmptyChain(t *testing.T) {
 	s := openTemp(t)
 	if lastOK, brokenAt, err := s.VerifyAuditChain(); err != nil || lastOK != 0 || brokenAt != 0 {
 		t.Fatalf("VerifyAuditChain = %d, %d, %v", lastOK, brokenAt, err)
+	}
+}
+
+// TestAddAuditWaitsForOtherWriter: another process committing a write
+// while AddAudit runs does not lose the entry (no SQLITE_BUSY_SNAPSHOT):
+// AddAudit takes the write lock before it reads the last hash.
+func TestAddAuditWaitsForOtherWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.AddAudit(chainEntry(0)); err != nil {
+		t.Fatal(err)
+	}
+	other, err := Open(path) // a second process, e.g. reset-password
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	ctx := context.Background()
+	conn, err := other.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO settings (key, value) VALUES ('x', 'y')`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.AddAudit(chainEntry(1))
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond) // AddAudit is now waiting on the lock
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("AddAudit while another process wrote: %v", err)
+	}
+	if lastOK, brokenAt, err := s.VerifyAuditChain(); err != nil || lastOK != 2 || brokenAt != 0 {
+		t.Fatalf("VerifyAuditChain = %d, %d, %v", lastOK, brokenAt, err)
+	}
+	// A failed AddAudit leaves the connection usable (no open transaction).
+	ro, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if _, err := ro.AddAudit(chainEntry(2)); err == nil {
+		t.Fatal("AddAudit on read-only store succeeded")
+	}
+	if _, _, err := ro.VerifyAuditChain(); err != nil {
+		t.Fatalf("read after failed AddAudit: %v", err)
 	}
 }

@@ -91,8 +91,10 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	// would fill the append-only log.
 	if ok := a.CheckPassword(hash, password); !ok || err != nil {
 		a.UserLimiter.Fail(userKey)
-		a.auditAs(r, auditUsername(username, err == nil), "login_failed", auditSession, 0, nil, msgLoginFailed)
-		a.Logger.Info("login failed", "username", username, "ip", ip)
+		who := auditUsername(username, err == nil)
+		a.auditAs(r, who, "login_failed", auditSession, 0, nil, msgLoginFailed)
+		// Never the typed name: it may be a password (SEC-44).
+		a.Logger.Info("login failed", "username", who, "ip", ip)
 		retry(http.StatusOK, msgLoginFailed)
 		return
 	}

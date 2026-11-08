@@ -435,6 +435,37 @@ func TestAuditPageShowsChainStatus(t *testing.T) {
 	}
 }
 
+// TestAuditPageCachesFailedCheck: a chain walk that fails is shown and
+// kept for the minute too, so page views do not re-walk the log each time.
+func TestAuditPageCachesFailedCheck(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	e := newEnv(t, func(d *web.Deps) { d.Now = clock.Now })
+	c := e.cookie()
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// A row the walk cannot read (target_id not a number), dated outside
+	// the page's window so the list itself still loads.
+	if _, err := db.Exec(`INSERT INTO audit_log (ts, action, target_id) VALUES ('2000-01-01T00:00:00Z', 'x', 'bukan-angka')`); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("GET", "/audit", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "tidak dapat diperiksa")
+
+	for _, q := range []string{`DROP TRIGGER audit_log_no_delete`, `DELETE FROM audit_log`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	clock.Add(30 * time.Second)
+	wantBody(t, e.do("GET", "/audit", nil, c), "tidak dapat diperiksa")
+	clock.Add(31 * time.Second)
+	wantBody(t, e.do("GET", "/audit", nil, c), "Rantai utuh sampai #0")
+}
+
 // TestAuditInsertLogged (SEC-45): every audit entry is also written to the
 // panel's log (journald under systemd) with its fields, a second copy that
 // outlives a tampered database; the copy carries no more than the entry,
@@ -477,9 +508,62 @@ func TestAuditInsertLogged(t *testing.T) {
 		}
 	}
 	for _, l := range lines {
-		raw, _ := json.Marshal(l)
-		if out := string(raw); strings.Contains(out, mysqlSecret) || strings.Contains(out, "maling") || strings.Contains(out, testPassword) {
-			t.Errorf("audit log line carries typed secrets: %s", out)
+		if l["stored"] != true {
+			t.Errorf("audit log line %v: stored = %v, want true", l, l["stored"])
 		}
+	}
+	// No log line at all, audit or not, carries what was typed: an unknown
+	// username may be a password typed in the wrong field.
+	if out := logs.String(); strings.Contains(out, mysqlSecret) || strings.Contains(out, "maling") || strings.Contains(out, testPassword) {
+		t.Errorf("log carries typed secrets:\n%s", out)
+	}
+}
+
+// TestAuditLogCopyWhenNotStored: when the database refuses the entry, the
+// journald copy is still written and says it was not stored.
+func TestAuditLogCopyWhenNotStored(t *testing.T) {
+	logs := &syncBuffer{}
+	e := newEnv(t, func(d *web.Deps) { d.Logger = slog.New(slog.NewJSONHandler(logs, nil)) })
+	c := e.cookie()
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER test_refuse BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'disk penuh'); END`); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, e.do("POST", "/logout", noForm, c), http.StatusSeeOther)
+	var found bool
+	sc := bufio.NewScanner(strings.NewReader(logs.String()))
+	for sc.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["msg"] == "audit" {
+			found = true
+			if m["stored"] != false || m["id"] != float64(0) || m["action"] != "logout" {
+				t.Errorf("audit copy of a refused insert = %v, want stored=false id=0 action=logout", m)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no audit log line:\n%s", logs.String())
+	}
+}
+
+// TestAuditOutcomeNewlinesFlattened: a multi-line error is stored on one
+// line, so no field of the hash input holds the "\n" separator.
+func TestAuditOutcomeNewlinesFlattened(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	f.err = errors.New("baris satu\nbaris dua\r\nbaris tiga")
+	e.do("POST", "/replicas/2/stop", noForm, e.cookie())
+	got := auditEntries(t, e.st)
+	if len(got) != 1 {
+		t.Fatalf("audit entries = %+v", got)
+	}
+	if o := got[0].Outcome; strings.ContainsAny(o, "\r\n") || !strings.Contains(o, "baris satu baris dua") {
+		t.Errorf("outcome = %q, want one line", o)
 	}
 }

@@ -1,7 +1,9 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"time"
@@ -20,32 +22,49 @@ type AuditEntry struct {
 
 // AddAudit appends e to the audit log and returns its id. The entry is
 // chained to the last one (SEC-45): reading the last hash and inserting
-// happen in one transaction, and the store's single connection serializes
-// concurrent writers.
-func (s *Store) AddAudit(e AuditEntry) (int64, error) {
-	tx, err := s.db.Begin()
+// happen in one BEGIN IMMEDIATE transaction, so the write lock is held
+// before the read. Concurrent writers in this process serialize on the
+// store's single connection; a writer in another process (a CLI command)
+// is waited for (busy_timeout) instead of failing the insert with a stale
+// snapshot, as a deferred transaction would.
+func (s *Store) AddAudit(e AuditEntry) (id int64, err error) {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("add audit: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return 0, fmt.Errorf("add audit: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if _, rbErr := conn.ExecContext(ctx, `ROLLBACK`); rbErr != nil {
+				// Do not hand a connection with an open transaction back
+				// to the pool.
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			}
+		}
+	}()
 	var prev string
-	err = tx.QueryRow(`SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&prev)
+	err = conn.QueryRowContext(ctx, `SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&prev)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("add audit: last hash: %w", err)
 	}
-	res, err := tx.Exec(`INSERT INTO audit_log (ts, username, ip, action, target_kind, target_id, detail_json, outcome, prev_hash, hash)
+	res, err := conn.ExecContext(ctx, `INSERT INTO audit_log (ts, username, ip, action, target_kind, target_id, detail_json, outcome, prev_hash, hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		formatTime(e.TS), e.Username, e.IP, e.Action, e.TargetKind, e.TargetID, e.DetailJSON, e.Outcome, prev, AuditHash(prev, e))
 	if err != nil {
 		return 0, fmt.Errorf("add audit: %w", err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
+	if id, err = res.LastInsertId(); err != nil {
 		return 0, fmt.Errorf("add audit: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return 0, fmt.Errorf("add audit: %w", err)
 	}
+	committed = true
 	return id, nil
 }
 

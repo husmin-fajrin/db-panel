@@ -36,7 +36,7 @@ type chainCache struct {
 
 // chainStatus returns the chain's status, walking the chain when the
 // cached one is older than chainCheckEvery (or missing). A failed walk is
-// logged and shown, and not cached.
+// logged, shown and cached like any other result.
 func (a *app) chainStatus() chainStatus {
 	a.chain.mu.Lock()
 	defer a.chain.mu.Unlock()
@@ -47,7 +47,8 @@ func (a *app) chainStatus() chainStatus {
 	lastOK, brokenAt, err := a.Store.VerifyAuditChain()
 	if err != nil {
 		a.Logger.Error("verify audit chain", "err", err)
-		return chainStatus{Failed: true, Text: "Rantai catatan audit tidak dapat diperiksa saat ini.", CheckedAt: now}
+		a.chain.status = chainStatus{Failed: true, Text: "Rantai catatan audit tidak dapat diperiksa saat ini.", CheckedAt: now}
+		return a.chain.status
 	}
 	st := chainStatus{OK: true, Text: fmt.Sprintf("Rantai utuh sampai #%d", lastOK), CheckedAt: now}
 	if brokenAt != 0 {
