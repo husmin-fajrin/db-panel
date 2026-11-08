@@ -128,6 +128,7 @@ type app struct {
 	Deps
 	render   *Renderer
 	loginSem chan struct{} // one slot per running password check
+	chain    chainCache    // the audit page's chain status
 }
 
 // NewRouter returns the UI handler. It does not serve the agent endpoints

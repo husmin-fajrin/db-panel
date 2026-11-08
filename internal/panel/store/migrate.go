@@ -19,6 +19,12 @@ var migrationsFS embed.FS
 // on a schema the code does not know could corrupt it, so nothing is applied.
 var ErrNewerSchema = errors.New("database dibuat oleh versi dbpanel yang lebih baru")
 
+// migrationHooks run Go code in a migration's transaction, after its SQL
+// and before its version is recorded; tests replace an entry.
+var migrationHooks = map[int]func(*sql.Tx) error{
+	9: backfillAuditChain,
+}
+
 type migration struct {
 	name    string
 	version int
@@ -79,9 +85,10 @@ func embeddedMigrations() ([]migration, error) {
 	return out, nil
 }
 
-// applyMigration runs body and records version in one transaction, unless
-// version is already recorded; the check is inside the transaction so it
-// sees the same state the migration is applied to.
+// applyMigration runs body, then the version's hook if any, and records
+// version in one transaction, unless version is already recorded; the
+// check is inside the transaction so it sees the same state the migration
+// is applied to.
 func applyMigration(db *sql.DB, version int, body string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -97,6 +104,11 @@ func applyMigration(db *sql.DB, version int, body string) error {
 	}
 	if _, err := tx.Exec(body); err != nil {
 		return err
+	}
+	if hook := migrationHooks[version]; hook != nil {
+		if err := hook(tx); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, version); err != nil {
 		return err

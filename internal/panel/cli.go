@@ -28,6 +28,9 @@ const usage = `Penggunaan:
   dbpanel panel reset-local-agent [--data-dir DIR]
       lepaskan agent host panel (sebagai pengguna dbpanel, panel berhenti);
       start panel berikutnya menulis token baru untuknya
+  dbpanel panel audit-verify [--data-dir DIR]
+      periksa rantai hash catatan audit (sebagai pengguna dbpanel; hanya membaca);
+      keluar 0 bila utuh, 1 bila putus
 `
 
 // Main runs the "dbpanel panel" command; args start with "panel". It returns
@@ -44,6 +47,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			return mainResetPassword(args[1:], stdout, stderr)
 		case "reset-local-agent":
 			return mainResetLocalAgent(args[1:], stdout, stderr)
+		case "audit-verify":
+			return mainAuditVerify(args[1:], stdout, stderr)
 		case "help", "-h", "--help":
 			fmt.Fprint(stdout, usage)
 			return 0
@@ -169,6 +174,48 @@ func resetLocalAgent(dataDir string) (int64, error) {
 		return id, nil // nothing to release
 	}
 	return id, st.MarkUnpaired(id, srv.Address)
+}
+
+// auditVerifyRootRefusal is the message of "audit-verify" run as root:
+// even a read-only open may create the database's -wal and -shm files,
+// which must stay the panel user's.
+const auditVerifyRootRefusal = `jalankan sebagai pengguna panel: sudo -u dbpanel dbpanel panel audit-verify`
+
+// mainAuditVerify checks the audit log's hash chain (SEC-45): exit 0 and
+// "Rantai utuh sampai #N", or exit 1 and "Rantai putus di #M" (the first
+// row that does not fit). The database is opened read-only.
+func mainAuditVerify(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("panel audit-verify", stderr)
+	dataDir := fs.String("data-dir", DefaultDataDir, "direktori data (panel.db)")
+	if !parse(fs, args) {
+		return 2
+	}
+	if geteuid() == 0 {
+		fmt.Fprintln(stderr, auditVerifyRootRefusal)
+		return 1
+	}
+	path := filepath.Join(*dataDir, dbFile)
+	if _, err := os.Stat(path); err != nil {
+		fmt.Fprintf(stderr, "kesalahan: basis data panel tidak ditemukan di %s: %v\n", path, err)
+		return 1
+	}
+	st, err := store.OpenReadOnly(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "kesalahan: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+	lastOK, brokenAt, err := st.VerifyAuditChain()
+	if err != nil {
+		fmt.Fprintf(stderr, "kesalahan: %v\n", err)
+		return 1
+	}
+	if brokenAt != 0 {
+		fmt.Fprintf(stdout, "Rantai putus di #%d (utuh sampai #%d)\n", brokenAt, lastOK)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Rantai utuh sampai #%d\n", lastOK)
+	return 0
 }
 
 func mainResetPassword(args []string, stdout, stderr io.Writer) int {

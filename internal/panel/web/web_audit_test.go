@@ -1,9 +1,12 @@
 package web_test
 
 import (
+	"bufio"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -388,5 +391,95 @@ func TestAuditPageFilters(t *testing.T) {
 		rec := e.do("GET", "/audit?"+q, nil, c)
 		wantCode(t, rec, http.StatusBadRequest)
 		wantBody(t, rec, "Filter tidak valid")
+	}
+}
+
+// TestAuditPageShowsChainStatus (SEC-45): /audit shows whether the hash
+// chain is intact, worked out at most once a minute; a row changed
+// directly in SQLite shows as the first broken row once the minute is up.
+func TestAuditPageShowsChainStatus(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	e := newEnv(t, func(d *web.Deps) { d.Now = clock.Now })
+	c := e.cookie()
+	for i := range 3 {
+		if _, err := e.st.AddAudit(store.AuditEntry{TS: clock.Now(), Username: "admin", IP: "10.1.1.1",
+			Action: "server_check", TargetKind: "server", TargetID: int64(i), DetailJSON: "{}", Outcome: "ok"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := e.do("GET", "/audit", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Rantai utuh sampai #3")
+
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{`DROP TRIGGER audit_log_no_update`, `UPDATE audit_log SET ip = '10.9.9.9' WHERE id = 2`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	// Within the minute the page shows the cached status.
+	clock.Add(30 * time.Second)
+	rec = e.do("GET", "/audit", nil, c)
+	wantBody(t, rec, "Rantai utuh sampai #3")
+	clock.Add(31 * time.Second)
+	rec = e.do("GET", "/audit", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Rantai putus di #2")
+	if strings.Contains(rec.Body.String(), "Rantai utuh") {
+		t.Error("page still says the chain is intact")
+	}
+}
+
+// TestAuditInsertLogged (SEC-45): every audit entry is also written to the
+// panel's log (journald under systemd) with its fields, a second copy that
+// outlives a tampered database; the copy carries no more than the entry,
+// so no password typed into a form.
+func TestAuditInsertLogged(t *testing.T) {
+	logs := &syncBuffer{}
+	e, _, _ := controlEnv(t, func(d *web.Deps) {
+		d.Logger = slog.New(slog.NewJSONHandler(logs, nil))
+		d.CheckPassword = fastCheck
+	})
+	c := e.cookie()
+	wantCode(t, e.do("POST", "/login", loginForm("maling", testPassword, ""), nil), http.StatusOK)
+	e.do("POST", "/servers/2/mysql/connect", url.Values{"user": {"admin"}, "password": {mysqlSecret}, "host": {"10.1.1.5"}}, c)
+	e.do("POST", "/servers/2/snooze", url.Values{"hours": {"24"}}, c)
+
+	entries := auditEntries(t, e.st)
+	var lines []map[string]any
+	sc := bufio.NewScanner(strings.NewReader(logs.String()))
+	for sc.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			t.Fatalf("log line %q: %v", sc.Text(), err)
+		}
+		if m["msg"] == "audit" {
+			lines = append(lines, m)
+		}
+	}
+	if len(lines) != len(entries) || len(entries) < 3 {
+		t.Fatalf("audit log lines = %d, entries = %d:\n%s", len(lines), len(entries), logs.String())
+	}
+	for i, en := range entries {
+		l := lines[i]
+		want := map[string]any{"id": float64(en.ID), "ts": en.TS.UTC().Format(time.RFC3339), "username": en.Username,
+			"ip": en.IP, "action": en.Action, "target_kind": en.TargetKind, "target_id": float64(en.TargetID),
+			"detail_json": en.DetailJSON, "outcome": en.Outcome}
+		for k, v := range want {
+			if l[k] != v {
+				t.Errorf("entry #%d log %s = %v, want %v", en.ID, k, l[k], v)
+			}
+		}
+	}
+	for _, l := range lines {
+		raw, _ := json.Marshal(l)
+		if out := string(raw); strings.Contains(out, mysqlSecret) || strings.Contains(out, "maling") || strings.Contains(out, testPassword) {
+			t.Errorf("audit log line carries typed secrets: %s", out)
+		}
 	}
 }

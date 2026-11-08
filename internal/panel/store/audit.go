@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -16,16 +18,32 @@ type AuditEntry struct {
 	DetailJSON, Outcome  string
 }
 
-// AddAudit appends e to the audit log and returns its id.
+// AddAudit appends e to the audit log and returns its id. The entry is
+// chained to the last one (SEC-45): reading the last hash and inserting
+// happen in one transaction, and the store's single connection serializes
+// concurrent writers.
 func (s *Store) AddAudit(e AuditEntry) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO audit_log (ts, username, ip, action, target_kind, target_id, detail_json, outcome)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		formatTime(e.TS), e.Username, e.IP, e.Action, e.TargetKind, e.TargetID, e.DetailJSON, e.Outcome)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("add audit: %w", err)
+	}
+	defer tx.Rollback()
+	var prev string
+	err = tx.QueryRow(`SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&prev)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("add audit: last hash: %w", err)
+	}
+	res, err := tx.Exec(`INSERT INTO audit_log (ts, username, ip, action, target_kind, target_id, detail_json, outcome, prev_hash, hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		formatTime(e.TS), e.Username, e.IP, e.Action, e.TargetKind, e.TargetID, e.DetailJSON, e.Outcome, prev, AuditHash(prev, e))
 	if err != nil {
 		return 0, fmt.Errorf("add audit: %w", err)
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		return 0, fmt.Errorf("add audit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("add audit: %w", err)
 	}
 	return id, nil

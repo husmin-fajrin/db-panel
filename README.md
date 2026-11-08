@@ -1087,6 +1087,25 @@ dicadangkan bersamanya. Penjagaannya ada di dalam `panel.db` sendiri, jadi
 catatan ini tahan ubah terhadap aplikasi, bukan terhadap root di host panel
 (yang bisa mengubah berkasnya).
 
+Supaya perubahan langsung pada berkas itu tetap ketahuan, setiap baris
+membawa hash SHA-256 atas isinya dan hash baris sebelumnya (rantai hash).
+Bagian atas halaman **Audit** menunjukkan "Rantai utuh sampai #4521" atau,
+bila ada baris yang diubah, disisipkan, atau dihapus di tengah, "Rantai
+putus di #3100" (baris pertama yang tidak cocok); status ini diperiksa
+paling sering sekali per menit. Pemeriksaan yang sama dari baris perintah
+(hanya membaca `panel.db`; keluar 0 bila utuh, 1 bila putus):
+
+```sh
+sudo -u dbpanel dbpanel panel audit-verify
+```
+
+Setiap catatan juga ditulis ke log panel (`journalctl -u dbpanel-panel`,
+pesan `audit`) dengan isi yang sama, sebagai salinan kedua di luar
+`panel.db`. Rantai tidak bisa membuktikan bahwa baris *terakhir* tidak
+dihapus; untuk itu bandingkan dengan salinan di journald. Saat panel versi
+ini pertama kali dijalankan, rantai dihitung untuk catatan lama sekali
+(migrasi 0009; 10.000 catatan butuh kurang dari satu detik).
+
 ## Pembaruan
 
 Perbarui **panel dulu, lalu agent**. Jalankan ulang `install.sh` di host

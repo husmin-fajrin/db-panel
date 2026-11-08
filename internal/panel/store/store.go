@@ -65,6 +65,44 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db, plain: make(map[int64]plainToken)}, nil
 }
 
+// ErrSchemaTooOld is OpenReadOnly's error for a database this version of
+// dbpanel has not migrated yet: the panel has not been started since the
+// upgrade.
+var ErrSchemaTooOld = errors.New("basis data belum diperbarui ke versi ini; jalankan panel sekali dulu")
+
+// OpenReadOnly opens the database at path for reading only: no migration
+// runs and nothing can be written. The schema must be the one this binary
+// ships.
+func OpenReadOnly(path string) (*Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	ms, err := embeddedMigrations()
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	var applied sql.NullInt64
+	if err := db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&applied); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("read schema version: %w", err)
+	}
+	switch latest := int64(ms[len(ms)-1].version); {
+	case applied.Int64 > latest:
+		db.Close()
+		return nil, fmt.Errorf("%w (skema versi %d, versi ini mengenal sampai %d)", ErrNewerSchema, applied.Int64, latest)
+	case applied.Int64 < latest:
+		db.Close()
+		return nil, fmt.Errorf("%w (skema versi %d, versi ini %d)", ErrSchemaTooOld, applied.Int64, latest)
+	}
+	return &Store{db: db, plain: make(map[int64]plainToken)}, nil
+}
+
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
 

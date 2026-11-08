@@ -1,8 +1,10 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -13,7 +15,48 @@ const (
 	auditPageLimit   = 500 // most entries listed
 	auditDetailRunes = 120 // the detail column shows this much of detail_json
 	dateLayout       = "2006-01-02"
+	// chainCheckEvery bounds how often the audit page walks the whole
+	// hash chain.
+	chainCheckEvery = time.Minute
 )
+
+// chainStatus is the audit page's line on the hash chain (SEC-45).
+type chainStatus struct {
+	OK        bool   // intact
+	Failed    bool   // the walk failed; Text says so
+	Text      string // "Rantai utuh sampai #N", "Rantai putus di #M"
+	CheckedAt time.Time
+}
+
+// chainCache keeps the last chain status for chainCheckEvery.
+type chainCache struct {
+	mu     sync.Mutex
+	status chainStatus
+}
+
+// chainStatus returns the chain's status, walking the chain when the
+// cached one is older than chainCheckEvery (or missing). A failed walk is
+// logged and shown, and not cached.
+func (a *app) chainStatus() chainStatus {
+	a.chain.mu.Lock()
+	defer a.chain.mu.Unlock()
+	now := a.Now()
+	if c := a.chain.status; !c.CheckedAt.IsZero() && now.Sub(c.CheckedAt) < chainCheckEvery && !now.Before(c.CheckedAt) {
+		return c
+	}
+	lastOK, brokenAt, err := a.Store.VerifyAuditChain()
+	if err != nil {
+		a.Logger.Error("verify audit chain", "err", err)
+		return chainStatus{Failed: true, Text: "Rantai catatan audit tidak dapat diperiksa saat ini.", CheckedAt: now}
+	}
+	st := chainStatus{OK: true, Text: fmt.Sprintf("Rantai utuh sampai #%d", lastOK), CheckedAt: now}
+	if brokenAt != 0 {
+		st = chainStatus{Text: fmt.Sprintf("Rantai putus di #%d", brokenAt), CheckedAt: now}
+		a.Logger.Warn("audit chain broken", "broken_at", brokenAt, "last_ok", lastOK)
+	}
+	a.chain.status = st
+	return st
+}
 
 // auditActionLabels name each audited action for the UI.
 var auditActionLabels = map[string]string{
@@ -82,6 +125,7 @@ type auditPage struct {
 	ServerID int64  // filter; 0 is every server
 	Since    string // filter, YYYY-MM-DD
 	Limit    int
+	Chain    chainStatus
 }
 
 func (a *app) auditLog(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +141,8 @@ func (a *app) auditLog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	y, m, d := a.Now().Local().AddDate(0, 0, -auditDefaultDays).Date()
 	since := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
-	p := auditPage{Page: a.page(r), Servers: servers, Limit: auditPageLimit, Since: since.Format(dateLayout)}
+	p := auditPage{Page: a.page(r), Servers: servers, Limit: auditPageLimit, Since: since.Format(dateLayout),
+		Chain: a.chainStatus()}
 
 	bad := ""
 	if v := q.Get("server"); v != "" {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
@@ -79,13 +80,20 @@ func (a *app) auditAs(r *http.Request, username, action, targetKind string, targ
 	if runes := []rune(outcome); len(runes) > maxAuditOutcome {
 		outcome = string(runes[:maxAuditOutcome])
 	}
-	_, err := a.Store.AddAudit(store.AuditEntry{
+	e := store.AuditEntry{
 		TS: a.Now(), Username: username, IP: clientIP(r), Action: action,
 		TargetKind: targetKind, TargetID: targetID, DetailJSON: scrubDetail(detail, outcome != auditOK), Outcome: outcome,
-	})
+	}
+	id, err := a.Store.AddAudit(e)
 	if err != nil {
 		a.Logger.Error("write audit log", "action", action, "target_kind", targetKind, "target_id", targetID, "err", err)
 	}
+	// The second copy (SEC-45): the panel's log goes to journald, out of
+	// reach of whoever can edit panel.db. It carries exactly the stored
+	// fields (already scrubbed), also when the database write failed (id 0).
+	a.Logger.Info("audit", "id", id, "ts", e.TS.UTC().Format(time.RFC3339), "username", e.Username, "ip", e.IP,
+		"action", e.Action, "target_kind", e.TargetKind, "target_id", e.TargetID,
+		"detail_json", e.DetailJSON, "outcome", e.Outcome)
 }
 
 // outcomeOf is auditOK for nil, else the error's text.
