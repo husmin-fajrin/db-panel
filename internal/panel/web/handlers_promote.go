@@ -482,13 +482,14 @@ func agoWords(d time.Duration) string {
 // promoteEmergency reports whether a promotion of the master would run as
 // an emergency, as the orchestrator decides it (PromoteView.Mode): unless
 // its agent is online, its MySQL answers and its status is not one of a
-// master gone.
+// master gone (or of one whose agent connected again but has not reported
+// since: its last report is old).
 func promoteEmergency(online bool, v monitor.View, monitored bool) bool {
 	if !online || !monitored || v.Snap == nil || !v.Snap.MySQLOK {
 		return true
 	}
 	switch v.Status.Code {
-	case monitor.StatusDown, monitor.StatusUnreachable, monitor.StatusAgentOffline:
+	case monitor.StatusDown, monitor.StatusUnreachable, monitor.StatusAgentOffline, monitor.StatusAwaitingReport:
 		return true
 	}
 	return false

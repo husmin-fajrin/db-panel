@@ -59,8 +59,9 @@ type serverState struct {
 	// arrived since; the status is Menunggu laporan pertama until one does
 	// or StaleAfter passes (awaitingReport). Zero when not waiting.
 	awaitingSince time.Time
-	// unpinnedReports counts the reports in a row, while the server is a
-	// topology's master, whose role pin is not master (master_unpinned).
+	// unpinnedReports counts the live reports in a row, while the server
+	// is a topology's master, whose role pin is not master
+	// (master_unpinned); backlog reports leave it as it is.
 	unpinnedReports int
 
 	// Derived.
@@ -172,7 +173,11 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 	if err := m.resolve(id, s, at); err != nil {
 		m.log.Warn("monitor: resolve role", "server_id", id, "err", err)
 	}
-	s.unpinnedReports = unpinnedCount(s.unpinnedReports, s.role, &snap)
+	if !he.Backlog {
+		// Live reports only: a backlog flushed after a reconnect is one
+		// stretch of time, not reports in a row now.
+		s.unpinnedReports = unpinnedCount(s.unpinnedReports, s.role, &snap)
+	}
 	m.snapshotEvents(id, s, &snap, at, true)
 	if snap.MySQLOK {
 		s.unreachableSince = time.Time{}

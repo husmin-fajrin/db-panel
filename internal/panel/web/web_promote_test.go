@@ -474,6 +474,14 @@ func TestPromoteButtonTextByStatus(t *testing.T) {
 	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: time.Now(),
 		Status: monitor.Status{Code: monitor.StatusUnreachable, Severity: monitor.SevCrit}, Snap: snap})
 	wantBody(t, e.do("GET", "/masters/1", nil, c), "Promote darurat")
+
+	// Connected again, no report since: the last report is old, so
+	// emergency, as for an agent that is away.
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: time.Now(),
+		Status: monitor.Status{Code: monitor.StatusAwaitingReport, Severity: monitor.SevNeutral}, Snap: masterSnap()})
+	rec = e.do("GET", "/masters/1", nil, c)
+	wantBody(t, rec, "Promote darurat")
+	wantNoBody(t, rec, "Promote terencana")
 }
 
 const localMasterWarning = "Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel"

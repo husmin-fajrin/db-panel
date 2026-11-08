@@ -411,6 +411,26 @@ func TestPromoteEmergencyQuarantineDeferredUntilOnline(t *testing.T) {
 	}
 }
 
+// TestPromoteViewWaitingMasterIsEmergency: a master whose agent connected
+// again but has not reported since (Menunggu laporan pertama) is judged
+// like one whose agent is away: its last report is old, so the mode is
+// emergency, as before the waiting status existed.
+func TestPromoteViewWaitingMasterIsEmergency(t *testing.T) {
+	g := newPromoteRig(t)
+	v, err := g.e.r.PromoteView(context.Background(), g.m.id)
+	if err != nil || v.Mode != proto.PromotePlanned {
+		t.Fatalf("healthy master: mode %q, err %v", v.Mode, err)
+	}
+	g.h.set(g.m.id, healthyView(monitor.StatusAwaitingReport, masterGTID, nil))
+	v, err = g.e.r.PromoteView(context.Background(), g.m.id)
+	if err != nil {
+		t.Fatalf("PromoteView: %v", err)
+	}
+	if v.Mode != proto.PromoteEmergency {
+		t.Fatalf("waiting master: mode %q, want emergency", v.Mode)
+	}
+}
+
 func TestPromoteViewMarksPartialAndMostCurrent(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e

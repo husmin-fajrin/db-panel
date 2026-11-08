@@ -137,7 +137,8 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 	v.Mode = proto.PromoteEmergency
 	if masterOnline && mv.Snap != nil && mv.Snap.MySQLOK {
 		switch mv.Status.Code {
-		case monitor.StatusDown, monitor.StatusUnreachable, monitor.StatusAgentOffline:
+		// Menunggu laporan pertama: the last report predates a reconnect.
+		case monitor.StatusDown, monitor.StatusUnreachable, monitor.StatusAgentOffline, monitor.StatusAwaitingReport:
 		default:
 			v.Mode = proto.PromotePlanned
 		}

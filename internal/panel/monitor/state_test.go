@@ -116,8 +116,8 @@ func TestReconnectShowsWaitingFirstReport(t *testing.T) {
 	r.m.tick()
 	r.wantStatus(mID, StatusAwaitingReport, SevNeutral)
 	r.wantStatus(rID, StatusAwaitingReport, SevNeutral)
-	if r.isOpen(rID, KindAgentOffline) {
-		t.Error("agent_offline still open while the agent is connected")
+	if !r.isOpen(rID, KindAgentOffline) {
+		t.Error("agent_offline closed before the agent reported")
 	}
 
 	// A backlog report is not fresh; the next live one is.
@@ -128,6 +128,9 @@ func TestReconnectShowsWaitingFirstReport(t *testing.T) {
 	r.wantStatus(mID, StatusHealthy, SevOK)
 	rb.send(replicaSnap(srcUUID+":1-120"), false, 0)
 	r.wantStatus(rID, StatusSynced, SevOK)
+	if r.isOpen(rID, KindAgentOffline) {
+		t.Error("agent_offline still open after a live report")
+	}
 
 	// Connected again but silent: waiting for as long as a report may be
 	// late, then Agent offline.

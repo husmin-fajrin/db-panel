@@ -213,9 +213,14 @@ var alertRules = []alertRule{
 			}
 			return true, "Agent tidak terhubung ke panel atau laporannya terlambat."
 		},
-		// Opened and closed on the derived status only: a reconnected agent
-		// shows Menunggu laporan pertama at once (OnOnline), which closes it.
-		close: func(v View, _ ruleCtx) bool { return v.Status.Code != StatusAgentOffline },
+		// Opened and closed on the derived status only. A reconnected agent
+		// shows Menunggu laporan pertama at once (OnOnline), which keeps it
+		// open: only a report closes it, so a connection that drops and
+		// comes back is one alert, and no "pulih" goes out before the
+		// agent reports.
+		close: func(v View, _ ruleCtx) bool {
+			return v.Status.Code != StatusAgentOffline && v.Status.Code != StatusAwaitingReport
+		},
 	},
 	{
 		kind: KindDiskWarn,
@@ -334,12 +339,15 @@ func unpinnedMessage(snap *proto.HealthSnapshot) string {
 		return "Master tidak dipin: berkas pin di server ini tidak bisa dibaca." + advice +
 			"Saran: perbaiki berkas pin (lihat Detail teknis di halaman server), lalu jalankan ulang Siapkan master."
 	}
-	role := snap.RolePin
-	if role == "unassigned" {
-		role = "belum ada"
+	if snap.RolePin == "unassigned" {
+		return "Master tidak dipin: peran yang dipin di server ini belum ada, bukan master." + advice +
+			"Saran: jalankan ulang Siapkan master."
 	}
-	return "Master tidak dipin: peran yang dipin di server ini " + role + ", bukan master." + advice +
-		"Saran: jalankan ulang Siapkan master."
+	// Siapkan master never changes a pinned role (replica, quarantined):
+	// only the local CLI does.
+	return "Master tidak dipin: peran yang dipin di server ini " + snap.RolePin + ", bukan master." + advice +
+		"Saran: bila server ini memang master, jalankan di server ini: sudo dbpanel agent set-role master, " +
+		"lalu jalankan ulang Siapkan master."
 }
 
 // diskCritActive reports whether disk_crit is open after this evaluation:

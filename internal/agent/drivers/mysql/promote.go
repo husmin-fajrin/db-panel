@@ -641,7 +641,7 @@ func (d *Driver) finishPromote(j *jobs.Job, h Host, db *sql.DB, p proto.PromoteP
 	if _, err := db.ExecContext(ctx, filterStatement(nil, quoteString)); err != nil {
 		return fmt.Errorf("hapus filter replikasi: %w", err)
 	}
-	if err := ensureReplUser(ctx, j, h, db, p.ReplPassword); err != nil {
+	if err := d.ensureReplUser(ctx, j, h, db, p.ReplPassword); err != nil {
 		return err
 	}
 	var set string
@@ -666,8 +666,14 @@ func (d *Driver) finishPromote(j *jobs.Job, h Host, db *sql.DB, p proto.PromoteP
 
 // ensureReplUser makes dbpanel_repl@'%' for this server's replicas when no
 // row of it exists, on this server only (no binary log): a replica made
-// from the old master already has it.
-func ensureReplUser(ctx context.Context, j *jobs.Job, h Host, db *sql.DB, password string) error {
+// from the old master already has it. It holds replUserMu like
+// mysql.createReplUser, so a concurrent one can neither make a second
+// account nor put super_read_only back after the promotion opened writes
+// (its liftReadOnly restore). Lock order: promoteMu (when the caller holds
+// it), then replUserMu; createReplUser never takes promoteMu.
+func (d *Driver) ensureReplUser(ctx context.Context, j *jobs.Job, h Host, db *sql.DB, password string) error {
+	d.replUserMu.Lock()
+	defer d.replUserMu.Unlock()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err

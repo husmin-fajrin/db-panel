@@ -686,7 +686,7 @@ Status replika, dalam kata sederhana:
 | Berhenti | replikasi berhenti karena error; panel menyebut nomor error, artinya, dan sarannya |
 | Tidak terjangkau | MySQL di replika tidak menjawab |
 | Agent offline | agent tidak terhubung ke panel, atau laporannya terlambat |
-| Menunggu laporan pertama | agent baru tersambung lagi setelah offline; laporan lama tidak dinilai sampai laporan baru masuk (paling lama selama batas laporan terlambat, sesudah itu Agent offline lagi) |
+| Menunggu laporan pertama | agent baru tersambung lagi setelah offline; laporan lama tidak dinilai sampai laporan baru masuk (paling lama selama batas laporan terlambat, sesudah itu Agent offline lagi); peringatan agent offline baru ditutup oleh laporan itu, dan promote master dalam status ini dianggap darurat |
 | Agent perlu dimutakhirkan | agent versi lama yang belum bisa memantau (lihat "Pembaruan") |
 | Belum siap | replika sedang dibuat atau disync ulang, atau pembuatannya gagal |
 

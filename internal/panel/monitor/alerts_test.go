@@ -660,9 +660,9 @@ func TestSnoozeKeepsAlertsOpen(t *testing.T) {
 }
 
 // TestAgentOfflineAlertStableUntilReport: a reconnected agent whose first
-// report has not arrived shows Menunggu laporan pertama (spec 5.12), so
-// the first evaluation closes its agent_offline once; other servers'
-// reports and its own first one neither reopen it nor close it again.
+// report has not arrived shows Menunggu laporan pertama (spec 5.12), but
+// its agent_offline stays open: other servers' reports and the ticks
+// neither close nor reopen it; its own first report closes it once.
 func TestAgentOfflineAlertStableUntilReport(t *testing.T) {
 	r := newRig(t)
 	mID, topo := r.master("db-master")
@@ -683,18 +683,59 @@ func TestAgentOfflineAlertStableUntilReport(t *testing.T) {
 		r.clk.Add(time.Second)
 		ma.send()
 	}
-	as := r.alerts(rID, KindAgentOffline)
-	if len(as) != 1 || as[0].ID != first.ID || as[0].ClosedAt == nil {
-		t.Fatalf("agent_offline alerts after other reports = %+v, want the first closed", as)
-	}
-	if ups := r.alertUpdates(rID, KindAgentOffline); len(ups) != 2 {
-		t.Fatalf("alert_update = %v, want the opening and one closing", ups)
-	}
 	r.m.tick()
+	as := r.alerts(rID, KindAgentOffline)
+	if len(as) != 1 || as[0].ID != first.ID || as[0].ClosedAt != nil {
+		t.Fatalf("agent_offline alerts after other reports = %+v, want the first still open", as)
+	}
+	if ups := r.alertUpdates(rID, KindAgentOffline); len(ups) != 1 {
+		t.Fatalf("alert_update = %v, want only the opening", ups)
+	}
+	// Its own report closes it, once.
+	ra.send()
+	as = r.alerts(rID, KindAgentOffline)
+	if len(as) != 1 || as[0].ClosedAt == nil {
+		t.Fatalf("agent_offline alerts after the report = %+v, want the one closed", as)
+	}
 	ra.send()
 	r.m.tick()
 	if n := len(r.alerts(rID, KindAgentOffline)); n != 1 {
 		t.Fatalf("agent_offline alerts = %d, want 1", n)
+	}
+	if ups := r.alertUpdates(rID, KindAgentOffline); len(ups) != 2 {
+		t.Fatalf("alert_update = %v, want the opening and one closing", ups)
+	}
+}
+
+// TestAgentOfflineAlertOneThroughReconnectLoop: an agent that keeps
+// dropping, staying away past the grace, and connecting again without a
+// report has one agent_offline open the whole time, never closed and
+// reopened.
+func TestAgentOfflineAlertOneThroughReconnectLoop(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	ra.detach()
+	r.clk.Add(31 * time.Second)
+	r.m.tick()
+	first := r.openAlert(rID, KindAgentOffline)
+	for range 5 {
+		r.m.OnOnline(rID)
+		for range 3 {
+			r.clk.Add(5 * time.Second)
+			r.m.tick()
+		}
+		r.m.OnOffline(rID)
+		r.clk.Add(31 * time.Second)
+		r.m.tick()
+	}
+	as := r.alerts(rID, KindAgentOffline)
+	if len(as) != 1 || as[0].ID != first.ID || as[0].ClosedAt != nil {
+		t.Fatalf("agent_offline alerts through the loop = %+v, want the first still open", as)
+	}
+	if ups := r.alertUpdates(rID, KindAgentOffline); len(ups) != 1 {
+		t.Fatalf("alert_update = %v, want only the opening", ups)
 	}
 }
 
@@ -1361,8 +1402,9 @@ func TestMasterUnpinnedAlertAfterThreeReports(t *testing.T) {
 		t.Fatal("master_unpinned open after two reports following the master pin")
 	}
 	ma.send()
-	if a := r.openAlert(mID, KindMasterUnpinned); !strings.Contains(a.Message, "replica") {
-		t.Errorf("message %q does not name the pinned role", a.Message)
+	if a := r.openAlert(mID, KindMasterUnpinned); !strings.Contains(a.Message, "replica") ||
+		!strings.Contains(a.Message, "sudo dbpanel agent set-role master") {
+		t.Errorf("message %q does not name the pinned role and the local command", a.Message)
 	}
 	ma.setSnap(rolePin("master"))
 	ma.send()
@@ -1375,6 +1417,27 @@ func TestMasterUnpinnedAlertAfterThreeReports(t *testing.T) {
 	a = r.openAlert(mID, KindMasterUnpinned)
 	if !strings.Contains(a.Message, "berkas pin") || strings.Contains(a.Message, "milik root") {
 		t.Errorf("message %q: want the unreadable pin, without the agent's text", a.Message)
+	}
+	ma.setSnap(rolePin("master"))
+	ma.send()
+
+	// Backlog reports (kept while the panel was away) do not count; the
+	// live ones after them do.
+	ma.setSnap(rolePin("unassigned"))
+	for range 5 {
+		he := ma.report()
+		he.Backlog = true
+		ma.emit(he)
+	}
+	ma.send()
+	r.m.tick()
+	if r.isOpen(mID, KindMasterUnpinned) {
+		t.Fatal("master_unpinned opened by backlog reports")
+	}
+	ma.send()
+	ma.send()
+	if a := r.openAlert(mID, KindMasterUnpinned); strings.Contains(a.Message, "set-role") {
+		t.Errorf("message %q: an unassigned pin needs only Siapkan master", a.Message)
 	}
 	ma.setSnap(rolePin("master"))
 	ma.send()
