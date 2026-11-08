@@ -9,6 +9,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -841,5 +842,42 @@ func TestTLSVerifiedAfterIOThread(t *testing.T) {
 func TestIssuedSerialRequired(t *testing.T) {
 	if err := matchIssuedSerial("not a certificate", ""); err == nil {
 		t.Fatal("an unparsable issued certificate matched an empty serial")
+	}
+}
+
+// TestAwaitVerifiedLinkUsesRunnerClock (C3): the wait for a verified
+// receiver ends on the runner's clock, not the wall clock: an hour's
+// wait ends at once when the runner's clock moves past it.
+func TestAwaitVerifiedLinkUsesRunnerClock(t *testing.T) {
+	e := newEnv(t)
+	e.r.verifyIOWait = time.Hour
+	var mu sync.Mutex
+	now := time.Now()
+	e.r.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	m, topo := e.readyMaster("db-master")
+	r := e.followingReplica(topo, "a")
+	r.reply("mysql.startReplica", proto.ReplicaStatus{IORunning: "Connecting", SQLRunning: "Yes", SSLVerifyServerCert: true})
+	polls := 0
+	r.on("mysql.status", func(json.RawMessage) (any, error) {
+		mu.Lock()
+		polls++
+		now = now.Add(20 * time.Minute)
+		mu.Unlock()
+		return proto.MySQLStatus{Version: "8.4.3", Series: "8.4", Replica: &proto.ReplicaStatus{IORunning: "Connecting",
+			SQLRunning: "Yes", SSLVerifyServerCert: true}}, nil
+	})
+	id, err := e.r.StartTightenTLS(context.Background(), m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	mu.Lock()
+	defer mu.Unlock()
+	if polls < 3 || polls > 4 {
+		t.Fatalf("polled %d times, want 3 (the hour on the runner's clock), at most one more", polls)
 	}
 }

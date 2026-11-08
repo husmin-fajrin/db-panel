@@ -75,42 +75,55 @@ func Quotes(s string) string {
 
 // templates are MySQL's messages that print a value without escaping it
 // (a quote inside the value is printed as is): the text before the
-// value's opening quote, and what follows its closing quote. The value
-// ends at the LAST occurrence of that follower on the line, so quotes
-// inside it cannot end it early. An empty follower is the statement in
-// Last_SQL_Error's "Query: '…'": it is censored to the end of the whole
-// message, whatever follows, since a statement may span lines and MySQL
-// cuts Last_SQL_Error off (512 bytes) inside it.
-var templates = []struct{ before, after string }{
-	{"Duplicate entry ", "' for key '"},
-	{" value: ", "' for column"},
-	{"Error ", "' on query"}, // Last_SQL_Error: Error '<message>' on query.
-	{"Query: ", ""},
+// value's opening quote (with lead, when set, before it in turn: one
+// word between them, such as "Truncated incorrect DOUBLE value: "), and
+// what follows its closing quote. The value ends at the LAST occurrence
+// of that follower in the rest of the message, whatever lines lie
+// between, so neither a quote nor a newline inside it can end it early.
+// An empty follower censors to the end of the whole message: the
+// statement in Last_SQL_Error's "Query: '…'", a parse error's "near
+// '…' at line N", and a "Truncated incorrect … value: '…'", whose value
+// may hold anything and whose message may be cut. A template whose
+// follower is missing (MySQL cut Last_SQL_Error off at 512 bytes inside
+// the value) censors to the end of the message too.
+var templates = []struct{ lead, before, after string }{
+	{"", "Duplicate entry ", "' for key '"},
+	{"Truncated incorrect ", " value: ", ""},
+	{"", " value: ", "' for column"},
+	{"", "Error ", "' on query"}, // Last_SQL_Error: Error '<message>' on query.
+	{"", "Query: ", ""},
+	{"", "near ", ""}, // ER_PARSE_ERROR: … near '<statement>' at line 1
 }
 
 // template reports where the value opened by the quote at s[open] ends,
 // when the quote opens a value of one of MySQL's templates.
 func template(s string, open int) (int, bool) {
-	if s[open] != '\'' {
+	q := s[open]
+	if q != '\'' && q != '"' {
 		return 0, false
 	}
-	line := s[open+1:]
-	if n := strings.IndexAny(line, "\n\r"); n >= 0 {
-		line = line[:n]
-	}
+	rest := s[open+1:]
 	for _, t := range templates {
-		if !strings.HasSuffix(s[:open], t.before) {
+		head, ok := strings.CutSuffix(s[:open], t.before)
+		if !ok || (t.lead != "" && !strings.HasSuffix(strings.TrimRightFunc(head, isWordRune), t.lead)) {
 			continue
 		}
 		if t.after == "" {
 			return len(s) - 1, true // the rest of the message
 		}
-		if n := strings.LastIndex(line, t.after); n >= 0 {
+		// MySQL quotes these values with ', but a value quoted with " is
+		// matched the same way, so that censoring is a fixed point
+		// (Quotes writes every censored literal as '…').
+		after := string(q) + t.after[1:]
+		if n := strings.LastIndex(rest, after); n >= 0 {
 			return open + 1 + n, true
 		}
+		return len(s) - 1, true // cut inside the value: the rest of the message
 	}
 	return 0, false
 }
+
+func isWordRune(r rune) bool { return r < 0x80 && word(byte(r)) }
 
 // closing finds the quote that closes the literal opened at s[open]:
 // the same quote, not escaped (\q or qq), with no word character after

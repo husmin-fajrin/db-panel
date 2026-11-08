@@ -287,7 +287,7 @@ func (r *Runner) createJob(kind string, serverID, topologyID int64, st jobState,
 	r.d.Publish("job_update", map[string]any{"id": id, "kind": kind, "server_id": serverID, "status": store.JobQueued})
 	if err := r.launch(id, action{kind: actRun}); err != nil {
 		// No goroutine will run it: do not leave it queued, blocking the server.
-		msg := "pekerjaan tidak bisa dimulai: " + err.Error()
+		msg := "pekerjaan tidak bisa dimulai: " + logErr(err)
 		now := r.now()
 		if serr := r.d.Store.SetStep(id, 0, store.StepFailed, msg, now); serr != nil {
 			r.log.Warn("fail step of unstarted job", "job", id, "err", serr)
@@ -1251,8 +1251,11 @@ func (jr *jobRun) setJob(status, errMsg string) bool {
 	return true
 }
 
+// setStep records the current step's status and message. The message
+// may carry an agent's text, quoting MySQL's row data: it is censored
+// here (redact.Quotes), once for every step message.
 func (jr *jobRun) setStep(status, message string) {
-	message = truncate(message, maxStepMessage)
+	message = truncate(redact.Quotes(message), maxStepMessage)
 	if err := jr.r.d.Store.SetStep(jr.job.ID, jr.idx, status, message, jr.r.now()); err != nil {
 		jr.r.log.Warn("update job step", "job", jr.job.ID, "step", jr.idx, "err", err)
 	}

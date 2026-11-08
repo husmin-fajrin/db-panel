@@ -65,6 +65,10 @@ const (
 	// dropLogEvery is the minimum time between two log lines about one
 	// server's dropped reports.
 	dropLogEvery = time.Minute
+	// maxHealthPayload is the largest health report the hub reads, the
+	// monitor's own limit (internal/panel/monitor maxPayload): a larger
+	// one is dropped before it is decoded.
+	maxHealthPayload = 64 << 10
 )
 
 // Hub maps server IDs to their active connection.
@@ -230,27 +234,65 @@ func (h *Hub) OnEvent(serverID int64, ev proto.Event) {
 	h.l.OnEvent(serverID, ev)
 }
 
-// allowReport takes a token from serverID's bucket; without one, a backlog
-// report takes from the backlog allowance. Otherwise it records the drop
-// and logs it, at most once per dropLogEvery.
+// allowReport drops a payload over maxHealthPayload unread; otherwise it
+// takes a token from serverID's bucket and, without one, lets a backlog
+// report take from the backlog allowance. A dropped report is counted
+// and logged, at most once per dropLogEvery. The payload is decoded
+// outside rateMu, so one server's flood holds no other server's
+// admission behind a JSON scan.
 func (h *Hub) allowReport(serverID int64, payload json.RawMessage) bool {
-	now := h.now()
+	if len(payload) > maxHealthPayload {
+		h.drop(serverID, "payload over 64 KiB")
+		return false
+	}
 	h.rateMu.Lock()
-	b := h.bucket(serverID, now)
+	b := h.bucket(serverID, h.now())
+	if h.takeToken(b) {
+		h.rateMu.Unlock()
+		return true
+	}
+	mayBacklog := b.backlogLeft > 0
+	h.rateMu.Unlock()
+	if mayBacklog && backlogOf(payload) {
+		h.rateMu.Lock()
+		b := h.bucket(serverID, h.now())
+		// A token may have come back while the payload was read.
+		if h.takeToken(b) {
+			h.rateMu.Unlock()
+			return true
+		}
+		if b.backlogLeft > 0 {
+			b.backlogLeft--
+			h.rateMu.Unlock()
+			return true
+		}
+		h.rateMu.Unlock()
+	}
+	h.drop(serverID, "over the rate limit")
+	return false
+}
+
+// takeToken refills b and takes one token from it if it has one. The
+// caller holds rateMu.
+func (h *Hub) takeToken(b *reportBucket) bool {
+	now := h.now()
 	if elapsed := now.Sub(b.last); elapsed > 0 {
 		b.tokens = min(reportBurst, b.tokens+float64(elapsed)/float64(reportRefill))
 		b.last = now
 	}
 	if b.tokens >= 1 {
 		b.tokens--
-		h.rateMu.Unlock()
 		return true
 	}
-	if b.backlogLeft > 0 && isBacklog(payload) {
-		b.backlogLeft--
-		h.rateMu.Unlock()
-		return true
-	}
+	return false
+}
+
+// drop counts one dropped report of serverID and logs it with reason, at
+// most once per dropLogEvery.
+func (h *Hub) drop(serverID int64, reason string) {
+	now := h.now()
+	h.rateMu.Lock()
+	b := h.bucket(serverID, now)
 	minute := now.Truncate(time.Minute)
 	if n := len(b.drops); n > 0 && b.drops[n-1].minute.Equal(minute) {
 		b.drops[n-1].n++
@@ -266,11 +308,13 @@ func (h *Hub) allowReport(serverID int64, payload json.RawMessage) bool {
 	}
 	h.rateMu.Unlock()
 	if logIt {
-		h.log.Warn("agent health reports dropped: over the rate limit", "server_id", serverID,
+		h.log.Warn("agent health reports dropped", "server_id", serverID, "reason", reason,
 			"dropped_last_hour", dropped)
 	}
-	return false
 }
+
+// backlogOf is isBacklog; a test swaps it to see rateMu is not held.
+var backlogOf = isBacklog
 
 // isBacklog reports whether a health report payload is marked as backlog
 // (proto.HealthEvent.Backlog); read only once the bucket is empty.

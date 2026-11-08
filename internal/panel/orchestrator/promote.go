@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -1123,7 +1124,7 @@ func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64,
 		}
 	}
 	if err != nil {
-		r.markQuarantine(promID, oldID, true, truncate(err.Error(), maxLogLine))
+		r.markQuarantine(promID, oldID, true, truncate(logErr(err), maxLogLine))
 		return err
 	}
 	r.markQuarantine(promID, oldID, false, "")
@@ -1145,6 +1146,9 @@ type repointOutcome struct {
 // promotion promID (0: the topology's latest). Callers hold repointMu.
 func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep store.Replica, promID int64) repointOutcome {
 	set := func(o repointOutcome, lastErr string) repointOutcome {
+		// lastErr and ioErr may carry the agent's (MySQL's) text: censored
+		// before replicas.last_error and the promotion's detail.
+		lastErr = redact.Quotes(lastErr)
 		if err := r.d.Store.SetReplicaState(rep.ServerID, o.state, lastErr); err != nil {
 			r.log.Warn("replica state after repoint", "server_id", rep.ServerID, "err", err)
 		}
@@ -1183,7 +1187,7 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 	case errors.Is(err, proto.ErrOffline):
 		return set(repointOutcome{state: store.ReplicaNeedsRepoint, offline: true}, waitMsg)
 	case err != nil:
-		return set(repointOutcome{state: store.ReplicaNeedsRepoint, err: err}, truncate("Arahkan ulang gagal: "+err.Error(), maxLogLine))
+		return set(repointOutcome{state: store.ReplicaNeedsRepoint, err: err}, truncate("Arahkan ulang gagal: "+logErr(err), maxLogLine))
 	case res.NeedsRebuild:
 		return set(repointOutcome{state: store.ReplicaNeedsRebuild, errant: res.Errant},
 			truncate("Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru ("+res.Errant+")", maxLogLine))
@@ -1202,7 +1206,7 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 	}
 	o := repointOutcome{state: store.ReplicaReady}
 	if !res.IORunning {
-		o.ioErr = truncate(res.IOError, maxLogLine)
+		o.ioErr = truncate(redact.Quotes(res.IOError), maxLogLine)
 		if o.ioErr == "" {
 			o.ioErr = "penerima replikasi belum tersambung"
 		}
@@ -1455,7 +1459,7 @@ func (r *Runner) markQuarantine(promID, oldID int64, pending bool, detail string
 	if pending {
 		state = QuarantineStatePending
 	}
-	r.setPromotionServer(promID, PromotionServer{ServerID: oldID, Role: PromotionOldMaster, State: state, Detail: detail})
+	r.setPromotionServer(promID, PromotionServer{ServerID: oldID, Role: PromotionOldMaster, State: state, Detail: redact.Quotes(detail)})
 }
 
 // markReplica records a replica's outcome on promotion promID, or on the
@@ -1468,5 +1472,5 @@ func (r *Runner) markReplica(promID, topologyID, serverID int64, state, detail s
 		}
 		promID = p.ID
 	}
-	r.setPromotionServer(promID, PromotionServer{ServerID: serverID, Role: PromotionReplica, State: state, Detail: detail})
+	r.setPromotionServer(promID, PromotionServer{ServerID: serverID, Role: PromotionReplica, State: state, Detail: redact.Quotes(detail)})
 }

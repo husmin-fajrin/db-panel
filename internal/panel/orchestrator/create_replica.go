@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -954,7 +955,10 @@ func notSynced(w proto.WaitSyncedResult, lag string) error {
 	return errors.New(lag)
 }
 
+// setReplicaState records the job's replica state; lastError may carry
+// an agent's text and is censored (redact.Quotes).
 func (jr *jobRun) setReplicaState(state, lastError string) {
+	lastError = redact.Quotes(lastError)
 	if err := jr.r.d.Store.SetReplicaState(jr.job.ServerID, state, lastError); err != nil && !errors.Is(err, store.ErrNotFound) {
 		jr.r.log.Warn("replica state", "job", jr.job.ID, "err", err)
 	}

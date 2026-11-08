@@ -298,7 +298,9 @@ func verifiedLink(rs *proto.ReplicaStatus) bool {
 // without verification, or an agent that does not report it, is false at
 // once: waiting does not change it. last is the status last seen.
 func (jr *jobRun) awaitVerifiedLink(ctx context.Context, serverID int64, rs *proto.ReplicaStatus) (last *proto.ReplicaStatus, ok bool, err error) {
-	deadline := time.Now().Add(jr.r.verifyIOWait)
+	// The deadline is on the runner's clock; the pause between two
+	// polls is pollEvery (at most a second).
+	deadline := jr.r.now().Add(jr.r.verifyIOWait)
 	every := min(jr.r.pollEvery, time.Second)
 	for {
 		switch {
@@ -306,13 +308,15 @@ func (jr *jobRun) awaitVerifiedLink(ctx context.Context, serverID int64, rs *pro
 			return rs, true, nil
 		case rs != nil && rs.IORunning == "Yes" && rs.LastIOErrno == 0, ioRefused(rs):
 			return rs, false, nil
-		case !time.Now().Before(deadline):
+		case !jr.r.now().Before(deadline):
 			return rs, false, nil
 		}
+		pause := time.NewTimer(every)
 		select {
 		case <-ctx.Done():
+			pause.Stop()
 			return rs, false, ctx.Err()
-		case <-time.After(every):
+		case <-pause.C:
 		}
 		var st proto.MySQLStatus
 		if err := jr.call(ctx, serverID, "mysql.status", nil, &st); err != nil {

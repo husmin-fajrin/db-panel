@@ -1157,3 +1157,60 @@ func TestDeleteServerClearsOldMaster(t *testing.T) {
 		t.Fatalf("topology after deleting the old master = %+v, %v", topo, err)
 	}
 }
+
+// SEC-75: an agent error quoting row data on the promote paths (the
+// quarantine, a repoint refusal, a receiver's IO error) reaches no step
+// message, replicas.last_error, promotion detail, job error or job log
+// uncensored.
+func TestPromoteAgentErrorsCensored(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	const quoted = "Error 'Duplicate entry 'Budi' for key 'PRIMARY'' on query. Default database: 'rs'. Query: 'INSERT INTO p VALUES ('Budi')'"
+	g.m.fail("mysql.quarantine", "quarantine: "+quoted)
+	g.b.fail("mysql.repoint", "repoint: "+quoted)
+	g.d.reply("mysql.repoint", proto.RepointResult{IORunning: false, IOError: "receiver: Duplicate entry 'Budi' for key 'k'"})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	j, steps := e.waitJob(id, store.JobPartial)
+	check := func(what, s string) {
+		t.Helper()
+		if strings.Contains(s, "Budi") {
+			t.Errorf("%s holds Budi: %q", what, s)
+		}
+	}
+	check("jobs.error", j.Error)
+	sawQuarantine := false
+	for _, s := range steps {
+		check("step "+s.Name, s.Message)
+		if s.Idx == 4 && strings.Contains(s.Message, "'…'") {
+			sawQuarantine = true
+		}
+	}
+	if !sawQuarantine {
+		t.Errorf("quarantine step message = %q, want the censored agent error", steps[4].Message)
+	}
+	for _, fa := range []*fakeAgent{g.b, g.d} {
+		rep, err := e.st.GetReplicaByServer(fa.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("replicas.last_error", rep.LastError)
+	}
+	if rep, _ := e.st.GetReplicaByServer(g.b.id); !strings.Contains(rep.LastError, "Arahkan ulang gagal") {
+		t.Errorf("b last_error = %q, want the repoint failure", rep.LastError)
+	}
+	p := g.promotion()
+	check("promotion replicas", p.ReplicasJSON)
+	if !strings.Contains(p.ReplicasJSON, "receiver") || !strings.Contains(p.ReplicasJSON, "quarantine") {
+		t.Errorf("promotion replicas = %s, want the censored details", p.ReplicasJSON)
+	}
+	lines, err := e.st.JobLog(id, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range lines {
+		check("job log", l.Message)
+	}
+}

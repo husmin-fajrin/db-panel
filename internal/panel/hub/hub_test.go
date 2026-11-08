@@ -1,11 +1,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -562,5 +565,69 @@ func TestDisconnectForgetsOfflineBucket(t *testing.T) {
 	h.rateMu.Unlock()
 	if kept || h.Dropped(5) != 0 {
 		t.Fatal("bucket of a server deleted while offline kept")
+	}
+}
+
+// TestHubDropsOversizeReportUnread (SEC-76): a health report over 64 KiB
+// is dropped before it is decoded, even with tokens left, counted, and
+// logged with its own reason; one at the limit passes.
+func TestHubDropsOversizeReportUnread(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}
+	l := &fakeListener{}
+	var logs bytes.Buffer
+	h := New(l, WithNow(clk.Now), WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	h.Attach(1, newFakeConn(0))
+	decoded := 0
+	old := backlogOf
+	backlogOf = func(p json.RawMessage) bool { decoded++; return old(p) }
+	t.Cleanup(func() { backlogOf = old })
+
+	pad := func(n int) json.RawMessage {
+		b := []byte(`{"backlog":true,"x":"`)
+		b = append(b, bytes.Repeat([]byte("a"), n-len(b)-2)...)
+		return append(b, '"', '}')
+	}
+	big := proto.Event{Type: proto.EventHealth, Payload: pad(64<<10 + 1)}
+	h.OnEvent(1, big)
+	if n := l.eventCount(1, proto.EventHealth); n != 0 || h.Dropped(1) != 1 || decoded != 0 {
+		t.Fatalf("oversize: passed %d, dropped %d, decoded %d; want 0, 1, 0", n, h.Dropped(1), decoded)
+	}
+	if !strings.Contains(logs.String(), "payload over 64 KiB") {
+		t.Fatalf("log = %q, want the oversize reason", logs.String())
+	}
+	h.OnEvent(1, proto.Event{Type: proto.EventHealth, Payload: pad(64 << 10)})
+	if n := l.eventCount(1, proto.EventHealth); n != 1 {
+		t.Fatalf("at the limit: passed %d, want 1", n)
+	}
+}
+
+// TestHubDecodesBacklogOutsideLock (SEC-76): with the bucket empty, the
+// backlog mark is read without the hub-wide rateMu held.
+func TestHubDecodesBacklogOutsideLock(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}
+	l := &fakeListener{}
+	h := New(l, WithNow(clk.Now))
+	h.Attach(1, newFakeConn(0))
+	calls, held := 0, 0
+	old := backlogOf
+	backlogOf = func(p json.RawMessage) bool {
+		calls++
+		if !h.rateMu.TryLock() {
+			held++
+		} else {
+			h.rateMu.Unlock()
+		}
+		return old(p)
+	}
+	t.Cleanup(func() { backlogOf = old })
+	backlog := healthEvent(t, true)
+	for range 15 {
+		h.OnEvent(1, backlog)
+	}
+	if n := l.eventCount(1, proto.EventHealth); n != 15 {
+		t.Fatalf("passed %d, want 15", n)
+	}
+	if calls != 5 || held != 0 {
+		t.Fatalf("decoded %d times (want 5, once the 10 tokens are gone), %d under rateMu (want 0)", calls, held)
 	}
 }

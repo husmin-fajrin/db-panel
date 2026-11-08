@@ -25,7 +25,7 @@ var quoteCases = []struct {
 	{"pengguna dan host", "Access denied for user 'Budi'@'10.0.0.9' (using password: YES)",
 		"Access denied for user '…'@'…' (using password: YES)"},
 	{"kutipan kosong", "nilai '' kosong", "nilai '…' kosong"},
-	{"tak tertutup", "Duplicate entry 'Budi Santoso for key", "Duplicate entry '…"},
+	{"tak tertutup", "Duplicate entry 'Budi Santoso for key", "Duplicate entry '…'"},
 	{"tak tertutup hanya sebaris", "baris 'Budi\nbaris kedua tanpa kutipan", "baris '…\nbaris kedua tanpa kutipan"},
 	{"literal lintas baris", "nilai 'Jl. Mawar\nNo. 5' ditolak", "nilai '…' ditolak"},
 	{"apostrof dalam kata", "the event's master log 'x'", "the event's master log '…'"},
@@ -67,8 +67,21 @@ var quoteCases = []struct {
 	{"host angka saja", "'dbpanel_a'@'3201234567890001'", "'dbpanel_a'@'…'"},
 	{"host ipv6 tetap", "'dbpanel_repl'@'fe80::1'", "'dbpanel_repl'@'fe80::1'"},
 	{"backtick tetap", "Table `rs`.`pasien` doesn't exist", "Table `rs`.`pasien` doesn't exist"},
+	// SEC-74: values holding a quote then a non-word character or a
+	// newline, parse errors, and cut messages leave no fragment.
+	{"parse error lintas baris", "Error 'You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'nama = 'Budi'\n AND nik = 3201234567890123' at line 1' on query. Default database: 'rs'. Query: 'SELECT 1'",
+		"Error '…' on query. Default database: '…'. Query: '…'"},
+	{"parse error tanpa error luar", "You have an error in your SQL syntax; check the manual for the right syntax to use near 'nama = 'Budi'\n AND nik = 3201234567890123' at line 1",
+		"You have an error in your SQL syntax; check the manual for the right syntax to use near '…'"},
+	{"truncated incorrect", "Truncated incorrect DOUBLE value: 'Jl. Merdeka No' 5 RT 3'", "Truncated incorrect DOUBLE value: '…'"},
+	{"duplikat newline dan kutip", "Duplicate entry 'Budi\nO' Santoso' for key 'nama'", "Duplicate entry '…' for key '…'"},
+	{"error terpotong kutip di nilai", "Error 'Duplicate entry 'O' Brien", "Error '…'"},
 	{"utf8", "Duplicate entry 'Siti Nurhalizah ✓' for key 'k'", "Duplicate entry '…' for key '…'"},
 }
+
+// leakFragments are pieces of the SEC-74 inputs' values; none may
+// survive Quotes, whole or cut at any byte.
+var leakFragments = []string{"Budi", "3201234567890123", " 5 RT 3", "Santoso", "Brien", "AND nik"}
 
 func TestRedactQuotes(t *testing.T) {
 	for _, c := range quoteCases {
@@ -103,6 +116,11 @@ func TestRedactQuotesFixedPoint(t *testing.T) {
 			once := Quotes(in)
 			if twice := Quotes(once); twice != once {
 				t.Errorf("%s, cut at %d: Quotes(%q) = %q, Quotes again = %q", c.name, n, in, once, twice)
+			}
+			for _, leak := range leakFragments {
+				if strings.Contains(once, leak) {
+					t.Errorf("%s, cut at %d: Quotes(%q) = %q leaks %q", c.name, n, in, once, leak)
+				}
 			}
 		}
 	}
