@@ -94,10 +94,12 @@ func (s *Store) VerifyAuditChain() (lastOK int64, brokenAt int64, err error) {
 	}
 }
 
+// auditTriggers are the append-only triggers' names.
+var auditTriggers = []string{"audit_log_no_update", "audit_log_no_delete"}
+
 // Statements of the append-only triggers (as 0004_monitoring.sql creates
 // them). Only migration 0009 lifts and restores them.
 const (
-	dropAuditTriggers   = `DROP TRIGGER audit_log_no_update; DROP TRIGGER audit_log_no_delete;`
 	createAuditTriggers = `
 CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log
 BEGIN
@@ -114,8 +116,21 @@ END;`
 // the existing rows in id order and restores the triggers. A failure
 // rolls the whole migration back.
 func backfillAuditChain(tx *sql.Tx) error {
-	if _, err := tx.Exec(dropAuditTriggers); err != nil {
-		return fmt.Errorf("drop audit triggers: %w", err)
+	// A trigger already gone was removed outside the panel: the rows it
+	// guarded may have been changed. The migration fails closed and says
+	// why (C4), instead of "no such trigger".
+	for _, name := range auditTriggers {
+		var n int
+		if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&n); err != nil {
+			return fmt.Errorf("check audit trigger %s: %w", name, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("audit trigger %s is missing: it was removed outside the panel, so the audit log may have been tampered with; "+
+				"compare audit_log with the journald copy (journalctl -u dbpanel-panel) before restoring the trigger", name)
+		}
+		if _, err := tx.Exec(`DROP TRIGGER ` + name); err != nil {
+			return fmt.Errorf("drop audit trigger %s: %w", name, err)
+		}
 	}
 	stmt, err := tx.Prepare(`UPDATE audit_log SET prev_hash = ?, hash = ? WHERE id = ?`)
 	if err != nil {

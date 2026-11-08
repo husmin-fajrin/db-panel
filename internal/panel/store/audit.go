@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -28,15 +29,32 @@ type AuditEntry struct {
 // is waited for (busy_timeout) instead of failing the insert with a stale
 // snapshot, as a deferred transaction would.
 func (s *Store) AddAudit(e AuditEntry) (id int64, err error) {
+	rec, err := s.AddAuditRecord(e)
+	return rec.ID, err
+}
+
+// AuditRecord is what AddAuditRecord stored for an entry: its id, the ts
+// text and the chain hash exactly as in the row, for the journald copy
+// (LogAudit).
+type AuditRecord struct {
+	ID       int64
+	TS, Hash string
+}
+
+// AddAuditRecord is AddAudit returning the stored row's id, ts text and
+// hash.
+func (s *Store) AddAuditRecord(e AuditEntry) (rec AuditRecord, err error) {
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("add audit: %w", err)
+		return AuditRecord{}, fmt.Errorf("add audit: %w", err)
 	}
 	defer conn.Close()
+	auditLockHook("begin")
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return 0, fmt.Errorf("add audit: %w", err)
+		return AuditRecord{}, fmt.Errorf("add audit: %w", err)
 	}
+	auditLockHook("locked")
 	committed := false
 	defer func() {
 		if !committed {
@@ -50,22 +68,47 @@ func (s *Store) AddAudit(e AuditEntry) (id int64, err error) {
 	var prev string
 	err = conn.QueryRowContext(ctx, `SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&prev)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("add audit: last hash: %w", err)
+		return AuditRecord{}, fmt.Errorf("add audit: last hash: %w", err)
 	}
+	ts, hash := formatTime(e.TS), AuditHash(prev, e)
 	res, err := conn.ExecContext(ctx, `INSERT INTO audit_log (ts, username, ip, action, target_kind, target_id, detail_json, outcome, prev_hash, hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		formatTime(e.TS), e.Username, e.IP, e.Action, e.TargetKind, e.TargetID, e.DetailJSON, e.Outcome, prev, AuditHash(prev, e))
+		ts, e.Username, e.IP, e.Action, e.TargetKind, e.TargetID, e.DetailJSON, e.Outcome, prev, hash)
 	if err != nil {
-		return 0, fmt.Errorf("add audit: %w", err)
+		return AuditRecord{}, fmt.Errorf("add audit: %w", err)
 	}
-	if id, err = res.LastInsertId(); err != nil {
-		return 0, fmt.Errorf("add audit: %w", err)
+	id, err := res.LastInsertId()
+	if err != nil {
+		return AuditRecord{}, fmt.Errorf("add audit: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return 0, fmt.Errorf("add audit: %w", err)
+		return AuditRecord{}, fmt.Errorf("add audit: %w", err)
 	}
 	committed = true
-	return id, nil
+	return AuditRecord{ID: id, TS: ts, Hash: hash}, nil
+}
+
+// auditLockHook is called by AddAuditRecord just before it asks for the
+// write lock ("begin") and once it holds it ("locked"); tests replace it
+// to see AddAudit wait for another writer.
+var auditLockHook = func(stage string) {}
+
+// LogAudit writes the second copy of an audit entry (SEC-45, SEC-77) to
+// l, the panel's log, which goes to journald, out of reach of whoever
+// can edit panel.db. It carries the stored fields, the ts text as stored
+// and the row's chain hash, so the journal can anchor the chain: a row
+// rewritten or removed no longer matches the hash logged for it. err is
+// AddAuditRecord's error: the copy is written also when the database
+// write failed (stored=false, id 0, no hash). Callers that keep a field
+// out of the journal (a typed username's hash) pass e with it replaced.
+func LogAudit(l *slog.Logger, e AuditEntry, rec AuditRecord, err error) {
+	ts := rec.TS
+	if ts == "" {
+		ts = formatTime(e.TS)
+	}
+	l.Info("audit", "stored", err == nil, "id", rec.ID, "ts", ts, "hash", rec.Hash, "username", e.Username, "ip", e.IP,
+		"action", e.Action, "target_kind", e.TargetKind, "target_id", e.TargetID,
+		"detail_json", e.DetailJSON, "outcome", e.Outcome)
 }
 
 // ListAudit returns entries at or after since, newest first, at most limit.

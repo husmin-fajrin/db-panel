@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -231,18 +232,42 @@ func TestAddAuditWaitsForOtherWriter(t *testing.T) {
 	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO settings (key, value) VALUES ('x', 'y')`); err != nil {
 		t.Fatal(err)
 	}
+	// AddAudit asks for the write lock while the other process holds it
+	// ("begin" before the COMMIT below) and gets it only after that
+	// COMMIT ("locked" sees committed): it waited, it did not fail.
+	begin, locked := make(chan struct{}), make(chan bool, 1)
+	var committed atomic.Bool
+	auditLockHook = func(stage string) {
+		switch stage {
+		case "begin":
+			close(begin)
+		case "locked":
+			locked <- committed.Load()
+		}
+	}
+	t.Cleanup(func() { auditLockHook = func(string) {} })
 	done := make(chan error, 1)
 	go func() {
 		_, err := s.AddAudit(chainEntry(1))
 		done <- err
 	}()
-	time.Sleep(200 * time.Millisecond) // AddAudit is now waiting on the lock
+	<-begin
+	select {
+	case <-locked:
+		t.Fatal("AddAudit took the write lock while another process held it")
+	default:
+	}
+	committed.Store(true)
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("AddAudit while another process wrote: %v", err)
 	}
+	if !<-locked {
+		t.Fatal("AddAudit took the write lock before the other process committed")
+	}
+	auditLockHook = func(string) {}
 	if lastOK, brokenAt, err := s.VerifyAuditChain(); err != nil || lastOK != 2 || brokenAt != 0 {
 		t.Fatalf("VerifyAuditChain = %d, %d, %v", lastOK, brokenAt, err)
 	}

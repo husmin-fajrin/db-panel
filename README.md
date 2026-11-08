@@ -730,16 +730,24 @@ termasuk escape `\'` dan `''`) dengan `'…'`, jadi yang tersimpan adalah
 `Duplicate entry '…' for key '…'`. Berlaku untuk error MySQL di laporan
 agent (`mysql_error`, `last_io_error`, `last_sql_error`: snapshot,
 garis waktu, peringatan, dan Telegram yang dibangun darinya), log dan
-pesan pekerjaan, serta hasil di catatan audit bila berasal dari jawaban
-agent. Teks di luar kutipan tetap utuh: nomor error, nama tabel, posisi
-binlog, dan angka panjang lain. Kutipan yang tidak ditutup menyensor
-sisa barisnya; pernyataan SQL setelah `Query: '` di error replikasi
-disensor sampai akhir pesan.
+pesan pekerjaan (termasuk langkah promote dan arahkan ulang), galat
+terakhir replika, rincian server di catatan promosi, serta hasil di
+catatan audit bila berasal dari jawaban agent. Teks di luar kutipan tetap
+utuh: nomor error, nama tabel, posisi binlog, dan angka panjang lain.
+Untuk pesan MySQL yang mencetak nilai tanpa escape (`Duplicate entry`,
+`Incorrect … value`, `Error '…' on query`), panel mencari penutup pesan
+itu di seluruh pesan, jadi kutip atau baris baru di dalam nilai tidak
+memotong sensornya. Pernyataan SQL setelah `Query: '`, teks setelah
+`near '` (error sintaks), nilai `Truncated incorrect … value: '`, dan
+pesan yang terpotong di tengah nilai disensor sampai akhir pesan. Kutipan
+lain yang tidak ditutup menyensor sisa barisnya.
 
 Yang *tidak* disensor: nama akun buatan panel beserta host-nya
 (`'dbpanel_repl'@'10.0.0.%'`, `'dbpanel_dump_…'`) dan baris saran panel
 yang memuatnya (perintah `DROP USER`/`GRANT` yang perlu dijalankan), karena
-itu bukan data aplikasi; data yang ditulis MySQL tanpa tanda kutip; dan
+itu bukan data aplikasi; data yang ditulis MySQL tanpa tanda kutip; di
+pesan yang polanya tidak dikenal panel, potongan nilai yang memuat kutip
+diikuti spasi atau tanda baca (sensornya heuristik); dan
 teks yang tersimpan sebelum versi ini (tidak diubah di basis data; snapshot
 lama disensor saat dibaca ulang, tetapi garis waktu, peringatan, log
 pekerjaan, dan catatan audit lama tetap seperti aslinya). Sensor terjadi di
@@ -1132,7 +1140,9 @@ ditolak); sandi dan token tidak pernah dicatat. Perubahan chat id dan
 alamat dasar panel dicatat dengan nilai barunya, utuh. Isi rincian tiap baris
 dibatasi (2 KiB); untuk tindakan yang ditolak atau gagal hanya nama isian
 dan panjang nilainya yang dicatat, dan login gagal dengan nama pengguna
-yang tidak ada dicatat sebagai `(tidak dikenal)` dengan hash pendek. Saring
+yang tidak ada dicatat sebagai `(tidak dikenal)` dengan hash pendek (hash
+itu hanya ada di `panel.db`, tidak di salinan journal, karena nama yang
+diketik bisa saja sandi). Saring
 menurut server dan tanggal. Bila hasil sebuah tindakan berasal dari pesan
 error agent, kutipan data di dalamnya disensor (lihat "Sensor kutipan data"
 di "Pemantauan"). Catatan tidak bisa diubah atau dihapus lewat
@@ -1148,8 +1158,9 @@ cocok lagi dengan rantai. Itu bisa baris yang diubah atau disisipkan, atau
 baris sesudahnya (bila pengubah ikut menghitung ulang hash baris yang ia
 ubah, atau bila sebuah baris di tengah dihapus). Status ini diperiksa paling
 sering sekali per menit. Pemeriksaan yang sama dari baris perintah (hanya
-membaca `panel.db`; keluar 0 bila utuh, 1 bila putus; jalankan sebagai
-pengguna `dbpanel`, karena root ditolak):
+membaca `panel.db`; keluar 0 bila utuh, 1 bila putus atau tidak bisa
+diperiksa, 2 bila argumennya salah; jalankan sebagai pengguna `dbpanel`,
+karena root ditolak):
 
 ```sh
 sudo -u dbpanel dbpanel panel audit-verify
@@ -1161,7 +1172,11 @@ yang ia ubah sampai akhir, dan hasilnya tetap "Rantai utuh". Menghapus
 baris-baris *terakhir* juga tidak memutus rantai. Kedua hal itu hanya
 ketahuan dengan membandingkan isi `panel.db` dengan salinan kedua: setiap
 catatan juga ditulis ke log panel (`journalctl -u dbpanel-panel`, pesan
-`audit`, dengan `stored=false` bila basis data menolak catatan itu). Log itu
+`audit`, dengan `stored=false` bila basis data menolak catatan itu),
+termasuk penolakan pairing agent (`agent_pair`). Salinan itu membawa `ts`
+persis seperti tersimpan dan `hash` barisnya: baris di `panel.db` yang
+hash-nya tidak sama dengan `hash` terakhir di journal, atau yang hilang
+dari ujung rantai, menandakan catatan diubah atau dihapus. Log itu
 bisa dibaca anggota grup `adm` dan `systemd-journal` di host panel, lebih
 luas daripada `panel.db` (0600), jadi batasi keanggotaan grup itu.
 
@@ -1445,10 +1460,15 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   tampil di **Detail teknis**; satu pesan paling besar 1 MiB. Lihat "Batas
   dari agent" di "Pemantauan".
 - **Sensor kutipan data.** Nilai berkutip di pesan error MySQL (isi baris,
-  mis. nama atau NIK pasien) disensor panel sebelum disimpan, ditampilkan,
-  atau dikirim ke Telegram. Sensor ini tidak menyentuh data yang ditulis
-  MySQL tanpa kutip, teks lama di basis data, journal agent, dan log error
-  MySQL di server database. Lihat "Sensor kutipan data" di "Pemantauan".
+  mis. nama atau NIK pasien) disensor panel sebelum disimpan di
+  `panel.db` (laporan agent, pesan dan log pekerjaan, galat terakhir
+  replika, catatan promosi, hasil audit dari jawaban agent) dan sebelum
+  dikirim ke Telegram. Sensornya heuristik: ia mengenali kutipan, bukan
+  data. Data yang ditulis MySQL tanpa kutip (mis. teks `SIGNAL` trigger)
+  tetap terbaca, dan nilai berkutip di pesan yang polanya tidak dikenal
+  panel bisa tersisa sebagian bila nilainya sendiri memuat kutip. Teks
+  lama di basis data, journal agent, dan log error MySQL di server
+  database tidak disentuh. Lihat "Sensor kutipan data" di "Pemantauan".
 - **Rantai hash audit** menangkap catatan yang diubah, disisipkan, atau
   dihapus di tengah oleh orang yang tidak menghitung ulang hash-nya. Ia
   tidak menangkap penulisan ulang seluruh `panel.db` atau penghapusan
@@ -1463,13 +1483,19 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   panel tidak bisa memastikan kunci master sudah dibuka, panel menolak
   promote darurat, **Resync ulang**, **Buat replika**, **Tambah database**,
   **Lepas database** yang menghapus datanya, dan **Ulangi** pekerjaan itu
-  di topologi tersebut sampai tenggat kunci lewat, supaya penjaga kunci
+  di topologi tersebut sampai tenggat kunci +60 detik lewat, supaya penjaga kunci
   tidak mengkarantina master yang sehat (lihat "Promote terencana dan
   darurat").
 - **Pairing server lokal hanya dari loopback.** Token `local-pair-token`
   hanya diterima dari alamat loopback (`127.0.0.0/8`, `::1`); percobaan dari alamat lain ditolak
   tanpa memakai token dan dicatat di audit (`agent_pair`). Bila panel tidak
   bisa memeriksa token itu, permintaan ditolak (gagal tertutup).
+- **Reverse proxy di depan panel tidak didukung.** Pemeriksaan loopback
+  pairing lokal, batas login per IP, dan IP di catatan audit memakai
+  alamat asal sambungan yang sebenarnya. Di belakang proxy di host panel
+  semua permintaan tampak datang dari `127.0.0.1`: token pairing lokal
+  diterima dari mana saja, batas login per IP menjadi satu batas untuk
+  semua orang, dan catatan audit kehilangan IP aslinya.
 - **Nomor seri sertifikat MySQL diperiksa.** Panel hanya mencatat
   sertifikat MySQL yang dipasang bila nomor seri yang disajikan MySQL sama
   dengan yang diterbitkan panel (lihat "Sertifikat MySQL").

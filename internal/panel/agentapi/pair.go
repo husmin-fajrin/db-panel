@@ -199,10 +199,14 @@ func isLoopback(ip string) bool {
 // has no panel user: the username is "agent").
 func (d Deps) auditPairRefused(serverID int64, ip, hostname, outcome string) {
 	detail, _ := json.Marshal(map[string]string{"hostname": hostname})
-	if _, err := d.Store.AddAudit(store.AuditEntry{TS: d.now(), Username: "agent", IP: ip, Action: "agent_pair",
-		TargetKind: "server", TargetID: serverID, DetailJSON: string(detail), Outcome: outcome}); err != nil {
+	e := store.AuditEntry{TS: d.now(), Username: "agent", IP: ip, Action: "agent_pair",
+		TargetKind: "server", TargetID: serverID, DetailJSON: string(detail), Outcome: outcome}
+	rec, err := d.Store.AddAuditRecord(e)
+	if err != nil {
 		d.logger().Error("write audit log", "action", "agent_pair", "server_id", serverID, "err", err)
 	}
+	// The journald copy (SEC-45, SEC-77), as for the web's entries.
+	store.LogAudit(d.logger(), e, rec, err)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

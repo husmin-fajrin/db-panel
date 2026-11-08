@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
@@ -91,17 +90,28 @@ func (a *app) auditAs(r *http.Request, username, action, targetKind string, targ
 		TS: a.Now(), Username: username, IP: clientIP(r), Action: action,
 		TargetKind: targetKind, TargetID: targetID, DetailJSON: scrubDetail(detail, outcome != auditOK), Outcome: outcome,
 	}
-	id, err := a.Store.AddAudit(e)
+	rec, err := a.Store.AddAuditRecord(e)
 	if err != nil {
 		a.Logger.Error("write audit log", "action", action, "target_kind", targetKind, "target_id", targetID, "err", err)
 	}
-	// The second copy (SEC-45): the panel's log goes to journald, out of
-	// reach of whoever can edit panel.db. It carries exactly the stored
-	// fields (already scrubbed), also when the database write failed
-	// (stored=false, id 0).
-	a.Logger.Info("audit", "stored", err == nil, "id", id, "ts", e.TS.UTC().Format(time.RFC3339), "username", e.Username, "ip", e.IP,
-		"action", e.Action, "target_kind", e.TargetKind, "target_id", e.TargetID,
-		"detail_json", e.DetailJSON, "outcome", e.Outcome)
+	// The second copy (SEC-45, SEC-77): the stored fields (already
+	// scrubbed), the ts text and the row's hash, to journald. The hash of
+	// a typed unknown username stays in the database row only (SEC-78):
+	// journald is readable by the adm and systemd-journal groups, and an
+	// unsalted short hash of a password typed as a username can be
+	// confirmed with a dictionary.
+	journal := e
+	journal.Username = journalUsername(e.Username)
+	store.LogAudit(a.Logger, journal, rec, err)
+}
+
+// journalUsername is username as the panel's log (journald) may carry
+// it: an unknown username (auditUsername) loses its hash (SEC-78).
+func journalUsername(username string) string {
+	if strings.HasPrefix(username, unknownUser+" ") {
+		return unknownUser
+	}
+	return username
 }
 
 // oneLine replaces line breaks with spaces.

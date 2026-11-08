@@ -2,13 +2,15 @@
 {{define "content"}}
 <h1 class="text-2xl font-bold mb-4">Catatan audit</h1>
 {{if .Chain.OK}}
-<p class="mb-4 text-sm text-success">{{.Chain.Text}} <span class="text-base-content/60">(diperiksa {{fmtTime .Chain.CheckedAt}})</span></p>
+<p class="mb-4 text-sm"><span class="text-success">{{.Chain.Text}}</span> <span class="text-base-content/60">(diperiksa {{fmtTime .Chain.CheckedAt}}).
+  Pemeriksaan ini tidak dapat mendeteksi penulisan ulang seluruh catatan atau penghapusan baris terakhir;
+  bandingkan dengan salinan di journald (<code>journalctl -u dbpanel-panel</code>).</span></p>
 {{else if .Chain.Failed}}
 <p class="mb-4 text-sm text-warning">{{.Chain.Text}}</p>
 {{else}}
 <div role="alert" class="alert alert-error mb-4">
   <span>{{.Chain.Text}}. Catatan audit diubah di luar panel; bandingkan dengan salinan di journald
-  (<code>journalctl -u dbpanel-panel</code>) dan periksa dengan <code>dbpanel panel audit-verify</code>.</span>
+  (<code>journalctl -u dbpanel-panel</code>) dan periksa dengan <code>sudo -u dbpanel dbpanel panel audit-verify</code>.</span>
 </div>
 {{end}}
 <div class="card bg-base-100 shadow">

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,12 @@ func TestLocalPairTokenLoopbackOnly(t *testing.T) {
 	}
 	if n != 4 {
 		t.Fatalf("%d refusal audit entries, want 4 (3 + the missed peek): %+v", n, entries)
+	}
+	// SEC-77: each refusal has its journald copy, with the stored ts
+	// and the row's hash.
+	copies := regexp.MustCompile(`msg=audit stored=true id=\d+ ts=\S+Z hash=[0-9a-f]{64} username=agent .*action=agent_pair .*outcome=".*loopback`)
+	if got := len(copies.FindAllString(e.logs.String(), -1)); got != 4 {
+		t.Fatalf("%d journald copies of the refusals, want 4:\n%s", got, e.logs.String())
 	}
 
 	// From loopback it pairs, at the panel's public host.

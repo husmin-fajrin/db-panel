@@ -240,6 +240,36 @@ func TestMigrate0009RollsBackOnFailure(t *testing.T) {
 	}
 }
 
+// TestMigrate0009MissingTriggerSaysTampered (C4): an append-only trigger
+// removed before the upgrade fails migration 0009 closed, with an error
+// that names the trigger and says the audit log may have been tampered
+// with; nothing is changed.
+func TestMigrate0009MissingTriggerSaysTampered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.db")
+	db := openAtVersion(t, path, 8)
+	fillOldAudit(t, db, 3)
+	if _, err := db.Exec(`DROP TRIGGER audit_log_no_delete`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	_, err := Open(path)
+	if err == nil || !strings.Contains(err.Error(), "audit_log_no_delete") || !strings.Contains(err.Error(), "tampered") ||
+		!strings.Contains(err.Error(), "apply migration") {
+		t.Fatalf("Open with a missing trigger: err = %v", err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var triggers, v int
+	raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`).Scan(&triggers)
+	raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v)
+	if triggers != 1 || v != 8 {
+		t.Fatalf("after refused migration: triggers %d, version %d; want 1, 8", triggers, v)
+	}
+}
+
 // TestOpenReadOnly: the read-only store reads the chain but cannot write,
 // and refuses a database the panel has not migrated yet.
 func TestOpenReadOnly(t *testing.T) {

@@ -94,7 +94,7 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		who := auditUsername(username, err == nil)
 		a.auditAs(r, who, "login_failed", auditSession, 0, nil, msgLoginFailed)
 		// Never the typed name: it may be a password (SEC-44).
-		a.Logger.Info("login failed", "username", who, "ip", ip)
+		a.Logger.Info("login failed", "username", journalUsername(who), "ip", ip)
 		retry(http.StatusOK, msgLoginFailed)
 		return
 	}
