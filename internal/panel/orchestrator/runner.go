@@ -853,7 +853,7 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 	defer cancel()
 	if st.AgentJobID != "" {
 		if err := r.d.Hub.Call(ctx, st.AgentServerID, "job.cancel", proto.JobIDParams{JobID: st.AgentJobID}, nil); err != nil {
-			r.log.Warn("cancel agent job", "job", j.ID, "agent_job", st.AgentJobID, "err", err)
+			r.log.Warn("cancel agent job", "job", j.ID, "agent_job", st.AgentJobID, "err", logErr(err))
 		}
 	}
 	jr := &jobRun{r: r, lj: lj, job: j, st: st, idx: j.CurrentStep, connect: connectIndex(rows)}
@@ -876,14 +876,14 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 		// best effort.
 		if jr.connect >= 0 && j.CurrentStep >= jr.connect {
 			if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.resetReplica", nil, nil); err != nil {
-				r.log.Warn("reset replication on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
+				r.log.Warn("reset replication on cancel", "job", j.ID, "server_id", j.ServerID, "err", logErr(err))
 			}
 		}
 		if st.RebuildOldMaster {
 			break
 		}
 		if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.releaseRole", nil, nil); err != nil {
-			r.log.Warn("release role on cancel", "job", j.ID, "server_id", j.ServerID, "err", err)
+			r.log.Warn("release role on cancel", "job", j.ID, "server_id", j.ServerID, "err", logErr(err))
 		}
 	case j.Kind == KindResyncReplica:
 		// The server stays a replica of its master, failed: Resync ulang
@@ -1201,7 +1201,7 @@ func (jr *jobRun) fail(err error) {
 	// censoring and one cap for the step, the log line, jobs.error, the
 	// replica's last error and the alert.
 	msg = truncate(redact.Quotes(msg), maxLogLine)
-	jr.r.log.Warn("job step failed", "job", jr.job.ID, "kind", jr.job.Kind, "step", jr.idx, "err", redact.Quotes(err.Error()))
+	jr.r.log.Warn("job step failed", "job", jr.job.ID, "kind", jr.job.Kind, "step", jr.idx, "err", logErr(err))
 	jr.setStep(store.StepFailed, msg)
 	jr.logf("error", "%s", msg)
 	switch {
@@ -1338,6 +1338,16 @@ func (jr *jobRun) logChecks(checks []proto.Check) {
 		}
 		jr.logf(level, "%s [%s]: %s", c.Title, c.Status, c.Detail)
 	}
+}
+
+// logErr is err's text for the panel's log (journald), with the quoted
+// literals censored (redact.Quotes): an agent's error may quote MySQL's
+// row data. "" for nil.
+func logErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return redact.Quotes(err.Error())
 }
 
 // truncate cuts s to at most n bytes on a rune boundary, marking the cut.

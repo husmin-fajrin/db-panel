@@ -522,7 +522,7 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		errors.Is(err, orchestrator.ErrCutoverPending), errors.Is(err, orchestrator.ErrQuarantinePending),
 		errors.Is(err, orchestrator.ErrNotQuarantinePending):
 		// The orchestrator's refusals are written for the user.
-		a.Logger.Warn("delete server refused", "id", srv.ID, "err", err)
+		a.Logger.Warn("delete server refused", "id", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	case err != nil:

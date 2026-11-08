@@ -144,7 +144,7 @@ func (jr *jobRun) sweepDumpAccounts(ctx context.Context) {
 	var res proto.SweepDumpUsersResult
 	if err := jr.call(ctx, jr.master(), "mysql.sweepDumpUsers",
 		proto.SweepDumpUsersParams{OlderThanSec: int64(dumpAccountMaxAge / time.Second)}, &res); err != nil {
-		jr.r.log.Warn("sweep leftover dump accounts", "job", jr.job.ID, "err", err)
+		jr.r.log.Warn("sweep leftover dump accounts", "job", jr.job.ID, "err", logErr(err))
 		return
 	}
 	if len(res.Dropped) > 0 {
@@ -165,7 +165,7 @@ func (jr *jobRun) dropDumpAccount(ctx context.Context) error {
 	user, host := jr.st.DumpUser, jr.st.DumpHost
 	if err := jr.r.d.Hub.Call(dctx, jr.st.MasterServerID, "mysql.dropUser",
 		proto.DropUserParams{User: user, FromHost: host}, nil); err != nil {
-		jr.r.log.Warn("drop dump account", "job", jr.job.ID, "user", user, "err", err)
+		jr.r.log.Warn("drop dump account", "job", jr.job.ID, "user", user, "err", logErr(err))
 		if errors.Is(err, proto.ErrOffline) {
 			// Most likely the account was never created: the master was
 			// already unreachable for createDumpUser.

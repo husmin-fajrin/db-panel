@@ -738,7 +738,7 @@ func (jr *jobRun) verifyCopyAfterReconnect(ctx context.Context) (outcome, error)
 		return outcome{}, err
 	}
 	if _, err := jr.r.RefreshInventory(ctx, jr.target()); err != nil {
-		jr.r.log.Warn("refresh target inventory", "job", jr.job.ID, "err", err)
+		jr.r.log.Warn("refresh target inventory", "job", jr.job.ID, "err", logErr(err))
 	}
 	jr.st.AdminReplaced = false
 	jr.save()
@@ -949,6 +949,6 @@ func (jr *jobRun) stopReplicaAfter(ctx context.Context) {
 		return
 	}
 	if err := jr.r.d.Hub.Call(ctx, jr.job.ServerID, "mysql.stopReplica", nil, nil); err != nil {
-		jr.r.log.Warn("stop replica after failure", "job", jr.job.ID, "err", err)
+		jr.r.log.Warn("stop replica after failure", "job", jr.job.ID, "err", logErr(err))
 	}
 }

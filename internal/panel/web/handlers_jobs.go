@@ -374,7 +374,7 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, name string, do 
 	err := do(job.ID)
 	a.audit(r, name, auditJob, job.ServerID, map[string]any{"job_id": job.ID, "kind": job.Kind}, outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", err)
+		a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", logErr(err))
 		a.renderJob(w, r, http.StatusConflict, err.Error())
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -461,5 +462,22 @@ func TestControlPagesHaveNoInlineScript(t *testing.T) {
 		if m := inline.FindString(rec.Body.String()); m != "" {
 			t.Errorf("GET %s has inline script/handler/style %q", p, m)
 		}
+	}
+}
+
+// TestControlRefusalLogCensored: a refused replica control logs the
+// agent's error to the panel's log (journald) only censored.
+func TestControlRefusalLogCensored(t *testing.T) {
+	logs := &syncBuffer{}
+	e, f, _ := controlEnv(t, func(d *web.Deps) { d.Logger = slog.New(slog.NewTextHandler(logs, nil)) })
+	c := e.cookie()
+	f.err = fmt.Errorf("jalankan replikasi: %w",
+		&proto.Error{Code: proto.CodeInternal, Message: "Error 1062: Duplicate entry 'Budi' for key 'nama'"})
+	for _, path := range []string{"/replicas/2/stop", "/replicas/2/start", "/replicas/2/relock"} {
+		wantCode(t, e.do("POST", path, noForm, c), http.StatusBadRequest)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "replica control refused") || strings.Contains(out, "Budi") {
+		t.Errorf("panel log:\n%s", out)
 	}
 }

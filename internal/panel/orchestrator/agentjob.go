@@ -108,7 +108,7 @@ func (jr *jobRun) waitAgentJob(ctx context.Context, serverID int64, agentID stri
 			case errors.As(err, &pe) && pe.Code == proto.CodeBadParams:
 				return gone // the agent restarted and no longer knows the job
 			case err != nil:
-				r.log.Debug("poll agent job", "job", jr.job.ID, "agent_job", agentID, "err", err)
+				r.log.Debug("poll agent job", "job", jr.job.ID, "agent_job", agentID, "err", logErr(err))
 				continue
 			}
 			if s.State == "running" {

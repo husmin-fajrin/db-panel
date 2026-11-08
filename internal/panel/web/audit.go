@@ -123,6 +123,16 @@ func outcomeOf(err error) string {
 	return err.Error()
 }
 
+// logErr is err's text for the panel's log (journald), with the quoted
+// literals censored (redact.Quotes): an agent's error may quote MySQL's
+// row data. "" for nil.
+func logErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return redact.Quotes(err.Error())
+}
+
 // outcomeMsg is the audit outcome of a refusal message: auditOK when empty.
 func outcomeMsg(msg string) string {
 	if msg == "" {

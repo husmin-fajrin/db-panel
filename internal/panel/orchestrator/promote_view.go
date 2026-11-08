@@ -125,7 +125,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 				cctx, cancel := context.WithTimeout(ctx, viewCheckTimeout)
 				defer cancel()
 				if err := r.d.Health.CheckNow(cctx, id); err != nil {
-					r.log.Debug("check now for promote", "server_id", id, "err", err)
+					r.log.Debug("check now for promote", "server_id", id, "err", logErr(err))
 				}
 			}()
 		}
@@ -163,7 +163,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 				v.LastMasterGTID = bt.GTIDExecuted
 			}
 		} else {
-			r.log.Debug("binlog tail for promote", "server_id", masterServerID, "err", err)
+			r.log.Debug("binlog tail for promote", "server_id", masterServerID, "err", logErr(err))
 		}
 	}
 	var masterDBs []string

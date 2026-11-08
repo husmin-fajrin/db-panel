@@ -120,7 +120,7 @@ func (r *Runner) DetachReplica(ctx context.Context, serverID int64, stop bool) e
 			return fmt.Errorf("hapus pengaturan replikasi: %w", err)
 		}
 		if err := r.directCall(ctx, serverID, "mysql.releaseRole", nil); err != nil {
-			r.log.Warn("release role on detach", "server_id", serverID, "err", err)
+			r.log.Warn("release role on detach", "server_id", serverID, "err", logErr(err))
 		}
 	}
 	r.startMu.Lock()
@@ -176,7 +176,7 @@ func (r *Runner) deleteServer(ctx context.Context, serverID int64, unquarantined
 	}
 	rctx, cancel := context.WithTimeout(ctx, cancelTimeout)
 	if err := r.d.Hub.Call(rctx, serverID, "mysql.releaseRole", nil, nil); err != nil {
-		r.log.Info("release role before delete", "server_id", serverID, "err", err)
+		r.log.Info("release role before delete", "server_id", serverID, "err", logErr(err))
 	}
 	cancel()
 	r.startMu.Lock()

@@ -205,7 +205,7 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 	// port and a server without networking.
 	_, err := a.Orchestrator.Connect(r.Context(), srv.ID, proto.ConnectParams{User: form.User, Password: password, Host: form.Host})
 	if err != nil {
-		a.Logger.Warn("mysql connect failed", "server", srv.ID, "err", err)
+		a.Logger.Warn("mysql connect failed", "server", srv.ID, "err", logErr(err))
 		fail(err.Error())
 		return
 	}
@@ -222,7 +222,7 @@ func (a *app) refreshMySQL(w http.ResponseWriter, r *http.Request) {
 	_, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID)
 	a.audit(r, "mysql_refresh", auditServer, srv.ID, nil, outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("mysql refresh failed", "server", srv.ID, "err", err)
+		a.Logger.Warn("mysql refresh failed", "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
@@ -250,7 +250,7 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	id, err := a.Orchestrator.StartPrepareMaster(r.Context(), srv.ID)
 	a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("prepare master refused", "server", srv.ID, "err", err)
+		a.Logger.Warn("prepare master refused", "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
@@ -279,7 +279,7 @@ func (a *app) installMySQLTLS(w http.ResponseWriter, r *http.Request) {
 	id, err := a.Orchestrator.StartMySQLTLS(r.Context(), srv.ID)
 	a.audit(r, "mysql_tls", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("mysql certificate refused", "server", srv.ID, "err", err)
+		a.Logger.Warn("mysql certificate refused", "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
@@ -297,7 +297,7 @@ func (a *app) tightenTLS(w http.ResponseWriter, r *http.Request) {
 	id, err := a.Orchestrator.StartTightenTLS(r.Context(), srv.ID)
 	a.audit(r, "tighten_tls", auditMaster, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("tighten replication refused", "master", srv.ID, "err", err)
+		a.Logger.Warn("tighten replication refused", "master", srv.ID, "err", logErr(err))
 		p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
 		p.Flash = err.Error()
 		a.renderMaster(w, r, http.StatusBadRequest, p)
@@ -697,7 +697,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		Databases: selected, ForceDump: p.ForceDump, ConfirmWipe: true, RebuildOldMaster: rebuild,
 	})
 	if err != nil {
-		a.Logger.Warn("create replica refused", "master", master.ID, "target", p.Target, "err", err)
+		a.Logger.Warn("create replica refused", "master", master.ID, "target", p.Target, "err", logErr(err))
 		fail(err.Error())
 		return
 	}

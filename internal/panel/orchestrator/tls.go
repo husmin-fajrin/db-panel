@@ -107,7 +107,7 @@ func (r *Runner) RenewMySQLTLS(ctx context.Context) []string {
 		}
 		id, err := r.StartMySQLTLS(ctx, rec.ServerID)
 		if err != nil {
-			r.log.Warn("mysql certificate renewal refused", "server_id", rec.ServerID, "err", err)
+			r.log.Warn("mysql certificate renewal refused", "server_id", rec.ServerID, "err", logErr(err))
 			continue
 		}
 		r.log.Info("mysql certificate renewal started", "server_id", rec.ServerID, "job", id, "not_after", rec.NotAfter)
@@ -574,7 +574,7 @@ func (jr *jobRun) revertUnverified(ctx context.Context, serverID int64, topo sto
 	defer cancel()
 	// A failed start may leave a thread running; CHANGE needs both stopped.
 	if err := jr.r.d.Hub.Call(rctx, serverID, "mysql.stopReplica", nil, nil); err != nil {
-		jr.r.log.Warn("stop replica before reverting the redirect", "job", jr.job.ID, "server_id", serverID, "err", err)
+		jr.r.log.Warn("stop replica before reverting the redirect", "job", jr.job.ID, "server_id", serverID, "err", logErr(err))
 	}
 	err := jr.r.d.Hub.Call(rctx, serverID, "mysql.configureReplication", proto.ReplicationSourceParams{
 		Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password, SSL: true,
@@ -618,7 +618,7 @@ func (jr *jobRun) restartReplica(ctx context.Context, serverID int64) {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelTimeout)
 	defer cancel()
 	if err := jr.r.d.Hub.Call(sctx, serverID, "mysql.startReplica", nil, nil); err != nil {
-		jr.r.log.Warn("start replica after unfinished redirect", "job", jr.job.ID, "server_id", serverID, "err", err)
+		jr.r.log.Warn("start replica after unfinished redirect", "job", jr.job.ID, "server_id", serverID, "err", logErr(err))
 		return
 	}
 	jr.unpause(serverID)

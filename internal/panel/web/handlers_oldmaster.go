@@ -101,7 +101,7 @@ func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsVi
 	case errors.Is(err, proto.ErrOffline):
 		v.Unreadable = unreachable
 	case err != nil:
-		a.Logger.Warn("read connections", "server", srv.ID, "err", err)
+		a.Logger.Warn("read connections", "server", srv.ID, "err", logErr(err))
 		v.Unreadable = agentFailure(err, msgConnsFailed)
 	}
 	if err != nil {
@@ -230,7 +230,7 @@ func (a *app) cutoverDone(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"topology_id": topo.ID, "old_master_server_id": topo.OldMasterServerID, "warning": warning != ""},
 		outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("cutover confirmation refused", "master", srv.ID, "err", err)
+		a.Logger.Warn("cutover confirmation refused", "master", srv.ID, "err", logErr(err))
 		a.renderCutover(w, r, http.StatusConflict, srv, topo, err.Error())
 		return
 	}
@@ -295,7 +295,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		files, err := a.Orchestrator.SalvageList(lctx, srv.ID)
 		cancel()
 		if err != nil {
-			a.Logger.Warn("list salvage files", "server", srv.ID, "err", err)
+			a.Logger.Warn("list salvage files", "server", srv.ID, "err", logErr(err))
 			sf.Unreadable = agentFailure(err, msgSalvageList)
 		}
 		now := a.Now()
@@ -434,7 +434,7 @@ func (a *app) startOldMasterJob(w http.ResponseWriter, r *http.Request, action s
 	}
 	a.audit(r, action, auditServer, srv.ID, detail, outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("old master job refused", "action", action, "server", srv.ID, "err", err)
+		a.Logger.Warn("old master job refused", "action", action, "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
@@ -468,7 +468,7 @@ func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		msg := agentFailure(err, msgSalvageRead)
 		a.audit(r, "salvage_download", auditServer, srv.ID, detail, msg)
-		a.Logger.Warn("salvage download failed", "server", srv.ID, "file", name, "err", err)
+		a.Logger.Warn("salvage download failed", "server", srv.ID, "file", name, "err", logErr(err))
 		a.showError(w, r, srv, http.StatusBadGateway, msg)
 		return
 	}
@@ -510,7 +510,7 @@ func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
 			if ctx.Err() != nil {
 				outcome = outcomeDownloadGone
 			}
-			a.Logger.Warn("salvage download interrupted", "server", srv.ID, "file", name, "sent", sent, "err", err)
+			a.Logger.Warn("salvage download interrupted", "server", srv.ID, "file", name, "sent", sent, "err", logErr(err))
 			break
 		}
 	}
@@ -543,7 +543,7 @@ func (a *app) salvageDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	a.audit(r, "salvage_delete", auditServer, srv.ID, map[string]any{auditSalvageFile: name}, msg)
 	if err != nil {
-		a.Logger.Warn("salvage delete failed", "server", srv.ID, "file", name, "err", err)
+		a.Logger.Warn("salvage delete failed", "server", srv.ID, "file", name, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msg})
 		return
 	}
@@ -647,7 +647,7 @@ func (a *app) repointReplica(w http.ResponseWriter, r *http.Request) {
 		p.RepointInfo = "Replika tidak diarahkan: " + err.Error() + "."
 		a.renderReplica(w, r, http.StatusOK, p)
 	default:
-		a.Logger.Warn("repoint refused", "server", srv.ID, "err", err)
+		a.Logger.Warn("repoint refused", "server", srv.ID, "err", logErr(err))
 		a.replicaError(w, r, srv, rep, outcome)
 	}
 }

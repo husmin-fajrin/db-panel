@@ -936,7 +936,7 @@ func (jr *jobRun) promoteUndo(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		r.log.Warn("unlock promote", "job", jr.job.ID, "err", err)
+		r.log.Warn("unlock promote", "job", jr.job.ID, "err", logErr(err))
 		jr.logf("error", "Kunci master tidak bisa dibuka (%v); agent master membukanya sendiri saat tenggat kunci.", err)
 		return
 	}
@@ -1249,7 +1249,7 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 		}
 		if err := r.sendQuarantine(ctx, prom.ID, serverID, topo.MasterServerID, topo.SourceHost, topo.SourcePort,
 			topo.ReplUser, password); err != nil {
-			r.log.Warn("pending quarantine failed", "server_id", serverID, "err", err)
+			r.log.Warn("pending quarantine failed", "server_id", serverID, "err", logErr(err))
 		}
 	case store.RoleReplica:
 		rep, err := r.d.Store.GetReplicaByServer(serverID)
@@ -1270,7 +1270,7 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 			return
 		}
 		out := r.repointReplica(ctx, topo, rep, 0)
-		r.log.Info("replica repointed on reconnect", "server_id", serverID, "state", out.state, "err", out.err)
+		r.log.Info("replica repointed on reconnect", "server_id", serverID, "state", out.state, "err", logErr(out.err))
 	}
 }
 

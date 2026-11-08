@@ -157,7 +157,7 @@ func (a *app) promoteForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) promoteViewFailed(w http.ResponseWriter, r *http.Request, srv store.Server, err error) {
-	a.Logger.Warn("promote view", "master", srv.ID, "err", err)
+	a.Logger.Warn("promote view", "master", srv.ID, "err", logErr(err))
 	a.showError(w, r, srv, http.StatusServiceUnavailable, agentFailureAs(err, msgPromoteView, msgPromoteViewOff))
 }
 
