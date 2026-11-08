@@ -147,7 +147,30 @@ func Quotes(s string) string   // "Duplicate entry 'Budi' for key" → "Duplicat
 - [ ] **Step 2:** README: bagian "Catatan audit" (rantai hash, `audit-verify`), "Pemantauan" (laporan dibuang, retensi), "Keamanan" (sensor kutipan, pin dilaporkan).
 - [ ] **Step 3:** `graphify update .`; commit — `git commit -m "docs: Plan 4c audit hardening"`
 
+### Task 6: Titipan 4a/4b
+
+Item yang ditunda ke 4c oleh ledger 4a (SEC-63c, SEC-63g) dan 4b (temuan
+parkir re-review akhir, dua minor Task 10).
+
+**Files:**
+- Modify: `internal/agent/drivers/mysql/tls.go` (SEC-63c: `tlsInstall` memverifikasi serial sertifikat yang terpasang sama
+  dengan yang dikirim panel sebelum melapor sukses; `tls_verified` baru ditandai setelah IO thread replika tersambung dengan
+  `SOURCE_SSL_VERIFY_SERVER_CERT=1`), `internal/panel/agentapi/pair.go` atau padanannya (SEC-63g: pairing dengan
+  `local-pair-token` hanya diterima dari alamat loopback), `internal/panel/orchestrator/resync.go`, `create_replica.go`,
+  `databases.go` (tolak `resync_replica`, `create_replica`, `add_databases` pada topologi yang promote terakhirnya memegang
+  kunci yang belum dipastikan terbuka dan tenggat + 60 detik belum lewat — pakai pemeriksaan yang sama dengan
+  `StartPromote`; pesan menyebut kapan boleh dan CLI `unlock-master`), `internal/panel/web/handlers_oldmaster.go`
+  (fragmen koneksi hanya untuk master, master lama, atau replika topologi yang punya promosi; `SalvageList` dilewati bila
+  `agent_version` ≠ versi panel), `internal/agent/drivers/mysql/salvage.go` (komentar `allowSalvage` yang usang), `README.md`
+- Test: `tls_test.go`, `pair_test.go`, `resync_test.go`, `web_oldmaster_test.go`
+
+- [ ] **Step 1: Tulis test** `TestTLSInstallRefusesSerialMismatch`, `TestTLSVerifiedAfterIOThread`, `TestLocalPairTokenLoopbackOnly`, `TestResyncRefusedWhileLockMayStand` (juga create_replica dan add_databases; setelah tenggat + 60 detik diterima), `TestConnectionsFragmentOnlyTopologyMembers`, `TestSalvageListSkippedForOldAgent`.
+- [ ] **Step 2–4.** Implementasi; `go test ./internal/... -race -short` dan paket agent mysql yang terkait dengan `-run`.
+- [ ] **Step 5: Commit** — `git commit -m "fix: carried items from Plans 4a and 4b (TLS serial, loopback pairing, lock-aware resync)"`
+
+---
+
 ## Catatan untuk pelaksana
 
-- Urutan bebas kecuali Task 5 terakhir; Task 3 mengubah `AddAudit`,
+- Urutan bebas kecuali Task 5 terakhir (Task 6 boleh sebelum atau sesudah Task 5, tetapi sebelum review akhir); Task 3 mengubah `AddAudit`,
   jadi test web yang memeriksa audit tetap harus lulus.
