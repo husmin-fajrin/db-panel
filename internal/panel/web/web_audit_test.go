@@ -18,6 +18,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // testRemoteIP is the client address httptest.NewRequest uses.
@@ -565,5 +566,20 @@ func TestAuditOutcomeNewlinesFlattened(t *testing.T) {
 	}
 	if o := got[0].Outcome; strings.ContainsAny(o, "\r\n") || !strings.Contains(o, "baris satu baris dua") {
 		t.Errorf("outcome = %q, want one line", o)
+	}
+}
+
+// TestOutcomeOfRedactsAgentErrors: an agent's error quoting MySQL's row
+// data is stored in the audit outcome only censored; the panel's own
+// refusals keep their quotes.
+func TestOutcomeOfRedactsAgentErrors(t *testing.T) {
+	agentErr := fmt.Errorf("jalankan replikasi: %w",
+		&proto.Error{Code: proto.CodeInternal, Message: "Error 1062: Duplicate entry 'Budi' for key 'nama'"})
+	if got, want := web.OutcomeOf(agentErr), "jalankan replikasi: Error 1062: Duplicate entry '…' for key '…'"; got != want {
+		t.Errorf("web.OutcomeOf(agent error) = %q, want %q", got, want)
+	}
+	own := errors.New(`tekan "Sudah saya alihkan" dulu`)
+	if got := web.OutcomeOf(own); got != own.Error() {
+		t.Errorf("web.OutcomeOf(panel refusal) = %q", got)
 	}
 }

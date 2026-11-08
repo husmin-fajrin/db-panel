@@ -85,7 +85,9 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	}
 	jr.logf("info", "Akun dump sementara %s@%s dibuat di master; dihapus lagi setelah salinan selesai.", user, host)
 	if created.Warning != "" {
-		jr.logf("warn", "%s", created.Warning)
+		// The agent's own advice, naming the admin account (from
+		// CURRENT_USER(), never row data) in a GRANT to run: kept whole.
+		jr.logLine("warn", created.Warning)
 	}
 	p.User, p.Password = user, password
 	return jr.runAgentJob(ctx, jr.target(), cmd, p, res)

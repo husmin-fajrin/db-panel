@@ -707,6 +707,19 @@ RAM, beban, lag, umur binlog, dan garis waktu kejadian 7 hari (bisa diperluas ke
 90 hari; riwayat disimpan 180 hari, lihat Retensi di bawah). Pesan error MySQL apa adanya hanya ada di **Detail teknis** halaman
 replika.
 
+**Sensor kutipan data.** Pesan error MySQL sering mengutip isi baris
+(`Duplicate entry 'Budi' for key 'nama'`). Sebelum disimpan atau
+dikirim, panel mengganti setiap nilai berkutip (`'…'` atau `"…"`,
+termasuk escape `\'` dan `''`) dengan `'…'`, jadi yang tersimpan adalah
+`Duplicate entry '…' for key '…'`. Berlaku untuk error MySQL di laporan
+agent (`mysql_error`, `last_io_error`, `last_sql_error`: snapshot,
+garis waktu, peringatan, dan Telegram yang dibangun darinya), log dan
+pesan pekerjaan, serta hasil di catatan audit bila berasal dari jawaban
+agent. Teks di luar kutipan tetap utuh: nomor error, nama tabel, posisi
+binlog, dan angka panjang lain. Kutipan yang tidak ditutup menyensor
+sisa barisnya. Teks yang tersimpan sebelum versi ini tidak diubah di
+basis data (snapshot lama disensor saat dibaca ulang).
+
 **Beban.** Setiap agent hanya membaca MySQL di servernya sendiri: beberapa
 kueri ringan (`SHOW GLOBAL STATUS`/`VARIABLES`, `SHOW REPLICA STATUS`) tiap
 15 detik lewat satu koneksi yang dipakai ulang, tanpa menyentuh tabel

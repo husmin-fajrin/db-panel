@@ -36,6 +36,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
@@ -1196,9 +1197,10 @@ func (jr *jobRun) fail(err error) {
 	if errors.As(err, &se) {
 		msg = se.Error()
 	}
-	// The error may be an agent's text: one cap for the step, the log
-	// line, jobs.error, the replica's last error and the alert.
-	msg = truncate(msg, maxLogLine)
+	// The error may be an agent's text, quoting MySQL's row data: one
+	// censoring and one cap for the step, the log line, jobs.error, the
+	// replica's last error and the alert.
+	msg = truncate(redact.Quotes(msg), maxLogLine)
 	jr.r.log.Warn("job step failed", "job", jr.job.ID, "kind", jr.job.Kind, "step", jr.idx, "err", err)
 	jr.setStep(store.StepFailed, msg)
 	jr.logf("error", "%s", msg)
@@ -1215,7 +1217,7 @@ func (jr *jobRun) fail(err error) {
 		jr.setReplicaState(store.ReplicaFailed, msg)
 	case changesDatabases(jr.job.Kind):
 		jr.logChangeFailure()
-		jr.setReplicaState(store.ReplicaAttention, truncate(failedAt(jr.job.Kind, jr.idx, err.Error()), maxLogLine))
+		jr.setReplicaState(store.ReplicaAttention, truncate(failedAt(jr.job.Kind, jr.idx, redact.Quotes(err.Error())), maxLogLine))
 	}
 	status := store.JobFailed
 	if isPromote(jr.job.Kind) {
@@ -1250,9 +1252,29 @@ func (jr *jobRun) setStep(status, message string) {
 }
 
 // logf appends a line to the job log and publishes it, cut to maxLogLine
-// (args may hold agent text). Never log a password.
+// (args may hold agent text). String and error args are MySQL's text as
+// often as not: their quoted literals are censored (redact.Quotes), the
+// panel's own format is kept as written. Never log a password.
 func (jr *jobRun) logf(level, format string, args ...any) {
-	msg := truncate(fmt.Sprintf(format, args...), maxLogLine)
+	safe := make([]any, len(args)) // not the caller's slice
+	for i, a := range args {
+		switch v := a.(type) {
+		case string:
+			safe[i] = redact.Quotes(v)
+		case error:
+			safe[i] = redact.Quotes(v.Error())
+		default:
+			safe[i] = a
+		}
+	}
+	jr.logLine(level, fmt.Sprintf(format, safe...))
+}
+
+// logLine appends msg to the job log as it is, cut to maxLogLine, and
+// publishes it. Only for text with no MySQL message in it (logf censors
+// one): the agent's own advice that quotes an account to GRANT.
+func (jr *jobRun) logLine(level, msg string) {
+	msg = truncate(msg, maxLogLine)
 	now := jr.r.now()
 	id, err := jr.r.d.Store.AppendJobLog(jr.job.ID, level, msg, now)
 	if err != nil {

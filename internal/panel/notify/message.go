@@ -14,7 +14,10 @@ import (
 // Messages are plain text (no Markdown, so nothing needs escaping). They
 // carry server names, statuses, error numbers, plain explanations, times
 // and panel links; MySQL's own error text never leaves the panel (spec
-// 5.3), and the alert engine's messages do not hold it either.
+// 5.3), and the alert engine's messages do not hold it either. They are
+// built only from fields the panel already censored (spec 5.12: alert
+// messages, from snapshots redacted at ingest), so nothing here censors
+// again.
 
 const (
 	iconCrit      = "⛔"

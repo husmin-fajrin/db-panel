@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -168,7 +169,7 @@ var alertRules = []alertRule{
 			if !isMaster(v) || v.Status.Code != StatusLocked {
 				return false, ""
 			}
-			return true, v.Status.Detail + ". " + masterLockedAdvice
+			return true, redact.Quotes(v.Status.Detail) + ". " + masterLockedAdvice
 		},
 		close: func(v View, _ ruleCtx) bool {
 			return !isMaster(v) || v.Status.Code == StatusHealthy
@@ -423,8 +424,12 @@ func connPercent(snap *proto.HealthSnapshot) (int, bool) {
 
 // stoppedMessage words a stopped replica: the status detail (errno, never
 // MySQL's text) and, for a known error, its plain explanation and advice.
+// A status detail may hold MySQL's error text (Tidak terjangkau): alert
+// messages, and the Telegram texts built from them, take it censored
+// (redact.Quotes; ingest already censored the snapshot, so this only
+// guards a detail built from another source).
 func stoppedMessage(v View) string {
-	msg := v.Status.Detail + "."
+	msg := redact.Quotes(v.Status.Detail) + "."
 	if v.Snap == nil || v.Snap.Replica == nil {
 		return msg
 	}

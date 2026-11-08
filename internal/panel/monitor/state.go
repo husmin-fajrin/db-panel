@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -139,6 +140,7 @@ func (m *Monitor) load() {
 			if err := json.Unmarshal([]byte(h.SnapshotJSON), &snap); err != nil {
 				m.log.Warn("monitor: stored snapshot unreadable", "server_id", h.ServerID, "err", err)
 			} else {
+				snap = redactSnapshot(snap) // stored before the panel censored them
 				s.snap = &snap
 				m.snapshotEvents(h.ServerID, s, &snap, h.ReceivedAt, false)
 			}
@@ -163,7 +165,7 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 		return nil
 	}
 	s.lastSeq = he.Seq
-	snap := he.Snapshot
+	snap := redactSnapshot(he.Snapshot)
 	s.snap, s.receivedAt, s.snapBacklog, s.graceUntil = &snap, at, he.Backlog, time.Time{}
 	s.needsUpgrade = false // only a current agent reports
 	s.dirty = true
@@ -196,6 +198,21 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 		return nil
 	}
 	return m.commit(id, s, nil)
+}
+
+// redactSnapshot is snap with MySQL's error texts censored (spec 5.12):
+// they quote row data, which the panel neither stores (server_health,
+// status_events, alerts) nor sends. The replica status is copied, not
+// changed in place.
+func redactSnapshot(snap proto.HealthSnapshot) proto.HealthSnapshot {
+	snap.MySQLError = redact.Quotes(snap.MySQLError)
+	if snap.Replica != nil {
+		rs := *snap.Replica
+		rs.LastIOError = redact.Quotes(rs.LastIOError)
+		rs.LastSQLError = redact.Quotes(rs.LastSQLError)
+		snap.Replica = &rs
+	}
+	return snap
 }
 
 // unpinnedCount is the count of reports in a row whose role pin is not

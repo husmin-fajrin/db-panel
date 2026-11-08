@@ -182,3 +182,71 @@ func TestReconnectWithoutAnyReport(t *testing.T) {
 	a.send(masterSnap(srcUUID+":1-5"), false, 0)
 	r.wantStatus(mID, StatusHealthy, SevOK)
 }
+
+// TestIngestRedactsErrors: MySQL's error texts quote row data; the panel
+// keeps them only censored, in the stored snapshot, the view, the
+// timeline and the alerts.
+func TestIngestRedactsErrors(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	r.wantStatus(rID, StatusSynced, SevOK)
+
+	ra.setSnap(func(s *proto.HealthSnapshot) {
+		rs := s.Replica
+		rs.SQLRunning, rs.LastSQLErrno = "No", 1062
+		rs.LastSQLError = "Could not execute Write_rows event on table rs.pasien; Duplicate entry 'Budi' for key 'nama', " +
+			"Error_code: 1062; the event's master log binlog.000003, end_log_pos 123456789"
+		rs.IORunning, rs.LastIOErrno = "No", 1236
+		rs.LastIOError = `Got fatal error 1236 from source: "O\"Brien" 'a''b'`
+	})
+	ra.send()
+	ma.setSnap(func(s *proto.HealthSnapshot) {
+		*s = proto.HealthSnapshot{MySQLError: `Error 1062: Duplicate entry 'O\'Budi' for key 'nama'`}
+	})
+	ma.send()
+	if v := r.view(mID); v.Status.Code != StatusUnreachable || v.Status.Detail != "Error 1062: Duplicate entry '…' for key '…'" {
+		t.Errorf("master status = %+v, want unreachable with the censored error", v.Status)
+	}
+	r.clk.Add(time.Minute)
+	ma.send()
+	ra.send()
+
+	for _, id := range []int64{mID, rID} {
+		h, err := r.st.GetHealth(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, leak := range []string{"Budi", "Brien", "a''b"} {
+			if strings.Contains(h.SnapshotJSON, leak) {
+				t.Errorf("server %d snapshot_json holds %q: %s", id, leak, h.SnapshotJSON)
+			}
+		}
+		for _, ev := range r.events(id, "") {
+			if strings.Contains(ev.Detail, "Budi") {
+				t.Errorf("status event holds Budi: %+v", ev)
+			}
+		}
+		v := r.view(id)
+		if b, _ := json.Marshal(v); strings.Contains(string(b), "Budi") {
+			t.Errorf("view of %d holds Budi: %s", id, b)
+		}
+	}
+	h, _ := r.st.GetHealth(rID)
+	for _, kept := range []string{"Duplicate entry '…' for key '…'", "end_log_pos 123456789", "the event's master log"} {
+		if !strings.Contains(h.SnapshotJSON, kept) {
+			t.Errorf("replica snapshot_json lost %q: %s", kept, h.SnapshotJSON)
+		}
+	}
+	alerts, err := r.st.ListOpenAlerts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range alerts {
+		if strings.Contains(a.Message, "Budi") {
+			t.Errorf("alert %s holds Budi: %s", a.Kind, a.Message)
+		}
+	}
+}

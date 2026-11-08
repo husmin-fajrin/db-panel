@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,7 +13,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
+	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // Audit target kinds: the entity an action concerns. The target id is the
@@ -106,10 +109,16 @@ func oneLine(s string) string {
 	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
 }
 
-// outcomeOf is auditOK for nil, else the error's text.
+// outcomeOf is auditOK for nil, else the error's text. An agent's answer
+// (a *proto.Error in the chain) may quote MySQL's row data: its quoted
+// literals are censored (spec 5.12); the panel's own refusals are kept as
+// written.
 func outcomeOf(err error) string {
 	if err == nil {
 		return auditOK
+	}
+	if _, ok := errors.AsType[*proto.Error](err); ok {
+		return redact.Quotes(err.Error())
 	}
 	return err.Error()
 }

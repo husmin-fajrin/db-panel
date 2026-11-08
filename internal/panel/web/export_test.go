@@ -44,3 +44,6 @@ var (
 func StatusExplain(id int64, role string, v monitor.View) *monitor.Explanation {
 	return newStatusView(id, role, v, true, time.Time{}).Explain
 }
+
+// OutcomeOf exposes outcomeOf to web_test.
+var OutcomeOf = outcomeOf
