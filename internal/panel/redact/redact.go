@@ -77,8 +77,10 @@ func Quotes(s string) string {
 // (a quote inside the value is printed as is): the text before the
 // value's opening quote, and what follows its closing quote. The value
 // ends at the LAST occurrence of that follower on the line, so quotes
-// inside it cannot end it early. An empty follower means the line's last
-// quote: the statement in Last_SQL_Error's "Query: '…'".
+// inside it cannot end it early. An empty follower is the statement in
+// Last_SQL_Error's "Query: '…'": it is censored to the end of the whole
+// message, whatever follows, since a statement may span lines and MySQL
+// cuts Last_SQL_Error off (512 bytes) inside it.
 var templates = []struct{ before, after string }{
 	{"Duplicate entry ", "' for key '"},
 	{" value: ", "' for column"},
@@ -100,17 +102,11 @@ func template(s string, open int) (int, bool) {
 		if !strings.HasSuffix(s[:open], t.before) {
 			continue
 		}
-		var n int
 		if t.after == "" {
-			n = strings.LastIndexByte(line, '\'')
-		} else {
-			n = strings.LastIndex(line, t.after)
+			return len(s) - 1, true // the rest of the message
 		}
-		if n >= 0 {
+		if n := strings.LastIndex(line, t.after); n >= 0 {
 			return open + 1 + n, true
-		}
-		if t.after == "" {
-			return 0, false // never closed: the rest of the line
 		}
 	}
 	return 0, false

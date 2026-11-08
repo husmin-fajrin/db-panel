@@ -717,7 +717,8 @@ garis waktu, peringatan, dan Telegram yang dibangun darinya), log dan
 pesan pekerjaan, serta hasil di catatan audit bila berasal dari jawaban
 agent. Teks di luar kutipan tetap utuh: nomor error, nama tabel, posisi
 binlog, dan angka panjang lain. Kutipan yang tidak ditutup menyensor
-sisa barisnya. Teks yang tersimpan sebelum versi ini tidak diubah di
+sisa barisnya; pernyataan SQL setelah `Query: '` di error replikasi
+disensor sampai akhir pesan. Teks yang tersimpan sebelum versi ini tidak diubah di
 basis data (snapshot lama disensor saat dibaca ulang).
 
 **Beban.** Setiap agent hanya membaca MySQL di servernya sendiri: beberapa
