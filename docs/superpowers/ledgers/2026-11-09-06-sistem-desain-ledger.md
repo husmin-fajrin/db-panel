@@ -85,3 +85,4 @@ Rulings:
 - Final review: fix wave dispatched (opus, one agent).
 - Final fix wave: commits c245659..0566027 (ea7916f web, 0566027 monitor), pushed; panel -race -short ok; browser confirm e2e ok (now asserts the source dialog closes and reopens on Batal); tour 64 PNGs, no overflow. Residual: job pages/job tables still yyyy-mm-dd (ruling scoped to cutover/server pages) — accepted for now, listed for the owner; agentapi flake recurred once (pre-existing). Scoped re-review (opus) dispatched on review-fixwave.diff.
 - Final re-review (opus): all 15 addressed; Final verdict: mergeable. Spec §5.1 token amendments and §9 execution notes written by the controller. Ledger, final review and fix report archived to docs/superpowers/ledgers/.
+- Final evidence at 130b193: make test exit 0 (24 packages ok, uncached), make test-e2e exit 0 (510 s). Plan 6 done.
