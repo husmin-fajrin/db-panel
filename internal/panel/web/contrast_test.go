@@ -172,6 +172,8 @@ func TestBuiltCSSMenuAndFocus(t *testing.T) {
 	for _, want := range []string{
 		".menu{--menu-active-bg:var(--color-primary);--menu-active-fg:var(--color-primary-content)}",
 		".menu li>a:focus-visible,",
+		// The current entry is primary: its ring is base-content, outside.
+		".menu li>a.menu-active:focus-visible{outline:2px solid var(--color-base-content);outline-offset:2px}",
 		// The minifier merges the button and input focus rules.
 		".btn:focus-visible,.input:focus,",
 		"{outline:2px solid var(--color-primary);outline-offset:2px}",

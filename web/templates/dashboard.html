@@ -29,9 +29,7 @@
     <section class="card bg-base-100 min-w-0 lg:col-span-7">
       <div class="card-body p-6">
         {{template "card-head" (cardHead "Lag replikasi 24 jam" "" "")}}
-        <div class="overflow-x-auto">
-          <div class="min-w-[480px]">{{template "lag-chart" $t.Chart}}</div>
-        </div>
+        {{template "lag-chart" $t.Chart}}
       </div>
     </section>
     <section class="card bg-base-100 min-w-0 lg:col-span-5">
@@ -81,14 +79,14 @@
       {{if .Jobs}}
       <div class="overflow-x-auto">
         <table class="table table-sm">
-          <thead><tr><th>Pekerjaan</th><th>Server</th><th>Dibuat</th><th>Status</th></tr></thead>
+          <thead><tr><th>Pekerjaan</th><th>Status</th><th>Server</th><th>Dibuat</th></tr></thead>
           <tbody>
             {{range .Jobs}}
             <tr>
               <td class="whitespace-nowrap"><a class="link font-semibold" href="/jobs/{{.ID}}">{{kindLabel .Kind}}</a></td>
+              <td>{{template "badge" .Badge}}</td>
               <td class="whitespace-nowrap">{{.ServerName}}</td>
               <td class="mono whitespace-nowrap">{{ago .CreatedAt $.Now}}</td>
-              <td>{{template "badge" .Badge}}</td>
             </tr>
             {{end}}
           </tbody>

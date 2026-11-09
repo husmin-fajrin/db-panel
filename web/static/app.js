@@ -67,6 +67,17 @@
     return status === "queued" || status === "running" ? "aktif" : status;
   }
 
+  // fokuskan memberi fokus ke el. Dialog daisyUI (.modal) baru terlihat
+  // satu frame setelah showModal() (transisi visibility), jadi focus()
+  // tepat sesudahnya tidak berhasil; dicoba lagi tiap frame, paling banyak
+  // 20 kali.
+  function fokuskan(el, sisa = 20) {
+    el.focus();
+    if (document.activeElement !== el && sisa > 0 && el.isConnected) {
+      requestAnimationFrame(() => fokuskan(el, sisa - 1));
+    }
+  }
+
   // isiTersembunyi mengisi <input type="hidden" name=name> di form,
   // membuatnya bila belum ada.
   function isiTersembunyi(form, name, value) {
@@ -326,7 +337,12 @@
       busy: false,
       danger: false,
       tombol: null,
+      // sumber: dialog lain yang terbuka saat tombol diklik (mis. "Lepas
+      // replika?"); ditutup selama konfirmasi agar tidak bertumpuk, lalu
+      // dibuka lagi bila konfirmasi dibatalkan.
+      sumber: null,
       init() {
+        this.$root.addEventListener("close", () => this.kembali());
         document.addEventListener("click", (e) => {
           const btn = e.target.closest("[data-confirm-action]");
           if (!btn) {
@@ -355,8 +371,13 @@
         this.busy = false;
         this.$refs.typed.value = "";
         this.$refs.password.value = "";
+        const sumber = btn.closest("dialog[open]");
+        this.sumber = sumber && sumber !== this.$root ? sumber : null;
+        if (this.sumber) {
+          this.sumber.close();
+        }
         this.$root.showModal();
-        (this.name ? this.$refs.typed : this.replicaName ? this.$refs.typedReplica : this.$refs.password).focus();
+        fokuskan(this.name ? this.$refs.typed : this.replicaName ? this.$refs.typedReplica : this.$refs.password);
       },
       input() {
         this.typed = this.$refs.typed.value;
@@ -365,6 +386,19 @@
       close() {
         this.$refs.password.value = "";
         this.$root.close();
+      },
+      // kembali: dialog konfirmasi tertutup (Batal, Esc, atau setelah
+      // unduhan): dialog sumbernya dibuka lagi dan fokus kembali ke tombol
+      // yang membukanya.
+      kembali() {
+        const sumber = this.sumber;
+        this.sumber = null;
+        if (sumber && !sumber.open && sumber.isConnected) {
+          sumber.showModal();
+        }
+        if (this.tombol && this.tombol.isConnected) {
+          fokuskan(this.tombol);
+        }
       },
       get tombolClass() {
         return { "btn-error": this.danger, "btn-primary": !this.danger };

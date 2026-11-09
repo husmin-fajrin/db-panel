@@ -460,9 +460,9 @@ func TestDashboardCounts(t *testing.T) {
 	rec := e.do("GET", "/", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
 	// The dashboard has no server counts any more (design spec 5.6); the
-	// sidebar's status box counts the paired agents, and with no topology
-	// the page offers to start one.
-	wantBody(t, rec, "1 agent offline", "data-empty", "Belum ada replika", "admin", "Keluar")
+	// sidebar's status box counts every server (the unpaired db-c as not
+	// connected), and with no topology the page offers to start one.
+	wantBody(t, rec, "1 dari 3 server tersambung", "data-empty", "Belum ada replika", "admin", "Keluar")
 }
 
 func TestServerListStatus(t *testing.T) {

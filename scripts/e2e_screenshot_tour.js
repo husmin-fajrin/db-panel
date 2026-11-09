@@ -18,9 +18,10 @@
 // <nn>-<halaman>-<tema>-<lebar>.png. The theme is fixed per pass through
 // both prefers-color-scheme and localStorage.tema, so the panel's default
 // theme setting does not matter. Nothing is submitted besides the login.
-// At 390 px a page wider than the viewport (horizontal page scroll) is
-// reported on stdout as "OVERFLOW <file>: <n> px" (the run goes on, so the
-// remaining screenshots are still taken).
+// A page wider than the viewport (horizontal page scroll) is reported on
+// stdout as "OVERFLOW <file>: <n> px"; the run goes on, so the remaining
+// screenshots are still taken, and then the script fails (exit status 1)
+// so the test fails.
 // Needs Node with the playwright package and its Chromium.
 "use strict";
 const path = require("path");
@@ -55,6 +56,7 @@ async function main() {
     throw new Error("unknown PHASE " + phase);
   }
 
+  const overflows = [];
   const browser = await chromium.launch();
   try {
     for (const tema of TEMA) {
@@ -64,6 +66,9 @@ async function main() {
     }
   } finally {
     await browser.close();
+  }
+  if (overflows.length !== 0) {
+    throw new Error(`horizontal overflow on ${overflows.length} screenshot(s): ` + overflows.join("; "));
   }
 
   async function pass(browser, tema, lebar) {
@@ -95,6 +100,7 @@ async function main() {
         );
         if (overflow > 0) {
           console.log(`OVERFLOW ${file}: ${overflow} px`);
+          overflows.push(`${path.basename(file)}: ${overflow} px`);
         }
         await page.screenshot({ path: file, fullPage: opts.fullPage !== false });
         console.log("screenshot " + file);

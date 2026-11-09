@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
@@ -116,23 +117,32 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 	}
 }
 
-// TestLayoutAgentStatus: the status box counts the paired servers and the
-// offline agents.
+// TestLayoutAgentStatus: the status box counts every registered server.
+// "Semua agent tersambung" only when every one has a paired agent that is
+// connected and not judged away by the monitor; otherwise "K dari N
+// server tersambung" in the warning tone. An unpaired server (no agent, or
+// its token reissued) counts as not connected, never skipped (UX1).
 func TestLayoutAgentStatus(t *testing.T) {
 	e := newEnv(t)
 	a, _ := e.st.CreateServer("db-a")
 	b, _ := e.st.CreateServer("db-b")
-	e.st.CreateServer("db-c") // not paired: no agent
 	e.st.MarkPaired(a.ID, "s1", "10.0.0.1")
 	e.st.MarkPaired(b.ID, "s2", "10.0.0.2")
 	e.hub.Attach(a.ID, fakeConn{})
 	rec := e.do("GET", "/servers", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "1 agent offline")
+	wantBody(t, rec, `<span class="text-warning-text font-semibold">1 dari 2 server tersambung</span>`, "bg-warning")
+	wantNoBody(t, rec, "Semua agent tersambung")
 	e.hub.Attach(b.ID, fakeConn{})
 	rec = e.do("GET", "/servers", nil, e.cookie())
 	wantBody(t, rec, "Semua agent tersambung · 2 server · panel <span class=\"mono whitespace-nowrap\">v-test</span>")
-	wantNoBody(t, rec, "agent offline")
+	wantNoBody(t, rec, "server tersambung</span>")
+
+	// A third server without an agent: no longer all connected.
+	e.st.CreateServer("db-c")
+	rec = e.do("GET", "/servers", nil, e.cookie())
+	wantBody(t, rec, "2 dari 3 server tersambung")
+	wantNoBody(t, rec, "Semua agent tersambung")
 }
 
 func TestLayoutMobileMenu(t *testing.T) {
@@ -304,4 +314,24 @@ func TestLoginBannerInsideCard(t *testing.T) {
 	if strings.Contains(body, "menu-utama") {
 		t.Error("login page has the sidebar")
 	}
+}
+
+// TestLayoutAgentStatusFromMonitor: a monitored server whose agent the
+// monitor judges away (presumed down for it, as db-gudang in the review's
+// screenshot) is not connected, even with a hub connection (UX1).
+func TestLayoutAgentStatusFromMonitor(t *testing.T) {
+	e, mon, _ := monitorEnv(t)
+	mon.setView(masterView(1, 50))
+	mon.setView(monitor.View{ServerID: 2, Role: store.RoleReplica, ReceivedAt: monNow,
+		Status: monitor.Status{Code: monitor.StatusSynced, Severity: monitor.SevOK}})
+	rec := e.do("GET", "/servers", nil, e.cookie())
+	wantBody(t, rec, "Semua agent tersambung · 2 server")
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow,
+		Status: monitor.Status{Code: monitor.StatusDown, Severity: monitor.SevCrit, Detail: "Diduga tumbang (agent offline)"}})
+	rec = e.do("GET", "/servers", nil, e.cookie())
+	wantBody(t, rec, "1 dari 2 server tersambung")
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow,
+		Status: monitor.Status{Code: monitor.StatusAwaitingReport, Severity: monitor.SevNeutral}})
+	rec = e.do("GET", "/servers", nil, e.cookie())
+	wantBody(t, rec, "1 dari 2 server tersambung")
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // How auditDetailSummary words a detail field's value.
@@ -24,6 +25,7 @@ const (
 	sumJob           // a job id, its first 8 characters
 	sumKind          // a job kind (kindLabel)
 	sumAction        // a confirmation's action
+	sumMode          // a promote mode: terencana, darurat
 )
 
 // auditSummaryRunes caps each value of a detail summary.
@@ -40,7 +42,7 @@ type auditDetailField struct {
 var auditDetailFields = []auditDetailField{
 	{"candidate", "kandidat", sumServer},
 	{"candidate_id", "kandidat", sumServer},
-	{"mode", "mode", sumText},
+	{"mode", "mode", sumMode},
 	{"accept_partial", "terima sebagian", sumFlag},
 	{"accept_unreachable", "terima replika tak terjangkau", sumFlag},
 	{"accept_branched", "terima replika bercabang", sumFlag},
@@ -202,6 +204,13 @@ func summaryValue(v any, how int, names map[int64]string) string {
 		return cutRunes(s, 8)
 	case sumKind:
 		return kindLabel(s)
+	case sumMode:
+		switch s {
+		case proto.PromotePlanned:
+			return "terencana"
+		case proto.PromoteEmergency:
+			return "darurat"
+		}
 	case sumAction:
 		if l, ok := confirmActionLabels[s]; ok {
 			return l

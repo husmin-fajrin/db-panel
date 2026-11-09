@@ -35,10 +35,10 @@ type Page struct {
 	// Active is the sidebar entry of the current page (menuDashboard, ...);
 	// "" marks none.
 	Active string
-	// ServersTotal is the number of servers with a paired agent and
-	// ServersOnline how many of those agents are connected, for the
-	// sidebar's status box.
-	ServersTotal, ServersOnline int
+	// ServersTotal is the number of registered servers and
+	// ServersConnected how many of them have a paired agent that is
+	// connected and reporting, for the sidebar's status box.
+	ServersTotal, ServersConnected int
 	// CertNotice shows that the panel's certificate to install changed.
 	CertNotice bool
 	// CertFallback shows that the uploaded certificate is unusable and the
@@ -103,8 +103,9 @@ func (p Page) MenuAttr(key string) template.HTMLAttr {
 	return ""
 }
 
-// AgentsOffline is the number of paired agents that are not connected.
-func (p Page) AgentsOffline() int { return max(p.ServersTotal-p.ServersOnline, 0) }
+// AllConnected reports whether every registered server's agent is
+// connected (and there is at least one server).
+func (p Page) AllConnected() bool { return p.ServersTotal > 0 && p.ServersConnected >= p.ServersTotal }
 
 // Banner is a message box above or inside a page (template "banner"):
 // Tone is info, success, warning or error; HTML, when set, is shown

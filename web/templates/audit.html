@@ -35,16 +35,18 @@
     {{if .Rows}}
     <div class="overflow-x-auto">
       <table class="table table-sm">
-        <thead><tr><th>Waktu</th><th>Pengguna</th><th>IP</th><th>Aksi</th><th>Target</th><th>Hasil</th><th>Detail</th></tr></thead>
+        {{/* Waktu, Aksi and Hasil first: a 390 px screen shows them
+             without scrolling. */}}
+        <thead><tr><th>Waktu</th><th>Aksi</th><th>Hasil</th><th>Pengguna</th><th>IP</th><th>Target</th><th>Detail</th></tr></thead>
         <tbody>
           {{range .Rows}}
           <tr>
             <td class="mono text-xs whitespace-nowrap">{{fmtDateTime .TS}}</td>
+            <td class="font-semibold">{{.ActionLabel}}</td>
+            <td>{{if .OK}}{{template "badge" (badgeOf "success" "Berhasil")}}{{else}}{{template "badge" (badgeOf "error" "Gagal")}}<div class="mt-1 text-xs text-error-text">{{.Outcome}}</div>{{end}}</td>
             <td class="whitespace-nowrap">{{.Username}}</td>
             <td class="mono text-xs">{{.IP}}</td>
-            <td class="font-semibold">{{.ActionLabel}}</td>
             <td>{{.Target}}</td>
-            <td>{{if .OK}}{{template "badge" (badgeOf "success" "Berhasil")}}{{else}}{{template "badge" (badgeOf "error" "Gagal")}}<div class="mt-1 text-xs text-error-text">{{.Outcome}}</div>{{end}}</td>
             <td class="min-w-56 max-w-md">
               {{with .Summary}}<div class="break-words">{{.}}</div>{{end}}
               {{with .Detail}}<details class="mt-1"><summary class="help cursor-pointer">JSON</summary><code class="mt-1 block text-xs break-all">{{.}}</code></details>{{end}}

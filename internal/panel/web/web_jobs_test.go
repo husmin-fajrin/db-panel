@@ -67,8 +67,20 @@ func TestJobDetailTimeline(t *testing.T) {
 	// The list's times in Space Mono 12 px.
 	rec = e.do("GET", "/jobs", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	if row := between(rec.Body.String(), `href="/jobs/`+waitingJob+`"`, "</tr>"); strings.Count(row, `<td class="mono text-xs whitespace-nowrap">`) != 2 {
+	if row := between(rec.Body.String(), `href="/jobs/`+waitingJob+`"`, "</tr>"); strings.Count(row, `<td class="mono text-xs whitespace-nowrap`) != 2 {
 		t.Errorf("Dibuat/Selesai not in Space Mono 12 px: %q", row)
+	}
+	// At 390 px: Status is the second column and Selesai shows only from md.
+	head := between(rec.Body.String(), "<thead>", "</thead>")
+	if !strings.Contains(head, `<th>Pekerjaan</th><th>Status</th><th>Server</th><th>Dibuat</th><th class="hidden md:table-cell">Selesai</th>`) {
+		t.Errorf("job table head is not Pekerjaan, Status, Server, Dibuat, Selesai (md+): %q", head)
+	}
+	row := between(rec.Body.String(), `href="/jobs/`+waitingJob+`"`, "</tr>")
+	if i, j := strings.Index(row, "lencana"), strings.Index(row, `href="/servers/`); i < 0 || j < 0 || i > j {
+		t.Errorf("status badge is not before the server: %q", row)
+	}
+	if !strings.Contains(row, `<td class="mono text-xs whitespace-nowrap hidden md:table-cell">`) {
+		t.Errorf("Selesai cell is not hidden below md: %q", row)
 	}
 }
 

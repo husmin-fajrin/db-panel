@@ -23,9 +23,9 @@
       <h2 class="mb-2">Ringkasan promote</h2>
       <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
         <dt class="text-muted">Promote</dt><dd>{{if $.Planned}}terencana{{else}}darurat{{end}}</dd>
-        <dt class="text-muted">Promote selesai</dt><dd class="mono text-xs leading-5">{{fmtTime .FinishedAt}}</dd>
+        <dt class="text-muted">Promote selesai</dt><dd class="mono text-xs leading-5">{{fmtDateTime .FinishedAt}}</dd>
         {{if $.Planned}}
-        <dt class="text-muted">Master lama dikunci</dt><dd class="mono text-xs leading-5">{{fmtTime .LockAt}}</dd>
+        <dt class="text-muted">Master lama dikunci</dt><dd class="mono text-xs leading-5">{{fmtDateTime .LockAt}}</dd>
         {{with $.WritePause}}<dt class="text-muted">Lama jeda tulis</dt><dd class="mono text-xs leading-5">{{.}}</dd>{{end}}
         {{end}}
       </dl>

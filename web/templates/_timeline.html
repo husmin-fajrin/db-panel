@@ -23,7 +23,7 @@ entries, newest first. */}}
         <span class="{{.Tone}} mt-0.5">{{template "timeline-icon" .Icon}}</span>
         <div class="flex min-w-0 flex-col">
           <span><span class="font-semibold">{{.Title}}</span>{{with .Detail}} <span class="text-muted">· {{.}}</span>{{end}}</span>
-          <span class="mono text-xs text-muted">{{fmtTime .At}}</span>
+          <span class="mono text-xs text-muted">{{fmtDateTime .At}}</span>
         </div>
       </li>
       {{end}}

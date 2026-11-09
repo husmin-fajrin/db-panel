@@ -23,7 +23,7 @@
       <input type="hidden" name="rebuild" value="1">
       <input type="hidden" name="target" value="{{.Rebuild.Server.ID}}">
       <p><strong>{{.Rebuild.Server.Name}}</strong>{{with .Rebuild.Server.Address}} ({{.}}){{end}}</p>
-      {{range .Targets}}{{if .NotConnected}}<p class="text-sm">MySQL di <strong>{{.Name}}</strong> belum dihubungkan: <a class="link" href="/servers/{{.ID}}">buka halaman servernya dan klik Hubungkan MySQL</a> dulu.</p>{{end}}{{else}}<p class="text-sm text-warning">Agent {{.Rebuild.Server.Name}} offline; bangun ulang bisa dimulai setelah agent-nya tersambung.</p>{{end}}
+      {{range .Targets}}{{if .NotConnected}}<p class="text-sm">MySQL di <strong>{{.Name}}</strong> belum dihubungkan: <a class="link" href="/servers/{{.ID}}">buka halaman servernya dan klik Hubungkan MySQL</a> dulu.</p>{{end}}{{else}}<p class="text-sm text-warning-text">Agent {{.Rebuild.Server.Name}} offline; bangun ulang bisa dimulai setelah agent-nya tersambung.</p>{{end}}
       {{else if .Targets}}
       <select class="select w-full" name="target" required>
         <option value="" disabled{{if not .Target}} selected{{end}}>Pilih server</option>

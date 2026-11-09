@@ -203,6 +203,13 @@ func TestDashboardHeaderAndLists(t *testing.T) {
 	if main := between(rec.Body.String(), "data-page-head", "</main>"); strings.Contains(main, `class="badge`) {
 		t.Error("dashboard uses a daisyUI badge")
 	}
+	// Recent jobs: Status second, so a 390 px screen shows it (UX3).
+	if err := e.st.CreateJob(store.Job{ID: "dashjob0123456789", Kind: "prepare_master", ServerID: 1,
+		ParamsJSON: "{}", CreatedAt: monNow}, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	rec = e.do("GET", "/", nil, e.cookie())
+	wantBody(t, rec, "<th>Pekerjaan</th><th>Status</th><th>Server</th><th>Dibuat</th>")
 }
 
 func TestDashboardBannersKept(t *testing.T) {

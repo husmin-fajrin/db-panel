@@ -245,8 +245,7 @@ func (c LagChart) ThresholdY() float64 {
 	return y
 }
 
-// PeakX and PeakY place the peak's dot; PeakAnchor keeps its label
-// inside the chart near the edges.
+// PeakX and PeakY place the peak's dot; its label is in the legend.
 func (c LagChart) PeakX() float64 {
 	if c.Peak == nil {
 		return 0
@@ -261,44 +260,6 @@ func (c LagChart) PeakY() float64 {
 	}
 	_, y := chartXY(c, c.Peak.T, *c.Peak.Lag, chartPlotW, chartPlotH)
 	return y
-}
-
-func (c LagChart) PeakAnchor() string {
-	x := c.PeakX()
-	switch {
-	case c.peakAtTop() && x > chartPlotW*0.7:
-		return "end"
-	case c.peakAtTop():
-		return "start"
-	case x < chartPlotW*0.15:
-		return "start"
-	case x > chartPlotW*0.85:
-		return "end"
-	}
-	return "middle"
-}
-
-// peakAtTop: the peak's dot is too near the top for a label above it, so
-// the label goes beside it.
-func (c LagChart) peakAtTop() bool { return c.PeakY() < 16 }
-
-// PeakLabelX and PeakLabelY place the peak's label above the dot, or
-// beside it when the dot is at the top of the chart.
-func (c LagChart) PeakLabelX() float64 {
-	switch {
-	case !c.peakAtTop():
-		return c.PeakX()
-	case c.PeakAnchor() == "end":
-		return c.PeakX() - 10
-	}
-	return c.PeakX() + 10
-}
-
-func (c LagChart) PeakLabelY() float64 {
-	if c.peakAtTop() {
-		return c.PeakY() + 4
-	}
-	return c.PeakY() - 8
 }
 
 // PeakTone is the tone of the peak's series, for its dot.

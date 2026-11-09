@@ -389,18 +389,24 @@ func (a *app) page(r *http.Request) Page {
 		} else {
 			p.AlertCount = len(open)
 		}
-		// The sidebar's status box: agents paired and connected.
+		// The sidebar's status box: every registered server, and those
+		// whose agent is paired, connected and, for a monitored server,
+		// not judged away by the monitor (agent offline, presumed down for
+		// it, awaiting its first report). An unpaired server has no agent
+		// and so counts as not connected.
 		if servers, err := a.Store.ListServers(); err != nil {
 			a.Logger.Warn("count servers", "err", err)
 		} else {
+			views := a.Monitor.Views()
 			for _, s := range servers {
-				if !s.Paired {
+				p.ServersTotal++
+				if !s.Paired || !a.Hub.IsOnline(s.ID) {
 					continue
 				}
-				p.ServersTotal++
-				if a.Hub.IsOnline(s.ID) {
-					p.ServersOnline++
+				if v, ok := views[s.ID]; ok && v.Role != "" && v.AgentAway() {
+					continue
 				}
+				p.ServersConnected++
 			}
 		}
 	}

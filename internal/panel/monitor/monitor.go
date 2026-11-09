@@ -70,6 +70,13 @@ type View struct {
 	ReportsDropped int
 }
 
+// AgentAway reports whether the view's status comes from the agent's
+// absence: Agent offline, a master presumed down because its agent is
+// away, or connected again and awaiting its first report.
+func (v View) AgentAway() bool {
+	return offlineStatus(v.Status) || v.Status.Code == StatusAwaitingReport
+}
+
 // Monitor ingests the agents' health reports, derives each server's status,
 // records the timeline (status_events) and tells browsers (health_update).
 // Report handlers, the tick and the background monitor.configure calls

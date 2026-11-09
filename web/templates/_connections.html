@@ -20,5 +20,5 @@
 </div>
 <p class="mt-2 text-sm">Jumlah koneksi: <strong>{{.Total}}</strong></p>
 {{end}}
-{{if not .TakenAt.IsZero}}<p class="help mt-1">Dibaca <span class="mono">{{fmtTime .TakenAt}}</span></p>{{end}}
+{{if not .TakenAt.IsZero}}<p class="help mt-1">Dibaca <span class="mono">{{fmtDateTime .TakenAt}}</span></p>{{end}}
 {{end}}

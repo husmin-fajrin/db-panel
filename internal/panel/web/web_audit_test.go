@@ -354,7 +354,13 @@ func TestAuditPageFilters(t *testing.T) {
 	// Default: the last 7 days, every server.
 	rec := e.do("GET", "/audit", nil, c)
 	wantCode(t, rec, http.StatusOK)
+	// Waktu, Aksi and Hasil first, so a 390 px screen shows them (UX4).
+	wantBody(t, rec, "<th>Waktu</th><th>Aksi</th><th>Hasil</th><th>Pengguna</th><th>IP</th><th>Target</th><th>Detail</th>")
 	got := rows(rec)
+	if row := between(got, "<tr>", "</tr>"); !(strings.Index(row, "Jangan ganggu") < strings.Index(row, "Berhasil") &&
+		strings.Index(row, "Berhasil") < strings.Index(row, "10.1.1.1")) {
+		t.Errorf("row cells not in Waktu, Aksi, Hasil, Pengguna, IP order: %q", row)
+	}
 	for _, s := range []string{"Jangan ganggu", "Server db-satu", "10.1.1.1", "Berhasil",
 		"Stop replika", "Replika db-dua", "operator", "replika sedang dipakai pekerjaan lain",
 		"Ubah pengaturan", "monitor_check_every"} {
@@ -724,13 +730,20 @@ func TestAuditDetailSummaryPromote(t *testing.T) {
 	// What the promote handler writes: false acceptances are left out.
 	got := web.AuditDetailSummary("promote", `{"candidate":7,"mode":"planned","accept_partial":false,`+
 		`"accept_unreachable":false,"accept_branched":true,"job_id":"0123456789abcdef"}`)
-	for _, s := range []string{"kandidat: #7", "terima replika bercabang: ya", "pekerjaan: 01234567"} {
+	for _, s := range []string{"kandidat: #7", "mode: terencana", "terima replika bercabang: ya", "pekerjaan: 01234567"} {
 		if !strings.Contains(got, s) {
 			t.Errorf("summary %q lacks %q", got, s)
 		}
 	}
 	if strings.Contains(got, "sebagian") || strings.Contains(got, "accept") {
 		t.Errorf("summary %q shows a false acceptance or a raw key", got)
+	}
+	// The promote mode in Indonesian; an unknown value passes through.
+	if got := web.AuditDetailSummary("promote", `{"mode":"emergency"}`); got != "mode: darurat" {
+		t.Errorf("summary = %q, want mode: darurat", got)
+	}
+	if got := web.AuditDetailSummary("promote", `{"mode":"lain"}`); got != "mode: lain" {
+		t.Errorf("summary = %q, want mode: lain", got)
 	}
 	for _, c := range []struct{ action, detail, want string }{
 		{"server_delete", "{}", ""},

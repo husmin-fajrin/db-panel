@@ -1171,7 +1171,7 @@ func TestMySQLTLSButtonNeedsToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = e.do("GET", "/servers/1", nil, c)
-	wantBody(t, rec, "0a1b2c3d4e5f60718293a4b5c6d7e8f9", "2028-11-04", "Perbarui sertifikat MySQL")
+	wantBody(t, rec, "0a1b2c3d4e5f60718293a4b5c6d7e8f9", notAfter.Local().Format("02-01-2006 15:04"), "Perbarui sertifikat MySQL")
 	wantNoBody(t, rec, "Belum ada sertifikat MySQL dari panel")
 }
 

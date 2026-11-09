@@ -51,7 +51,7 @@
           {{end}}{{end}}
           <tr><th>Belum diterima dari master</th><td>{{if .Status.GTIDGapKnown}}{{.Status.GTIDGap}} transaksi{{else}}belum dihitung{{end}}</td></tr>
           {{end}}
-          <tr><th>Dibuat</th><td class="mono">{{fmtTime .Replica.CreatedAt}}</td></tr>
+          <tr><th>Dibuat</th><td class="mono">{{fmtDateTime .Replica.CreatedAt}}</td></tr>
           {{with .Replica.LastError}}<tr><th>Kesalahan terakhir</th><td class="text-error-text">{{.}}</td></tr>{{end}}
         </tbody>
       </table>

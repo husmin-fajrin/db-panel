@@ -207,11 +207,21 @@ func TestLagChartTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`\.grafik-lag>svg\{[^}]*max-width:752px`).Match(css) {
-		t.Errorf("web/static/app.css does not cap .grafik-lag>svg at 752px (run scripts/tailwind.sh)")
+	if !regexp.MustCompile(`\.grafik-lag-geser\{[^}]*max-width:752px`).Match(css) {
+		t.Errorf("web/static/app.css does not cap .grafik-lag-geser at 752px (run scripts/tailwind.sh)")
 	}
-	if !strings.Contains(out, `<svg class="h-auto w-full" viewBox="0 0 640 200"`) {
-		t.Errorf("chart svg is not the direct child sized by .grafik-lag>svg:\n%s", out)
+	// Only the SVG scrolls (min 480 px); the legend with the peak and
+	// threshold labels is outside the scroll box, so a 390 px screen
+	// shows it whole.
+	box := regexp.MustCompile(`(?s)<div class="grafik-lag-geser overflow-x-auto" data-grafik-geser><div class="min-w-\[480px\]">\s*<svg class="h-auto w-full" viewBox="0 0 640 200".*?</svg>\s*</div></div>`).FindStringIndex(out)
+	if box == nil {
+		t.Fatalf("no scroll box around the chart svg:\n%s", out)
+	}
+	inside, after := out[box[0]:box[1]], out[box[1]:]
+	for _, s := range []string{`<span class="mono">puncak 40 dtk ·`, `ambang <span class="mono">60 dtk</span>`, "</svg>replika-a</span>"} {
+		if strings.Contains(inside, s) || !strings.Contains(after, s) {
+			t.Errorf("%q is not in the legend outside the scroll box", s)
+		}
 	}
 }
 

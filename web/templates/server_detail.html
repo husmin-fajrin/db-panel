@@ -40,7 +40,7 @@
   <div class="card-body gap-3 p-6">
     <h2>Pasang agent di server ini</h2>
     {{template "pair-command" .}}
-    <p class="help">Token berlaku sampai <span class="mono">{{fmtTime .TokenExpires}}</span> dan hanya bisa dipakai sekali. Halaman ini diperbarui otomatis setelah agent terhubung.</p>
+    <p class="help">Token berlaku sampai <span class="mono">{{fmtDateTime .TokenExpires}}</span> dan hanya bisa dipakai sekali. Halaman ini diperbarui otomatis setelah agent terhubung.</p>
     <form method="post" action="/servers/{{.Server.ID}}/token">
       <button type="submit" class="btn btn-sm">Buat token baru</button>
     </form>
@@ -57,7 +57,7 @@
       <button type="submit" class="btn btn-sm">Buat token baru</button>
     </form>
     {{end}}
-    <p class="help">Token berlaku sampai <span class="mono">{{fmtTime .TokenExpires}}</span> dan hanya bisa dipakai sekali. Agent lama tetap bekerja sampai agent baru berhasil dipasangkan; saat itu koneksi agent lama langsung diputus dan sertifikatnya tidak diterima lagi.</p>
+    <p class="help">Token berlaku sampai <span class="mono">{{fmtDateTime .TokenExpires}}</span> dan hanya bisa dipakai sekali. Agent lama tetap bekerja sampai agent baru berhasil dipasangkan; saat itu koneksi agent lama langsung diputus dan sertifikatnya tidak diterima lagi.</p>
   </div>
 </section>
 {{end}}
@@ -98,7 +98,7 @@
             <tr><th>CPU</th><td><span class="mono">{{.CPUCores}}</span> inti</td></tr>
             <tr><th>RAM</th><td class="mono">{{fmtMB .MemTotalMB}}</td></tr>
             <tr><th>Alamat</th><td class="mono">{{or $.Server.Address "-"}}</td></tr>
-            <tr><th>Terakhir terlihat</th><td class="mono">{{fmtTime $.Server.LastSeenAt}}</td></tr>
+            <tr><th>Terakhir terlihat</th><td class="mono">{{fmtDateTime $.Server.LastSeenAt}}</td></tr>
           </tbody>
         </table>
         {{else}}
@@ -225,7 +225,7 @@
 <div class="divider my-1"></div>
 {{if .Inventory.Connected}}
 <h3 class="font-semibold">Akun admin MySQL terhubung</h3>
-<p class="help">Versi <span class="mono">{{.Inventory.Version}}</span>, diperbarui <span class="mono">{{fmtTime .Inventory.UpdatedAt}}</span>.</p>
+<p class="help">Versi <span class="mono">{{.Inventory.Version}}</span>, diperbarui <span class="mono">{{fmtDateTime .Inventory.UpdatedAt}}</span>.</p>
 {{if .InventoryCut}}
 <p class="text-sm text-warning-text">Daftar database terlalu panjang; panel hanya menyimpan 5000 database pertama.</p>
 {{end}}
@@ -268,7 +268,7 @@
 <div class="divider my-1"></div>
 <h3 class="font-semibold">Sertifikat MySQL</h3>
 {{with .MySQLCert}}
-<p class="text-sm">Sertifikat MySQL dari panel terpasang: nomor seri <code class="break-all">{{.CertSerial}}</code>, berlaku sampai <span class="mono">{{.NotAfter.Format "2006-01-02"}}</span>. Panel memperbaruinya sendiri 30 hari sebelum habis masa berlakunya.</p>
+<p class="text-sm">Sertifikat MySQL dari panel terpasang: nomor seri <code class="break-all">{{.CertSerial}}</code>, berlaku sampai <span class="mono">{{fmtDateTime .NotAfter}}</span>. Panel memperbaruinya sendiri 30 hari sebelum habis masa berlakunya.</p>
 {{else}}
 <p class="help">Belum ada sertifikat MySQL dari panel. Dengan sertifikat ini replika bisa memastikan bahwa MySQL yang dihubunginya benar-benar server ini.</p>
 {{end}}
@@ -329,7 +329,7 @@
   <div class="card-body gap-4 p-6">
     <div class="flex flex-wrap items-start gap-2">
       <span class="text-warning-text mt-0.5">{{template "icon" "warning"}}</span>
-      <h2 class="min-w-0 flex-1">Master lama (dikarantina sejak <span class="mono">{{fmtTime (or .Promotion.FinishedAt .Promotion.StartedAt)}}</span>, promote {{if .Planned}}terencana{{else}}darurat{{end}} ke {{or .NewMaster.Name "master baru"}})</h2>
+      <h2 class="min-w-0 flex-1">Master lama (dikarantina sejak <span class="mono">{{fmtDateTime (or .Promotion.FinishedAt .Promotion.StartedAt)}}</span>, promote {{if .Planned}}terencana{{else}}darurat{{end}} ke {{or .NewMaster.Name "master baru"}})</h2>
     </div>
     <div data-status-for="{{$s.ID}}">{{template "status-full" .Status}}</div>
     {{if .CutoverPending}}
@@ -359,7 +359,7 @@
         <table class="table table-sm">
           <tbody>
             <tr><th class="w-28">Transaksi</th><td class="mono">{{.Transactions}}</td></tr>
-            <tr><th>Waktu</th><td><span class="mono">{{fmtTime .From}}</span> sampai <span class="mono">{{fmtTime .To}}</span></td></tr>
+            <tr><th>Waktu</th><td><span class="mono">{{fmtDateTime .From}}</span> sampai <span class="mono">{{fmtDateTime .To}}</span></td></tr>
             <tr><th>Binlog</th><td class="mono">{{range $i, $b := .Binlogs}}{{if $i}}, {{end}}{{$b}}{{else}}-{{end}}</td></tr>
             <tr><th>GTID</th><td><code class="break-all">{{.GTIDSet}}</code></td></tr>
           </tbody>
@@ -368,7 +368,7 @@
       {{else}}
       <div role="status" class="banner banner-success mb-0">{{template "banner-icon" "success"}}<span class="flex-1">Tidak ada data tertinggal.</span></div>
       {{end}}
-      <p class="help">Diperiksa <span class="mono">{{fmtTime .CheckedAt}}</span>{{with .JobID}} · <a class="link" href="/jobs/{{.}}">pekerjaan</a>{{end}}</p>
+      <p class="help">Diperiksa <span class="mono">{{fmtDateTime .CheckedAt}}</span>{{with .JobID}} · <a class="link" href="/jobs/{{.}}">pekerjaan</a>{{end}}</p>
       {{else}}
       <p class="text-muted">Belum diperiksa.</p>
       {{end}}
@@ -417,7 +417,7 @@
           <tr>
             <td class="mono whitespace-nowrap">{{.Name}}</td>
             <td class="mono whitespace-nowrap">{{fmtBytes (bytesOf .Size)}}</td>
-            <td class="mono whitespace-nowrap">{{fmtTime .CreatedAt}}</td>
+            <td class="mono whitespace-nowrap">{{fmtDateTime .CreatedAt}}</td>
             <td class="whitespace-nowrap">{{.DaysLeft}}</td>
             <td>
               <div class="flex flex-nowrap justify-end gap-2">

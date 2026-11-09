@@ -343,9 +343,10 @@
     fill: var(--color-base-content);
   }
 
-  /* Lag chart (template "lag-chart"). It stops growing at 752 px wide,
-     so its 11 px labels (viewBox 640) stay near 13 px on wide cards. */
-  .grafik-lag > svg {
+  /* Lag chart (template "lag-chart"). Its scroll box stops growing at
+     752 px wide, so the 11 px labels (viewBox 640) stay near 13 px on
+     wide cards. */
+  .grafik-lag-geser {
     max-width: 752px;
   }
   .grafik-grid {
@@ -356,10 +357,6 @@
     font-family: var(--font-mono);
     font-size: 11px;
     fill: var(--color-muted);
-  }
-  .grafik-label-puncak {
-    font-weight: 700;
-    fill: var(--color-base-content);
   }
   .grafik-ambang {
     fill: none;
@@ -423,6 +420,13 @@ p.label {
 .menu li > summary:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: -2px;
+}
+/* The current entry is primary itself: its ring is base-content, drawn
+   outside the entry against the sidebar's background, so it shows in both
+   themes. */
+.menu li > a.menu-active:focus-visible {
+  outline: 2px solid var(--color-base-content);
+  outline-offset: 2px;
 }
 .btn:focus-visible {
   outline: 2px solid var(--color-primary);

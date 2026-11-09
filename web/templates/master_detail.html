@@ -159,7 +159,7 @@
           <tr><th>Siap jadi master</th><td>{{if .Inventory.MasterReady}}{{template "badge" (badgeOf "success" "siap")}}{{else}}{{template "badge" (badgeOf "warning" "belum")}}{{end}}</td></tr>
           <tr><th>Alamat untuk replika</th><td class="mono break-all">{{.Topology.SourceHost}}:{{.Topology.SourcePort}}</td></tr>
           <tr><th>Akun replikasi</th><td><code>{{.Topology.ReplUser}}</code></td></tr>
-          <tr><th>Data diperbarui</th><td class="mono">{{fmtTime .Inventory.UpdatedAt}}</td></tr>
+          <tr><th>Data diperbarui</th><td class="mono">{{fmtDateTime .Inventory.UpdatedAt}}</td></tr>
         </tbody>
       </table>
       <details class="mt-2"{{if .SourceOpen}} open{{end}}>

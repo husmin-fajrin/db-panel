@@ -134,7 +134,10 @@ Tombol **Ganti tema** di menu samping (kiri; pada layar sempit di balik
 tombol **Menu** di atas) berpindah tema dan pilihannya disimpan di peramban
 itu saja. Peramban yang belum pernah memilih memakai **Pengaturan >
 Tampilan > Tema bawaan**: Ikuti sistem (bawaan: mengikuti mode gelap/terang
-sistem operasi), Gelap, atau Terang. Di bagian yang sama **Nama instansi**
+sistem operasi), Gelap, atau Terang. Setelah peramban memilih tema lewat
+**Ganti tema**, belum ada pilihan untuk kembali ke "ikuti sistem" di
+peramban itu (tombolnya hanya berganti antara gelap dan terang); hapus data
+situs panel di peramban untuk kembali ke tema bawaan. Di bagian yang sama **Nama instansi**
 (paling panjang 60 karakter) tampil di bawah logo di menu samping;
 kosongkan untuk menyembunyikannya.
 
@@ -151,6 +154,12 @@ banyak satu per 5 detik per server disimpan) dan disimpan 7 hari, bisa
 diubah di **Pengaturan > Retensi**. Semua halaman bisa dipakai di layar
 selebar 390 px (telepon) tanpa menggeser halaman ke samping; tabel yang
 lebar bergulir di dalam kotaknya sendiri.
+
+Isian tanggal (misalnya **Sejak**
+di halaman Audit) memakai pemilih tanggal bawaan peramban, yang mengikuti
+bahasa dan wilayah peramban atau sistem operasi: di peramban berbahasa
+Inggris (AS) 2 November tampil sebagai 11/02/2026. Atur bahasa peramban
+atau sistem operasi ke Indonesia agar urutannya hari/bulan/tahun.
 
 ## Tambah server database
 
@@ -1693,7 +1702,8 @@ make screens SCREENS_DIR=/tmp/layar  # direktori lain
 menjalankan promote terencana, lalu `scripts/e2e_screenshot_tour.js`
 menulis `<nn>-<halaman>-<tema>-<lebar>.png`, misalnya
 `02-dashboard-gelap-390.png` (64 berkas). Halaman yang lebih lebar dari
-layar 390 px dicetak sebagai `OVERFLOW <berkas>`. Kebutuhannya sama dengan
+layar dicetak sebagai `OVERFLOW <berkas>` dan membuat test gagal (setelah
+semua tangkapan selesai). Kebutuhannya sama dengan
 test browser di atas.
 
 ## Mengubah tampilan

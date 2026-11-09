@@ -6,7 +6,9 @@
 //   REPLICA_ID    the replica server's id
 //   REPLICA_NAME  its name
 // In Chromium it logs in, clicks "Resync ulang" on the replica page, then
-// "Ya, resync ulang", and in the confirmation dialog first gives a wrong
+// "Ya, resync ulang": the resync dialog closes under the confirmation, and
+// Batal opens it again with focus on that button, which is clicked again.
+// In the confirmation dialog it first gives a wrong
 // password (an error shows, nothing is submitted), then the right one with
 // the typed name: the resync form must be posted with a confirm_token and
 // the typed confirm_name. It prints the job page path the panel answered
@@ -64,6 +66,24 @@ async function main() {
 
     const confirm = page.locator("#modal-konfirmasi");
     await confirm.waitFor({ state: "visible" });
+    // The source dialog closes while the confirmation is open (no stacked
+    // dialogs), and Batal opens it again with focus on its trigger.
+    if (await resync.evaluate((d) => d.open)) {
+      throw new Error("the resync dialog is still open under the confirmation");
+    }
+    await confirm.getByRole("button", { name: "Batal" }).click();
+    await resync.waitFor({ state: "visible" });
+    // The dialog shows a frame after showModal(): wait for the focus.
+    await page
+      .waitForFunction((b) => document.activeElement === b, await trigger.elementHandle(), { timeout: 2000 })
+      .catch(() => {
+        throw new Error("focus did not return to the trigger after Batal");
+      });
+    await trigger.click();
+    await confirm.waitFor({ state: "visible" });
+    if (await resync.evaluate((d) => d.open)) {
+      throw new Error("the resync dialog is still open under the confirmation (second time)");
+    }
     const ok = confirm.getByRole("button", { name: "Konfirmasi" });
     // The confirm button is pink (btn-error) only for a trigger marked
     // data-confirm-danger="1", else primary (design spec 5.5).
