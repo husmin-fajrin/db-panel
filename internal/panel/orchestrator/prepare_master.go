@@ -25,6 +25,10 @@ func prepareMasterStepNames() []string {
 	return []string{"Periksa master", "Terapkan pengaturan", stepInstallCert, "Mulai ulang MySQL", "Verifikasi"}
 }
 
+// ErrPrepareQuarantined refuses preparing a quarantined old master as a
+// master: with a topology of its own it would be a second writable master.
+var ErrPrepareQuarantined = errors.New("server ini master lama yang dikarantina; bangun ulang sebagai replika atau hapus")
+
 // StartPrepareMaster starts the prepare_master job: check the server, make
 // it a master (binary log, GTID, clone plugin, replication account), give
 // its MySQL the panel's certificate (no restart needed) and verify. It refuses a server whose MySQL is not connected or whose admin
@@ -38,6 +42,11 @@ func (r *Runner) StartPrepareMaster(ctx context.Context, serverID int64) (string
 	}
 	if srv.Role == store.RoleReplica {
 		return "", errors.New("server ini sudah menjadi replika; tidak bisa disiapkan sebagai master")
+	}
+	// An old master in quarantine with a topology of its own would be a
+	// second writable master.
+	if srv.Role == store.RoleQuarantined {
+		return "", ErrPrepareQuarantined
 	}
 	inv, err := r.d.Store.GetInventory(serverID)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !inv.Connected) {

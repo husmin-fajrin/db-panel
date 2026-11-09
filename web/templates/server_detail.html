@@ -150,7 +150,7 @@
 {{end}}
 {{end}}
 
-<a href="/servers" class="btn btn-ghost">Kembali ke daftar server</a>
+<a href="/servers" class="btn btn-sm">Kembali ke daftar server</a>
 
 {{if not .Local}}
 {{if .Server.Paired}}
@@ -278,7 +278,7 @@
 </form>
 {{end}}
 <details class="mt-2"{{if .Connect.Open}} open{{end}}>
-  <summary class="btn btn-ghost btn-sm">Hubungkan ulang</summary>
+  <summary class="btn btn-sm">Hubungkan ulang</summary>
   {{template "mysql-connect-form" .}}
 </details>
 {{if and .CanPrepare .PrepareAgain}}

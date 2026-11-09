@@ -365,6 +365,15 @@
   box-shadow: none;
 }
 
+/* Secondary buttons (no colour modifier) are a neutral fill with a
+   base-300 edge (design spec 5.5): daisyUI's default fill is base-200,
+   the page's own background, so without the edge they read as plain
+   text. Coloured buttons keep their edge; ghost and link buttons have
+   none. Unlayered, like the rules around it, to beat daisyUI's .btn. */
+.btn:not(.btn-ghost, .btn-link) {
+  --btn-border: var(--btn-color, var(--color-base-300));
+}
+
 /* daisyUI's .label never wraps; help text written as <p class="label">
    under a field must, or a long sentence widens the page. Unlayered,
    because daisyUI's own rule comes later than @layer components. */

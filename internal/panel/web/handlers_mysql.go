@@ -236,6 +236,14 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A quarantined old master is never prepared: the orchestrator
+	// refuses it too; refused here before any confirmation is asked.
+	if srv.Role == store.RoleQuarantined {
+		err := orchestrator.ErrPrepareQuarantined
+		a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{}, outcomeOf(err))
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		return
+	}
 	// Preparing a server that already is a master (it has a topology)
 	// again needs the password confirmed.
 	_, err := a.Store.GetTopologyByMaster(srv.ID)

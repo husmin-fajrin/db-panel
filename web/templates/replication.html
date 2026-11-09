@@ -9,7 +9,7 @@
     <div class="card-body p-6">
       <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div class="flex min-w-0 flex-wrap items-baseline gap-x-2">
-          <h2 class="whitespace-nowrap">{{.Master.Server.Name}}</h2>
+          <h2 class="min-w-0 break-words">{{.Master.Server.Name}}</h2>
           <span class="help whitespace-nowrap">{{len .Replicas}} replika</span>
         </div>
         <a class="btn btn-sm btn-primary" href="/masters/{{.Master.Server.ID}}">Buka halaman master</a>

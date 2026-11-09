@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
@@ -720,5 +721,38 @@ func TestOldMasterCardTone(t *testing.T) {
 	// An old master is not offered to be prepared as a master again.
 	if strings.Contains(body, `action="/servers/1/prepare-master"`) {
 		t.Error("quarantined old master offers Siapkan sebagai master")
+	}
+}
+
+// TestPrepareQuarantinedRefused: a crafted Siapkan sebagai master on a
+// quarantined old master is refused in words and starts nothing.
+func TestPrepareQuarantinedRefused(t *testing.T) {
+	e, f, _ := promotedEnv(t)
+	rec := e.do("POST", "/servers/1/prepare-master", noForm, e.cookie())
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "server ini master lama yang dikarantina; bangun ulang sebagai replika atau hapus")
+	wantCalls(t, f)
+}
+
+// TestExplainBannerTone: the Penyebab/Saran box is pink only for a
+// critical status; an old master in quarantine (expected) is not.
+func TestExplainBannerTone(t *testing.T) {
+	mon := &fakeMonitor{}
+	e, _, _ := promotedEnv(t, func(d *web.Deps) { d.Monitor = mon })
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleQuarantined, ReceivedAt: time.Now(),
+		Status: monitor.DeriveQuarantined(false)})
+	body := e.do("GET", "/servers/1", nil, e.cookie()).Body.String()
+	if !strings.Contains(body, "data-explain") {
+		t.Fatalf("old master page has no explanation:\n%s", body)
+	}
+	if strings.Contains(body, "banner-error") {
+		t.Errorf("quarantined old master shows a pink banner:\n%s", between(body, "data-old-master", "data-old-master-end"))
+	}
+
+	// A replica stopped on error 1062 is critical: still pink.
+	mon.setView(stoppedOn1062(3))
+	body = e.do("GET", "/replicas/3", nil, e.cookie()).Body.String()
+	if !regexp.MustCompile(`class="banner banner-error[^"]*" data-explain`).MatchString(body) {
+		t.Errorf("stopped replica's explanation is not pink:\n%s", body)
 	}
 }

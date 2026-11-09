@@ -140,6 +140,7 @@ var templateFuncs = template.FuncMap{
 	"kindLabel":   kindLabel,
 	// Monitoring.
 	"severityClass": severityClass,
+	"bannerTone":    bannerTone,
 	"fmtDuration":   fmtDuration,
 	"fmtPct":        fmtPct,
 	"ago":           ago,
@@ -269,6 +270,20 @@ func severityClass(s monitor.Severity) string {
 		return "lencana-error"
 	}
 	return "lencana-neutral"
+}
+
+// bannerTone is the banner tone of a status's explanation (Penyebab/Saran,
+// template "status-full"): pink only for a critical status (design spec
+// 5.1); a warning stays amber and an expected state (an old master in
+// quarantine, neutral) is information.
+func bannerTone(s monitor.Severity) string {
+	switch s {
+	case monitor.SevCrit:
+		return "error"
+	case monitor.SevWarn:
+		return "warning"
+	}
+	return "info"
 }
 
 // fmtDuration words a number of seconds: "2 hari 3 jam", "3 jam 5 menit",

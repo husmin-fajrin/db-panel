@@ -27,7 +27,7 @@ health_update. */}}
   <div class="flex flex-wrap items-center gap-2">
     <span class="lencana {{severityClass .Severity}}">{{.Label}}</span>
     {{template "status-lock" .}}
-    {{with .Lag}}<span class="mono whitespace-nowrap">{{.}}</span>{{end}}
+    {{with .Lag}}<span class="mono text-sm whitespace-nowrap">{{.}}</span>{{end}}
     {{template "status-checked" .}}
   </div>
   {{with .Detail}}<p>{{.}}</p>{{end}}
@@ -35,7 +35,8 @@ health_update. */}}
   {{with .Explain}}
   {{/* role="status", not alert: this block is replaced on every
        health_update, and an alert would be read out again each time. */}}
-  <div role="status" class="banner banner-error mb-0">{{template "banner-icon" "error"}}
+  {{$tone := bannerTone $.Severity}}
+  <div role="status" class="banner banner-{{$tone}} mb-0" data-explain>{{template "banner-icon" $tone}}
     <div class="flex flex-1 flex-col gap-1">
       <p><strong>Penyebab:</strong> {{.Text}}</p>
       {{with .Advice}}<p><strong>Saran:</strong> {{.}}</p>{{end}}

@@ -448,3 +448,19 @@ func TestMasterVerifyUsesStoredSource(t *testing.T) {
 		t.Fatalf("topology source = %s:%d, want 10.0.0.1:3306", got.SourceHost, got.SourcePort)
 	}
 }
+
+// TestPrepareMasterRefusesQuarantined: an old master in quarantine is
+// never prepared as a master (a second writable master); no job starts.
+func TestPrepareMasterRefusesQuarantined(t *testing.T) {
+	e := newEnv(t)
+	fa := e.connectedMaster("db-lama")
+	if err := e.st.SetServerRole(fa.id, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.StartPrepareMaster(context.Background(), fa.id); !errors.Is(err, ErrPrepareQuarantined) {
+		t.Fatalf("StartPrepareMaster on a quarantined server: %v", err)
+	}
+	if jobs, _ := e.st.ListJobs(0); len(jobs) != 0 {
+		t.Errorf("jobs after the refusal = %d, want 0", len(jobs))
+	}
+}
