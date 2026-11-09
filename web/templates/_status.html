@@ -15,8 +15,8 @@ health_update. */}}
 <span class="inline-flex flex-wrap items-center gap-2">
   {{template "status-badge-health" .}}
   {{template "status-lock" .}}
-  {{with .Lag}}<span class="mono text-sm whitespace-nowrap">{{.}}</span>{{end}}
-  {{if .ShowDetailInRow}}<span class="text-sm text-muted">{{.Detail}}</span>{{end}}
+  {{with .Lag}}<span class="mono text-xs whitespace-nowrap">{{.}}</span>{{end}}
+  {{if .ShowDetailInRow}}<span class="help">{{.Detail}}</span>{{end}}
   {{template "status-checked" .}}
 </span>
 {{end}}
@@ -33,7 +33,9 @@ health_update. */}}
   {{with .Detail}}<p>{{.}}</p>{{end}}
   {{if .LockLost}}<p class="text-sm text-error-text">MySQL replika ini tidak lagi terkunci hanya-baca (super_read_only mati), sehingga aplikasi bisa menulis ke sana dan isinya bisa berbeda dari master.</p>{{end}}
   {{with .Explain}}
-  <div role="alert" class="banner banner-error mb-0">{{template "banner-icon" "error"}}
+  {{/* role="status", not alert: this block is replaced on every
+       health_update, and an alert would be read out again each time. */}}
+  <div role="status" class="banner banner-error mb-0">{{template "banner-icon" "error"}}
     <div class="flex flex-1 flex-col gap-1">
       <p><strong>Penyebab:</strong> {{.Text}}</p>
       {{with .Advice}}<p><strong>Saran:</strong> {{.}}</p>{{end}}
@@ -45,7 +47,7 @@ health_update. */}}
 {{end}}
 
 {{define "down-guide"}}
-<div role="alert" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}
+<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}
 <div class="flex flex-1 flex-col items-start gap-2">
   <h3 class="font-semibold">Yang bisa dilakukan sekarang</h3>
   <ol class="list-decimal ml-6 flex flex-col gap-1">

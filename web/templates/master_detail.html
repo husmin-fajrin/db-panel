@@ -1,86 +1,172 @@
 {{define "title"}}Master {{.Server.Name}}{{end}}
-{{define "content"}}
-<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
-  <h1 class="text-2xl font-bold">Master {{.Server.Name}}</h1>
+{{define "page-title"}}<nav aria-label="Jejak halaman" class="help mb-1"><a class="link" href="/replikasi">Replikasi</a> <span aria-hidden="true">/</span></nav>
+<h1 class="break-words">Master {{.Server.Name}}</h1>
+<div class="mt-2 flex flex-wrap items-center gap-2">
   <span class="lencana {{if .Online}}lencana-success{{else}}lencana-error{{end}}"
         x-data="serverStatus" data-server-id="{{.Server.ID}}" data-connected="{{.Online}}"
         :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
-</div>
-
+  {{template "badge" (badgeOf "primary" "master")}}
+  <span class="help mono">{{.Source}}</span>
+</div>{{end}}
+{{define "page-actions"}}<a class="btn btn-sm" href="/servers/{{.Server.ID}}">Halaman server</a>{{end}}
+{{define "content"}}
 {{if .Topology.CutoverPending}}
-<div role="alert" class="alert alert-warning mb-4 flex flex-col items-start gap-2" data-promote-cutover>
-  <span>Server ini master baru hasil promote. Aplikasi belum dinyatakan dialihkan ke alamat <code>{{.Topology.SourceHost}}:{{.Topology.SourcePort}}</code>.</span>
-  <a class="btn btn-sm" href="/masters/{{.Server.ID}}/cutover">Buka layar pengalihan</a>
+<div role="status" class="banner banner-warning" data-promote-cutover>{{template "banner-icon" "warning"}}
+  <div class="flex flex-1 flex-col items-start gap-2">
+    <span>Server ini master baru hasil promote. Aplikasi belum dinyatakan dialihkan ke alamat <code>{{.Topology.SourceHost}}:{{.Topology.SourcePort}}</code>.</span>
+    <a class="btn btn-sm" href="/masters/{{.Server.ID}}/cutover">Buka layar pengalihan</a>
+  </div>
 </div>
 {{end}}
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <h2 class="card-title">Status</h2>
-    <div data-status-for="{{.Server.ID}}">{{template "status-full" .Status}}</div>
-  </div>
-</div>
-
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <h2 class="card-title">Kondisi saat ini</h2>
-    {{with .Facts}}{{with .Snap}}
-    <table class="table table-sm">
-      <tbody>
-        {{if .MySQLOK}}
-        <tr><th>Versi MySQL</th><td>{{.Version}}</td></tr>
-        <tr><th>MySQL berjalan selama</th><td>{{fmtDuration .UptimeSec}}</td></tr>
-        <tr><th>Replika tersambung</th><td>{{.BinlogDumpThreads}} dari {{$.Facts.Registered}} terdaftar</td></tr>
-        <tr><th>Binlog tertua</th><td>{{with .BinlogOldestAgeSec}}{{fmtDuration .}}{{else}}-{{end}}{{with $.Facts.BinlogKeep}} (batas simpan {{.}}){{end}}; total {{fmtBytes .BinlogTotalBytes}}</td></tr>
-        <tr><th>Koneksi</th><td>{{.ThreadsConnected}} / {{.MaxConnections}}</td></tr>
-        {{end}}
-        {{if .DiskTotal}}<tr><th>Disk data</th><td>{{fmtPct $.Facts.DiskUsed .DiskTotal}} terpakai dari {{fmtBytes .DiskTotal}}</td></tr>{{end}}
-        {{if .MemTotal}}<tr><th>RAM</th><td>{{fmtBytes .MemAvailable}} tersedia dari {{fmtBytes .MemTotal}}</td></tr>{{end}}
-        <tr><th>Beban (1 menit)</th><td>{{printf "%.2f" .Load1}}</td></tr>
-      </tbody>
-    </table>
-    {{if and (not .MySQLOK) .MySQLError}}
-    <details class="mt-2">
-      <summary class="btn btn-ghost btn-sm">Detail teknis</summary>
-      <p class="text-sm mt-2">Pesan MySQL: <code class="break-all">{{.MySQLError}}</code></p>
-    </details>
-    {{end}}
-    {{else}}
-    <p class="text-base-content/70">Belum ada laporan pemantauan dari server ini.</p>
-    {{end}}{{end}}
-  </div>
+<div class="mb-4 grid items-start gap-4 lg:grid-cols-12">
+  <section class="card bg-base-100 min-w-0 lg:col-span-7">
+    <div class="card-body p-6">
+      <h2 class="mb-2">Status</h2>
+      <div data-status-for="{{.Server.ID}}">{{template "status-full" .Status}}</div>
+    </div>
+  </section>
+  <section class="card bg-base-100 min-w-0 lg:col-span-5" data-topologi="{{.Topology.ID}}">
+    <div class="card-body p-6">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h2>Topologi</h2>
+        <a class="btn btn-sm" href="/masters/{{.Server.ID}}/promote">Ganti master…</a>
+      </div>
+      {{template "topology-tree" .Tree}}
+    </div>
+  </section>
 </div>
 
 {{if .SetSource}}
-<div role="alert" class="alert alert-warning alert-soft flex flex-col items-start gap-2 mb-6" data-set-source>
-  <h3 class="font-bold">Arahkan agent replika ke alamat master {{.Source}}</h3>
-  <p class="text-sm">Agent di tiap replika hanya menerima master yang alamatnya ia ingat, dan menolak alamat lain dari panel (Resync ulang dan salin data akan gagal). Jalankan perintah ini di server replika masing-masing:</p>
-  <ul class="flex flex-col gap-1 text-sm">
-    {{range .SetSource}}
-    <li><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a>{{with .Following}} (sekarang mengikuti {{.}}){{end}}: <code class="break-all">sudo dbpanel agent set-source {{$.Source}}</code></li>
-    {{end}}
-  </ul>
-  <p class="text-sm">Replikasi yang sedang berjalan tetap memakai alamat lama sampai replika itu disinkronkan ulang dengan <strong>Resync ulang</strong>.</p>
+<div role="status" class="banner banner-warning" data-set-source>{{template "banner-icon" "warning"}}
+  <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
+    <h3 class="font-semibold">Arahkan agent replika ke alamat master {{.Source}}</h3>
+    <p class="text-sm">Agent di tiap replika hanya menerima master yang alamatnya ia ingat, dan menolak alamat lain dari panel (Resync ulang dan salin data akan gagal). Jalankan perintah ini di server replika masing-masing:</p>
+    <ul class="flex flex-col gap-1 text-sm">
+      {{range .SetSource}}
+      <li><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a>{{with .Following}} (sekarang mengikuti {{.}}){{end}}: <code class="break-all">sudo dbpanel agent set-source {{$.Source}}</code></li>
+      {{end}}
+    </ul>
+    <p class="text-sm">Replikasi yang sedang berjalan tetap memakai alamat lama sampai replika itu disinkronkan ulang dengan <strong>Resync ulang</strong>.</p>
+  </div>
 </div>
 {{end}}
 
-<div class="grid gap-6 md:grid-cols-2 mb-6">
-  <div class="card bg-base-100 shadow">
-    <div class="card-body">
-      <h2 class="card-title">Kesehatan</h2>
+{{if .Tighten}}
+<div role="status" class="banner banner-warning" data-tighten>{{template "banner-icon" "warning"}}
+  <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
+    <h3 class="font-semibold">Perketat sambungan replikasi</h3>
+    <p class="text-sm">{{if .NoCert}}MySQL master ini belum memakai sertifikat dari panel{{else}}Sebagian replika belum memeriksa sertifikat MySQL master{{end}}, jadi replika belum bisa memastikan bahwa yang dihubunginya benar-benar master ini.</p>
+    <p class="text-sm">Panel memasang sertifikat MySQL di master dan di tiap replika, lalu menyambungkan ulang replikasi tiap replika dengan pemeriksaan sertifikat. Replikasi tiap replika berhenti beberapa detik; MySQL tidak dimulai ulang. Replika yang sedang tidak terjangkau dilewati; jalankan lagi nanti.</p>
+    <form method="post" action="/masters/{{.Server.ID}}/tighten-tls">
+      <button type="submit" class="btn btn-primary btn-sm" data-confirm-action="tighten_tls" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="Perketat sambungan replikasi master {{.Server.Name}} dan replikanya.">Perketat sambungan replikasi</button>
+    </form>
+  </div>
+</div>
+{{end}}
+
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
+    <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <h2>Replika</h2>
+      <a class="btn btn-primary btn-sm" href="/masters/{{.Server.ID}}/replicas/new">Buat replika</a>
+    </div>
+    {{if .Replicas}}
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>Server</th><th>Status</th><th>Database yang diikuti</th></tr></thead>
+        <tbody>
+          {{range .Replicas}}
+          <tr>
+            <td><a class="link font-semibold whitespace-nowrap" href="/replicas/{{.ServerID}}">{{.ServerName}}</a>{{if .Unverified}}<div class="text-xs text-warning-text">Sambungan replikasi belum diverifikasi</div>{{end}}</td>
+            <td>{{template "status-badge" .State}}</td>
+            <td>{{if .Databases}}{{range $i, $d := .Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    {{template "empty" (emptyOf "Belum ada replika. Klik Buat replika untuk menyalin database master ke server lain." "Buat replika" (printf "/masters/%d/replicas/new" .Server.ID))}}
+    {{end}}
+  </div>
+</section>
+
+<section class="card bg-base-100 mb-4" data-promote>
+  <div class="card-body gap-3 p-6">
+    <h2>Ganti master</h2>
+    <p class="text-sm">Jadikan salah satu replika sebagai master baru. Layar berikutnya menampilkan keadaan tiap replika dan akibat promote; promote baru berjalan setelah Anda memilih replika dan mengonfirmasi dengan kata sandi.</p>
+    <div class="flex flex-wrap items-center gap-2">
+      <a class="btn btn-sm" href="/masters/{{.Server.ID}}/promote">Promote…</a>
+      {{if .PromoteEmergency}}{{template "badge" (badgeOf "error" "mode darurat")}}{{else}}{{template "badge" (badgeOf "neutral" "mode terencana")}}{{end}}
+    </div>
+    {{if .PromoteEmergency}}
+    <p class="text-sm"><strong>Promote darurat</strong>: master tidak terjangkau atau MySQL-nya tidak menjawab, jadi replika terpilih dijadikan master dengan transaksi yang sudah diterimanya.</p>
+    {{else}}
+    <p class="text-sm"><strong>Promote terencana</strong>: master hidup, jadi panel mengunci master, menunggu replika terpilih menerapkan semua transaksinya, lalu menjadikannya master baru.</p>
+    {{end}}
+    {{if .Local}}
+    <div role="status" class="banner banner-warning mb-0" data-local-master>{{template "banner-icon" "warning"}}<div class="flex-1">Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel</div></div>
+    {{end}}
+  </div>
+</section>
+
+<section class="card bg-base-100 mb-4">
+  <div class="card-body gap-3 p-6">
+    <h2>Kontrol</h2>
+    {{if .Locked}}
+    <div><button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-unlock">Buka kunci master</button></div>
+    {{end}}
+    {{template "server-controls" .Controls}}
+  </div>
+</section>
+
+<div class="mb-4 grid items-start gap-4 lg:grid-cols-2">
+  <section class="card bg-base-100 min-w-0">
+    <div class="card-body p-6">
+      {{template "card-head" (cardHead "Kondisi saat ini" "" "")}}
+      {{with .Facts}}{{with .Snap}}
       <table class="table table-sm">
         <tbody>
-          <tr><th>Versi MySQL</th><td>{{or .Inventory.Version "-"}}</td></tr>
-          <tr><th>Siap jadi master</th><td>{{if .Inventory.MasterReady}}<span class="badge badge-success badge-sm">siap</span>{{else}}<span class="badge badge-warning badge-sm">belum</span>{{end}}</td></tr>
-          <tr><th>Alamat untuk replika</th><td>{{.Topology.SourceHost}}:{{.Topology.SourcePort}}</td></tr>
+          {{if .MySQLOK}}
+          <tr><th class="w-44">Versi MySQL</th><td class="mono">{{.Version}}</td></tr>
+          <tr><th>MySQL berjalan selama</th><td class="mono">{{fmtDuration .UptimeSec}}</td></tr>
+          <tr><th>Replika tersambung</th><td>{{.BinlogDumpThreads}} dari {{$.Facts.Registered}} terdaftar</td></tr>
+          <tr><th>Binlog tertua</th><td>{{with .BinlogOldestAgeSec}}<span class="mono">{{fmtDuration .}}</span>{{else}}-{{end}}{{with $.Facts.BinlogKeep}} (batas simpan <span class="mono">{{.}}</span>){{end}}; total <span class="mono">{{fmtBytes .BinlogTotalBytes}}</span></td></tr>
+          <tr><th>Koneksi</th><td class="mono">{{.ThreadsConnected}} / {{.MaxConnections}}</td></tr>
+          {{end}}
+          {{if .DiskTotal}}<tr><th>Disk data</th><td><span class="mono">{{fmtPct $.Facts.DiskUsed .DiskTotal}}</span> terpakai dari <span class="mono">{{fmtBytes .DiskTotal}}</span></td></tr>{{end}}
+          {{if .MemTotal}}<tr><th>RAM</th><td><span class="mono">{{fmtBytes .MemAvailable}}</span> tersedia dari <span class="mono">{{fmtBytes .MemTotal}}</span></td></tr>{{end}}
+          <tr><th>Beban (1 menit)</th><td class="mono">{{printf "%.2f" .Load1}}</td></tr>
+        </tbody>
+      </table>
+      {{if and (not .MySQLOK) .MySQLError}}
+      <details class="mt-2">
+        <summary class="cursor-pointer font-semibold">Detail teknis</summary>
+        <p class="mono mt-2 text-xs">Pesan MySQL: <code class="break-all">{{.MySQLError}}</code></p>
+      </details>
+      {{end}}
+      {{else}}
+      <p class="text-muted">Belum ada laporan pemantauan dari server ini.</p>
+      {{end}}{{end}}
+    </div>
+  </section>
+  <section class="card bg-base-100 min-w-0">
+    <div class="card-body p-6">
+      {{template "card-head" (cardHead "Kesehatan" "" "")}}
+      <table class="table table-sm">
+        <tbody>
+          <tr><th class="w-44">Versi MySQL</th><td class="mono">{{or .Inventory.Version "-"}}</td></tr>
+          <tr><th>Siap jadi master</th><td>{{if .Inventory.MasterReady}}{{template "badge" (badgeOf "success" "siap")}}{{else}}{{template "badge" (badgeOf "warning" "belum")}}{{end}}</td></tr>
+          <tr><th>Alamat untuk replika</th><td class="mono break-all">{{.Topology.SourceHost}}:{{.Topology.SourcePort}}</td></tr>
           <tr><th>Akun replikasi</th><td><code>{{.Topology.ReplUser}}</code></td></tr>
-          <tr><th>Data diperbarui</th><td>{{fmtTime .Inventory.UpdatedAt}}</td></tr>
+          <tr><th>Data diperbarui</th><td class="mono">{{fmtTime .Inventory.UpdatedAt}}</td></tr>
         </tbody>
       </table>
       <details class="mt-2"{{if .SourceOpen}} open{{end}}>
         <summary class="btn btn-ghost btn-sm">Ubah alamat untuk replika</summary>
-        <form method="post" action="/masters/{{.Server.ID}}/source" class="flex flex-col gap-2 mt-2">
-          <p class="text-sm text-base-content/70">Alamat yang dipakai replika untuk menghubungi MySQL master ini. Ubah bila master punya beberapa alamat jaringan, berada di balik NAT, atau dihubungi lewat VPN. Alamat baru diperiksa dari server replika saat Anda membuat replika berikutnya.</p>
+        <form method="post" action="/masters/{{.Server.ID}}/source" class="mt-2 flex flex-col gap-2">
+          <p class="help">Alamat yang dipakai replika untuk menghubungi MySQL master ini. Ubah bila master punya beberapa alamat jaringan, berada di balik NAT, atau dihubungi lewat VPN. Alamat baru diperiksa dari server replika saat Anda membuat replika berikutnya.</p>
           <label class="floating-label">
             <span>Alamat IP atau nama host</span>
             <input class="input input-sm w-full" type="text" name="source_host" value="{{if .SourceOpen}}{{.SourceHost}}{{else}}{{.Topology.SourceHost}}{{end}}" placeholder="Alamat IP atau nama host" maxlength="255" required autocomplete="off">
@@ -96,108 +182,44 @@
       <p class="text-sm">Master belum siap. Buka <a class="link" href="/servers/{{.Server.ID}}">halaman server</a> lalu jalankan <strong>Siapkan sebagai master</strong>.</p>
       {{end}}
     </div>
-  </div>
-  <div class="card bg-base-100 shadow">
-    <div class="card-body">
-      <h2 class="card-title">Database</h2>
-      {{if .Inventory.Databases}}
-      <div class="overflow-x-auto">
-        <table class="table table-sm">
-          <thead><tr><th>Nama</th><th>Ukuran</th><th>Tabel</th></tr></thead>
-          <tbody>
-            {{range .Inventory.Databases}}
-            <tr><td>{{.Name}}</td><td>{{fmtBytes .Bytes}}</td><td>{{.Tables}}</td></tr>
-            {{end}}
-          </tbody>
-        </table>
-      </div>
-      {{else}}
-      <p>Belum ada database pengguna.</p>
-      {{end}}
-    </div>
-  </div>
+  </section>
 </div>
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body gap-3">
-    <h2 class="card-title">Kontrol</h2>
-    {{if .Locked}}
-    <div><button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-unlock">Buka kunci master</button></div>
-    {{end}}
-    {{template "server-controls" .Controls}}
-  </div>
-</div>
-
-<div class="card bg-base-100 shadow mb-6" data-promote>
-  <div class="card-body gap-3">
-    <h2 class="card-title">Ganti master</h2>
-    <p class="text-sm">Jadikan salah satu replika sebagai master baru. Layar berikutnya menampilkan keadaan tiap replika dan akibat promote; promote baru berjalan setelah Anda memilih replika dan mengonfirmasi dengan kata sandi.</p>
-    <div><a class="btn btn-warning btn-sm" href="/masters/{{.Server.ID}}/promote">Promote…</a></div>
-    {{if .PromoteEmergency}}
-    <p class="text-sm"><strong>Promote darurat</strong>: master tidak terjangkau atau MySQL-nya tidak menjawab, jadi replika terpilih dijadikan master dengan transaksi yang sudah diterimanya.</p>
-    {{else}}
-    <p class="text-sm"><strong>Promote terencana</strong>: master hidup, jadi panel mengunci master, menunggu replika terpilih menerapkan semua transaksinya, lalu menjadikannya master baru.</p>
-    {{end}}
-    {{if .Local}}
-    <div role="alert" class="alert alert-warning alert-soft text-sm" data-local-master>Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel</div>
-    {{end}}
-  </div>
-</div>
-
-{{if .Tighten}}
-<div role="alert" class="alert alert-warning alert-soft flex flex-col items-start gap-2 mb-6" data-tighten>
-  <h3 class="font-bold">Perketat sambungan replikasi</h3>
-  <p class="text-sm">{{if .NoCert}}MySQL master ini belum memakai sertifikat dari panel{{else}}Sebagian replika belum memeriksa sertifikat MySQL master{{end}}, jadi replika belum bisa memastikan bahwa yang dihubunginya benar-benar master ini.</p>
-  <p class="text-sm">Panel memasang sertifikat MySQL di master dan di tiap replika, lalu menyambungkan ulang replikasi tiap replika dengan pemeriksaan sertifikat. Replikasi tiap replika berhenti beberapa detik; MySQL tidak dimulai ulang. Replika yang sedang tidak terjangkau dilewati; jalankan lagi nanti.</p>
-  <form method="post" action="/masters/{{.Server.ID}}/tighten-tls">
-    <button type="submit" class="btn btn-warning btn-sm" data-confirm-action="tighten_tls" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="Perketat sambungan replikasi master {{.Server.Name}} dan replikanya.">Perketat sambungan replikasi</button>
-  </form>
-</div>
-{{end}}
-
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h2 class="card-title">Replika</h2>
-      <a class="btn btn-primary btn-sm" href="/masters/{{.Server.ID}}/replicas/new">Buat replika</a>
-    </div>
-    {{if .Replicas}}
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
+    {{template "card-head" (cardHead "Database" "" "")}}
+    {{if .Inventory.Databases}}
     <div class="overflow-x-auto">
       <table class="table table-sm">
-        <thead><tr><th>Server</th><th>Status</th><th>Pemantauan</th><th>Database yang diikuti</th></tr></thead>
+        <thead><tr><th>Nama</th><th>Ukuran</th><th>Tabel</th></tr></thead>
         <tbody>
-          {{range .Replicas}}
-          <tr>
-            <td><a class="link" href="/replicas/{{.ServerID}}">{{.ServerName}}</a>{{if .Unverified}}<div class="text-xs text-warning">Sambungan replikasi belum diverifikasi</div>{{end}}</td>
-            <td>{{template "status-badge" .State}}</td>
-            <td data-status-for="{{.ServerID}}" data-status-variant="baris">{{template "status-row" .Status}}</td>
-            <td>{{if .Databases}}{{range $i, $d := .Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td>
-          </tr>
+          {{range .Inventory.Databases}}
+          <tr><td class="break-all">{{.Name}}</td><td class="mono whitespace-nowrap">{{fmtBytes .Bytes}}</td><td class="mono">{{.Tables}}</td></tr>
           {{end}}
         </tbody>
       </table>
     </div>
     {{else}}
-    <p>Belum ada replika. Klik <strong>Buat replika</strong> untuk menyalin database master ke server lain.</p>
+    <p class="text-muted">Belum ada database pengguna.</p>
     {{end}}
   </div>
-</div>
+</section>
 
 {{template "timeline" .Timeline}}
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <h2 class="card-title">Pekerjaan terakhir</h2>
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
+    {{template "card-head" (cardHead "Pekerjaan terakhir" "" "")}}
     {{template "job-table" .Jobs}}
   </div>
-</div>
+</section>
 
 <a href="/servers/{{.Server.ID}}" class="btn btn-ghost">Kembali ke halaman server</a>
 
 {{if .Locked}}
 <dialog id="modal-unlock" class="modal">
   <form method="post" action="/masters/{{.Server.ID}}/unlock" class="modal-box flex flex-col gap-2">
-    <h3 class="text-lg font-bold">Buka kunci master {{.Server.Name}}?</h3>
+    <h2>Buka kunci master {{.Server.Name}}?</h2>
     <p>Kunci hanya-baca (read_only dan super_read_only) di MySQL master ini dilepas, sehingga aplikasi bisa menulis lagi.</p>
     <p>Pastikan hanya satu server yang menerima tulisan: bila server lain sudah dijadikan tempat menulis, membuka kunci ini membuat dua salinan data yang saling berbeda.</p>
     <!-- The confirming button comes first, so Enter uses it. -->

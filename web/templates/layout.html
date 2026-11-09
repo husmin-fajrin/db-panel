@@ -31,7 +31,7 @@
       <ul class="menu w-full gap-1 px-3 py-3 md:pt-0">
         <li><a href="/" data-menu="dashboard" {{.MenuAttr "dashboard"}}>{{template "icon" "dashboard"}}Dashboard</a></li>
         <li><a href="/servers" data-menu="servers" {{.MenuAttr "servers"}}>{{template "icon" "server"}}Server</a></li>
-        {{if .HasReplikasi}}<li><a href="/replikasi" data-menu="replikasi" {{.MenuAttr "replikasi"}}>{{template "icon" "replikasi"}}Replikasi</a></li>{{end}}
+        <li><a href="/replikasi" data-menu="replikasi" {{.MenuAttr "replikasi"}}>{{template "icon" "replikasi"}}Replikasi</a></li>
         <li><a href="/jobs" data-menu="jobs" {{.MenuAttr "jobs"}}>{{template "icon" "jobs"}}Pekerjaan</a></li>
         <li><a href="/alerts" data-menu="alerts" {{.MenuAttr "alerts"}} x-data="alertCount">{{template "icon" "alerts"}}<span class="flex-1">Peringatan</span><span class="badge badge-sm badge-warning mono{{if not .AlertCount}} hidden{{end}}" data-alert-count>{{.AlertCount}}</span></a></li>
         <li><a href="/audit" data-menu="audit" {{.MenuAttr "audit"}}>{{template "icon" "audit"}}Audit</a></li>

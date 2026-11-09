@@ -79,7 +79,7 @@
     <div class="card-actions justify-between">
       <a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Batal</a>
       {{with .Rebuild}}
-      <button type="submit" class="btn btn-warning"{{if or (not $.Targets) .CutoverPending}} disabled{{end}} data-confirm-action="rebuild_old_master" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="{{.ConfirmText}}">Bangun ulang sebagai replika</button>
+      <button type="submit" class="btn btn-error"{{if or (not $.Targets) .CutoverPending}} disabled{{end}} data-confirm-action="rebuild_old_master" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-danger="1" data-confirm-text="{{.ConfirmText}}">Bangun ulang sebagai replika</button>
       {{else}}
       <button type="submit" class="btn btn-primary"{{if or (not .Targets) .RebuildBad}} disabled{{end}}>Buat replika</button>
       {{end}}

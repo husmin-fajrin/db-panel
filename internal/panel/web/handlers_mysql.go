@@ -345,6 +345,9 @@ type masterPage struct {
 	// master is gone); Local: the master is the panel's own server.
 	PromoteEmergency bool
 	Local            bool
+	// Tree is the topology card: the master and its replicas with their
+	// live status, as on the dashboard (design spec 5.6).
+	Tree replicationRow
 }
 
 // setSourceRow is a replica whose agent's pinned source must be changed
@@ -475,6 +478,10 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 		if p.SourceSaved || (following != "" && !strings.EqualFold(following, p.Source)) {
 			p.SetSource = append(p.SetSource, setSourceRow{ServerID: rep.ServerID, ServerName: names[rep.ServerID], Following: following})
 		}
+	}
+	p.Tree = replicationRow{ID: topo.ID, Master: masterCard{Server: srv, Status: p.Status}}
+	for _, row := range p.Replicas {
+		p.Tree.Replicas = append(p.Tree.Replicas, replicaCard{Server: store.Server{ID: row.ServerID, Name: row.ServerName}, Status: row.Status})
 	}
 	p.Facts = newMasterFacts(v, monitored, len(reps))
 	if p.Timeline, err = a.timeline(r, srv.ID); err != nil {

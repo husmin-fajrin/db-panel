@@ -209,6 +209,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /servers/{id}/salvage", authedPost(a.startSalvage))
 	mux.Handle("GET /servers/{id}/salvage/{name}", authed(a.salvageDownload))
 	mux.Handle("POST /servers/{id}/salvage/{name}/delete", authedPost(a.salvageDelete))
+	mux.Handle("GET /replikasi", authed(a.replication))
 	mux.Handle("GET /masters/{id}", authed(a.masterDetail))
 	mux.Handle("POST /masters/{id}/source", authedPost(a.setMasterSource))
 	mux.Handle("POST /masters/{id}/unlock", authedPost(a.unlockMaster))

@@ -52,3 +52,6 @@ var OutcomeOf = outcomeOf
 func StatusLabelOf(id int64, role string, v monitor.View) string {
 	return newStatusView(id, role, v, true, time.Time{}).Label
 }
+
+// ServiceLineOf exposes serviceLineOf to web_test.
+var ServiceLineOf = serviceLineOf

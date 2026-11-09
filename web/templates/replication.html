@@ -1,0 +1,27 @@
+{{define "title"}}Replikasi{{end}}
+{{define "page-title"}}<h1>Replikasi</h1>
+<p class="mt-1 text-muted">Tiap master dengan replikanya. Buka halaman master untuk menambah replika atau mengganti master.</p>{{end}}
+{{define "content"}}
+{{if .Topologies}}
+<div class="grid items-start gap-4 lg:grid-cols-2">
+  {{range .Topologies}}
+  <section class="card bg-base-100 min-w-0" data-topologi="{{.ID}}">
+    <div class="card-body p-6">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div class="flex min-w-0 flex-wrap items-baseline gap-x-2">
+          <h2 class="whitespace-nowrap">{{.Master.Server.Name}}</h2>
+          <span class="help whitespace-nowrap">{{len .Replicas}} replika</span>
+        </div>
+        <a class="btn btn-sm btn-primary" href="/masters/{{.Master.Server.ID}}">Buka halaman master</a>
+      </div>
+      {{template "topology-tree" .}}
+    </div>
+  </section>
+  {{end}}
+</div>
+{{else}}
+<section class="card bg-base-100">
+  <div class="card-body p-6">{{template "empty" (emptyOf "Belum ada replikasi. Siapkan sebuah server sebagai master, lalu tambah replika." "Buka daftar server" "/servers")}}</div>
+</section>
+{{end}}
+{{end}}

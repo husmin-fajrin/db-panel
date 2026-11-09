@@ -1,92 +1,105 @@
 {{define "title"}}Replika {{.Server.Name}}{{end}}
-{{define "content"}}
-<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
-  <h1 class="text-2xl font-bold">Replika {{.Server.Name}}</h1>
+{{define "page-title"}}<nav aria-label="Jejak halaman" class="help mb-1"><a class="link" href="/replikasi">Replikasi</a> <span aria-hidden="true">/</span> <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a> <span aria-hidden="true">/</span></nav>
+<h1 class="break-words">Replika {{.Server.Name}}</h1>
+<div class="mt-2 flex flex-wrap items-center gap-2">
   <span class="lencana {{if .Online}}lencana-success{{else}}lencana-error{{end}}"
         x-data="serverStatus" data-server-id="{{.Server.ID}}" data-connected="{{.Online}}"
         :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
-</div>
-
+  {{template "badge" (badgeOf "neutral" "replika")}}
+  {{template "status-badge" .Replica.State}}
+  {{with .Server.Address}}<span class="help mono">{{.}}</span>{{end}}
+</div>{{end}}
+{{define "page-actions"}}<a class="btn btn-sm" href="/servers/{{.Server.ID}}">Halaman server</a>{{end}}
+{{define "content"}}
 {{if eq .Replica.State "needs_repoint"}}
-<div role="alert" class="alert alert-warning mb-6 flex flex-col items-start gap-2" data-needs-repoint>
-  <span>Perlu diarahkan ulang ke master baru; akan dilakukan saat tersambung. Master baru: <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a>.</span>
-  {{if .CanRepoint}}<form method="post" action="/replicas/{{.Server.ID}}/repoint"><button type="submit" class="btn btn-sm btn-primary">Arahkan sekarang</button></form>{{end}}
+<div role="status" class="banner banner-warning" data-needs-repoint>{{template "banner-icon" "warning"}}
+  <div class="flex flex-1 flex-col items-start gap-2">
+    <span>Perlu diarahkan ulang ke master baru; akan dilakukan saat tersambung. Master baru: <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a>.</span>
+    {{if .CanRepoint}}<form method="post" action="/replicas/{{.Server.ID}}/repoint"><button type="submit" class="btn btn-sm btn-primary">Arahkan sekarang</button></form>{{end}}
+  </div>
 </div>
 {{else if eq .Replica.State "needs_rebuild"}}
-<div role="alert" class="alert alert-error mb-6 flex flex-col items-start gap-2" data-needs-rebuild>
-  <span>Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru. Tekan <strong>Resync ulang</strong> di bagian Kontrol untuk menyalin ulang dari master baru <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a>; ini tidak dilakukan otomatis.</span>
+<div role="alert" class="banner banner-error" data-needs-rebuild>{{template "banner-icon" "error"}}
+  <div class="flex flex-1 flex-col items-start gap-2">
+    <span>Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru. Tekan <strong>Resync ulang</strong> di bagian Kontrol untuk menyalin ulang dari master baru <a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a>; ini tidak dilakukan otomatis.</span>
+  </div>
 </div>
 {{end}}
-{{with .RepointInfo}}<div role="status" class="alert alert-info mb-6"><span>{{.}}</span></div>{{end}}
+{{with .RepointInfo}}{{template "banner" (banner "info" .)}}{{end}}
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <h2 class="card-title">Status</h2>
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
+    <h2 class="mb-2">Status</h2>
     <div data-status-for="{{.Server.ID}}">{{template "status-full" .Status}}</div>
   </div>
-</div>
+</section>
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <h2 class="card-title">Ringkasan</h2>
-    <table class="table table-sm">
-      <tbody>
-        <tr><th>Status</th><td>{{template "status-badge" .Replica.State}}</td></tr>
-        <tr><th>Master</th><td><a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></td></tr>
-        <tr><th>Database yang diikuti</th><td>{{if .Replica.Databases}}{{range $i, $d := .Replica.Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td></tr>
-        <tr><th>Ketertinggalan</th><td>{{or .Status.Lag "-"}}</td></tr>
-        {{with .Health}}{{with .Snap}}{{with .Replica}}
-        <tr><th>GTID diterima</th><td><code class="break-all">{{or .RetrievedGTID "-"}}</code></td></tr>
-        <tr><th>GTID dieksekusi</th><td><code class="break-all">{{or .ExecutedGTID "-"}}</code></td></tr>
-        {{end}}{{end}}
-        <tr><th>Belum diterima dari master</th><td>{{if .Status.GTIDGapKnown}}{{.Status.GTIDGap}} transaksi{{else}}belum dihitung{{end}}</td></tr>
+<div class="mb-4 grid items-start gap-4 lg:grid-cols-12">
+  <section class="card bg-base-100 min-w-0 lg:col-span-7">
+    <div class="card-body p-6">
+      {{template "card-head" (cardHead "Ringkasan" "" "")}}
+      <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <tbody>
+          <tr><th class="w-44">Status</th><td>{{template "status-badge" .Replica.State}}</td></tr>
+          <tr><th>Master</th><td><a class="link whitespace-nowrap" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></td></tr>
+          <tr><th>Database yang diikuti</th><td>{{if .Replica.Databases}}{{range $i, $d := .Replica.Databases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}semua{{end}}</td></tr>
+          <tr><th>Ketertinggalan</th><td class="mono">{{or .Status.Lag "-"}}</td></tr>
+          {{with .Health}}{{with .Snap}}{{with .Replica}}
+          <tr><th>GTID diterima</th><td><code class="break-all text-xs">{{or .RetrievedGTID "-"}}</code></td></tr>
+          <tr><th>GTID dieksekusi</th><td><code class="break-all text-xs">{{or .ExecutedGTID "-"}}</code></td></tr>
+          {{end}}{{end}}
+          <tr><th>Belum diterima dari master</th><td>{{if .Status.GTIDGapKnown}}{{.Status.GTIDGap}} transaksi{{else}}belum dihitung{{end}}</td></tr>
+          {{end}}
+          <tr><th>Dibuat</th><td class="mono">{{fmtTime .Replica.CreatedAt}}</td></tr>
+          {{with .Replica.LastError}}<tr><th>Kesalahan terakhir</th><td class="text-error-text">{{.}}</td></tr>{{end}}
+        </tbody>
+      </table>
+      </div>
+      {{if .Replica.Databases}}
+      <div class="mt-2 flex flex-wrap gap-2">
+        {{if .CanChange}}
+        <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#tambah">Tambah database</a>
+        <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#lepas">Lepas database</a>
+        {{else}}
+        <button type="button" class="btn btn-sm" disabled>Tambah database</button>
+        <button type="button" class="btn btn-sm" disabled>Lepas database</button>
         {{end}}
-        <tr><th>Dibuat</th><td>{{fmtTime .Replica.CreatedAt}}</td></tr>
-        {{with .Replica.LastError}}<tr><th>Kesalahan terakhir</th><td class="text-error">{{.}}</td></tr>{{end}}
-      </tbody>
-    </table>
-    {{if .Replica.Databases}}
-    <div class="flex flex-wrap gap-2 mt-2">
-      {{if .CanChange}}
-      <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#tambah">Tambah database</a>
-      <a class="btn btn-sm" href="/replicas/{{.Server.ID}}/databases#lepas">Lepas database</a>
-      {{else}}
-      <button type="button" class="btn btn-sm" disabled>Tambah database</button>
-      <button type="button" class="btn btn-sm" disabled>Lepas database</button>
+      </div>
+      {{if not .CanChange}}<p class="help mt-2">Database replika hanya bisa diubah saat replika berstatus Siap atau Perlu perhatian.</p>{{end}}
       {{end}}
     </div>
-    {{if not .CanChange}}<p class="text-sm text-base-content/70">Database replika hanya bisa diubah saat replika berstatus Siap atau Perlu perhatian.</p>{{end}}
-    {{end}}
-  </div>
-</div>
+  </section>
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body gap-3">
-    <h2 class="card-title">Kontrol</h2>
-    {{if .Replica.Paused}}<p class="text-sm">Replikasi dihentikan lewat panel.</p>{{end}}
-    {{if .Busy}}<p class="text-sm text-base-content/70">Server ini masih punya pekerjaan yang belum selesai; tombol kontrol tersedia lagi setelah pekerjaan itu selesai.</p>{{end}}
-    <div class="flex flex-wrap gap-2">
-      {{if .CanStop}}<button type="button" class="btn btn-sm" data-open-modal="modal-stop">Stop replika</button>{{end}}
-      {{if .CanStart}}<button type="button" class="btn btn-sm{{with .ButtonClass "start"}} {{.}}{{end}}" data-open-modal="modal-start">Start replika</button>{{end}}
-      {{if .CanRelock}}<button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-relock">Kunci kembali</button>{{end}}
-      {{if .CanResync}}
-      <form method="post" action="/replicas/{{.Server.ID}}/resync/prepare"><button type="submit" class="btn btn-sm{{with .ButtonClass "resync"}} {{.}}{{end}}">Resync ulang</button></form>
-      {{end}}
-      {{if eq (.ButtonClass "master") "btn-primary"}}<a class="btn btn-sm btn-primary" href="/masters/{{.Master.ID}}">Buka halaman master</a>{{end}}
-      {{if .CanDetach}}<button type="button" class="btn btn-sm btn-error btn-outline" data-open-modal="modal-detach">Lepas replika</button>{{end}}
+  <section class="card bg-base-100 min-w-0 lg:col-span-5">
+    <div class="card-body gap-3 p-6">
+      <h2>Kontrol</h2>
+      {{if .Replica.Paused}}<p class="text-sm">Replikasi dihentikan lewat panel.</p>{{end}}
+      {{if .Busy}}<p class="help">Server ini masih punya pekerjaan yang belum selesai; tombol kontrol tersedia lagi setelah pekerjaan itu selesai.</p>{{end}}
+      <div class="flex flex-wrap gap-2">
+        {{if .CanStop}}<button type="button" class="btn btn-sm" data-open-modal="modal-stop">Stop replika</button>{{end}}
+        {{if .CanStart}}<button type="button" class="btn btn-sm{{with .ButtonClass "start"}} {{.}}{{end}}" data-open-modal="modal-start">Start replika</button>{{end}}
+        {{if .CanRelock}}<button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-relock">Kunci kembali</button>{{end}}
+        {{if .CanResync}}
+        <form method="post" action="/replicas/{{.Server.ID}}/resync/prepare"><button type="submit" class="btn btn-sm{{with .ButtonClass "resync"}} {{.}}{{end}}">Resync ulang</button></form>
+        {{end}}
+        {{if eq (.ButtonClass "master") "btn-primary"}}<a class="btn btn-sm btn-primary" href="/masters/{{.Master.ID}}">Buka halaman master</a>{{end}}
+        {{if .CanDetach}}<button type="button" class="btn btn-sm btn-error" data-open-modal="modal-detach">Lepas replika</button>{{end}}
+      </div>
+      {{template "server-controls" .Controls}}
     </div>
-    {{template "server-controls" .Controls}}
-  </div>
+  </section>
 </div>
 
 {{with .Health}}
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
     <details>
       <summary class="cursor-pointer font-semibold">Detail teknis</summary>
-      <table class="table table-sm mt-2">
+      <div class="overflow-x-auto">
+      <table class="table table-sm mono mt-2 text-xs">
         <tbody>
-          <tr><th>Kode status</th><td><code>{{or .Status.Code "-"}}</code></td></tr>
+          <tr><th class="w-44">Kode status</th><td><code>{{or .Status.Code "-"}}</code></td></tr>
           {{with .Snap}}
           {{with .MySQLError}}<tr><th>Pesan MySQL</th><td><code class="break-all">{{.}}</code></td></tr>{{end}}
           {{with .Replica}}
@@ -99,26 +112,27 @@
           {{end}}
         </tbody>
       </table>
+      </div>
     </details>
   </div>
-</div>
+</section>
 {{end}}
 
 {{template "timeline" .Timeline}}
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <h2 class="card-title">Riwayat pekerjaan</h2>
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
+    {{template "card-head" (cardHead "Riwayat pekerjaan" "" "")}}
     {{template "job-table" .Jobs}}
   </div>
-</div>
+</section>
 
 <a href="/servers/{{.Server.ID}}" class="btn btn-ghost">Kembali ke halaman server</a>
 
 {{if .CanStop}}
 <dialog id="modal-stop" class="modal">
   <div class="modal-box">
-    <h3 class="text-lg font-bold">Stop replika {{.Server.Name}}?</h3>
+    <h2>Stop replika {{.Server.Name}}?</h2>
     <p class="py-2">Replikasi di server ini dihentikan sampai Anda menjalankannya lagi dengan <strong>Start replika</strong>.</p>
     <p class="py-2">Lag akan membesar selama replika berhenti.{{with .BinlogKeep}} Master menyimpan binlog {{.}}; lebih dari itu replika harus disync ulang.{{end}}</p>
     <div class="modal-action">
@@ -133,7 +147,7 @@
 {{if .CanStart}}
 <dialog id="modal-start" class="modal">
   <div class="modal-box">
-    <h3 class="text-lg font-bold">Start replika {{.Server.Name}}?</h3>
+    <h2>Start replika {{.Server.Name}}?</h2>
     <p class="py-2">Replikasi dijalankan lagi dan replika mengejar ketertinggalannya dari master.</p>
     <div class="modal-action">
       <form method="dialog"><button class="btn">Batal</button></form>
@@ -147,7 +161,7 @@
 {{if .CanRelock}}
 <dialog id="modal-relock" class="modal">
   <div class="modal-box">
-    <h3 class="text-lg font-bold">Kunci kembali {{.Server.Name}}?</h3>
+    <h2>Kunci kembali {{.Server.Name}}?</h2>
     <p class="py-2">MySQL di server ini dikunci hanya-baca lagi (super_read_only), sehingga hanya replikasi yang bisa mengubah isinya.</p>
     <p class="py-2">Bila ada yang sempat menulis ke replika, isinya bisa berbeda dari master; pertimbangkan Resync ulang.</p>
     <div class="modal-action">
@@ -162,7 +176,7 @@
 {{if .CanResync}}
 <dialog id="modal-resync" class="modal" x-data="openDialog" data-open="{{.OpenResync}}">
   <form method="post" action="/replicas/{{.Server.ID}}/resync" class="modal-box flex flex-col gap-2">
-    <h3 class="text-lg font-bold">Resync ulang {{.Server.Name}}?</h3>
+    <h2>Resync ulang {{.Server.Name}}?</h2>
     <p>Panel menyalin ulang data dari master <strong>{{.Master.Name}}</strong> ke replika ini, lalu menyambungkan replikasinya lagi.</p>
     {{if .WipeList}}
     <p>Database berikut DIBUANG dari {{.Server.Name}} lalu disalin ulang dari master; isi yang hanya ada di replika hilang:</p>
@@ -179,7 +193,7 @@
     <label class="label"><input type="checkbox" name="force_dump" value="1" class="checkbox checkbox-sm"> Paksa dump (jangan pakai CLONE)</label>
     <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" data-confirm-action="resync" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="Resync ulang {{.Server.Name}}: data replika ini disalin ulang dari master.">Ya, resync ulang</button>
+      <button type="submit" class="btn btn-error" data-confirm-action="resync" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-danger="1" data-confirm-text="Resync ulang {{.Server.Name}}: data replika ini disalin ulang dari master.">Ya, resync ulang</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
   </form>
@@ -190,7 +204,7 @@
 {{if .CanDetach}}
 <dialog id="modal-detach" class="modal">
   <form method="post" action="/replicas/{{.Server.ID}}/detach" class="modal-box flex flex-col gap-2">
-    <h3 class="text-lg font-bold">Lepas replika {{.Server.Name}}?</h3>
+    <h2>Lepas replika {{.Server.Name}}?</h2>
     <p>Panel berhenti mengelola server ini sebagai replika master <strong>{{.Master.Name}}</strong>. Akun replikasi di master tidak disentuh.</p>
     <label class="flex gap-2 items-start">
       <input type="radio" class="radio radio-sm mt-1" name="mode" value="keep" required>
@@ -202,7 +216,7 @@
     </label>
     <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" data-confirm-action="detach" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-text="Lepas replika {{.Server.Name}}: panel berhenti mengelolanya.">Ya, lepas</button>
+      <button type="submit" class="btn btn-error" data-confirm-action="detach" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-danger="1" data-confirm-text="Lepas replika {{.Server.Name}}: panel berhenti mengelolanya.">Ya, lepas</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
   </form>

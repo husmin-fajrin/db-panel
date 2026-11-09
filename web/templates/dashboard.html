@@ -43,28 +43,7 @@
             <a class="btn btn-sm" href="/masters/{{$t.Master.Server.ID}}/promote">Ganti master…</a>
           </div>
         </div>
-        <ul class="flex flex-col gap-3">
-          <li class="rounded-lg border border-base-300 p-3">
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <a class="link font-semibold whitespace-nowrap" href="/masters/{{$t.Master.Server.ID}}">{{$t.Master.Server.Name}}</a>
-              {{template "badge" (badgeOf "primary" "master")}}
-              {{with $t.Master.Server.Address}}<span class="help mono">{{.}}</span>{{end}}
-            </div>
-            <div class="mt-1" data-status-for="{{$t.Master.Server.ID}}" data-status-variant="baris">{{template "status-row" $t.Master.Status}}</div>
-          </li>
-          {{range $t.Replicas}}
-          <li class="ml-4 rounded-lg border border-base-300 p-3 sm:ml-6">
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span class="text-muted" aria-hidden="true">↳</span>
-              <a class="link font-semibold whitespace-nowrap" href="/replicas/{{.Server.ID}}">{{.Server.Name}}</a>
-              {{template "badge" (badgeOf "neutral" "replika")}}
-            </div>
-            <div class="mt-1" data-status-for="{{.Server.ID}}" data-status-variant="baris">{{template "status-row" .Status}}</div>
-          </li>
-          {{else}}
-          <li class="help ml-4 sm:ml-6">Belum ada replika untuk master ini.</li>
-          {{end}}
-        </ul>
+        {{template "topology-tree" $t}}
       </div>
     </section>
   </div>

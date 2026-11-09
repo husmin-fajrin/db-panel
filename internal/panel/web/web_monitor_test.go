@@ -144,7 +144,7 @@ func TestReplicaPageShowsExplanationAndPrimaryButton(t *testing.T) {
 	mon.setView(stoppedOn1062(2))
 	rec := e.do("GET", "/replicas/2", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
-	status := between(rec.Body.String(), `data-status-for="2"`, `<h2 class="card-title">Kontrol`)
+	status := between(rec.Body.String(), `data-status-for="2"`, `<h2>Kontrol</h2>`)
 	for _, s := range []string{"Berhenti", "lencana-error", "Replikasi berhenti karena error 1062",
 		"Data ganda: ada baris yang sudah ada di replika.", "Saran:", "Resync ulang"} {
 		if !strings.Contains(status, s) {
@@ -232,7 +232,7 @@ func TestReplicaPageTechnicalDetailsHoldRawError(t *testing.T) {
 		Snap:   &proto.HealthSnapshot{MySQLError: "dial tcp 127.0.0.1:3306: connect: connection refused"}})
 	rec = e.do("GET", "/replicas/2", nil, e.cookie())
 	body = rec.Body.String()
-	if status := between(body, `data-status-for="2"`, `<h2 class="card-title">Kontrol`); strings.Contains(status, "dial tcp") ||
+	if status := between(body, `data-status-for="2"`, `<h2>Kontrol</h2>`); strings.Contains(status, "dial tcp") ||
 		!strings.Contains(status, "MySQL tidak menjawab") {
 		t.Errorf("status section of an unreachable replica:\n%s", status)
 	}
@@ -256,7 +256,7 @@ func TestMasterPageDownShowsManualGuidance(t *testing.T) {
 		Status: monitor.Status{Code: monitor.StatusDown, Severity: monitor.SevCrit, Detail: down}, Snap: masterSnap()})
 	rec := e.do("GET", "/masters/1", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
-	status := between(rec.Body.String(), `data-status-for="1"`, `<h2 class="card-title">Kontrol`)
+	status := between(rec.Body.String(), `data-status-for="1"`, `<h2>Kontrol</h2>`)
 	for _, s := range []string{"Diduga tumbang", "lencana-error", down, "Yang bisa dilakukan sekarang",
 		"STOP REPLICA; RESET REPLICA ALL; SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF;",
 		"tetap terbuka walau MySQL di-restart",

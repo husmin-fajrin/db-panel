@@ -309,3 +309,21 @@ func auditActionLabel(action string) string {
 	}
 	return action
 }
+
+// serviceLine is the server page's Layanan row (design spec 5.6, 5.8 #3):
+// what was checked, in words, and its badge tone.
+type serviceLine struct{ Text, Tone string }
+
+// serviceLineOf joins the probe's systemd unit (serviceName, active) with
+// the health report's MySQLOK. Without an agent change the panel cannot
+// tell a missing unit from a stopped one, so a MySQL that answers is never
+// red: only a MySQL that does not answer is.
+func serviceLineOf(serviceName string, active bool, mysqlOK bool) serviceLine {
+	switch {
+	case !mysqlOK:
+		return serviceLine{Text: "MySQL tidak menjawab", Tone: "error"}
+	case active:
+		return serviceLine{Text: "MySQL menjawab · layanan systemd " + serviceName + " aktif", Tone: "success"}
+	}
+	return serviceLine{Text: "MySQL menjawab · layanan systemd tidak terdeteksi (mungkin bukan systemd)", Tone: "neutral"}
+}

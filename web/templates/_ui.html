@@ -37,3 +37,32 @@
 {{- else}}<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>
 {{- end}}</svg>{{end}}
 
+
+{{/* topology-tree: a topology's master and its replicas, each with its
+     compact status (live through data-status-for). Data: any value with
+     Master (masterCard) and Replicas ([]replicaCard): the dashboard's
+     topologyPanel, the Replikasi page's rows, the master page. */}}
+{{define "topology-tree"}}
+<ul class="flex flex-col gap-3">
+  <li class="rounded-lg border border-base-300 p-3">
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <a class="link font-semibold whitespace-nowrap" href="/masters/{{.Master.Server.ID}}">{{.Master.Server.Name}}</a>
+      {{template "badge" (badgeOf "primary" "master")}}
+      {{with .Master.Server.Address}}<span class="help mono">{{.}}</span>{{end}}
+    </div>
+    <div class="mt-1" data-status-for="{{.Master.Server.ID}}" data-status-variant="baris">{{template "status-row" .Master.Status}}</div>
+  </li>
+  {{range .Replicas}}
+  <li class="ml-4 rounded-lg border border-base-300 p-3 sm:ml-6">
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span class="text-muted" aria-hidden="true">↳</span>
+      <a class="link font-semibold whitespace-nowrap" href="/replicas/{{.Server.ID}}">{{.Server.Name}}</a>
+      {{template "badge" (badgeOf "neutral" "replika")}}
+    </div>
+    <div class="mt-1" data-status-for="{{.Server.ID}}" data-status-variant="baris">{{template "status-row" .Status}}</div>
+  </li>
+  {{else}}
+  <li class="help ml-4 sm:ml-6">Belum ada replika untuk master ini.</li>
+  {{end}}
+</ul>
+{{end}}

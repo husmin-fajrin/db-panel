@@ -173,6 +173,11 @@ type serverDetailPage struct {
 	// old master's leftover data, its salvage files); shown in the modal
 	// and the confirmation.
 	DeleteWarnings []string
+	// ServiceLine is the MySQL card's Layanan row from the probe's systemd
+	// unit and the last health report (design spec 5.8 #3); nil without a
+	// report that says whether MySQL answers (none yet, or no MySQL
+	// account connected), when the row shows the unit alone.
+	ServiceLine *serviceLine
 }
 
 // dashboardListLen is how many alerts and jobs the dashboard lists.
@@ -682,7 +687,11 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 		}
 		p.ShowMySQL = p.Probe == nil || p.Probe.MySQL.Installed
 		p.InventoryCut = len(p.Inventory.Databases) >= inventoryCap
-		p.CanPrepare = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0 && srv.Role != store.RoleReplica
+		// Not on a quarantined old master either: it waits for Bangun ulang or
+		// Hapus (design spec 5.6), and a topology of its own would be a
+		// second writable master.
+		p.CanPrepare = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0 &&
+			srv.Role != store.RoleReplica && srv.Role != store.RoleQuarantined
 		if p.CanPrepare {
 			_, err := a.Store.GetTopologyByMaster(srv.ID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -704,6 +713,10 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 		if v, ok := a.Monitor.View(srv.ID); ok {
 			p.Pins = newPinFacts(v.Snap)
 			p.ReportsDropped = reportsDroppedText(v.ReportsDropped)
+			if p.Probe != nil && v.Snap != nil && v.Snap.MySQLError != mysqlNotConnected {
+				sl := serviceLineOf(p.Probe.MySQL.ServiceName, p.Probe.MySQL.ServiceActive, v.Snap.MySQLOK)
+				p.ServiceLine = &sl
+			}
 		}
 		if err := a.oldMasterViews(r.Context(), srv, &p); err != nil {
 			a.internalError(w, "old master", err)

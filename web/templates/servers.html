@@ -1,53 +1,53 @@
 {{define "title"}}Server{{end}}
+{{define "page-title"}}<h1>Server</h1>{{end}}
+{{define "page-actions"}}<a href="/servers/new" class="btn btn-primary">Tambah server</a>{{end}}
 {{define "content"}}
-<div class="flex items-center justify-between mb-4">
-  <h1 class="text-2xl font-bold">Server</h1>
-  <a href="/servers/new" class="btn btn-primary">Tambah server</a>
-</div>
 {{if .Rows}}
-<div class="overflow-x-auto bg-base-100 rounded-box shadow">
-  <table class="table">
-    <thead>
-      <tr><th>Nama</th><th>Alamat</th><th>Status</th><th>Status pemantauan</th><th>Versi MySQL</th><th>Versi agent</th><th>OS</th><th>Terakhir terlihat</th></tr>
-    </thead>
-    <tbody>
-      {{range .Rows}}
-      <tr class="hover:bg-base-200">
-        <td><a href="/servers/{{.ID}}" class="link link-primary font-semibold">{{.Name}}</a></td>
-        <td>{{or .Address "-"}}</td>
-        <td>
-          {{if not .Paired}}<span class="badge badge-ghost">Belum dipasangkan</span>
-          {{else if .Online}}<span class="badge badge-success">Online</span>
-          {{else}}<span class="badge badge-error">Offline</span>{{end}}
-        </td>
-        <td>{{template "status-badge-health" .Status}}</td>
-        <td>{{or .MySQLVersion "-"}}</td>
-        <td>
-          {{or .AgentVersion "-"}}
-          {{if .NeedsUpgrade}}
-          <span class="badge badge-warning badge-sm">perlu dimutakhirkan</span>
-          {{if .Local}}
-          <p class="text-xs mt-1">Agent ini dipasang bersama panel; perbarui panel dengan install.sh untuk memutakhirkannya.</p>
-          {{else if .UpgradeCommand}}
-          <p class="text-xs mt-1">Jalankan di server ini untuk memasang ulang agent:</p>
-          <pre class="text-xs bg-base-200 rounded p-2 mt-1 whitespace-pre-wrap break-all"><code>{{.UpgradeCommand}}</code></pre>
-          {{else}}
-          <p class="text-xs mt-1">Buat perintah pemasangan ulang di <a class="link" href="/servers/{{.ID}}">halaman server</a>, lalu jalankan di server ini.</p>
-          {{end}}
-          {{end}}
-        </td>
-        <td>{{or .OS "-"}}</td>
-        <td>{{fmtTime .LastSeenAt}}</td>
-      </tr>
-      {{end}}
-    </tbody>
-  </table>
-</div>
-{{else}}
-<div class="card bg-base-100 shadow">
-  <div class="card-body">
-    <p>Belum ada server. Tambahkan server pertama, lalu jalankan perintah pemasangan agent di server tersebut.</p>
+<section class="card bg-base-100 min-w-0">
+  <div class="overflow-x-auto">
+    <table class="table table-sm">
+      <thead>
+        <tr><th>Nama</th><th>Status</th><th>Status pemantauan</th><th>Alamat</th><th>Versi MySQL</th><th>Versi agent</th><th>OS</th><th>Terakhir terlihat</th></tr>
+      </thead>
+      <tbody>
+        {{range .Rows}}
+        <tr>
+          <td class="whitespace-nowrap"><a href="/servers/{{.ID}}" class="link link-primary font-semibold">{{.Name}}</a></td>
+          <td>
+            <div class="flex flex-wrap gap-1">
+              {{if .Paired}}{{if .Online}}{{template "badge" (badgeOf "success" "Online")}}{{else}}{{template "badge" (badgeOf "error" "Offline")}}{{end}}
+              {{else if not .Local}}{{template "badge" (badgeOf "neutral" "Belum dipasangkan")}}{{end}}
+              {{if .Local}}{{template "badge" (badgeOf "neutral" "server panel")}}{{end}}
+            </div>
+          </td>
+          <td>{{template "status-badge-health" .Status}}</td>
+          <td class="mono whitespace-nowrap text-xs">{{or .Address "-"}}</td>
+          <td class="mono text-xs break-all">{{or .MySQLVersion "-"}}</td>
+          <td>
+            <div class="flex flex-wrap items-center gap-2"><span class="mono whitespace-nowrap">{{or .AgentVersion "-"}}</span>
+            {{if .NeedsUpgrade}}{{template "badge" (badgeOf "warning" "perlu dimutakhirkan")}}{{end}}</div>
+            {{if .NeedsUpgrade}}
+            {{if .Local}}
+            <p class="help mt-1">Agent ini dipasang bersama panel; perbarui panel dengan install.sh untuk memutakhirkannya.</p>
+            {{else if .UpgradeCommand}}
+            <p class="help mt-1">Jalankan di server ini untuk memasang ulang agent:</p>
+            <pre class="mt-1 whitespace-pre-wrap break-all rounded bg-base-200 p-2 text-xs"><code>{{.UpgradeCommand}}</code></pre>
+            {{else}}
+            <p class="help mt-1">Buat perintah pemasangan ulang di <a class="link" href="/servers/{{.ID}}">halaman server</a>, lalu jalankan di server ini.</p>
+            {{end}}
+            {{end}}
+          </td>
+          <td>{{or .OS "-"}}</td>
+          <td class="mono whitespace-nowrap text-xs">{{fmtTime .LastSeenAt}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
   </div>
-</div>
+</section>
+{{else}}
+<section class="card bg-base-100">
+  <div class="card-body p-6">{{template "empty" (emptyOf "Belum ada server. Tambahkan server pertama, lalu jalankan perintah pemasangan agent di server tersebut." "Tambah server" "/servers/new")}}</div>
+</section>
 {{end}}
 {{end}}

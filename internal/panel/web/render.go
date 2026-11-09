@@ -35,8 +35,6 @@ type Page struct {
 	// Active is the sidebar entry of the current page (menuDashboard, ...);
 	// "" marks none.
 	Active string
-	// HasReplikasi shows the sidebar's Replikasi entry (/replikasi).
-	HasReplikasi bool
 	// ServersTotal is the number of servers with a paired agent and
 	// ServersOnline how many of those agents are connected, for the
 	// sidebar's status box.
@@ -80,9 +78,9 @@ func activeMenu(path string) string {
 	switch {
 	case path == "/":
 		return menuDashboard
-	case under("/servers"), under("/masters"), under("/replicas"):
+	case under("/servers"):
 		return menuServers
-	case under("/replikasi"):
+	case under("/replikasi"), under("/masters"), under("/replicas"):
 		return menuReplikasi
 	case under("/jobs"):
 		return menuJobs
@@ -120,7 +118,7 @@ type Banner struct {
 // pageNames are the page templates; each file templates/<name>.html defines
 // "title" and "content".
 var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
-	"master_detail", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail",
+	"master_detail", "replication", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail",
 	"alerts", "settings", "audit", "cert", "promote", "cutover"}
 
 // Renderer renders a page inside the shared layout.

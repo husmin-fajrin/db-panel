@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -683,5 +684,41 @@ func TestSalvageListSkippedForOldAgent(t *testing.T) {
 	wantBody(t, rec, salvageName)
 	if n := f.callsOf(f.listCalls, 1); n != 1 {
 		t.Fatalf("%d SalvageList calls, want 1", n)
+	}
+}
+
+// TestOldMasterCardTone: the old master's box is a card with a warning
+// edge (design spec 5.6), Bangun ulang is a neutral button and Hapus the
+// pink one, which opens the danger variant of the confirmation.
+func TestOldMasterCardTone(t *testing.T) {
+	e, _, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	body := e.do("GET", "/servers/1", nil, c).Body.String()
+	head := regexp.MustCompile(`<[a-z]+ class="([^"]*)"[^>]*data-old-master`).FindStringSubmatch(body)
+	if head == nil || !strings.Contains(head[1], "card") || !strings.Contains(head[1], "border-warning") {
+		t.Fatalf("old master box is not a warning card: %v", head)
+	}
+	card := between(body, "data-old-master", "data-old-master-end")
+	rebuild := regexp.MustCompile(`<a class="([^"]*)" href="/masters/2/replicas/new\?bangun-ulang=1">`).FindStringSubmatch(card)
+	if rebuild == nil || strings.Contains(rebuild[1], "btn-warning") || strings.Contains(rebuild[1], "btn-error") ||
+		strings.Contains(rebuild[1], "btn-primary") {
+		t.Errorf("Bangun ulang is not neutral: %v", rebuild)
+	}
+	del := regexp.MustCompile(`<button type="button" class="([^"]*)" data-open-modal="modal-hapus">`).FindStringSubmatch(card)
+	if del == nil || !strings.Contains(del[1], "btn-error") || strings.Contains(del[1], "btn-outline") {
+		t.Errorf("Hapus in the old master card is not btn-error: %v\n%s", del, card)
+	}
+	if n := strings.Count(body, `data-open-modal="modal-hapus"`); n != 1 {
+		t.Errorf("Hapus triggers = %d, want 1", n)
+	}
+	if !regexp.MustCompile(`data-confirm-action="delete_server"[^>]*data-confirm-danger="1"`).MatchString(body) {
+		t.Error("Ya, hapus does not open the danger confirmation")
+	}
+	// An old master is not offered to be prepared as a master again.
+	if strings.Contains(body, `action="/servers/1/prepare-master"`) {
+		t.Error("quarantined old master offers Siapkan sebagai master")
 	}
 }

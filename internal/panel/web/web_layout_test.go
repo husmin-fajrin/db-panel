@@ -46,10 +46,8 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 		t.Errorf("sidebar has no dbpanel logo:\n%s", nav)
 	}
 	links := menuLinks(nav)
-	// Replikasi appears once its page exists (Page.HasReplikasi); the
-	// other six are always there.
 	want := map[string]string{
-		"dashboard": `href="/"`, "servers": `href="/servers"`, "jobs": `href="/jobs"`,
+		"dashboard": `href="/"`, "servers": `href="/servers"`, "replikasi": `href="/replikasi"`, "jobs": `href="/jobs"`,
 		"alerts": `href="/alerts"`, "audit": `href="/audit"`, "settings": `href="/settings"`,
 	}
 	if len(links) != len(want) {
@@ -59,9 +57,6 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 		if !strings.Contains(links[k], href) {
 			t.Errorf("menu %s = %q, want %s", k, links[k], href)
 		}
-	}
-	if strings.Contains(nav, `href="/replikasi"`) {
-		t.Error("Replikasi is listed before its page exists")
 	}
 	if !strings.Contains(nav, "data-alert-count") || !strings.Contains(nav, `x-data="alertCount"`) {
 		t.Error("Peringatan has no live count badge")
@@ -87,6 +82,7 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 	active("/jobs", "jobs")
 	active("/alerts", "alerts")
 	active("/audit", "audit")
+	active("/replikasi", "replikasi")
 	srv, err := e.st.CreateServer("db-a")
 	if err != nil {
 		t.Fatal(err)
