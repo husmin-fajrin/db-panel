@@ -14,6 +14,10 @@ import (
 // notMonitored is the label of a server the monitor does not judge yet.
 const notMonitored = "Belum dipantau"
 
+// labelCatchingUp is the label of a replica the monitor judges Sinkron
+// while it still has transactions of the master to apply.
+const labelCatchingUp = "Mengejar"
+
 // mysqlNotConnected is the agent's MySQLError while no MySQL account is
 // stored (internal/agent/drivers/mysql/health.go).
 const mysqlNotConnected = "belum terhubung"
@@ -79,6 +83,13 @@ func newStatusView(id int64, role string, v monitor.View, ok bool, now time.Time
 		sv.Lag = "tertinggal " + strconv.FormatInt(*st.LagSec, 10) + " dtk"
 	case st.GTIDGap > 0:
 		sv.Lag = "tertinggal " + strconv.Itoa(st.GTIDGap) + " transaksi"
+		if st.Code == monitor.StatusSynced {
+			// Below the lag threshold the monitor still judges it Sinkron
+			// (alerts, Telegram and the weekly summary keep that code);
+			// shown, "Sinkron" beside "tertinggal N transaksi" contradicts
+			// itself (design spec 5.8 #4).
+			sv.Label = labelCatchingUp
+		}
 	}
 	if role == store.RoleReplica && st.Code == monitor.StatusStopped && v.Snap != nil && v.Snap.Replica != nil {
 		e := monitor.Explain(v.Snap.Replica.LastSQLErrno, v.Snap.Replica.LastIOErrno)

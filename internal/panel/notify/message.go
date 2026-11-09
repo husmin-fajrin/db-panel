@@ -86,6 +86,10 @@ var (
 	}
 )
 
+// Critical reports whether an alert of kind needs action now (the
+// messages' critical icon; the dashboard's Kritis badge).
+func Critical(kind string) bool { return critKinds[kind] }
+
 func icon(kind string) string {
 	switch {
 	case critKinds[kind]:

@@ -801,7 +801,10 @@ func TestMySQLPagesAreCSPSafe(t *testing.T) {
 		wantNoBody(t, rec, mysqlSecret)
 	}
 	rec := e.do("GET", "/", nil, c)
-	wantBody(t, rec, `href="/jobs"`, "Pekerjaan", `data-stat="masters">1<`, `data-stat="replicas">2<`)
+	// One topology (no tabs) with its two replicas, and the job listed.
+	wantBody(t, rec, `href="/jobs"`, "Pekerjaan", `href="/masters/1/replicas/new"`, `href="/replicas/2"`, `href="/replicas/4"`,
+		">0/2<", `href="/jobs/`+waitingJob+`"`)
+	wantNoBody(t, rec, `role="tablist"`)
 }
 
 // subsetReplica makes server 1 a master with dbs and server 2 a ready

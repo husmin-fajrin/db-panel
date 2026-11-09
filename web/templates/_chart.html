@@ -3,7 +3,8 @@
      by newLagChart): y axis 0..MaxY seconds with a light grid, hour labels
      every 6 hours, one line per replica (primary, warning, success, then
      dashed), the threshold as a dashed line, a dot and label on the peak,
-     a legend, and the sparse-data note. A div, not a figure: daisyUI
+     a legend, a line when there is no lag data at all, and the
+     sparse-data note. A div, not a figure: daisyUI
      centres figures inside cards. */}}
 {{define "lag-chart"}}<div class="grafik-lag">
   <svg class="h-auto w-full" viewBox="0 0 640 200" role="img" aria-label="{{.Aria}}">
@@ -28,5 +29,6 @@
     {{end}}
     {{if gt .ThresholdSec 0}}<span class="inline-flex items-center gap-2 whitespace-nowrap text-muted"><svg class="grafik-ambang" width="20" height="6" viewBox="0 0 20 6" aria-hidden="true"><line x1="1" x2="19" y1="3" y2="3" stroke-dasharray="2 3"/></svg>ambang <span class="mono">{{.ThresholdSec}} dtk</span></span>{{end}}
   </div>
+  {{if not .Peak}}<p class="mt-1 text-muted">Belum ada data lag 24 jam terakhir.</p>{{end}}
   {{if .Sparse}}<p class="help mt-1">grafik jarang: agent perlu dimutakhirkan</p>{{end}}
 </div>{{end}}

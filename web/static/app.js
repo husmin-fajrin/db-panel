@@ -506,6 +506,87 @@
       },
     }));
 
+    // Tab topologi di dashboard (lebih dari satu topologi): tombol
+    // [role=tab] dengan data-tab="<id topologi>" menampilkan panel
+    // #topologi-<id> dan menyembunyikan yang lain. Pilihan disimpan di
+    // localStorage.topoTab dan dipulihkan saat halaman dibuka; id yang
+    // tidak ada (topologi sudah dihapus) diabaikan. Panah kiri/kanan,
+    // Home, dan End berpindah tab. Tanpa tablist (satu topologi) komponen
+    // ini tidak melakukan apa-apa.
+    window.Alpine.data("topoTabs", () => ({
+      init() {
+        const root = this.$el;
+        const daftar = root.querySelector('[role="tablist"]');
+        if (!daftar) {
+          return;
+        }
+        const tabs = Array.from(daftar.querySelectorAll('[role="tab"]'));
+        const tampilkan = (id, fokus) => {
+          for (const t of tabs) {
+            const aktif = t.dataset.tab === id;
+            t.setAttribute("aria-selected", aktif ? "true" : "false");
+            t.tabIndex = aktif ? 0 : -1;
+            t.classList.toggle("btn-primary", aktif);
+            t.classList.toggle("btn-ghost", !aktif);
+            if (aktif && fokus) {
+              t.focus();
+            }
+          }
+          for (const p of root.querySelectorAll("[data-panel]")) {
+            p.classList.toggle("hidden", p.dataset.panel !== id);
+          }
+        };
+        const pilih = (id, fokus) => {
+          tampilkan(id, fokus);
+          try {
+            window.localStorage.setItem("topoTab", id);
+          } catch (e) {
+            // Penyimpanan diblokir: pilihan berlaku untuk halaman ini saja.
+          }
+        };
+        let simpanan = null;
+        try {
+          simpanan = window.localStorage.getItem("topoTab");
+        } catch (e) {
+          simpanan = null;
+        }
+        if (simpanan && tabs.some((t) => t.dataset.tab === simpanan)) {
+          tampilkan(simpanan, false);
+        }
+        daftar.addEventListener("click", (e) => {
+          const t = e.target.closest('[role="tab"]');
+          if (t) {
+            pilih(t.dataset.tab, false);
+          }
+        });
+        daftar.addEventListener("keydown", (e) => {
+          const i = tabs.indexOf(document.activeElement);
+          if (i < 0) {
+            return;
+          }
+          let j = -1;
+          switch (e.key) {
+            case "ArrowRight":
+              j = (i + 1) % tabs.length;
+              break;
+            case "ArrowLeft":
+              j = (i - 1 + tabs.length) % tabs.length;
+              break;
+            case "Home":
+              j = 0;
+              break;
+            case "End":
+              j = tabs.length - 1;
+              break;
+            default:
+              return;
+          }
+          e.preventDefault();
+          pilih(tabs[j].dataset.tab, true);
+        });
+      },
+    }));
+
     // Lencana jumlah peringatan aktif di menu (elemen [data-alert-count]
     // di dalam komponen): setiap event alert_update jumlahnya diambil ulang
     // dari GET /alerts/count; lencana disembunyikan saat jumlahnya 0.

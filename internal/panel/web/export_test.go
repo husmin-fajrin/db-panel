@@ -47,3 +47,8 @@ func StatusExplain(id int64, role string, v monitor.View) *monitor.Explanation {
 
 // OutcomeOf exposes outcomeOf to web_test.
 var OutcomeOf = outcomeOf
+
+// StatusLabelOf is the label newStatusView gives a view.
+func StatusLabelOf(id int64, role string, v monitor.View) string {
+	return newStatusView(id, role, v, true, time.Time{}).Label
+}

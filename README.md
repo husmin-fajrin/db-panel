@@ -680,18 +680,37 @@ sama, setiap komputer harus memasang ulang sertifikat keamanan panel.
 ## Pemantauan
 
 Begitu sebuah server menjadi master atau replika, agent di server itu
-memeriksa MySQL-nya sendiri dan melapor ke panel. **Dashboard** menampilkan
-jumlah master, replika, dan peringatan aktif, lalu satu kartu per
-topologi: master dengan statusnya dan setiap replika satu baris (status
-berwarna, penanda kunci, tertinggal berapa detik, kapan terakhir dicek).
-Halaman berganti sendiri saat status berubah; tidak perlu dimuat ulang.
-Server yang belum menjadi master atau replika tampil **Belum dipantau**.
+memeriksa MySQL-nya sendiri dan melapor ke panel. **Dashboard** dibuka
+dengan satu baris ringkasan (peringatan terbuka dan tindakan yang
+menunggu Anda) dan kapan laporan terbaru masuk, lalu empat gauge yang
+menjumlahkan semua topologi:
+
+- **Replika sinkron**: berapa replika yang Sinkron dari semuanya.
+- **Lag tertinggi**: lag terbesar di antara semua replika, dengan nama
+  replikanya dan ambang lag dari Pengaturan (kuning bila mencapai ambang).
+- **Disk master terburuk**: persen terpakai disk data master yang paling
+  penuh, dengan nama master dan sisa ruangnya (kuning dan merah mengikuti
+  batas disk di Pengaturan).
+- **Peringatan terbuka**: jumlahnya dan judul peringatan terbaru (merah
+  bila ada yang kritis).
+
+Di bawahnya grafik lag 24 jam (titik per 5 menit, satu garis per replika,
+garis putus-putus ambang) dan kartu topologi: master lalu setiap replika
+satu baris (status berwarna, penanda kunci, tertinggal berapa, kapan
+terakhir dicek), dengan tombol **Tambah replika** dan **Ganti master…**.
+Bila ada lebih dari satu topologi, grafik dan kartunya dipisah per tab
+(nama master); tab yang terakhir dipilih diingat oleh peramban. Paling
+bawah tiga peringatan dan tiga pekerjaan terbaru. Baris status berganti
+sendiri saat status berubah; angka gauge dan grafik diperbarui saat
+halaman dibuka lagi (**Periksa sekarang** memuat ulang dashboard). Server
+yang belum menjadi master atau replika tampil **Belum dipantau**.
 
 Status replika, dalam kata sederhana:
 
 | Status | Artinya |
 |---|---|
 | Sinkron | replikasi berjalan dan mengikuti master |
+| Mengejar | dinilai Sinkron (di bawah ambang), tetapi masih ada transaksi master yang belum dijalankan; tampil bersama "tertinggal N transaksi". Peringatan, Telegram, dan ringkasan mingguan tetap menyebutnya Sinkron |
 | Ketinggalan | replikasi berjalan tetapi tertinggal dari master (bawaan: 60 detik atau lebih) |
 | Terputus | replika tidak tersambung ke master; MySQL mencoba menyambung sendiri (merah setelah 3 menit) |
 | Dihentikan | replikasi dihentikan lewat panel (**Stop replika**) |

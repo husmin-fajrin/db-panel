@@ -1,79 +1,124 @@
 {{define "title"}}Dashboard{{end}}
+{{define "page-title"}}<h1>Dashboard</h1>
+<p class="mt-1 text-muted" data-summary>{{.Summary}}</p>{{end}}
+{{define "page-actions"}}<span class="help whitespace-nowrap" data-updated>{{with .Updated}}{{.}}{{else}}Belum ada laporan pemantauan{{end}}</span>
+<a class="btn btn-sm" href="/" title="Muat ulang dashboard dengan laporan terbaru">Periksa sekarang</a>{{end}}
 {{define "content"}}
-<h1 class="text-2xl font-bold mb-4">Dashboard</h1>
-{{range .Cutover}}
-<div role="alert" class="alert alert-warning mb-4 flex flex-col items-start gap-2" data-promote-cutover>
-  <h2 class="font-bold">Promote menunggu pengalihan aplikasi</h2>
-  <p class="text-sm">Master sekarang {{.Name}}. Arahkan aplikasi ke master baru, lalu tekan "Sudah saya alihkan" di layar pengalihan.</p>
-  <a class="btn btn-sm" href="/masters/{{.ID}}/cutover">Buka layar pengalihan</a>
+{{range .Banners}}{{template "banner" .}}{{end}}
+{{if .Empty}}
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">{{template "empty" (emptyOf "Belum ada replika. Siapkan sebuah server sebagai master, lalu tambah replika." "Tambah replika" "/servers")}}</div>
+</section>
+{{else}}
+<div class="mb-4 grid gap-4 grid-cols-2 lg:grid-cols-4">
+  <section class="card bg-base-100 min-w-0" data-gauge="sinkron"><div class="card-body p-6">{{template "gauge" (index .Gauges 0)}}</div></section>
+  <section class="card bg-base-100 min-w-0" data-gauge="lag"><div class="card-body p-6">{{template "gauge" (index .Gauges 1)}}</div></section>
+  <section class="card bg-base-100 min-w-0" data-gauge="disk"><div class="card-body p-6">{{template "gauge" (index .Gauges 2)}}</div></section>
+  <section class="card bg-base-100 min-w-0" data-gauge="peringatan"><div class="card-body p-6">{{template "gauge" (index .Gauges 3)}}</div></section>
 </div>
-{{end}}
-{{range .PromotePartial}}
-<div role="alert" class="alert alert-error mb-4 flex flex-col items-start gap-2" data-promote-partial>
-  <h2 class="font-bold">Promote belum tuntas</h2>
-  <p class="text-sm">{{.Message}}</p>
-  {{if .JobID}}<a class="btn btn-sm" href="/jobs/{{.JobID}}">Buka pekerjaan promote</a>{{else}}<a class="btn btn-sm" href="/alerts">Lihat peringatan</a>{{end}}
-</div>
-{{end}}
-<div class="stats stats-vertical md:stats-horizontal bg-base-100 shadow w-full">
-  <div class="stat">
-    <div class="stat-title">Jumlah server</div>
-    <div class="stat-value" data-stat="total">{{.Total}}</div>
-  </div>
-  <div class="stat">
-    <div class="stat-title">Online</div>
-    <div class="stat-value text-success" data-stat="online">{{.Online}}</div>
-  </div>
-  <div class="stat">
-    <div class="stat-title">Belum dipasangkan</div>
-    <div class="stat-value text-warning" data-stat="unpaired">{{.Unpaired}}</div>
-  </div>
-</div>
-<div class="stats stats-vertical md:stats-horizontal bg-base-100 shadow w-full mt-4">
-  <div class="stat">
-    <div class="stat-title">Master</div>
-    <div class="stat-value" data-stat="masters">{{.Masters}}</div>
-  </div>
-  <div class="stat">
-    <div class="stat-title">Replika</div>
-    <div class="stat-value" data-stat="replicas">{{.Replicas}}</div>
-  </div>
-  <div class="stat">
-    <div class="stat-title">Peringatan aktif</div>
-    <div class="stat-value {{if .ActiveAlerts}}text-error{{end}}" data-stat="alerts">{{.ActiveAlerts}}</div>
-    <div class="stat-desc"><a class="link" href="/alerts">Lihat peringatan</a></div>
-  </div>
-  <div class="stat">
-    <div class="stat-title">Pekerjaan aktif</div>
-    <div class="stat-value text-info" data-stat="jobs">{{.ActiveJobs}}</div>
-    <div class="stat-desc"><a class="link" href="/jobs">Lihat semua pekerjaan</a></div>
-  </div>
-</div>
-{{range .Topologies}}
-<div class="card bg-base-100 shadow mt-6">
-  <div class="card-body gap-3">
-    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-      <h2 class="card-title"><a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></h2>
-      <span class="text-sm text-base-content/70">master{{with .Master.Address}} · {{.}}{{end}}</span>
-      <div data-status-for="{{.Master.ID}}" data-status-variant="baris">{{template "status-row" .MasterStatus}}</div>
-    </div>
-    {{if .Replicas}}
-    <ul class="list">
-      {{range .Replicas}}
-      <li class="list-row items-center">
-        <a class="link font-semibold" href="/replicas/{{.Server.ID}}">{{.Server.Name}}</a>
-        <div class="list-col-grow" data-status-for="{{.Server.ID}}" data-status-variant="baris">{{template "status-row" .Status}}</div>
-      </li>
-      {{end}}
-    </ul>
-    {{else}}
-    <p class="text-sm text-base-content/70">Belum ada replika. <a class="link" href="/masters/{{.Master.ID}}/replicas/new">Buat replika</a></p>
+{{$multi := gt (len .Topologies) 1}}
+<div x-data="topoTabs">
+  {{if $multi}}
+  <div role="tablist" aria-label="Topologi" class="mb-4 flex flex-wrap gap-2">
+    {{range $i, $t := .Topologies}}<button type="button" role="tab" id="tab-topologi-{{$t.ID}}" aria-controls="topologi-{{$t.ID}}" aria-selected="{{if eq $i 0}}true{{else}}false{{end}}" tabindex="{{if eq $i 0}}0{{else}}-1{{end}}" data-tab="{{$t.ID}}" class="btn btn-sm whitespace-nowrap {{if eq $i 0}}btn-primary{{else}}btn-ghost{{end}}">{{$t.Name}}</button>
     {{end}}
   </div>
+  {{end}}
+  {{range $i, $t := .Topologies}}
+  <div id="topologi-{{$t.ID}}" class="mb-4 grid gap-4 lg:grid-cols-12{{if ne $i 0}} hidden{{end}}" data-panel="{{$t.ID}}"{{if $multi}} role="tabpanel" aria-labelledby="tab-topologi-{{$t.ID}}" tabindex="0"{{end}}>
+    <section class="card bg-base-100 min-w-0 lg:col-span-7">
+      <div class="card-body p-6">
+        {{template "card-head" (cardHead "Lag replikasi 24 jam" "" "")}}
+        <div class="overflow-x-auto">
+          <div class="min-w-[480px]">{{template "lag-chart" $t.Chart}}</div>
+        </div>
+      </div>
+    </section>
+    <section class="card bg-base-100 min-w-0 lg:col-span-5">
+      <div class="card-body p-6">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h2>Topologi</h2>
+          <div class="flex flex-wrap gap-2">
+            <a class="btn btn-sm btn-primary" href="/masters/{{$t.Master.Server.ID}}/replicas/new">Tambah replika</a>
+            <a class="btn btn-sm" href="/masters/{{$t.Master.Server.ID}}/promote">Ganti master…</a>
+          </div>
+        </div>
+        <ul class="flex flex-col gap-3">
+          <li class="rounded-lg border border-base-300 p-3">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <a class="link font-semibold whitespace-nowrap" href="/masters/{{$t.Master.Server.ID}}">{{$t.Master.Server.Name}}</a>
+              {{template "badge" (badgeOf "primary" "master")}}
+              {{with $t.Master.Server.Address}}<span class="help mono">{{.}}</span>{{end}}
+            </div>
+            <div class="mt-1" data-status-for="{{$t.Master.Server.ID}}" data-status-variant="baris">{{template "status-row" $t.Master.Status}}</div>
+          </li>
+          {{range $t.Replicas}}
+          <li class="ml-4 rounded-lg border border-base-300 p-3 sm:ml-6">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span class="text-muted" aria-hidden="true">↳</span>
+              <a class="link font-semibold whitespace-nowrap" href="/replicas/{{.Server.ID}}">{{.Server.Name}}</a>
+              {{template "badge" (badgeOf "neutral" "replika")}}
+            </div>
+            <div class="mt-1" data-status-for="{{.Server.ID}}" data-status-variant="baris">{{template "status-row" .Status}}</div>
+          </li>
+          {{else}}
+          <li class="help ml-4 sm:ml-6">Belum ada replika untuk master ini.</li>
+          {{end}}
+        </ul>
+      </div>
+    </section>
+  </div>
+  {{end}}
 </div>
 {{end}}
-<div class="mt-6 flex gap-2">
-  <a href="/servers" class="btn">Lihat daftar server</a>
-  <a href="/servers/new" class="btn btn-primary">Tambah server</a>
+<div class="grid gap-4 lg:grid-cols-2">
+  <section class="card bg-base-100 min-w-0">
+    <div class="card-body p-6">
+      {{template "card-head" (cardHead "Peringatan terbaru" "Lihat peringatan" "/alerts")}}
+      {{if .Alerts}}
+      <div class="overflow-x-auto">
+        <table class="table table-sm">
+          <thead><tr><th>Peringatan</th><th>Server</th><th>Sejak</th><th>Status</th></tr></thead>
+          <tbody>
+            {{range .Alerts}}
+            <tr>
+              <td><div class="font-semibold">{{.KindLabel}}</div><div class="help">{{.Message}}</div></td>
+              <td class="whitespace-nowrap">{{if .ServerKnown}}<a class="link" href="/servers/{{.ServerID}}">{{.ServerName}}</a>{{else}}-{{end}}</td>
+              <td class="mono whitespace-nowrap">{{ago .OpenedAt $.Now}}</td>
+              <td>{{template "badge" .Badge}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="text-muted">Belum ada peringatan.</p>
+      {{end}}
+    </div>
+  </section>
+  <section class="card bg-base-100 min-w-0">
+    <div class="card-body p-6">
+      {{template "card-head" (cardHead "Pekerjaan terakhir" "Lihat semua pekerjaan" "/jobs")}}
+      {{if .Jobs}}
+      <div class="overflow-x-auto">
+        <table class="table table-sm">
+          <thead><tr><th>Pekerjaan</th><th>Server</th><th>Dibuat</th><th>Status</th></tr></thead>
+          <tbody>
+            {{range .Jobs}}
+            <tr>
+              <td class="whitespace-nowrap"><a class="link font-semibold" href="/jobs/{{.ID}}">{{kindLabel .Kind}}</a></td>
+              <td class="whitespace-nowrap">{{.ServerName}}</td>
+              <td class="mono whitespace-nowrap">{{ago .CreatedAt $.Now}}</td>
+              <td>{{template "badge" .Badge}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="text-muted">Belum ada pekerjaan.</p>
+      {{end}}
+    </div>
+  </section>
 </div>
 {{end}}

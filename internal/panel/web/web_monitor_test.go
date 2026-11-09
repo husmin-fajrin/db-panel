@@ -101,7 +101,13 @@ func TestDashboardShowsStatusPerReplica(t *testing.T) {
 	rec := e.do("GET", "/", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
 	body := rec.Body.String()
-	wantBody(t, rec, `data-stat="masters">1<`, `data-stat="replicas">3<`, `data-stat="alerts">1<`, `href="/alerts"`,
+	if g := between(body, `data-gauge="sinkron"`, `data-gauge=`); !strings.Contains(g, ">0/3<") {
+		t.Errorf("sinkron gauge is not 0/3:\n%s", g)
+	}
+	if g := between(body, `data-gauge="peringatan"`, `</section>`); !strings.Contains(g, ">1<") {
+		t.Errorf("alert gauge is not 1:\n%s", g)
+	}
+	wantBody(t, rec, `href="/alerts"`,
 		`href="/masters/1"`, `href="/replicas/2"`, `href="/replicas/3"`, `href="/replicas/4"`)
 
 	master := between(body, `data-status-for="1"`, `data-status-for=`)
@@ -605,4 +611,53 @@ func TestServerPageShowsDroppedReports(t *testing.T) {
 
 	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow, Snap: masterSnap()})
 	wantNoBody(t, e.do("GET", "/servers/1", nil, e.cookie()), "laporan dibuang")
+}
+
+// TestStatusLabelMengejar: a replica judged Sinkron while transactions are
+// still to apply reads "Mengejar" (design spec 5.8 #4); the monitor's
+// status code, which alerts, Telegram and the weekly summary use, stays.
+func TestStatusLabelMengejar(t *testing.T) {
+	e, mon, _ := monitorEnv(t)
+	v := monitor.View{ServerID: 2, Role: store.RoleReplica, ReceivedAt: monNow.Add(-4 * time.Second),
+		Status: monitor.Status{Code: monitor.StatusSynced, Severity: monitor.SevOK,
+			Detail: "Replikasi berjalan dan mengikuti master", LagSec: ptr[int64](0), GTIDGap: 8, GTIDGapKnown: true}}
+	mon.setView(v)
+	for _, p := range []string{"/", "/servers/2/status-fragment?tampilan=baris", "/replicas/2"} {
+		rec := e.do("GET", p, nil, e.cookie())
+		wantCode(t, rec, http.StatusOK)
+		row := between(rec.Body.String(), `<span class="lencana`, "dicek")
+		if !strings.Contains(row, ">Mengejar<") || !strings.Contains(row, "tertinggal 8 transaksi") {
+			t.Errorf("GET %s: status is not Mengejar with the gap:\n%s", p, row)
+		}
+		if strings.Contains(row, ">Sinkron<") {
+			t.Errorf("GET %s: still labelled Sinkron:\n%s", p, row)
+		}
+	}
+	if got, _ := mon.View(2); got.Status.Code != monitor.StatusSynced {
+		t.Errorf("status code changed to %q", got.Status.Code)
+	}
+	if got := web.StatusLabelOf(2, store.RoleReplica, v); got != "Mengejar" {
+		t.Errorf("label = %q, want Mengejar", got)
+	}
+
+	// No gap: Sinkron.
+	v.Status.GTIDGap = 0
+	mon.setView(v)
+	if got := web.StatusLabelOf(2, store.RoleReplica, v); got != monitor.StatusSynced {
+		t.Errorf("label without a gap = %q, want Sinkron", got)
+	}
+	rec := e.do("GET", "/servers/2/status-fragment?tampilan=baris", nil, e.cookie())
+	wantBody(t, rec, ">Sinkron<")
+	wantNoBody(t, rec, "Mengejar", "transaksi")
+
+	// A lag in seconds is not a gap of transactions: Sinkron.
+	v.Status.LagSec, v.Status.GTIDGap = ptr[int64](3), 8
+	if got := web.StatusLabelOf(2, store.RoleReplica, v); got != monitor.StatusSynced {
+		t.Errorf("label with a lag in seconds = %q, want Sinkron", got)
+	}
+	// Another status with a gap keeps its own label.
+	v.Status.Code, v.Status.LagSec = monitor.StatusLagging, ptr[int64](0)
+	if got := web.StatusLabelOf(2, store.RoleReplica, v); got != monitor.StatusLagging {
+		t.Errorf("label of Ketinggalan = %q", got)
+	}
 }

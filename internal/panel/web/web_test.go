@@ -459,7 +459,10 @@ func TestDashboardCounts(t *testing.T) {
 	e.hub.Attach(a.ID, fakeConn{})
 	rec := e.do("GET", "/", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, `data-stat="total">3<`, `data-stat="online">1<`, `data-stat="unpaired">1<`, "admin", "Keluar")
+	// The dashboard has no server counts any more (design spec 5.6); the
+	// sidebar's status box counts the paired agents, and with no topology
+	// the page offers to start one.
+	wantBody(t, rec, "1 agent offline", "data-empty", "Belum ada replika", "admin", "Keluar")
 }
 
 func TestServerListStatus(t *testing.T) {

@@ -3,13 +3,17 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"html/template"
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -27,38 +31,70 @@ func (a *app) isLocal(srv store.Server) bool {
 	return a.LocalServerID != 0 && srv.ID == a.LocalServerID
 }
 
+// dashboardPage is the dashboard (design spec 5.6, 8.2): four gauges
+// over every topology, a tab per topology with its lag chart and its
+// card, the newest alerts and jobs, and the promote banners.
 type dashboardPage struct {
 	Page
-	Total, Online, Unpaired  int
-	Masters, Replicas        int
-	ActiveJobs, ActiveAlerts int
-	Topologies               []topologyCard
-	// PromotePartial are the open promote_partial alerts, each with the
-	// job of its promotion.
-	PromotePartial []promoteBanner
-	// Cutover are the masters whose promotion waits for the applications
-	// to be cut over (topologies.cutover_pending).
-	Cutover []store.Server
+	Gauges     [4]Gauge
+	Topologies []topologyPanel
+	Alerts     []alertRow
+	Jobs       []jobRow
+	// Empty: no topology yet; the page offers to start one.
+	Empty bool
+	// Summary is the line under the title; Updated says how long ago the
+	// newest health report came ("" before any).
+	Summary, Updated string
+	// Banners are the promote_partial and cutover_pending messages above
+	// the page (Tasks 9 and 10 of plan 4b).
+	Banners []Banner
+	Now     time.Time // the lists' "N menit lalu"
 }
 
-// promoteBanner is a promotion that stopped partway (spec 5.3): its
-// alert's message and the job to retry it from ("" when unknown).
-type promoteBanner struct {
-	Message string
-	JobID   string
+// topologyPanel is one topology's tab: its card and its lag chart. Name
+// is the master's.
+type topologyPanel struct {
+	ID       int64
+	Name     string
+	Master   masterCard
+	Replicas []replicaCard
+	Chart    LagChart
 }
 
-// topologyCard is a master and its replicas on the dashboard.
-type topologyCard struct {
-	Master       store.Server
-	MasterStatus statusView
-	Replicas     []serverStatusRow
+// masterCard is the master of a topology with its status and, when its
+// agent reported one, its data directory's disk.
+type masterCard struct {
+	Server   store.Server
+	Status   statusView
+	DiskPct  int // percent used; -1 when unknown
+	DiskFree uint64
 }
 
-// serverStatusRow is a server with its monitoring status.
-type serverStatusRow struct {
+// replicaCard is a replica of a topology with its status; LagSec is the
+// monitor's lag in seconds, nil when unknown.
+type replicaCard struct {
 	Server store.Server
 	Status statusView
+	LagSec *int64
+}
+
+// Badge is the badge of an alert on the dashboard: Kritis or
+// Peringatan while open, Pulih or Ditutup once closed.
+func (r alertRow) Badge() Badge {
+	switch {
+	case r.ClosedAt != nil && r.CloseReason != "":
+		return Badge{Tone: "neutral", Text: "Ditutup"}
+	case r.ClosedAt != nil:
+		return Badge{Tone: "success", Text: "Pulih"}
+	case notify.Critical(r.Kind):
+		return Badge{Tone: "error", Text: "Kritis"}
+	}
+	return Badge{Tone: "warning", Text: "Peringatan"}
+}
+
+// Badge is the job's status as a badge.
+func (r jobRow) Badge() Badge {
+	return Badge{Tone: strings.TrimPrefix(statusClass(r.Status), "lencana-"), Text: statusLabel(r.Status)}
 }
 
 type serverRow struct {
@@ -139,95 +175,356 @@ type serverDetailPage struct {
 	DeleteWarnings []string
 }
 
+// dashboardListLen is how many alerts and jobs the dashboard lists.
+const dashboardListLen = 3
+
+// alertTitleMax is the most characters of the newest alert's title under
+// the alerts gauge.
+const alertTitleMax = 48
+
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 	servers, err := a.Store.ListServers()
 	if err != nil {
 		a.internalError(w, "list servers", err)
 		return
 	}
-	active, err := a.Store.RunningJobs()
-	if err != nil {
-		a.internalError(w, "running jobs", err)
-		return
-	}
-	alerts, err := a.Store.ListOpenAlerts()
+	open, err := a.Store.ListOpenAlerts()
 	if err != nil {
 		a.internalError(w, "list open alerts", err)
 		return
-	}
-	p := dashboardPage{Page: a.page(r), Total: len(servers), ActiveJobs: len(active), ActiveAlerts: len(alerts)}
-	for _, s := range servers {
-		switch {
-		case !s.Paired:
-			p.Unpaired++
-		case a.Hub.IsOnline(s.ID):
-			p.Online++
-		}
-		switch s.Role {
-		case store.RoleMaster:
-			p.Masters++
-		case store.RoleReplica:
-			p.Replicas++
-		}
-	}
-	for _, al := range alerts {
-		if al.Kind != monitor.KindPromotePartial {
-			continue
-		}
-		b := promoteBanner{Message: al.Message}
-		if prom, err := a.Store.LatestPromotion(al.TopologyID); err == nil {
-			b.JobID = prom.JobID
-		} else if !errors.Is(err, store.ErrNotFound) {
-			a.internalError(w, "latest promotion", err)
-			return
-		}
-		p.PromotePartial = append(p.PromotePartial, b)
 	}
 	topos, err := a.Store.ListTopologies()
 	if err != nil {
 		a.internalError(w, "list topologies", err)
 		return
 	}
-	for _, t := range topos {
-		if !t.CutoverPending {
-			continue
-		}
-		if i := slices.IndexFunc(servers, func(s store.Server) bool { return s.ID == t.MasterServerID }); i >= 0 {
-			p.Cutover = append(p.Cutover, servers[i])
-		}
-	}
-	if p.Topologies, err = a.topologyCards(servers); err != nil {
-		a.internalError(w, "topology cards", err)
+	now := a.Now()
+	p := dashboardPage{Page: a.page(r), Now: now}
+	var cutover int
+	if p.Banners, cutover, err = a.dashboardBanners(servers, topos, open); err != nil {
+		a.internalError(w, "dashboard banners", err)
 		return
 	}
-	a.render.Render(w, "dashboard", p)
-}
+	if p.Topologies, err = a.topologyPanels(servers, topos, now); err != nil {
+		a.internalError(w, "topology panels", err)
+		return
+	}
+	p.Empty = len(p.Topologies) == 0
+	p.Gauges = a.dashboardGauges(p.Topologies, open)
 
-// topologyCards is one card per topology, its master with its replicas.
-func (a *app) topologyCards(servers []store.Server) ([]topologyCard, error) {
+	recent, err := a.Store.ListAlerts(now.AddDate(0, 0, -alertHistoryDays), dashboardListLen)
+	if err != nil {
+		a.internalError(w, "list alerts", err)
+		return
+	}
 	byID := make(map[int64]store.Server, len(servers))
 	for _, s := range servers {
 		byID[s.ID] = s
 	}
-	topos, err := a.Store.ListTopologies()
-	if err != nil {
-		return nil, err
+	for _, al := range recent {
+		row := alertRow{Alert: al, KindLabel: alertKindLabel(al.Kind)}
+		if srv, ok := byID[al.ServerID]; ok {
+			row.ServerName, row.ServerKnown = srv.Name, true
+		}
+		p.Alerts = append(p.Alerts, row)
 	}
-	cards := make([]topologyCard, 0, len(topos))
+	jobs, err := a.Store.ListJobs(dashboardListLen)
+	if err != nil {
+		a.internalError(w, "list jobs", err)
+		return
+	}
+	if p.Jobs, err = a.jobRows(jobs); err != nil {
+		a.internalError(w, "list servers", err)
+		return
+	}
+	running, err := a.Store.RunningJobs()
+	if err != nil {
+		a.internalError(w, "running jobs", err)
+		return
+	}
+	waiting := 0
+	for _, j := range running {
+		if j.Status == store.JobWaiting {
+			waiting++
+		}
+	}
+	p.Summary = dashboardSummary(len(open), waiting+cutover, p.Empty)
+	var newest time.Time
+	for _, v := range a.Monitor.Views() {
+		if v.ReceivedAt.After(newest) {
+			newest = v.ReceivedAt
+		}
+	}
+	if !newest.IsZero() {
+		p.Updated = "Diperbarui " + agoWords(now.Sub(newest))
+	}
+	a.render.Render(w, "dashboard", p)
+}
+
+// dashboardSummary is the line under the dashboard's title: the open
+// alerts and the actions waiting for the user (jobs waiting for an
+// approval, promotions waiting for the cutover).
+func dashboardSummary(alerts, actions int, empty bool) string {
+	switch {
+	case alerts == 0 && actions == 0 && empty:
+		return "Belum ada replikasi yang dipantau. Tidak ada tindakan yang menunggu Anda."
+	case alerts == 0 && actions == 0:
+		return "Replikasi berjalan normal. Tidak ada tindakan yang menunggu Anda."
+	case actions == 0:
+		return fmt.Sprintf("%d peringatan terbuka. Tidak ada tindakan yang menunggu Anda.", alerts)
+	case alerts == 0:
+		return fmt.Sprintf("Tidak ada peringatan terbuka. %d tindakan menunggu Anda.", actions)
+	}
+	return fmt.Sprintf("%d peringatan terbuka dan %d tindakan menunggu Anda.", alerts, actions)
+}
+
+// dashboardBanners are the messages above the dashboard: a promotion
+// waiting for the applications to be cut over (topologies.cutover_pending,
+// returned counted) and a promotion that stopped partway (open
+// promote_partial alerts, with the job to retry it from).
+func (a *app) dashboardBanners(servers []store.Server, topos []store.Topology, open []store.Alert) ([]Banner, int, error) {
+	var out []Banner
+	cutover := 0
+	for _, t := range topos {
+		if !t.CutoverPending {
+			continue
+		}
+		i := slices.IndexFunc(servers, func(s store.Server) bool { return s.ID == t.MasterServerID })
+		if i < 0 {
+			continue
+		}
+		cutover++
+		m := servers[i]
+		out = append(out, Banner{Tone: "warning", HTML: template.HTML(
+			`<div class="flex flex-col items-start gap-2" data-promote-cutover>` +
+				`<h2 class="font-bold">Promote menunggu pengalihan aplikasi</h2>` +
+				`<p class="text-sm">Master sekarang ` + template.HTMLEscapeString(m.Name) +
+				`. Arahkan aplikasi ke master baru, lalu tekan "Sudah saya alihkan" di layar pengalihan.</p>` +
+				`<a class="btn btn-sm" href="/masters/` + strconv.FormatInt(m.ID, 10) + `/cutover">Buka layar pengalihan</a></div>`)})
+	}
+	for _, al := range open {
+		if al.Kind != monitor.KindPromotePartial {
+			continue
+		}
+		link := `<a class="btn btn-sm" href="/alerts">Lihat peringatan</a>`
+		if prom, err := a.Store.LatestPromotion(al.TopologyID); err == nil && prom.JobID != "" {
+			link = `<a class="btn btn-sm" href="/jobs/` + template.HTMLEscapeString(prom.JobID) + `">Buka pekerjaan promote</a>`
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, 0, err
+		}
+		out = append(out, Banner{Tone: "error", HTML: template.HTML(
+			`<div class="flex flex-col items-start gap-2" data-promote-partial>` +
+				`<h2 class="font-bold">Promote belum tuntas</h2>` +
+				`<p class="text-sm">` + template.HTMLEscapeString(al.Message) + `</p>` + link + `</div>`)})
+	}
+	return out, cutover, nil
+}
+
+// topologyPanels is one panel per topology: its master and replicas with
+// their status, and its replicas' lag over the last 24 hours.
+func (a *app) topologyPanels(servers []store.Server, topos []store.Topology, now time.Time) ([]topologyPanel, error) {
+	byID := make(map[int64]store.Server, len(servers))
+	for _, s := range servers {
+		byID[s.ID] = s
+	}
+	thresholdSec := int(a.monitorSettings().Lag / time.Second)
+	panels := make([]topologyPanel, 0, len(topos))
 	for _, t := range topos {
 		master := byID[t.MasterServerID]
-		card := topologyCard{Master: master, MasterStatus: a.statusOf(master.ID, master.Role)}
+		v, ok := a.Monitor.View(master.ID)
+		mc := masterCard{Server: master, Status: newStatusView(master.ID, master.Role, v, ok, now), DiskPct: -1}
+		if ok && v.Snap != nil && v.Snap.DiskTotal > 0 {
+			total, free := v.Snap.DiskTotal, min(v.Snap.DiskFree, v.Snap.DiskTotal)
+			mc.DiskPct, mc.DiskFree = int(((total-free)*100+total/2)/total), free
+		}
+		panel := topologyPanel{ID: t.ID, Name: master.Name, Master: mc}
 		reps, err := a.Store.ListReplicas(t.ID)
 		if err != nil {
 			return nil, err
 		}
 		for _, rep := range reps {
 			srv := byID[rep.ServerID]
-			card.Replicas = append(card.Replicas, serverStatusRow{Server: srv, Status: a.statusOf(srv.ID, srv.Role)})
+			v, ok := a.Monitor.View(srv.ID)
+			rc := replicaCard{Server: srv, Status: newStatusView(srv.ID, srv.Role, v, ok, now)}
+			if ok && v.Status.Code != "" {
+				rc.LagSec = v.Status.LagSec
+			}
+			panel.Replicas = append(panel.Replicas, rc)
 		}
-		cards = append(cards, card)
+		if panel.Chart, err = a.lagChart(panel.Replicas, now, thresholdSec); err != nil {
+			return nil, err
+		}
+		panels = append(panels, panel)
 	}
-	return cards, nil
+	return panels, nil
+}
+
+// lagChart is the lag of reps over the 24 hours before now in buckets of
+// chartBucket (design spec 5.7); it is sparse when a replica has no sample
+// in the last hour.
+func (a *app) lagChart(reps []replicaCard, now time.Time, thresholdSec int) (LagChart, error) {
+	// LagSeries moves from down to its bucket's start; the chart starts
+	// there too, so the first bucket is drawn (289 buckets at most).
+	from := now.Add(-24 * time.Hour).Truncate(chartBucket)
+	ids := make([]int64, 0, len(reps))
+	for _, rc := range reps {
+		ids = append(ids, rc.Server.ID)
+	}
+	byServer, err := a.Store.LagSeries(ids, from, now, chartBucket)
+	if err != nil {
+		return LagChart{}, err
+	}
+	sparse := false
+	series := make([]ChartSeries, 0, len(reps))
+	for _, rc := range reps {
+		s := ChartSeries{Name: rc.Server.Name}
+		for _, p := range byServer[rc.Server.ID] {
+			s.Points = append(s.Points, ChartPoint{T: p.T, Lag: p.Lag})
+		}
+		series = append(series, s)
+		has, err := a.Store.HasSamples(rc.Server.ID, now.Add(-time.Hour))
+		if err != nil {
+			return LagChart{}, err
+		}
+		sparse = sparse || !has
+	}
+	return newLagChart(series, from, now, thresholdSec, sparse), nil
+}
+
+// monitorSettings are the stored monitoring settings (thresholds); the
+// defaults when they cannot be read.
+func (a *app) monitorSettings() monitor.Settings {
+	set, err := monitor.LoadSettings(a.Store)
+	if err != nil {
+		a.Logger.Warn("read monitor settings", "err", err)
+		return monitor.DefaultSettings()
+	}
+	return set
+}
+
+// dashboardGauges are the dashboard's four gauges over every topology
+// (design spec 8.2): replicas Sinkron of all; the highest lag and its
+// replica against lag_threshold_sec; the fullest master disk and its
+// master against disk_warn_pct and disk_crit_pct; the open alerts and the
+// newest one's title.
+func (a *app) dashboardGauges(topos []topologyPanel, openAlerts []store.Alert) [4]Gauge {
+	set := a.monitorSettings()
+	lagThreshold := int64(set.Lag / time.Second)
+	names := map[int64]string{}
+	var (
+		synced, total int
+		critical      bool
+		top           *replicaCard
+		worst         *masterCard
+	)
+	for i := range topos {
+		t := &topos[i]
+		names[t.Master.Server.ID] = t.Master.Server.Name
+		if t.Master.DiskPct >= 0 && (worst == nil || t.Master.DiskPct > worst.DiskPct) {
+			worst = &t.Master
+		}
+		for j := range t.Replicas {
+			rc := &t.Replicas[j]
+			names[rc.Server.ID] = rc.Server.Name
+			total++
+			if rc.Status.Label == monitor.StatusSynced {
+				synced++
+			}
+			critical = critical || rc.Status.Severity == monitor.SevCrit
+			if rc.LagSec != nil && (top == nil || *rc.LagSec > *top.LagSec) {
+				top = rc
+			}
+		}
+	}
+	var g [4]Gauge
+
+	g[0] = Gauge{Label: "Replika sinkron", Value: fmt.Sprintf("%d/%d", synced, total),
+		Aria: fmt.Sprintf("Replika sinkron: %d dari %d", synced, total)}
+	switch {
+	case total == 0:
+		g[0].Tone, g[0].Sub = "neutral", "belum ada replika"
+	case critical:
+		g[0].Tone = "error"
+	case synced < total:
+		g[0].Tone = "warning"
+	default:
+		g[0].Tone = "success"
+	}
+	if total > 0 {
+		g[0].Percent = float64(synced) * 100 / float64(total)
+		if synced == total {
+			g[0].Sub = "semua replika mengikuti master"
+		} else {
+			g[0].Sub = fmt.Sprintf("%d replika perlu perhatian", total-synced)
+		}
+	}
+
+	g[1] = Gauge{Label: "Lag tertinggi", Value: "-", Tone: "neutral", Sub: "belum ada data lag",
+		Aria: "Lag tertinggi: belum ada data"}
+	if top != nil {
+		lag := *top.LagSec
+		g[1].Value = fmt.Sprintf("%ds", lag)
+		g[1].Sub = fmt.Sprintf("%s · ambang %d dtk", top.Server.Name, lagThreshold)
+		g[1].Aria = fmt.Sprintf("Lag tertinggi %d detik di %s; ambang %d detik", lag, top.Server.Name, lagThreshold)
+		g[1].Tone = "success"
+		if lag >= lagThreshold {
+			g[1].Tone = "warning"
+		}
+		if lagThreshold > 0 {
+			g[1].Percent = float64(lag) * 100 / float64(lagThreshold)
+		}
+	}
+
+	g[2] = Gauge{Label: "Disk master terburuk", Value: "-", Tone: "neutral", Sub: "belum ada laporan disk",
+		Aria: "Disk master terburuk: belum ada laporan"}
+	if worst != nil {
+		pct := worst.DiskPct
+		g[2].Value, g[2].Percent = fmt.Sprintf("%d%%", pct), float64(pct)
+		g[2].Sub = worst.Server.Name + " · " + fmtBytes(worst.DiskFree) + " bebas"
+		g[2].Aria = fmt.Sprintf("Disk master terburuk %d%% terpakai di %s, %s bebas", pct, worst.Server.Name, fmtBytes(worst.DiskFree))
+		switch {
+		case pct >= set.DiskCrit:
+			g[2].Tone = "error"
+		case pct >= set.DiskWarn:
+			g[2].Tone = "warning"
+		default:
+			g[2].Tone = "success"
+		}
+	}
+
+	n := len(openAlerts)
+	g[3] = Gauge{Label: "Peringatan terbuka", Value: strconv.Itoa(n), Tone: "success", Percent: 100,
+		Sub: "tidak ada peringatan terbuka", Aria: fmt.Sprintf("Peringatan terbuka: %d", n)}
+	if n > 0 {
+		g[3].Tone = "warning"
+		for _, al := range openAlerts {
+			if notify.Critical(al.Kind) {
+				g[3].Tone = "error"
+			}
+		}
+		newest := openAlerts[0]
+		for _, al := range openAlerts[1:] {
+			if !al.OpenedAt.Before(newest.OpenedAt) {
+				newest = al
+			}
+		}
+		title := alertKindLabel(newest.Kind)
+		if name, ok := names[newest.ServerID]; ok {
+			title += " · " + name
+		}
+		g[3].Sub = truncateRunes(title, alertTitleMax)
+		g[3].Aria += "; terbaru: " + title
+	}
+	return g
+}
+
+// truncateRunes cuts s to at most n characters, ending with "…" when cut.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return strings.TrimSpace(string(r[:n-1])) + "…"
 }
 
 func (a *app) listServers(w http.ResponseWriter, r *http.Request) {
