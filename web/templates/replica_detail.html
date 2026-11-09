@@ -2,7 +2,7 @@
 {{define "content"}}
 <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
   <h1 class="text-2xl font-bold">Replika {{.Server.Name}}</h1>
-  <span class="badge badge-lg {{if .Online}}badge-success{{else}}badge-error{{end}}"
+  <span class="lencana {{if .Online}}lencana-success{{else}}lencana-error{{end}}"
         x-data="serverStatus" data-server-id="{{.Server.ID}}" data-connected="{{.Online}}"
         :class="badgeClass" x-text="label">{{if .Online}}Online{{else}}Offline{{end}}</span>
 </div>

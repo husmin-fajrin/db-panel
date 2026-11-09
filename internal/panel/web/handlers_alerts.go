@@ -81,15 +81,15 @@ func (r alertRow) TelegramLabel() string {
 	return r.TelegramState
 }
 
-// TelegramClass is the badge class of the delivery state.
+// TelegramClass is the badge class (.lencana) of the delivery state.
 func (r alertRow) TelegramClass() string {
 	switch r.TelegramState {
 	case store.TelegramSent, store.TelegramRecovered:
-		return "badge-success"
+		return "lencana-success"
 	case store.TelegramFailed:
-		return "badge-error"
+		return "lencana-error"
 	}
-	return "badge-ghost"
+	return "lencana-neutral"
 }
 
 type alertsPage struct {

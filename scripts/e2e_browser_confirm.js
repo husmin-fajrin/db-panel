@@ -58,16 +58,24 @@ async function main() {
     ]);
     const resync = page.locator("#modal-resync");
     await resync.waitFor({ state: "visible" });
-    await resync.getByRole("button", { name: "Ya, resync ulang" }).click();
+    const trigger = resync.getByRole("button", { name: "Ya, resync ulang" });
+    const danger = (await trigger.getAttribute("data-confirm-danger")) === "1";
+    await trigger.click();
 
     const confirm = page.locator("#modal-konfirmasi");
     await confirm.waitFor({ state: "visible" });
     const ok = confirm.getByRole("button", { name: "Konfirmasi" });
+    // The confirm button is pink (btn-error) only for a trigger marked
+    // data-confirm-danger="1", else primary (design spec 5.5).
+    const okClass = (await ok.getAttribute("class")) || "";
+    if (okClass.includes("btn-error") !== danger || okClass.includes("btn-primary") === danger) {
+      throw new Error(`confirm button class "${okClass}" for data-confirm-danger ${danger}`);
+    }
     // The dialog has a second name field (promote's replica name), hidden here.
     await confirm.locator('input[x-ref="typed"]').fill(name);
     await confirm.locator('input[type="password"]').fill(password + "-salah");
     await ok.click();
-    await confirm.locator("p.text-error").filter({ hasText: /\S/ }).waitFor();
+    await confirm.locator("p[data-confirm-error]").filter({ hasText: /\S/ }).waitFor();
     if (resyncPosts.length !== 0) {
       throw new Error("the resync form was posted after a wrong password");
     }

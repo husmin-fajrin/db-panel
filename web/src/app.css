@@ -1,9 +1,14 @@
 @import "tailwindcss";
 @source "../templates";
-/* Badge classes chosen in Go (statusBadges in internal/panel/web/handlers_jobs.go). */
-@source inline("badge-ghost badge-info badge-warning badge-success badge-error badge-neutral");
-/* Timeline icon colours chosen in Go (toneOf, auditEntry in internal/panel/web/views_monitor.go). */
-@source inline("text-success text-warning text-error text-info text-base-content/60");
+/* app.js switches classes too (badges, the confirm dialog's button). */
+@source "../static/app.js";
+/* Classes chosen in Go, exactly the set TestGoEmittedClassesInCSS
+   (internal/panel/web/views_ui_test.go) collects. Badge classes:
+   severityClass (render.go), statusBadges/statusClass (handlers_jobs.go),
+   TelegramClass (handlers_alerts.go). */
+@source inline("lencana-primary lencana-success lencana-warning lencana-error lencana-neutral");
+/* Timeline icon colours: toneOf, auditEntry (views_monitor.go). */
+@source inline("text-success-text text-warning-text text-error-text text-muted text-primary");
 
 /* No built-in theme: the panel's two themes below are the only ones.
    web/static/theme.js picks one before the page renders (data-theme on
@@ -14,8 +19,10 @@
 
 /* Colour tokens (design spec 5.1). internal/panel/web/theme_tokens.go holds
    the same values for the contrast test, and TestThemeTokensMatchCSS fails
-   when the two differ. muted and error-text are panel tokens: dimmed text
-   (text-muted) and red text on the page background (text-error-text). */
+   when the two differ. muted, success-text, warning-text and error-text
+   are panel tokens: dimmed text (text-muted) and status text on cards and
+   the page (text-success-text, ...), which the light theme needs darker
+   than its status colours to reach 4.5:1. */
 @plugin "../../.tools/daisyui-theme.js" {
   name: "dbpanel-gelap";
   default: true;
@@ -36,8 +43,10 @@
   --color-info-content: #0A0A14;
   --color-success: #39FF14;
   --color-success-content: #0A0A14;
+  --color-success-text: #39FF14;
   --color-warning: #FFD600;
   --color-warning-content: #0A0A14;
+  --color-warning-text: #FFD600;
   --color-error: #FF006E;
   --color-error-content: #0A0A14;
   --color-error-text: #FF4D94;
@@ -73,8 +82,10 @@
   --color-info-content: #FFFFFF;
   --color-success: #1E9E2E;
   --color-success-content: #141424;
+  --color-success-text: #15641F;
   --color-warning: #C98A00;
   --color-warning-content: #141424;
+  --color-warning-text: #7A5200;
   --color-error: #E0005F;
   --color-error-content: #FFFFFF;
   --color-error-text: #B8004E;
@@ -142,6 +153,8 @@
   --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-display: "Bungee", "Work Sans", ui-sans-serif, sans-serif;
   --color-muted: #9999AA;
+  --color-success-text: #39FF14;
+  --color-warning-text: #FFD600;
   --color-error-text: #FF4D94;
 }
 
@@ -232,6 +245,109 @@
   .modal-box {
     border-radius: 0.75rem; /* 12 px */
   }
+  /* The confirm dialog's warning for a destructive action
+     (data-confirm-danger="1", app.js confirmModal). */
+  .kotak-bahaya {
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--color-error);
+    border-left-width: 3px;
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--color-error) 8%, var(--color-base-100));
+  }
+
+  /* Tones of the shared components (views_ui.go): --nada is the status
+     colour (arcs, lines, badge backgrounds), --nada-teks the text colour
+     that reaches 4.5:1 on cards. nada-* for gauges and chart series,
+     lencana-* for badges. */
+  .nada-primary,
+  .lencana-primary {
+    --nada: var(--color-primary);
+    --nada-teks: var(--color-primary);
+  }
+  .nada-success,
+  .lencana-success {
+    --nada: var(--color-success);
+    --nada-teks: var(--color-success-text);
+  }
+  .nada-warning,
+  .lencana-warning {
+    --nada: var(--color-warning);
+    --nada-teks: var(--color-warning-text);
+  }
+  .nada-error,
+  .lencana-error {
+    --nada: var(--color-error);
+    --nada-teks: var(--color-error-text);
+  }
+  .nada-neutral,
+  .lencana-neutral {
+    --nada: var(--color-muted);
+    --nada-teks: var(--color-base-content);
+  }
+  /* Badge (template "badge"): 3x10, radius 4, Work Sans 12/600, the tone
+     at 13 % over base-100 behind the tone's text colour (TestContrastBadges
+     computes the same mix). Inline, so it follows the text and never
+     covers its neighbours. */
+  .lencana {
+    display: inline-block;
+    max-width: 100%;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.25;
+    white-space: nowrap;
+    vertical-align: middle;
+    background: color-mix(in srgb, var(--nada, var(--color-muted)) 13%, var(--color-base-100));
+    color: var(--nada-teks, var(--color-base-content));
+  }
+
+  /* Gauge (template "gauge"). */
+  .gauge-dasar {
+    stroke: var(--color-base-300);
+  }
+  .gauge-busur {
+    stroke: var(--nada);
+  }
+  .gauge-nilai {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    font-weight: 700;
+    fill: var(--color-base-content);
+  }
+
+  /* Lag chart (template "lag-chart"). */
+  .grafik-grid {
+    stroke: var(--color-base-300);
+    stroke-width: 1;
+  }
+  .grafik-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    fill: var(--color-muted);
+  }
+  .grafik-label-puncak {
+    font-weight: 700;
+    fill: var(--color-base-content);
+  }
+  .grafik-ambang {
+    fill: none;
+    stroke: var(--color-muted);
+    stroke-width: 1;
+  }
+  .grafik-seri {
+    fill: none;
+    stroke: var(--nada);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .grafik-puncak {
+    fill: var(--nada);
+    stroke: var(--color-base-100);
+    stroke-width: 2;
+  }
   /* Visible keyboard focus: 2 px primary ring. */
   :where(a, button, input, select, textarea, summary, .btn):focus-visible {
     outline: 2px solid var(--color-primary);
@@ -281,6 +397,16 @@ p.label {
 .textarea:focus-within {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+}
+
+/* The only glow: the gauge arc, in the dark theme only (design spec 5.3).
+   Switched off for terang rather than on for gelap, because gelap is also
+   what the page gets when theme.js could not set data-theme. */
+.gauge-busur {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--nada) 35%, transparent));
+}
+[data-theme="dbpanel-terang"] .gauge-busur {
+  filter: none;
 }
 
 /* User-triggered transitions only, at most 150 ms, none at all when the

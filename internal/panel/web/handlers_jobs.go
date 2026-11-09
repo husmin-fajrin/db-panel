@@ -28,25 +28,25 @@ const (
 var jobIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // statusBadges maps job, step and replica states to their Indonesian
-// label and daisyUI badge class (replica "failed" is the job's "failed").
-// web/src/app.css lists the classes for Tailwind.
+// label and badge class (.lencana in app.css; replica "failed" is the
+// job's "failed"). web/src/app.css lists the classes in @source inline.
 var statusBadges = map[string]struct{ Label, Class string }{
-	store.ReplicaCreating:     {"Sedang dibuat", "badge-info"},
-	store.ReplicaReady:        {"Siap", "badge-success"},
-	store.ReplicaChanging:     {"Sedang diubah", "badge-info"},
-	store.ReplicaAttention:    {"Perlu perhatian", "badge-warning"},
-	store.JobQueued:           {"Antre", "badge-ghost"},
-	store.StepPending:         {"Antre", "badge-ghost"},
-	store.JobRunning:          {"Berjalan", "badge-info"},
-	store.JobWaiting:          {"Menunggu persetujuan", "badge-warning"},
-	store.JobSucceeded:        {"Selesai", "badge-success"},
-	store.StepDone:            {"Selesai", "badge-success"},
-	store.JobFailed:           {"Gagal", "badge-error"},
-	store.JobPartial:          {"Selesai sebagian", "badge-warning"},
-	store.ReplicaNeedsRepoint: {"Perlu diarahkan ulang", "badge-warning"},
-	store.ReplicaNeedsRebuild: {"Perlu dibangun ulang", "badge-error"},
-	store.JobCanceled:         {"Dibatalkan", "badge-neutral"},
-	store.StepSkipped:         {"Dilewati", "badge-ghost"},
+	store.ReplicaCreating:     {"Sedang dibuat", "lencana-primary"},
+	store.ReplicaReady:        {"Siap", "lencana-success"},
+	store.ReplicaChanging:     {"Sedang diubah", "lencana-primary"},
+	store.ReplicaAttention:    {"Perlu perhatian", "lencana-warning"},
+	store.JobQueued:           {"Antre", "lencana-neutral"},
+	store.StepPending:         {"Antre", "lencana-neutral"},
+	store.JobRunning:          {"Berjalan", "lencana-primary"},
+	store.JobWaiting:          {"Menunggu persetujuan", "lencana-warning"},
+	store.JobSucceeded:        {"Selesai", "lencana-success"},
+	store.StepDone:            {"Selesai", "lencana-success"},
+	store.JobFailed:           {"Gagal", "lencana-error"},
+	store.JobPartial:          {"Selesai sebagian", "lencana-warning"},
+	store.ReplicaNeedsRepoint: {"Perlu diarahkan ulang", "lencana-warning"},
+	store.ReplicaNeedsRebuild: {"Perlu dibangun ulang", "lencana-error"},
+	store.JobCanceled:         {"Dibatalkan", "lencana-neutral"},
+	store.StepSkipped:         {"Dilewati", "lencana-neutral"},
 }
 
 // statusBadgesJSON is statusBadges for app.js, which updates badges live.
@@ -71,7 +71,7 @@ func statusClass(status string) string {
 	if b, ok := statusBadges[status]; ok {
 		return b.Class
 	}
-	return "badge-ghost"
+	return "lencana-neutral"
 }
 
 // kindLabel names a job kind for the UI.

@@ -95,7 +95,7 @@
         const badges = JSON.parse(el.dataset.badges || "{}");
         const log = el.querySelector("[data-job-log]");
         const setBadge = (badge, st) => {
-          const info = badges[st] || { Label: st, Class: "badge-ghost" };
+          const info = badges[st] || { Label: st, Class: "lencana-neutral" };
           for (const b of Object.values(badges)) {
             badge.classList.remove(b.Class);
           }
@@ -238,7 +238,7 @@
         });
       },
       get badgeClass() {
-        return { "badge-success": this.online, "badge-error": !this.online };
+        return { "lencana-success": this.online, "lencana-error": !this.online };
       },
       get label() {
         return this.online ? "Online" : "Offline";
@@ -313,6 +313,7 @@
       typedReplica: "",
       error: "",
       busy: false,
+      danger: false,
       tombol: null,
       init() {
         document.addEventListener("click", (e) => {
@@ -330,6 +331,9 @@
       open(btn) {
         this.tombol = btn;
         this.text = btn.dataset.confirmText || "";
+        // Destructive actions (data-confirm-danger="1") get the pink
+        // confirm button and a framed warning; the rest primary.
+        this.danger = btn.dataset.confirmDanger === "1";
         this.name = btn.dataset.confirmName || "";
         this.nameLabel = btn.dataset.confirmNameLabel || "Ketik nama server";
         this.replicaName = btn.dataset.confirmReplicaName || "";
@@ -350,6 +354,12 @@
       close() {
         this.$refs.password.value = "";
         this.$root.close();
+      },
+      get tombolClass() {
+        return { "btn-error": this.danger, "btn-primary": !this.danger };
+      },
+      get teksClass() {
+        return { "kotak-bahaya": this.danger };
       },
       get nameClass() {
         return { hidden: this.name === "" };

@@ -1,0 +1,39 @@
+{{/* Shared components (design spec 5.5). Data types in
+     internal/panel/web/views_ui.go. */}}
+
+{{/* card-head: a card's title row, H2 on the left and, when Href is set,
+     a link on the right. Data: CardHead{Title, Action, Href}, or
+     (cardHead "Replika" "Lihat semua" "/replikasi"). */}}
+{{define "card-head"}}<div class="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2"><h2>{{.Title}}</h2>{{with .Href}}<a class="link link-primary text-sm font-semibold" href="{{.}}">{{$.Action}}</a>{{end}}</div>{{end}}
+
+{{/* badge: a status badge, padding 3x10, radius 4, Work Sans 12/600, the
+     tone at 13 % behind the tone's text colour; never wraps. Data:
+     Badge{Tone: primary|success|warning|error|neutral, Text}, or
+     (badgeOf "error" "Gagal"). Where Go picks the class (severityClass,
+     statusClass), templates write class="lencana" plus that class. */}}
+{{define "badge"}}<span class="lencana {{lencanaClass .Tone}}">{{.Text}}</span>{{end}}
+
+{{/* empty: an empty state, a small icon and a sentence and, when Href is
+     set, a button. Data: Empty{Text, Action, Href}, or
+     (emptyOf "Belum ada replika. Tambah replika pertama." "Tambah replika" "/replicas/new"). */}}
+{{define "empty"}}<div class="flex flex-col items-center gap-3 px-4 py-8 text-center" data-empty><span class="text-muted">{{template "icon" "kosong"}}</span><p class="text-muted">{{.Text}}</p>{{with .Href}}<a class="btn btn-primary btn-sm" href="{{.}}">{{$.Action}}</a>{{end}}</div>{{end}}
+
+{{/* icon: a stroke SVG icon, 18 px, decorative (aria-hidden). */}}
+{{define "icon"}}<svg class="size-[18px] shrink-0" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+{{- if eq . "dashboard"}}<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>
+{{- else if eq . "server"}}<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>
+{{- else if eq . "replikasi"}}<circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M9 6h6M6 9v3a6 6 0 0 0 6 6h3"/>
+{{- else if eq . "jobs"}}<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>
+{{- else if eq . "alerts"}}<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+{{- else if eq . "audit"}}<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/>
+{{- else if eq . "settings"}}<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+{{- else if eq . "menu"}}<path d="M4 6h16M4 12h16M4 18h16"/>
+{{- else if eq . "tema"}}<circle cx="12" cy="12" r="9"/><path d="M12 3v18a9 9 0 0 0 0-18z" fill="currentColor"/>
+{{- else if eq . "keluar"}}<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+{{- else if eq . "check"}}<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
+{{- else if eq . "warning"}}<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>
+{{- else if eq . "kosong"}}<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+{{- else if eq . "error"}}<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/>
+{{- else}}<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>
+{{- end}}</svg>{{end}}
+

@@ -49,6 +49,11 @@ func TestContrastTokens(t *testing.T) {
 		{"muted", "base-200"},
 		{"primary-content", "primary"},
 		{"error-text", "base-100"},
+		{"error-text", "base-200"},
+		{"success-text", "base-100"}, // status text (timeline icons, badges)
+		{"success-text", "base-200"},
+		{"warning-text", "base-100"},
+		{"warning-text", "base-200"},
 		{"warning-content", "warning"},
 		{"success-content", "success"},
 		{"neutral-content", "neutral"},
@@ -71,6 +76,53 @@ func TestContrastTokens(t *testing.T) {
 			}
 			if c := contrast(t, fg, bg); c < 4.5 {
 				t.Errorf("%s: %s %s on %s %s = %.2f:1, want >= 4.5", theme, p[0], fg, p[1], bg, c)
+			}
+		}
+	}
+}
+
+// mix is color-mix(in srgb, a pct%, b): each sRGB channel weighted.
+func mix(t *testing.T, a string, pct float64, b string) string {
+	t.Helper()
+	ch := func(hex string, i int) float64 {
+		v, err := strconv.ParseUint(hex[1+2*i:3+2*i], 16, 8)
+		if err != nil {
+			t.Fatalf("colour %q: %v", hex, err)
+		}
+		return float64(v)
+	}
+	out := "#"
+	for i := range 3 {
+		v := ch(a, i)*pct/100 + ch(b, i)*(100-pct)/100
+		out += hex2(uint64(math.Round(v)))
+	}
+	return out
+}
+
+func hex2(v uint64) string {
+	s := strconv.FormatUint(v, 16)
+	if len(s) == 1 {
+		s = "0" + s
+	}
+	return s
+}
+
+// TestContrastBadges: a badge's text (the tone's text colour, base-content
+// for neutral) on its background, the tone at 13 % over base-100 (.lencana
+// in app.css), reaches 4.5:1 in both themes.
+func TestContrastBadges(t *testing.T) {
+	tones := map[string][2]string{ // tone: colour, text colour
+		"primary": {"primary", "primary"},
+		"success": {"success", "success-text"},
+		"warning": {"warning", "warning-text"},
+		"error":   {"error", "error-text"},
+		"neutral": {"muted", "base-content"},
+	}
+	for theme, tok := range themeTokens() {
+		for tone, c := range tones {
+			bg := mix(t, tok[c[0]], 13, tok["base-100"])
+			if r := contrast(t, tok[c[1]], bg); r < 4.5 {
+				t.Errorf("%s: badge %s text %s on %s = %.2f:1, want >= 4.5", theme, tone, tok[c[1]], bg, r)
 			}
 		}
 	}

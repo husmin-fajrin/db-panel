@@ -3,7 +3,7 @@
 <div x-data="jobLive" data-job-id="{{.Job.ID}}" data-status="{{.Job.Status}}" data-last-log-id="{{.LastLogID}}" data-badges="{{.StatusJSON}}">
 <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
   <h1 class="text-2xl font-bold">{{kindLabel .Job.Kind}} · <a class="link" href="/servers/{{.Server.ID}}">{{.Server.Name}}</a></h1>
-  <span class="badge badge-lg {{statusClass .Job.Status}}" data-job-badge>{{statusLabel .Job.Status}}</span>
+  <span class="lencana {{statusClass .Job.Status}}" data-job-badge>{{statusLabel .Job.Status}}</span>
 </div>
 
 {{with .Waiting}}
@@ -38,7 +38,7 @@
         <div class="flex items-center gap-2">
           <span class="font-mono text-sm text-base-content/60">{{.Idx}}.</span>
           <span class="flex-1">{{.Name}}</span>
-          <span class="badge {{statusClass .Status}}" data-step-badge="{{.Idx}}">{{statusLabel .Status}}</span>
+          <span class="lencana {{statusClass .Status}}" data-step-badge="{{.Idx}}">{{statusLabel .Status}}</span>
         </div>
         <p class="text-sm text-base-content/70 whitespace-pre-line" data-step-message="{{.Idx}}">{{.Message}}</p>
       </li>

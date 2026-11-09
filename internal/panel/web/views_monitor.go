@@ -201,17 +201,19 @@ func (a *app) timeline(r *http.Request, serverID int64) (timelineView, error) {
 	return tv, nil
 }
 
-// toneOf is the text colour of a severity.
+// toneOf is the text colour class of a severity: the status text tokens
+// of app.css, which reach 4.5:1 on cards in both themes (web/src/app.css
+// lists them in @source inline).
 func toneOf(s monitor.Severity) string {
 	switch s {
 	case monitor.SevOK:
-		return "text-success"
+		return "text-success-text"
 	case monitor.SevWarn:
-		return "text-warning"
+		return "text-warning-text"
 	case monitor.SevCrit:
-		return "text-error"
+		return "text-error-text"
 	}
-	return "text-base-content/60"
+	return "text-muted"
 }
 
 // eventEntry words a status event (kinds of internal/panel/monitor/state.go).
@@ -243,9 +245,9 @@ func eventEntry(e store.StatusEvent) timelineEntry {
 // auditEntry words an audit entry: the action and who did it. A failure
 // shows as "Gagal" only; its text may be an internal error.
 func auditEntry(e store.AuditEntry) timelineEntry {
-	t := timelineEntry{At: e.TS, Icon: "action", Tone: "text-info", Title: auditActionLabel(e.Action), Detail: "oleh " + e.Username}
+	t := timelineEntry{At: e.TS, Icon: "action", Tone: "text-primary", Title: auditActionLabel(e.Action), Detail: "oleh " + e.Username}
 	if e.Outcome != auditOK {
-		t.Tone = "text-error"
+		t.Tone = toneOf(monitor.SevCrit)
 		t.Detail = "Gagal · " + t.Detail
 	}
 	return t

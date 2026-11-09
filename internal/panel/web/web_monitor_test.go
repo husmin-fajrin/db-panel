@@ -105,13 +105,13 @@ func TestDashboardShowsStatusPerReplica(t *testing.T) {
 		`href="/masters/1"`, `href="/replicas/2"`, `href="/replicas/3"`, `href="/replicas/4"`)
 
 	master := between(body, `data-status-for="1"`, `data-status-for=`)
-	for _, s := range []string{"Sehat", "badge-success", "Master menjawab dan bisa ditulisi"} {
+	for _, s := range []string{"Sehat", "lencana-success", "Master menjawab dan bisa ditulisi"} {
 		if !strings.Contains(master, s) {
 			t.Errorf("master row lacks %q:\n%s", s, master)
 		}
 	}
 	rep2 := between(body, `data-status-for="2"`, `data-status-for=`)
-	for _, s := range []string{"Ketinggalan", "badge-warning", "Kunci terlepas", "tertinggal 42 dtk", "dicek 12 dtk lalu"} {
+	for _, s := range []string{"Ketinggalan", "lencana-warning", "Kunci terlepas", "tertinggal 42 dtk", "dicek 12 dtk lalu"} {
 		if !strings.Contains(rep2, s) {
 			t.Errorf("replica 2 row lacks %q:\n%s", s, rep2)
 		}
@@ -126,7 +126,7 @@ func TestDashboardShowsStatusPerReplica(t *testing.T) {
 		t.Errorf("replica 3 row shows a lost lock:\n%s", rep3)
 	}
 	rep4 := between(body, `data-status-for="4"`, `</li>`)
-	if !strings.Contains(rep4, "Belum dipantau") || !strings.Contains(rep4, "badge-ghost") {
+	if !strings.Contains(rep4, "Belum dipantau") || !strings.Contains(rep4, "lencana-neutral") {
 		t.Errorf("replica 4 row is not Belum dipantau:\n%s", rep4)
 	}
 	// Rows ask for the compact fragment on live updates.
@@ -139,7 +139,7 @@ func TestReplicaPageShowsExplanationAndPrimaryButton(t *testing.T) {
 	rec := e.do("GET", "/replicas/2", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
 	status := between(rec.Body.String(), `data-status-for="2"`, `<h2 class="card-title">Kontrol`)
-	for _, s := range []string{"Berhenti", "badge-error", "Replikasi berhenti karena error 1062",
+	for _, s := range []string{"Berhenti", "lencana-error", "Replikasi berhenti karena error 1062",
 		"Data ganda: ada baris yang sudah ada di replika.", "Saran:", "Resync ulang"} {
 		if !strings.Contains(status, s) {
 			t.Errorf("status section lacks %q:\n%s", s, status)
@@ -181,7 +181,7 @@ func TestReplicaPageShowsExplanationAndPrimaryButton(t *testing.T) {
 	mon.setView(monitor.View{ServerID: 2, Role: store.RoleReplica, ReceivedAt: monNow,
 		Status: monitor.Status{Code: monitor.StatusSynced, Severity: monitor.SevOK, Detail: "Replikasi berjalan dan mengikuti master", LagSec: ptr[int64](0)}})
 	rec = e.do("GET", "/replicas/2", nil, e.cookie())
-	wantBody(t, rec, "Sinkron", "badge-success", "tertinggal 0 dtk")
+	wantBody(t, rec, "Sinkron", "lencana-success", "tertinggal 0 dtk")
 	wantNoBody(t, rec, "Saran:", "btn-primary\">Resync ulang")
 }
 
@@ -251,7 +251,7 @@ func TestMasterPageDownShowsManualGuidance(t *testing.T) {
 	rec := e.do("GET", "/masters/1", nil, e.cookie())
 	wantCode(t, rec, http.StatusOK)
 	status := between(rec.Body.String(), `data-status-for="1"`, `<h2 class="card-title">Kontrol`)
-	for _, s := range []string{"Diduga tumbang", "badge-error", down, "Yang bisa dilakukan sekarang",
+	for _, s := range []string{"Diduga tumbang", "lencana-error", down, "Yang bisa dilakukan sekarang",
 		"STOP REPLICA; RESET REPLICA ALL; SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF;",
 		"tetap terbuka walau MySQL di-restart",
 		"Executed_Gtid_Set", "panel belum bisa"} {
@@ -263,7 +263,7 @@ func TestMasterPageDownShowsManualGuidance(t *testing.T) {
 	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow,
 		Status: monitor.Status{Code: monitor.StatusHealthy, Severity: monitor.SevOK, Detail: "Master menjawab dan bisa ditulisi"}, Snap: masterSnap()})
 	rec = e.do("GET", "/masters/1", nil, e.cookie())
-	wantBody(t, rec, "Sehat", "badge-success")
+	wantBody(t, rec, "Sehat", "lencana-success")
 	wantNoBody(t, rec, "Yang bisa dilakukan sekarang", "RESET REPLICA ALL")
 }
 
@@ -359,13 +359,13 @@ func TestStatusFragmentEndpoint(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	wantBody(t, rec, "Berhenti", "badge-error", "Data ganda", "dicek 5 dtk lalu")
+	wantBody(t, rec, "Berhenti", "lencana-error", "Data ganda", "dicek 5 dtk lalu")
 	wantNoBody(t, rec, "<html", "<nav", rawSQLError)
 
 	// The compact variant for rows: no explanation.
 	rec = e.do("GET", "/servers/2/status-fragment?tampilan=baris", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Berhenti", "badge-error")
+	wantBody(t, rec, "Berhenti", "lencana-error")
 	wantNoBody(t, rec, "Data ganda", "<html")
 
 	// A master's fragment.
@@ -373,21 +373,21 @@ func TestStatusFragmentEndpoint(t *testing.T) {
 		Status: monitor.Status{Code: monitor.StatusLocked, Severity: monitor.SevCrit, Detail: "Master dikunci"}})
 	rec = e.do("GET", "/servers/1/status-fragment", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Terkunci", "badge-error", "Master dikunci")
+	wantBody(t, rec, "Terkunci", "lencana-error", "Master dikunci")
 
 	// MySQL not connected to the panel yet: not monitored.
 	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow,
 		Status: monitor.Status{Code: monitor.StatusUnreachable, Severity: monitor.SevCrit, Detail: "belum terhubung"},
 		Snap:   &proto.HealthSnapshot{MySQLError: "belum terhubung"}})
 	rec = e.do("GET", "/servers/1/status-fragment", nil, c)
-	wantBody(t, rec, "Belum dipantau", "badge-ghost")
+	wantBody(t, rec, "Belum dipantau", "lencana-neutral")
 	wantNoBody(t, rec, "Tidak terjangkau")
 
 	// A server outside any topology, and one whose agent is too old.
 	srv := e.pairedOnline(t, "db-lain")
 	rec = e.do("GET", "/servers/3/status-fragment", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Belum dipantau", "badge-ghost", "belum menerima laporan")
+	wantBody(t, rec, "Belum dipantau", "lencana-neutral", "belum menerima laporan")
 	mon.setView(monitor.View{ServerID: srv.ID, ReceivedAt: monNow.Add(-4 * time.Second)})
 	rec = e.do("GET", "/servers/3/status-fragment", nil, c)
 	wantBody(t, rec, "Belum dipantau", "belum menjadi master atau replika", "dicek 4 dtk lalu")

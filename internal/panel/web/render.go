@@ -153,14 +153,15 @@ var templateFuncs = template.FuncMap{
 
 // partials are the templates shared by several pages and rendered on their
 // own by the fragment endpoint.
-var partials = []string{"templates/layout.html", "templates/_status.html", "templates/_timeline.html",
+var partials = []string{"templates/layout.html", "templates/_ui.html", "templates/_gauge.html",
+	"templates/_chart.html", "templates/_status.html", "templates/_timeline.html",
 	"templates/_confirm.html", "templates/_connections.html"}
 
 // NewRenderer parses the layout and the shared partials together with each
 // page into its own template set, plus one set of the partials alone for
 // fragments.
 func NewRenderer() (*Renderer, error) {
-	base, err := template.New("").Funcs(templateFuncs).ParseFS(webfs.FS, partials...)
+	base, err := template.New("").Funcs(templateFuncs).Funcs(uiFuncs).ParseFS(webfs.FS, partials...)
 	if err != nil {
 		return nil, fmt.Errorf("parse layout: %w", err)
 	}
@@ -258,17 +259,18 @@ func fmtBytes(b uint64) string {
 	return fmt.Sprintf("%d KB", (b+1023)/1024)
 }
 
-// severityClass is the daisyUI badge class of a monitoring severity.
+// severityClass is the badge class (.lencana in app.css) of a monitoring
+// severity; web/src/app.css lists it in @source inline.
 func severityClass(s monitor.Severity) string {
 	switch s {
 	case monitor.SevOK:
-		return "badge-success"
+		return "lencana-success"
 	case monitor.SevWarn:
-		return "badge-warning"
+		return "lencana-warning"
 	case monitor.SevCrit:
-		return "badge-error"
+		return "lencana-error"
 	}
-	return "badge-ghost"
+	return "lencana-neutral"
 }
 
 // fmtDuration words a number of seconds: "2 hari 3 jam", "3 jam 5 menit",
