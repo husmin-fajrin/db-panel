@@ -65,3 +65,9 @@ func PromoteScreenSteps(mode string) []string {
 	}
 	return names
 }
+
+// Audit page wording, exposed to web_test.
+var (
+	AuditActionLabel   = auditActionLabel
+	AuditDetailSummary = auditDetailSummary
+)

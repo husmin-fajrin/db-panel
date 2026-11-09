@@ -59,33 +59,40 @@ func (a *app) chainStatus() chainStatus {
 	return st
 }
 
-// auditActionLabels name each audited action for the UI.
+// auditActionLabels name, for people, every action the panel writes to
+// the audit log (design spec 5.6, 5.8 #5): the audit page and the
+// timelines. TestAuditActionLabelsComplete scans the code for the actions
+// and fails on one without a label here.
 var auditActionLabels = map[string]string{
 	"login":             "Masuk",
 	"login_failed":      "Gagal masuk",
 	"logout":            "Keluar",
 	"confirm_issued":    "Konfirmasi kata sandi",
 	"confirm_failed":    "Konfirmasi kata sandi gagal",
+	"confirm_rejected":  "Konfirmasi ditolak",
+	"agent_pair":        "Pemasangan agent ditolak",
 	"server_create":     "Tambah server",
-	"server_token":      "Token pemasangan baru",
+	"server_token":      "Perintah pemasangan dibuat",
 	"server_delete":     "Hapus server",
 	"server_check":      "Periksa sekarang",
 	"server_snooze":     "Jangan ganggu",
 	"mysql_connect":     "Hubungkan MySQL",
 	"mysql_refresh":     "Segarkan data MySQL",
-	"prepare_master":    "Siapkan master",
+	"prepare_master":    "Siapkan sebagai master",
 	"mysql_tls":         "Pasang sertifikat MySQL",
 	"tighten_tls":       "Perketat sambungan replikasi",
-	"master_source":     "Ubah alamat MySQL master",
+	"master_source":     "Ubah alamat untuk replika",
 	"master_unlock":     "Buka kunci master",
+	"promote":           "Promote replika",
 	"create_replica":    "Buat replika",
 	"add_databases":     "Tambah database",
 	"remove_databases":  "Lepas database",
 	"replica_stop":      "Stop replika",
 	"replica_start":     "Start replika",
-	"replica_relock":    "Kunci kembali replika",
+	"replica_relock":    "Kunci kembali",
 	"replica_resync":    "Resync ulang",
 	"replica_detach":    "Lepas replika",
+	"replica_repoint":   "Arahkan sekarang",
 	"job_approve":       "Setujui pekerjaan",
 	"job_retry":         "Ulangi pekerjaan",
 	"job_cancel":        "Batalkan pekerjaan",
@@ -99,7 +106,11 @@ var auditActionLabels = map[string]string{
 	"salvage_download":  "Unduh data tertinggal",
 	"salvage_delete":    "Hapus berkas data tertinggal",
 	"cutover_confirmed": "Sudah saya alihkan",
-	"replica_repoint":   "Arahkan sekarang",
+}
+
+// auditActionLabel is action's label, or action itself when it has none.
+func auditActionLabel(action string) string {
+	return labelOr(auditActionLabels, action)
 }
 
 // auditTargetLabels name the target kinds.
@@ -115,8 +126,11 @@ var auditTargetLabels = map[string]string{
 // auditRow is an audit entry as the audit page shows it.
 type auditRow struct {
 	store.AuditEntry
-	ActionLabel, Target, Detail string
-	OK                          bool
+	ActionLabel, Target string
+	// Summary is the detail in words (auditDetailSummary); Detail the raw
+	// JSON, cut to auditDetailRunes, for the row's <details>.
+	Summary, Detail string
+	OK              bool
 }
 
 type auditPage struct {
@@ -172,8 +186,9 @@ func (a *app) auditLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, e := range entries {
-		p.Rows = append(p.Rows, auditRow{AuditEntry: e, ActionLabel: labelOr(auditActionLabels, e.Action),
-			Target: auditTarget(e, names), Detail: shortDetail(e.DetailJSON), OK: e.Outcome == auditOK})
+		p.Rows = append(p.Rows, auditRow{AuditEntry: e, ActionLabel: auditActionLabel(e.Action),
+			Target: auditTarget(e, names), Summary: auditDetailSummary(e.Action, e.DetailJSON),
+			Detail: shortDetail(e.DetailJSON), OK: e.Outcome == auditOK})
 	}
 	a.render.Render(w, "audit", p)
 }

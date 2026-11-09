@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
@@ -92,11 +93,34 @@ func (r alertRow) TelegramClass() string {
 	return "lencana-neutral"
 }
 
+// Level is the alert's level as a badge: Kritis (notify.Critical) or
+// Peringatan; the alerts page's filter chips and its open alerts use it.
+func (r alertRow) Level() Badge {
+	if notify.Critical(r.Kind) {
+		return Badge{Tone: "error", Text: "Kritis"}
+	}
+	return Badge{Tone: "warning", Text: "Peringatan"}
+}
+
+// Alert levels the alerts page filters by (?tingkat=); "" is every level.
+const (
+	levelCritical = "kritis"
+	levelWarning  = "peringatan"
+)
+
+// alertChip is a filter chip of the alerts page.
+type alertChip struct {
+	Value, Label string
+	On           bool
+}
+
 type alertsPage struct {
 	Page
 	Now     time.Time
 	Active  []alertRow
 	History []alertRow
+	Level   string // the filter: "", levelCritical or levelWarning
+	Chips   []alertChip
 }
 
 func (a *app) alertsPage(w http.ResponseWriter, r *http.Request) {
@@ -137,11 +161,24 @@ func (a *app) alertsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := alertsPage{Page: a.page(r), Now: now}
+	switch lv := r.URL.Query().Get("tingkat"); lv {
+	case levelCritical, levelWarning:
+		p.Level = lv // anything else shows every level
+	}
+	for _, c := range []alertChip{{"", "Semua", false}, {levelCritical, "Kritis", false}, {levelWarning, "Peringatan", false}} {
+		c.On = c.Value == p.Level
+		p.Chips = append(p.Chips, c)
+	}
+	keep := func(al store.Alert) bool {
+		return p.Level == "" || notify.Critical(al.Kind) == (p.Level == levelCritical)
+	}
 	for _, al := range open {
-		p.Active = append(p.Active, row(al))
+		if keep(al) {
+			p.Active = append(p.Active, row(al))
+		}
 	}
 	for _, al := range recent {
-		if al.ClosedAt != nil {
+		if al.ClosedAt != nil && keep(al) {
 			p.History = append(p.History, row(al))
 		}
 	}

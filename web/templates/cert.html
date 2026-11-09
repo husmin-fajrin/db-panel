@@ -3,32 +3,46 @@
 <p class="logo text-primary mb-4">dbpanel</p>
 <h1 class="mb-6">Pasang sertifikat keamanan panel</h1>
 {{if .Custom}}
-<div role="status" class="alert alert-info"><span>Panel memakai sertifikat yang dipasang admin; tidak ada yang perlu dipasang.</span></div>
-<p class="mt-4"><a class="link" href="/">Buka panel</a></p>
+{{template "banner" (banner "info" "Panel memakai sertifikat yang dipasang admin; tidak ada yang perlu dipasang.")}}
+<p><a class="btn btn-primary" href="/">Buka panel</a></p>
 {{else}}
-<section class="card bg-base-100 mb-6">
-  <div class="card-body gap-4">
-    <p class="text-lg">Browser menampilkan peringatan? Unduh berkas ini, klik dua kali, pilih Pasang, lalu buka panel lagi.</p>
-    <div><a class="btn btn-primary" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat keamanan panel</a></div>
-    <p class="text-sm text-base-content/70">Cukup sekali untuk tiap komputer atau ponsel. Setelah terpasang, browser membuka panel tanpa peringatan dan sambungannya terenkripsi. Sertifikat ini hanya berlaku untuk alamat panel ini: nama panel beserta semua subnamanya, dan alamat IP di jaringan panel.</p>
+<section class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
+    <ol class="flex flex-col gap-6" aria-label="Langkah pemasangan">
+      <li class="flex gap-4">
+        <span class="mono flex size-8 shrink-0 items-center justify-center rounded-full border border-primary font-bold text-primary" aria-hidden="true">1</span>
+        <div class="flex min-w-0 flex-1 flex-col gap-3">
+          <p class="text-base font-semibold">Browser menampilkan peringatan? Unduh berkas ini, klik dua kali, pilih Pasang, lalu buka panel lagi.</p>
+          <div><a class="btn btn-primary" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat keamanan panel</a></div>
+          <p class="help">Cukup sekali untuk tiap komputer atau ponsel. Setelah terpasang, browser membuka panel tanpa peringatan dan sambungannya terenkripsi. Sertifikat ini hanya berlaku untuk alamat panel ini: nama panel beserta semua subnamanya, dan alamat IP di jaringan panel.</p>
+        </div>
+      </li>
+      <li class="flex gap-4">
+        <span class="mono flex size-8 shrink-0 items-center justify-center rounded-full border border-primary font-bold text-primary" aria-hidden="true">2</span>
+        <div class="flex min-w-0 flex-1 flex-col gap-3">
+          <h2>Cocokkan sidik jari sebelum memasang</h2>
+          <p>Sidik jari SHA-256 sertifikat ini:</p>
+          <p class="rounded-lg border border-base-300 bg-base-200 p-3"><code class="break-all text-base" data-fingerprint>{{.Fingerprint}}</code></p>
+          <p>Sebelum klik <b>Install</b>, <b>Add</b> atau <b>OK</b>, buka berkas yang diunduh dan pastikan sidik jari SHA-256-nya <b>sama persis</b> dengan angka yang tampil di layar pemasangan panel (keluaran <code>install.sh</code> di server panel) atau di halaman <b>Pengaturan</b> panel setelah login. Bila berbeda, jangan pasang: ada yang mengganti berkasnya di jaringan. Cara melihatnya ada di langkah tiap sistem di bawah.</p>
+          {{if not .HTTPS}}<div role="alert" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<div class="min-w-0 flex-1">Halaman ini dibuka lewat http:// tanpa enkripsi, jadi isinya (juga sidik jari di atas) bisa diubah orang lain di jaringan. Cocokkan dengan keluaran <code>install.sh</code> atau halaman Pengaturan, atau buka <a class="link" href="{{.HTTPSURL}}">{{.HTTPSURL}}</a> (terima peringatan browser sekali).</div></div>{{end}}
+          {{with .CertIPURL}}<p class="help">Browser menolak membuka panel lewat nama tanpa pilihan lanjut (setelah sertifikat panel berganti)? Buka <a class="link" href="{{.}}">{{.}}</a>: alamat IP selalu bisa dibuka lewat http://, lalu pasang ulang sertifikatnya.</p>{{end}}
+        </div>
+      </li>
+      <li class="flex gap-4">
+        <span class="mono flex size-8 shrink-0 items-center justify-center rounded-full border border-primary font-bold text-primary" aria-hidden="true">3</span>
+        <div class="flex min-w-0 flex-1 flex-col gap-1">
+          <h2>Pasang menurut sistem</h2>
+          <p class="help">Windows, macOS, Firefox, Android, iPhone dan iPad: langkahnya di bawah ini.</p>
+        </div>
+      </li>
+    </ol>
   </div>
 </section>
 
-<section class="card bg-base-100 mb-6">
-  <div class="card-body gap-3">
-    <h2 class="card-title">Cocokkan sidik jari sebelum memasang</h2>
-    <p>Sidik jari SHA-256 sertifikat ini:</p>
-    <p><code class="break-all text-lg" data-fingerprint>{{.Fingerprint}}</code></p>
-    <p>Sebelum klik <b>Install</b>, <b>Add</b> atau <b>OK</b>, buka berkas yang diunduh dan pastikan sidik jari SHA-256-nya <b>sama persis</b> dengan angka yang tampil di layar pemasangan panel (keluaran <code>install.sh</code> di server panel) atau di halaman <b>Pengaturan</b> panel setelah login. Bila berbeda, jangan pasang: ada yang mengganti berkasnya di jaringan. Cara melihatnya ada di langkah tiap sistem di bawah.</p>
-    {{if not .HTTPS}}<div role="alert" class="alert alert-warning"><span>Halaman ini dibuka lewat http:// tanpa enkripsi, jadi isinya (juga sidik jari di atas) bisa diubah orang lain di jaringan. Cocokkan dengan keluaran <code>install.sh</code> atau halaman Pengaturan, atau buka <a class="link" href="{{.HTTPSURL}}">{{.HTTPSURL}}</a> (terima peringatan browser sekali).</span></div>{{end}}
-    {{with .CertIPURL}}<p class="text-sm text-base-content/70">Browser menolak membuka panel lewat nama tanpa pilihan lanjut (setelah sertifikat panel berganti)? Buka <a class="link" href="{{.}}">{{.}}</a>: alamat IP selalu bisa dibuka lewat http://, lalu pasang ulang sertifikatnya.</p>{{end}}
-  </div>
-</section>
-
-<div class="flex flex-col gap-6">
+<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
   <section class="card bg-base-100">
-    <div class="card-body gap-3">
-      <h2 class="card-title">Windows (Chrome, Edge)</h2>
+    <div class="card-body gap-3 p-6">
+      <h2>Windows (Chrome, Edge)</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
         <li>Cocokkan sidik jari dulu: buka Command Prompt di folder unduhan, jalankan <code>certutil -dump dbpanel-panel.crt</code>, lalu bandingkan baris <b>Cert Hash(sha256)</b> dengan sidik jari di atas (abaikan spasi, titik dua dan huruf besar/kecil).</li>
         <li>Klik dua kali berkas <code>dbpanel-panel.crt</code> yang sudah diunduh, lalu klik <b>Install Certificate...</b></li>
@@ -42,8 +56,8 @@
   </section>
 
   <section class="card bg-base-100">
-    <div class="card-body gap-3">
-      <h2 class="card-title">macOS (Safari, Chrome)</h2>
+    <div class="card-body gap-3 p-6">
+      <h2>macOS (Safari, Chrome)</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
         <li>Cocokkan sidik jari dulu: pilih berkas <code>dbpanel-panel.crt</code> di Finder dan tekan spasi (Quick Look), buka <b>Details</b>, lalu bandingkan <b>SHA-256</b> di bagian <b>Fingerprints</b> dengan sidik jari di atas.</li>
         <li>Klik dua kali berkas <code>dbpanel-panel.crt</code>. Pada pertanyaan Keychain pilih <b>System</b>, lalu <b>Add</b>, dan masukkan kata sandi Mac.</li>
@@ -56,9 +70,9 @@
   </section>
 
   <section class="card bg-base-100">
-    <div class="card-body gap-3">
-      <h2 class="card-title">Firefox</h2>
-      <p class="text-sm text-base-content/70">Firefox memakai daftarnya sendiri, juga di Windows dan macOS.</p>
+    <div class="card-body gap-3 p-6">
+      <h2>Firefox</h2>
+      <p class="help">Firefox memakai daftarnya sendiri, juga di Windows dan macOS.</p>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
         <li>Buka <b>Settings</b>, pilih <b>Privacy &amp; Security</b>.</li>
         <li>Di bagian <b>Certificates</b> klik <b>View Certificates...</b>, buka tab <b>Authorities</b>, klik <b>Import...</b></li>
@@ -70,8 +84,8 @@
   </section>
 
   <section class="card bg-base-100">
-    <div class="card-body gap-3">
-      <h2 class="card-title">Android</h2>
+    <div class="card-body gap-3 p-6">
+      <h2>Android</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
         <li>Unduh berkas dengan tombol di atas.</li>
         <li>Buka <b>Settings</b> → <b>Security</b> → <b>Encryption &amp; credentials</b> → <b>Install a certificate</b>.</li>
@@ -84,8 +98,8 @@
   </section>
 
   <section class="card bg-base-100">
-    <div class="card-body gap-3">
-      <h2 class="card-title">iPhone dan iPad</h2>
+    <div class="card-body gap-3 p-6">
+      <h2>iPhone dan iPad</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
         <li>Buka halaman ini di <b>Safari</b>, ketuk tombol unduh, lalu <b>Allow</b>.</li>
         <li>Buka <b>Settings</b>, ketuk <b>Profile Downloaded</b>, ketuk <b>More Details</b> lalu nama sertifikat, dan bandingkan <b>SHA-256</b> di bagian <b>Fingerprints</b> dengan sidik jari di atas. Bila sama, ketuk <b>Install</b> dan masukkan kode sandi.</li>
@@ -97,8 +111,8 @@
   </section>
 
   <section class="card bg-base-100">
-    <div class="card-body gap-3">
-      <h2 class="card-title">Banyak komputer sekaligus</h2>
+    <div class="card-body gap-3 p-6">
+      <h2>Banyak komputer sekaligus</h2>
       <p>Admin domain Windows bisa menyebarkan berkas ini ke semua komputer lewat Group Policy (Computer Configuration → Policies → Windows Settings → Security Settings → Public Key Policies → Trusted Root Certification Authorities). Ambil berkasnya langsung dari server panel (<code>/etc/dbpanel/panel/web-ca.crt</code>, lewat SSH atau flashdisk) dan cocokkan sidik jarinya, jangan dari unduhan browser.</p>
     </div>
   </section>

@@ -1,10 +1,14 @@
 {{define "title"}}Peringatan{{end}}
+{{define "page-title"}}<h1>Peringatan</h1>{{end}}
 {{define "content"}}
-<h1 class="text-2xl font-bold mb-4">Peringatan</h1>
+<form method="get" action="/alerts" class="mb-4 flex flex-wrap items-center gap-2" role="group" aria-label="Saring menurut tingkat">
+  <span class="help me-1">Tingkat</span>
+  {{range .Chips}}<button type="submit" name="tingkat" value="{{.Value}}" aria-pressed="{{.On}}" class="chip">{{.Label}}</button>{{end}}
+</form>
 
-<section id="aktif" class="card bg-base-100 shadow mb-6">
-  <div class="card-body">
-    <h2 class="card-title">Aktif</h2>
+<section id="aktif" class="card bg-base-100 mb-4">
+  <div class="card-body p-6">
+    {{template "card-head" (cardHead "Aktif" "" "")}}
     {{if .Active}}
     <div class="overflow-x-auto">
       <table class="table table-sm">
@@ -12,30 +16,30 @@
         <tbody>
           {{range .Active}}
           <tr>
-            <td>
-              <div class="font-semibold">{{.KindLabel}}</div>
-              <div class="text-sm text-base-content/70">{{.Message}}</div>
+            <td class="min-w-56">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">{{template "badge" .Level}}<span class="font-semibold">{{.KindLabel}}</span></div>
+              <div class="text-muted">{{.Message}}</div>
             </td>
-            <td>{{if .ServerKnown}}<a class="link" href="/servers/{{.ServerID}}">{{.ServerName}}</a>{{else}}{{.ServerName}}{{end}}</td>
-            <td><div>{{fmtTime .OpenedAt}}</div><div class="text-xs text-base-content/70">{{ago .OpenedAt $.Now}}</div></td>
+            <td>{{if .ServerKnown}}<a class="link whitespace-nowrap" href="/servers/{{.ServerID}}">{{.ServerName}}</a>{{else}}<span class="whitespace-nowrap">{{.ServerName}}</span>{{end}}</td>
+            <td><div class="mono text-xs">{{fmtTime .OpenedAt}}</div><div class="help">{{ago .OpenedAt $.Now}}</div></td>
             <td><span class="lencana {{.TelegramClass}} whitespace-normal">{{.TelegramLabel}}</span></td>
             <td>
               {{if .ServerKnown}}
               {{if .SnoozeUntil}}
-              <div class="text-sm mb-1">Jangan ganggu sampai {{fmtTime .SnoozeUntil}}</div>
+              <div class="mb-1 text-sm">Jangan ganggu sampai <span class="mono text-xs whitespace-nowrap">{{fmtTime .SnoozeUntil}}</span></div>
               <form method="post" action="/servers/{{.ServerID}}/snooze">
                 <input type="hidden" name="hours" value="0">
-                <button type="submit" class="btn btn-ghost btn-xs">Batalkan</button>
+                <button type="submit" class="btn btn-ghost btn-sm">Batalkan</button>
               </form>
               {{else}}
               <form method="post" action="/servers/{{.ServerID}}/snooze" class="join">
-                <select name="hours" class="select select-xs join-item w-auto" aria-label="Lama Jangan ganggu untuk {{.ServerName}}">
+                <select name="hours" class="select select-sm join-item w-24 pe-8" aria-label="Lama Jangan ganggu untuk {{.ServerName}}">
                   <option value="1">1 jam</option>
                   <option value="2">2 jam</option>
                   <option value="8">8 jam</option>
                   <option value="24">24 jam</option>
                 </select>
-                <button type="submit" class="btn btn-xs join-item">Jangan ganggu</button>
+                <button type="submit" class="btn btn-sm join-item whitespace-nowrap">Jangan ganggu</button>
               </form>
               {{end}}
               {{end}}
@@ -45,31 +49,31 @@
         </tbody>
       </table>
     </div>
-    <p class="text-xs text-base-content/70">Jangan ganggu menunda pemberitahuan Telegram untuk server itu; peringatan tetap dicatat dan tampil di sini.</p>
+    <p class="help mt-3">Jangan ganggu menunda pemberitahuan Telegram untuk server itu; peringatan tetap dicatat dan tampil di sini.</p>
     {{else}}
-    <p class="text-base-content/70">Tidak ada peringatan aktif.</p>
+    {{template "empty" (emptyOf "Tidak ada peringatan aktif." "" "")}}
     {{end}}
   </div>
 </section>
 
-<section id="riwayat" class="card bg-base-100 shadow">
-  <div class="card-body">
-    <h2 class="card-title">Riwayat 90 hari</h2>
+<section id="riwayat" class="card bg-base-100">
+  <div class="card-body p-6">
+    {{template "card-head" (cardHead "Riwayat 90 hari" "" "")}}
     {{if .History}}
     <div class="overflow-x-auto">
       <table class="table table-sm">
         <thead><tr><th>Peringatan</th><th>Server</th><th>Mulai</th><th>Pulih</th><th>Lama</th><th>Telegram</th></tr></thead>
         <tbody>
           {{range .History}}
-          <tr>
-            <td>
-              <div class="font-semibold">{{.KindLabel}}</div>
-              <div class="text-sm text-base-content/70">{{.Message}}</div>
+          <tr class="text-muted">
+            <td class="min-w-56">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">{{template "badge" .Badge}}<span class="font-semibold">{{.KindLabel}}</span></div>
+              <div>{{.Message}}</div>
             </td>
-            <td>{{.ServerName}}</td>
-            <td>{{fmtTime .OpenedAt}}</td>
-            <td>{{fmtTime .ClosedAt}}</td>
-            <td>{{fmtDuration .DurationSec}}</td>
+            <td class="whitespace-nowrap">{{.ServerName}}</td>
+            <td class="mono text-xs">{{fmtTime .OpenedAt}}</td>
+            <td class="mono text-xs">{{fmtTime .ClosedAt}}</td>
+            <td class="mono text-xs">{{fmtDuration .DurationSec}}</td>
             <td><span class="lencana {{.TelegramClass}} whitespace-normal">{{.TelegramLabel}}</span></td>
           </tr>
           {{end}}
@@ -77,7 +81,7 @@
       </table>
     </div>
     {{else}}
-    <p class="text-base-content/70">Belum ada peringatan yang selesai dalam 90 hari terakhir.</p>
+    {{template "empty" (emptyOf "Belum ada peringatan yang selesai dalam 90 hari terakhir." "" "")}}
     {{end}}
   </div>
 </section>

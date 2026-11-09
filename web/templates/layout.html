@@ -66,7 +66,8 @@
 {{else}}
 <main class="flex min-h-screen flex-col items-center p-4 md:p-8">
   <div class="my-auto w-full max-w-3xl">
-    {{template "banners" .}}
+    {{/* A page may show its messages itself (login: inside its card). */}}
+    {{block "public-banners" .}}{{template "banners" .}}{{end}}
     {{template "content" .}}
   </div>
   <p class="help mt-6">dbpanel <span class="mono whitespace-nowrap">{{.Version}}</span></p>
@@ -121,7 +122,7 @@
 <div class="flex flex-wrap items-center gap-2">
   <form method="post" action="/servers/{{.ServerID}}/check"><button type="submit" class="btn btn-sm">Periksa sekarang</button></form>
   <form method="post" action="/servers/{{.ServerID}}/snooze" class="join">
-    <select name="hours" class="select select-sm join-item w-auto" aria-label="Lama Jangan ganggu">
+    <select name="hours" class="select select-sm join-item w-24 pe-8" aria-label="Lama Jangan ganggu">
       <option value="1">1 jam</option>
       <option value="2">2 jam</option>
       <option value="8">8 jam</option>

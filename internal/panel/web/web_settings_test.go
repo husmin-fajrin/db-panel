@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -577,4 +578,48 @@ func TestSamplesRetentionValidation(t *testing.T) {
 		t.Fatalf("samples retention after a post without the field = %q, want 90", v)
 	}
 	wantBody(t, e.do("GET", "/settings", nil, c), `name="samples_retention" value="90"`)
+}
+
+// TestSettingsNoOverflowStructure (design spec 5.6, 5.8 #2): every part of
+// the settings page is a card; the form's cards lay their fields out in a
+// grid of 1 column (2 from md) whose cells may shrink (min-w-0), with
+// full-width inputs; no fixed width wider than its container.
+func TestSettingsNoOverflowStructure(t *testing.T) {
+	e := settingsEnv(t)
+	rec := e.do("GET", "/settings", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	content := between(body, "<main", "</main>")
+	sections := regexp.MustCompile(`<section[^>]*>`).FindAllString(content, -1)
+	if len(sections) < 7 {
+		t.Fatalf("settings page has %d sections, want at least 7 (Telegram, Ambang dan interval, Ringkasan mingguan, Alamat dasar panel, Retensi, Tampilan, Sertifikat)", len(sections))
+	}
+	for _, s := range sections {
+		if !regexp.MustCompile(`class="card[ "]`).MatchString(s) {
+			t.Errorf("section is not a card: %s", s)
+		}
+	}
+	for _, title := range []string{"Telegram", "Ambang dan interval", "Ringkasan mingguan", "Alamat dasar panel",
+		"Retensi", "Tampilan", "Sertifikat keamanan panel"} {
+		if !strings.Contains(content, "<h2>"+title+"</h2>") {
+			t.Errorf("settings page lacks the card %q", title)
+		}
+	}
+	form := between(content, `<form method="post" action="/settings"`, "</form>")
+	for i, part := range strings.Split(form, "<section")[1:] {
+		if !strings.Contains(part, "grid-cols-1 md:grid-cols-2") {
+			t.Errorf("form card %d has no 1/2-column grid:\n%s", i+1, part)
+		}
+	}
+	for _, fs := range regexp.MustCompile(`<fieldset[^>]*>`).FindAllString(content, -1) {
+		if !strings.Contains(fs, "min-w-0") {
+			t.Errorf("fieldset may not shrink below its content: %s", fs)
+		}
+	}
+	if m := regexp.MustCompile(`[\s"](?:min-)?w-\[[^\]]*\]`).FindString(content); m != "" {
+		t.Errorf("settings page has a fixed width %q", m)
+	}
+	if strings.Contains(content, "shadow") || strings.Contains(content, `class="input w-auto`) || strings.Contains(content, `class="select w-auto`) {
+		t.Error("settings page still has a card shadow or a w-auto field")
+	}
 }

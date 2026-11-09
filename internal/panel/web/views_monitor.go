@@ -267,49 +267,6 @@ func auditEntry(e store.AuditEntry) timelineEntry {
 	return t
 }
 
-// auditActions word the audit log's actions for people.
-var auditActions = map[string]string{
-	"confirm_issued":    "Konfirmasi kata sandi",
-	"confirm_failed":    "Konfirmasi kata sandi gagal",
-	"server_create":     "Server ditambahkan",
-	"server_token":      "Perintah pemasangan dibuat",
-	"server_delete":     "Hapus server",
-	"server_check":      "Periksa sekarang",
-	"server_snooze":     "Jangan ganggu",
-	"mysql_connect":     "Hubungkan MySQL",
-	"mysql_refresh":     "Segarkan data MySQL",
-	"prepare_master":    "Siapkan sebagai master",
-	"mysql_tls":         "Pasang sertifikat MySQL",
-	"tighten_tls":       "Perketat sambungan replikasi",
-	"master_source":     "Ubah alamat untuk replika",
-	"master_unlock":     "Buka kunci master",
-	"promote":           "Promote replika",
-	"create_replica":    "Buat replika",
-	"replica_stop":      "Stop replika",
-	"replica_start":     "Start replika",
-	"replica_relock":    "Kunci kembali",
-	"replica_resync":    "Resync ulang",
-	"replica_detach":    "Lepas replika",
-	"add_databases":     "Tambah database",
-	"remove_databases":  "Lepas database",
-	"job_approve":       "Setujui pekerjaan",
-	"job_retry":         "Ulangi pekerjaan",
-	"job_cancel":        "Batalkan pekerjaan",
-	"leftover_check":    "Periksa data tertinggal",
-	"salvage":           "Amankan data tertinggal",
-	"salvage_download":  "Unduh data tertinggal",
-	"salvage_delete":    "Hapus berkas data tertinggal",
-	"cutover_confirmed": "Sudah saya alihkan",
-	"replica_repoint":   "Arahkan sekarang",
-}
-
-func auditActionLabel(action string) string {
-	if l, ok := auditActions[action]; ok {
-		return l
-	}
-	return action
-}
-
 // serviceLine is the server page's Layanan row (design spec 5.6, 5.8 #3):
 // what was checked, in words, and its badge tone.
 type serviceLine struct{ Text, Tone string }

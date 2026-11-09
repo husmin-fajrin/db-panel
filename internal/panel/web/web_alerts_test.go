@@ -118,3 +118,65 @@ func TestAlertPagesNeedLogin(t *testing.T) {
 }
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
+
+// TestAlertsFilterChips (design spec 5.6, 5.8 #6): the level filters are
+// chips (buttons with aria-pressed) that narrow both tables; open alerts
+// carry a level badge, closed ones a muted Pulih/Ditutup badge; the
+// Jangan ganggu select keeps room for its arrow.
+func TestAlertsFilterChips(t *testing.T) {
+	e := newEnv(t)
+	c := e.cookie()
+	srv := e.pairedOnline(t, "db-satu")
+	e.openAlert(t, monitor.KindReplicaStopped, srv.ID, 10*time.Minute, "Replika berhenti karena data ganda.")
+	e.openAlert(t, monitor.KindReplicaLagging, srv.ID, 5*time.Minute, "Replika ketinggalan 900 detik.")
+	closed := e.openAlert(t, monitor.KindDiskCrit, srv.ID, 5*time.Hour, "Disk terpakai 97%.")
+	if err := e.st.CloseAlert(closed, time.Now().Add(-4*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := e.do("GET", "/alerts", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	wantBody(t, rec, `name="tingkat" value="" aria-pressed="true"`, `name="tingkat" value="kritis" aria-pressed="false"`,
+		`name="tingkat" value="peringatan" aria-pressed="false"`)
+	active := between(body, `id="aktif"`, `id="riwayat"`)
+	for _, s := range []string{`lencana lencana-error">Kritis`, `lencana lencana-warning">Peringatan`,
+		`class="select select-sm join-item w-24 pe-8"`} {
+		if !strings.Contains(active, s) {
+			t.Errorf("active alerts lack %q:\n%s", s, active)
+		}
+	}
+	history := between(body, `id="riwayat"`, "</section>")
+	if !strings.Contains(history, `lencana lencana-success">Pulih`) || !strings.Contains(history, "Disk kritis") {
+		t.Errorf("history lacks the closed alert with its Pulih badge:\n%s", history)
+	}
+	if strings.Contains(history, "lencana-error") || strings.Contains(between(body, "<main", "</main>"), `class="badge`) {
+		t.Errorf("a closed alert is pink, or a raw daisyUI badge is used:\n%s", history)
+	}
+
+	rec = e.do("GET", "/alerts?tingkat=kritis", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	body = rec.Body.String()
+	wantBody(t, rec, `name="tingkat" value="kritis" aria-pressed="true"`)
+	active = between(body, `id="aktif"`, `id="riwayat"`)
+	if !strings.Contains(active, "Replika berhenti karena data ganda.") || strings.Contains(active, "Replika ketinggalan 900") {
+		t.Errorf("kritis filter, active:\n%s", active)
+	}
+	if history := between(body, `id="riwayat"`, "</section>"); !strings.Contains(history, "Disk terpakai 97%.") {
+		t.Errorf("kritis filter drops a critical closed alert:\n%s", history)
+	}
+
+	rec = e.do("GET", "/alerts?tingkat=peringatan", nil, c)
+	body = rec.Body.String()
+	active = between(body, `id="aktif"`, `id="riwayat"`)
+	if strings.Contains(active, "Replika berhenti karena data ganda.") || !strings.Contains(active, "Replika ketinggalan 900") {
+		t.Errorf("peringatan filter, active:\n%s", active)
+	}
+	if history := between(body, `id="riwayat"`, "</section>"); strings.Contains(history, "Disk terpakai 97%.") {
+		t.Errorf("peringatan filter keeps a critical closed alert:\n%s", history)
+	}
+	// An unknown level shows everything.
+	rec = e.do("GET", "/alerts?tingkat=aneh", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Replika berhenti karena data ganda.", "Replika ketinggalan 900", `name="tingkat" value="" aria-pressed="true"`)
+}

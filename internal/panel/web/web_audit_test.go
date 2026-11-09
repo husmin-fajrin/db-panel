@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -612,5 +616,131 @@ func TestOutcomeOfRedactsAgentErrors(t *testing.T) {
 	own := errors.New(`tekan "Sudah saya alihkan" dulu`)
 	if got := web.OutcomeOf(own); got != own.Error() {
 		t.Errorf("web.OutcomeOf(panel refusal) = %q", got)
+	}
+}
+
+// auditActionPatterns find the action strings the panel's code writes to
+// the audit log: a literal at the action position of audit/auditAs, of the
+// helpers that pass their action on, and of an AuditEntry written
+// directly (agentapi's refused pairing).
+var auditActionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\.audit\(r, "([a-z_]+)"`),
+	regexp.MustCompile(`\.auditAs\(r, [^,]+, "([a-z_]+)"`),
+	regexp.MustCompile(`\.(?:replicaControl|jobAction|startOldMasterJob|changeReplicaDatabases)\(w, r, "([a-z_]+)"`),
+	regexp.MustCompile(`AuditEntry\{[^}]*Action: "([a-z_]+)"`),
+}
+
+// auditVariableAction finds an audit call whose action is a variable.
+var auditVariableAction = regexp.MustCompile(`\.audit(?:As)?\(r, (?:[^,"]+, )?([a-zA-Z]\w*), (?:audit|kind|targetKind)`)
+
+// auditVariableActionsKnown are the audit calls with a variable action
+// whose callers auditActionPatterns cover (file: variable).
+var auditVariableActionsKnown = map[string]bool{
+	"audit.go:action":              true, // audit → auditAs
+	"handlers_jobs.go:name":        true, // jobAction
+	"handlers_controls.go:action":  true, // replicaControl
+	"handlers_mysql.go:action":     true, // changeReplicaDatabases
+	"handlers_oldmaster.go:action": true, // startOldMasterJob
+}
+
+// TestAuditActionLabelsComplete (design spec 5.6, 5.8 #5): every action
+// the panel writes to the audit log has an Indonesian label on the audit
+// page and in the timelines.
+func TestAuditActionLabelsComplete(t *testing.T) {
+	actions := map[string]bool{}
+	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, re := range auditActionPatterns {
+			for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+				actions[m[1]] = true
+			}
+		}
+		for _, m := range auditVariableAction.FindAllStringSubmatch(string(src), -1) {
+			if key := filepath.Base(path) + ":" + m[1]; !auditVariableActionsKnown[key] {
+				t.Errorf("%s: audit call with the variable action %s: add its callers to auditActionPatterns", path, m[1])
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"login", "logout", "login_failed", "promote", "cutover_confirmed", "salvage_download",
+		"salvage_delete", "leftover_check", "salvage", "replica_repoint", "agent_pair", "replica_stop", "job_approve",
+		"add_databases", "settings_update", "confirm_rejected"} {
+		if !actions[want] {
+			t.Errorf("the source scan did not find the action %q: the patterns are stale", want)
+		}
+	}
+	for a := range actions {
+		if got := web.AuditActionLabel(a); got == a || got == "" {
+			t.Errorf("audit action %q has no label (shows %q)", a, got)
+		}
+	}
+}
+
+func TestAuditDetailSummaryPromote(t *testing.T) {
+	if got, want := web.AuditDetailSummary("promote", `{"candidate_id":3,"accept_partial":true}`),
+		"kandidat: #3; terima sebagian: ya"; got != want {
+		t.Errorf("summary = %q, want %q", got, want)
+	}
+	// What the promote handler writes: false acceptances are left out.
+	got := web.AuditDetailSummary("promote", `{"candidate":7,"mode":"planned","accept_partial":false,`+
+		`"accept_unreachable":false,"accept_branched":true,"job_id":"0123456789abcdef"}`)
+	for _, s := range []string{"kandidat: #7", "terima replika bercabang: ya", "pekerjaan: 01234567"} {
+		if !strings.Contains(got, s) {
+			t.Errorf("summary %q lacks %q", got, s)
+		}
+	}
+	if strings.Contains(got, "sebagian") || strings.Contains(got, "accept") {
+		t.Errorf("summary %q shows a false acceptance or a raw key", got)
+	}
+	for _, c := range []struct{ action, detail, want string }{
+		{"server_delete", "{}", ""},
+		{"server_delete", "", ""},
+		{"settings_update", `{"changed":["monitor_check_every","lag_threshold"]}`, "diubah: monitor_check_every, lag_threshold"},
+		{"server_snooze", `{"hours":24}`, "lama: 24 jam"},
+		{"remove_databases", `{"databases":["a","b"],"drop_data":true}`, "database: a, b; hapus data: ya"},
+		{"mysql_connect", `{"mysql_user_len":5,"host_len":9}`, "pengguna MySQL: 5 karakter; host: 9 karakter"},
+		{"x", `bukan json`, "bukan json"},
+	} {
+		if got := web.AuditDetailSummary(c.action, c.detail); got != c.want {
+			t.Errorf("AuditDetailSummary(%q, %q) = %q, want %q", c.action, c.detail, got, c.want)
+		}
+	}
+}
+
+// TestAuditDateInputs (design spec 5.6, 5.8 #5): the date filter is a
+// date input and the page shows dates as dd-mm-yyyy HH:MM; the detail is
+// a summary with the raw JSON in a <details>.
+func TestAuditDateInputs(t *testing.T) {
+	e := newEnv(t)
+	c := e.cookie()
+	ts := time.Now().Add(-time.Hour).Truncate(time.Minute)
+	if _, err := e.st.AddAudit(store.AuditEntry{TS: ts, Username: "admin", IP: "10.1.1.1", Action: "promote",
+		TargetKind: "master", DetailJSON: `{"candidate":3,"accept_partial":true}`, Outcome: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("GET", "/audit", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `type="date" id="sejak" name="sejak"`)
+	rows := between(rec.Body.String(), "<tbody>", "</tbody>")
+	for _, s := range []string{ts.Local().Format("02-01-2006 15:04"), "Promote replika",
+		"kandidat: #3; terima sebagian: ya", "<details", "{&#34;candidate&#34;:3,&#34;accept_partial&#34;:true}"} {
+		if !strings.Contains(rows, s) {
+			t.Errorf("audit rows lack %q:\n%s", s, rows)
+		}
+	}
+	if strings.Contains(rows, ts.Local().Format("2006-01-02")) {
+		t.Errorf("audit rows still show the date as yyyy-mm-dd:\n%s", rows)
+	}
+	if strings.Contains(rows, `class="badge`) {
+		t.Errorf("audit rows use a raw daisyUI badge, not the badge partial:\n%s", rows)
 	}
 }

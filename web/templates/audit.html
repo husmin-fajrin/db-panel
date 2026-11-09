@@ -1,33 +1,36 @@
 {{define "title"}}Audit{{end}}
+{{define "page-title"}}<h1>Catatan audit</h1>{{end}}
 {{define "content"}}
-<h1 class="text-2xl font-bold mb-4">Catatan audit</h1>
 {{if .Chain.OK}}
-<p class="mb-4 text-sm"><span class="text-success">{{.Chain.Text}}</span> <span class="text-base-content/60">(diperiksa {{fmtTime .Chain.CheckedAt}}).
+<div class="mb-4 flex flex-wrap items-start gap-x-3 gap-y-1">
+  {{template "badge" (badgeOf "success" .Chain.Text)}}
+  <p class="help w-full min-w-0 sm:w-auto sm:flex-1">Diperiksa <span class="mono whitespace-nowrap">{{fmtDateTime .Chain.CheckedAt}}</span>.
   Pemeriksaan ini tidak dapat mendeteksi penulisan ulang seluruh catatan atau penghapusan baris terakhir;
-  bandingkan dengan salinan di journald (<code>journalctl -u dbpanel-panel</code>).</span></p>
+  bandingkan dengan salinan di journald (<code>journalctl -u dbpanel-panel</code>).</p>
+</div>
 {{else if .Chain.Failed}}
-<p class="mb-4 text-sm text-warning">{{.Chain.Text}}</p>
+<div class="mb-4">{{template "badge" (badgeOf "warning" .Chain.Text)}}</div>
 {{else}}
-<div role="alert" class="alert alert-error mb-4">
-  <span>{{.Chain.Text}}. Catatan audit diubah di luar panel; bandingkan dengan salinan di journald
-  (<code>journalctl -u dbpanel-panel</code>) dan periksa dengan <code>sudo -u dbpanel dbpanel panel audit-verify</code>.</span>
+<div role="alert" class="banner banner-error">{{template "banner-icon" "error"}}
+  <div class="flex-1">{{.Chain.Text}}. Catatan audit diubah di luar panel; bandingkan dengan salinan di journald
+  (<code>journalctl -u dbpanel-panel</code>) dan periksa dengan <code>sudo -u dbpanel dbpanel panel audit-verify</code>.</div>
 </div>
 {{end}}
-<div class="card bg-base-100 shadow">
-  <div class="card-body">
-    <form method="get" action="/audit" class="flex flex-wrap items-end gap-3 mb-2">
-      <fieldset class="fieldset">
+<section class="card bg-base-100">
+  <div class="card-body p-6">
+    <form method="get" action="/audit" class="mb-4 grid grid-cols-1 items-end gap-4 sm:flex sm:flex-wrap">
+      <fieldset class="fieldset min-w-0 py-0">
         <label class="label" for="server">Server</label>
-        <select id="server" name="server" class="select select-sm w-auto">
+        <select id="server" name="server" class="select select-sm w-full sm:w-56">
           <option value="0">Semua server</option>
           {{range .Servers}}<option value="{{.ID}}"{{if eq .ID $.ServerID}} selected{{end}}>{{.Name}}</option>{{end}}
         </select>
       </fieldset>
-      <fieldset class="fieldset">
+      <fieldset class="fieldset min-w-0 py-0">
         <label class="label" for="sejak">Sejak</label>
-        <input type="date" id="sejak" name="sejak" value="{{.Since}}" class="input input-sm w-auto">
+        <input type="date" id="sejak" name="sejak" value="{{.Since}}" class="input input-sm w-full sm:w-44">
       </fieldset>
-      <button type="submit" class="btn btn-sm">Tampilkan</button>
+      <div><button type="submit" class="btn btn-sm btn-primary">Tampilkan</button></div>
     </form>
     {{if .Rows}}
     <div class="overflow-x-auto">
@@ -36,22 +39,25 @@
         <tbody>
           {{range .Rows}}
           <tr>
-            <td class="whitespace-nowrap">{{fmtTime .TS}}</td>
-            <td>{{.Username}}</td>
-            <td class="font-mono text-xs">{{.IP}}</td>
-            <td>{{.ActionLabel}}</td>
+            <td class="mono text-xs whitespace-nowrap">{{fmtDateTime .TS}}</td>
+            <td class="whitespace-nowrap">{{.Username}}</td>
+            <td class="mono text-xs">{{.IP}}</td>
+            <td class="font-semibold">{{.ActionLabel}}</td>
             <td>{{.Target}}</td>
-            <td>{{if .OK}}<span class="badge badge-success">Berhasil</span>{{else}}<span class="text-error text-sm">{{.Outcome}}</span>{{end}}</td>
-            <td class="font-mono text-xs break-all">{{.Detail}}</td>
+            <td>{{if .OK}}{{template "badge" (badgeOf "success" "Berhasil")}}{{else}}{{template "badge" (badgeOf "error" "Gagal")}}<div class="mt-1 text-xs text-error-text">{{.Outcome}}</div>{{end}}</td>
+            <td class="min-w-56 max-w-md">
+              {{with .Summary}}<div class="break-words">{{.}}</div>{{end}}
+              {{with .Detail}}<details class="mt-1"><summary class="help cursor-pointer">JSON</summary><code class="mt-1 block text-xs break-all">{{.}}</code></details>{{end}}
+            </td>
           </tr>
           {{end}}
         </tbody>
       </table>
     </div>
-    {{if eq (len .Rows) .Limit}}<p class="text-xs text-base-content/70">Menampilkan {{.Limit}} catatan terbaru; persempit filter untuk melihat yang lebih lama.</p>{{end}}
+    {{if eq (len .Rows) .Limit}}<p class="help mt-3">Menampilkan {{.Limit}} catatan terbaru; persempit filter untuk melihat yang lebih lama.</p>{{end}}
     {{else}}
-    <p class="text-base-content/70">Tidak ada catatan untuk filter ini.</p>
+    {{template "empty" (emptyOf "Tidak ada catatan untuk filter ini." "" "")}}
     {{end}}
   </div>
-</div>
+</section>
 {{end}}

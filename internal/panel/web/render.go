@@ -131,7 +131,9 @@ type Renderer struct {
 }
 
 var templateFuncs = template.FuncMap{
-	"fmtTime":     fmtTime,
+	"fmtTime": fmtTime,
+	// fmtDateTime is the audit page's date: dd-mm-yyyy HH:MM.
+	"fmtDateTime": fmtDateTime,
 	"fmtMB":       fmtMB,
 	"fmtBytes":    fmtBytes,
 	"sub":         func(a, b int64) int64 { return a - b },
@@ -237,6 +239,24 @@ func fmtTime(v any) string {
 		return "-"
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+// fmtDateTime formats a time (or *time.Time) as dd-mm-yyyy HH:MM in the
+// panel host's local zone (design spec 5.6, 5.8 #5); zero or nil shows "-".
+func fmtDateTime(v any) string {
+	var t time.Time
+	switch x := v.(type) {
+	case time.Time:
+		t = x
+	case *time.Time:
+		if x != nil {
+			t = *x
+		}
+	}
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Local().Format("02-01-2006 15:04")
 }
 
 // fmtMB shows a size in MB as "x.y GB" from 1024 MB upwards, else "n MB".

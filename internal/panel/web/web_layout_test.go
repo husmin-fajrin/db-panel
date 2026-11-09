@@ -287,3 +287,21 @@ func TestSettingsTampilan(t *testing.T) {
 		t.Errorf("tema_bawaan = %q after a form without it, want gelap", v)
 	}
 }
+
+// TestLoginBannerInsideCard (design spec 5.6): the login page shows its
+// error once, inside the card, with the banner partial; no sidebar.
+func TestLoginBannerInsideCard(t *testing.T) {
+	e := newEnv(t)
+	rec := e.do("POST", "/login", map[string][]string{"username": {"admin"}, "password": {"salah"}}, nil)
+	body := rec.Body.String()
+	if n := strings.Count(body, "Nama pengguna atau kata sandi salah"); n != 1 {
+		t.Errorf("login error shown %d times, want once", n)
+	}
+	card := between(body, `class="card bg-base-100 w-full max-w-sm"`, "</form>")
+	if !strings.Contains(card, `class="banner banner-error"`) || !strings.Contains(card, "Nama pengguna atau kata sandi salah") {
+		t.Errorf("login error is not a banner inside the card:\n%s", card)
+	}
+	if strings.Contains(body, "menu-utama") {
+		t.Error("login page has the sidebar")
+	}
+}
