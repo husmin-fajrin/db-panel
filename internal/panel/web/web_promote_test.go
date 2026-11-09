@@ -393,7 +393,7 @@ func TestPromotePlannedShowsMasterReportTime(t *testing.T) {
 	at := time.Date(2026, 11, 2, 9, 59, 50, 0, time.Local)
 	v.LastReportAt = &at
 	f.setView(v)
-	wantBody(t, e.do("GET", "/masters/1/promote", nil, e.cookie()), "Laporan master: pukul 09:59:50")
+	wantBody(t, e.do("GET", "/masters/1/promote", nil, e.cookie()), `Laporan master: pukul <span class="mono">09:59:50</span>`)
 }
 
 func TestPromotePageBranchedNeedsAcceptance(t *testing.T) {
@@ -596,6 +596,15 @@ func TestPromotePageColumnsAndBadges(t *testing.T) {
 		!strings.Contains(btn, `data-confirm-danger="1"`) {
 		t.Errorf("promote button = %q", btn)
 	}
+	// The most current replica cannot be chosen: its figure says why.
+	v := plannedView()
+	v.Candidates[0].Writable = true
+	f.setView(v)
+	rec2 := e.do("GET", "/masters/1/promote", nil, e.cookie())
+	if note := between(rec2.Body.String(), "data-most-current-note>", "</span>"); !strings.Contains(note, "tidak bisa dipilih: Bisa ditulis (super_read_only mati)") {
+		t.Errorf("most current figure note = %q", note)
+	}
+	f.setView(plannedView())
 	// The summary figures from the consideration data.
 	wantBody(t, rec, "Apa yang akan terjadi", "Laporan master", "Jeda tulis", "Kandidat paling mutakhir")
 }
@@ -629,6 +638,10 @@ func TestPromotePageStepsList(t *testing.T) {
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("emergency steps = %q, want %q", got, want)
 	}
+	// What the steps say about other replicas and the old master.
+	wantBody(t, e.do("GET", "/masters/1/promote", nil, c),
+		"Replika lain mengikuti master baru; yang tidak terjangkau diarahkan saat tersambung lagi; yang punya transaksi di luar master baru perlu dibangun ulang.",
+		"Master lama dijadikan baca-saja di bawah master baru;")
 	// Every step but the last (the user's own) is a step of the job.
 	for _, mode := range []string{proto.PromotePlanned, proto.PromoteEmergency} {
 		job := orchestrator.PromoteStepNames(mode)

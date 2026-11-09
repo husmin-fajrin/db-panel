@@ -131,8 +131,8 @@ func promoteScreenSteps(mode string) []promoteStep {
 	}
 	steps = append(steps,
 		promoteStep{0, "Jadikan master baru", "Replika terpilih menjadi master dan menerima tulisan."},
-		promoteStep{0, "Karantina master lama", "Master lama ditahan di luar layanan; bila tidak terjangkau, karantina menyusul saat tersambung."},
-		promoteStep{0, "Arahkan replika lain", "Replika lain mengikuti master baru; yang tidak terjangkau diarahkan saat tersambung lagi."},
+		promoteStep{0, "Karantina master lama", "Master lama dijadikan baca-saja di bawah master baru; bila tidak terjangkau, karantina menyusul saat tersambung."},
+		promoteStep{0, "Arahkan replika lain", "Replika lain mengikuti master baru; yang tidak terjangkau diarahkan saat tersambung lagi; yang punya transaksi di luar master baru perlu dibangun ulang."},
 		promoteStep{0, "Alihkan aplikasi", "Anda mengganti alamat database di tiap aplikasi ke master baru, di layar pengalihan."})
 	for i := range steps {
 		steps[i].Num = i + 1

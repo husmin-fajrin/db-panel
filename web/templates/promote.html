@@ -20,7 +20,7 @@
       </div>
       <div class="flex min-w-0 flex-col gap-1 rounded-lg border border-base-300 p-4">
         <span class="help">Kandidat paling mutakhir</span>
-        {{with .MostCurrent}}<span class="text-lg font-semibold break-words">{{.Name}}</span><span class="help">lag <span class="mono">{{.Lag}}</span></span>
+        {{with .MostCurrent}}<span class="text-lg font-semibold break-words">{{.Name}}</span><span class="help" data-most-current-note>{{with .NotSelectable}}tidak bisa dipilih: {{.}}{{else}}lag <span class="mono">{{$.MostCurrent.Lag}}</span>{{end}}</span>
         {{else}}<span class="text-lg font-semibold">tidak ada</span><span class="help">{{if $.View.Branched}}replika bercabang{{else}}tidak ada replika yang memuat semua transaksi{{end}}</span>{{end}}
       </div>
     </div>
@@ -54,7 +54,7 @@
     <p class="text-sm">Panel membaca binlog terakhir di disk master: {{if .Lost}}ada {{.Lost}} transaksi yang belum sampai ke replika mana pun{{else}}semua transaksi di binlog master sudah sampai ke replika paling mutakhir{{end}}.</p>
     {{end}}
     {{else}}
-    {{if .LastReport}}<p class="text-sm" data-master-report>Laporan master: pukul {{.LastReport}} ({{.LastReportAgo}}).</p>{{end}}
+    {{if .LastReport}}<p class="text-sm" data-master-report>Laporan master: pukul <span class="mono">{{.LastReport}}</span> ({{.LastReportAgo}}).</p>{{end}}
     <p>Agent master tersambung dan MySQL master menjawab{{with .MasterStatus}} (status: {{.}}){{end}}, jadi promote berjalan terencana: panel mengunci master, menunggu replika terpilih menerapkan semua transaksi master, lalu menjadikannya master baru. Tidak ada transaksi yang hilang. Anda tidak memilih mode; mode mengikuti keadaan master.</p>
     {{end}}
     {{if .Local}}
