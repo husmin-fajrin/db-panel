@@ -82,6 +82,9 @@ const (
 	// (spec 5.12); audit_log and job_log never are.
 	SettingAlertsRetentionDays = "alerts_retention_days"
 	SettingEventsRetentionDays = "events_retention_days"
+	// SettingSamplesRetentionDays: lag samples (health_samples) older
+	// than this many days are pruned daily; 1 to 90, 7 by default.
+	SettingSamplesRetentionDays = "samples_retention_days"
 )
 
 // Setting keys of the panel's look (Pengaturan, Tampilan).

@@ -239,7 +239,10 @@ func (h *Hub) OnEvent(serverID int64, ev proto.Event) {
 // report take from the backlog allowance. A dropped report is counted
 // and logged, at most once per dropLogEvery. The payload is decoded
 // outside rateMu, so one server's flood holds no other server's
-// admission behind a JSON scan.
+// admission behind a JSON scan. Only monitor.snapshot reports come here:
+// the agent's lag sample (proto.EventSample, one per check) passes to the
+// listener as is, and the panel's monitor limits it instead (one per 5 s
+// per server, its drops counted with these in View.ReportsDropped).
 func (h *Hub) allowReport(serverID int64, payload json.RawMessage) bool {
 	if len(payload) > maxHealthPayload {
 		h.drop(serverID, "payload over 64 KiB")

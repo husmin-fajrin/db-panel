@@ -68,8 +68,10 @@ type settingsForm struct {
 	WeeklyDay, WeeklyTime string
 	BaseURL               string
 
-	// Days.
-	AlertsRetention, EventsRetention string
+	// Days. A post without samples_retention (a page from before it
+	// existed) keeps the stored value: keepSamples.
+	AlertsRetention, EventsRetention, SamplesRetention string
+	keepSamples                                        bool
 
 	// Tampilan: nama_instansi and tema_bawaan. A post without the field
 	// (a page from before they existed) keeps the stored value:
@@ -90,6 +92,8 @@ func readSettingsForm(r *http.Request) settingsForm {
 		BaseURL:         v("base_url"),
 		AlertsRetention: v("alerts_retention"), EventsRetention: v("events_retention"),
 	}
+	_, hasSamples := r.PostForm["samples_retention"]
+	f.SamplesRetention, f.keepSamples = v("samples_retention"), !hasSamples
 	_, hasInstansi := r.PostForm["nama_instansi"]
 	_, hasTema := r.PostForm["tema_bawaan"]
 	f.Instansi, f.keepInstansi = v("nama_instansi"), !hasInstansi
@@ -114,7 +118,8 @@ func formFromSettings(set monitor.Settings, chatID string, kinds map[string]bool
 		Weekly:      set.WeeklySummary, WeeklyDay: day, WeeklyTime: at,
 		BaseURL:         set.PanelBaseURL,
 		AlertsRetention: strconv.Itoa(set.AlertsRetentionDays), EventsRetention: strconv.Itoa(set.EventsRetentionDays),
-		Instansi: lk.Instansi, TemaBawaan: lk.Tema,
+		SamplesRetention: strconv.Itoa(set.SamplesRetentionDays),
+		Instansi:         lk.Instansi, TemaBawaan: lk.Tema,
 	}
 	for _, k := range monitor.AllKinds() {
 		on, ok := kinds[k]
@@ -159,6 +164,9 @@ func (f settingsForm) validate(base monitor.Settings) (monitor.Settings, string)
 		"Retensi peringatan tertutup", "hari")
 	set.EventsRetentionDays = num(f.EventsRetention, monitor.MinRetentionDays, monitor.MaxRetentionDays,
 		"Retensi riwayat status", "hari")
+	// Its own range, not the 1–3650 above (spec 5.7).
+	set.SamplesRetentionDays = num(f.SamplesRetention, monitor.MinSamplesRetentionDays,
+		monitor.MaxSamplesRetentionDays, "Retensi sampel lag", "hari")
 	switch {
 	case msg != "":
 	case !slices.ContainsFunc(weekDays, func(d weekDay) bool { return d.Value == f.WeeklyDay }):
@@ -346,6 +354,9 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "load look settings", err)
 		return
 	}
+	if f.keepSamples {
+		f.SamplesRetention = strconv.Itoa(prev.SamplesRetentionDays)
+	}
 	if f.keepInstansi {
 		f.Instansi = prevLook.Instansi
 	}
@@ -458,6 +469,7 @@ func changedSettings(prev, cur monitor.Settings) []string {
 		{store.SettingPanelBaseURL, prev.PanelBaseURL == cur.PanelBaseURL},
 		{store.SettingAlertsRetentionDays, prev.AlertsRetentionDays == cur.AlertsRetentionDays},
 		{store.SettingEventsRetentionDays, prev.EventsRetentionDays == cur.EventsRetentionDays},
+		{store.SettingSamplesRetentionDays, prev.SamplesRetentionDays == cur.SamplesRetentionDays},
 	} {
 		if !c.same {
 			out = append(out, c.key)

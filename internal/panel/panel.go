@@ -65,8 +65,9 @@ const (
 	defaultTLSRenewFirst = 10 * time.Minute
 	tlsRenewEvery        = 24 * time.Hour
 
-	// Closed alerts and status events past their retention (settings) are
-	// pruned this long after the start, then every day (spec 5.12).
+	// Closed alerts, status events and lag samples past their retention
+	// (settings) are pruned this long after the start, then every day (spec
+	// 5.12, 5.7).
 	defaultPruneFirst = 5 * time.Minute
 	pruneEvery        = 24 * time.Hour
 )

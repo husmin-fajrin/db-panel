@@ -537,3 +537,44 @@ func TestRetentionSettingsValidation(t *testing.T) {
 	rec = e.do("GET", "/settings", nil, c)
 	wantBody(t, rec, `name="alerts_retention" value="3650"`, `name="events_retention" value="1"`)
 }
+
+// TestSamplesRetentionValidation (spec 5.7): the lag samples' retention
+// is shown in Retensi (7 days by default), takes 1 to 90 days only and
+// is stored as samples_retention_days; a page posted without the field
+// keeps the stored value.
+func TestSamplesRetentionValidation(t *testing.T) {
+	e := settingsEnv(t)
+	c := e.cookie()
+	rec := e.do("GET", "/settings", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `name="samples_retention" value="7"`)
+
+	for _, v := range []string{"0", "91", "abc", ""} {
+		rec := e.do("POST", "/settings", with(validSettings(), "samples_retention", v), c)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("samples_retention=%q: status %d, want 400", v, rec.Code)
+			continue
+		}
+		const msg = "Retensi sampel lag harus 1 sampai 90 hari"
+		if flash := between(rec.Body.String(), `role="alert"`, "</div>"); !strings.Contains(flash, msg) {
+			t.Errorf("samples_retention=%q: flash %q does not mention %q", v, flash, msg)
+		}
+	}
+	if saves, _ := e.set.counts(); saves != 0 {
+		t.Fatalf("refused forms saved %d times", saves)
+	}
+
+	for _, ok := range []string{"1", "90"} {
+		rec := e.do("POST", "/settings", with(validSettings(), "samples_retention", ok), c)
+		wantCode(t, rec, http.StatusSeeOther)
+		if v, err := e.st.GetSetting(store.SettingSamplesRetentionDays); err != nil || v != ok {
+			t.Fatalf("stored samples retention = %q, %v; want %s", v, err, ok)
+		}
+	}
+	// validSettings has no samples_retention: the stored 90 stays.
+	wantCode(t, e.do("POST", "/settings", validSettings(), c), http.StatusSeeOther)
+	if v, _ := e.st.GetSetting(store.SettingSamplesRetentionDays); v != "90" {
+		t.Fatalf("samples retention after a post without the field = %q, want 90", v)
+	}
+	wantBody(t, e.do("GET", "/settings", nil, c), `name="samples_retention" value="90"`)
+}

@@ -57,13 +57,18 @@ func (f *fakeSource) callCount() int {
 
 // fakeEmitter records the health events it accepts. While offline it
 // refuses with proto.ErrOffline; acceptLeft >= 0 accepts only that many
-// more events before going offline; failOnce refuses the next event only.
+// more health events before going offline; failOnce refuses the next
+// health event only. Samples (monitor.sample) are refused while offline
+// and otherwise recorded apart, never counted against acceptLeft or
+// failOnce.
 type fakeEmitter struct {
-	mu         sync.Mutex
-	offline    bool
-	acceptLeft int
-	failOnce   bool
-	events     []proto.HealthEvent
+	mu          sync.Mutex
+	offline     bool
+	acceptLeft  int
+	failOnce    bool
+	events      []proto.HealthEvent
+	samples     []proto.SampleEvent
+	sampleBytes []int
 }
 
 func (e *fakeEmitter) Emit(ev proto.Event) error {
@@ -71,6 +76,15 @@ func (e *fakeEmitter) Emit(ev proto.Event) error {
 	defer e.mu.Unlock()
 	if e.offline {
 		return proto.ErrOffline
+	}
+	if ev.Type == proto.EventSample {
+		var se proto.SampleEvent
+		if err := json.Unmarshal(ev.Payload, &se); err != nil {
+			panic(err)
+		}
+		e.samples = append(e.samples, se)
+		e.sampleBytes = append(e.sampleBytes, len(ev.Payload))
+		return nil
 	}
 	if e.failOnce {
 		e.failOnce = false
@@ -104,6 +118,12 @@ func (e *fakeEmitter) got() []proto.HealthEvent {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]proto.HealthEvent(nil), e.events...)
+}
+
+func (e *fakeEmitter) gotSamples() ([]proto.SampleEvent, []int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]proto.SampleEvent(nil), e.samples...), append([]int(nil), e.sampleBytes...)
 }
 
 type fakeClock struct {
@@ -868,5 +888,62 @@ func TestMonitorRetriesBusySalvageSweep(t *testing.T) {
 	defer src.mu.Unlock()
 	if n := len(src.calls); n != 4 || !src.calls[3].Equal(ran.Add(SalvageSweepEvery)) {
 		t.Errorf("sweeps a day after the one that ran = %d (%v), want 4", n, src.calls)
+	}
+}
+
+// TestAgentEmitsSampleEveryCheck (spec 8.1): every scheduled check sends
+// one monitor.sample, whether or not a health report goes out; a sample
+// carries the lag, the thread states and MySQLOK, stays within 200 bytes
+// and is never kept in the backlog while the panel is away.
+func TestAgentEmitsSampleEveryCheck(t *testing.T) {
+	r := newRig(t, base())
+	r.tick(15 * time.Second)
+	r.tick(15 * time.Second)
+	if reports := r.em.got(); len(reports) > 1 {
+		t.Fatalf("3 checks without a change sent %d health reports, want at most 1", len(reports))
+	}
+	samples, sizes := r.em.gotSamples()
+	if len(samples) != 3 {
+		t.Fatalf("3 checks sent %d samples, want 3", len(samples))
+	}
+	for i, s := range samples {
+		if s.LagSec == nil || *s.LagSec != 5 || s.IORunning != "Yes" || s.SQLRunning != "Yes" || !s.MySQLOK || s.TakenAgoMS != 0 {
+			t.Errorf("sample %d = %+v, want lag 5, Yes/Yes, mysql ok, taken now", i, s)
+		}
+	}
+
+	// The largest sample: a long lag, Connecting, no MySQL.
+	r.src.set(func(s *proto.HealthSnapshot) {
+		s.MySQLOK = true
+		s.Replica.IORunning, s.Replica.SQLRunning = "Connecting", "No"
+		big := int64(1<<62 - 1)
+		s.Replica.SecondsBehind = &big
+	})
+	r.tick(15 * time.Second)
+	// MySQL not answering: no replica fields, lag unknown.
+	r.src.set(func(s *proto.HealthSnapshot) { *s = proto.HealthSnapshot{MySQLError: "dial tcp: connection refused"} })
+	r.tick(15 * time.Second)
+	samples, sizes = r.em.gotSamples()
+	if len(samples) != 5 {
+		t.Fatalf("5 checks sent %d samples, want 5", len(samples))
+	}
+	if s := samples[4]; s.MySQLOK || s.LagSec != nil || s.IORunning != "" || s.SQLRunning != "" {
+		t.Errorf("sample without MySQL = %+v", s)
+	}
+	for i, n := range sizes {
+		if n > 200 {
+			t.Errorf("sample %d is %d bytes of JSON, want at most 200", i, n)
+		}
+	}
+
+	// Offline: samples are dropped, not kept for later.
+	r.em.setOnline(false, -1)
+	r.tick(15 * time.Second)
+	r.tick(15 * time.Second)
+	r.em.setOnline(true, -1)
+	r.tick(15 * time.Second)
+	samples, _ = r.em.gotSamples()
+	if len(samples) != 6 {
+		t.Fatalf("after 2 offline checks and 1 online: %d samples, want 6 (none from the backlog)", len(samples))
 	}
 }

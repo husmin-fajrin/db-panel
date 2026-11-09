@@ -1033,3 +1033,116 @@ func TestHealthReportKeepsTLSVerified(t *testing.T) {
 		t.Fatal("an older agent's report set tls_verified")
 	}
 }
+
+// sendSample emits a monitor.sample of the agent through the hub.
+func (a *fakeAgent) sendSample(se proto.SampleEvent) {
+	b, err := json.Marshal(se)
+	if err != nil {
+		a.r.t.Fatal(err)
+	}
+	a.r.hub.OnEvent(a.id, proto.Event{Type: proto.EventSample, Payload: b})
+}
+
+// samplesAt is serverID's stored samples between from and to, one point
+// per second.
+func (r *rig) samplesAt(serverID int64, from, to time.Time) []store.LagPoint {
+	r.t.Helper()
+	got, err := r.st.LagSeries([]int64{serverID}, from, to, time.Second)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return got[serverID]
+}
+
+// TestPanelStoresSampleAndSnapshotLag (spec 5.7, 8.1): a monitor.sample
+// becomes a health_samples row at the panel's now minus its age; a health
+// report (also from the backlog, also from an agent without samples)
+// writes one at the report's time; a sample and a report at the same
+// second are one row. Samples never change the status; one arriving
+// within 5 s of the server's previous sample is dropped and counted in
+// ReportsDropped.
+func TestPanelStoresSampleAndSnapshotLag(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	start := r.clk.Now()
+	if pts := r.samplesAt(rID, start.Add(-time.Minute), start.Add(time.Minute)); len(pts) != 1 ||
+		!pts[0].T.Equal(start) || pts[0].Lag == nil || *pts[0].Lag != 0 {
+		t.Fatalf("samples after the first report = %+v, want one at %v with lag 0", pts, start)
+	}
+	statusEvents := len(r.events(rID, "status"))
+
+	// A sample taken 1.5 s ago, the threads stopped: stored, status kept.
+	r.clk.Add(30 * time.Second)
+	ra.sendSample(proto.SampleEvent{TakenAgoMS: 1500, LagSec: ptr(42), IORunning: "No", SQLRunning: "No", MySQLOK: true})
+	at := r.clk.Now().Add(-1500 * time.Millisecond).Truncate(time.Second)
+	pts := r.samplesAt(rID, start.Add(time.Second), r.clk.Now())
+	if len(pts) != 1 || !pts[0].T.Equal(at) || pts[0].Lag == nil || *pts[0].Lag != 42 {
+		t.Fatalf("samples after monitor.sample = %+v, want lag 42 at %v", pts, at)
+	}
+	if v := r.view(rID); v.Status.Code != StatusSynced {
+		t.Fatalf("status after a sample = %q, want %q (samples never change it)", v.Status.Code, StatusSynced)
+	}
+	if n := len(r.events(rID, "status")); n != statusEvents {
+		t.Fatalf("a sample wrote %d status events", n-statusEvents)
+	}
+
+	// Within 5 s of the last sample: dropped and counted.
+	r.clk.Add(2 * time.Second)
+	ra.sendSample(proto.SampleEvent{LagSec: ptr(77), IORunning: "Yes", SQLRunning: "Yes", MySQLOK: true})
+	if pts := r.samplesAt(rID, start.Add(time.Second), r.clk.Now()); len(pts) != 1 {
+		t.Fatalf("a sample 2 s after the last one was stored: %+v", pts)
+	}
+	if v := r.view(rID); v.ReportsDropped != 1 {
+		t.Fatalf("ReportsDropped = %d, want 1 (the early sample)", v.ReportsDropped)
+	}
+	r.clk.Add(5 * time.Second)
+	ra.sendSample(proto.SampleEvent{LagSec: nil, IORunning: "Connecting", SQLRunning: "Yes", MySQLOK: true})
+	if pts := r.samplesAt(rID, start.Add(time.Second), r.clk.Now()); len(pts) != 2 || pts[1].Lag != nil {
+		t.Fatalf("samples after one 5 s later = %+v, want 2, the last without lag", pts)
+	}
+
+	// An unreadable or oversized sample is ignored.
+	r.hub.OnEvent(rID, proto.Event{Type: proto.EventSample, Payload: json.RawMessage(`{"lag_sec":"x"`)})
+	r.hub.OnEvent(rID, proto.Event{Type: proto.EventSample, Payload: json.RawMessage(`"` + strings.Repeat("a", 2048) + `"`)})
+
+	// A health report (an agent without samples gives these only): a row
+	// at the report's time; a sample at the same second adds nothing.
+	r.clk.Add(time.Minute)
+	ra.setSnap(func(s *proto.HealthSnapshot) {
+		rs := *s.Replica
+		rs.SecondsBehind = ptr(7)
+		s.Replica = &rs
+	})
+	b, err := json.Marshal(proto.HealthEvent{Seq: 50, TakenAgoMS: 3000, Snapshot: func() proto.HealthSnapshot {
+		ra.mu.Lock()
+		defer ra.mu.Unlock()
+		return ra.snap
+	}()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.hub.OnEvent(rID, proto.Event{Type: proto.EventHealth, Payload: b})
+	repAt := r.clk.Now().Add(-3 * time.Second)
+	ra.sendSample(proto.SampleEvent{TakenAgoMS: 3000, LagSec: ptr(8), IORunning: "Yes", SQLRunning: "Yes", MySQLOK: true})
+	pts = r.samplesAt(rID, repAt.Add(-time.Second), r.clk.Now())
+	if len(pts) != 1 || !pts[0].T.Equal(repAt) || pts[0].Lag == nil || *pts[0].Lag != 7 {
+		t.Fatalf("samples around the report = %+v, want one at %v with the report's lag 7", pts, repAt)
+	}
+
+	// A backlog report fills the gap at its own time.
+	r.clk.Add(time.Minute)
+	b, err = json.Marshal(proto.HealthEvent{Seq: 51, TakenAgoMS: 40_000, Backlog: true, Snapshot: replicaSnap(srcUUID + ":1-100")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.hub.OnEvent(rID, proto.Event{Type: proto.EventHealth, Payload: b})
+	blAt := r.clk.Now().Add(-40 * time.Second)
+	if pts := r.samplesAt(rID, blAt, blAt); len(pts) != 1 {
+		t.Fatalf("no sample from the backlog report at %v: %+v", blAt, pts)
+	}
+	if ok, err := r.st.HasSamples(rID, start); err != nil || !ok {
+		t.Fatalf("HasSamples = %v, %v", ok, err)
+	}
+}

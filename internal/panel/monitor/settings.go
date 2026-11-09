@@ -29,27 +29,35 @@ type Settings struct {
 	// status events older than this many days are pruned daily (spec
 	// 5.12).
 	AlertsRetentionDays, EventsRetentionDays int
+	// SamplesRetentionDays: lag samples older than this many days are
+	// pruned daily (spec 5.7); its own bounds, MinSamplesRetentionDays to
+	// MaxSamplesRetentionDays.
+	SamplesRetentionDays int
 }
 
 // Defaults (plan 3, Global Constraints).
 const (
-	defaultCheckEvery      = 15 * time.Second
-	defaultSummaryEvery    = 120 * time.Second
-	defaultLag             = 60 * time.Second
-	defaultDisconnectAlert = 3 * time.Minute
-	defaultDownAfter       = 30 * time.Second
-	defaultDiskWarn        = 85
-	defaultDiskCrit        = 95
-	defaultConnPct         = 80
-	defaultAlertRepeat     = 6 * time.Hour
-	defaultLaggingAlert    = 5 * time.Minute
-	defaultWeeklyAt        = "Mon 07:00"
-	defaultAlertsRetention = 90  // days
-	defaultEventsRetention = 180 // days
+	defaultCheckEvery       = 15 * time.Second
+	defaultSummaryEvery     = 120 * time.Second
+	defaultLag              = 60 * time.Second
+	defaultDisconnectAlert  = 3 * time.Minute
+	defaultDownAfter        = 30 * time.Second
+	defaultDiskWarn         = 85
+	defaultDiskCrit         = 95
+	defaultConnPct          = 80
+	defaultAlertRepeat      = 6 * time.Hour
+	defaultLaggingAlert     = 5 * time.Minute
+	defaultWeeklyAt         = "Mon 07:00"
+	defaultAlertsRetention  = 90  // days
+	defaultEventsRetention  = 180 // days
+	defaultSamplesRetention = 7   // days
 
 	// Bounds of both retentions, in days.
 	MinRetentionDays = 1
 	MaxRetentionDays = 3650
+	// Bounds of the lag samples' retention, in days.
+	MinSamplesRetentionDays = 1
+	MaxSamplesRetentionDays = 90
 
 	staleFactor = 3 // a report older than staleFactor × SummaryEvery is stale
 
@@ -80,6 +88,8 @@ func DefaultSettings() Settings {
 
 		AlertsRetentionDays: defaultAlertsRetention,
 		EventsRetentionDays: defaultEventsRetention,
+
+		SamplesRetentionDays: defaultSamplesRetention,
 	}
 	s.StaleAfter = staleFactor * s.SummaryEvery
 	return s
@@ -90,7 +100,7 @@ var settingKeys = []string{
 	store.SettingDisconnectAlert, store.SettingDownAfter, store.SettingDiskWarn, store.SettingDiskCrit,
 	store.SettingAlertRepeatHours, store.SettingWeeklySummary, store.SettingWeeklySummaryAt,
 	store.SettingPanelBaseURL, store.SettingConnPct, store.SettingLaggingAlert,
-	store.SettingAlertsRetentionDays, store.SettingEventsRetentionDays,
+	store.SettingAlertsRetentionDays, store.SettingEventsRetentionDays, store.SettingSamplesRetentionDays,
 }
 
 // LoadSettings reads the settings from s. A key that is not set, or holds a
@@ -147,6 +157,9 @@ func LoadSettings(s *store.Store) (Settings, error) {
 	if v, ok := num(store.SettingEventsRetentionDays, MinRetentionDays, MaxRetentionDays); ok {
 		st.EventsRetentionDays = v
 	}
+	if v, ok := num(store.SettingSamplesRetentionDays, MinSamplesRetentionDays, MaxSamplesRetentionDays); ok {
+		st.SamplesRetentionDays = v
+	}
 	st.StaleAfter = staleFactor * st.SummaryEvery
 	return st, nil
 }
@@ -196,6 +209,8 @@ func (st Settings) Validate() error {
 		return fmt.Errorf("retensi peringatan tertutup harus %d sampai %d hari", MinRetentionDays, MaxRetentionDays)
 	case st.EventsRetentionDays < MinRetentionDays || st.EventsRetentionDays > MaxRetentionDays:
 		return fmt.Errorf("retensi riwayat status harus %d sampai %d hari", MinRetentionDays, MaxRetentionDays)
+	case st.SamplesRetentionDays < MinSamplesRetentionDays || st.SamplesRetentionDays > MaxSamplesRetentionDays:
+		return fmt.Errorf("retensi sampel lag harus %d sampai %d hari", MinSamplesRetentionDays, MaxSamplesRetentionDays)
 	}
 	return nil
 }
@@ -227,6 +242,7 @@ func SaveSettings(s *store.Store, st Settings) error {
 		{store.SettingLaggingAlert, sec(st.LaggingAlert)},
 		{store.SettingAlertsRetentionDays, strconv.Itoa(st.AlertsRetentionDays)},
 		{store.SettingEventsRetentionDays, strconv.Itoa(st.EventsRetentionDays)},
+		{store.SettingSamplesRetentionDays, strconv.Itoa(st.SamplesRetentionDays)},
 	}
 	for _, p := range kv {
 		if err := s.SetSetting(p[0], p[1]); err != nil {

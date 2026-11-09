@@ -381,9 +381,10 @@ func (m *Monitor) pause(ctx context.Context) bool {
 }
 
 // tick is one scheduled check: send what the backlog holds, read a
-// snapshot, and report it when it changed or a summary is due. A change
-// the panel cannot take now joins the backlog; so does any change while
-// older entries still wait, keeping the panel's view in order.
+// snapshot, send its lag sample, and report it when it changed or a
+// summary is due. A change the panel cannot take now joins the backlog;
+// so does any change while older entries still wait, keeping the panel's
+// view in order.
 func (m *Monitor) tick(ctx context.Context) {
 	m.checkMu.Lock()
 	defer m.checkMu.Unlock()
@@ -395,6 +396,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	}
 	m.bootstrap(snap)
 	takenAt := m.now()
+	m.emitSample(snap, takenAt)
 	change := changed(m.prev, snap, o.LagThreshold, diskWarnPct, diskCritPct, connWarnPct)
 	if !change && takenAt.Sub(m.lastSent) < o.SummaryEvery {
 		return
@@ -469,4 +471,37 @@ func (m *Monitor) emit(e entry, backlog bool) error {
 		return err
 	}
 	return m.em.Emit(proto.Event{Type: proto.EventHealth, Payload: b})
+}
+
+// maxSampleState bounds the thread states a sample carries, keeping it
+// within 200 bytes whatever MySQL answers (Yes, No and Connecting fit).
+const maxSampleState = 16
+
+// emitSample sends snap's lag sample (proto.EventSample), taken at
+// takenAt. It is sent on every scheduled check and never kept: when the
+// panel cannot take it the chart loses one point only.
+func (m *Monitor) emitSample(snap proto.HealthSnapshot, takenAt time.Time) {
+	se := proto.SampleEvent{TakenAgoMS: m.now().Sub(takenAt).Milliseconds(), MySQLOK: snap.MySQLOK}
+	if rs := snap.Replica; rs != nil {
+		se.IORunning, se.SQLRunning = clip(rs.IORunning, maxSampleState), clip(rs.SQLRunning, maxSampleState)
+		if rs.SecondsBehind != nil {
+			lag := *rs.SecondsBehind
+			se.LagSec = &lag
+		}
+	}
+	b, err := json.Marshal(se)
+	if err != nil {
+		return
+	}
+	if err := m.em.Emit(proto.Event{Type: proto.EventSample, Payload: b}); err != nil {
+		m.logger.Debug("lag sample not sent", "err", err)
+	}
+}
+
+// clip is s cut to at most n bytes.
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }

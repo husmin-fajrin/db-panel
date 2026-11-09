@@ -101,6 +101,10 @@ type Monitor struct {
 	sendWeekly      func(ctx context.Context, text string) error
 	webCert         func() (int64, time.Time, bool)
 	version         string
+
+	sampleMu    sync.Mutex            // guards the two maps below; never held with mu
+	lastSample  map[int64]time.Time   // when each server's last sample was taken in
+	sampleDrops map[int64]sampleDrops // samples dropped per server (samples.go)
 }
 
 // New returns a Monitor holding the health rows the store kept from the
@@ -127,6 +131,8 @@ func New(d Deps) *Monitor {
 		sendWeekly:      d.SendWeekly,
 		webCert:         d.WebCert,
 		version:         d.Version,
+		lastSample:      make(map[int64]time.Time),
+		sampleDrops:     make(map[int64]sampleDrops),
 	}
 	set, err := LoadSettings(d.Store)
 	if err != nil {
@@ -218,12 +224,17 @@ func (m *Monitor) Run(ctx context.Context) {
 	}
 }
 
-// HandleEvent takes an agent's health report and the promote lock
+// HandleEvent takes an agent's health report, its lag sample
+// (monitor.sample, stored for the chart only) and the promote lock
 // guard's events (monitor.quarantined, monitor.lockExpired: one-time
 // notices). It reports whether ev was one of them (handled, possibly by
 // ignoring it).
 func (m *Monitor) HandleEvent(serverID int64, ev proto.Event) bool {
 	if m.handlePromoteEvent(serverID, ev) {
+		return true
+	}
+	if ev.Type == proto.EventSample {
+		m.handleSample(serverID, ev.Payload)
 		return true
 	}
 	if ev.Type != proto.EventHealth {
@@ -397,13 +408,15 @@ func (m *Monitor) Views() map[int64]View {
 	return out
 }
 
-// dropped is the hub's count of serverID's reports dropped in the last
-// hour; read without the Monitor's lock.
+// dropped is the count of serverID's reports dropped in the last hour:
+// the hub's (health reports over its rate limit) plus the Monitor's (lag
+// samples over theirs); read without the Monitor's lock.
 func (m *Monitor) dropped(serverID int64) int {
-	if m.hub == nil {
-		return 0
+	n := m.samplesDropped(serverID)
+	if m.hub != nil {
+		n += m.hub.Dropped(serverID)
 	}
-	return m.hub.Dropped(serverID)
+	return n
 }
 
 // String names a severity for browsers: ok, warn, crit or neutral.
@@ -564,6 +577,7 @@ func (m *Monitor) tick() {
 	alerts = append(alerts, m.checkPromotions(now)...)
 	alerts = append(alerts, m.closeNotices(now)...)
 	m.mu.Unlock()
+	m.forgetSamples(func(id int64) bool { return seen[id] })
 	m.emit(ups)
 	m.emitAlerts(alerts)
 }

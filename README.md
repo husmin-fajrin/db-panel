@@ -793,6 +793,18 @@ hari. Kedua angka bisa diubah di **Pengaturan > Retensi** (1 sampai 3650
 hari). Peringatan yang masih aktif tidak pernah dihapus, dan log audit
 serta log pekerjaan tidak pernah dipangkas.
 
+**Sampel lag.** Untuk grafik lag di dashboard, agent mengirim sampel kecil
+(lag, status thread IO dan SQL, MySQL terjangkau atau tidak) pada setiap
+pemeriksaan, terlepas dari apakah laporan dikirim. Sampel hanya mengisi
+grafik: status, peringatan, dan Telegram tetap dinilai dari laporan
+kesehatan. Panel menyimpan paling banyak satu sampel per 5 detik per
+server; sampel yang lebih sering dibuang dan ikut dihitung di **Detail
+teknis**. Saat panel tidak terjangkau sampel tidak disimpan agent, tetapi
+laporan tertunda tetap mengisi celahnya. Agent versi lama tidak mengirim
+sampel; grafiknya hanya memakai laporan kesehatan sehingga jarang. Sampel
+yang lebih tua dari 7 hari dihapus sekali sehari; angkanya bisa diubah di
+**Pengaturan > Retensi** (1 sampai 90 hari).
+
 ## Notifikasi Telegram
 
 Panel mengirim peringatan ke grup Telegram lewat bot milik Anda sendiri.

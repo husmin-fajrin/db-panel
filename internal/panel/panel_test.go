@@ -1514,3 +1514,81 @@ func TestPruneNeverTouchesAudit(t *testing.T) {
 		t.Fatalf("job log after pruning = %+v, %v; want the old line", lines, err)
 	}
 }
+
+// TestRetentionPrunesSamples (spec 5.7): the daily pruning deletes the
+// health samples older than samples_retention_days (7 by default), and
+// never touches audit_log or job_log.
+func TestRetentionPrunesSamples(t *testing.T) {
+	t.Parallel()
+	p := newPanel(t, testOptions(t))
+	now := time.Date(2026, 11, 9, 3, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	day := 24 * time.Hour
+	for _, ago := range []time.Duration{8 * day, 6 * day, time.Hour} {
+		if err := p.Store.AddHealthSample(store.HealthSample{ServerID: p.localID, TS: now.Add(-ago), MySQLOK: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := now.Add(-3000 * day)
+	if _, err := p.Store.AddAudit(store.AuditEntry{TS: old, Username: "admin", Action: "login", Outcome: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	job := store.Job{ID: "job-sampel", Kind: "prepare-master", ServerID: p.localID, ParamsJSON: "{}", CreatedAt: old}
+	if err := p.Store.CreateJob(job, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Store.AppendJobLog(job.ID, "info", "baris lama", old); err != nil {
+		t.Fatal(err)
+	}
+	auditBefore, err := p.Store.ListAudit(0, time.Time{}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(since time.Time) bool {
+		t.Helper()
+		ok, err := p.Store.HasSamples(p.localID, since)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	samplesBetween := func(from, to time.Time) int {
+		t.Helper()
+		got, err := p.Store.LagSeries([]int64{p.localID}, from, to, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got[p.localID])
+	}
+
+	p.pruneFirst = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.retentionLoop(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for samplesBetween(now.Add(-9*day), now.Add(-7*day)) > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if n := samplesBetween(now.Add(-9*day), now); n != 2 {
+		t.Fatalf("samples after the default 7-day pruning = %d, want the 6-day and 1-hour old ones", n)
+	}
+
+	if err := p.Store.SetSetting(store.SettingSamplesRetentionDays, "1"); err != nil {
+		t.Fatal(err)
+	}
+	p.pruneOld()
+	if n := samplesBetween(now.Add(-9*day), now); n != 1 || !has(now.Add(-2*time.Hour)) {
+		t.Fatalf("samples with 1-day retention = %d, want the 1-hour old one", n)
+	}
+
+	audit, err := p.Store.ListAudit(0, time.Time{}, 1000)
+	if err != nil || len(audit) != len(auditBefore) || len(audit) == 0 {
+		t.Fatalf("audit entries after pruning = %d (%v), want all %d", len(audit), err, len(auditBefore))
+	}
+	lines, err := p.Store.JobLog(job.ID, 0, 0)
+	if err != nil || len(lines) != 1 {
+		t.Fatalf("job log after pruning = %+v, %v; want the old line", lines, err)
+	}
+}

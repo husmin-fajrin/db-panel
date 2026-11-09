@@ -155,9 +155,10 @@ func (m *Monitor) load() {
 	}
 }
 
-// ingest takes one report placed at at; the caller holds mu. Reports
-// older (by Seq) than the last one taken since the agent connected are
-// ignored. A backlog report is not committed: the end of its batch is.
+// ingest takes one report placed at at, also as a lag sample; the caller
+// holds mu. Reports older (by Seq) than the last one taken since the
+// agent connected are ignored. A backlog report is not committed: the
+// end of its batch is.
 func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthUpdate {
 	s := m.state(id)
 	if he.Seq < s.lastSeq {
@@ -166,6 +167,7 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 	}
 	s.lastSeq = he.Seq
 	snap := redactSnapshot(he.Snapshot)
+	m.reportSample(id, &snap, at)
 	s.snap, s.receivedAt, s.snapBacklog, s.graceUntil = &snap, at, he.Backlog, time.Time{}
 	s.needsUpgrade = false // only a current agent reports
 	s.dirty = true

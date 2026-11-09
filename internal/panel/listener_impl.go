@@ -121,8 +121,8 @@ func (p *Panel) retentionLoop(ctx context.Context) {
 }
 
 // pruneOld deletes the alerts closed more than alerts_retention_days ago,
-// the status events older than events_retention_days and the expired
-// confirmations. It is the panel's only pruning: audit_log and job_log
+// the status events older than events_retention_days, the lag samples
+// older than samples_retention_days and the expired confirmations. It is the panel's only pruning: audit_log and job_log
 // are never pruned (spec 5.12). Failures are logged only.
 func (p *Panel) pruneOld() {
 	set, err := healthmon.LoadSettings(p.Store)
@@ -138,6 +138,7 @@ func (p *Panel) pruneOld() {
 	}{
 		{"closed alerts", func() (int64, error) { return p.Store.PruneAlertsClosedBefore(days(set.AlertsRetentionDays)) }},
 		{"status events", func() (int64, error) { return p.Store.PruneStatusEvents(days(set.EventsRetentionDays)) }},
+		{"lag samples", func() (int64, error) { return p.Store.PruneHealthSamples(days(set.SamplesRetentionDays)) }},
 		{"expired confirmations", func() (int64, error) { return p.Store.PruneConfirmations(now) }},
 	} {
 		n, err := step.prune()

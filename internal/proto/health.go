@@ -64,6 +64,26 @@ type HealthEvent struct {
 	Snapshot HealthSnapshot `json:"snapshot"`
 }
 
+// EventSample is the light event an agent's monitor sends with a
+// SampleEvent payload on every scheduled check (spec 8.1), whether or not
+// a health report goes out. The panel only stores it for the lag chart:
+// it never changes a status, an alert or a Telegram message. A sample the
+// panel cannot take at once is dropped, never kept for later.
+const EventSample = "monitor.sample"
+
+// SampleEvent is one check's lag sample: at most 200 bytes of JSON.
+type SampleEvent struct {
+	// TakenAgoMS is how long before sending the reading was taken, by the
+	// agent's clock, as in HealthEvent.
+	TakenAgoMS int64 `json:"taken_ago_ms"`
+	// LagSec is the replica's Seconds_Behind_Source; nil when unknown or
+	// the server is not a replica.
+	LagSec     *int64 `json:"lag_sec"`
+	IORunning  string `json:"io_running,omitempty"`  // as reported: Yes | No | Connecting; "" when not a replica
+	SQLRunning string `json:"sql_running,omitempty"` // Yes | No; "" when not a replica
+	MySQLOK    bool   `json:"mysql_ok"`
+}
+
 // MonitorConfigureParams are the parameters of monitor.configure. Each
 // interval is 10..3600 seconds; LagThresholdSec 0 keeps the current one.
 type MonitorConfigureParams struct {
