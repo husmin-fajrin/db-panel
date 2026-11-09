@@ -90,10 +90,10 @@ ArcadeNeon yang disesuaikan (D), mode gelap dan terang, huruf dibundel.
 | `base-300` garis, pemisah | `#2A2A3E` | `#DDE2EA` |
 | `base-content` teks | `#EEEEF0` | `#141424` |
 | teks redup (`base-content/70` dipetakan ke warna tetap) | `#9999AA` | `#5E6577` |
-| `primary` aksi utama, tautan, menu aktif | `#00F0FF` (teks di atasnya `#0A0A14`) | `#0A7F93` (teks `#FFFFFF`) |
+| `primary` aksi utama, tautan, menu aktif | `#00F0FF` (teks di atasnya `#0A0A14`) | `#076F81` (teks `#FFFFFF`; semula `#0A7F93`, diubah saat eksekusi karena 4,34:1 di atas `base-200`) |
 | `success` sehat, pulih, sinkron | `#39FF14` | `#1E9E2E` |
 | `warning` peringatan, tertunda, sebagian | `#FFD600` | `#C98A00` |
-| `error` bahaya, destruktif, gagal, kritis | `#FF006E` (teks di atasnya `#FFFFFF`; teks merah di latar gelap memakai `#FF4D94`) | `#E0005F` (teks merah `#B8004E`) |
+| `error` bahaya, destruktif, gagal, kritis | `#FF006E` (teks di atasnya `#0A0A14`; semula putih, diubah saat eksekusi karena 3,83:1; teks merah di latar gelap memakai `#FF4D94`) | `#E0005F` (teks merah `#B8004E`) |
 | `info` | sama dengan `primary` | sama dengan `primary` |
 | `neutral` tombol sekunder | `#1A1A2E` | `#E9EDF2` |
 
@@ -398,3 +398,20 @@ berubah per halaman:
   sama persis dengan mockup D). Pilihan tab disimpan di `localStorage`.
   Alasan: bentuk tidak berubah untuk pemakai satu topologi, dan
   informasi terburuk tetap terlihat tanpa berpindah tab.
+
+## 9. Catatan eksekusi (2026-11-09)
+
+- Token diubah saat eksekusi agar lolos kontras 4,5:1: primary terang
+  `#076F81`, error-content gelap `#0A0A14` (tabel 5.1 sudah diperbarui).
+- Kolom "Antrean terapan" di tabel kandidat promote dilipat menjadi
+  baris bantu di bawah "Posisi terhadap master" dengan teks yang sama.
+- Tombol promote tetap "Promote" (teks "Lanjutkan ke konfirmasi" di
+  mockup tidak dipakai); penjelasan langkah di layar promote diambil
+  dari nama langkah job (terencana 6, darurat 4).
+- Sampel lag: event `monitor.sample` dibatasi 1 KiB, umur ≤ 60 detik,
+  1 per 5 detik per server; umur laporan kesehatan ikut dijepit ke
+  retensi kejadian (temuan audit akhir SEC-81, cacat lama).
+- Halaman job masih menampilkan tanggal `yyyy-mm-dd`; pilihan tema
+  manual belum bisa kembali ke "ikuti sistem"; keduanya dicatat untuk
+  rencana berikutnya.
+
