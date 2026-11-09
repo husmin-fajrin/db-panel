@@ -1,6 +1,6 @@
 # Rencana 6: Sistem Desain dbpanel dan Rapi-Tampilan
 
-Status: draf untuk persetujuan pemilik produk (2026-11-09)
+Status: disetujui pemilik produk 2026-11-09 (keputusan 8.1 b, 8.2 b)
 Mockup acuan: kanvas "Mockup tampilan dbpanel", varian D (gelap) dan D-terang.
 Dasar: tur tangkapan layar 15 halaman dari panel yang berjalan (commit 5e0d213).
 
@@ -373,22 +373,28 @@ berubah per halaman:
 - Bungee tidak punya huruf Indonesia khusus yang bermasalah (Latin
   dasar), tetapi tidak cocok untuk teks panjang: dibatasi H1 dan logo.
 
-## 8. Keputusan pemilik produk yang masih terbuka
+## 8. Keputusan pemilik produk (2026-11-09)
 
-Dua pertanyaan dari builder check mengubah apa yang dibangun dan
-menunggu jawaban pemilik produk; speknya ditulis dengan kedua pilihan:
-
-- **8.1 Kepadatan grafik lag.** (a) Panel saja: grafik dari laporan yang
-  ada (jarang; celah digambar sebagai garis putus dan puncak pendek bisa
-  terlewat; label pada puncak hanya bila ada datanya), tanpa perubahan
-  agent. (b) Agent melaporkan sampel lag ringan tiap pemeriksaan
-  (field baru `monitor.sample` kecil, batas laju yang ada menampungnya:
-  1 per 10–60 detik per server), sehingga grafik rapat dan jujur, dengan
-  biaya pembaruan agent di semua server.
-- **8.2 Dashboard dengan beberapa topologi.** (a) Satu set gauge per
-  topologi, ditumpuk; (b) gauge agregat (jumlah replika sinkron dari
-  semua topologi, lag tertinggi global, disk master terburuk,
-  peringatan terbuka global) dengan grafik per topologi di bawahnya
-  memakai tab; (c) hanya topologi pertama. Hari ini kebanyakan pemakai
-  punya satu topologi.
-
+- **8.1 Kepadatan grafik lag: (b) sampel dari agent.** Agent mengirim
+  event ringan `monitor.sample` pada setiap pemeriksaan kesehatan
+  (interval pemeriksaan yang ada, 10–60 detik): `{ts, lag_sec|null,
+  io_running, sql_running, mysql_ok}`; ukurannya ≤ 200 byte. Panel
+  menyimpannya ke `health_samples` (5.7) dan tidak memakainya untuk
+  status, peringatan, atau Telegram (laporan kesehatan tetap sumber
+  kebenaran untuk itu). Event ini melewati ember token laporan yang
+  ada (10 token, isi ulang 1 per 2 detik) karena 1 event per 10 detik
+  per server berada jauh di bawah laju isi ulang; event yang dibuang
+  hanya mengurangi titik grafik. Agent lama (tanpa event ini) tetap
+  bekerja; grafiknya memakai laporan kesehatan saja dan halaman
+  menyebut "grafik jarang: agent perlu dimutakhirkan". Alasan: grafik
+  berlubang lebih menyesatkan daripada tidak ada grafik; pembaruan
+  agent terjadi bersama rilis ini.
+- **8.2 Dashboard beberapa topologi: (b) gauge agregat + tab per
+  topologi.** Empat gauge menjumlahkan semua topologi (replika sinkron
+  total/semua, lag tertinggi di antara semua replika dengan nama
+  replikanya, disk master terburuk dengan nama masternya, peringatan
+  terbuka global). Grafik lag dan kartu topologi berada dalam tab per
+  topologi (tab tersembunyi bila hanya satu topologi, sehingga tampilan
+  sama persis dengan mockup D). Pilihan tab disimpan di `localStorage`.
+  Alasan: bentuk tidak berubah untuk pemakai satu topologi, dan
+  informasi terburuk tetap terlihat tanpa berpindah tab.
