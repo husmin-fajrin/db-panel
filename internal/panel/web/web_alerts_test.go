@@ -3,6 +3,7 @@ package web_test
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -127,10 +128,25 @@ func TestAlertsFilterChips(t *testing.T) {
 	e := newEnv(t)
 	c := e.cookie()
 	srv := e.pairedOnline(t, "db-satu")
-	e.openAlert(t, monitor.KindReplicaStopped, srv.ID, 10*time.Minute, "Replika berhenti karena data ganda.")
-	e.openAlert(t, monitor.KindReplicaLagging, srv.ID, 5*time.Minute, "Replika ketinggalan 900 detik.")
-	closed := e.openAlert(t, monitor.KindDiskCrit, srv.ID, 5*time.Hour, "Disk terpakai 97%.")
-	if err := e.st.CloseAlert(closed, time.Now().Add(-4*time.Hour)); err != nil {
+	// Every time below derives from base, whole minutes, so the expected
+	// strings never straddle a minute, hour or day boundary.
+	base := time.Now().Truncate(time.Minute)
+	opened := base.Add(-10 * time.Minute)
+	critStart, critEnd := base.Add(-5*time.Hour), base.Add(-4*time.Hour)
+	for _, al := range []store.Alert{
+		{Kind: monitor.KindReplicaStopped, ServerID: srv.ID, OpenedAt: opened, Message: "Replika berhenti karena data ganda."},
+		{Kind: monitor.KindReplicaLagging, ServerID: srv.ID, OpenedAt: base.Add(-5 * time.Minute), Message: "Replika ketinggalan 900 detik."},
+	} {
+		if _, err := e.st.OpenAlert(al); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closed, err := e.st.OpenAlert(store.Alert{Kind: monitor.KindDiskCrit, ServerID: srv.ID, OpenedAt: critStart,
+		Message: "Disk terpakai 97%."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.CloseAlert(closed, critEnd); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,25 +163,27 @@ func TestAlertsFilterChips(t *testing.T) {
 		}
 	}
 	// Dates as dd-mm-yyyy HH:MM (design spec 5.6), also "Jangan ganggu
-	// sampai".
-	if strings.Contains(active, time.Now().Format("2006-01-02")) {
-		t.Errorf("active alerts show a yyyy-mm-dd date:\n%s", active)
-	}
-	if !strings.Contains(active, time.Now().Add(-10*time.Minute).Format("02-01-2006 15:04")) {
-		t.Errorf("active alerts lack the opening time as dd-mm-yyyy HH:MM:\n%s", active)
+	// sampai"; no yyyy-mm-dd date anywhere in either table.
+	const dateTime = "02-01-2006 15:04"
+	isoDate := regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b`)
+	if !strings.Contains(active, opened.Format(dateTime)) {
+		t.Errorf("active alerts lack the opening time %s:\n%s", opened.Format(dateTime), active)
 	}
 	history := between(body, `id="riwayat"`, "</section>")
-	for _, at := range []time.Time{time.Now().Add(-5 * time.Hour), time.Now().Add(-4 * time.Hour)} {
-		if !strings.Contains(history, at.Format("02-01-2006 15:04")) {
-			t.Errorf("history lacks %s as dd-mm-yyyy HH:MM:\n%s", at.Format("02-01-2006 15:04"), history)
+	for _, at := range []time.Time{critStart, critEnd} {
+		if !strings.Contains(history, at.Format(dateTime)) {
+			t.Errorf("history lacks %s:\n%s", at.Format(dateTime), history)
 		}
 	}
-	if err := e.st.SetSnooze(srv.ID, ptr(time.Now().Add(time.Hour))); err != nil {
+	if m := isoDate.FindString(active + history); m != "" {
+		t.Errorf("alerts page shows the yyyy-mm-dd date %q", m)
+	}
+	until := base.Add(2 * time.Hour)
+	if err := e.st.SetSnooze(srv.ID, &until); err != nil {
 		t.Fatal(err)
 	}
 	snoozed := e.do("GET", "/alerts", nil, c).Body.String()
-	if want := "Jangan ganggu sampai <span class=\"mono text-xs whitespace-nowrap\">" +
-		time.Now().Add(time.Hour).Format("02-01-2006 15:"); !strings.Contains(snoozed, want) {
+	if want := `Jangan ganggu sampai <span class="mono text-xs whitespace-nowrap">` + until.Format(dateTime) + "</span>"; !strings.Contains(snoozed, want) {
 		t.Errorf("snoozed alert lacks %q", want)
 	}
 	if !strings.Contains(history, `lencana lencana-success">Pulih`) || !strings.Contains(history, "Disk kritis") {
