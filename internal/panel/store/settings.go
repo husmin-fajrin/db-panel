@@ -84,6 +84,17 @@ const (
 	SettingEventsRetentionDays = "events_retention_days"
 )
 
+// Setting keys of the panel's look (Pengaturan, Tampilan).
+const (
+	// SettingNamaInstansi is the organisation's name shown under the logo
+	// in the sidebar (at most 60 characters); empty hides it.
+	SettingNamaInstansi = "nama_instansi"
+	// SettingTemaBawaan is the theme a browser starts with before its user
+	// picks one: "sistem" (follow the operating system, the default),
+	// "gelap" or "terang".
+	SettingTemaBawaan = "tema_bawaan"
+)
+
 // Setting keys of the panel's HTTPS certificate.
 const (
 	// SettingHTTPSMode is "panel" (the certificate the panel issues itself,

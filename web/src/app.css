@@ -4,6 +4,263 @@
 @source inline("badge-ghost badge-info badge-warning badge-success badge-error badge-neutral");
 /* Timeline icon colours chosen in Go (toneOf, auditEntry in internal/panel/web/views_monitor.go). */
 @source inline("text-success text-warning text-error text-info text-base-content/60");
+
+/* No built-in theme: the panel's two themes below are the only ones.
+   web/static/theme.js picks one before the page renders (data-theme on
+   <html>); dbpanel-gelap is the default when it cannot run. */
 @plugin "../../.tools/daisyui.js" {
-  themes: corporate --default;
+  themes: false;
+}
+
+/* Colour tokens (design spec 5.1). internal/panel/web/theme_tokens.go holds
+   the same values for the contrast test, and TestThemeTokensMatchCSS fails
+   when the two differ. muted and error-text are panel tokens: dimmed text
+   (text-muted) and red text on the page background (text-error-text). */
+@plugin "../../.tools/daisyui-theme.js" {
+  name: "dbpanel-gelap";
+  default: true;
+  prefersdark: false;
+  color-scheme: dark;
+  --color-base-100: #12121F;
+  --color-base-200: #0A0A14;
+  --color-base-300: #2A2A3E;
+  --color-base-content: #EEEEF0;
+  --color-muted: #9999AA;
+  --color-primary: #00F0FF;
+  --color-primary-content: #0A0A14;
+  --color-secondary: #00F0FF;
+  --color-secondary-content: #0A0A14;
+  --color-accent: #00F0FF;
+  --color-accent-content: #0A0A14;
+  --color-info: #00F0FF;
+  --color-info-content: #0A0A14;
+  --color-success: #39FF14;
+  --color-success-content: #0A0A14;
+  --color-warning: #FFD600;
+  --color-warning-content: #0A0A14;
+  --color-error: #FF006E;
+  --color-error-content: #FFFFFF;
+  --color-error-text: #FF4D94;
+  --color-neutral: #1A1A2E;
+  --color-neutral-content: #EEEEF0;
+  --radius-selector: 0.25rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@plugin "../../.tools/daisyui-theme.js" {
+  name: "dbpanel-terang";
+  default: false;
+  prefersdark: false;
+  color-scheme: light;
+  --color-base-100: #FFFFFF;
+  --color-base-200: #F4F6F9;
+  --color-base-300: #DDE2EA;
+  --color-base-content: #141424;
+  --color-muted: #5E6577;
+  --color-primary: #0A7F93;
+  --color-primary-content: #FFFFFF;
+  --color-secondary: #0A7F93;
+  --color-secondary-content: #FFFFFF;
+  --color-accent: #0A7F93;
+  --color-accent-content: #FFFFFF;
+  --color-info: #0A7F93;
+  --color-info-content: #FFFFFF;
+  --color-success: #1E9E2E;
+  --color-success-content: #141424;
+  --color-warning: #C98A00;
+  --color-warning-content: #141424;
+  --color-error: #E0005F;
+  --color-error-content: #FFFFFF;
+  --color-error-text: #B8004E;
+  --color-neutral: #E9EDF2;
+  --color-neutral-content: #141424;
+  --radius-selector: 0.25rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+/* Typefaces (design spec 5.2): WOFF2 Latin subsets in web/static/fonts
+   (licence: web/static/fonts/LICENSE, SIL OFL 1.1). */
+@font-face {
+  font-family: "Bungee";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/bungee-regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Work Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/worksans-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Work Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/fonts/worksans-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Work Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/worksans-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/spacemono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/fonts/spacemono-700.woff2") format("woff2");
+}
+
+/* Fallback values of the panel tokens, so text-muted and text-error-text
+   exist as utilities; each theme above sets the real value. */
+@theme {
+  --font-sans: "Work Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Bungee", "Work Sans", ui-sans-serif, sans-serif;
+  --color-muted: #9999AA;
+  --color-error-text: #FF4D94;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+  }
+  body {
+    font-size: 0.875rem; /* 14 px */
+    line-height: 1.5;
+  }
+  /* Page title: Bungee 28 px (design spec 5.2); the logo uses .logo. */
+  h1 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 1.75rem;
+    line-height: 1.2;
+  }
+  /* Card title: Work Sans 16 px / 600. */
+  h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+  }
+}
+
+@layer components {
+  .logo {
+    font-family: var(--font-display);
+    font-size: 1.125rem; /* 18 px */
+    line-height: 1.2;
+    letter-spacing: 0.01em;
+  }
+  /* Numbers, times, sizes, GTIDs, versions. */
+  .mono {
+    font-family: var(--font-mono);
+  }
+  /* Help text under a field or a section: 12 px, dimmed. */
+  .help {
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: var(--color-muted);
+  }
+  .btn {
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+  /* Cards: 1 px base-300 edge (a border-* utility may recolour it). */
+  .card {
+    border: 1px solid var(--color-base-300);
+  }
+  /* Banner (template "banner"): 3 px status edge on the left, status
+     background at 8 %, icon in the status colour. */
+  .banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    border-left: 3px solid var(--banner-tone);
+    background: color-mix(in oklab, var(--banner-tone) 8%, var(--color-base-100));
+    color: var(--color-base-content);
+  }
+  .banner > svg {
+    margin-top: 0.125rem;
+    color: var(--banner-tone);
+  }
+  .banner-info {
+    --banner-tone: var(--color-info);
+  }
+  .banner-success {
+    --banner-tone: var(--color-success);
+  }
+  .banner-warning {
+    --banner-tone: var(--color-warning);
+  }
+  .banner-error {
+    --banner-tone: var(--color-error);
+  }
+  .modal-box {
+    border-radius: 0.75rem; /* 12 px */
+  }
+  /* Visible keyboard focus: 2 px primary ring. */
+  :where(a, button, input, select, textarea, summary, .btn):focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+}
+
+/* Cards never have a shadow (design spec 5.3). Outside every layer so it
+   also beats a shadow utility still on a page's card. */
+.card {
+  box-shadow: none;
+}
+
+/* daisyUI's .label never wraps; help text written as <p class="label">
+   under a field must, or a long sentence widens the page. Unlayered,
+   because daisyUI's own rule comes later than @layer components. */
+p.label {
+  white-space: normal;
+}
+
+/* User-triggered transitions only, at most 150 ms, none at all when the
+   user asks for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -78,7 +78,7 @@ type certPage struct {
 // how to install the panel's certificate on each system.
 func (a *app) certPage(w http.ResponseWriter, r *http.Request) {
 	ci := a.CertInfo()
-	p := certPage{Page: Page{Version: a.Version}, Custom: ci.Mode == certModeCustom, Fingerprint: ci.CAFingerprint,
+	p := certPage{Page: a.page(r), Custom: ci.Mode == certModeCustom, Fingerprint: ci.CAFingerprint,
 		HTTPS: r.TLS != nil, HTTPSURL: "https://" + r.Host + "/sertifikat"}
 	p.CertIPURL = certIPURL(r, ci)
 	a.render.Render(w, "cert", p)

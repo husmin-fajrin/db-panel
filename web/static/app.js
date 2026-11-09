@@ -460,6 +460,42 @@
       },
     }));
 
+    // Tombol tema di sidebar: berganti antara gelap dan terang, menyimpan
+    // pilihan di localStorage.tema (dibaca theme.js di halaman berikutnya)
+    // dan langsung mengganti data-theme di <html>.
+    window.Alpine.data("themeToggle", () => ({
+      gelap: true,
+      init() {
+        this.gelap = document.documentElement.dataset.theme !== "dbpanel-terang";
+      },
+      // label: aksi tombol, bukan tema yang sedang dipakai.
+      get label() {
+        return this.gelap ? "Tema terang" : "Tema gelap";
+      },
+      toggle() {
+        this.gelap = !this.gelap;
+        const tema = this.gelap ? "gelap" : "terang";
+        try {
+          window.localStorage.setItem("tema", tema);
+        } catch (e) {
+          // Penyimpanan diblokir: tema tetap berganti untuk halaman ini.
+        }
+        document.documentElement.dataset.theme = `dbpanel-${tema}`;
+      },
+    }));
+
+    // Menu di telepon (< md): tombol di bar atas membuka dan menutup
+    // sidebar (#menu-utama lewat atribut data-terbuka); Escape menutupnya.
+    window.Alpine.data("sideMenu", () => ({
+      open: false,
+      toggle() {
+        this.open = !this.open;
+      },
+      close() {
+        this.open = false;
+      },
+    }));
+
     // Lencana jumlah peringatan aktif di menu (elemen [data-alert-count]
     // di dalam komponen): setiap event alert_update jumlahnya diambil ulang
     // dari GET /alerts/count; lencana disembunyikan saat jumlahnya 0.

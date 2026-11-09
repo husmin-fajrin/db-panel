@@ -2,6 +2,8 @@
 # Kompilasi web/src/app.css -> web/static/app.css dengan Tailwind CSS
 # standalone CLI dan plugin daisyUI (tanpa Node.js). Jalankan dari root repo.
 # Unduhan disimpan di .tools/ (tidak dikomit) dan dilewati bila sudah ada.
+# daisyui-theme.js dipakai app.css untuk dua tema panel (dbpanel-gelap,
+# dbpanel-terang); huruf di web/static/fonts tidak dibangun di sini.
 set -euo pipefail
 
 TAILWIND_VERSION="${TAILWIND_VERSION:-v4.1.14}"

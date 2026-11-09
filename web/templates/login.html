@@ -1,9 +1,10 @@
 {{define "title"}}Masuk{{end}}
 {{define "content"}}
-<div class="flex justify-center mt-12">
-  <div class="card bg-base-100 w-full max-w-sm shadow">
-    <form method="post" action="/login" class="card-body gap-4">
-      <h1 class="card-title text-2xl">Masuk ke dbpanel</h1>
+<div class="flex justify-center">
+  <div class="card bg-base-100 w-full max-w-sm">
+    <form method="post" action="/login" class="card-body gap-4 p-6">
+      <p class="logo text-primary text-center">dbpanel</p>
+      <h1 class="text-center">Masuk</h1>
       <input type="hidden" name="next" value="{{.Next}}">
       <fieldset class="fieldset">
         <label class="label" for="username">Nama pengguna</label>

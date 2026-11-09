@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"runtime"
@@ -121,6 +122,14 @@ type MonitorView interface {
 	// Snooze mutes the server's alert notifications until until; nil
 	// clears it.
 	Snooze(serverID int64, until *time.Time) error
+}
+
+// The bundled fonts (static/fonts) are served as font/woff2 everywhere: Go's
+// own type table lacks .woff2, and the host's mime.types may too.
+func init() {
+	if err := mime.AddExtensionType(".woff2", "font/woff2"); err != nil {
+		panic("web: " + err.Error())
+	}
 }
 
 // app carries the dependencies into the handlers.
@@ -353,18 +362,45 @@ func (f noDirFS) Open(name string) (fs.File, error) {
 
 // page returns the layout fields for the current request.
 func (a *app) page(r *http.Request) Page {
-	p := Page{Username: auth.UsernameFrom(r.Context()), Version: a.Version}
+	p := Page{Username: auth.UsernameFrom(r.Context()), Version: a.Version, ThemeDefault: temaSistem,
+		Active: activeMenu(r.URL.Path)}
+	// The look applies to the pages without login too; a page still
+	// renders without it.
+	if kv, err := a.Store.GetSettings(store.SettingNamaInstansi, store.SettingTemaBawaan); err != nil {
+		a.Logger.Warn("read look settings", "err", err)
+	} else {
+		if t := kv[store.SettingTemaBawaan]; validTema(t) {
+			p.ThemeDefault = t
+		}
+		if p.Username != "" {
+			p.Instansi = kv[store.SettingNamaInstansi]
+		}
+	}
 	if p.Username != "" {
 		ci := a.CertInfo()
 		p.CertNotice, p.CertFallback = ci.CANeedsReinstall, ci.CustomFallback
 		if p.CertNotice {
 			p.CertIPURL = certIPURL(r, ci)
 		}
-		// The navbar's alert badge; a page still renders without it.
+		// The sidebar's alert badge; a page still renders without it.
 		if open, err := a.Store.ListOpenAlerts(); err != nil {
 			a.Logger.Warn("count open alerts", "err", err)
 		} else {
 			p.AlertCount = len(open)
+		}
+		// The sidebar's status box: agents paired and connected.
+		if servers, err := a.Store.ListServers(); err != nil {
+			a.Logger.Warn("count servers", "err", err)
+		} else {
+			for _, s := range servers {
+				if !s.Paired {
+					continue
+				}
+				p.ServersTotal++
+				if a.Hub.IsOnline(s.ID) {
+					p.ServersOnline++
+				}
+			}
 		}
 	}
 	return p

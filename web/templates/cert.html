@@ -1,11 +1,12 @@
 {{define "title"}}Pasang sertifikat keamanan panel{{end}}
 {{define "content"}}
-<h1 class="text-2xl font-bold mb-4">Pasang sertifikat keamanan panel</h1>
+<p class="logo text-primary mb-4">dbpanel</p>
+<h1 class="mb-6">Pasang sertifikat keamanan panel</h1>
 {{if .Custom}}
 <div role="status" class="alert alert-info"><span>Panel memakai sertifikat yang dipasang admin; tidak ada yang perlu dipasang.</span></div>
 <p class="mt-4"><a class="link" href="/">Buka panel</a></p>
 {{else}}
-<section class="card bg-base-100 shadow mb-6">
+<section class="card bg-base-100 mb-6">
   <div class="card-body gap-4">
     <p class="text-lg">Browser menampilkan peringatan? Unduh berkas ini, klik dua kali, pilih Pasang, lalu buka panel lagi.</p>
     <div><a class="btn btn-primary" href="/sertifikat/dbpanel-panel.crt" download>Unduh sertifikat keamanan panel</a></div>
@@ -13,7 +14,7 @@
   </div>
 </section>
 
-<section class="card bg-base-100 shadow mb-6">
+<section class="card bg-base-100 mb-6">
   <div class="card-body gap-3">
     <h2 class="card-title">Cocokkan sidik jari sebelum memasang</h2>
     <p>Sidik jari SHA-256 sertifikat ini:</p>
@@ -25,7 +26,7 @@
 </section>
 
 <div class="flex flex-col gap-6">
-  <section class="card bg-base-100 shadow">
+  <section class="card bg-base-100">
     <div class="card-body gap-3">
       <h2 class="card-title">Windows (Chrome, Edge)</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
@@ -40,7 +41,7 @@
     </div>
   </section>
 
-  <section class="card bg-base-100 shadow">
+  <section class="card bg-base-100">
     <div class="card-body gap-3">
       <h2 class="card-title">macOS (Safari, Chrome)</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
@@ -54,7 +55,7 @@
     </div>
   </section>
 
-  <section class="card bg-base-100 shadow">
+  <section class="card bg-base-100">
     <div class="card-body gap-3">
       <h2 class="card-title">Firefox</h2>
       <p class="text-sm text-base-content/70">Firefox memakai daftarnya sendiri, juga di Windows dan macOS.</p>
@@ -68,7 +69,7 @@
     </div>
   </section>
 
-  <section class="card bg-base-100 shadow">
+  <section class="card bg-base-100">
     <div class="card-body gap-3">
       <h2 class="card-title">Android</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
@@ -82,7 +83,7 @@
     </div>
   </section>
 
-  <section class="card bg-base-100 shadow">
+  <section class="card bg-base-100">
     <div class="card-body gap-3">
       <h2 class="card-title">iPhone dan iPad</h2>
       <ol class="list-decimal ml-6 flex flex-col gap-1">
@@ -95,7 +96,7 @@
     </div>
   </section>
 
-  <section class="card bg-base-100 shadow">
+  <section class="card bg-base-100">
     <div class="card-body gap-3">
       <h2 class="card-title">Banyak komputer sekaligus</h2>
       <p>Admin domain Windows bisa menyebarkan berkas ini ke semua komputer lewat Group Policy (Computer Configuration → Policies → Windows Settings → Security Settings → Public Key Policies → Trusted Root Certification Authorities). Ambil berkasnya langsung dari server panel (<code>/etc/dbpanel/panel/web-ca.crt</code>, lewat SSH atau flashdisk) dan cocokkan sidik jarinya, jangan dari unduhan browser.</p>

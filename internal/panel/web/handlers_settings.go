@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
@@ -31,6 +32,8 @@ const (
 	msgTelegramUnreadable = "Pengaturan Telegram tersimpan tidak bisa dibaca; simpan ulang token bot dan chat id. " +
 		"Lihat log panel untuk detailnya."
 	maxBaseURL = 200
+	// maxInstansi is the longest nama_instansi, in characters.
+	maxInstansi = 60
 )
 
 type weekDay struct{ Value, Label string }
@@ -66,6 +69,12 @@ type settingsForm struct {
 
 	// Days.
 	AlertsRetention, EventsRetention string
+
+	// Tampilan: nama_instansi and tema_bawaan. A post without the field
+	// (a page from before they existed) keeps the stored value:
+	// keepInstansi, keepTema.
+	Instansi, TemaBawaan   string
+	keepInstansi, keepTema bool
 }
 
 // readSettingsForm reads the posted form.
@@ -80,6 +89,10 @@ func readSettingsForm(r *http.Request) settingsForm {
 		BaseURL:         v("base_url"),
 		AlertsRetention: v("alerts_retention"), EventsRetention: v("events_retention"),
 	}
+	_, hasInstansi := r.PostForm["nama_instansi"]
+	_, hasTema := r.PostForm["tema_bawaan"]
+	f.Instansi, f.keepInstansi = v("nama_instansi"), !hasInstansi
+	f.TemaBawaan, f.keepTema = v("tema_bawaan"), !hasTema
 	posted := r.PostForm["kinds"]
 	for _, k := range monitor.AllKinds() {
 		f.Kinds[k] = slices.Contains(posted, k)
@@ -88,7 +101,7 @@ func readSettingsForm(r *http.Request) settingsForm {
 }
 
 // formFromSettings fills the form from the stored settings.
-func formFromSettings(set monitor.Settings, chatID string, kinds map[string]bool) settingsForm {
+func formFromSettings(set monitor.Settings, chatID string, kinds map[string]bool, lk look) settingsForm {
 	sec := func(d time.Duration) string { return strconv.FormatInt(int64(d/time.Second), 10) }
 	day, at, _ := strings.Cut(set.WeeklySummaryAt, " ")
 	f := settingsForm{
@@ -100,6 +113,7 @@ func formFromSettings(set monitor.Settings, chatID string, kinds map[string]bool
 		Weekly:      set.WeeklySummary, WeeklyDay: day, WeeklyTime: at,
 		BaseURL:         set.PanelBaseURL,
 		AlertsRetention: strconv.Itoa(set.AlertsRetentionDays), EventsRetention: strconv.Itoa(set.EventsRetentionDays),
+		Instansi: lk.Instansi, TemaBawaan: lk.Tema,
 	}
 	for _, k := range monitor.AllKinds() {
 		on, ok := kinds[k]
@@ -155,6 +169,10 @@ func (f settingsForm) validate(base monitor.Settings) (monitor.Settings, string)
 			"(tanpa nama pengguna dan sandi), atau dikosongkan."
 	case f.ChatID != "" && !chatIDRe.MatchString(f.ChatID):
 		msg = "Chat id harus angka (grup dan kanal diawali tanda minus) atau @nama kanal."
+	case utf8.RuneCountInString(f.Instansi) > maxInstansi || !utf8.ValidString(f.Instansi):
+		msg = fmt.Sprintf("Nama instansi paling panjang %d karakter.", maxInstansi)
+	case !validTema(f.TemaBawaan):
+		msg = "Tema bawaan tidak dikenal."
 	}
 	if msg != "" {
 		return base, msg
@@ -178,6 +196,23 @@ func validBaseURL(s string) bool {
 	u, err := url.Parse(s)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil &&
 		u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
+}
+
+// look is the stored Tampilan settings; Tema is temaSistem when unset or
+// unknown.
+type look struct{ Instansi, Tema string }
+
+// storedLook reads nama_instansi and tema_bawaan.
+func (a *app) storedLook() (look, error) {
+	kv, err := a.Store.GetSettings(store.SettingNamaInstansi, store.SettingTemaBawaan)
+	if err != nil {
+		return look{}, err
+	}
+	lk := look{Instansi: kv[store.SettingNamaInstansi], Tema: kv[store.SettingTemaBawaan]}
+	if !validTema(lk.Tema) {
+		lk.Tema = temaSistem
+	}
+	return lk, nil
 }
 
 // kindsJSON is the telegram_kinds_json setting: every kind with its switch,
@@ -262,13 +297,18 @@ func (a *app) renderStoredSettings(w http.ResponseWriter, r *http.Request, statu
 		a.internalError(w, "load telegram settings", err)
 		return
 	}
+	lk, err := a.storedLook()
+	if err != nil {
+		a.internalError(w, "load look settings", err)
+		return
+	}
 	saved, problem := a.tokenSaved()
 	if flash == "" {
 		flash = problem
 	}
 	// An empty base URL stays empty (messages then carry no links); the
 	// public URL is only the field's placeholder, so clearing it sticks.
-	f := formFromSettings(set, chatID, kinds)
+	f := formFromSettings(set, chatID, kinds, lk)
 	a.renderSettings(w, r, status, f, saved, flash)
 }
 
@@ -282,6 +322,17 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.internalError(w, "load settings", err)
 		return
+	}
+	prevLook, err := a.storedLook()
+	if err != nil {
+		a.internalError(w, "load look settings", err)
+		return
+	}
+	if f.keepInstansi {
+		f.Instansi = prevLook.Instansi
+	}
+	if f.keepTema {
+		f.TemaBawaan = prevLook.Tema
 	}
 	refuse := func(msg string) {
 		a.audit(r, "settings_update", auditSettings, 0, nil, msg)
@@ -313,6 +364,8 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 		err = errors.Join(
 			a.Store.SetSetting(store.SettingTelegramChatID, f.ChatID),
 			a.Store.SetSetting(store.SettingTelegramKinds, f.kindsJSON()),
+			a.Store.SetSetting(store.SettingNamaInstansi, f.Instansi),
+			a.Store.SetSetting(store.SettingTemaBawaan, f.TemaBawaan),
 		)
 	}
 	if err != nil {
@@ -328,6 +381,12 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if !sameKinds(prevKinds, f.Kinds) {
 		changed = append(changed, store.SettingTelegramKinds)
+	}
+	if f.Instansi != prevLook.Instansi {
+		changed = append(changed, store.SettingNamaInstansi)
+	}
+	if f.TemaBawaan != prevLook.Tema {
+		changed = append(changed, store.SettingTemaBawaan)
 	}
 	if token != "" {
 		changed = append(changed, auditTelegramBot)

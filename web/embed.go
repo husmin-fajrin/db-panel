@@ -8,7 +8,8 @@ import "embed"
 // FS contains templates/ (the *.html pages, the _*.html partials they
 // share, which need the all: prefix to be embedded, and
 // agent-install.sh.tmpl, the agent install script the panel serves) and
-// static/** (app.css, vendor/alpine-csp.min.js, app.js).
+// static/** (app.css, app.js, theme.js, vendor/alpine-csp.min.js, cert/*.svg
+// and fonts/: the bundled WOFF2 fonts with their LICENSE).
 //
 //go:embed all:templates static
 var FS embed.FS

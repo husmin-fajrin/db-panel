@@ -152,6 +152,28 @@
     </div>
   </section>
 
+  <section class="card bg-base-100 shadow">
+    <div class="card-body gap-4">
+      <h2 class="card-title">Tampilan</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
+        <fieldset class="fieldset">
+          <label class="label" for="nama_instansi">Nama instansi</label>
+          <input type="text" id="nama_instansi" name="nama_instansi" value="{{.Form.Instansi}}" maxlength="60" class="input w-full">
+          <p class="label whitespace-normal">Tampil di bawah logo di menu samping, paling panjang 60 karakter. Kosongkan untuk menyembunyikannya.</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <label class="label" for="tema_bawaan">Tema bawaan</label>
+          <select id="tema_bawaan" name="tema_bawaan" class="select w-full">
+            <option value="sistem"{{if eq .Form.TemaBawaan "sistem"}} selected{{end}}>Ikuti sistem</option>
+            <option value="gelap"{{if eq .Form.TemaBawaan "gelap"}} selected{{end}}>Gelap</option>
+            <option value="terang"{{if eq .Form.TemaBawaan "terang"}} selected{{end}}>Terang</option>
+          </select>
+          <p class="label whitespace-normal">Tema awal di peramban yang belum memilih sendiri. Pilihan lewat tombol tema di menu samping disimpan per peramban dan menang atas nilai ini.</p>
+        </fieldset>
+      </div>
+    </div>
+  </section>
+
   <div class="flex justify-end">
     <button type="submit" class="btn btn-primary">Simpan pengaturan</button>
   </div>

@@ -170,7 +170,7 @@ func TestLoginPageRenders(t *testing.T) {
 	rec := e.do("GET", "/login?next=/servers", nil, nil)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "Masuk", `name="username"`, `name="password"`, `value="/servers"`,
-		`data-theme="corporate"`, "/static/app.css", "/static/app.js", "/static/vendor/alpine-csp.min.js")
+		`data-tema-bawaan="sistem"`, "/static/theme.js", "/static/app.css", "/static/app.js", "/static/vendor/alpine-csp.min.js")
 }
 
 func TestLoginWrongPassword(t *testing.T) {
@@ -845,7 +845,8 @@ func TestFormBodyLimit(t *testing.T) {
 
 func TestStaticAssets(t *testing.T) {
 	e := newEnv(t)
-	for _, p := range []string{"/static/app.css", "/static/app.js", "/static/vendor/alpine-csp.min.js"} {
+	for _, p := range []string{"/static/app.css", "/static/app.js", "/static/theme.js", "/static/vendor/alpine-csp.min.js",
+		"/static/fonts/worksans-400.woff2", "/static/fonts/bungee-regular.woff2", "/static/fonts/LICENSE"} {
 		rec := e.do("GET", p, nil, nil)
 		wantCode(t, rec, http.StatusOK)
 		if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=3600" {

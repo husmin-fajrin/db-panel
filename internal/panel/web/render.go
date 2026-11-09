@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
@@ -17,13 +18,29 @@ import (
 
 // Page holds the fields the layout needs; every page's data embeds it.
 type Page struct {
-	Username string // logged-in user; empty hides the navbar
+	Username string // logged-in user; empty hides the sidebar
 	Version  string
 	Flash    string // error message shown above the page content
 	Notice   string // success message shown above the page content
-	// AlertCount is the number of open alerts, on the navbar's Peringatan
+	// AlertCount is the number of open alerts, on the sidebar's Peringatan
 	// link.
 	AlertCount int
+	// Instansi is the organisation's name under the sidebar's logo
+	// (setting nama_instansi); empty hides it.
+	Instansi string
+	// ThemeDefault is the theme a browser starts with before its user
+	// picks one (setting tema_bawaan): "sistem", "gelap" or "terang".
+	// web/static/theme.js reads it from <html data-tema-bawaan>.
+	ThemeDefault string
+	// Active is the sidebar entry of the current page (menuDashboard, ...);
+	// "" marks none.
+	Active string
+	// HasReplikasi shows the sidebar's Replikasi entry (/replikasi).
+	HasReplikasi bool
+	// ServersTotal is the number of servers with a paired agent and
+	// ServersOnline how many of those agents are connected, for the
+	// sidebar's status box.
+	ServersTotal, ServersOnline int
 	// CertNotice shows that the panel's certificate to install changed.
 	CertNotice bool
 	// CertFallback shows that the uploaded certificate is unusable and the
@@ -33,6 +50,71 @@ type Page struct {
 	// (HSTS never applies to an IP), for a browser that refuses the panel's
 	// name; "" when the certificate names no IP.
 	CertIPURL string
+}
+
+// Sidebar entries, the values of Page.Active.
+const (
+	menuDashboard = "dashboard"
+	menuServers   = "servers"
+	menuReplikasi = "replikasi"
+	menuJobs      = "jobs"
+	menuAlerts    = "alerts"
+	menuAudit     = "audit"
+	menuSettings  = "settings"
+)
+
+// Themes a browser can start with (setting tema_bawaan); temaSistem
+// follows the operating system and is the default.
+const (
+	temaSistem = "sistem"
+	temaGelap  = "gelap"
+	temaTerang = "terang"
+)
+
+// validTema reports whether v is a tema_bawaan value.
+func validTema(v string) bool { return v == temaSistem || v == temaGelap || v == temaTerang }
+
+// activeMenu is the sidebar entry of the page at path.
+func activeMenu(path string) string {
+	under := func(prefix string) bool { return path == prefix || strings.HasPrefix(path, prefix+"/") }
+	switch {
+	case path == "/":
+		return menuDashboard
+	case under("/servers"), under("/masters"), under("/replicas"):
+		return menuServers
+	case under("/replikasi"):
+		return menuReplikasi
+	case under("/jobs"):
+		return menuJobs
+	case under("/alerts"):
+		return menuAlerts
+	case under("/audit"):
+		return menuAudit
+	case under("/settings"):
+		return menuSettings
+	}
+	return ""
+}
+
+// MenuAttr marks the sidebar entry key as the current page: the
+// menu-active class and aria-current; nothing for the other entries.
+func (p Page) MenuAttr(key string) template.HTMLAttr {
+	if key == p.Active {
+		return `class="menu-active" aria-current="page"`
+	}
+	return ""
+}
+
+// AgentsOffline is the number of paired agents that are not connected.
+func (p Page) AgentsOffline() int { return max(p.ServersTotal-p.ServersOnline, 0) }
+
+// Banner is a message box above or inside a page (template "banner"):
+// Tone is info, success, warning or error; HTML, when set, is shown
+// instead of Text.
+type Banner struct {
+	Tone string
+	Text string
+	HTML template.HTML
 }
 
 // pageNames are the page templates; each file templates/<name>.html defines
@@ -63,6 +145,8 @@ var templateFuncs = template.FuncMap{
 	"fmtDuration":   fmtDuration,
 	"fmtPct":        fmtPct,
 	"ago":           ago,
+	// banner is the data of the "banner" partial: banner "error" .Flash.
+	"banner": func(tone, text string) Banner { return Banner{Tone: tone, Text: text} },
 	// bytesOf is a size in bytes from the agent (int64) for fmtBytes.
 	"bytesOf": func(n int64) uint64 { return uint64(max(n, 0)) },
 }
