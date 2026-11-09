@@ -18,7 +18,7 @@
             </td>
             <td>{{if .ServerKnown}}<a class="link" href="/servers/{{.ServerID}}">{{.ServerName}}</a>{{else}}{{.ServerName}}{{end}}</td>
             <td><div>{{fmtTime .OpenedAt}}</div><div class="text-xs text-base-content/70">{{ago .OpenedAt $.Now}}</div></td>
-            <td><span class="lencana {{.TelegramClass}}">{{.TelegramLabel}}</span></td>
+            <td><span class="lencana {{.TelegramClass}} whitespace-normal">{{.TelegramLabel}}</span></td>
             <td>
               {{if .ServerKnown}}
               {{if .SnoozeUntil}}
@@ -70,7 +70,7 @@
             <td>{{fmtTime .OpenedAt}}</td>
             <td>{{fmtTime .ClosedAt}}</td>
             <td>{{fmtDuration .DurationSec}}</td>
-            <td><span class="lencana {{.TelegramClass}}">{{.TelegramLabel}}</span></td>
+            <td><span class="lencana {{.TelegramClass}} whitespace-normal">{{.TelegramLabel}}</span></td>
           </tr>
           {{end}}
         </tbody>

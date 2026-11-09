@@ -76,6 +76,14 @@ func TestChartPathBreaksOnGaps(t *testing.T) {
 	if len(segs) != 2 || !strings.Contains(segs[0], "L") {
 		t.Errorf("lone points: %q, want 2 segments each with an L", segs)
 	}
+	// Points outside [From, To] are dropped and end the segment there.
+	out := ChartSeries{Points: []ChartPoint{
+		{t0.Add(-chartBucket), lagPtr(10)}, {at(0), lagPtr(10)}, {at(1), lagPtr(10)},
+		{c.To.Add(chartBucket), lagPtr(10)},
+	}}
+	if segs := chartPath(out, c, 600, 200); len(segs) != 1 || strings.Count(segs[0], "L") != 1 {
+		t.Errorf("out of window: %q, want one segment of two points", segs)
+	}
 	// Values above MaxY stay inside the chart.
 	high := ChartSeries{Points: []ChartPoint{{at(0), lagPtr(500)}, {at(1), lagPtr(500)}}}
 	if segs := chartPath(high, c, 600, 200); len(segs) != 1 || !strings.HasPrefix(segs[0], "M0 0L") {
@@ -110,6 +118,21 @@ func TestChartMaxYFromThreshold(t *testing.T) {
 	c = newLagChart([]ChartSeries{{Name: "r1", Points: pts(7)}}, t0, t1, 5, false)
 	if c.MaxY != 10 {
 		t.Errorf("threshold 5, peak 7: MaxY %d, want 10", c.MaxY)
+	}
+	// Points outside the window do not make the peak; unsorted points are
+	// sorted, so the line does not zigzag back.
+	c = newLagChart([]ChartSeries{{Name: "r1", Points: []ChartPoint{
+		{T: t0.Add(-time.Hour), Lag: lagPtr(900)}, {T: t1.Add(time.Hour), Lag: lagPtr(800)},
+		{T: t0.Add(2 * chartBucket), Lag: lagPtr(30)}, {T: t0, Lag: lagPtr(10)}, {T: t0.Add(chartBucket), Lag: lagPtr(20)},
+	}}}, t0, t1, 60, false)
+	if c.Peak == nil || *c.Peak.Lag != 30 || c.MaxY != 90 {
+		t.Errorf("out-of-window peak: peak %+v MaxY %d, want 30 and 90", c.Peak, c.MaxY)
+	}
+	if !slices.IsSortedFunc(c.Series[0].Points, func(a, b ChartPoint) int { return a.T.Compare(b.T) }) {
+		t.Errorf("points not sorted: %+v", c.Series[0].Points)
+	}
+	if segs := c.Paths(c.Series[0]); len(segs) != 1 || strings.Count(segs[0], "L") != 2 {
+		t.Errorf("sorted series paths %q, want one segment of three points", segs)
 	}
 	c = newLagChart(nil, t0, t1, 0, true)
 	if c.MaxY != 10 || c.Peak != nil || !c.Sparse {
@@ -178,6 +201,18 @@ func TestLagChartTemplate(t *testing.T) {
 	if strings.Contains(out, "style=") {
 		t.Errorf("lag-chart has a style attribute (CSP)")
 	}
+	// The chart stops growing at 752 px, so its 11 px labels stay near
+	// 13 px on wide cards.
+	css, err := os.ReadFile("../../../web/static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`\.grafik-lag>svg\{[^}]*max-width:752px`).Match(css) {
+		t.Errorf("web/static/app.css does not cap .grafik-lag>svg at 752px (run scripts/tailwind.sh)")
+	}
+	if !strings.Contains(out, `<svg class="h-auto w-full" viewBox="0 0 640 200"`) {
+		t.Errorf("chart svg is not the direct child sized by .grafik-lag>svg:\n%s", out)
+	}
 }
 
 func TestGaugeTemplate(t *testing.T) {
@@ -196,6 +231,13 @@ func TestGaugeTemplate(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("gauge lacks %q:\n%s", want, out)
 		}
+	}
+	buf.Reset()
+	if err := r.fragments.ExecuteTemplate(&buf, "gauge", Gauge{Label: "Lag", Value: "3 dtk"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `aria-label="Lag 3 dtk"`) {
+		t.Errorf("gauge without Aria has no fallback name:\n%s", buf.String())
 	}
 	buf.Reset()
 	if err := r.fragments.ExecuteTemplate(&buf, "gauge", Gauge{Tone: "ungu"}); err != nil {

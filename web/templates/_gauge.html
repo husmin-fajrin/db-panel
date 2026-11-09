@@ -2,9 +2,9 @@
      in the tone filled to Percent (r 34, circumference 213.6, from the
      top, clockwise), Value in Space Mono 17/700 in the centre, Label and
      Sub to the right. Data: Gauge{Label, Sub, Value, Tone, Aria, Percent};
-     Aria names the value and what it means. */}}
+     Aria names the value and what it means (else "Label Value"). */}}
 {{define "gauge"}}<div class="gauge {{nada .Tone}} flex min-w-0 items-center gap-4">
-  <svg class="size-[84px] shrink-0" viewBox="0 0 84 84" role="img" aria-label="{{.Aria}}">
+  <svg class="size-[84px] shrink-0" viewBox="0 0 84 84" role="img" aria-label="{{or .Aria (printf "%s %s" .Label .Value)}}">
     <circle class="gauge-dasar" cx="42" cy="42" r="34" fill="none" stroke-width="9"/>
     <circle class="gauge-busur" cx="42" cy="42" r="34" fill="none" stroke-width="9" stroke-dasharray="{{gaugeDash .Percent}}" transform="rotate(-90 42 42)"/>
     <text class="gauge-nilai" x="42" y="42" text-anchor="middle" dominant-baseline="central">{{.Value}}</text>

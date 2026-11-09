@@ -317,7 +317,11 @@
     fill: var(--color-base-content);
   }
 
-  /* Lag chart (template "lag-chart"). */
+  /* Lag chart (template "lag-chart"). It stops growing at 752 px wide,
+     so its 11 px labels (viewBox 640) stay near 13 px on wide cards. */
+  .grafik-lag > svg {
+    max-width: 752px;
+  }
   .grafik-grid {
     stroke: var(--color-base-300);
     stroke-width: 1;

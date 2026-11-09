@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -107,14 +108,18 @@ var seriesTones = []string{"primary", "warning", "success"}
 
 // newLagChart makes a chart of series: colours, the peak, and a y axis to
 // max(threshold × 1.5, peak) rounded up to a multiple of 10 (at least 10).
+// Each series' points are sorted by time (on a copy); points outside
+// [from, to] neither draw nor make the peak.
 func newLagChart(series []ChartSeries, from, to time.Time, thresholdSec int, sparse bool) LagChart {
 	c := LagChart{From: from, To: to, ThresholdSec: thresholdSec, Sparse: sparse}
 	for i, s := range series {
 		s.Tone = seriesTones[i%len(seriesTones)]
 		s.Dashed = i >= len(seriesTones)
+		s.Points = slices.Clone(s.Points)
+		slices.SortStableFunc(s.Points, func(a, b ChartPoint) int { return a.T.Compare(b.T) })
 		c.Series = append(c.Series, s)
 		for _, p := range s.Points {
-			if p.Lag != nil && (c.Peak == nil || *p.Lag > *c.Peak.Lag) {
+			if p.Lag != nil && c.inWindow(p.T) && (c.Peak == nil || *p.Lag > *c.Peak.Lag) {
 				c.Peak = &ChartPoint{T: p.T, Lag: p.Lag}
 				c.PeakSeries = s.Name
 			}
@@ -127,6 +132,9 @@ func newLagChart(series []ChartSeries, from, to time.Time, thresholdSec int, spa
 	c.MaxY = max((top+9)/10*10, 10)
 	return c
 }
+
+// inWindow: t lies within [From, To].
+func (c LagChart) inWindow(t time.Time) bool { return !t.Before(c.From) && !t.After(c.To) }
 
 // chartXY places a point in a w×h box: time across, lag up (clamped to
 // MaxY).
@@ -143,9 +151,10 @@ func chartXY(c LagChart, t time.Time, lag int64, w, h float64) (float64, float64
 }
 
 // chartPath is the line of series s in a w×h box as SVG path segments
-// ("M x y L x y …"): a nil value, or a gap of more than two buckets
-// between points, ends a segment. A lone point is a zero-length line,
-// which round caps draw as a dot.
+// ("M x y L x y …"): a nil value, a point outside [From, To] (dropped), or
+// a gap of more than two buckets between points ends a segment. Points
+// must be in time order (newLagChart sorts them). A lone point is a
+// zero-length line, which round caps draw as a dot.
 func chartPath(s ChartSeries, c LagChart, w, h float64) []string {
 	var segs []string
 	var b strings.Builder
@@ -163,7 +172,7 @@ func chartPath(s ChartSeries, c LagChart, w, h float64) []string {
 		n = 0
 	}
 	for _, p := range s.Points {
-		if p.Lag == nil {
+		if p.Lag == nil || !c.inWindow(p.T) {
 			flush()
 			continue
 		}
