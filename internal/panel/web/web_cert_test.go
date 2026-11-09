@@ -173,7 +173,9 @@ func TestSettingsCertSection(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "Sertifikat keamanan panel", "Sertifikat buatan panel", "panel.kantor.local", "192.168.1.10",
 		testWebPin, `href="/sertifikat/dbpanel-panel.crt"`, "Lanjutan", `action="/settings/cert"`,
-		`enctype="multipart/form-data"`, `action="/settings/cert-names"`)
+		`enctype="multipart/form-data"`, `action="/settings/cert-names"`,
+		// Dates as dd-mm-yyyy HH:MM (design spec 5.6).
+		fc.info.NotAfter.Local().Format("02-01-2006 15:04"))
 	if strings.Contains(rec.Body.String(), "Kembali ke sertifikat panel") {
 		t.Error("panel mode offers Kembali ke sertifikat panel")
 	}

@@ -3,7 +3,7 @@
 {{define "content"}}
 {{if .Chain.OK}}
 <div class="mb-4 flex flex-wrap items-start gap-x-3 gap-y-1">
-  {{template "badge" (badgeOf "success" .Chain.Text)}}
+  <span class="lencana lencana-success">{{.Chain.Label}} <span class="mono">#{{.Chain.Row}}</span></span>
   <p class="help w-full min-w-0 sm:w-auto sm:flex-1">Diperiksa <span class="mono whitespace-nowrap">{{fmtDateTime .Chain.CheckedAt}}</span>.
   Pemeriksaan ini tidak dapat mendeteksi penulisan ulang seluruh catatan atau penghapusan baris terakhir;
   bandingkan dengan salinan di journald (<code>journalctl -u dbpanel-panel</code>).</p>
@@ -12,7 +12,7 @@
 <div class="mb-4">{{template "badge" (badgeOf "warning" .Chain.Text)}}</div>
 {{else}}
 <div role="alert" class="banner banner-error">{{template "banner-icon" "error"}}
-  <div class="flex-1">{{.Chain.Text}}. Catatan audit diubah di luar panel; bandingkan dengan salinan di journald
+  <div class="flex-1">{{.Chain.Label}} <span class="mono">#{{.Chain.Row}}</span>. Catatan audit diubah di luar panel; bandingkan dengan salinan di journald
   (<code>journalctl -u dbpanel-panel</code>) dan periksa dengan <code>sudo -u dbpanel dbpanel panel audit-verify</code>.</div>
 </div>
 {{end}}

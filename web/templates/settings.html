@@ -196,7 +196,7 @@
         <tbody>
           <tr><th>Dipakai</th><td>{{if eq .Cert.Mode "custom"}}Sertifikat yang dipasang admin{{else}}Sertifikat buatan panel{{end}}</td></tr>
           <tr><th>Berlaku untuk</th><td>{{range $i, $n := .Cert.Names}}{{if $i}}, {{end}}<code>{{$n}}</code>{{end}}</td></tr>
-          <tr><th>Berlaku sampai</th><td class="mono text-xs">{{fmtTime .Cert.NotAfter}}</td></tr>
+          <tr><th>Berlaku sampai</th><td class="mono text-xs">{{fmtDateTime .Cert.NotAfter}}</td></tr>
           <tr><th>Pin kunci</th><td><code class="break-all">{{.Cert.Pin}}</code></td></tr>
           <tr><th>Sidik jari SHA-256 sertifikat untuk dipasang</th><td><code class="break-all" data-fingerprint>{{.Cert.CAFingerprint}}</code></td></tr>
         </tbody>

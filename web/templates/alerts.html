@@ -21,12 +21,12 @@
               <div class="text-muted">{{.Message}}</div>
             </td>
             <td>{{if .ServerKnown}}<a class="link whitespace-nowrap" href="/servers/{{.ServerID}}">{{.ServerName}}</a>{{else}}<span class="whitespace-nowrap">{{.ServerName}}</span>{{end}}</td>
-            <td><div class="mono text-xs">{{fmtTime .OpenedAt}}</div><div class="help">{{ago .OpenedAt $.Now}}</div></td>
+            <td><div class="mono text-xs whitespace-nowrap">{{fmtDateTime .OpenedAt}}</div><div class="help">{{ago .OpenedAt $.Now}}</div></td>
             <td><span class="lencana {{.TelegramClass}} whitespace-normal">{{.TelegramLabel}}</span></td>
             <td>
               {{if .ServerKnown}}
               {{if .SnoozeUntil}}
-              <div class="mb-1 text-sm">Jangan ganggu sampai <span class="mono text-xs whitespace-nowrap">{{fmtTime .SnoozeUntil}}</span></div>
+              <div class="mb-1 text-sm">Jangan ganggu sampai <span class="mono text-xs whitespace-nowrap">{{fmtDateTime .SnoozeUntil}}</span></div>
               <form method="post" action="/servers/{{.ServerID}}/snooze">
                 <input type="hidden" name="hours" value="0">
                 <button type="submit" class="btn btn-ghost btn-sm">Batalkan</button>
@@ -71,8 +71,8 @@
               <div>{{.Message}}</div>
             </td>
             <td class="whitespace-nowrap">{{.ServerName}}</td>
-            <td class="mono text-xs">{{fmtTime .OpenedAt}}</td>
-            <td class="mono text-xs">{{fmtTime .ClosedAt}}</td>
+            <td class="mono text-xs whitespace-nowrap">{{fmtDateTime .OpenedAt}}</td>
+            <td class="mono text-xs whitespace-nowrap">{{fmtDateTime .ClosedAt}}</td>
             <td class="mono text-xs">{{fmtDuration .DurationSec}}</td>
             <td><span class="lencana {{.TelegramClass}} whitespace-normal">{{.TelegramLabel}}</span></td>
           </tr>

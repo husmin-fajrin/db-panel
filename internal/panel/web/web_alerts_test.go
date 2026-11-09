@@ -146,7 +146,28 @@ func TestAlertsFilterChips(t *testing.T) {
 			t.Errorf("active alerts lack %q:\n%s", s, active)
 		}
 	}
+	// Dates as dd-mm-yyyy HH:MM (design spec 5.6), also "Jangan ganggu
+	// sampai".
+	if strings.Contains(active, time.Now().Format("2006-01-02")) {
+		t.Errorf("active alerts show a yyyy-mm-dd date:\n%s", active)
+	}
+	if !strings.Contains(active, time.Now().Add(-10*time.Minute).Format("02-01-2006 15:04")) {
+		t.Errorf("active alerts lack the opening time as dd-mm-yyyy HH:MM:\n%s", active)
+	}
 	history := between(body, `id="riwayat"`, "</section>")
+	for _, at := range []time.Time{time.Now().Add(-5 * time.Hour), time.Now().Add(-4 * time.Hour)} {
+		if !strings.Contains(history, at.Format("02-01-2006 15:04")) {
+			t.Errorf("history lacks %s as dd-mm-yyyy HH:MM:\n%s", at.Format("02-01-2006 15:04"), history)
+		}
+	}
+	if err := e.st.SetSnooze(srv.ID, ptr(time.Now().Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	snoozed := e.do("GET", "/alerts", nil, c).Body.String()
+	if want := "Jangan ganggu sampai <span class=\"mono text-xs whitespace-nowrap\">" +
+		time.Now().Add(time.Hour).Format("02-01-2006 15:"); !strings.Contains(snoozed, want) {
+		t.Errorf("snoozed alert lacks %q", want)
+	}
 	if !strings.Contains(history, `lencana lencana-success">Pulih`) || !strings.Contains(history, "Disk kritis") {
 		t.Errorf("history lacks the closed alert with its Pulih badge:\n%s", history)
 	}

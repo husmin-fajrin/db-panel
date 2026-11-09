@@ -365,9 +365,14 @@ func TestAuditPageFilters(t *testing.T) {
 	if strings.Contains(got, "10.1.1.4") {
 		t.Errorf("default audit page shows an entry older than 7 days:\n%s", got)
 	}
-	// The detail is cut to 120 characters.
-	if strings.Contains(got, strings.Repeat("x", 120)) || !strings.Contains(got, strings.Repeat("x", 100)) {
-		t.Errorf("long detail not cut to 120 characters:\n%s", got)
+	// The summary cuts a long value to 60 characters; the <details> holds
+	// the stored JSON in full.
+	if !strings.Contains(got, "catatan: "+strings.Repeat("x", 60)+"…") ||
+		strings.Contains(got, "catatan: "+strings.Repeat("x", 61)) {
+		t.Errorf("long value in the summary not cut to 60 characters:\n%s", got)
+	}
+	if !strings.Contains(got, `{&#34;catatan&#34;:&#34;`+strings.Repeat("x", 200)+`&#34;}`) {
+		t.Errorf("<details> does not hold the full detail:\n%s", got)
 	}
 	wantBody(t, rec, `name="sejak" value="`+now.AddDate(0, 0, -7).Format("2006-01-02")+`"`,
 		`<option value="`+itoa(a.ID)+`">db-satu</option>`)
@@ -414,7 +419,7 @@ func TestAuditPageShowsChainStatus(t *testing.T) {
 	}
 	rec := e.do("GET", "/audit", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Rantai utuh sampai #3")
+	wantBody(t, rec, `Rantai utuh sampai <span class="mono">#3</span>`)
 	// SEC-80: the green line says what the check cannot see.
 	wantBody(t, rec, "tidak dapat mendeteksi penulisan ulang seluruh catatan atau penghapusan baris terakhir")
 	wantBody(t, rec, "bandingkan dengan salinan di journald")
@@ -433,11 +438,11 @@ func TestAuditPageShowsChainStatus(t *testing.T) {
 	// Within the minute the page shows the cached status.
 	clock.Add(30 * time.Second)
 	rec = e.do("GET", "/audit", nil, c)
-	wantBody(t, rec, "Rantai utuh sampai #3")
+	wantBody(t, rec, `Rantai utuh sampai <span class="mono">#3</span>`)
 	clock.Add(31 * time.Second)
 	rec = e.do("GET", "/audit", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Rantai putus di #2")
+	wantBody(t, rec, `Rantai putus di <span class="mono">#2</span>`)
 	// SEC-80: the command as the dbpanel user (root is refused).
 	wantBody(t, rec, "<code>sudo -u dbpanel dbpanel panel audit-verify</code>")
 	if strings.Contains(rec.Body.String(), "Rantai utuh") {
@@ -473,7 +478,7 @@ func TestAuditPageCachesFailedCheck(t *testing.T) {
 	clock.Add(30 * time.Second)
 	wantBody(t, e.do("GET", "/audit", nil, c), "tidak dapat diperiksa")
 	clock.Add(31 * time.Second)
-	wantBody(t, e.do("GET", "/audit", nil, c), "Rantai utuh sampai #0")
+	wantBody(t, e.do("GET", "/audit", nil, c), `Rantai utuh sampai <span class="mono">#0</span>`)
 }
 
 // TestAuditInsertLogged (SEC-45): every audit entry is also written to the
@@ -620,23 +625,34 @@ func TestOutcomeOfRedactsAgentErrors(t *testing.T) {
 }
 
 // auditActionPatterns find the action strings the panel's code writes to
-// the audit log: a literal at the action position of audit/auditAs, of the
-// helpers that pass their action on, and of an AuditEntry written
-// directly (agentapi's refused pairing).
+// the audit log through helpers that pass their action on to audit.
 var auditActionPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\.audit\(r, "([a-z_]+)"`),
-	regexp.MustCompile(`\.auditAs\(r, [^,]+, "([a-z_]+)"`),
-	regexp.MustCompile(`\.(?:replicaControl|jobAction|startOldMasterJob|changeReplicaDatabases)\(w, r, "([a-z_]+)"`),
-	regexp.MustCompile(`AuditEntry\{[^}]*Action: "([a-z_]+)"`),
+	regexp.MustCompile(`\.(?:replicaControl|jobAction|startOldMasterJob|changeReplicaDatabases)\(\s*\w+,\s*\w+,\s*"([a-z_]+)"`),
 }
 
-// auditVariableAction finds an audit call whose action is a variable.
-var auditVariableAction = regexp.MustCompile(`\.audit(?:As)?\(r, (?:[^,"]+, )?([a-zA-Z]\w*), (?:audit|kind|targetKind)`)
+// auditCallStart finds every place that writes to the audit log: a call
+// of audit or auditAs, or an AuditEntry built directly.
+var auditCallStart = regexp.MustCompile(`\.audit\(|\.auditAs\(|AuditEntry\{`)
 
-// auditVariableActionsKnown are the audit calls with a variable action
-// whose callers auditActionPatterns cover (file: variable).
+// What follows auditCallStart: the action as a literal or as a variable
+// (any request variable, arguments over several lines).
+var (
+	auditLiteral = []*regexp.Regexp{
+		regexp.MustCompile(`^\.audit\(\s*\w+,\s*"([a-z_]+)"`),
+		regexp.MustCompile(`^\.auditAs\(\s*\w+,\s*[^,]+,\s*"([a-z_]+)"`),
+		regexp.MustCompile(`^AuditEntry\{[^}]*?\bAction:\s*"([a-z_]+)"`),
+	}
+	auditVariable = []*regexp.Regexp{
+		regexp.MustCompile(`^\.audit\(\s*\w+,\s*([A-Za-z_]\w*),`),
+		regexp.MustCompile(`^\.auditAs\(\s*\w+,\s*[^,]+,\s*([A-Za-z_]\w*),`),
+		regexp.MustCompile(`^AuditEntry\{[^}]*?\bAction:\s*([A-Za-z_]\w*)`),
+	}
+)
+
+// auditVariableActionsKnown are the audit writes with a variable action
+// whose callers auditActionPatterns cover (file:variable).
 var auditVariableActionsKnown = map[string]bool{
-	"audit.go:action":              true, // audit → auditAs
+	"audit.go:action":              true, // audit → auditAs → AuditEntry
 	"handlers_jobs.go:name":        true, // jobAction
 	"handlers_controls.go:action":  true, // replicaControl
 	"handlers_mysql.go:action":     true, // changeReplicaDatabases
@@ -661,10 +677,25 @@ func TestAuditActionLabelsComplete(t *testing.T) {
 				actions[m[1]] = true
 			}
 		}
-		for _, m := range auditVariableAction.FindAllStringSubmatch(string(src), -1) {
-			if key := filepath.Base(path) + ":" + m[1]; !auditVariableActionsKnown[key] {
-				t.Errorf("%s: audit call with the variable action %s: add its callers to auditActionPatterns", path, m[1])
+	calls:
+		for _, loc := range auditCallStart.FindAllIndex(src, -1) {
+			rest := string(src[loc[0]:])
+			for _, re := range auditLiteral {
+				if m := re.FindStringSubmatch(rest); m != nil {
+					actions[m[1]] = true
+					continue calls
+				}
 			}
+			for _, re := range auditVariable {
+				if m := re.FindStringSubmatch(rest); m != nil {
+					if !auditVariableActionsKnown[filepath.Base(path)+":"+m[1]] {
+						t.Errorf("%s: audit write with the variable action %s: add its callers to auditActionPatterns and auditVariableActionsKnown", path, m[1])
+					}
+					continue calls
+				}
+			}
+			line := strings.SplitN(rest, "\n", 2)[0]
+			t.Errorf("%s: audit write whose action the test cannot tell: %s", path, line)
 		}
 		return nil
 	})
@@ -709,6 +740,9 @@ func TestAuditDetailSummaryPromote(t *testing.T) {
 		{"remove_databases", `{"databases":["a","b"],"drop_data":true}`, "database: a, b; hapus data: ya"},
 		{"mysql_connect", `{"mysql_user_len":5,"host_len":9}`, "pengguna MySQL: 5 karakter; host: 9 karakter"},
 		{"x", `bukan json`, "bukan json"},
+		{"https_cert_upload", `{"names":["panel.local","10.0.0.5"]}`, "nama sertifikat: panel.local, 10.0.0.5"},
+		{"x", `{"lain":{"a":1,"b":"c"}}`, `lain: {"a":1,"b":"c"}`},
+		{"x", `{"wipe_list_len":3,"wipe_list_count":2}`, "kosongkan: 3 karakter; kosongkan: 2 item"},
 	} {
 		if got := web.AuditDetailSummary(c.action, c.detail); got != c.want {
 			t.Errorf("AuditDetailSummary(%q, %q) = %q, want %q", c.action, c.detail, got, c.want)
@@ -723,16 +757,20 @@ func TestAuditDateInputs(t *testing.T) {
 	e := newEnv(t)
 	c := e.cookie()
 	ts := time.Now().Add(-time.Hour).Truncate(time.Minute)
-	if _, err := e.st.AddAudit(store.AuditEntry{TS: ts, Username: "admin", IP: "10.1.1.1", Action: "promote",
-		TargetKind: "master", DetailJSON: `{"candidate":3,"accept_partial":true}`, Outcome: "ok"}); err != nil {
-		t.Fatal(err)
+	rep := e.pairedOnline(t, "replika-a")
+	for _, detail := range []string{`{"candidate":3,"accept_partial":true}`,
+		`{"candidate":` + itoa(rep.ID) + `,"accept_branched":true}`} {
+		if _, err := e.st.AddAudit(store.AuditEntry{TS: ts, Username: "admin", IP: "10.1.1.1", Action: "promote",
+			TargetKind: "master", DetailJSON: detail, Outcome: "ok"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	rec := e.do("GET", "/audit", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, `type="date" id="sejak" name="sejak"`)
 	rows := between(rec.Body.String(), "<tbody>", "</tbody>")
 	for _, s := range []string{ts.Local().Format("02-01-2006 15:04"), "Promote replika",
-		"kandidat: #3; terima sebagian: ya", "<details", "{&#34;candidate&#34;:3,&#34;accept_partial&#34;:true}"} {
+		"kandidat: #3; terima sebagian: ya", "kandidat: replika-a; terima replika bercabang: ya", "<details", "{&#34;candidate&#34;:3,&#34;accept_partial&#34;:true}"} {
 		if !strings.Contains(rows, s) {
 			t.Errorf("audit rows lack %q:\n%s", s, rows)
 		}

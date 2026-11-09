@@ -13,7 +13,6 @@ import (
 const (
 	auditDefaultDays = 7   // the audit page shows this many days unless ?sejak= says otherwise
 	auditPageLimit   = 500 // most entries listed
-	auditDetailRunes = 120 // the detail column shows this much of detail_json
 	dateLayout       = "2006-01-02"
 	// chainCheckEvery bounds how often the audit page walks the whole
 	// hash chain.
@@ -22,9 +21,14 @@ const (
 
 // chainStatus is the audit page's line on the hash chain (SEC-45).
 type chainStatus struct {
-	OK        bool   // intact
-	Failed    bool   // the walk failed; Text says so
-	Text      string // "Rantai utuh sampai #N", "Rantai putus di #M"
+	OK     bool   // intact
+	Failed bool   // the walk failed; Text says so
+	Text   string // "Rantai utuh sampai #N", "Rantai putus di #M"
+	// Label and Row are Text in two parts, so the page can set the row
+	// number in Space Mono: "Rantai utuh sampai" and N. Row is 0 when
+	// Failed.
+	Label     string
+	Row       int64
 	CheckedAt time.Time
 }
 
@@ -50,9 +54,11 @@ func (a *app) chainStatus() chainStatus {
 		a.chain.status = chainStatus{Failed: true, Text: "Rantai catatan audit tidak dapat diperiksa saat ini.", CheckedAt: now}
 		return a.chain.status
 	}
-	st := chainStatus{OK: true, Text: fmt.Sprintf("Rantai utuh sampai #%d", lastOK), CheckedAt: now}
+	st := chainStatus{OK: true, Text: fmt.Sprintf("Rantai utuh sampai #%d", lastOK), Label: "Rantai utuh sampai",
+		Row: lastOK, CheckedAt: now}
 	if brokenAt != 0 {
-		st = chainStatus{Text: fmt.Sprintf("Rantai putus di #%d", brokenAt), CheckedAt: now}
+		st = chainStatus{Text: fmt.Sprintf("Rantai putus di #%d", brokenAt), Label: "Rantai putus di", Row: brokenAt,
+			CheckedAt: now}
 		a.Logger.Warn("audit chain broken", "broken_at", brokenAt, "last_ok", lastOK)
 	}
 	a.chain.status = st
@@ -128,7 +134,8 @@ type auditRow struct {
 	store.AuditEntry
 	ActionLabel, Target string
 	// Summary is the detail in words (auditDetailSummary); Detail the raw
-	// JSON, cut to auditDetailRunes, for the row's <details>.
+	// JSON in full (scrubDetail keeps it under 2 KiB), for the row's
+	// <details>.
 	Summary, Detail string
 	OK              bool
 }
@@ -187,8 +194,8 @@ func (a *app) auditLog(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, e := range entries {
 		p.Rows = append(p.Rows, auditRow{AuditEntry: e, ActionLabel: auditActionLabel(e.Action),
-			Target: auditTarget(e, names), Summary: auditDetailSummary(e.Action, e.DetailJSON),
-			Detail: shortDetail(e.DetailJSON), OK: e.Outcome == auditOK})
+			Target: auditTarget(e, names), Summary: auditDetailSummaryNamed(e.DetailJSON, names),
+			Detail: rawDetail(e.DetailJSON), OK: e.Outcome == auditOK})
 	}
 	a.render.Render(w, "audit", p)
 }
@@ -214,14 +221,11 @@ func auditTarget(e store.AuditEntry, names map[int64]string) string {
 	return label + " " + name
 }
 
-// shortDetail is the first auditDetailRunes characters of an entry's
-// detail; "" for an empty one.
-func shortDetail(detail string) string {
+// rawDetail is an entry's detail_json as the page shows it; "" for an
+// empty one.
+func rawDetail(detail string) string {
 	if detail == "{}" {
 		return ""
-	}
-	if runes := []rune(detail); len(runes) > auditDetailRunes {
-		return string(runes[:auditDetailRunes]) + "…"
 	}
 	return detail
 }
