@@ -422,6 +422,9 @@ func TestUnlockMasterNeedsToken(t *testing.T) {
 	rec = e.do("GET", "/masters/1", nil, c)
 	wantBody(t, rec, `data-confirm-action="unlock_master"`, `data-confirm-kind="master"`, `data-confirm-id="1"`,
 		`data-confirm-name="db-master"`, `x-data="confirmModal"`)
+	// SEC-84: unlocking can leave two writable masters, so its confirm is
+	// the destructive (pink) one; the button keeps its label.
+	wantBody(t, rec, `data-confirm-action="unlock_master" data-confirm-danger="1"`, ">Ya, buka kunci</button>")
 }
 
 func TestPrepareMasterAgainNeedsTokenOnlyWithTopology(t *testing.T) {

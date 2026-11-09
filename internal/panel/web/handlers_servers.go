@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"net/http"
 	"slices"
 	"strconv"
@@ -301,27 +300,19 @@ func (a *app) dashboardBanners(servers []store.Server, topos []store.Topology, o
 		}
 		cutover++
 		m := servers[i]
-		out = append(out, Banner{Tone: "warning", HTML: template.HTML(
-			`<div class="flex flex-col items-start gap-2" data-promote-cutover>` +
-				`<h2 class="font-bold">Promote menunggu pengalihan aplikasi</h2>` +
-				`<p class="text-sm">Master sekarang ` + template.HTMLEscapeString(m.Name) +
-				`. Arahkan aplikasi ke master baru, lalu tekan "Sudah saya alihkan" di layar pengalihan.</p>` +
-				`<a class="btn btn-sm" href="/masters/` + strconv.FormatInt(m.ID, 10) + `/cutover">Buka layar pengalihan</a></div>`)})
+		out = append(out, Banner{Tone: "warning", Kind: BannerCutover, Name: m.Name, ServerID: m.ID})
 	}
 	for _, al := range open {
 		if al.Kind != monitor.KindPromotePartial {
 			continue
 		}
-		link := `<a class="btn btn-sm" href="/alerts">Lihat peringatan</a>`
+		b := Banner{Tone: "error", Kind: BannerPartial, Message: al.Message}
 		if prom, err := a.Store.LatestPromotion(al.TopologyID); err == nil && prom.JobID != "" {
-			link = `<a class="btn btn-sm" href="/jobs/` + template.HTMLEscapeString(prom.JobID) + `">Buka pekerjaan promote</a>`
+			b.JobID = prom.JobID
 		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, 0, err
 		}
-		out = append(out, Banner{Tone: "error", HTML: template.HTML(
-			`<div class="flex flex-col items-start gap-2" data-promote-partial>` +
-				`<h2 class="font-bold">Promote belum tuntas</h2>` +
-				`<p class="text-sm">` + template.HTMLEscapeString(al.Message) + `</p>` + link + `</div>`)})
+		out = append(out, b)
 	}
 	return out, cutover, nil
 }

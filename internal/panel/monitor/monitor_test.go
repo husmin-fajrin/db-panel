@@ -1237,3 +1237,41 @@ func TestClipState(t *testing.T) {
 		}
 	}
 }
+
+// TestReportAgeBounded (SEC-81): an agent's taken_ago_ms near MaxInt64
+// would overflow the Duration product and place the report in the future,
+// keeping the server fresh after its reports stop. The age is clamped to
+// the events' retention before it is multiplied.
+func TestReportAgeBounded(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	r.clk.Add(time.Minute)
+	stopped := replicaSnap(srcUUID + ":1-100")
+	stopped.Replica.SQLRunning, stopped.Replica.LastSQLErrno = "No", 1032
+	ra.emit(proto.HealthEvent{Seq: 1000, TakenAgoMS: math.MaxInt64, Snapshot: stopped})
+	now := r.clk.Now()
+	if v := r.view(rID); v.ReceivedAt.After(now) {
+		t.Fatalf("report placed in the future: ReceivedAt %v after now %v", v.ReceivedAt, now)
+	}
+	for _, ev := range r.events(rID, "status") {
+		if ev.TS.After(now) {
+			t.Fatalf("status event in the future: %+v (now %v)", ev, now)
+		}
+	}
+	r.m.mu.Lock()
+	limit := time.Duration(r.m.settings.EventsRetentionDays) * 24 * time.Hour
+	got := r.m.reportAge(rID, math.MaxInt64)
+	clamped := r.m.ageClamped[rID]
+	r.m.mu.Unlock()
+	if got != limit {
+		t.Fatalf("reportAge(MaxInt64) = %v, want the events' retention %v", got, limit)
+	}
+	if !clamped {
+		t.Fatal("clamped age not recorded for the once-per-server log")
+	}
+	if at := now.Add(-got); at.After(now) {
+		t.Fatalf("at = %v is in the future (now %v)", at, now)
+	}
+}

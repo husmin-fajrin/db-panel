@@ -108,13 +108,26 @@ func (p Page) MenuAttr(key string) template.HTMLAttr {
 func (p Page) AllConnected() bool { return p.ServersTotal > 0 && p.ServersConnected >= p.ServersTotal }
 
 // Banner is a message box above or inside a page (template "banner"):
-// Tone is info, success, warning or error; HTML, when set, is shown
-// instead of Text.
+// Tone is info, success, warning or error. Kind, when set, picks a richer
+// body defined in the template with its typed fields, so every value goes
+// through html/template's escaping (SEC-82): BannerCutover (Name, ServerID:
+// the new master) or BannerPartial (Message, JobID: the promote job, or
+// empty for a link to the alerts). Otherwise Text is shown.
 type Banner struct {
-	Tone string
-	Text string
-	HTML template.HTML
+	Tone     string
+	Text     string
+	Kind     string
+	Name     string
+	ServerID int64
+	Message  string
+	JobID    string
 }
+
+// Banner kinds with their own body in the "banner" template.
+const (
+	BannerCutover = "cutover"
+	BannerPartial = "partial"
+)
 
 // pageNames are the page templates; each file templates/<name>.html defines
 // "title" and "content".

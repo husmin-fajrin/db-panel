@@ -100,6 +100,9 @@ type Monitor struct {
 	settings  Settings
 	servers   map[int64]*serverState
 	lastCheck map[int64]time.Time // last CheckNow per server
+	// ageClamped: servers whose report age was clamped (SEC-81), logged
+	// once per server.
+	ageClamped map[int64]bool
 	// weeklyRetryAt holds back the next try of the weekly summary after a
 	// failed send.
 	weeklyRetryAt time.Time
@@ -134,6 +137,7 @@ func New(d Deps) *Monitor {
 		st: d.Store, hub: d.Hub, publish: d.Publish, log: d.Logger, now: d.Now,
 		tickEvery: d.TickEvery, startedAt: d.Now(), ctx: ctx, cancel: cancel,
 		servers: make(map[int64]*serverState), lastCheck: make(map[int64]time.Time),
+		ageClamped:      make(map[int64]bool),
 		onAlertsChanged: d.OnAlertsChanged,
 		sendWeekly:      d.SendWeekly,
 		webCert:         d.WebCert,
@@ -465,8 +469,8 @@ func (m *Monitor) emit(ups []healthUpdate) {
 // and evaluated with the end of its batch: the next live report or tick.
 func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	now := m.now()
-	at := now.Add(-time.Duration(max(he.TakenAgoMS, 0)) * time.Millisecond)
 	m.mu.Lock()
+	at := now.Add(-m.reportAge(serverID, he.TakenAgoMS))
 	ups := m.ingest(serverID, he, at)
 	var alerts []alertUpdate
 	if !he.Backlog {
@@ -478,6 +482,29 @@ func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	if !he.Backlog {
 		m.syncTLSVerified(serverID, he.Snapshot.Replica, he.Snapshot.MySQLOK)
 	}
+}
+
+// reportAge is a report's age as the agent gave it (taken_ago_ms), bound
+// before it is turned into a Duration (SEC-81): a negative age is zero,
+// and one beyond the events' retention, which no backlog can reach and
+// whose product could overflow into a future time, is clamped to that
+// retention, logged once per server. The caller holds mu.
+func (m *Monitor) reportAge(serverID int64, takenAgoMS int64) time.Duration {
+	days := int64(m.settings.EventsRetentionDays)
+	if days <= 0 {
+		days = 7
+	}
+	limit := days * 24 * int64(time.Hour/time.Millisecond)
+	ms := max(takenAgoMS, 0)
+	if ms > limit {
+		ms = limit
+		if !m.ageClamped[serverID] {
+			m.ageClamped[serverID] = true
+			m.log.Warn("health report age beyond the events' retention; clamped",
+				"server_id", serverID, "taken_ago_ms", takenAgoMS, "limit_ms", limit)
+		}
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // syncTLSVerified keeps a replica's tls_verified in step with what its

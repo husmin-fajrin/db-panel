@@ -86,10 +86,14 @@
 {{end}}
 
 {{/* banner: a message box with a 3 px status edge (design spec 5.5).
-     Data: Banner{Tone: info|success|warning|error, Text or HTML}; made in
+     Data: Banner{Tone: info|success|warning|error, Text, or Kind with its fields}; made in
      templates with the banner function: {{template "banner" (banner "error" .Flash)}}.
      Messages with links or a form use the same classes and banner-icon. */}}
-{{define "banner"}}<div role="{{if or (eq .Tone "error") (eq .Tone "warning")}}alert{{else}}status{{end}}" class="banner banner-{{.Tone}}">{{template "banner-icon" .Tone}}<div class="flex-1">{{with .HTML}}{{.}}{{else}}{{.Text}}{{end}}</div></div>{{end}}
+{{define "banner"}}<div role="{{if or (eq .Tone "error") (eq .Tone "warning")}}alert{{else}}status{{end}}" class="banner banner-{{.Tone}}">{{template "banner-icon" .Tone}}<div class="flex-1">{{if eq .Kind "cutover"}}{{template "banner-cutover" .}}{{else if eq .Kind "partial"}}{{template "banner-partial" .}}{{else}}{{.Text}}{{end}}</div></div>{{end}}
+
+{{/* The dashboard's promote banners (Banner.Kind cutover, partial). */}}
+{{define "banner-cutover"}}<div class="flex flex-col items-start gap-2" data-promote-cutover><h2 class="font-bold">Promote menunggu pengalihan aplikasi</h2><p class="text-sm">Master sekarang {{.Name}}. Arahkan aplikasi ke master baru, lalu tekan "Sudah saya alihkan" di layar pengalihan.</p><a class="btn btn-sm" href="/masters/{{.ServerID}}/cutover">Buka layar pengalihan</a></div>{{end}}
+{{define "banner-partial"}}<div class="flex flex-col items-start gap-2" data-promote-partial><h2 class="font-bold">Promote belum tuntas</h2><p class="text-sm">{{.Message}}</p>{{if .JobID}}<a class="btn btn-sm" href="/jobs/{{.JobID}}">Buka pekerjaan promote</a>{{else}}<a class="btn btn-sm" href="/alerts">Lihat peringatan</a>{{end}}</div>{{end}}
 
 {{define "banner-icon"}}{{if eq . "success"}}{{template "icon" "check"}}{{else if eq . "warning"}}{{template "icon" "warning"}}{{else if eq . "error"}}{{template "icon" "error"}}{{else}}{{template "icon" "info"}}{{end}}{{end}}
 

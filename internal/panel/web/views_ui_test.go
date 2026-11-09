@@ -428,3 +428,48 @@ func TestChartFromWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestBannerKindsEscaped (SEC-82): the dashboard's promote banners are
+// built by the template from typed data, so a name, message or job id
+// with markup in it is escaped, and the texts stay as they were.
+func TestBannerKindsEscaped(t *testing.T) {
+	r, err := NewRenderer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(b Banner) string {
+		var buf bytes.Buffer
+		if err := r.fragments.ExecuteTemplate(&buf, "banner", b); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	out := render(Banner{Tone: "warning", Kind: BannerCutover, Name: "db<b>baru</b>", ServerID: 7})
+	for _, want := range []string{`class="banner banner-warning"`, "data-promote-cutover",
+		"Promote menunggu pengalihan aplikasi", "Master sekarang db&lt;b&gt;baru&lt;/b&gt;. Arahkan aplikasi ke master baru, lalu tekan \"Sudah saya alihkan\" di layar pengalihan.",
+		`href="/masters/7/cutover"`, "Buka layar pengalihan"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("cutover banner lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "<b>") {
+		t.Errorf("cutover banner leaks markup:\n%s", out)
+	}
+	out = render(Banner{Tone: "error", Kind: BannerPartial, Message: "gagal <script>x</script>", JobID: `j"1<`})
+	for _, want := range []string{`class="banner banner-error"`, "data-promote-partial", "Promote belum tuntas",
+		"gagal &lt;script&gt;x&lt;/script&gt;", "Buka pekerjaan promote", `href="/jobs/j%221%3c"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("partial banner lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "<script>") {
+		t.Errorf("partial banner leaks markup:\n%s", out)
+	}
+	out = render(Banner{Tone: "error", Kind: BannerPartial, Message: "m"})
+	if !strings.Contains(out, `href="/alerts"`) || !strings.Contains(out, "Lihat peringatan") {
+		t.Errorf("partial banner without a job does not link the alerts:\n%s", out)
+	}
+	if out := render(Banner{Tone: "info", Text: "a <i>b</i>"}); !strings.Contains(out, "a &lt;i&gt;b&lt;/i&gt;") {
+		t.Errorf("plain banner text not escaped:\n%s", out)
+	}
+}

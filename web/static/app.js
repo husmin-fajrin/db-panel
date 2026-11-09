@@ -212,7 +212,10 @@
           if (d.step_status !== undefined) {
             // Ikon dan sorotan langkah mengikuti statusnya (app.css,
             // data-langkah).
-            const langkah = el.querySelector(`[data-step="${d.step}"]`);
+            // d.step datang dari SSE: di-escape agar tanda kutip di nama
+            // langkah tidak memecah selektor dan menghentikan pembaruan.
+            const step = CSS.escape(String(d.step));
+            const langkah = el.querySelector(`[data-step="${step}"]`);
             if (langkah) {
               langkah.dataset.langkah = d.step_status;
               const isi = langkah.querySelector("[data-step-isi]");
@@ -220,11 +223,11 @@
                 isi.classList.toggle("bg-primary/5", d.step_status === "running");
               }
             }
-            const badge = el.querySelector(`[data-step-badge="${d.step}"]`);
+            const badge = el.querySelector(`[data-step-badge="${step}"]`);
             if (badge) {
               setBadge(badge, d.step_status);
             }
-            const msg = el.querySelector(`[data-step-message="${d.step}"]`);
+            const msg = el.querySelector(`[data-step-message="${step}"]`);
             if (msg) {
               msg.textContent = d.message || "";
             }
