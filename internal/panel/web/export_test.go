@@ -55,3 +55,13 @@ func StatusLabelOf(id int64, role string, v monitor.View) string {
 
 // ServiceLineOf exposes serviceLineOf to web_test.
 var ServiceLineOf = serviceLineOf
+
+// PromoteScreenSteps are the step names of the promote screen's
+// "Urutan langkah" card in mode.
+func PromoteScreenSteps(mode string) []string {
+	var names []string
+	for _, s := range promoteScreenSteps(mode) {
+		names = append(names, s.Name)
+	}
+	return names
+}

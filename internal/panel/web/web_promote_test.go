@@ -84,7 +84,7 @@ func TestPromotePageShowsModeAndCandidates(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "Terencana (master hidup)",
 		// The columns.
-		"Nama", "Status", "Lag", "Posisi terhadap master", "Antrean terapan", "Cakupan database", "Kesegaran laporan",
+		"Replika", "Status", "Lag", "Posisi terhadap master", "Cakupan database", "Laporan", "Bisa dipilih?",
 		"db-replika", "db-sebagian", "db-mati", monitor.StatusSynced, "5 detik",
 		"sudah menerima semua transaksi master", "tertinggal 2 transaksi dari master",
 		"semua diterima, 3 belum diterapkan; akan diterapkan sebelum promote",
@@ -331,7 +331,7 @@ func TestPromoteProbeFailedCandidate(t *testing.T) {
 		t.Errorf("default choice is not the replica that answered")
 	}
 	// Not chosen: its unreachable box shows, its red box is hidden.
-	if box := between(body, `class="alert alert-warning flex flex-col items-start gap-2`, `data-unreachable="2"`); strings.Contains(box, "hidden") || box == "" {
+	if box := between(body, `class="banner banner-warning mb-0`, `data-unreachable="2"`); strings.Contains(box, "hidden") || box == "" {
 		t.Errorf("unreachable box of db-replika = %q", box)
 	}
 	wantBody(t, rec, `hidden" data-promote-box="2"`, "Replika db-replika tidak terjangkau")
@@ -341,7 +341,7 @@ func TestPromoteProbeFailedCandidate(t *testing.T) {
 	rec = e.do("POST", "/masters/1/promote", form, c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, `name="candidate" value="2" checked`, `hidden" data-unreachable="2"`,
-		`items-start gap-2" data-promote-box="2"`, "promote ke replika ini akan gagal")
+		`banner-error mb-0" data-promote-box="2"`, "promote ke replika ini akan gagal")
 	// The candidate itself needs no acceptance as unreachable.
 	wantNoBody(t, rec, "Setujui bahwa replika db-replika")
 	wantBody(t, rec, "Setujui bahwa replika db-mati")
@@ -543,4 +543,106 @@ func promoteParamsEqual(a, b orchestrator.PromoteParams) bool {
 		}
 	}
 	return true
+}
+
+// TestPromotePageColumnsAndBadges: the candidate table of the new design
+// (spec 5.6, 5.8 #1): every column including "Bisa dipilih?", the markers
+// on their own line under the name (never inside the name's link), the
+// chosen row highlighted, and the destructive "Promote" button.
+func TestPromotePageColumnsAndBadges(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	f.setView(plannedView())
+	rec := e.do("GET", "/masters/1/promote", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	head := between(body, "<thead>", "</thead>")
+	for _, col := range []string{"Pilih", "Replika", "Status", "Lag", "Posisi terhadap master", "Cakupan database",
+		"Laporan", "Bisa dipilih?"} {
+		if !strings.Contains(head, ">"+col+"</th>") {
+			t.Errorf("column %q missing from %q", col, head)
+		}
+	}
+	// The table scrolls on its own below 1280 px.
+	if !strings.Contains(body, `<div class="overflow-x-auto" data-candidates>`) {
+		t.Errorf("candidate table not in an overflow-x-auto box")
+	}
+	// The name's link holds the name only; the badge follows it in an
+	// element of its own.
+	cell := between(body, `href="/replicas/2"`, "</td>")
+	link, rest, ok := strings.Cut(cell, "</a>")
+	if !ok || strings.Contains(link, "Paling mutakhir") || !strings.HasSuffix(link, ">db-replika") {
+		t.Errorf("name link of db-replika = %q", link)
+	}
+	if !strings.Contains(rest, `<div class="mt-1 flex flex-wrap gap-1"><span class="lencana lencana-success">Paling mutakhir</span>`) {
+		t.Errorf("Paling mutakhir badge not on its own line under the name: %q", rest)
+	}
+	// Partial and unreachable replicas are marked the same way.
+	wantBody(t, rec, `<span class="lencana lencana-warning">Replika sebagian</span>`,
+		`<span class="lencana lencana-warning">Tidak terjangkau</span>`)
+	// The default choice's row is highlighted; the others are not.
+	if row := between(body, `data-candidate-row="2"`, ">"); !strings.Contains(row, "bg-primary/5") {
+		t.Errorf("chosen row = %q, want bg-primary/5", row)
+	}
+	if row := between(body, `data-candidate-row="3"`, ">"); strings.Contains(row, "bg-primary/5") {
+		t.Errorf("unchosen row = %q highlighted", row)
+	}
+	// Why a replica cannot be chosen, readable in its column.
+	if cell := between(body, `data-candidate-row="4"`, "</tr>"); !strings.Contains(cell, "Tidak: Agent offline") {
+		t.Errorf("row of db-mati = %q, want its reason", cell)
+	}
+	// The button keeps its name and opens the danger-variant dialog.
+	btn := between(body, `<button type="submit" class="btn btn-error`, "</button>")
+	if !strings.HasSuffix(btn, ">Promote") || !strings.Contains(btn, `data-confirm-action="promote"`) ||
+		!strings.Contains(btn, `data-confirm-danger="1"`) {
+		t.Errorf("promote button = %q", btn)
+	}
+	// The summary figures from the consideration data.
+	wantBody(t, rec, "Apa yang akan terjadi", "Laporan master", "Jeda tulis", "Kandidat paling mutakhir")
+}
+
+// TestPromotePageStepsList: the "Urutan langkah" card lists the steps of
+// the promotion in order: six for a planned one, four for an emergency.
+func TestPromotePageStepsList(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	steps := func(body string) []string {
+		list := between(body, "<ol data-promote-steps", "</ol>")
+		if list == "" {
+			t.Fatalf("no <ol data-promote-steps> in the page")
+		}
+		var names []string
+		for _, li := range strings.Split(list, "<li")[1:] {
+			names = append(names, between(li, `<span class="font-semibold">`, "</span>")[len(`<span class="font-semibold">`):])
+		}
+		return names
+	}
+	f.setView(plannedView())
+	got := steps(e.do("GET", "/masters/1/promote", nil, c).Body.String())
+	want := []string{"Kunci master", "Replika mengejar", "Jadikan master baru", "Karantina master lama",
+		"Arahkan replika lain", "Alihkan aplikasi"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("planned steps = %q, want %q", got, want)
+	}
+	f.setView(emergencyView())
+	got = steps(e.do("GET", "/masters/1/promote", nil, c).Body.String())
+	want = []string{"Jadikan master baru", "Karantina master lama", "Arahkan replika lain", "Alihkan aplikasi"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("emergency steps = %q, want %q", got, want)
+	}
+	// Every step but the last (the user's own) is a step of the job.
+	for _, mode := range []string{proto.PromotePlanned, proto.PromoteEmergency} {
+		job := orchestrator.PromoteStepNames(mode)
+		i := 0
+		for _, s := range web.PromoteScreenSteps(mode) {
+			if s == "Alihkan aplikasi" {
+				continue
+			}
+			for i < len(job) && job[i] != s {
+				i++
+			}
+			if i == len(job) {
+				t.Errorf("%s: step %q not in the job's steps %q (in order)", mode, s, job)
+			}
+		}
+	}
 }

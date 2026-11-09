@@ -4,21 +4,21 @@
      15 detik. */}}
 {{define "connections"}}
 {{if .Unreadable}}
-<p class="text-warning">{{.Unreadable}}</p>
+<p class="text-warning-text">{{.Unreadable}}</p>
 {{else if not .Rows}}
-<p class="text-success">{{.Empty}}</p>
+<p class="text-success-text">{{.Empty}}</p>
 {{else}}
 <div class="overflow-x-auto">
   <table class="table table-sm">
-    <thead><tr><th>Dari host</th><th>Akun</th><th>Database</th><th>Jumlah</th></tr></thead>
+    <thead><tr><th>Dari host</th><th>Akun</th><th>Database</th><th class="text-right">Jumlah</th></tr></thead>
     <tbody>
       {{range .Rows}}
-      <tr><td>{{.Host}}</td><td>{{.User}}{{if .AdminAccount}} <span class="badge badge-warning badge-sm">akun admin panel</span>{{end}}</td><td>{{or .DB "-"}}</td><td>{{.Count}}</td></tr>
+      <tr class="align-top"><td class="mono text-xs whitespace-nowrap">{{.Host}}</td><td><span class="whitespace-nowrap">{{.User}}</span>{{if .AdminAccount}}<div class="mt-1">{{template "badge" (badgeOf "warning" "akun admin panel")}}</div>{{end}}</td><td>{{or .DB "-"}}</td><td class="mono text-right">{{.Count}}</td></tr>
       {{end}}
     </tbody>
   </table>
 </div>
-<p class="text-sm">Jumlah koneksi: <strong>{{.Total}}</strong></p>
+<p class="mt-2 text-sm">Jumlah koneksi: <strong>{{.Total}}</strong></p>
 {{end}}
-{{if not .TakenAt.IsZero}}<p class="text-xs text-base-content/60">Dibaca {{fmtTime .TakenAt}}</p>{{end}}
+{{if not .TakenAt.IsZero}}<p class="help mt-1">Dibaca <span class="mono">{{fmtTime .TakenAt}}</span></p>{{end}}
 {{end}}

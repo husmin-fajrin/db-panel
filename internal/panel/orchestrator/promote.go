@@ -79,6 +79,16 @@ func promoteEmergencyStepNames() []string {
 	return []string{stepPromoteNewMaster, stepPromoteSwap, stepPromoteQuarantine, stepPromoteRepoint, stepPromoteFinish}
 }
 
+// PromoteStepNames are the steps of a promote job in mode
+// (proto.PromotePlanned or proto.PromoteEmergency), in order; the
+// consideration screen lists them.
+func PromoteStepNames(mode string) []string {
+	if mode == proto.PromoteEmergency {
+		return promoteEmergencyStepNames()
+	}
+	return promotePlannedStepNames()
+}
+
 func (jr *jobRun) promotePlannedSteps() []step {
 	return []step{
 		{stepPromoteAccount, jr.promoteAccount},

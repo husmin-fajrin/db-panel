@@ -121,9 +121,9 @@
           const line = document.createElement("div");
           line.className = "whitespace-pre-wrap";
           if (d.level === "error") {
-            line.classList.add("text-error");
+            line.classList.add("text-error-text");
           } else if (d.level === "warn") {
-            line.classList.add("text-warning");
+            line.classList.add("text-warning-text");
           }
           line.textContent = `${fmtWaktu(d.ts)} [${d.level}] ${d.message}`;
           const diBawah = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
@@ -199,6 +199,16 @@
             return;
           }
           if (d.step_status !== undefined) {
+            // Ikon dan sorotan langkah mengikuti statusnya (app.css,
+            // data-langkah).
+            const langkah = el.querySelector(`[data-step="${d.step}"]`);
+            if (langkah) {
+              langkah.dataset.langkah = d.step_status;
+              const isi = langkah.querySelector("[data-step-isi]");
+              if (isi) {
+                isi.classList.toggle("bg-primary/5", d.step_status === "running");
+              }
+            }
             const badge = el.querySelector(`[data-step-badge="${d.step}"]`);
             if (badge) {
               setBadge(badge, d.step_status);
@@ -214,7 +224,8 @@
               return;
             }
             status = d.status;
-            const badge = el.querySelector("[data-job-badge]");
+            // Lencana pekerjaan ada di kepala halaman, di luar elemen ini.
+            const badge = document.querySelector("[data-job-badge]");
             if (badge) {
               setBadge(badge, status);
             }
@@ -436,6 +447,10 @@
         const perbarui = () => {
           const pilih = form.querySelector('input[name="candidate"]:checked');
           const id = pilih ? pilih.value : "";
+          // Baris replika terpilih disorot (bg-primary/5).
+          form.querySelectorAll("[data-candidate-row]").forEach((el) => {
+            el.classList.toggle("bg-primary/5", el.dataset.candidateRow === id);
+          });
           form.querySelectorAll("[data-promote-box]").forEach((el) => {
             el.classList.toggle("hidden", el.dataset.promoteBox !== id);
           });

@@ -105,6 +105,73 @@ type promoteRow struct {
 	// AcceptPartial / AcceptUnreachable: the boxes as posted.
 	AcceptPartial     bool
 	AcceptUnreachable bool
+	// StatusTone is the badge tone of Status; Badges the markers shown
+	// under the name.
+	StatusTone string
+	Badges     []Badge
+}
+
+// promoteStep is one step of the "Urutan langkah" card.
+type promoteStep struct {
+	Num        int
+	Name, Text string
+}
+
+// promoteScreenSteps are the steps of the promotion the screen lists, in
+// order: the job's steps (orchestrator.PromoteStepNames) the user sees
+// happen, without the bookkeeping ones, then the user's own step, moving
+// the applications. TestPromotePageStepsList checks the names against
+// the job's.
+func promoteScreenSteps(mode string) []promoteStep {
+	var steps []promoteStep
+	if mode != proto.PromoteEmergency {
+		steps = append(steps,
+			promoteStep{0, "Kunci master", "Master dijadikan hanya-baca; aplikasi tidak bisa menulis mulai langkah ini."},
+			promoteStep{0, "Replika mengejar", "Replika terpilih menerapkan semua transaksi master."})
+	}
+	steps = append(steps,
+		promoteStep{0, "Jadikan master baru", "Replika terpilih menjadi master dan menerima tulisan."},
+		promoteStep{0, "Karantina master lama", "Master lama ditahan di luar layanan; bila tidak terjangkau, karantina menyusul saat tersambung."},
+		promoteStep{0, "Arahkan replika lain", "Replika lain mengikuti master baru; yang tidak terjangkau diarahkan saat tersambung lagi."},
+		promoteStep{0, "Alihkan aplikasi", "Anda mengganti alamat database di tiap aplikasi ke master baru, di layar pengalihan."})
+	for i := range steps {
+		steps[i].Num = i + 1
+	}
+	return steps
+}
+
+// severityTone is the badge tone of a monitor status code.
+func severityTone(code string) string {
+	switch monitor.SeverityOf(code) {
+	case monitor.SevOK:
+		return "success"
+	case monitor.SevWarn:
+		return "warning"
+	case monitor.SevCrit:
+		return "error"
+	}
+	return "neutral"
+}
+
+// rowBadges are the markers of a candidate, shown under its name.
+func rowBadges(row promoteRow) []Badge {
+	var b []Badge
+	if row.MostCurrent {
+		b = append(b, Badge{"success", "Paling mutakhir"})
+	}
+	if row.Partial {
+		b = append(b, Badge{"warning", "Replika sebagian"})
+	}
+	if row.Unreachable {
+		b = append(b, Badge{"warning", "Tidak terjangkau"})
+	}
+	if row.Branched {
+		b = append(b, Badge{"error", "Bercabang"})
+	}
+	if row.Writable {
+		b = append(b, Badge{"error", "Bisa ditulis"})
+	}
+	return b
 }
 
 type promotePage struct {
@@ -136,6 +203,12 @@ type promotePage struct {
 	SelectedMasterName  string
 	SelectedReplicaName string
 	SelectedConfirmText string
+	// The "Apa yang akan terjadi" card: the steps, the write pause in
+	// short (the full sentence is View.WritePause) and the most current
+	// candidate (nil: none).
+	Steps          []promoteStep
+	WritePauseFrom string
+	MostCurrent    *promoteRow
 }
 
 // promoteForm shows the consideration screen of master {id}.
@@ -368,7 +441,20 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		if c.MostCurrent && p.Emergency && v.BinlogTail != nil && v.BinlogTail.GTIDExecuted != "" {
 			p.LostKnown, p.Lost = true, c.GapToMaster
 		}
+		row.StatusTone = severityTone(c.Status)
+		row.Badges = rowBadges(row)
 		p.Rows = append(p.Rows, row)
+	}
+	p.Steps = promoteScreenSteps(v.Mode)
+	p.WritePauseFrom = "sejak Kunci master"
+	if p.Emergency {
+		p.WritePauseFrom = "sejak master hilang"
+	}
+	for i := range p.Rows {
+		if p.Rows[i].MostCurrent {
+			p.MostCurrent = &p.Rows[i]
+			break
+		}
 	}
 	if choice != nil {
 		p.AcceptBranched = choice.AcceptBranched

@@ -1,67 +1,73 @@
 {{define "title"}}Pengalihan aplikasi ke {{.Master.Name}}{{end}}
+{{define "page-title"}}<nav aria-label="Jejak halaman" class="help mb-1"><a class="link" href="/replikasi">Replikasi</a> <span aria-hidden="true">/</span> <a class="link" href="/masters/{{.Master.ID}}">Master {{.Master.Name}}</a> <span aria-hidden="true">/</span></nav>
+<h1 class="break-words">Pengalihan aplikasi ke {{.Master.Name}}</h1>{{end}}
+{{define "page-actions"}}<a href="/masters/{{.Master.ID}}" class="btn btn-sm">Kembali ke halaman master</a>{{end}}
 {{define "content"}}
-<h1 class="text-2xl font-bold mb-4">Pengalihan aplikasi ke {{.Master.Name}}</h1>
+{{if .QuarantinePending}}{{template "banner" (banner "warning" "Master lama belum dikarantina karena belum terjangkau. Pastikan aplikasi dialihkan sebelum ia dihidupkan kembali.")}}{{end}}
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body gap-3">
-    <h2 class="card-title">Alamat master baru</h2>
-    <div class="flex flex-wrap items-center gap-2" x-data="copyCommand">
-      <code class="text-xl font-bold break-all" x-ref="perintah">{{.NewAddress}}</code>
-      <button type="button" class="btn btn-sm" @click="copy" x-text="buttonLabel">Salin</button>
+<div class="mb-4 grid gap-4 lg:grid-cols-12">
+  <section class="card bg-base-100 min-w-0 lg:col-span-7">
+    <div class="card-body gap-3 p-6">
+      <h2>Alamat master baru</h2>
+      <div class="flex flex-wrap items-center gap-2" x-data="copyCommand">
+        <code class="mono text-xl font-bold break-all" x-ref="perintah">{{.NewAddress}}</code>
+        <button type="button" class="btn btn-sm" @click="copy" x-text="buttonLabel">Salin</button>
+      </div>
+      <p>Arahkan semua aplikasi yang menulis ke database ke alamat ini, lalu restart aplikasinya.</p>
+      {{with .OldAddress}}<p class="help">Alamat lama{{if $.HasOld}} ({{$.Old.Name}}){{end}}: <code class="mono">{{.}}</code></p>{{end}}
     </div>
-    <p>Arahkan semua aplikasi yang menulis ke database ke alamat ini, lalu restart aplikasinya.</p>
-    {{with .OldAddress}}<p class="text-sm text-base-content/70">Alamat lama{{if $.HasOld}} ({{$.Old.Name}}){{end}}: <code>{{.}}</code></p>{{end}}
-    {{with .Promotion}}
-    <table class="table table-sm w-auto">
-      <tbody>
-        <tr><th>Promote</th><td>{{if $.Planned}}terencana{{else}}darurat{{end}}</td></tr>
-        <tr><th>Promote selesai</th><td>{{fmtTime .FinishedAt}}</td></tr>
+  </section>
+  {{with .Promotion}}
+  <section class="card bg-base-100 min-w-0 lg:col-span-5">
+    <div class="card-body p-6">
+      <h2 class="mb-2">Promote</h2>
+      <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+        <dt class="text-muted">Promote</dt><dd>{{if $.Planned}}terencana{{else}}darurat{{end}}</dd>
+        <dt class="text-muted">Promote selesai</dt><dd class="mono text-xs leading-5">{{fmtTime .FinishedAt}}</dd>
         {{if $.Planned}}
-        <tr><th>Master lama dikunci</th><td>{{fmtTime .LockAt}}</td></tr>
-        {{with $.WritePause}}<tr><th>Lama jeda tulis</th><td>{{.}}</td></tr>{{end}}
+        <dt class="text-muted">Master lama dikunci</dt><dd class="mono text-xs leading-5">{{fmtTime .LockAt}}</dd>
+        {{with $.WritePause}}<dt class="text-muted">Lama jeda tulis</dt><dd class="mono text-xs leading-5">{{.}}</dd>{{end}}
         {{end}}
-      </tbody>
-    </table>
-    {{end}}
-  </div>
+      </dl>
+    </div>
+  </section>
+  {{end}}
 </div>
 
-{{if .QuarantinePending}}
-<div role="alert" class="alert alert-warning mb-6">
-  <span>Master lama belum dikarantina karena belum terjangkau. Pastikan aplikasi dialihkan sebelum ia dihidupkan kembali.</span>
-</div>
-{{end}}
-
-<div class="grid gap-6 md:grid-cols-2 mb-6">
-  <div class="card bg-base-100 shadow">
-    <div class="card-body gap-3">
-      <h2 class="card-title">Koneksi yang masih ke master lama</h2>
+<div class="mb-4 grid gap-4 md:grid-cols-2">
+  <section class="card bg-base-100 min-w-0">
+    <div class="card-body gap-3 p-6">
+      <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h2>Koneksi yang masih ke master lama</h2>
+        {{if .HasOld}}<a class="link text-sm" href="/servers/{{.Old.ID}}">{{.Old.Name}}</a>{{end}}
+      </div>
       {{if .HasOld}}
-      <p class="text-sm text-base-content/70"><a class="link" href="/servers/{{.Old.ID}}">{{.Old.Name}}</a></p>
       <div x-data="pollFragment" data-url="/servers/{{.Old.ID}}/connections-fragment" data-every="{{.EveryMS}}">{{template "connections" .OldConns}}</div>
       {{else}}
       <p>Master lama sudah tidak terdaftar di panel.</p>
       {{end}}
     </div>
-  </div>
-  <div class="card bg-base-100 shadow">
-    <div class="card-body gap-3">
-      <h2 class="card-title">Koneksi yang sudah ke master baru</h2>
-      <p class="text-sm text-base-content/70"><a class="link" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a></p>
+  </section>
+  <section class="card bg-base-100 min-w-0">
+    <div class="card-body gap-3 p-6">
+      <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h2>Koneksi yang sudah ke master baru</h2>
+        <a class="link text-sm" href="/masters/{{.Master.ID}}">{{.Master.Name}}</a>
+      </div>
       <div x-data="pollFragment" data-url="/servers/{{.Master.ID}}/connections-fragment" data-every="{{.EveryMS}}">{{template "connections" .NewConns}}</div>
     </div>
-  </div>
+  </section>
 </div>
-<p class="text-sm text-base-content/70 mb-6">Kedua tabel diperbarui tiap 15 detik. Tidak ditampilkan: akun panel (dbpanel_*), replika yang membaca binlog, thread MySQL sendiri, koneksi agent sendiri, dan sesi akun admin MySQL yang dipakai agent bila tersambung dari server itu sendiri (socket, localhost, 127.0.0.1 atau ::1). Sesi akun admin itu dari host lain ditampilkan dengan tanda "akun admin panel": itu orang atau aplikasi yang memakai akun yang sama, dan tulisannya ikut hilang bila belum dialihkan.</p>
+<p class="help mb-4">Kedua tabel diperbarui tiap 15 detik. Tidak ditampilkan: akun panel (dbpanel_*), replika yang membaca binlog, thread MySQL sendiri, koneksi agent sendiri, dan sesi akun admin MySQL yang dipakai agent bila tersambung dari server itu sendiri (socket, localhost, 127.0.0.1 atau ::1). Sesi akun admin itu dari host lain ditampilkan dengan tanda "akun admin panel": itu orang atau aplikasi yang memakai akun yang sama, dan tulisannya ikut hilang bila belum dialihkan.</p>
 
 {{if .Topology.CutoverPending}}
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body gap-3">
-    <h2 class="card-title">Sudah dialihkan?</h2>
+<section class="card bg-base-100 mb-4">
+  <div class="card-body gap-3 p-6">
+    <h2>Sudah dialihkan?</h2>
     <p>Tekan tombol ini setelah semua aplikasi memakai alamat master baru. Panel berhenti mengingatkan, dan master lama bisa dibangun ulang sebagai replika atau dihapus.</p>
     <div><button type="button" class="btn btn-primary" data-open-modal="modal-dialihkan">Sudah saya alihkan</button></div>
   </div>
-</div>
+</section>
 <dialog id="modal-dialihkan" class="modal">
   <div class="modal-box">
     <h3 class="text-lg font-bold">Semua aplikasi sudah memakai {{.NewAddress}}?</h3>
@@ -74,8 +80,6 @@
   <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
 </dialog>
 {{else}}
-<div role="status" class="alert alert-success mb-6"><span>Pengalihan aplikasi sudah dinyatakan selesai; tidak ada promote yang menunggu di topologi ini.</span></div>
+{{template "banner" (banner "success" "Pengalihan aplikasi sudah dinyatakan selesai; tidak ada promote yang menunggu di topologi ini.")}}
 {{end}}
-
-<a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Kembali ke halaman master</a>
 {{end}}

@@ -27,7 +27,7 @@ health_update. */}}
   <div class="flex flex-wrap items-center gap-2">
     <span class="lencana {{severityClass .Severity}}">{{.Label}}</span>
     {{template "status-lock" .}}
-    {{with .Lag}}<span class="mono text-sm whitespace-nowrap">{{.}}</span>{{end}}
+    {{with .Lag}}<span class="mono text-xs whitespace-nowrap">{{.}}</span>{{end}}
     {{template "status-checked" .}}
   </div>
   {{with .Detail}}<p>{{.}}</p>{{end}}

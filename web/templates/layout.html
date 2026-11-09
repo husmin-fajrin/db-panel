@@ -102,11 +102,11 @@
     <tbody>
       {{range .}}
       <tr>
-        <td><a class="link" href="/jobs/{{.ID}}">{{kindLabel .Kind}}</a></td>
-        <td><a class="link" href="/servers/{{.ServerID}}">{{.ServerName}}</a></td>
+        <td><a class="link whitespace-nowrap" href="/jobs/{{.ID}}">{{kindLabel .Kind}}</a></td>
+        <td><a class="link whitespace-nowrap" href="/servers/{{.ServerID}}">{{.ServerName}}</a></td>
         <td>{{template "status-badge" .Status}}</td>
-        <td>{{fmtTime .CreatedAt}}</td>
-        <td>{{fmtTime .FinishedAt}}</td>
+        <td class="mono text-xs whitespace-nowrap">{{fmtTime .CreatedAt}}</td>
+        <td class="mono text-xs whitespace-nowrap">{{fmtTime .FinishedAt}}</td>
       </tr>
       {{end}}
     </tbody>

@@ -1,18 +1,52 @@
 {{define "title"}}Promote replika master {{.Master.Name}}{{end}}
+{{define "page-title"}}<nav aria-label="Jejak halaman" class="help mb-1"><a class="link" href="/replikasi">Replikasi</a> <span aria-hidden="true">/</span> <a class="link" href="/masters/{{.Master.ID}}">Master {{.Master.Name}}</a> <span aria-hidden="true">/</span></nav>
+<h1 class="break-words">Ganti master {{.Master.Name}}</h1>{{end}}
+{{define "page-actions"}}<a href="/masters/{{.Master.ID}}" class="btn btn-sm">Kembali ke halaman master</a>{{end}}
 {{define "content"}}
-<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
-  <h1 class="text-2xl font-bold">Ganti master {{.Master.Name}}</h1>
-  <a href="/masters/{{.Master.ID}}" class="btn btn-ghost btn-sm">Kembali ke halaman master</a>
+<div class="mb-4 grid items-start gap-4 lg:grid-cols-12">
+<section class="card bg-base-100 min-w-0 lg:col-span-7" data-promote-summary>
+  <div class="card-body gap-4 p-6">
+    <h2>Apa yang akan terjadi</h2>
+    <div class="grid gap-4 sm:grid-cols-3">
+      <div class="flex min-w-0 flex-col gap-1 rounded-lg border border-base-300 p-4">
+        <span class="help">Laporan master</span>
+        {{if .LastReport}}<span class="mono text-lg font-bold">{{.LastReport}}</span><span class="help">{{.LastReportAgo}}</span>
+        {{else}}<span class="text-lg font-semibold">belum ada</span><span class="help">panel belum menerima laporan master</span>{{end}}
+      </div>
+      <div class="flex min-w-0 flex-col gap-1 rounded-lg border border-base-300 p-4">
+        <span class="help">Jeda tulis</span>
+        <span class="text-lg font-semibold">{{.WritePauseFrom}}</span>
+        <span class="help">sampai alamat di tiap aplikasi diganti</span>
+      </div>
+      <div class="flex min-w-0 flex-col gap-1 rounded-lg border border-base-300 p-4">
+        <span class="help">Kandidat paling mutakhir</span>
+        {{with .MostCurrent}}<span class="text-lg font-semibold break-words">{{.Name}}</span><span class="help">lag <span class="mono">{{.Lag}}</span></span>
+        {{else}}<span class="text-lg font-semibold">tidak ada</span><span class="help">{{if $.View.Branched}}replika bercabang{{else}}tidak ada replika yang memuat semua transaksi{{end}}</span>{{end}}
+      </div>
+    </div>
+    <p class="text-sm"><strong>Jeda tulis:</strong> {{.View.WritePause}}</p>
+  </div>
+</section>
+<section class="card bg-base-100 min-w-0 lg:col-span-5" data-promote-urutan>
+  <div class="card-body gap-4 p-6">
+    <h2>Urutan langkah</h2>
+    <ol data-promote-steps class="flex flex-col gap-3">
+      {{range $s := .Steps}}
+      <li class="flex items-start gap-3"><span class="mono flex size-6 shrink-0 items-center justify-center rounded-full border border-base-300 text-xs font-bold">{{$s.Num}}</span><div class="flex min-w-0 flex-col"><span class="font-semibold">{{$s.Name}}</span><span class="help">{{$s.Text}}</span></div></li>
+      {{end}}
+    </ol>
+  </div>
+</section>
 </div>
 
-<div class="card bg-base-100 shadow mb-6">
-  <div class="card-body gap-2">
-    <h2 class="card-title">Mode: {{if .Emergency}}Darurat (master tidak terjangkau){{else}}Terencana (master hidup){{end}}</h2>
+<section class="card bg-base-100 mb-4" data-promote-mode>
+  <div class="card-body gap-2 p-6">
+    <h2>Mode: {{if .Emergency}}Darurat (master tidak terjangkau){{else}}Terencana (master hidup){{end}}</h2>
     {{if .Emergency}}
     <p>Panel tidak bisa memakai MySQL master {{.Master.Name}}{{with .MasterStatus}} (status: {{.}}){{end}}, jadi hanya promote darurat yang tersedia: replika terpilih dijadikan master dengan transaksi yang sudah diterimanya. Anda tidak memilih mode; mode mengikuti keadaan master.</p>
     <p class="text-sm">Ragu master benar-benar tidak terjangkau? <a class="btn btn-sm" href="/masters/{{.Master.ID}}/promote">Periksa sekarang</a> membuka ulang halaman ini dan meminta laporan baru dari master dan tiap replika.</p>
     {{if .LastReport}}
-    <p class="text-sm">Laporan terakhir master: pukul {{.LastReport}} ({{.LastReportAgo}}).</p>
+    <p class="text-sm">Laporan terakhir master: pukul <span class="mono">{{.LastReport}}</span> ({{.LastReportAgo}}).</p>
     {{else}}
     <p class="text-sm">Panel belum pernah menerima laporan dari master ini, jadi posisi replika terhadap master tidak bisa dihitung.</p>
     {{end}}
@@ -23,115 +57,126 @@
     {{if .LastReport}}<p class="text-sm" data-master-report>Laporan master: pukul {{.LastReport}} ({{.LastReportAgo}}).</p>{{end}}
     <p>Agent master tersambung dan MySQL master menjawab{{with .MasterStatus}} (status: {{.}}){{end}}, jadi promote berjalan terencana: panel mengunci master, menunggu replika terpilih menerapkan semua transaksi master, lalu menjadikannya master baru. Tidak ada transaksi yang hilang. Anda tidak memilih mode; mode mengikuti keadaan master.</p>
     {{end}}
-    <p class="text-sm"><strong>Jeda tulis:</strong> {{.View.WritePause}}</p>
     {{if .Local}}
-    <div role="alert" class="alert alert-warning alert-soft text-sm" data-local-master>Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel</div>
+    <div role="alert" class="banner banner-warning mb-0 text-sm" data-local-master>{{template "banner-icon" "warning"}}<div class="flex-1">Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel</div></div>
     {{end}}
     {{if .View.LastMasterGTID}}
     <details>
       <summary class="btn btn-ghost btn-sm">Detail teknis</summary>
-      <p class="text-sm mt-2">GTID master yang dipakai sebagai pembanding{{if .View.BinlogTail}} (dari binlog di disk master){{end}}: <code class="break-all">{{.View.LastMasterGTID}}</code></p>
+      <p class="text-sm mt-2">GTID master yang dipakai sebagai pembanding{{if .View.BinlogTail}} (dari binlog di disk master){{end}}: <code class="mono break-all">{{.View.LastMasterGTID}}</code></p>
     </details>
     {{end}}
   </div>
-</div>
+</section>
 
 {{if .Emergency}}
-<div role="alert" class="alert alert-warning flex flex-col items-start gap-2 mb-6" data-split-network>
+<div role="alert" class="banner banner-warning" data-split-network>{{template "banner-icon" "warning"}}
+  <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
   {{with .ProbeSilent}}<p>Master tidak menjawab dari replika {{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}.</p>{{end}}
   {{range .ProbeAnswered}}
   <p><strong>Master menjawab dari replika {{.}}; masalahnya mungkin di jaringan panel atau agent master, bukan MySQL-nya. Promote darurat akan ditolak agent.</strong> Pulihkan agent master (<code>systemctl restart dbpanel-agent</code> di server master) lalu jalankan promote terencana. Master yang masih menjawab, terkunci atau tidak, bukan keadaan darurat: agent replika menolak promote darurat selama MySQL master menjawab. Bila master terkunci dan harus dipakai lagi, buka kuncinya di server master dengan <code>sudo dbpanel agent unlock-master</code>.</p>
   {{end}}
   <p><strong>Pastikan master benar-benar mati atau tidak lagi dipakai aplikasi; bila ia hidup di jaringan lain, tulisan di sana akan tertinggal.</strong></p>
+  </div>
 </div>
 {{end}}
 
 {{if .Blocked}}
-<div role="alert" class="alert alert-error flex flex-col items-start gap-2 mb-6" data-promote-blocked>
+<div role="alert" class="banner banner-error" data-promote-blocked>{{template "banner-icon" "error"}}
+  <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
   <p>{{.Blocked}}</p>
   {{with .BlockedJob}}<a class="btn btn-sm" href="/jobs/{{.}}">Buka pekerjaan promote</a>{{end}}
+  </div>
 </div>
 {{end}}
 
 <form method="post" action="/masters/{{.Master.ID}}/promote" x-data="promotePicker">
   <input type="hidden" name="mode" value="{{.View.Mode}}">
-  <div class="card bg-base-100 shadow mb-6">
-    <div class="card-body gap-3">
-      <h2 class="card-title">Pilih replika yang dijadikan master baru</h2>
+  <section class="card bg-base-100 mb-4">
+    <div class="card-body gap-4 p-6">
+      <h2>Pilih replika yang dijadikan master baru</h2>
       {{if .View.Branched}}
-      <div role="alert" class="alert alert-error flex flex-col items-start gap-2" data-branched>
+      <div role="alert" class="banner banner-error mb-0" data-branched>{{template "banner-icon" "error"}}
+        <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
         <p><strong>Replika bercabang.</strong> Masing-masing replika yang ditandai punya transaksi yang tidak dimiliki yang lain, jadi tidak ada replika yang memuat semuanya. Bila Anda memilih satu, replika lain yang bercabang tidak bisa mengikuti master baru dan harus dibangun ulang dari master baru; transaksi yang hanya ada di replika itu tidak masuk ke master baru.</p>
         <label class="flex items-start gap-2">
           <input type="checkbox" class="checkbox checkbox-sm" name="accept_branched" value="1"{{if .AcceptBranched}} checked{{end}}>
           <span>Saya setuju: replika lain yang bercabang dibangun ulang dari master baru.</span>
         </label>
+        </div>
       </div>
       {{end}}
       {{if .View.Candidates}}
-      <div class="overflow-x-auto">
+      <div class="overflow-x-auto" data-candidates>
         <table class="table table-sm">
           <thead>
-            <tr><th>Pilih</th><th>Nama</th><th>Status</th><th>Lag</th><th>Posisi terhadap master</th><th>Antrean terapan</th><th>Cakupan database</th><th>Kesegaran laporan</th><th>Alasan tidak bisa dipilih</th></tr>
+            <tr><th>Pilih</th><th>Replika</th><th>Status</th><th>Lag</th><th>Posisi terhadap master</th><th>Cakupan database</th><th>Laporan</th><th class="whitespace-nowrap">Bisa dipilih?</th></tr>
           </thead>
           <tbody>
             {{range .Rows}}
-            <tr>
-              <td>{{if and .Selectable (not $.Blocked)}}<input type="radio" class="radio radio-sm" name="candidate" value="{{.ServerID}}"{{if .Checked}} checked{{end}} data-name="{{.MasterName}}" data-replica-name="{{.ReplicaName}}" data-text="{{.ConfirmText}}" aria-label="Pilih {{.Name}}" required>{{else}}-{{end}}</td>
-              <td>
-                <a class="link" href="/replicas/{{.ServerID}}">{{.Name}}</a>
-                {{if .MostCurrent}}<div><span class="badge badge-success badge-sm">Paling mutakhir</span></div>{{end}}
-                {{if .Branched}}<div><span class="badge badge-error badge-sm">Bercabang</span></div>{{end}}
+            <tr data-candidate-row="{{.ServerID}}" class="align-top{{if .Checked}} bg-primary/5{{end}}">
+              <td>{{if and .Selectable (not $.Blocked)}}<input type="radio" class="radio radio-sm radio-primary" name="candidate" value="{{.ServerID}}"{{if .Checked}} checked{{end}} data-name="{{.MasterName}}" data-replica-name="{{.ReplicaName}}" data-text="{{.ConfirmText}}" aria-label="Pilih {{.Name}}" required>{{else}}<span class="text-muted">-</span>{{end}}</td>
+              <td class="min-w-32">
+                <a class="link font-semibold whitespace-nowrap" href="/replicas/{{.ServerID}}">{{.Name}}</a>
+                {{with .Badges}}<div class="mt-1 flex flex-wrap gap-1">{{range .}}{{template "badge" .}}{{end}}</div>{{end}}
               </td>
-              <td>{{or .Status "-"}}</td>
-              <td>{{.Lag}}</td>
-              <td>{{.Position}}</td>
-              <td>{{.Backlog}}</td>
+              <td>{{if .Status}}{{template "badge" (badgeOf .StatusTone .Status)}}{{else}}-{{end}}</td>
+              <td class="mono whitespace-nowrap">{{.Lag}}</td>
+              <td>{{.Position}}{{with .Backlog}}<div class="help mt-1">{{.}}</div>{{end}}</td>
               <td>{{if .Partial}}{{if .MissingDatabases}}sebagian: tidak ada {{range $i, $d := .MissingDatabases}}{{if $i}}, {{end}}<code>{{$d}}</code>{{end}}{{else}}sebagian (saat ini mencakup semua database master){{end}}{{else}}semua database{{end}}</td>
               <td>{{.Freshness}}</td>
-              <td>{{with .NotSelectable}}<span class="text-error">{{.}}</span>{{else}}-{{end}}</td>
+              <td class="min-w-28">{{with .NotSelectable}}<span class="text-warning-text">Tidak: {{.}}</span>{{else}}<span class="text-success-text">Ya</span>{{end}}</td>
             </tr>
             {{end}}
           </tbody>
         </table>
       </div>
       {{else}}
-      <p>Master ini belum punya replika, jadi tidak ada yang bisa dijadikan master baru.</p>
+      {{template "empty" (emptyOf "Master ini belum punya replika, jadi tidak ada yang bisa dijadikan master baru." "" "")}}
       {{end}}
 
       {{range .Rows}}{{if and .Selectable .Partial}}
-      <div role="alert" class="alert alert-error flex flex-col items-start gap-2{{if not .Checked}} hidden{{end}}" data-promote-box="{{.ServerID}}">
+      <div role="alert" class="banner banner-error mb-0{{if not .Checked}} hidden{{end}}" data-promote-box="{{.ServerID}}">{{template "banner-icon" "error"}}
+        <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
         <p>Database berikut tidak akan ada di master baru: {{if .MissingDatabases}}{{range $i, $d := .MissingDatabases}}{{if $i}}, {{end}}{{$d}}{{end}}{{else}}database master yang nanti tidak diikuti {{.Name}}{{end}}; data itu tetap utuh di master lama yang dikarantina dan bisa diamankan dari sana.</p>
         <label class="flex items-start gap-2">
           <input type="checkbox" class="checkbox checkbox-sm" name="accept_partial" value="{{.ServerID}}"{{if .AcceptPartial}} checked{{end}}>
           <span>Saya setuju {{.Name}} menjadi master baru tanpa database tersebut.</span>
         </label>
+        </div>
       </div>
       {{end}}{{if and .Selectable .ProbeErr}}
-      <div role="alert" class="alert alert-error flex flex-col items-start gap-2{{if not .Checked}} hidden{{end}}" data-promote-box="{{.ServerID}}">
+      <div role="alert" class="banner banner-error mb-0{{if not .Checked}} hidden{{end}}" data-promote-box="{{.ServerID}}">{{template "banner-icon" "error"}}
+        <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
         <p>Panel tidak mendapat jawaban dari {{.Name}} saat memintanya memeriksa master: <code class="break-all">{{.ProbeErr}}</code>. Bila {{.Name}} memang tidak terjangkau, promote ke replika ini akan gagal.</p>
+        </div>
       </div>
       {{end}}{{end}}
 
       {{range .Unreachable}}
-      <div role="alert" class="alert alert-warning flex flex-col items-start gap-2{{if .Checked}} hidden{{end}}" data-unreachable="{{.ServerID}}">
+      <div role="alert" class="banner banner-warning mb-0{{if .Checked}} hidden{{end}}" data-unreachable="{{.ServerID}}">{{template "banner-icon" "warning"}}
+        <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
         <p>Replika {{.Name}} tidak terjangkau. Promote tetap bisa dijalankan; {{.Name}} akan ditandai 'Perlu diarahkan ulang' dan diarahkan ke master baru saat tersambung lagi. Bila ternyata {{.Name}} punya data yang tidak dimiliki master baru, {{.Name}} perlu dibangun ulang.</p>
         <label class="flex items-start gap-2">
           <input type="checkbox" class="checkbox checkbox-sm" name="accept_unreachable" value="{{.ServerID}}"{{if .AcceptUnreachable}} checked{{end}}>
           <span>Saya setuju {{.Name}} diarahkan ulang ke master baru saat tersambung lagi.</span>
         </label>
+        </div>
       </div>
-      {{end}}
-
-      {{if .Emergency}}
-      <p class="font-semibold">Transaksi yang belum sampai ke replika terpilih akan hilang dari master baru. Bila master lama hidup kembali, panel bisa memeriksa dan mengamankannya.</p>
       {{end}}
 
       {{if not .Blocked}}
-      <div>
-        <button type="submit" class="btn btn-error" data-confirm-action="promote" data-confirm-kind="master" data-confirm-id="{{.Master.ID}}" data-confirm-name="{{.SelectedMasterName}}" data-confirm-name-label="Ketik nama master lama" data-confirm-replica-name="{{.SelectedReplicaName}}" data-confirm-text="{{.SelectedConfirmText}}">Promote</button>
+      <div class="mt-2 flex flex-col gap-4 border-t border-base-300 pt-4 md:flex-row md:items-center md:justify-between" data-promote-footer>
+        <div class="kotak-bahaya flex min-w-0 flex-1 flex-col gap-1 text-sm">
+          {{if .Emergency}}<p class="font-semibold">Transaksi yang belum sampai ke replika terpilih akan hilang dari master baru. Bila master lama hidup kembali, panel bisa memeriksa dan mengamankannya.</p>{{end}}
+          <p>Promote tidak bisa dibatalkan setelah dikirim ke kandidat (langkah "Jadikan master baru"); tunggu sampai selesai.</p>
+        </div>
+        <button type="submit" class="btn btn-error md:self-center" data-confirm-action="promote" data-confirm-kind="master" data-confirm-id="{{.Master.ID}}" data-confirm-name="{{.SelectedMasterName}}" data-confirm-name-label="Ketik nama master lama" data-confirm-replica-name="{{.SelectedReplicaName}}" data-confirm-danger="1" data-confirm-text="{{.SelectedConfirmText}}">Promote</button>
       </div>
+      {{else if .Emergency}}
+      <p class="font-semibold">Transaksi yang belum sampai ke replika terpilih akan hilang dari master baru. Bila master lama hidup kembali, panel bisa memeriksa dan mengamankannya.</p>
       {{end}}
     </div>
-  </div>
+  </section>
 </form>
 {{end}}

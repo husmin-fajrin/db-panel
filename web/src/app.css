@@ -434,3 +434,48 @@ p.label {
     scroll-behavior: auto !important;
   }
 }
+
+/* Job steps (job_detail.html, template "step-icon"): the icon shows the
+   glyph and tone of the step's data-langkah; the connector after a done
+   step is green. jobLive sets data-langkah as steps change. Unlayered to
+   beat daisyUI's .timeline rules. */
+.langkah-ikon {
+  color: var(--color-muted);
+}
+.langkah-ikon g {
+  display: none;
+}
+[data-langkah="done"] .langkah-ikon {
+  color: var(--color-success-text);
+}
+[data-langkah="running"] .langkah-ikon {
+  color: var(--color-primary);
+}
+[data-langkah="waiting"] .langkah-ikon {
+  color: var(--color-warning-text);
+}
+[data-langkah="failed"] .langkah-ikon {
+  color: var(--color-error-text);
+}
+[data-langkah="pending"] .langkah-ikon,
+[data-langkah="skipped"] .langkah-ikon {
+  color: var(--color-muted);
+}
+[data-langkah="done"] .g-done,
+[data-langkah="running"] .g-running,
+[data-langkah="waiting"] .g-waiting,
+[data-langkah="failed"] .g-failed,
+[data-langkah="pending"] .g-pending,
+[data-langkah="skipped"] .g-skipped {
+  display: inline;
+}
+.langkah-garis > li > hr {
+  background-color: var(--color-base-300);
+}
+.langkah-garis > li[data-langkah="done"] > hr:last-child,
+.langkah-garis > li[data-langkah="done"] + li > hr:first-child {
+  background-color: var(--color-success);
+}
+.langkah-garis > li:last-child > hr:last-child {
+  display: none;
+}
