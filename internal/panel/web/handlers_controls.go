@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -99,7 +100,7 @@ func (a *app) replicaControl(w http.ResponseWriter, r *http.Request, action, not
 		a.replicaError(w, r, srv, rep, err.Error())
 		return
 	}
-	a.Logger.Info("replica control", "action", action, "server", srv.ID, "by", a.page(r).Username)
+	a.Logger.Info("replica control", "action", action, "server", srv.ID, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, replicaURL(srv.ID)+"?pesan="+notice, http.StatusSeeOther)
 }
 
@@ -171,7 +172,7 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 		a.replicaError(w, r, srv, rep, err.Error())
 		return
 	}
-	a.Logger.Info("resync started", "server", srv.ID, "job", id, "by", a.page(r).Username)
+	a.Logger.Info("resync started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
@@ -202,7 +203,7 @@ func (a *app) detachReplica(w http.ResponseWriter, r *http.Request) {
 		a.replicaError(w, r, srv, rep, err.Error())
 		return
 	}
-	a.Logger.Info("replica detached", "server", srv.ID, "mode", mode, "by", a.page(r).Username)
+	a.Logger.Info("replica detached", "server", srv.ID, "mode", mode, "by", auth.UsernameFrom(r.Context()))
 	notice := "dilepas"
 	if mode == "stop" {
 		notice = "dilepas-henti"
@@ -229,7 +230,7 @@ func (a *app) unlockMaster(w http.ResponseWriter, r *http.Request) {
 		a.renderMaster(w, r, http.StatusBadRequest, p)
 		return
 	}
-	a.Logger.Info("master unlocked", "server", srv.ID, "by", a.page(r).Username)
+	a.Logger.Info("master unlocked", "server", srv.ID, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan=kunci-dibuka", http.StatusSeeOther)
 }
 
@@ -273,7 +274,7 @@ func (a *app) snoozeServer(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "snooze", err)
 		return
 	}
-	a.Logger.Info("snooze", "server", srv.ID, "hours", hours, "by", a.page(r).Username)
+	a.Logger.Info("snooze", "server", srv.ID, "hours", hours, "by", auth.UsernameFrom(r.Context()))
 	notice := "senyap"
 	if until == nil {
 		notice = "senyap-batal"

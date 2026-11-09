@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -198,7 +199,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	}
 	a.audit(r, "promote", auditMaster, srv.ID, detail, auditOK)
 	a.Logger.Info("promote started", "master", srv.ID, "candidate", params.CandidateServerID, "mode", view.Mode,
-		"job", id, "by", a.page(r).Username)
+		"job", id, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 

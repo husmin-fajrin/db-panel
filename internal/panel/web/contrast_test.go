@@ -52,7 +52,10 @@ func TestContrastTokens(t *testing.T) {
 		{"warning-content", "warning"},
 		{"success-content", "success"},
 		{"neutral-content", "neutral"},
-		{"primary", "base-100"}, // links and the active menu entry
+		{"primary", "base-100"}, // links on cards and the sidebar
+		{"primary", "base-200"}, // links and the logo on the page background
+		{"error-content", "error"},
+		{"info-content", "info"},
 	}
 	tokens := themeTokens()
 	for _, theme := range []string{"dbpanel-gelap", "dbpanel-terang"} {
@@ -99,6 +102,35 @@ func TestThemeTokensMatchCSS(t *testing.T) {
 			if got := strings.TrimSpace(m[1]); !strings.EqualFold(got, hex) {
 				t.Errorf("%s: --color-%s = %s in app.css, %s in themeTokens", theme, role, got, hex)
 			}
+		}
+	}
+}
+
+// TestBuiltCSSMenuAndFocus: the built stylesheet marks the current menu
+// entry in primary (cyan) and gives menu entries, buttons and inputs a
+// primary focus ring, outside daisyUI's layer so they win.
+func TestBuiltCSSMenuAndFocus(t *testing.T) {
+	raw, err := os.ReadFile("../../../web/static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(raw)
+	// Unlayered rules come after the last @layer block's end; checking the
+	// exact minified text keeps the test simple.
+	for _, want := range []string{
+		".menu{--menu-active-bg:var(--color-primary);--menu-active-fg:var(--color-primary-content)}",
+		".menu li>a:focus-visible,",
+		// The minifier merges the button and input focus rules.
+		".btn:focus-visible,.input:focus,",
+		"{outline:2px solid var(--color-primary);outline-offset:2px}",
+	} {
+		i := strings.LastIndex(css, want)
+		if i < 0 {
+			t.Errorf("web/static/app.css lacks %q (run scripts/tailwind.sh)", want)
+			continue
+		}
+		if j := strings.LastIndex(css, "@layer utilities{"); j > i {
+			t.Errorf("%q comes before the utilities layer: it must be unlayered", want)
 		}
 	}
 }

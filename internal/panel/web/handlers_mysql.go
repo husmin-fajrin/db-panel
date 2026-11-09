@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -210,7 +211,7 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit(r, "mysql_connect", auditServer, srv.ID, detail, auditOK)
-	a.Logger.Info("mysql connected", "server", srv.ID, "mysql_user", form.User, "by", a.page(r).Username)
+	a.Logger.Info("mysql connected", "server", srv.ID, "mysql_user", form.User, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, serverURL(srv.ID)+"?pesan=terhubung", http.StatusSeeOther)
 }
 
@@ -254,7 +255,7 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
-	a.Logger.Info("prepare master started", "server", srv.ID, "job", id, "by", a.page(r).Username)
+	a.Logger.Info("prepare master started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
@@ -283,7 +284,7 @@ func (a *app) installMySQLTLS(w http.ResponseWriter, r *http.Request) {
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
-	a.Logger.Info("mysql certificate job started", "server", srv.ID, "job", id, "by", a.page(r).Username)
+	a.Logger.Info("mysql certificate job started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
@@ -303,7 +304,7 @@ func (a *app) tightenTLS(w http.ResponseWriter, r *http.Request) {
 		a.renderMaster(w, r, http.StatusBadRequest, p)
 		return
 	}
-	a.Logger.Info("tighten replication started", "master", srv.ID, "job", id, "by", a.page(r).Username)
+	a.Logger.Info("tighten replication started", "master", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
@@ -416,7 +417,7 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "set topology source", err)
 		return
 	}
-	a.Logger.Info("master source address changed", "master", srv.ID, "host", host, "port", port, "by", a.page(r).Username)
+	a.Logger.Info("master source address changed", "master", srv.ID, "host", host, "port", port, "by", auth.UsernameFrom(r.Context()))
 	notice := "sumber"
 	// The master's MySQL certificate does not name the new address: the
 	// next replica would refuse it (I8).
@@ -703,7 +704,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	detail["job_id"] = id
 	a.audit(r, "create_replica", auditReplica, p.Target, detail, auditOK)
-	a.Logger.Info("create replica started", "master", master.ID, "target", p.Target, "job", id, "by", a.page(r).Username)
+	a.Logger.Info("create replica started", "master", master.ID, "target", p.Target, "job", id, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
@@ -1034,6 +1035,6 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 	a.Logger.Info("replica databases "+verb+" started", "server", srv.ID, "databases", selected, "job", id,
-		"by", a.page(r).Username)
+		"by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }

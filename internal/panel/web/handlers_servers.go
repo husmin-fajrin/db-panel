@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -299,7 +300,7 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "create pair token", err)
 		return
 	}
-	a.Logger.Info("server created", "id", srv.ID, "name", srv.Name, "by", a.page(r).Username)
+	a.Logger.Info("server created", "id", srv.ID, "name", srv.Name, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
 }
 
@@ -466,7 +467,7 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if srv.Paired {
-		a.Logger.Info("re-pairing token created", "id", srv.ID, "by", a.page(r).Username)
+		a.Logger.Info("re-pairing token created", "id", srv.ID, "by", auth.UsernameFrom(r.Context()))
 	}
 	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
 }
@@ -529,7 +530,7 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "delete server", err)
 		return
 	}
-	a.Logger.Info("server deleted", "id", srv.ID, "name", srv.Name, "unquarantined", unquarantined, "by", a.page(r).Username)
+	a.Logger.Info("server deleted", "id", srv.ID, "name", srv.Name, "unquarantined", unquarantined, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, "/servers?pesan=dihapus", http.StatusSeeOther)
 }
 

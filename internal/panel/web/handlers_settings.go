@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
@@ -169,8 +170,10 @@ func (f settingsForm) validate(base monitor.Settings) (monitor.Settings, string)
 			"(tanpa nama pengguna dan sandi), atau dikosongkan."
 	case f.ChatID != "" && !chatIDRe.MatchString(f.ChatID):
 		msg = "Chat id harus angka (grup dan kanal diawali tanda minus) atau @nama kanal."
-	case utf8.RuneCountInString(f.Instansi) > maxInstansi || !utf8.ValidString(f.Instansi):
+	case utf8.RuneCountInString(f.Instansi) > maxInstansi:
 		msg = fmt.Sprintf("Nama instansi paling panjang %d karakter.", maxInstansi)
+	case !plainText(f.Instansi):
+		msg = "Nama instansi tidak boleh memuat karakter kendali atau karakter tak terlihat."
 	case !validTema(f.TemaBawaan):
 		msg = "Tema bawaan tidak dikenal."
 	}
@@ -196,6 +199,21 @@ func validBaseURL(s string) bool {
 	u, err := url.Parse(s)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil &&
 		u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
+}
+
+// plainText reports whether s is valid UTF-8 without control characters
+// or invisible format characters (Cf: bidi overrides such as U+202E,
+// zero-width spaces), which could disguise the name in the sidebar.
+func plainText(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // look is the stored Tampilan settings; Tema is temaSistem when unset or

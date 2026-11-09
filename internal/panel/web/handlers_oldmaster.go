@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -281,7 +282,7 @@ func (a *app) cutoverDone(w http.ResponseWriter, r *http.Request) {
 		a.renderCutover(w, r, http.StatusConflict, srv, topo, err.Error())
 		return
 	}
-	a.Logger.Info("cutover confirmed", "master", srv.ID, "topology", topo.ID, "by", a.page(r).Username)
+	a.Logger.Info("cutover confirmed", "master", srv.ID, "topology", topo.ID, "by", auth.UsernameFrom(r.Context()))
 	if warning == "" {
 		http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan=dialihkan", http.StatusSeeOther)
 		return
@@ -491,7 +492,7 @@ func (a *app) startOldMasterJob(w http.ResponseWriter, r *http.Request, action s
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
 		return
 	}
-	a.Logger.Info("old master job started", "action", action, "server", srv.ID, "job", id, "by", a.page(r).Username)
+	a.Logger.Info("old master job started", "action", action, "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
@@ -570,7 +571,7 @@ func (a *app) salvageDownload(w http.ResponseWriter, r *http.Request) {
 	detail["size"], detail["sent"] = size, sent
 	a.audit(r, "salvage_download", auditServer, srv.ID, detail, outcome)
 	a.Logger.Info("salvage download", "server", srv.ID, "file", name, "size", size, "sent", sent, "outcome", outcome,
-		"by", a.page(r).Username)
+		"by", auth.UsernameFrom(r.Context()))
 }
 
 // salvageDelete deletes a salvage file (token for that file: it may be the
@@ -600,7 +601,7 @@ func (a *app) salvageDelete(w http.ResponseWriter, r *http.Request) {
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msg})
 		return
 	}
-	a.Logger.Info("salvage file deleted", "server", srv.ID, "file", name, "by", a.page(r).Username)
+	a.Logger.Info("salvage file deleted", "server", srv.ID, "file", name, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, serverURL(srv.ID)+"?pesan=berkas-dihapus", http.StatusSeeOther)
 }
 
@@ -690,7 +691,7 @@ func (a *app) repointReplica(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "replica_repoint", auditReplica, srv.ID, nil, outcome)
 	switch {
 	case err == nil:
-		a.Logger.Info("replica repointed", "server", srv.ID, "by", a.page(r).Username)
+		a.Logger.Info("replica repointed", "server", srv.ID, "by", auth.UsernameFrom(r.Context()))
 		http.Redirect(w, r, replicaURL(srv.ID)+"?pesan=diarahkan", http.StatusSeeOther)
 	case errors.Is(err, orchestrator.ErrNeedsRebuild):
 		if fresh, rerr := a.Store.GetReplicaByServer(srv.ID); rerr == nil {

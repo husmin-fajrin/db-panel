@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
@@ -378,7 +379,7 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, name string, do 
 		a.renderJob(w, r, http.StatusConflict, err.Error())
 		return
 	}
-	a.Logger.Info("job action", "action", name, "job", job.ID, "by", a.page(r).Username)
+	a.Logger.Info("job action", "action", name, "job", job.ID, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(job.ID), http.StatusSeeOther)
 }
 

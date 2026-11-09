@@ -39,7 +39,7 @@
   --color-warning: #FFD600;
   --color-warning-content: #0A0A14;
   --color-error: #FF006E;
-  --color-error-content: #FFFFFF;
+  --color-error-content: #0A0A14;
   --color-error-text: #FF4D94;
   --color-neutral: #1A1A2E;
   --color-neutral-content: #EEEEF0;
@@ -63,13 +63,13 @@
   --color-base-300: #DDE2EA;
   --color-base-content: #141424;
   --color-muted: #5E6577;
-  --color-primary: #0A7F93;
+  --color-primary: #076F81;
   --color-primary-content: #FFFFFF;
-  --color-secondary: #0A7F93;
+  --color-secondary: #076F81;
   --color-secondary-content: #FFFFFF;
-  --color-accent: #0A7F93;
+  --color-accent: #076F81;
   --color-accent-content: #FFFFFF;
-  --color-info: #0A7F93;
+  --color-info: #076F81;
   --color-info-content: #FFFFFF;
   --color-success: #1E9E2E;
   --color-success-content: #141424;
@@ -250,6 +250,37 @@
    because daisyUI's own rule comes later than @layer components. */
 p.label {
   white-space: normal;
+}
+
+/* Sidebar menu: the current page is cyan (primary), not daisyUI's
+   neutral, which nearly vanishes on the dark sidebar. Unlayered so it wins
+   over daisyUI's .menu rule. */
+.menu {
+  --menu-active-bg: var(--color-primary);
+  --menu-active-fg: var(--color-primary-content);
+}
+
+/* Visible keyboard focus, 2 px primary (design spec 5.5). daisyUI removes
+   the outline on focused menu entries and colours the one of inputs and
+   buttons itself; these unlayered rules win over both. */
+.menu li > a:focus-visible,
+.menu li > button:focus-visible,
+.menu li > summary:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.input:focus,
+.input:focus-within,
+.select:focus,
+.select:focus-within,
+.textarea:focus,
+.textarea:focus-within {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 /* User-triggered transitions only, at most 150 ms, none at all when the

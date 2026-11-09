@@ -20,9 +20,9 @@
   </header>
   <aside id="menu-utama" class="hidden md:flex data-[terbuka]:flex flex-col w-full md:w-60 md:shrink-0 md:sticky md:top-0 md:h-screen bg-base-100 border-b md:border-b-0 md:border-r border-base-300" :data-terbuka="open">
     <nav aria-label="Menu utama" class="flex-1 overflow-y-auto">
-      <div class="hidden md:block px-6 pt-6 pb-4">
-        <a href="/" class="logo text-primary">dbpanel</a>
-        {{with .Instansi}}<p class="help mt-1 break-words" data-instansi>{{.}}</p>{{end}}
+      <div class="px-6 pt-4 md:pt-6 md:pb-4{{if not .Instansi}} hidden md:block{{end}}">
+        <a href="/" class="logo text-primary hidden md:inline">dbpanel</a>
+        {{with .Instansi}}<p class="help md:mt-1 break-words" data-instansi>{{.}}</p>{{end}}
       </div>
       <ul class="menu w-full gap-1 px-3 py-3 md:pt-0">
         <li><a href="/" data-menu="dashboard" {{.MenuAttr "dashboard"}}>{{template "icon" "dashboard"}}Dashboard</a></li>

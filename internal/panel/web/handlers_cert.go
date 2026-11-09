@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 )
 
@@ -192,7 +193,7 @@ func (a *app) uploadCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit(r, "https_cert_upload", auditSettings, 0, map[string]any{"names": a.CertInfo().Names}, auditOK)
-	a.Logger.Info("uploaded HTTPS certificate in use", "by", a.page(r).Username)
+	a.Logger.Info("uploaded HTTPS certificate in use", "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, "/settings?pesan=sertifikat-sendiri", http.StatusSeeOther)
 }
 

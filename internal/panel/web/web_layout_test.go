@@ -113,6 +113,11 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 	if !strings.Contains(nav, "data-instansi") || !strings.Contains(nav, "Dinas Kominfo &lt;Kota&gt;") {
 		t.Errorf("nama_instansi not shown (escaped) in the sidebar:\n%s", nav)
 	}
+	// Phones see it in the opened menu: its box is not hidden below md.
+	box := regexp.MustCompile(`<div class="[^"]*">\s*<a href="/" class="logo`).FindString(nav)
+	if box == "" || regexp.MustCompile(`["\s]hidden["\s]`).MatchString(box) {
+		t.Errorf("nama_instansi box is hidden on phones: %q", box)
+	}
 }
 
 // TestLayoutAgentStatus: the status box counts the paired servers and the
@@ -239,6 +244,11 @@ func TestSettingsTampilan(t *testing.T) {
 	rec = e.do("POST", "/settings", with(validSettings(), "nama_instansi", long), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Nama instansi paling panjang 60 karakter.")
+	for _, bad := range []string{"Dinas \u202eatok", "Dinas\u200bKota", "Dinas\x07Kota"} {
+		rec = e.do("POST", "/settings", with(validSettings(), "nama_instansi", bad), c)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, "Nama instansi tidak boleh memuat karakter kendali atau karakter tak terlihat.")
+	}
 	rec = e.do("POST", "/settings", with(validSettings(), "tema_bawaan", "ungu"), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Tema bawaan tidak dikenal.")
