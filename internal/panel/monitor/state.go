@@ -571,7 +571,7 @@ func (m *Monitor) snapshotEvents(id int64, s *serverState, snap *proto.HealthSna
 			s.connLevel = lvl
 		}
 	}
-	if pct, ok := diskPercent(snap); ok {
+	if pct, ok := DiskPercent(snap); ok {
 		lvl := 0
 		switch {
 		case pct >= th.DiskCrit:

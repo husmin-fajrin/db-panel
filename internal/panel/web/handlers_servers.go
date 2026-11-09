@@ -205,12 +205,13 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "dashboard banners", err)
 		return
 	}
-	if p.Topologies, err = a.topologyPanels(servers, topos, now); err != nil {
+	set := a.monitorSettings()
+	if p.Topologies, err = a.topologyPanels(servers, topos, now, int(set.Lag/time.Second)); err != nil {
 		a.internalError(w, "topology panels", err)
 		return
 	}
 	p.Empty = len(p.Topologies) == 0
-	p.Gauges = a.dashboardGauges(p.Topologies, open)
+	p.Gauges = dashboardGauges(p.Topologies, open, set)
 
 	recent, err := a.Store.ListAlerts(now.AddDate(0, 0, -alertHistoryDays), dashboardListLen)
 	if err != nil {
@@ -234,7 +235,7 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Jobs, err = a.jobRows(jobs); err != nil {
-		a.internalError(w, "list servers", err)
+		a.internalError(w, "job rows", err)
 		return
 	}
 	running, err := a.Store.RunningJobs()
@@ -322,20 +323,20 @@ func (a *app) dashboardBanners(servers []store.Server, topos []store.Topology, o
 
 // topologyPanels is one panel per topology: its master and replicas with
 // their status, and its replicas' lag over the last 24 hours.
-func (a *app) topologyPanels(servers []store.Server, topos []store.Topology, now time.Time) ([]topologyPanel, error) {
+func (a *app) topologyPanels(servers []store.Server, topos []store.Topology, now time.Time, thresholdSec int) ([]topologyPanel, error) {
 	byID := make(map[int64]store.Server, len(servers))
 	for _, s := range servers {
 		byID[s.ID] = s
 	}
-	thresholdSec := int(a.monitorSettings().Lag / time.Second)
 	panels := make([]topologyPanel, 0, len(topos))
 	for _, t := range topos {
 		master := byID[t.MasterServerID]
 		v, ok := a.Monitor.View(master.ID)
 		mc := masterCard{Server: master, Status: newStatusView(master.ID, master.Role, v, ok, now), DiskPct: -1}
-		if ok && v.Snap != nil && v.Snap.DiskTotal > 0 {
-			total, free := v.Snap.DiskTotal, min(v.Snap.DiskFree, v.Snap.DiskTotal)
-			mc.DiskPct, mc.DiskFree = int(((total-free)*100+total/2)/total), free
+		if pct, known := monitor.DiskPercent(v.Snap); ok && known {
+			// Rounded down as the disk alerts judge it, so the gauge
+			// never turns red without a disk_crit alert.
+			mc.DiskPct, mc.DiskFree = pct, v.Snap.DiskFree
 		}
 		panel := topologyPanel{ID: t.ID, Name: master.Name, Master: mc}
 		reps, err := a.Store.ListReplicas(t.ID)
@@ -359,13 +360,23 @@ func (a *app) topologyPanels(servers []store.Server, topos []store.Topology, now
 	return panels, nil
 }
 
-// lagChart is the lag of reps over the 24 hours before now in buckets of
+// chartBuckets is how many buckets the dashboard's lag chart spans: 24
+// hours of chartBucket (design spec 5.7, at most 288 points per series).
+const chartBuckets = int(24 * time.Hour / chartBucket)
+
+// chartFrom is the start of the lag chart ending at now: the bucket
+// boundary chartBuckets-1 buckets before now's bucket, so the window holds
+// exactly chartBuckets buckets, now's included.
+func chartFrom(now time.Time) time.Time {
+	return now.Truncate(chartBucket).Add(-time.Duration(chartBuckets-1) * chartBucket)
+}
+
+// lagChart is the lag of reps over the last 24 hours in buckets of
 // chartBucket (design spec 5.7); it is sparse when a replica has no sample
-// in the last hour.
+// in the last hour, read from the same buckets (a bucket that ends after
+// now−1h counts, so up to one bucket of slack).
 func (a *app) lagChart(reps []replicaCard, now time.Time, thresholdSec int) (LagChart, error) {
-	// LagSeries moves from down to its bucket's start; the chart starts
-	// there too, so the first bucket is drawn (289 buckets at most).
-	from := now.Add(-24 * time.Hour).Truncate(chartBucket)
+	from := chartFrom(now)
 	ids := make([]int64, 0, len(reps))
 	for _, rc := range reps {
 		ids = append(ids, rc.Server.ID)
@@ -382,11 +393,9 @@ func (a *app) lagChart(reps []replicaCard, now time.Time, thresholdSec int) (Lag
 			s.Points = append(s.Points, ChartPoint{T: p.T, Lag: p.Lag})
 		}
 		series = append(series, s)
-		has, err := a.Store.HasSamples(rc.Server.ID, now.Add(-time.Hour))
-		if err != nil {
-			return LagChart{}, err
-		}
-		sparse = sparse || !has
+		pts := byServer[rc.Server.ID]
+		recent := len(pts) > 0 && pts[len(pts)-1].T.Add(chartBucket).After(now.Add(-time.Hour))
+		sparse = sparse || !recent
 	}
 	return newLagChart(series, from, now, thresholdSec, sparse), nil
 }
@@ -407,12 +416,12 @@ func (a *app) monitorSettings() monitor.Settings {
 // replica against lag_threshold_sec; the fullest master disk and its
 // master against disk_warn_pct and disk_crit_pct; the open alerts and the
 // newest one's title.
-func (a *app) dashboardGauges(topos []topologyPanel, openAlerts []store.Alert) [4]Gauge {
-	set := a.monitorSettings()
+func dashboardGauges(topos []topologyPanel, openAlerts []store.Alert, set monitor.Settings) [4]Gauge {
 	lagThreshold := int64(set.Lag / time.Second)
 	names := map[int64]string{}
 	var (
 		synced, total int
+		catchingUp    int
 		critical      bool
 		top           *replicaCard
 		worst         *masterCard
@@ -427,8 +436,13 @@ func (a *app) dashboardGauges(topos []topologyPanel, openAlerts []store.Alert) [
 			rc := &t.Replicas[j]
 			names[rc.Server.ID] = rc.Server.Name
 			total++
-			if rc.Status.Label == monitor.StatusSynced {
+			// The monitor's code, not the label: a replica shown
+			// "Mengejar" is Sinkron to the monitor and the alerts.
+			if rc.Status.Code == monitor.StatusSynced {
 				synced++
+				if rc.Status.Label == labelCatchingUp {
+					catchingUp++
+				}
 			}
 			critical = critical || rc.Status.Severity == monitor.SevCrit
 			if rc.LagSec != nil && (top == nil || *rc.LagSec > *top.LagSec) {
@@ -453,9 +467,12 @@ func (a *app) dashboardGauges(topos []topologyPanel, openAlerts []store.Alert) [
 	if total > 0 {
 		g[0].Percent = float64(synced) * 100 / float64(total)
 		if synced == total {
-			g[0].Sub = "semua replika mengikuti master"
+			g[0].Sub = "semua mengikuti master"
 		} else {
 			g[0].Sub = fmt.Sprintf("%d replika perlu perhatian", total-synced)
+		}
+		if catchingUp > 0 {
+			g[0].Sub += fmt.Sprintf(" · %d mengejar", catchingUp)
 		}
 	}
 
@@ -475,7 +492,7 @@ func (a *app) dashboardGauges(topos []topologyPanel, openAlerts []store.Alert) [
 		}
 	}
 
-	g[2] = Gauge{Label: "Disk master terburuk", Value: "-", Tone: "neutral", Sub: "belum ada laporan disk",
+	g[2] = Gauge{Label: "Disk master", Value: "-", Tone: "neutral", Sub: "belum ada laporan disk",
 		Aria: "Disk master terburuk: belum ada laporan"}
 	if worst != nil {
 		pct := worst.DiskPct
@@ -493,7 +510,7 @@ func (a *app) dashboardGauges(topos []topologyPanel, openAlerts []store.Alert) [
 	}
 
 	n := len(openAlerts)
-	g[3] = Gauge{Label: "Peringatan terbuka", Value: strconv.Itoa(n), Tone: "success", Percent: 100,
+	g[3] = Gauge{Label: "Peringatan", Value: strconv.Itoa(n), Tone: "success", Percent: 100,
 		Sub: "tidak ada peringatan terbuka", Aria: fmt.Sprintf("Peringatan terbuka: %d", n)}
 	if n > 0 {
 		g[3].Tone = "warning"

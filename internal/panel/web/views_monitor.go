@@ -27,6 +27,9 @@ type statusView struct {
 	ServerID int64
 	Role     string // store.RoleMaster, store.RoleReplica or unassigned
 	Label    string
+	// Code is the monitor's status code (monitor.Status*); "" when the
+	// server is not judged. Label may differ (Mengejar).
+	Code     string
 	Severity monitor.Severity
 	// Detail is the status sentence; never MySQL's own error text, which
 	// only "Detail teknis" shows.
@@ -74,7 +77,7 @@ func newStatusView(id int64, role string, v monitor.View, ok bool, now time.Time
 		return sv
 	}
 	st := v.Status
-	sv.Label, sv.Severity, sv.Detail, sv.LockLost = st.Code, st.Severity, st.Detail, st.LockLost
+	sv.Label, sv.Code, sv.Severity, sv.Detail, sv.LockLost = st.Code, st.Code, st.Severity, st.Detail, st.LockLost
 	if st.Code == monitor.StatusUnreachable {
 		sv.Detail = "MySQL tidak menjawab" // st.Detail may be MySQL's raw error
 	}

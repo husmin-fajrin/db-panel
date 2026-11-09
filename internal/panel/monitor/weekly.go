@@ -147,10 +147,8 @@ func tally(row *WeeklyRow, evs []store.StatusEvent, current string, from, to tim
 // diskPct is the percent of the data disk used in the view's last report;
 // 0 when there is none.
 func diskPct(v View) int {
-	if v.Snap == nil || v.Snap.DiskTotal == 0 || v.Snap.DiskFree > v.Snap.DiskTotal {
-		return 0
-	}
-	return int((v.Snap.DiskTotal - v.Snap.DiskFree) * 100 / v.Snap.DiskTotal)
+	pct, _ := DiskPercent(v.Snap)
+	return pct
 }
 
 // FormatWeekly renders the summary as plain text for Telegram.

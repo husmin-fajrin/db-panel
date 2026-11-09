@@ -225,3 +225,58 @@ func TestDashboardBannersKept(t *testing.T) {
 	wantBody(t, rec, "data-promote-partial", "Promote belum tuntas", "Promote &lt;selesai&gt; sebagian",
 		`href="/alerts"`, "Lihat peringatan", `class="banner banner-error"`)
 }
+
+// TestDashboardMengejarCountsAsSynced: the display-only Mengejar label
+// does not change the Sinkron gauge, which counts the monitor's code.
+func TestDashboardMengejarCountsAsSynced(t *testing.T) {
+	e, mon, _ := monitorEnv(t)
+	mon.setView(masterView(1, 50))
+	mon.setView(monitor.View{ServerID: 2, Role: store.RoleReplica, ReceivedAt: monNow.Add(-3 * time.Second),
+		Status: monitor.Status{Code: monitor.StatusSynced, Severity: monitor.SevOK,
+			Detail: "Replikasi berjalan dan mengikuti master", LagSec: ptr[int64](0), GTIDGap: 8, GTIDGapKnown: true}})
+	body := e.do("GET", "/", nil, e.cookie()).Body.String()
+	g := gaugeOf(body, "sinkron")
+	for _, s := range []string{">1/1<", "nada-success", "semua mengikuti master · 1 mengejar"} {
+		if !strings.Contains(g, s) {
+			t.Errorf("sinkron gauge lacks %q:\n%s", s, g)
+		}
+	}
+	if strings.Contains(g, "perlu perhatian") {
+		t.Errorf("a catching-up replica needs attention:\n%s", g)
+	}
+	// The row still says Mengejar.
+	if row := between(body, `data-status-for="2"`, `</li>`); !strings.Contains(row, ">Mengejar<") {
+		t.Errorf("row is not Mengejar:\n%s", row)
+	}
+}
+
+// TestDashboardDiskRoundsDown: 94.6 % used reads 94 %, as the disk alerts
+// judge it, so it is not red under disk_crit_pct 95.
+func TestDashboardDiskRoundsDown(t *testing.T) {
+	e, mon, _ := monitorEnv(t)
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow,
+		Status: monitor.Status{Code: monitor.StatusHealthy, Severity: monitor.SevOK},
+		Snap:   &proto.HealthSnapshot{MySQLOK: true, DiskTotal: 1000 << 30, DiskFree: 54 << 30}})
+	g := gaugeOf(e.do("GET", "/", nil, e.cookie()).Body.String(), "disk")
+	for _, s := range []string{">94%<", "nada-warning", ">Disk master<"} {
+		if !strings.Contains(g, s) {
+			t.Errorf("disk gauge lacks %q:\n%s", s, g)
+		}
+	}
+	if strings.Contains(g, ">95%<") || strings.Contains(g, "nada-error") {
+		t.Errorf("disk gauge rounds 94.6%% up to critical:\n%s", g)
+	}
+}
+
+// TestDashboardSparseFromSeries: a replica whose newest sample is two
+// hours old has a chart, but a sparse one.
+func TestDashboardSparseFromSeries(t *testing.T) {
+	e, _, _ := monitorEnv(t)
+	if err := e.st.AddHealthSample(store.HealthSample{ServerID: 2, TS: monNow.Add(-2 * time.Hour),
+		LagSec: ptr[int64](4), MySQLOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("GET", "/", nil, e.cookie())
+	wantBody(t, rec, "grafik jarang", "puncak 4 dtk", ">Peringatan<")
+	wantNoBody(t, rec, "Belum ada data lag 24 jam terakhir")
+}

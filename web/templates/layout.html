@@ -18,7 +18,11 @@
     <a href="/" class="logo text-primary">dbpanel</a>
     <button type="button" class="btn btn-ghost btn-sm" aria-controls="menu-utama" aria-expanded="false" :aria-expanded="open" @click="toggle">{{template "icon" "menu"}}<span>Menu</span></button>
   </header>
-  <aside id="menu-utama" class="hidden md:flex data-[terbuka]:flex flex-col w-full md:w-60 md:shrink-0 md:sticky md:top-0 md:h-screen bg-base-100 border-b md:border-b-0 md:border-r border-base-300" :data-terbuka="open">
+  {{/* The column behind the sidebar stretches to the page's full height
+       (its background and edge), while the sidebar itself stays in view
+       (sticky, one screen tall). */}}
+  <div class="md:w-60 md:shrink-0 md:self-stretch md:bg-base-100 md:border-r md:border-base-300" data-sidebar-kolom>
+  <aside id="menu-utama" class="hidden md:flex data-[terbuka]:flex flex-col w-full md:sticky md:top-0 md:h-screen bg-base-100 border-b md:border-b-0 border-base-300" :data-terbuka="open">
     <nav aria-label="Menu utama" class="flex-1 overflow-y-auto">
       <div class="px-6 pt-4 md:pt-6 md:pb-4{{if not .Instansi}} hidden md:block{{end}}">
         <a href="/" class="logo text-primary hidden md:inline">dbpanel</a>
@@ -46,6 +50,7 @@
       </form>
     </div>
   </aside>
+  </div>
   <main class="flex-1 min-w-0 p-4 md:p-8">
     <div class="mx-auto w-full max-w-[1440px]">
       {{template "banners" .}}

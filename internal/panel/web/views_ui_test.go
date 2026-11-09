@@ -397,3 +397,24 @@ func TestConfirmDialogDangerStyle(t *testing.T) {
 		}
 	}
 }
+
+// TestChartFromWindow: the dashboard's chart window holds exactly 288
+// buckets of 5 minutes (design spec 5.7), now's bucket included, so
+// LagSeries never returns a 289th point.
+func TestChartFromWindow(t *testing.T) {
+	base := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	for _, off := range []time.Duration{0, time.Second, 2*time.Minute + 30*time.Second, 4*time.Minute + 59*time.Second, 7 * time.Hour} {
+		now := base.Add(off)
+		from := chartFrom(now)
+		secs := int64(chartBucket / time.Second)
+		if from.Unix()%secs != 0 {
+			t.Errorf("now %v: from %v is not on a bucket boundary", now, from)
+		}
+		if n := (now.Unix()-from.Unix())/secs + 1; n != 288 {
+			t.Errorf("now %v: %d buckets, want 288", now, n)
+		}
+		if chartBuckets != 288 || chartBuckets >= store.MaxLagBuckets {
+			t.Errorf("chartBuckets = %d", chartBuckets)
+		}
+	}
+}

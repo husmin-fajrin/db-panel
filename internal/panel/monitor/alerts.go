@@ -226,28 +226,28 @@ var alertRules = []alertRule{
 	{
 		kind: KindDiskWarn,
 		open: func(v View, ctx ruleCtx) (bool, string) {
-			pct, ok := diskPercent(v.Snap)
+			pct, ok := DiskPercent(v.Snap)
 			if !ok || pct < ctx.set.DiskWarn || ctx.diskCrit {
 				return false, ""
 			}
 			return true, diskMessage(pct)
 		},
 		close: func(v View, ctx ruleCtx) bool {
-			pct, ok := diskPercent(v.Snap)
+			pct, ok := DiskPercent(v.Snap)
 			return ctx.diskCrit || (ok && pct < ctx.set.DiskWarn-diskCloseMargin)
 		},
 	},
 	{
 		kind: KindDiskCrit,
 		open: func(v View, ctx ruleCtx) (bool, string) {
-			pct, ok := diskPercent(v.Snap)
+			pct, ok := DiskPercent(v.Snap)
 			if !ok || pct < ctx.set.DiskCrit {
 				return false, ""
 			}
 			return true, diskMessage(pct)
 		},
 		close: func(v View, ctx ruleCtx) bool {
-			pct, ok := diskPercent(v.Snap)
+			pct, ok := DiskPercent(v.Snap)
 			return ok && pct < ctx.set.DiskCrit-diskCloseMargin
 		},
 	},
@@ -354,7 +354,7 @@ func unpinnedMessage(snap *proto.HealthSnapshot) string {
 // diskCritActive reports whether disk_crit is open after this evaluation:
 // usage at or over DiskCrit, or open and not yet under DiskCrit − 5.
 func diskCritActive(snap *proto.HealthSnapshot, set Settings, open bool) bool {
-	pct, ok := diskPercent(snap)
+	pct, ok := DiskPercent(snap)
 	if !ok {
 		return open
 	}
@@ -405,8 +405,10 @@ func ioRunning(snap *proto.HealthSnapshot) bool {
 	return snap != nil && snap.MySQLOK && snap.Replica != nil && snap.Replica.IORunning == "Yes"
 }
 
-// diskPercent is the data directory's used share; false when unknown.
-func diskPercent(snap *proto.HealthSnapshot) (int, bool) {
+// DiskPercent is the data directory's used share, rounded down as the
+// disk alerts judge it; false when unknown. The dashboard shows the same
+// number, so it never shows a percent the alerts do not see.
+func DiskPercent(snap *proto.HealthSnapshot) (int, bool) {
 	if snap == nil || snap.DiskTotal == 0 || snap.DiskFree > snap.DiskTotal {
 		return 0, false
 	}
