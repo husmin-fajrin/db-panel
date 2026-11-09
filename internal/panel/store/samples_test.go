@@ -118,6 +118,24 @@ func TestLagSeriesBuckets(t *testing.T) {
 	if got, err := s.LagSeries(nil, base, base.Add(time.Hour), 5*time.Minute); err != nil || len(got) != 0 {
 		t.Fatalf("LagSeries(nil) = %v, %v", got, err)
 	}
+
+	// A window starting inside a bucket takes the whole bucket: a's 10:00
+	// bucket (25) comes back from 10:02, starting at 10:00.
+	got, err = s.LagSeries([]int64{a.ID}, base.Add(2*time.Minute), base.Add(15*time.Minute), 5*time.Minute)
+	if err != nil || len(got[a.ID]) != 2 || !got[a.ID][0].T.Equal(base) || *got[a.ID][0].Lag != 25 {
+		t.Fatalf("unaligned window = %+v, %v; want the whole 10:00 bucket first", got[a.ID], err)
+	}
+	// 24 hours from an unaligned start: 289 buckets, allowed.
+	if _, err := s.LagSeries([]int64{d.ID}, base.Add(time.Minute), base.Add(24*time.Hour+time.Minute), 5*time.Minute); err != nil {
+		t.Fatalf("24 h from an unaligned start: %v", err)
+	}
+	// More than 289 buckets is refused.
+	if _, err := s.LagSeries([]int64{d.ID}, base, base.Add(24*time.Hour), time.Second); err == nil {
+		t.Fatal("a 24 h series of 1 s buckets was not refused")
+	}
+	if _, err := s.LagSeries([]int64{d.ID}, base, base.Add(24*time.Hour+5*time.Minute), 5*time.Minute); err == nil {
+		t.Fatal("a 290-bucket series was not refused")
+	}
 }
 
 // TestPruneHealthSamplesKeepsRecent: prune deletes the samples older than

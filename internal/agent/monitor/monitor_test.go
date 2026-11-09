@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -912,7 +914,7 @@ func TestAgentEmitsSampleEveryCheck(t *testing.T) {
 		}
 	}
 
-	// The largest sample: a long lag, Connecting, no MySQL.
+	// The largest usual sample: the longest lag, Connecting.
 	r.src.set(func(s *proto.HealthSnapshot) {
 		s.MySQLOK = true
 		s.Replica.IORunning, s.Replica.SQLRunning = "Connecting", "No"
@@ -945,5 +947,31 @@ func TestAgentEmitsSampleEveryCheck(t *testing.T) {
 	samples, _ = r.em.gotSamples()
 	if len(samples) != 6 {
 		t.Fatalf("after 2 offline checks and 1 online: %d samples, want 6 (none from the backlog)", len(samples))
+	}
+
+	// Long, odd thread states: clipped on a rune boundary, and the JSON
+	// stays within 200 bytes even when every byte needs escaping.
+	big := int64(-1 << 63)
+	for i, st := range [][2]string{
+		{strings.Repeat("Connecting", 10), "x" + strings.Repeat("é", 40)},
+		{strings.Repeat("<", 40), strings.Repeat("\x01", 40)},
+		{strings.Repeat("&", 40), "\xff\xfe" + strings.Repeat("\x00", 40)},
+	} {
+		r.src.set(func(s *proto.HealthSnapshot) {
+			*s = base()
+			s.Replica.IORunning, s.Replica.SQLRunning, s.Replica.SecondsBehind = st[0], st[1], &big
+		})
+		r.tick(15 * time.Second)
+		samples, sizes = r.em.gotSamples()
+		last, n := samples[len(samples)-1], sizes[len(sizes)-1]
+		if n > 200 {
+			t.Errorf("case %d: sample is %d bytes of JSON, want at most 200", i, n)
+		}
+		if len(last.IORunning) > 16 || len(last.SQLRunning) > 16 || !utf8.ValidString(last.SQLRunning) || last.LagSec == nil {
+			t.Errorf("case %d: sample = %+v", i, last)
+		}
+	}
+	if s := samples[len(samples)-3]; s.IORunning != "ConnectingConnec" || s.SQLRunning != "x"+strings.Repeat("é", 7) {
+		t.Errorf("long states = %q, %q; want 16 bytes cut on a rune boundary", s.IORunning, s.SQLRunning)
 	}
 }

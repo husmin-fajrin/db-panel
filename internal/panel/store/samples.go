@@ -40,10 +40,17 @@ func (s *Store) AddHealthSample(h HealthSample) error {
 	return nil
 }
 
+// MaxLagBuckets is the most buckets LagSeries spans: 24 hours of 5
+// minutes (288), plus one for a window that does not start on a bucket
+// boundary.
+const MaxLagBuckets = 289
+
 // LagSeries returns, per server of serverIDs, the samples from from to to
-// (both included) in buckets of bucket (aligned to the unix epoch): one
+// (both included) in buckets of bucket (aligned to the unix epoch; from is
+// moved down to its bucket's start, so the first bucket is whole): one
 // LagPoint per bucket that has samples, in time order, with the bucket's
-// MAX(lag_sec). A server without samples in the window has no entry.
+// MAX(lag_sec). A server without samples in the window has no entry. A
+// window over MaxLagBuckets buckets is refused.
 func (s *Store) LagSeries(serverIDs []int64, from, to time.Time, bucket time.Duration) (map[int64][]LagPoint, error) {
 	out := make(map[int64][]LagPoint, len(serverIDs))
 	if len(serverIDs) == 0 {
@@ -53,11 +60,19 @@ func (s *Store) LagSeries(serverIDs []int64, from, to time.Time, bucket time.Dur
 	if secs < 1 {
 		return nil, fmt.Errorf("lag series: bucket %v is shorter than a second", bucket)
 	}
+	start, end := from.Unix(), to.Unix()
+	start -= ((start % secs) + secs) % secs // down to the bucket's start
+	if end < start {
+		return out, nil
+	}
+	if n := (end-start)/secs + 1; n > MaxLagBuckets {
+		return nil, fmt.Errorf("lag series: %d buckets of %v, at most %d", n, bucket, MaxLagBuckets)
+	}
 	args := []any{secs, secs}
 	for _, id := range serverIDs {
 		args = append(args, id)
 	}
-	args = append(args, from.Unix(), to.Unix())
+	args = append(args, start, end)
 	rows, err := s.db.Query(`SELECT server_id, (ts / ?) * ? AS bucket, MAX(lag_sec)
 		FROM health_samples
 		WHERE server_id IN (?`+strings.Repeat(", ?", len(serverIDs)-1)+`) AND ts >= ? AND ts <= ?

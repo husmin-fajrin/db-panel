@@ -3,6 +3,7 @@ package monitor
 import (
 	"encoding/json"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -22,6 +23,13 @@ const (
 	// sampleDropWindow is how far back the dropped samples are counted,
 	// as the hub counts dropped reports.
 	sampleDropWindow = time.Hour
+	// maxSampleAgeMS: an agent sends a sample right after its reading and
+	// never keeps one, so an older sample is dropped. This also keeps a
+	// bogus age from placing the row outside what the pruning reaches.
+	maxSampleAgeMS = 60_000
+	// maxSampleState bounds the thread states stored per row, as the
+	// agent bounds those it sends (Yes, No and Connecting fit).
+	maxSampleState = 16
 )
 
 // sampleDrops counts one server's dropped samples per minute over the
@@ -61,8 +69,9 @@ func (d sampleDrops) count(now time.Time) int {
 }
 
 // handleSample stores one monitor.sample of serverID at the panel's now
-// minus its age, unless it is unreadable, too large or arrives within
-// sampleEvery of the server's previous one (dropped and counted).
+// minus its age. A sample that is too large, unreadable, older than
+// maxSampleAgeMS or arrives within sampleEvery of the server's previous
+// one is dropped and counted.
 func (m *Monitor) handleSample(serverID int64, payload json.RawMessage) {
 	now := m.now()
 	if len(payload) > maxSamplePayload {
@@ -72,7 +81,14 @@ func (m *Monitor) handleSample(serverID int64, payload json.RawMessage) {
 	}
 	var se proto.SampleEvent
 	if err := json.Unmarshal(payload, &se); err != nil {
-		m.log.Debug("lag sample unreadable; ignored", "server_id", serverID, "err", err)
+		m.dropSample(serverID, now)
+		m.log.Debug("lag sample unreadable; dropped", "server_id", serverID, "err", err)
+		return
+	}
+	// Compared as integers: the age is never multiplied unchecked.
+	if se.TakenAgoMS > maxSampleAgeMS {
+		m.dropSample(serverID, now)
+		m.log.Debug("lag sample too old; dropped", "server_id", serverID, "taken_ago_ms", se.TakenAgoMS)
 		return
 	}
 	m.sampleMu.Lock()
@@ -84,7 +100,7 @@ func (m *Monitor) handleSample(serverID int64, payload json.RawMessage) {
 	m.lastSample[serverID] = now
 	m.sampleMu.Unlock()
 	m.storeSample(store.HealthSample{ServerID: serverID, TS: sampleTime(now, se.TakenAgoMS), LagSec: se.LagSec,
-		IORunning: se.IORunning, SQLRunning: se.SQLRunning, MySQLOK: se.MySQLOK})
+		IORunning: clipState(se.IORunning), SQLRunning: clipState(se.SQLRunning), MySQLOK: se.MySQLOK})
 }
 
 // dropSample counts one dropped sample of serverID at now.
@@ -122,13 +138,33 @@ func (m *Monitor) forgetSamples(exists func(id int64) bool) {
 // reportSample stores the sample a health report carries, taken at at, so
 // an agent without monitor.sample still gives the chart (sparse) data and
 // a backlog report fills the gap while the panel was away. A sample at
-// the same second is kept once.
+// the same second is kept once. A report placed after now, or before the
+// samples' retention (a bogus age), gives no sample: such a row would
+// never be pruned, or be pruned at once. The caller holds mu.
 func (m *Monitor) reportSample(serverID int64, snap *proto.HealthSnapshot, at time.Time) {
+	now := m.now()
+	if at.After(now) || at.Before(now.AddDate(0, 0, -m.settings.SamplesRetentionDays)) {
+		m.log.Debug("report outside the samples' window; no sample", "server_id", serverID, "at", at)
+		return
+	}
 	h := store.HealthSample{ServerID: serverID, TS: at.Truncate(time.Second), MySQLOK: snap.MySQLOK}
 	if rs := snap.Replica; rs != nil {
-		h.IORunning, h.SQLRunning, h.LagSec = rs.IORunning, rs.SQLRunning, rs.SecondsBehind
+		h.IORunning, h.SQLRunning, h.LagSec = clipState(rs.IORunning), clipState(rs.SQLRunning), rs.SecondsBehind
 	}
 	m.storeSample(h)
+}
+
+// clipState is a thread state cut to at most maxSampleState bytes, on a
+// rune boundary.
+func clipState(s string) string {
+	if len(s) <= maxSampleState {
+		return s
+	}
+	n := maxSampleState
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (m *Monitor) storeSample(h store.HealthSample) {
@@ -138,7 +174,8 @@ func (m *Monitor) storeSample(h store.HealthSample) {
 	}
 }
 
-// sampleTime is the panel's now minus a reading's age, to the second.
+// sampleTime is the panel's now minus a reading's age, to the second;
+// takenAgoMS is at most maxSampleAgeMS (checked by the caller).
 func sampleTime(now time.Time, takenAgoMS int64) time.Time {
 	return now.Add(-time.Duration(max(takenAgoMS, 0)) * time.Millisecond).Truncate(time.Second)
 }

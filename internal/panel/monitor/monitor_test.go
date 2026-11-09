@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1103,9 +1104,36 @@ func TestPanelStoresSampleAndSnapshotLag(t *testing.T) {
 		t.Fatalf("samples after one 5 s later = %+v, want 2, the last without lag", pts)
 	}
 
-	// An unreadable or oversized sample is ignored.
-	r.hub.OnEvent(rID, proto.Event{Type: proto.EventSample, Payload: json.RawMessage(`{"lag_sec":"x"`)})
-	r.hub.OnEvent(rID, proto.Event{Type: proto.EventSample, Payload: json.RawMessage(`"` + strings.Repeat("a", 2048) + `"`)})
+	// An unreadable, oversized or too old sample is dropped and counted,
+	// however long after the last one it comes. An age that would
+	// overflow (MaxInt64 ms) never places a row anywhere.
+	end := r.clk.Now().Add(2 * time.Minute) // past every sample below
+	rows := len(r.samplesAt(rID, start.Add(-time.Second), end))
+	dropped := r.view(rID).ReportsDropped
+	for i, ev := range []proto.Event{
+		{Type: proto.EventSample, Payload: json.RawMessage(`{"lag_sec":"x"`)},
+		{Type: proto.EventSample, Payload: json.RawMessage(`"` + strings.Repeat("a", 2048) + `"`)},
+		{Type: proto.EventSample, Payload: json.RawMessage(`{"taken_ago_ms":9223372036854775807,"lag_sec":1,"mysql_ok":true}`)},
+		{Type: proto.EventSample, Payload: json.RawMessage(`{"taken_ago_ms":61000,"lag_sec":1,"mysql_ok":true}`)},
+	} {
+		r.clk.Add(10 * time.Second)
+		r.hub.OnEvent(rID, ev)
+		if v := r.view(rID); v.ReportsDropped != dropped+i+1 {
+			t.Fatalf("bad sample %d: ReportsDropped = %d, want %d", i, v.ReportsDropped, dropped+i+1)
+		}
+	}
+	all := r.samplesAt(rID, start.Add(-time.Second), end)
+	if len(all) != rows {
+		t.Fatalf("bad samples stored rows: %d, want %d", len(all), rows)
+	}
+	if ok, err := r.st.HasSamples(rID, r.clk.Now().Add(time.Second)); err != nil || ok {
+		t.Fatalf("a sample was placed in the future: %v, %v", ok, err)
+	}
+	// 60 s old is still taken.
+	ra.sendSample(proto.SampleEvent{TakenAgoMS: 60_000, LagSec: ptr(3), MySQLOK: true})
+	if n := len(r.samplesAt(rID, start.Add(-time.Second), end)); n != rows+1 {
+		t.Fatalf("a 60 s old sample: %d rows, want %d", n, rows+1)
+	}
 
 	// A health report (an agent without samples gives these only): a row
 	// at the report's time; a sample at the same second adds nothing.
@@ -1144,5 +1172,68 @@ func TestPanelStoresSampleAndSnapshotLag(t *testing.T) {
 	}
 	if ok, err := r.st.HasSamples(rID, start); err != nil || !ok {
 		t.Fatalf("HasSamples = %v, %v", ok, err)
+	}
+}
+
+// TestReportSampleBounds (fix round 1): a health report gives no sample
+// when its age would place it in the future (an overflowing TakenAgoMS)
+// or before the samples' retention (7 days); one with long thread states
+// is still stored (clipped, clipState).
+func TestReportSampleBounds(t *testing.T) {
+	r := newRig(t)
+	_, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	day := 24 * time.Hour
+	r.clk.Add(10 * day)
+	now := r.clk.Now()
+	inPast := func() int {
+		t.Helper()
+		got, err := r.st.LagSeries([]int64{rID}, now.Add(-9*day), now.Add(-7*day), day)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got[rID])
+	}
+	send := func(seq uint64, ago int64, snap proto.HealthSnapshot) {
+		t.Helper()
+		b, err := json.Marshal(proto.HealthEvent{Seq: seq, TakenAgoMS: ago, Backlog: true, Snapshot: snap})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.hub.OnEvent(rID, proto.Event{Type: proto.EventHealth, Payload: b})
+	}
+	send(10, math.MaxInt64, replicaSnap(srcUUID+":1-100"))
+	send(11, (8 * day).Milliseconds(), replicaSnap(srcUUID+":1-100"))
+	if ok, err := r.st.HasSamples(rID, now.Add(time.Second)); err != nil || ok {
+		t.Fatalf("a report sample was placed in the future: %v, %v", ok, err)
+	}
+	if n := inPast(); n != 0 {
+		t.Fatalf("a report 8 days old stored %d samples, want 0", n)
+	}
+	if ok, err := r.st.HasSamples(rID, now.Add(-7*day)); err != nil || ok {
+		t.Fatalf("out-of-window reports stored a sample: %v, %v", ok, err)
+	}
+
+	long := replicaSnap(srcUUID + ":1-100")
+	long.Replica.IORunning = strings.Repeat("é", 40)
+	long.Replica.SQLRunning = strings.Repeat("x", 4000)
+	send(12, 1000, long)
+	if ok, err := r.st.HasSamples(rID, now.Add(-2*time.Second)); err != nil || !ok {
+		t.Fatalf("a report with long thread states stored no sample: %v, %v", ok, err)
+	}
+}
+
+func TestClipState(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"Yes", "Yes"},
+		{"Connecting", "Connecting"},
+		{strings.Repeat("x", 40), strings.Repeat("x", 16)},
+		{strings.Repeat("é", 40), strings.Repeat("é", 8)},             // 2-byte runes: 16 bytes exactly
+		{"x" + strings.Repeat("é", 40), "x" + strings.Repeat("é", 7)}, // never half a rune
+	} {
+		if got := clipState(c.in); got != c.want || len(got) > maxSampleState {
+			t.Errorf("clipState(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

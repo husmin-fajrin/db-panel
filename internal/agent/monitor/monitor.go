@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -473,9 +475,12 @@ func (m *Monitor) emit(e entry, backlog bool) error {
 	return m.em.Emit(proto.Event{Type: proto.EventHealth, Payload: b})
 }
 
-// maxSampleState bounds the thread states a sample carries, keeping it
-// within 200 bytes whatever MySQL answers (Yes, No and Connecting fit).
-const maxSampleState = 16
+// maxSampleState bounds the thread states a sample carries (Yes, No and
+// Connecting fit); maxSampleBytes is the most JSON a sample may be.
+const (
+	maxSampleState = 16
+	maxSampleBytes = 200
+)
 
 // emitSample sends snap's lag sample (proto.EventSample), taken at
 // takenAt. It is sent on every scheduled check and never kept: when the
@@ -490,6 +495,12 @@ func (m *Monitor) emitSample(snap proto.HealthSnapshot, takenAt time.Time) {
 		}
 	}
 	b, err := json.Marshal(se)
+	if err == nil && len(b) > maxSampleBytes {
+		// States JSON escapes past the limit (control characters,
+		// <, > or &): send the sample without them.
+		se.IORunning, se.SQLRunning = "", ""
+		b, err = json.Marshal(se)
+	}
 	if err != nil {
 		return
 	}
@@ -498,10 +509,14 @@ func (m *Monitor) emitSample(snap proto.HealthSnapshot, takenAt time.Time) {
 	}
 }
 
-// clip is s cut to at most n bytes.
+// clip is s as valid UTF-8, cut to at most n bytes on a rune boundary.
 func clip(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	s = strings.ToValidUTF8(s, "")
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

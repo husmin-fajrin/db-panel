@@ -1554,7 +1554,7 @@ func TestRetentionPrunesSamples(t *testing.T) {
 	}
 	samplesBetween := func(from, to time.Time) int {
 		t.Helper()
-		got, err := p.Store.LagSeries([]int64{p.localID}, from, to, time.Second)
+		got, err := p.Store.LagSeries([]int64{p.localID}, from, to, time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
