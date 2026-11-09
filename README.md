@@ -126,6 +126,32 @@ terkunci, misalnya karena orang lain sengaja salah sandi berulang kali,
 penghitung itu ada di memori panel: `sudo systemctl restart dbpanel-panel`
 menghapusnya (semua sesi yang sedang login juga berakhir).
 
+## Tampilan
+
+Panel punya dua tema: **gelap** (tema utama: latar hampir hitam, aksen neon
+hanya pada busur gauge, tombol utama dan titik status) dan **terang**.
+Tombol **Ganti tema** di menu samping (kiri; pada layar sempit di balik
+tombol **Menu** di atas) berpindah tema dan pilihannya disimpan di peramban
+itu saja. Peramban yang belum pernah memilih memakai **Pengaturan >
+Tampilan > Tema bawaan**: Ikuti sistem (bawaan: mengikuti mode gelap/terang
+sistem operasi), Gelap, atau Terang. Di bagian yang sama **Nama instansi**
+(paling panjang 60 karakter) tampil di bawah logo di menu samping;
+kosongkan untuk menyembunyikannya.
+
+Huruf ikut di dalam binary (subset Latin WOFF2, lisensi SIL OFL 1.1, lihat
+`web/static/fonts/LICENSE`): Bungee untuk logo dan judul halaman, Work Sans
+untuk teks, Space Mono untuk angka, alamat dan waktu. Panel tidak memuat
+apa pun dari internet, jadi tampilannya sama di jaringan tertutup.
+
+Dashboard dibuka dengan empat gauge (replika sinkron, lag tertinggi, disk
+master terburuk, peringatan terbuka) dan grafik lag 24 jam per replika;
+isinya dijelaskan di [Pemantauan](#pemantauan). Titik grafik berasal dari
+sampel lag yang dikirim agent pada setiap pemeriksaan kesehatan (paling
+banyak satu per 5 detik per server disimpan) dan disimpan 7 hari, bisa
+diubah di **Pengaturan > Retensi**. Semua halaman bisa dipakai di layar
+selebar 390 px (telepon) tanpa menggeser halaman ke samping; tabel yang
+lebar bergulir di dalam kotaknya sendiri.
+
 ## Tambah server database
 
 1. Di panel buka **Server > Tambah server**, isi nama, simpan.
@@ -1652,6 +1678,23 @@ Test itu menyiapkan master dan replika seperti di atas, lalu
 kata sandi salah (pesan galat tampil, tidak ada yang dikirim), lalu yang
 benar: formulir harus terkirim dengan `confirm_token`. Butuh Node.js
 dengan paket `playwright` dan Chromium-nya (test dilewati bila tidak ada).
+
+Tur tangkapan layar (alat pengembang, bukan test) memotret setiap halaman
+dalam kedua tema dan dua lebar (1440 dan 390 px), termasuk dialog
+konfirmasi dan halaman Replikasi dengan dua topologi:
+
+```sh
+make screens                         # ke /tmp/dbpanel-layar
+make screens SCREENS_DIR=/tmp/layar  # direktori lain
+```
+
+`TestE2EScreenshotTour` (tag `e2e_browser`, jalan hanya bila
+`DBPANEL_SCREENSHOT_DIR` diisi) menyiapkan master dan dua replika,
+menjalankan promote terencana, lalu `scripts/e2e_screenshot_tour.js`
+menulis `<nn>-<halaman>-<tema>-<lebar>.png`, misalnya
+`02-dashboard-gelap-390.png` (64 berkas). Halaman yang lebih lebar dari
+layar 390 px dicetak sebagai `OVERFLOW <berkas>`. Kebutuhannya sama dengan
+test browser di atas.
 
 ## Mengubah tampilan
 

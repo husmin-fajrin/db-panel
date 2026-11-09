@@ -19,18 +19,37 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// screenshotTour lists the files TestE2EScreenshotTour writes, in order.
+// screenshotTour lists the pages TestE2EScreenshotTour shoots, in order.
+// Each is written once per theme and width, as
+// <nn>-<halaman>-<tema>-<lebar>.png (screenshotFiles).
 var screenshotTour = []string{
 	"01-login", "02-dashboard", "03-servers", "04-server-detail", "05-master-detail", "06-replica-detail",
 	"07-promote", "08-job-promote", "09-cutover", "10-old-master", "11-alerts", "12-audit", "13-settings",
-	"14-jobs", "15-dialog-konfirmasi",
+	"14-jobs", "15-dialog-konfirmasi", "16-replikasi",
+}
+
+// screenshotFiles is every file name the tour writes: each page in the
+// dark theme (the panel's main one) and the light one, at 1440 and 390 px.
+func screenshotFiles() []string {
+	var files []string
+	for _, name := range screenshotTour {
+		for _, tema := range []string{"gelap", "terang"} {
+			for _, lebar := range []string{"1440", "390"} {
+				files = append(files, name+"-"+tema+"-"+lebar+".png")
+			}
+		}
+	}
+	return files
 }
 
 // TestE2EScreenshotTour is a development tool, not a product test: it
 // starts a panel with a master and two replicas (three real mysqld), writes
 // some data, runs a planned promote and takes full-page screenshots of the
-// UI in Chromium with scripts/e2e_screenshot_tour.js, into the directory
-// DBPANEL_SCREENSHOT_DIR names. Skipped unless that variable is set:
+// UI in Chromium with scripts/e2e_screenshot_tour.js, in both themes and at
+// 1440 and 390 px, into the directory DBPANEL_SCREENSHOT_DIR names. At the
+// end it adds a second topology (a master without agent or replicas) so
+// /replikasi shows its list instead of redirecting. Skipped unless that
+// variable is set (make screens sets it):
 //
 //	DBPANEL_SCREENSHOT_DIR=/tmp/layar go test -tags e2e_browser -timeout 20m \
 //	    -run TestE2EScreenshotTour ./internal/panel/
@@ -55,8 +74,8 @@ func TestE2EScreenshotTour(t *testing.T) {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range screenshotTour {
-		os.Remove(filepath.Join(out, name+".png"))
+	for _, name := range screenshotFiles() {
+		os.Remove(filepath.Join(out, name))
 	}
 
 	e := startE2EPromoteTopology(t)
@@ -129,8 +148,19 @@ func TestE2EScreenshotTour(t *testing.T) {
 	e.leftoverCheck(t, m)
 	tour("akhir", ids("JOB_ID="+id))
 
-	for _, name := range screenshotTour {
-		fi, err := os.Stat(filepath.Join(out, name+".png"))
+	// A second topology, only in the store: a master named db-gudang with
+	// no agent and no replicas is enough for /replikasi to list both.
+	gudang, err := p.Store.CreateServer("db-gudang")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Store.CreateTopology(gudang.ID, "dbpanel_repl", nil, "10.0.0.9", 3306); err != nil {
+		t.Fatal(err)
+	}
+	tour("replikasi", ids())
+
+	for _, name := range screenshotFiles() {
+		fi, err := os.Stat(filepath.Join(out, name))
 		if err != nil || fi.Size() == 0 {
 			t.Errorf("screenshot %s: %v (size %d)", name, err, sizeOf(fi))
 		}

@@ -62,7 +62,7 @@
     {{end}}
     {{if .View.LastMasterGTID}}
     <details>
-      <summary class="btn btn-ghost btn-sm">Detail teknis</summary>
+      <summary class="cursor-pointer font-semibold">Detail teknis</summary>
       <p class="text-sm mt-2">GTID master yang dipakai sebagai pembanding{{if .View.BinlogTail}} (dari binlog di disk master){{end}}: <code class="mono break-all">{{.View.LastMasterGTID}}</code></p>
     </details>
     {{end}}
