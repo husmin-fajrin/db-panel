@@ -1,6 +1,7 @@
 # Rencana 5a: Menutup Jalur Dua Master dan Kehilangan Data
 
-Status: draf untuk persetujuan pemilik produk (2026-11-10)
+Status: draf untuk persetujuan pemilik produk (2026-11-10), sudah melewati
+builder check; keputusan penulis sesudahnya ada di bagian 8
 Sumber: `docs/superpowers/security/2026-11-10-inventaris-risiko.md`
 (R-029 sampai R-036, R-043, R-058), pembacaan kode di `main` 0912c5f, dan
 eksperimen MySQL 8.0.46 (hasil diringkas di bagian 3).
@@ -121,13 +122,13 @@ perilaku.
   memuat UUID saya" bisa dipalsukan, sehingga panel yang dibobol bisa
   mengarantina master sehat. Itu serangan yang desain karantina larang.
 - **Pencatatan lokal yang lebih cepat dan lebih sering (dipilih)**, dengan
-  port dari `SHOW REPLICAS`, dan penjaga yang mempertahankan kunci bila ada
-  replika yang tidak terbaca.
+  port dari `SHOW REPLICAS`, dan penjaga yang mempertahankan kunci bila
+  replika yang terbaca saat kunci dipasang tidak lagi terbaca.
 
 **Pembuangan database (R-035, R-036, R-058).**
 - Hanya memperbaiki teks modal. Ditolak: "Ulangi" tetap membuang tanpa
   konfirmasi.
-- **Klasifikasi di modal, pengakuan per database, penegakan di agent, dan
+- **Klasifikasi di modal, pengakuan per database, penegakan di orchestrator, dan
   konfirmasi ulang pada "Ulangi"/"Setujui" (dipilih).**
 
 **"Jangan ganggu" (R-043).**
@@ -154,37 +155,90 @@ perilaku.
 
 ### 5.2 Karantina yang terkunci sejak MySQL menyala (R-031)
 
-- Selama peran server `quarantined`, blok konfigurasi terkelola memuat
-  `init_file=<berkas>`. Isi berkas, dua baris saja dan dalam urutan ini:
-  `SET PERSIST read_only=ON;` lalu `SET PERSIST super_read_only=ON;`.
-- Berkas ditaruh di samping konfigurasi terkelola, di luar datadir (CLONE
-  mengganti isi datadir): di direktori include bila ada, selain itu di
-  direktori berkas konfigurasi utama. Milik root, mode 0644.
-- Baris dan berkas ditulis pada setiap karantina, baik MySQL hidup maupun
-  mati. Penulisan memakai jalur tulis-validasi-kembalikan yang ada
-  (`mysqld --validate-config` bekerja saat MySQL mati) dan hanya menambah
-  satu baris; baris lain di blok tidak diubah.
-- Baris dan berkas dihapus saat karantina berakhir: bangun ulang selesai,
-  `releaseRole`, hapus server, dan `set-role` lewat CLI.
-- Hasil `mysql.quarantine` memuat `StartLocked bool` dan alasan bila
-  gagal. Bila penulisan gagal (validasi ditolak, direktori tidak bisa
-  ditulis, berkas tidak terbaca oleh pengguna `mysql`), karantina tetap
-  dipin, dan panel membuka peringatan Kritis "master lama belum terjamin
-  terkunci saat MySQL menyala; jangan nyalakan MySQL-nya sebelum agent
-  tersambung".
-- Bila operator sudah punya `init_file` sendiri, baris agent
-  menggantikannya selama karantina. Hasil karantina menyebut ini, dan
-  halaman master lama menampilkannya.
-- Penjaga karantina yang ada tetap berjalan sebagai lapis kedua. Bila pada
-  detak pertama setelah MySQL menyala ia mendapati bendera baca-saja mati
-  padahal `StartLocked` benar, ia menguncinya dan mengirim kejadian
-  `monitor.quarantineLate`; panel membuka peringatan Kritis "master lama
-  sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal".
-  Ini pengaman untuk versi MySQL yang berperilaku lain dari 8.0.46.
-- Akibat yang diterima: bila berkas itu dihapus orang, MySQL master lama
-  menolak menyala sampai agent menulisnya lagi. Ini hanya mengenai server
-  yang dikarantina. Agent memeriksa keberadaan berkas di setiap putaran
-  penjaga dan menulis ulang bila hilang.
+Kunci start terdiri dari dua bagian: satu baris `init_file=<berkas>` di
+blok konfigurasi terkelola, dan berkas itu sendiri.
+
+Isi berkas, tiga baris dalam urutan ini:
+1. `SET GLOBAL super_read_only=ON;`
+2. `SET PERSIST read_only=ON;`
+3. `SET PERSIST super_read_only=ON;`
+
+Baris pertama mengunci walau penyimpanan gagal (eksperimen: pernyataan yang
+gagal menghentikan pernyataan sesudahnya).
+
+Letak dan izin:
+- Di luar datadir (CLONE mengganti isi datadir, dan berkas yang hilang
+  membuat mysqld menolak menyala). Di direktori include bila ada, selain
+  itu di direktori berkas konfigurasi utama. Milik root, mode 0644.
+- Nama berkas harus termasuk yang boleh dibaca mysqld menurut profil
+  AppArmor/SELinux bawaan paket MySQL (Ubuntu, Oracle APT/YUM). Perencana
+  wajib membaca profil itu dari paketnya dan mencatat buktinya di rencana;
+  ini belum diuji di eksperimen.
+
+Menulis kunci:
+- Kunci ditulis pada setiap karantina, baik MySQL hidup maupun mati.
+  Urutannya: berkas dulu, baru baris. Penulisan baris memakai jalur
+  tulis-validasi-kembalikan yang ada dan hanya menambah satu baris.
+- `renderConfig` ikut memuat baris itu selama peran `quarantined`, sehingga
+  penulisan konfigurasi lain (misalnya saat bangun ulang) tidak
+  membuangnya.
+- Bila MySQL hidup saat karantina, agent juga menjalankan `SET PERSIST`
+  untuk kedua bendera saat itu juga.
+- Agent memeriksa nilai efektif dengan `mysqld --print-defaults` memakai
+  berkas konfigurasi yang sama dengan layanan. `StartLocked` benar hanya
+  bila `init_file` terakhir adalah berkas agent dan berkas itu terbaca oleh
+  pengguna `mysql` (pemeriksaan izin biasa).
+- Bila operator punya `init_file` sendiri di berkas yang dibaca lebih
+  dulu, baris agent menang karena urutan. Agent tidak menyunting berkas
+  operator. Hasil karantina menyebut `init_file` operator yang tidak
+  dijalankan selama karantina, dan halaman master lama menampilkannya.
+- Hasil `mysql.quarantine` memuat `StartLocked bool`, alasannya bila
+  salah, dan `MACConfined bool` (mysqld dibatasi AppArmor atau SELinux).
+  Bila `StartLocked` salah, karantina tetap dipin dan panel membuka
+  peringatan Kritis "master lama belum terjamin terkunci saat MySQL
+  menyala; jangan nyalakan MySQL-nya sebelum agent tersambung".
+
+Menjaga kunci (loop penjaga, 5 detik, di bawah kunci promote):
+- Selama peran `quarantined`: berkas dan baris harus ada. Yang hilang
+  ditulis ulang; kegagalan dicoba lagi paling sering sekali per menit.
+  Server yang dikarantina oleh agent versi lama mendapat kuncinya pada
+  putaran pertama setelah agent diperbarui.
+- Pada putaran pertama setelah MySQL menyala, penjaga menjalankan
+  `SET PERSIST` untuk kedua bendera dan memeriksa `@@init_file`. Tiga
+  hasil yang dilaporkan lewat kejadian `monitor.quarantineStart`:
+  bendera sempat mati (`late`, peringatan Kritis "master lama sempat bisa
+  ditulis saat menyala; jalankan Periksa data tertinggal"); `@@init_file`
+  bukan berkas agent (`bypassed`, peringatan Kritis "kunci start tidak
+  dipakai MySQL; periksa opsi layanan"); selain itu `ok`.
+- Selama peran `quarantined` dan MySQL mati, penjaga membaca ekor log
+  error MySQL. Bila ada "Failed to open the bootstrap file" untuk berkas
+  agent, ia mengirim kejadian dan panel membuka peringatan Kritis "MySQL
+  master lama gagal menyala karena berkas kunci tidak terbaca" dengan
+  langkah perbaikannya. Arah gagal ini aman bagi data: MySQL tidak
+  menyala, jadi tidak bisa ditulis.
+
+Melepas kunci:
+- Kunci dilepas hanya bila peran bukan lagi `quarantined` **dan** agent
+  sudah berhasil menjalankan `SET PERSIST` ON pada MySQL yang hidup sejak
+  karantina. Sebelum itu kunci tetap ada, apa pun perannya.
+- Urutannya: baris dulu, baru berkas. Berkas tidak pernah dihapus selama
+  konfigurasi terkelola masih menyebutnya.
+- Pelepasan dikerjakan loop penjaga, bukan langkah sekali jalan: di setiap
+  putaran, bila baris masih ada dan syarat lepas terpenuhi, penjaga
+  melepasnya. Jadi kegagalan tulis atau agent yang mati di tengah jalan
+  diulang sendiri, tanpa berkas penanda.
+- Pengecualian: `set-role master` lewat CLI melepas kunci saat itu juga,
+  sebelum pin diubah. Bila pelepasan gagal, peran tidak diubah dan CLI
+  menyebut sebabnya.
+- `mysql.promote` dan pemeriksaan kandidat menolak server yang barisnya
+  masih ada dan tidak bisa dilepas.
+- "Hapus server" tidak melepas kunci bila MySQL mati (`releaseRole` butuh
+  MySQL hidup). Server itu tetap dikarantina dan terkunci; dialog hapus
+  mengatakannya. Cara memakai ulang server itu masuk runbook 5b.
+
+Akibat yang diterima: bila berkas kunci dihapus orang saat agent mati,
+MySQL server itu menolak menyala sampai agent hidup dan menulisnya lagi.
+Ini hanya mengenai server yang kuncinya belum dilepas.
 
 ### 5.3 Replika tercatat lebih cepat (R-032)
 
@@ -202,29 +256,47 @@ perilaku.
 ### 5.4 Penjaga kunci membaca semua replika (R-033)
 
 - Bersama host, agent mencatat himpunan port dari `SHOW REPLICAS`.
-- Saat tenggat kunci lewat, penjaga membaca setiap host yang tercatat pada
-  port kandidat dan setiap port tercatat, paralel, 5 detik per bacaan.
-- Bila ada host yang tercatat dalam 48 jam terakhir dan tidak terbaca di
-  port mana pun, kunci dipertahankan dan kejadian `monitor.lockExpired`
-  dengan tindakan `kept` dikirim dengan daftar host itu. Host yang lebih
-  lama dari 48 jam dan tidak terbaca dilewati seperti sekarang.
+- Saat `lockForPromote`, agent membaca bendera baca-saja kandidat dan
+  setiap host tercatat (pada port kandidat dan setiap port tercatat,
+  paralel, 5 detik per bacaan), lalu menyimpan daftar host yang terbaca
+  bersama kunci. Bila kandidat tidak terbaca, kunci ditolak dan promote
+  gagal di awal tanpa akibat.
+- Saat tenggat kunci lewat, penjaga membaca lagi host dalam daftar itu.
+  Bila ada yang bisa ditulis, perilaku yang ada berlaku. Bila ada yang
+  tidak terbaca, kunci dipertahankan dan kejadian `monitor.lockExpired`
+  dengan tindakan `kept` dikirim dengan daftar host itu; panel membuka
+  peringatan Kritis yang memuat perintah `unlock-master`.
+- Host yang sudah tidak terbaca saat kunci dipasang (replika sebagian
+  tanpa akun replikasi, replika yang sudah lama mati) dilewati seperti
+  sekarang. Jadi topologi dengan replika sebagian tidak terkunci
+  selamanya.
+- Penjaga memeriksa ulang tiap menit. Kunci terbuka sendiri begitu semua
+  host dalam daftar terbaca dan baca-saja.
 - Pembukaan kunci memakai konteks waktu sendiri, sehingga hasilnya tidak
   bergantung pada sisa waktu pembacaan.
-- Akibat yang diterima: pada topologi dengan replika sebagian (yang tidak
-  punya akun replikasi), penjaga tidak pernah membuka kunci sendiri.
-  Pembukaan oleh panel saat job gagal tetap bekerja; bila panel tidak bisa
-  menjangkau agent, master tetap terkunci sampai `unlock-master` dijalankan
-  di server. Ini memilih henti layanan daripada dua master. Akun yang bisa
-  membaca replika sebagian masuk 5c.
 - CLI baru `dbpanel agent forget-replica <host>` menghapus satu host dari
-  catatan, untuk replika yang sudah dipensiunkan. Panel tidak punya
+  catatan dan dari daftar kunci yang sedang berdiri. Panel tidak punya
   padanannya.
+
+Akibat yang diterima, dan satu-satunya keputusan di spek ini yang menukar
+ketersediaan dengan keamanan data: bila replika yang terbaca saat kunci
+dipasang menjadi tidak terbaca (jaringan terbelah, atau MySQL-nya mati),
+master tetap baca-saja sampai replika itu terbaca lagi atau `unlock-master`
+dijalankan di server. Hari ini kunci selalu terbuka sendiri paling lama
+satu jam. Panel yang dibobol bisa memakai ini untuk menahan master dalam
+keadaan baca-saja setelah panel dicabut, dengan mematikan MySQL sebuah
+replika; keadaan itu berakhir saat MySQL replika dinyalakan lagi. Akibatnya
+henti tulis, bukan kehilangan data. Alternatifnya (membuka kunci setelah
+batas waktu) mengembalikan jalur dua master R-033.
 
 ### 5.5 Daftar koneksi yang jujur (R-029, R-034)
 
-- Kueri membaca semua thread FOREGROUND yang punya `PROCESSLIST_ID`, tanpa
-  saringan nama thread. Tetap dikecualikan: `system user`,
-  `event_scheduler`, thread Binlog Dump, dan koneksi kueri itu sendiri.
+- Kueri membaca semua thread FOREGROUND yang punya `PROCESSLIST_ID` dan
+  `PROCESSLIST_USER` tidak NULL, tanpa saringan nama thread. Tetap
+  dikecualikan: `system user`, `event_scheduler`, thread Binlog Dump, dan
+  koneksi kueri itu sendiri. Syarat pengguna tidak NULL membuang thread
+  sistem seperti `compress_gtid_table`, yang ada di setiap server GTID.
+  Sesi yang sedang masuk (`unauthenticated user`) dihitung sebagai koneksi.
 - Setiap baris membawa jenis: `sql`, `x` (X Protocol), atau `lain`. Jenis
   `lain` ditampilkan sebagai "jenis koneksi tidak dikenal".
 - Bila `performance_schema` mati, agent membaca
@@ -259,10 +331,15 @@ Resync:
   dan "hanya di replika, isinya hilang permanen". Setiap database kelompok
   kedua punya centang sendiri (`wipe_only`); semuanya wajib dicentang.
   Nama server yang diketik dan token tetap.
-- Agent menegakkan hal yang sama: parameter preflight mendapat
-  `WipeOnlyReplica`. Preflight gagal bila ada database di daftar buang yang
-  tidak ada di master dan tidak ada di `WipeOnlyReplica`. Agent memakai
-  daftar database master yang hidup, bukan inventaris panel.
+- Penegakan ada di orchestrator, satu tempat untuk mulai dan "Ulangi":
+  tepat sebelum preflight, inventaris master dibaca langsung dari agent
+  master. Job ditolak bila ada database di daftar buang yang tidak ada di
+  master dan tidak ada di daftar `wipe_only` yang diakui. Bila inventaris
+  master tidak bisa dibaca, job ditolak.
+- Agent replika tidak punya cara membaca daftar database master (akun
+  replikasi tidak bisa), jadi ini bukan pertahanan terhadap panel yang
+  dibobol; panel seperti itu memang bisa memerintahkan pembuangan (kelas B
+  di inventaris).
 
 "Ulangi" dan "Setujui":
 - Untuk job yang membuang data, keduanya meminta token konfirmasi baru
@@ -283,13 +360,20 @@ diketik.
 
 Tambah database (R-058):
 - Saat job dimulai, inventaris replika disegarkan. Bila database yang
-  ditambahkan sudah ada di replika, job berhenti di langkah tunggu "database
-  ini sudah ada di replika (sisa lama) dan akan dibuang sebelum disalin",
-  terikat pada hash daftar itu, dan menunggu "Setujui" bertoken.
+  ditambahkan sudah ada di replika, job berhenti di langkah tunggu, terikat
+  pada hash daftar itu.
+- Panel tidak mengaku tahu asal database itu. Teksnya: "Database X sudah
+  ada di replika ini. Panel tidak bisa memastikan isinya sama dengan
+  master. Isinya di replika akan dibuang permanen, lalu diganti salinan
+  dari master."
+- "Setujui" untuk langkah ini meminta token dan nama setiap database itu
+  diketik. Ini berlaku baik database itu sisa pelepasan lama maupun dibuat
+  langsung di replika.
 - Setelah disetujui, agent membuang database itu dengan `sql_log_bin=0`
   lalu memuat dump. Riwayat GTID replika tidak disentuh.
 - Halaman database replika mendapat catatan pada Tambah dan pada Lepas
-  tanpa hapus data: "bila ditambahkan lagi, isi lama dibuang lebih dulu".
+  tanpa hapus data: "bila ditambahkan lagi, isi di replika dibuang lebih
+  dulu".
 
 Kemampuan `DropExisting` pada `mysql.dumpFrom` tidak dipakai panel; agent
 menolak parameter itu.
@@ -298,7 +382,8 @@ menolak parameter itu.
 
 - Jenis yang tidak pernah dibungkam: `master_down`, `disk_crit`,
   `replica_unlocked`, `promote_partial`, `master_lock_expired`,
-  `master_quarantined`, `master_unpinned`, dan dua peringatan baru di 5.2.
+  `master_quarantined`, `master_unpinned`, kunci yang dipertahankan (5.4),
+  dan peringatan baru di 5.2.
 - Selama senyap, jenis itu tetap mengirim pesan pertama dan pesan pulih.
   Pengingat berulangnya diredam.
 - Jenis lain dibungkam seperti sekarang.
@@ -311,10 +396,11 @@ menolak parameter itu.
 
 ### 5.8 Perubahan protokol dan kompatibilitas
 
-- Baru: `mysql.recordReplicas`; kejadian `monitor.quarantineLate`; field
-  `StartLocked` pada hasil karantina; `WipeOnlyReplica` pada parameter
-  preflight; jenis baris, `Unreadable`, `Incomplete`, dan hitungan sesi
-  admin lokal pada hasil koneksi.
+- Baru: `mysql.recordReplicas`; kejadian `monitor.quarantineStart` dan
+  kejadian gagal-menyala di 5.2; field `StartLocked` dan `MACConfined` pada
+  hasil karantina; daftar host terbaca pada kunci promote; jenis baris,
+  `Unreadable`, `Incomplete`, dan hitungan sesi admin lokal pada hasil
+  koneksi.
 - Aturan yang ada tetap: agent yang versinya berbeda dari panel tidak boleh
   dipakai untuk promote. Agent lama yang tidak mengenal field baru
   diperlakukan sebagai "tidak terjamin": karantina tanpa `StartLocked`
@@ -332,7 +418,7 @@ menolak parameter itu.
 | Senyap membungkam `replica_unlocked` dan `promote_partial` | 5.7 |
 | Deteksi master tumbang mengikuti interval sampai satu jam | 5.1 |
 | Anggaran waktu pembacaan replika habis diam-diam | 5.4 |
-| Replika sebagian tidak terbaca penjaga | 5.4 (kunci dipertahankan); akun di 5c |
+| Replika sebagian tidak terbaca penjaga | 5.4 (dilewati seperti sekarang); akun di 5c |
 | `DropExisting` yang tidak terpakai | 5.6 |
 
 ### 5.10 Verifikasi
@@ -341,13 +427,22 @@ menolak parameter itu.
   dipromote, dikarantina saat mati, lalu dinyalakan sambil klien mencoba
   menulis terus-menerus: tidak ada tulisan yang lolos.
 - Tes bahwa penjaga berjalan tiap 5 detik saat `CheckEvery` 300.
+- Tes kunci start: baris tanpa berkas tidak pernah tertinggal setelah
+  pelepasan yang digagalkan di tengah; server yang dikarantina agent lama
+  mendapat kunci setelah pembaruan; `set-role replica` saat MySQL mati
+  tidak melepas kunci.
+- Tes penjaga kunci: replika yang terbaca saat kunci dipasang lalu
+  dimatikan mempertahankan kunci, dan kunci terbuka setelah replika hidup
+  lagi; replika sebagian tidak menahan kunci.
+- Tes daftar koneksi pada server GTID yang menganggur: hasilnya lengkap dan
+  kosong.
 - Tes daftar koneksi dengan `performance_schema=OFF`. Sesi X Protocol diuji
   lewat baris thread tiruan bila klien X tidak tersedia di lingkungan tes;
   laporan menyebut mana yang dipakai.
 - Tes "Ulangi" pada resync yang gagal di langkah salin: tanpa token
   ditolak; dengan token, preflight berjalan lagi.
-- Tes tambah database di atas sisa lama: objek yang hanya ada di replika
-  hilang setelah job selesai.
+- Tes tambah database yang sudah ada di replika: tanpa nama diketik
+  ditolak; setelah disetujui, objek yang hanya ada di replika hilang.
 - Tes ringkasan senyap setelah panel restart.
 - E2e promote terencana dan darurat yang ada tetap lulus.
 - Review per task dan audit keamanan akhir seperti rencana sebelumnya.
@@ -368,7 +463,38 @@ menolak parameter itu.
   luar alur panel tidak bisa dikarantina otomatis (5.3).
 - Atribut koneksi bisa dipalsukan klien; pemalsuan hanya menyembunyikan
   sesi yang sudah memakai akun admin dari server itu sendiri (5.5).
-- Perilaku `init_file` hanya diuji pada 8.0.46; lapis kedua di 5.2
-  melaporkan bila versi lain berperilaku beda.
+- Perilaku `init_file` hanya diuji pada 8.0.46 dan tanpa AppArmor/SELinux.
+  Bila versi lain berperilaku beda, penjaga melaporkannya (5.2). Bila
+  profil keamanan menolak berkas kunci, MySQL master lama tidak menyala dan
+  panel memperingatkan; data aman, tetapi "Periksa data tertinggal"
+  tertunda sampai diperbaiki.
+- Opsi `--init-file` di baris perintah layanan mengalahkan baris agent.
+  Agent tidak bisa melihatnya saat MySQL mati; penjaga melaporkannya begitu
+  MySQL menyala (5.2, `bypassed`).
+- Master bisa tertahan baca-saja selama replika yang tadinya terbaca tidak
+  terbaca (5.4).
 - Jaringan terbelah dan panel yang dibobol tetap seperti di inventaris
   kelas A dan B; perlakuannya di 5b.
+
+## 8. Keputusan penulis setelah builder check
+
+Reviewer membaca draf dengan kode dan hasil eksperimen. Keputusan berikut
+dibuat penulis, bukan pemilik produk; mohon diperiksa saat membaca.
+
+1. Tambah database: draf membuang database yang sudah ada di replika
+   dengan teks "sisa lama". Itu jalur kehilangan data baru bagi database
+   yang dibuat langsung di replika. Sekarang teksnya jujur dan nama
+   database wajib diketik (5.6).
+2. Kunci promote: draf mempertahankan kunci untuk setiap replika yang
+   tidak terbaca dalam 48 jam. Sekarang hanya untuk replika yang terbaca
+   saat kunci dipasang, dan kunci terbuka sendiri saat replika itu terbaca
+   lagi (5.4). Sisa akibatnya ditulis di 5.4.
+3. Kunci start dilepas hanya setelah MySQL terbukti menyimpan ON; pelepasan
+   diulang penjaga sampai tuntas; baris dilepas sebelum berkas (5.2).
+4. `set-role replica` atau `unassigned` saat MySQL mati tidak lagi membuka
+   jalan bagi MySQL untuk menyala dalam keadaan bisa ditulis (5.2).
+5. Isi berkas kunci diawali `SET GLOBAL super_read_only=ON` (5.2).
+6. Penegakan `wipe_only` ada di orchestrator dengan inventaris master yang
+   segar, bukan di agent (5.6).
+7. Daftar koneksi tetap membuang thread tanpa pengguna (5.5).
+8. "Hapus server" tidak menjanjikan pelepasan kunci (5.2).
