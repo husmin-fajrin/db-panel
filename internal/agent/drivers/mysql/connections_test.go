@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -518,3 +519,105 @@ func nonLoopbackIPv4(t *testing.T) string {
 // lostThreadsLimit is a performance_schema_max_thread_instances small
 // enough that the server's own threads and a few sessions overflow it.
 const lostThreadsLimit = 5
+
+// midLogin holds a TCP connection to inst that never answers the server's
+// greeting, until the test ends, and waits until the server has a thread for
+// it. The server keeps it for connect_timeout.
+func midLogin(t *testing.T, inst *testmysql.Instance) {
+	t.Helper()
+	c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", inst.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	obs, err := sql.Open("mysql", "root@unix("+inst.Socket+")/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { obs.Close() })
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		if err := obs.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = 'unauthenticated user'").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the server never listed the half-open connection")
+}
+
+// TestConnectionsCountsSessionMidLogin: a connection that has not finished
+// logging in (the server shows it as 'unauthenticated user') is a
+// connection, from either source.
+func TestConnectionsCountsSessionMidLogin(t *testing.T) {
+	for name, args := range map[string][]string{
+		"performance_schema": nil,
+		"information_schema": {"--performance-schema=OFF"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := testmysql.Start(t, testmysql.Options{ExtraArgs: args})
+			midLogin(t, inst)
+			if name == "performance_schema" {
+				var tn, user, host, cmd sql.NullString
+				db := rootDB(t, inst)
+				if err := db.QueryRow(`SELECT NAME, PROCESSLIST_USER, PROCESSLIST_HOST, PROCESSLIST_COMMAND FROM performance_schema.threads
+					WHERE PROCESSLIST_USER = 'unauthenticated user' OR (PROCESSLIST_USER IS NULL AND NAME = 'thread/sql/one_connection')`).Scan(&tn, &user, &host, &cmd); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("performance_schema thread: NAME=%v USER=%v HOST=%v COMMAND=%v", tn, user, host, cmd)
+			}
+			if name == "information_schema" {
+				var user, host, cmd sql.NullString
+				if err := rootDB(t, inst).QueryRow(`SELECT USER, HOST, COMMAND FROM information_schema.PROCESSLIST WHERE USER = 'unauthenticated user'`).Scan(&user, &host, &cmd); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("information_schema thread: USER=%v HOST=%v COMMAND=%v", user, host, cmd)
+			}
+			res := readConns(t, inst)
+			if res.Source != name {
+				t.Fatalf("Source = %q, want %q", res.Source, name)
+			}
+			var found bool
+			for _, r := range res.Rows {
+				if r.User == "unauthenticated user" {
+					found = true
+					if r.Count != 1 || (name == "performance_schema" && r.Kind != "sql") {
+						t.Errorf("row %+v, want one session (kind sql from performance_schema)", r)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("rows = %+v, want the session mid-login counted", res.Rows)
+			}
+		})
+	}
+}
+
+// TestConnectionsFilterByNameIsExact: the only thread names the
+// performance_schema query filters on are the six replication instruments
+// (an exact NOT IN list, one bound parameter each) and one_connection for a
+// session mid-login. A LIKE, REGEXP or prefix on NAME would hide a session
+// the agent cannot classify. (A live check would need a thread with a
+// replica-like name that is not in the list, which a client cannot make.)
+func TestConnectionsFilterByNameIsExact(t *testing.T) {
+	want := []string{
+		"thread/sql/replica_io", "thread/sql/replica_sql", "thread/sql/replica_worker",
+		"thread/sql/slave_io", "thread/sql/slave_sql", "thread/sql/slave_worker",
+	}
+	if !slices.Equal(mysql.ReplicationThreadNames, want) {
+		t.Errorf("replicationThreadNames = %v, want exactly %v", mysql.ReplicationThreadNames, want)
+	}
+	q := mysql.ConnectionsPSQuery()
+	pattern := regexp.MustCompile(`(?i)\b(LIKE|REGEXP|RLIKE)\b`)
+	for _, line := range strings.Split(q, "\n") {
+		if strings.Contains(line, "t.NAME") && pattern.MatchString(line) {
+			t.Errorf("the query filters NAME with a pattern: %s", strings.TrimSpace(line))
+		}
+	}
+	if n := strings.Count(q, "?"); n != len(mysql.PSArgs()) || n != len(want)+1 {
+		t.Errorf("query has %d parameters, args %d, want %d", n, len(mysql.PSArgs()), len(want)+1)
+	}
+}

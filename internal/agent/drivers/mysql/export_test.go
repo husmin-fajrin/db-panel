@@ -455,3 +455,12 @@ const AgentProgramName = agentProgramName
 
 // ReadConnections reads the connection list from db.
 var ReadConnections = readConnections
+
+// Connection list filter, for the guard tests.
+var (
+	ReplicationThreadNames = replicationThreadNames
+	PSArgs                 = psArgs
+)
+
+// ConnectionsPSQuery is the performance_schema thread query.
+func ConnectionsPSQuery() string { return connectionsPSQuery }
