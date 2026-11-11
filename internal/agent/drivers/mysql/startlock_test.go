@@ -625,3 +625,34 @@ func TestStartLockFileKeptWhenIntact(t *testing.T) {
 		t.Error("changed lock file not rewritten by configure")
 	}
 }
+
+func TestConfigLockPath(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		l    mysql.Layout
+		want string // "" = refused
+	}{
+		{"config dir", mysql.Layout{ConfigFile: "/etc/mysql/my.cnf", IncludeDir: "/etc/mysql/conf.d", DataDir: "/var/lib/mysql"},
+			"/etc/mysql/" + mysql.ConfigLockFile},
+		{"config in the datadir", mysql.Layout{ConfigFile: "/var/lib/mysql/my.cnf", DataDir: "/var/lib/mysql"},
+			"/var/lib/" + mysql.ConfigLockFile},
+		{"config below the datadir", mysql.Layout{ConfigFile: "/data/mysql/etc/my.cnf", DataDir: "/data/mysql"},
+			"/data/" + mysql.ConfigLockFile},
+		{"config in the include dir", mysql.Layout{ConfigFile: "/etc/mysql/conf.d/my.cnf", IncludeDir: "/etc/mysql/conf.d", DataDir: "/var/lib/mysql"},
+			"/etc/mysql/" + mysql.ConfigLockFile},
+		{"relative", mysql.Layout{ConfigFile: "my.cnf"}, ""},
+		{"no config", mysql.Layout{DataDir: "/var/lib/mysql"}, ""},
+		{"everything in the datadir", mysql.Layout{ConfigFile: "/my.cnf", DataDir: "/"}, ""},
+	} {
+		got, err := mysql.ConfigLockPath(c.l)
+		if c.want == "" {
+			if err == nil {
+				t.Errorf("%s: = %q, want refused", c.name, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("%s: = %q, %v; want %q", c.name, got, err, c.want)
+		}
+	}
+}

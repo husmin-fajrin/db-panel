@@ -49,9 +49,10 @@ var managedConfigMu sync.Mutex
 
 // ConfigLockFile is the file flocked by every writer of the managed config
 // or the start lock file, in the directory of ConfigFile (symlinks
-// followed): the agent and the CLI find the same place from the MySQL
-// layout they both discover. It is never a .cnf (no option file reads
-// it), never in DataDir or IncludeDir, and never removed.
+// followed), or the nearest one above it outside DataDir and IncludeDir:
+// the agent and the CLI find the same place from the MySQL layout they
+// both discover. It is never a .cnf (no option file reads it), never in
+// DataDir or IncludeDir, and never removed.
 const ConfigLockFile = "dbpanel-config.lock"
 
 // configLockWait bounds how long a writer waits for another process's
@@ -68,13 +69,18 @@ func configLockPath(l Layout) (string, error) {
 		p = r
 	}
 	dir := filepath.Dir(p)
-	switch {
-	case !filepath.IsAbs(dir):
+	if !filepath.IsAbs(dir) {
 		return "", fmt.Errorf("direktori konfigurasi MySQL %s bukan path absolut; kunci konfigurasi tidak bisa ditempatkan", dir)
-	case l.DataDir != "" && insideDir(dir, l.DataDir), l.IncludeDir != "" && insideDir(dir, l.IncludeDir):
-		return "", fmt.Errorf("direktori konfigurasi MySQL %s ada di dalam datadir atau direktori include; kunci konfigurasi tidak ditempatkan di sana", dir)
 	}
-	return filepath.Join(dir, ConfigLockFile), nil
+	// The nearest directory up that is neither in DataDir nor IncludeDir.
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if !(l.DataDir != "" && insideDir(d, l.DataDir)) && !(l.IncludeDir != "" && insideDir(d, l.IncludeDir)) {
+			return filepath.Join(d, ConfigLockFile), nil
+		}
+		if d == filepath.Dir(d) {
+			return "", fmt.Errorf("tidak ada direktori di atas %s yang berada di luar datadir dan direktori include; kunci konfigurasi tidak bisa ditempatkan", dir)
+		}
+	}
 }
 
 // flockConfig takes an exclusive flock on path (created 0600 when
