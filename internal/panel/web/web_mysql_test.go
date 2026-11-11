@@ -123,3 +123,28 @@ func storeInventory(id int64) store.Inventory {
 	return store.Inventory{ServerID: id, Connected: true, Version: "8.0.39", Series: "8.0",
 		Databases: shopDatabases, UpdatedAt: time.Now()}
 }
+
+// TestDatabasesPageNotes (spec 5.6, R-058): Tambah and Lepas without
+// dropping the data both say that a database added again has its content
+// on the replica dropped first.
+func TestDatabasesPageNotes(t *testing.T) {
+	e, _, _ := newMySQLEnv(t)
+	c := e.cookie()
+	e.subsetReplica(t, []string{"gudang", "toko"}, archiveDatabases...)
+	rec := e.do("GET", "/replicas/2/databases", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	const note = "bila ditambahkan lagi, isi di replika dibuang lebih dulu"
+	body := rec.Body.String()
+	addForm, removeForm, ok := strings.Cut(body, `action="/replicas/2/databases/remove"`)
+	if !ok {
+		t.Fatalf("no remove form:\n%s", body)
+	}
+	addForm = addForm[strings.Index(addForm, `action="/replicas/2/databases/add"`):]
+	if !strings.Contains(addForm, note) {
+		t.Errorf("Tambah lacks the note:\n%s", addForm)
+	}
+	_, keep, _ := strings.Cut(removeForm, "Hapus datanya juga di replika")
+	if keep, _, _ = strings.Cut(keep, "</form>"); !strings.Contains(keep, note) {
+		t.Errorf("Lepas without dropping the data lacks the note:\n%s", keep)
+	}
+}

@@ -54,6 +54,7 @@
       {{end}}
     </fieldset>
     <p class="help">Panel menunggu replika menyusul master, menghentikan replikasi sebentar, menyalin database baru dengan dump (master dikunci sesaat saat dump dimulai), lalu memperluas filter replikasi. Database yang sudah diikuti tidak disalin ulang.</p>
+    <p class="help">Database yang pernah dilepas tanpa hapus data: bila ditambahkan lagi, isi di replika dibuang lebih dulu.</p>
     <div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}
       <div class="flex flex-1 flex-col gap-1">
       <span>Lakukan <strong>di jam sepi</strong>: saat dump dimulai master dikunci sesaat, dan kueri panjang di master bisa membuat penulisan aplikasi tertahan lebih lama.</span>
@@ -89,7 +90,7 @@
       <input type="checkbox" class="checkbox checkbox-sm" name="drop_data" value="1">
       <span>Hapus datanya juga di replika</span>
     </label>
-    <p class="help">Tanpa centang ini, data database yang dilepas tetap ada di replika tetapi tidak lagi diperbarui.</p>
+    <p class="help">Tanpa centang ini, data database yang dilepas tetap ada di replika tetapi tidak lagi diperbarui; bila ditambahkan lagi, isi di replika dibuang lebih dulu.</p>
     <p class="text-sm text-error-text" x-text="error"></p>
     <div class="card-actions justify-end">
       <button type="button" class="btn btn-error" @click="confirm">Lepas database</button>

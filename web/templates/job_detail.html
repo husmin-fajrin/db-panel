@@ -46,10 +46,19 @@
           <dialog class="modal" x-ref="dialog">
             <div class="modal-box">
               <h3 class="text-lg font-bold">{{.Approval.Label}}?</h3>
-              <p class="py-2 whitespace-pre-line">{{.Approval.Impact}}</p>
+              {{with .Approval.Impact}}<p class="py-2 whitespace-pre-line">{{.}}</p>{{end}}
+              {{if .TypeDatabases}}
+              {{with .Waiting}}<p class="py-2 whitespace-pre-line">{{.Message}}</p>{{end}}
+              {{range .TypeDatabases}}
+              <label class="fieldset">
+                <span class="fieldset-legend break-all">Ketik nama database {{.}}</span>
+                <input type="text" name="confirm_db[]" form="form-setujui" class="input w-full" autocomplete="off" required>
+              </label>
+              {{end}}
+              {{end}}
               <div class="modal-action">
                 <form method="dialog"><button class="btn">Batal</button></form>
-                <form method="post" action="/jobs/{{.Job.ID}}/approve"><button type="submit" class="btn btn-error"{{if .DropsData}} data-confirm-action="job_approve:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.Approval.Label}}: {{.Server.Name}}."{{end}}>{{.Approval.Label}}</button></form>
+                <form method="post" action="/jobs/{{.Job.ID}}/approve" id="form-setujui"><button type="submit" class="btn btn-error"{{if .DropsData}} data-confirm-action="job_approve:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.Approval.Label}}: {{.Server.Name}}."{{end}}>{{.Approval.Label}}</button></form>
               </div>
             </div>
             <form method="dialog" class="modal-backdrop"><button>tutup</button></form>

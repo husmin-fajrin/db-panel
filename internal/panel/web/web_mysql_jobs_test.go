@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1315,4 +1316,54 @@ func TestRemoveDatabasesDropNeedsTypedName(t *testing.T) {
 	wantCode(t, post(url.Values{"databases": {"gudang"}}), http.StatusSeeOther)
 	wantCode(t, post(url.Values{"databases": {"gudang"}, "drop_data": {"1"}, "confirm_name": {"db-replika"}}), http.StatusSeeOther)
 	wantCalls(t, f, "remove-databases 2 gudang drop=false", "remove-databases 2 gudang drop=true")
+}
+
+// TestApproveAddExistingTypedNames (spec 5.6, R-058): the approval of an
+// add_databases whose databases already exist on the replica asks, in its
+// dialog, for each name typed (confirm_db[], escaped) behind a job_approve
+// token; the names reach the orchestrator, whose refusal is a 400.
+func TestApproveAddExistingTypedNames(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	const id = "4444444444444444444444444444444a"
+	storeJob(t, e.st, id, orchestrator.KindAddDatabases, 2,
+		`{"master_server_id":1,"change_databases":["rekap","x<y>"],"wait_reason":"add_existing","add_existing":["rekap","x<y>"]}`,
+		store.JobWaiting, "Menunggu replika menyusul")
+	f.drops = map[string]bool{id: true}
+
+	rec := e.do("GET", "/jobs/"+id, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `x-data="confirmApproval"`, "Ya, buang dan salin dari master", `action="/jobs/`+id+`/approve"`,
+		`data-confirm-action="job_approve:`+id+`" data-confirm-kind="job" data-confirm-id="2" data-confirm-danger="1"`,
+		"Ketik nama database rekap", "Ketik nama database x&lt;y&gt;")
+	wantNoBody(t, rec, "x<y>")
+	if n := strings.Count(rec.Body.String(), `name="confirm_db[]"`); n != 2 {
+		t.Fatalf("%d confirm_db[] inputs, want 2:\n%s", n, rec.Body.String())
+	}
+	if n := strings.Count(rec.Body.String(), `name="confirm_db[]" form="form-setujui" class="input w-full" autocomplete="off" required>`); n != 2 {
+		t.Fatalf("%d required confirm_db[] inputs of the approve form, want 2", n)
+	}
+
+	// Without the token nothing reaches the orchestrator.
+	rec = e.do("POST", "/jobs/"+id+"/approve", url.Values{"confirm_db[]": {"rekap", "x<y>"}}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantCalls(t, f)
+
+	approve := func(typed ...string) *httptest.ResponseRecorder {
+		form := withToken(t, e, url.Values{"confirm_db[]": typed}, "job_approve:"+id, "job", 2)
+		return e.do("POST", "/jobs/"+id+"/approve", form, c)
+	}
+	f.err = orchestrator.ErrAddExistingNames
+	rec = approve("rekap")
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Nama database yang diketik tidak cocok dengan daftar; ketik nama setiap database persis")
+	if ack := f.lastAck(t); !ack.Confirmed || !slices.Equal(ack.TypedDatabases, []string{"rekap"}) {
+		t.Fatalf("ack = %+v", ack)
+	}
+	f.err = nil
+	rec = approve("rekap", "x<y>")
+	wantCode(t, rec, http.StatusSeeOther)
+	if ack := f.lastAck(t); !ack.Confirmed || !slices.Equal(ack.TypedDatabases, []string{"rekap", "x<y>"}) {
+		t.Fatalf("ack = %+v", ack)
+	}
 }

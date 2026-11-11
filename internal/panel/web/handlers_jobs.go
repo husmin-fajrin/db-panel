@@ -146,6 +146,10 @@ type jobPage struct {
 	DropsData bool
 	OpenRetry bool
 	Retry     *retryView
+	// TypeDatabases: the databases an add_databases waiting for
+	// WaitAddExisting drops once approved; the approve dialog asks for
+	// each name typed (confirm_db[]), which the orchestrator compares.
+	TypeDatabases []string
 }
 
 // retryView is what the retry dialog of a job that drops data shows: the
@@ -167,6 +171,7 @@ type jobParams struct {
 	WaitReason       string   `json:"wait_reason"`
 	WipeList         []string `json:"wipe_list"`
 	RebuildOldMaster bool     `json:"rebuild_old_master"`
+	AddExisting      []string `json:"add_existing"`
 }
 
 // paramsOf reads job's params; unreadable params read as none.
@@ -213,6 +218,9 @@ func approvalFor(reason string, server store.Server) approval {
 				"Tidak ada yang tersisa dari isi lama server itu."}
 	case orchestrator.WaitReconnect:
 		return approval{Label: "Sudah saya hubungkan ulang — lanjutkan", ServerID: server.ID}
+	case orchestrator.WaitAddExisting:
+		// The dialog asks for each database typed (jobPage.TypeDatabases).
+		return approval{Label: "Ya, buang dan salin dari master", Danger: true}
 	}
 	return approval{Label: "Setujui & lanjutkan"}
 }
@@ -284,6 +292,9 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 	case store.JobWaiting:
 		p.CanApprove, p.CanCancel = true, true
 		p.Approval = approvalFor(params.WaitReason, srv)
+		if params.WaitReason == orchestrator.WaitAddExisting {
+			p.TypeDatabases = params.AddExisting
+		}
 	case store.JobFailed, store.JobPartial:
 		p.CanRetry = true
 	case store.JobQueued, store.JobRunning:
@@ -420,7 +431,8 @@ const msgRetryRefresh = "Daftar database tidak bisa disegarkan, jadi dialog Ulan
 // acknowledgements of its dialog: every database of the job's wipe list
 // that the master lacks ticked in wipe_only[] (only names of that list),
 // and accept_connections for a rebuild whose connections remain (the
-// orchestrator reads them again). A refusal leaves the job as it was: 403
+// orchestrator reads them again); for an approval, the database names
+// typed in confirm_db[] (the orchestrator compares them). A refusal leaves the job as it was: 403
 // for the token, 400 for an acknowledgement, on the job page.
 func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name string, do func(string, orchestrator.JobAck) error) {
 	job, _, ok := a.jobFromPath(w, r)
@@ -438,6 +450,9 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 			return
 		}
 		ack.Confirmed = true
+		if name == ActJobApprove {
+			ack.TypedDatabases = r.PostForm["confirm_db[]"]
+		}
 		if name == ActJobRetry {
 			params := paramsOf(job)
 			ack.WipeOnly = r.PostForm["wipe_only[]"]
@@ -553,7 +568,7 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, n
 		a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", logErr(err))
 		status := http.StatusConflict
 		switch {
-		case errors.Is(err, orchestrator.ErrConnectionsRemain):
+		case errors.Is(err, orchestrator.ErrConnectionsRemain), errors.Is(err, orchestrator.ErrAddExistingNames):
 			status = http.StatusBadRequest
 		case errors.Is(err, orchestrator.ErrJobNeedsConfirm):
 			status = http.StatusForbidden
