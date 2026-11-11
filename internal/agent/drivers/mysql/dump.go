@@ -217,8 +217,9 @@ func probeArgs(defaultsFile string, databases []string, tls clientTLS) []string 
 // the caller resets the binary logs first. That is right for a first
 // snapshot (whatever the server ran by itself is dropped) and when every
 // database is loaded. A replica that already replicates and takes one
-// more database must keep its history instead: COMMENTED leaves the dump's GTID set as a comment,
-// nothing is reset, and the result's GTIDExecuted is the replica's own.
+// more database must keep its history instead: COMMENTED leaves the dump's
+// GTID set as a comment, nothing is reset, and the result's GTIDExecuted is
+// the replica's own.
 func dumpGTIDMode(executed string, configuredReplica bool, p proto.SnapshotParams) string {
 	if executed != "" && configuredReplica && len(p.Databases) > 0 {
 		return "COMMENTED"

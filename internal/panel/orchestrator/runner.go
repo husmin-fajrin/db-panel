@@ -577,8 +577,8 @@ var (
 // made yet: CLONE replaces everything on the target, and the agent does
 // not check for user databases again, ruling 16); a remove_databases that
 // drops the data; an add_databases that waited for, or has, the drop of
-// added databases that already exist on the replica (AddDrop). Its Approve and Retry need a fresh confirmation
-// (JobAck.Confirmed).
+// added databases that already exist on the replica (AddDrop). Its
+// Approve and Retry need a fresh confirmation (JobAck.Confirmed).
 func dropsData(kind string, st jobState) bool {
 	switch kind {
 	case KindResyncReplica:
@@ -1312,7 +1312,7 @@ const (
 	WaitForeignSource = "foreign_source" // create_replica: reset the target's replication from elsewhere
 	WaitClone         = "clone"          // create_replica: CLONE replaces everything on the target
 	WaitReconnect     = "reconnect"      // create_replica: reconnect the target's MySQL after the copy
-	WaitAddExisting   = "add_existing"   // add_databases: database yang ditambahkan sudah ada di replika
+	WaitAddExisting   = "add_existing"   // add_databases: an added database already exists on the replica
 )
 
 // jobRun is one pass of a job's goroutine over its steps.
