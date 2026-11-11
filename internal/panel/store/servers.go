@@ -34,10 +34,13 @@ type Server struct {
 	AgentVersion string
 	LastSeenAt   *time.Time
 	SnoozeUntil  *time.Time // alerts for this server are muted until then
-	CreatedAt    time.Time
+	// SnoozeFrom is when the snooze began; set until the digest of the
+	// snooze has been sent (EndedSnoozes, ClearSnoozeFrom), nil otherwise.
+	SnoozeFrom *time.Time
+	CreatedAt  time.Time
 }
 
-const serverColumns = `id, name, address, role, paired, cert_serial, probe_json, agent_version, last_seen_at, snooze_until, created_at`
+const serverColumns = `id, name, address, role, paired, cert_serial, probe_json, agent_version, last_seen_at, snooze_until, snooze_from, created_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -47,10 +50,11 @@ func scanServer(r rowScanner) (Server, error) {
 		paired   int
 		lastSeen sql.NullString
 		snooze   sql.NullString
+		from     sql.NullString
 		created  string
 	)
 	if err := r.Scan(&srv.ID, &srv.Name, &srv.Address, &srv.Role, &paired, &srv.CertSerial,
-		&srv.ProbeJSON, &srv.AgentVersion, &lastSeen, &snooze, &created); err != nil {
+		&srv.ProbeJSON, &srv.AgentVersion, &lastSeen, &snooze, &from, &created); err != nil {
 		return Server{}, err
 	}
 	srv.Paired = paired != 0
@@ -59,6 +63,9 @@ func scanServer(r rowScanner) (Server, error) {
 		return Server{}, err
 	}
 	if srv.SnoozeUntil, err = parseNullTime(snooze); err != nil {
+		return Server{}, err
+	}
+	if srv.SnoozeFrom, err = parseNullTime(from); err != nil {
 		return Server{}, err
 	}
 	if srv.CreatedAt, err = parseTime(created); err != nil {
@@ -213,13 +220,76 @@ func (s *Store) TouchSeen(id int64, seen time.Time) error {
 	return s.execOne(`UPDATE servers SET last_seen_at = ? WHERE id = ?`, formatTime(seen), id)
 }
 
-// SetSnooze mutes alerts for the server until the given time; nil clears it.
-func (s *Store) SetSnooze(id int64, until *time.Time) error {
-	var v any
-	if until != nil {
-		v = formatTime(*until)
+// SetSnooze mutes alerts for the server until until; now is the caller's
+// clock. A snooze that is still running (snooze_until after now) when it
+// is extended or shortened keeps its snooze_from; one that is not running
+// starts at now. A nil until, or one that is not after now, ends a running
+// snooze at now: snooze_from stays, so the digest of the snooze is still
+// sent (EndedSnoozes); with no snooze running nothing changes.
+func (s *Store) SetSnooze(id int64, until *time.Time, now time.Time) error {
+	if until != nil && until.After(now) {
+		return s.execOne(`UPDATE servers SET
+			snooze_from = CASE WHEN snooze_until IS NOT NULL AND snooze_until > ? THEN snooze_from ELSE ? END,
+			snooze_until = ? WHERE id = ?`, formatTime(now), formatTime(now), formatTime(*until), id)
 	}
-	return s.execOne(`UPDATE servers SET snooze_until = ? WHERE id = ?`, v, id)
+	res, err := s.db.Exec(`UPDATE servers SET snooze_until = ? WHERE id = ? AND snooze_until IS NOT NULL AND snooze_until > ?`,
+		formatTime(now), id, formatTime(now))
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n > 0 {
+		return nil
+	}
+	var one int
+	if err := s.db.QueryRow(`SELECT 1 FROM servers WHERE id = ?`, id).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("get server: %w", err)
+	}
+	return nil
+}
+
+// SnoozeSpan is a snooze that has ended and whose digest is still owed.
+type SnoozeSpan struct {
+	ServerID    int64
+	From, Until time.Time
+}
+
+// EndedSnoozes returns the snoozes that have ended by now and whose digest
+// has not been sent: snooze_from set and snooze_until not after now.
+func (s *Store) EndedSnoozes(now time.Time) ([]SnoozeSpan, error) {
+	rows, err := s.db.Query(`SELECT id, snooze_from, snooze_until FROM servers
+		WHERE snooze_from IS NOT NULL AND snooze_until IS NOT NULL AND snooze_until <= ? ORDER BY id`, formatTime(now))
+	if err != nil {
+		return nil, fmt.Errorf("ended snoozes: %w", err)
+	}
+	defer rows.Close()
+	var out []SnoozeSpan
+	for rows.Next() {
+		var (
+			sp          SnoozeSpan
+			from, until string
+		)
+		if err := rows.Scan(&sp.ServerID, &from, &until); err != nil {
+			return nil, err
+		}
+		if sp.From, err = parseTime(from); err != nil {
+			return nil, err
+		}
+		if sp.Until, err = parseTime(until); err != nil {
+			return nil, err
+		}
+		out = append(out, sp)
+	}
+	return out, rows.Err()
+}
+
+// ClearSnoozeFrom records that the digest of the server's last snooze was
+// sent.
+func (s *Store) ClearSnoozeFrom(id int64) error {
+	return s.execOne(`UPDATE servers SET snooze_from = NULL WHERE id = ?`, id)
 }
 
 // DeleteServer removes a server (and, by cascade, its pair tokens,

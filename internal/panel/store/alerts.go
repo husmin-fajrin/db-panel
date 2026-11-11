@@ -165,6 +165,13 @@ func (s *Store) CountAlertsOpenedSince(kind string, serverID int64, since time.T
 	return n, nil
 }
 
+// AlertsOpenedBetween returns the server's alerts opened in [from, to),
+// closed ones included, oldest first.
+func (s *Store) AlertsOpenedBetween(serverID int64, from, to time.Time) ([]Alert, error) {
+	return s.queryAlerts(`SELECT `+alertColumns+` FROM alerts WHERE server_id = ? AND opened_at >= ? AND opened_at < ?
+		ORDER BY opened_at, id`, serverID, formatTime(from), formatTime(to))
+}
+
 // ListOpenAlerts returns all open alerts, oldest first.
 func (s *Store) ListOpenAlerts() ([]Alert, error) {
 	return s.queryAlerts(`SELECT ` + alertColumns + ` FROM alerts WHERE closed_at IS NULL ORDER BY opened_at, id`)

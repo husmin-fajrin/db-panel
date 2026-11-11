@@ -49,18 +49,18 @@ func TestMigrateSkipsApplied(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 10 {
-		t.Fatalf("schema_migrations rows = %d, want 10", n)
+	if n != 11 {
+		t.Fatalf("schema_migrations rows = %d, want 11", n)
 	}
 }
 
 // TestMigrate0004Applies: the monitoring tables and columns exist (0004
-// to 0010) and the schema is at version 10.
+// to 0011) and the schema is at version 11.
 func TestMigrate0004Applies(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 10 {
-		t.Fatalf("schema version = %d, %v; want 10", v, err)
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 11 {
+		t.Fatalf("schema version = %d, %v; want 11", v, err)
 	}
 	for _, table := range []string{"server_health", "status_events", "alerts", "audit_log", "confirmations", "server_tls", "health_samples"} {
 		var n int
@@ -154,7 +154,7 @@ func TestMigrate0009BackfillsEmptyAndLarge(t *testing.T) {
 			t.Logf("migration 0009 over %d rows: %v", n, time.Since(start))
 			defer s.Close()
 			var v int
-			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 10 {
+			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 11 {
 				t.Fatalf("schema version = %d, %v", v, err)
 			}
 			lastOK, brokenAt, err := s.VerifyAuditChain()
@@ -301,5 +301,48 @@ func TestOpenReadOnly(t *testing.T) {
 	}
 	if _, err := OpenReadOnly(filepath.Join(t.TempDir(), "missing.db")); err == nil {
 		t.Fatal("OpenReadOnly on a missing file succeeded")
+	}
+}
+
+// TestMigration0011AddsSnoozeFrom: 0011 adds servers.snooze_from to a
+// schema-10 database that already has a snoozed server; its snooze_until
+// keeps working, snooze_from is NULL (no digest owed), the migration runs
+// once, and opening the database again changes nothing.
+func TestMigration0011AddsSnoozeFrom(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.db")
+	db := openAtVersion(t, path, 10)
+	if _, err := db.Exec(`INSERT INTO servers (name, snooze_until, created_at) VALUES ('db1', '2026-11-11T12:00:00Z', '2026-10-30T10:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('servers') WHERE name = 'snooze_from'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("snooze_from before 0011: n=%d, err=%v", n, err)
+	}
+	db.Close()
+
+	for range 2 {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('servers') WHERE name = 'snooze_from'`).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("snooze_from after 0011: n=%d, err=%v", n, err)
+		}
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = 11`).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("version 11 rows = %d, %v", n, err)
+		}
+		list, err := s.ListServers()
+		if err != nil || len(list) != 1 {
+			t.Fatalf("ListServers = %+v, %v", list, err)
+		}
+		want := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+		if got := list[0]; got.SnoozeUntil == nil || !got.SnoozeUntil.Equal(want) || got.SnoozeFrom != nil {
+			t.Fatalf("snoozed server after 0011 = until %v, from %v; want until %v, from nil", got.SnoozeUntil, got.SnoozeFrom, want)
+		}
+		spans, err := s.EndedSnoozes(want.Add(time.Hour))
+		if err != nil || len(spans) != 0 {
+			t.Fatalf("EndedSnoozes for an old snooze = %+v, %v; want none (no digest owed)", spans, err)
+		}
+		s.Close()
 	}
 }

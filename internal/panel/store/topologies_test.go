@@ -244,7 +244,7 @@ func TestSnoozeRoundTrip(t *testing.T) {
 		t.Fatalf("new server snooze = %v", srv.SnoozeUntil)
 	}
 	until := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
-	if err := s.SetSnooze(srv.ID, &until); err != nil {
+	if err := s.SetSnooze(srv.ID, &until, until.Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetServer(srv.ID)
@@ -254,13 +254,14 @@ func TestSnoozeRoundTrip(t *testing.T) {
 	if list, _ := s.ListServers(); len(list) != 1 || list[0].SnoozeUntil == nil {
 		t.Fatalf("ListServers = %+v", list)
 	}
-	if err := s.SetSnooze(srv.ID, nil); err != nil {
+	cancelAt := until.Add(-time.Hour)
+	if err := s.SetSnooze(srv.ID, nil, cancelAt); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ = s.GetServer(srv.ID); got.SnoozeUntil != nil {
-		t.Fatalf("snooze after clear = %v", got.SnoozeUntil)
+	if got, _ = s.GetServer(srv.ID); got.SnoozeUntil == nil || !got.SnoozeUntil.Equal(cancelAt) {
+		t.Fatalf("snooze after cancel = %v, want it ended at %v", got.SnoozeUntil, cancelAt)
 	}
-	if err := s.SetSnooze(999, nil); !errors.Is(err, ErrNotFound) {
+	if err := s.SetSnooze(999, nil, cancelAt); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SetSnooze missing: %v", err)
 	}
 }
@@ -285,5 +286,141 @@ func TestGetSettings(t *testing.T) {
 	}
 	if got, err := s.GetSettings(); err != nil || len(got) != 0 {
 		t.Fatalf("GetSettings() = %v, %v", got, err)
+	}
+}
+
+var snoozeT0 = time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+
+// TestSetSnoozeKeepsFromWhenExtended: a snooze that starts records its
+// start; extending or shortening it while it runs keeps the start; a snooze
+// begun after the previous one ended starts anew.
+func TestSetSnoozeKeepsFromWhenExtended(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db")
+	until := snoozeT0.Add(2 * time.Hour)
+	if err := s.SetSnooze(srv.ID, &until, snoozeT0); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetServer(srv.ID)
+	if got.SnoozeFrom == nil || !got.SnoozeFrom.Equal(snoozeT0) || !got.SnoozeUntil.Equal(until) {
+		t.Fatalf("after start: from %v until %v", got.SnoozeFrom, got.SnoozeUntil)
+	}
+
+	// Extended an hour in: until moves, from stays.
+	extended := snoozeT0.Add(10 * time.Hour)
+	if err := s.SetSnooze(srv.ID, &extended, snoozeT0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetServer(srv.ID)
+	if got.SnoozeFrom == nil || !got.SnoozeFrom.Equal(snoozeT0) || !got.SnoozeUntil.Equal(extended) {
+		t.Fatalf("after extend: from %v until %v; want from %v until %v", got.SnoozeFrom, got.SnoozeUntil, snoozeT0, extended)
+	}
+
+	// Once it ended, a new one starts at its own now.
+	later := snoozeT0.Add(12 * time.Hour)
+	next := later.Add(time.Hour)
+	if err := s.SetSnooze(srv.ID, &next, later); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetServer(srv.ID)
+	if got.SnoozeFrom == nil || !got.SnoozeFrom.Equal(later) || !got.SnoozeUntil.Equal(next) {
+		t.Fatalf("after a new snooze: from %v until %v; want from %v until %v", got.SnoozeFrom, got.SnoozeUntil, later, next)
+	}
+}
+
+// TestCancelSnoozeEndsNowAndKeepsFrom: cancelling a running snooze ends it
+// now and keeps snooze_from, so its digest is still owed; cancelling when
+// none runs changes nothing, not even for a snooze whose digest is owed.
+func TestCancelSnoozeEndsNowAndKeepsFrom(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db")
+	until := snoozeT0.Add(8 * time.Hour)
+	if err := s.SetSnooze(srv.ID, &until, snoozeT0); err != nil {
+		t.Fatal(err)
+	}
+	cancelAt := snoozeT0.Add(time.Hour)
+	if err := s.SetSnooze(srv.ID, nil, cancelAt); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetServer(srv.ID)
+	if got.SnoozeUntil == nil || !got.SnoozeUntil.Equal(cancelAt) || got.SnoozeFrom == nil || !got.SnoozeFrom.Equal(snoozeT0) {
+		t.Fatalf("after cancel: from %v until %v; want from %v until %v", got.SnoozeFrom, got.SnoozeUntil, snoozeT0, cancelAt)
+	}
+	spans, err := s.EndedSnoozes(cancelAt)
+	if err != nil || len(spans) != 1 || spans[0].ServerID != srv.ID || !spans[0].From.Equal(snoozeT0) || !spans[0].Until.Equal(cancelAt) {
+		t.Fatalf("EndedSnoozes after cancel = %+v, %v", spans, err)
+	}
+
+	// Cancelling again, later: nothing is running, nothing changes.
+	if err := s.SetSnooze(srv.ID, nil, cancelAt.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := s.GetServer(srv.ID)
+	if !again.SnoozeUntil.Equal(cancelAt) || again.SnoozeFrom == nil || !again.SnoozeFrom.Equal(snoozeT0) {
+		t.Fatalf("second cancel changed the server: from %v until %v", again.SnoozeFrom, again.SnoozeUntil)
+	}
+	// A server never snoozed: still no error, still nothing.
+	other := mustServer(t, s, "db2")
+	if err := s.SetSnooze(other.ID, nil, snoozeT0); err != nil {
+		t.Fatal(err)
+	}
+	if o, _ := s.GetServer(other.ID); o.SnoozeUntil != nil || o.SnoozeFrom != nil {
+		t.Fatalf("cancel on an unsnoozed server set %v / %v", o.SnoozeUntil, o.SnoozeFrom)
+	}
+}
+
+// TestEndedSnoozesAndClear: a snooze is listed once it ended and until its
+// digest is cleared; a running one and one with no digest owed are not.
+func TestEndedSnoozesAndClear(t *testing.T) {
+	s := openTemp(t)
+	a, b := mustServer(t, s, "a"), mustServer(t, s, "b")
+	ua, ub := snoozeT0.Add(time.Hour), snoozeT0.Add(5*time.Hour)
+	if err := s.SetSnooze(a.ID, &ua, snoozeT0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSnooze(b.ID, &ub, snoozeT0); err != nil {
+		t.Fatal(err)
+	}
+	if spans, err := s.EndedSnoozes(snoozeT0.Add(time.Hour - time.Second)); err != nil || len(spans) != 0 {
+		t.Fatalf("before the end: %+v, %v", spans, err)
+	}
+	spans, err := s.EndedSnoozes(snoozeT0.Add(time.Hour))
+	if err != nil || len(spans) != 1 || spans[0].ServerID != a.ID || !spans[0].Until.Equal(ua) {
+		t.Fatalf("at the end of a: %+v, %v", spans, err)
+	}
+	if err := s.ClearSnoozeFrom(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if spans, err := s.EndedSnoozes(snoozeT0.Add(2 * time.Hour)); err != nil || len(spans) != 0 {
+		t.Fatalf("after clearing: %+v, %v", spans, err)
+	}
+	if err := s.ClearSnoozeFrom(999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ClearSnoozeFrom missing: %v", err)
+	}
+}
+
+// TestAlertsOpenedBetween: opened_at in [from, to), closed alerts
+// included, only the server's own, oldest first.
+func TestAlertsOpenedBetween(t *testing.T) {
+	s := openTemp(t)
+	srv, other := mustServer(t, s, "a"), mustServer(t, s, "b")
+	open := func(id int64, at time.Time, kind string) int64 {
+		aid, err := s.OpenAlert(Alert{Kind: kind, ServerID: id, OpenedAt: at, Message: "m"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return aid
+	}
+	open(srv.ID, snoozeT0.Add(-time.Second), "disk_warn") // before
+	in2 := open(srv.ID, snoozeT0.Add(30*time.Minute), "agent_offline")
+	in1 := open(srv.ID, snoozeT0, "master_down")       // from is inclusive
+	open(srv.ID, snoozeT0.Add(time.Hour), "disk_crit") // to is exclusive
+	open(other.ID, snoozeT0.Add(time.Minute), "master_down")
+	if err := s.CloseAlert(in2, snoozeT0.Add(40*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.AlertsOpenedBetween(srv.ID, snoozeT0, snoozeT0.Add(time.Hour))
+	if err != nil || len(got) != 2 || got[0].ID != in1 || got[1].ID != in2 || got[1].ClosedAt == nil {
+		t.Fatalf("AlertsOpenedBetween = %+v, %v", got, err)
 	}
 }

@@ -59,7 +59,7 @@ func TestAlertsPageShowsOpenWithTelegramState(t *testing.T) {
 	if err := e.st.CloseAlert(old, time.Now().Add(-99*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.SetSnooze(replica.ID, ptr(time.Now().Add(time.Hour))); err != nil {
+	if err := e.st.SetSnooze(replica.ID, ptr(time.Now().Add(time.Hour)), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -179,7 +179,7 @@ func TestAlertsFilterChips(t *testing.T) {
 		t.Errorf("alerts page shows the yyyy-mm-dd date %q", m)
 	}
 	until := base.Add(2 * time.Hour)
-	if err := e.st.SetSnooze(srv.ID, &until); err != nil {
+	if err := e.st.SetSnooze(srv.ID, &until, base); err != nil {
 		t.Fatal(err)
 	}
 	snoozed := e.do("GET", "/alerts", nil, c).Body.String()

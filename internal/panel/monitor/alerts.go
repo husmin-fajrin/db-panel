@@ -833,10 +833,11 @@ func (m *Monitor) JobEnded(serverID int64, jobID string) {
 	m.emitAlerts(ups)
 }
 
-// Snooze mutes the server's alert notifications until until (nil clears
-// it). Alerts still open and close; only their sending waits.
+// Snooze mutes the server's alert notifications until until (nil ends a
+// running snooze now). Alerts still open and close; only their sending
+// waits, and the critical kinds the notifier never silences still go out.
 func (m *Monitor) Snooze(serverID int64, until *time.Time) error {
-	if err := m.st.SetSnooze(serverID, until); err != nil {
+	if err := m.st.SetSnooze(serverID, until, m.now()); err != nil {
 		return err
 	}
 	m.mu.Lock()

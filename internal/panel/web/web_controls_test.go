@@ -376,7 +376,7 @@ func TestSnoozeHours(t *testing.T) {
 
 	// The server page names an active snooze.
 	until := time.Now().Add(2 * time.Hour)
-	if err := e.st.SetSnooze(2, &until); err != nil {
+	if err := e.st.SetSnooze(2, &until, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	wantBody(t, e.do("GET", "/servers/2", nil, c), "Jangan ganggu sampai")
