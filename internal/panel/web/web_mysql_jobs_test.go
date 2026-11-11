@@ -37,8 +37,14 @@ type fakeOrch struct {
 	replicas []orchestrator.CreateReplicaParams
 
 	result proto.ConnectResult
-	err    error // returned by every call when set
-	nextID string
+	// results answers Connect and RefreshInventory per server instead of
+	// result (the master and the replica hold different databases).
+	results map[int64]proto.ConnectResult
+	// refreshErr fails RefreshInventory of one server only.
+	refreshErr map[int64]error
+	resyncs    []orchestrator.ResyncParams // what StartResync received
+	err        error                       // returned by every call when set
+	nextID     string
 	// superseded answers Superseded per job id.
 	superseded map[string]string
 	// view is what PromoteView answers; promoteErr what StartPromote
@@ -82,10 +88,19 @@ func (f *fakeOrch) callList() []string {
 	return append([]string(nil), f.calls...)
 }
 
+// resultFor is what the server's agent answers.
+func (f *fakeOrch) resultFor(serverID int64) proto.ConnectResult {
+	if r, ok := f.results[serverID]; ok {
+		return r
+	}
+	return f.result
+}
+
 func (f *fakeOrch) storeInventory(serverID int64) error {
+	res := f.resultFor(serverID)
 	return f.st.SetInventory(store.Inventory{
-		ServerID: serverID, Connected: true, Version: f.result.Status.Version, Series: f.result.Status.Series,
-		Databases: f.result.Databases, MissingGrants: f.result.MissingGrants, UpdatedAt: time.Now(),
+		ServerID: serverID, Connected: true, Version: res.Status.Version, Series: res.Status.Series,
+		Databases: res.Databases, MissingGrants: res.MissingGrants, UpdatedAt: time.Now(),
 	})
 }
 
@@ -105,7 +120,10 @@ func (f *fakeOrch) RefreshInventory(_ context.Context, serverID int64) (proto.Co
 	if f.err != nil {
 		return proto.ConnectResult{}, f.err
 	}
-	return f.result, f.storeInventory(serverID)
+	if err := f.refreshErr[serverID]; err != nil {
+		return proto.ConnectResult{}, err
+	}
+	return f.resultFor(serverID), f.storeInventory(serverID)
 }
 
 func (f *fakeOrch) StartPrepareMaster(_ context.Context, serverID int64) (string, error) {
@@ -145,6 +163,9 @@ func (f *fakeOrch) StartRemoveDatabases(_ context.Context, serverID int64, dbs [
 
 func (f *fakeOrch) StartResync(_ context.Context, p orchestrator.ResyncParams) (string, error) {
 	f.record(fmt.Sprintf("resync %d %s force=%t", p.ServerID, strings.Join(p.WipeList, ","), p.ForceDump))
+	f.mu.Lock()
+	f.resyncs = append(f.resyncs, p)
+	f.mu.Unlock()
 	if f.err != nil {
 		return "", f.err
 	}

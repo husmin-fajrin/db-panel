@@ -178,11 +178,27 @@
   <form method="post" action="/replicas/{{.Server.ID}}/resync" class="modal-box flex flex-col gap-2">
     <h2>Resync ulang {{.Server.Name}}?</h2>
     <p>Panel menyalin ulang data dari master <strong>{{.Master.Name}}</strong> ke replika ini, lalu menyambungkan replikasinya lagi.</p>
-    {{if .WipeList}}
-    <p>Database berikut DIBUANG dari {{.Server.Name}} lalu disalin ulang dari master; isi yang hanya ada di replika hilang:</p>
-    <ul class="list-disc ml-6">
-      {{range .WipeList}}<li>{{.}}<input type="hidden" name="wipe_list[]" value="{{.}}"></li>{{end}}
-    </ul>
+    {{if not .MasterInventoryRead}}
+    <p>Daftar database master belum pernah dibaca. Tutup dialog ini lalu klik <strong>Resync ulang</strong> lagi agar panel membacanya.</p>
+    {{else if .WipeList}}
+    <p>Database berikut DIBUANG dari {{.Server.Name}} lalu disalin ulang dari master:</p>
+    {{if .Wipe.OnMaster}}
+    <fieldset class="flex flex-col gap-1">
+      <legend class="font-semibold">ada di master, disalin ulang</legend>
+      <ul class="list-disc ml-6">
+        {{range .Wipe.OnMaster}}<li>{{.}}<input type="hidden" name="wipe_list[]" value="{{.}}"></li>{{end}}
+      </ul>
+    </fieldset>
+    {{end}}
+    {{if .Wipe.ReplicaOnly}}
+    <fieldset class="flex flex-col gap-1 border border-error rounded p-2">
+      <legend class="font-semibold text-error">hanya di replika, isinya hilang permanen</legend>
+      <p>Master tidak punya database ini, jadi isinya tidak bisa disalin ulang. Centang setiap database untuk mengakui bahwa isinya hilang permanen.</p>
+      {{range .Wipe.ReplicaOnly}}
+      <label class="label justify-start gap-2"><input type="hidden" name="wipe_list[]" value="{{.}}"><input type="checkbox" name="wipe_only[]" value="{{.}}" class="checkbox checkbox-sm" required> <span>{{.}}</span></label>
+      {{end}}
+    </fieldset>
+    {{end}}
     {{else if .WipeListRead}}
     <p>Replika ini tidak punya database pengguna; tidak ada yang dibuang.</p>
     {{else}}

@@ -105,28 +105,79 @@ func (a *app) replicaControl(w http.ResponseWriter, r *http.Request, action, not
 	http.Redirect(w, r, replicaURL(srv.ID)+"?pesan="+notice, http.StatusSeeOther)
 }
 
-// prepareResync reads the replica's databases again (Resync ulang opens
-// its dialog on the fresh list, spec 5.4) and returns to the replica page
-// with the dialog open. A failed read is shown there and opens nothing.
+// prepareResync reads the databases of the replica and of its master again
+// (Resync ulang opens its dialog on the fresh lists, spec 5.4 and 5.6) and
+// returns to the replica page with the dialog open. A failed read of either
+// is shown there and opens nothing.
 func (a *app) prepareResync(w http.ResponseWriter, r *http.Request) {
 	srv, rep, ok := a.replicaFromPath(w, r)
 	if !ok {
 		return
 	}
-	_, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID)
+	master, err := a.replicaMaster(rep)
+	if err != nil {
+		a.internalError(w, "get master", err)
+		return
+	}
+	// One action, one audit entry: the replica is read first and the master
+	// only when that worked.
+	_, err = a.Orchestrator.RefreshInventory(r.Context(), srv.ID)
+	if err == nil {
+		_, err = a.Orchestrator.RefreshInventory(r.Context(), master.ID)
+	}
 	a.audit(r, "mysql_refresh", auditReplica, srv.ID, map[string]any{"reason": "resync"}, outcomeOf(err))
 	if err != nil {
-		a.Logger.Warn("refresh replica inventory for resync", "server", srv.ID, "err", logErr(err))
+		a.Logger.Warn("refresh inventories for resync", "server", srv.ID, "master", master.ID, "err", logErr(err))
 		a.replicaError(w, r, srv, rep, msgWipeRefresh+err.Error())
 		return
 	}
 	http.Redirect(w, r, replicaURL(srv.ID)+"?buka=resync", http.StatusSeeOther)
 }
 
-// validWipeList reports whether every name of list is a database of the
-// replica's stored inventory (the list its dialog showed), each at most once.
-func (a *app) validWipeList(serverID int64, list []string) (bool, error) {
+// wipeGroups splits the replica's databases the way the Resync dialog shows
+// them: OnMaster are copied again from the master, ReplicaOnly exist only on
+// the replica and are lost for good.
+type wipeGroups struct {
+	OnMaster    []string
+	ReplicaOnly []string
+}
+
+// groupWipe groups the replica's databases by whether the master has one of
+// the same name. Names are compared exactly (case-sensitive), as everywhere
+// a wipe list is checked.
+func groupWipe(replica, master []proto.DatabaseInfo) wipeGroups {
+	onMaster := make(map[string]bool, len(master))
+	for _, d := range master {
+		onMaster[d.Name] = true
+	}
+	var g wipeGroups
+	for _, d := range replica {
+		if onMaster[d.Name] {
+			g.OnMaster = append(g.OnMaster, d.Name)
+		} else {
+			g.ReplicaOnly = append(g.ReplicaOnly, d.Name)
+		}
+	}
+	return g
+}
+
+// validWipeList reports whether the resync's wipe list and acknowledgements
+// fit the stored inventories (the lists its dialog showed, which prepareResync
+// had just refreshed): every name of list is a database of the replica, each
+// at most once; every name of only is in list; and every name of list that
+// the master's inventory lacks (it exists only on the replica) is in only.
+// The orchestrator checks the same against a fresh read of the master when
+// the job runs.
+func (a *app) validWipeList(rep store.Replica, serverID int64, list, only []string) (bool, error) {
 	inv, err := a.inventory(serverID)
+	if err != nil {
+		return false, err
+	}
+	master, err := a.replicaMaster(rep)
+	if err != nil {
+		return false, err
+	}
+	masterInv, err := a.inventory(master.ID)
 	if err != nil {
 		return false, err
 	}
@@ -138,6 +189,17 @@ func (a *app) validWipeList(serverID int64, list []string) (bool, error) {
 		}
 		seen[name] = true
 	}
+	for _, name := range only {
+		if !seen[name] {
+			return false, nil
+		}
+	}
+	replicaOnly := groupWipe(inv.Databases, masterInv.Databases).ReplicaOnly
+	for _, name := range list {
+		if slices.Contains(replicaOnly, name) && !slices.Contains(only, name) {
+			return false, nil
+		}
+	}
 	return true, nil
 }
 
@@ -147,12 +209,12 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := orchestrator.ResyncParams{ServerID: srv.ID, ForceDump: r.PostFormValue("force_dump") != "",
-		WipeList: r.PostForm["wipe_list[]"]}
-	detail := map[string]any{"force_dump": p.ForceDump, "wipe_list": p.WipeList}
+		WipeList: r.PostForm["wipe_list[]"], WipeOnly: r.PostForm["wipe_only[]"]}
+	detail := map[string]any{"force_dump": p.ForceDump, "wipe_list": p.WipeList, "wipe_only": p.WipeOnly}
 	refused := ""
 	if !typedName(r, srv) {
 		refused = msgNameMismatch
-	} else if ok, err := a.validWipeList(srv.ID, p.WipeList); err != nil {
+	} else if ok, err := a.validWipeList(rep, srv.ID, p.WipeList, p.WipeOnly); err != nil {
 		a.internalError(w, "get inventory", err)
 		return
 	} else if !ok {

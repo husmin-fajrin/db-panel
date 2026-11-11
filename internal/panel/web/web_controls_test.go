@@ -246,8 +246,116 @@ func TestResyncPassesWipeListAndForceDump(t *testing.T) {
 	rec = e.do("POST", "/replicas/2/resync", withToken(t, e, form, web.ActResync, "replica", 2), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Resync ulang hanya bisa saat replika siap")
-	wantCalls(t, f, "refresh 2", "refresh 2", "resync 2 toko,gudang force=true", "resync 2  force=false",
+	wantCalls(t, f, "refresh 2", "refresh 1", "refresh 2", "resync 2 toko,gudang force=true", "resync 2  force=false",
 		"resync 2 toko force=false")
+}
+
+// resyncGroupEnv is controlEnv where the master has a and b and the replica
+// a and laporan (and the extra databases), both read by Resync ulang.
+func resyncGroupEnv(t *testing.T, replicaDBs ...string) (*env, *fakeOrch, *http.Cookie) {
+	t.Helper()
+	e, f, _ := controlEnv(t)
+	var master, replica []proto.DatabaseInfo
+	for _, n := range []string{"a", "b"} {
+		master = append(master, proto.DatabaseInfo{Name: n, Bytes: 1 << 20})
+	}
+	for _, n := range replicaDBs {
+		replica = append(replica, proto.DatabaseInfo{Name: n, Bytes: 1 << 20})
+	}
+	f.results = map[int64]proto.ConnectResult{1: {Databases: master}, 2: {Databases: replica}}
+	c := e.cookie()
+	wantCode(t, e.do("POST", "/replicas/2/resync/prepare", noForm, c), http.StatusSeeOther)
+	return e, f, c
+}
+
+func TestPrepareResyncRefreshesMasterToo(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	f.result = proto.ConnectResult{Databases: shopDatabases}
+
+	rec := e.do("POST", "/replicas/2/resync/prepare", noForm, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/replicas/2?buka=resync")
+	wantCalls(t, f, "refresh 2", "refresh 1")
+
+	// The master cannot be read: said on the page, no dialog.
+	f.refreshErr = map[int64]error{1: errors.New("agent db-master tidak terhubung")}
+	rec = e.do("POST", "/replicas/2/resync/prepare", noForm, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Daftar database replika tidak bisa disegarkan", "agent db-master tidak terhubung")
+	wantNoBody(t, rec, `data-open="true"`)
+
+	// The replica cannot be read: the same, and the master is not asked.
+	f.refreshErr = map[int64]error{2: errors.New("agent db-replika tidak terhubung")}
+	rec = e.do("POST", "/replicas/2/resync/prepare", noForm, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Daftar database replika tidak bisa disegarkan", "agent db-replika tidak terhubung")
+	wantNoBody(t, rec, `data-open="true"`)
+	wantCalls(t, f, "refresh 2", "refresh 1", "refresh 2", "refresh 1", "refresh 2")
+}
+
+func TestResyncModalGroups(t *testing.T) {
+	// Names are data: markup, quotes, case and spaces stay text.
+	e, _, c := resyncGroupEnv(t, "a", "laporan", `x"><script>alert(1)</script>`, "A", "my db")
+	rec := e.do("GET", "/replicas/2?buka=resync", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	const onMaster, replicaOnly = "ada di master, disalin ulang", "hanya di replika, isinya hilang permanen"
+	i, j := strings.Index(body, onMaster), strings.Index(body, replicaOnly)
+	if i < 0 || j < i {
+		t.Fatalf("groups %q then %q not found in order:\n%s", onMaster, replicaOnly, body)
+	}
+	first, second := body[i:j], body[j:strings.Index(body, "Ukuran data master")]
+	if !strings.Contains(first, `name="wipe_list[]" value="a"`) || strings.Contains(first, "laporan") ||
+		strings.Contains(first, "wipe_only[]") {
+		t.Errorf("group %q = %s", onMaster, first)
+	}
+	// Exact comparison: A is not the master's a.
+	for _, name := range []string{"laporan", "A", "my db", "x&#34;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"} {
+		raw := name
+		if !strings.Contains(second, `name="wipe_list[]" value="`+raw+`"`) ||
+			!regexp.MustCompile(`<input type="checkbox" name="wipe_only\[\]" value="`+regexp.QuoteMeta(raw)+`"[^>]* required>`).MatchString(second) ||
+			!strings.Contains(second, "<span>"+raw+"</span>") {
+			t.Errorf("group %q lacks %q with its hidden wipe_list[] and required wipe_only[]:\n%s", replicaOnly, name, second)
+		}
+	}
+	wantNoBody(t, rec, "<script>alert(1)", `x"><script>`)
+	wantBody(t, rec, `data-confirm-action="resync"`, `data-confirm-name="db-replika"`)
+}
+
+func TestResyncRequiresEveryReplicaOnlyTicked(t *testing.T) {
+	e, f, c := resyncGroupEnv(t, "a", "laporan", "A")
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		form.Set("confirm_name", "db-replika")
+		return e.do("POST", "/replicas/2/resync", withToken(t, e, form, web.ActResync, "replica", 2), c)
+	}
+	refused := func(name string, form url.Values) {
+		t.Helper()
+		rec := post(form)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Daftar database tidak sesuai dengan inventaris; segarkan daftar lalu coba lagi") {
+			t.Errorf("%s: code %d, body %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	// A crafted POST: laporan is replica-only and not acknowledged.
+	refused("no wipe_only", url.Values{"wipe_list[]": {"a", "laporan"}})
+	refused("other name acknowledged", url.Values{"wipe_list[]": {"a", "laporan"}, "wipe_only[]": {"a"}})
+	refused("one of two replica-only missing", url.Values{"wipe_list[]": {"laporan", "A"}, "wipe_only[]": {"laporan"}})
+	refused("case differs: A is replica-only", url.Values{"wipe_list[]": {"A"}, "wipe_only[]": {"a"}})
+	// An acknowledgement of something not in the list, or unknown, is no subset.
+	refused("wipe_only outside wipe_list", url.Values{"wipe_list[]": {"a"}, "wipe_only[]": {"laporan"}})
+	refused("wipe_only unknown", url.Values{"wipe_list[]": {"laporan"}, "wipe_only[]": {"laporan", "tidak-ada"}})
+	wantCalls(t, f, "refresh 2", "refresh 1")
+
+	// Every replica-only database ticked (a stale tick for a database the
+	// master has is harmless).
+	rec := post(url.Values{"wipe_list[]": {"a", "laporan", "A"}, "wipe_only[]": {"laporan", "A", "a"}})
+	wantCode(t, rec, http.StatusSeeOther)
+	rec = post(url.Values{"wipe_list[]": {"a"}})
+	wantCode(t, rec, http.StatusSeeOther)
+	if len(f.resyncs) != 2 || !reflect.DeepEqual(f.resyncs[0].WipeOnly, []string{"laporan", "A", "a"}) ||
+		len(f.resyncs[1].WipeOnly) != 0 {
+		t.Fatalf("StartResync params = %+v", f.resyncs)
+	}
 }
 
 func TestDetachModes(t *testing.T) {

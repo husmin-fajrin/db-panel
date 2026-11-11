@@ -760,9 +760,13 @@ type replicaPage struct {
 	// drops; WipeListRead is false while that inventory was never read.
 	WipeList     []string
 	WipeListRead bool
-	OpenResync   bool // open the resync dialog on load (after prepareResync)
-	Status       statusView
-	Timeline     timelineView
+	// Wipe is WipeList by whether the master's stored inventory has the
+	// database (MasterInventoryRead: that inventory was read).
+	Wipe                wipeGroups
+	MasterInventoryRead bool
+	OpenResync          bool // open the resync dialog on load (after prepareResync)
+	Status              statusView
+	Timeline            timelineView
 }
 
 // ButtonClass is the extra class of the control an explanation's Primary
@@ -873,6 +877,8 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 	for _, d := range inv.Databases {
 		p.WipeList = append(p.WipeList, d.Name)
 	}
+	p.MasterInventoryRead = masterInv.Connected
+	p.Wipe = groupWipe(inv.Databases, masterInv.Databases)
 
 	controllable := !p.Busy && canChangeDatabases(rep) // the orchestrator's rule for stop, start, relock
 	stopped := p.Health != nil &&
