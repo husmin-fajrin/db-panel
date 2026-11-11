@@ -70,6 +70,12 @@ const (
 // Binlog Dump thread: every later read of the candidate (the guard,
 // mysql.unlockPromote, mysql.quarantine) dials it, never the name in
 // Candidate again (lockAddr).
+//
+// Readable lists, as host:port, the other replicas lockForPromote could
+// read with the candidate's account when it set the lock
+// (readableAtLock): the guard keeps an expired lock while one of them
+// cannot be read. A lock without it (an older agent's) lists none. Only
+// "dbpanel agent forget-replica" removes an entry (ForgetLockHost).
 type PromoteLock struct {
 	Candidate string
 	Addr      string
@@ -94,9 +100,10 @@ func lockAddr(l PromoteLock) string {
 const CLILockCandidate = "cli"
 
 type lockJSON struct {
-	Candidate string `json:"candidate"`
-	Addr      string `json:"addr,omitempty"`
-	Deadline  string `json:"deadline"`
+	Candidate string   `json:"candidate"`
+	Addr      string   `json:"addr,omitempty"`
+	Deadline  string   `json:"deadline"`
+	Readable  []string `json:"readable,omitempty"`
 }
 
 // Promoted is the record of this server's promotion to master: when, how
@@ -168,7 +175,8 @@ func (p *Pins) WriteLock(l PromoteLock) error {
 	if l.Candidate == "" || l.Deadline.IsZero() {
 		return errors.New("kunci promosi butuh kandidat dan tenggat")
 	}
-	return writeJSON(p.path(LockFile), lockJSON{Candidate: l.Candidate, Addr: l.Addr, Deadline: l.Deadline.UTC().Format(time.RFC3339)})
+	return writeJSON(p.path(LockFile), lockJSON{Candidate: l.Candidate, Addr: l.Addr, Deadline: l.Deadline.UTC().Format(time.RFC3339),
+		Readable: l.Readable})
 }
 
 // ReadLock reads the promote lock; ok is false when there is none. A lock
@@ -183,7 +191,31 @@ func (p *Pins) ReadLock() (PromoteLock, bool, error) {
 	if err != nil || v.Candidate == "" || (v.Addr != "" && net.ParseIP(v.Addr) == nil) {
 		return PromoteLock{}, false, fmt.Errorf("%s tidak valid; hapus dengan: sudo dbpanel agent unlock-master", p.path(LockFile))
 	}
-	return PromoteLock{Candidate: v.Candidate, Addr: v.Addr, Deadline: d}, true, nil
+	return PromoteLock{Candidate: v.Candidate, Addr: v.Addr, Deadline: d, Readable: v.Readable}, true, nil
+}
+
+// ForgetLockHost removes every entry of host (any port; names compare
+// case-insensitively) from the readable replicas of the promote lock and
+// reports how many went. Without a lock, or an entry of host, nothing is
+// written.
+func (p *Pins) ForgetLockHost(host string) (removed int, err error) {
+	l, ok, err := p.ReadLock()
+	if err != nil || !ok {
+		return 0, err
+	}
+	kept := slices.DeleteFunc(slices.Clone(l.Readable), func(e string) bool {
+		h, _, err := net.SplitHostPort(e)
+		return err == nil && strings.EqualFold(h, host)
+	})
+	removed = len(l.Readable) - len(kept)
+	if removed == 0 {
+		return 0, nil
+	}
+	l.Readable = kept
+	if err := p.WriteLock(l); err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 
 // ClearLock removes the promote lock; no lock is not an error.
@@ -255,17 +287,38 @@ func RecordReplicasSeen(path string, hosts []string, now time.Time) error {
 		}
 	}
 	cutoff := seenCutoff(now)
+	maps.DeleteFunc(seen, func(_ string, t time.Time) bool { return t.Before(cutoff) })
+	return writeSeen(path, seen)
+}
+
+// writeSeen writes seen to the replicas-seen file at path, one
+// "<host> <RFC3339>" line per host, sorted, creating its directory when
+// missing.
+func writeSeen(path string, seen map[string]time.Time) error {
 	var lines []string
 	for _, h := range slices.Sorted(maps.Keys(seen)) {
-		if seen[h].Before(cutoff) {
-			continue
-		}
 		lines = append(lines, h+" "+seen[h].UTC().Format(time.RFC3339))
 	}
 	if err := os.MkdirAll(filepath.Dir(path), seenDirMode); err != nil {
 		return fmt.Errorf("buat %s: %w", filepath.Dir(path), err)
 	}
 	return writePin(path, strings.Join(lines, "\n"))
+}
+
+// ForgetReplica removes host (names compare case-insensitively) from the
+// replicas-seen file at path and reports whether it was there; the other
+// hosts keep their times. Without the host nothing is written.
+func ForgetReplica(seenPath, host string) (bool, error) {
+	seen, err := readSeen(seenPath)
+	if err != nil {
+		return false, err
+	}
+	n := len(seen)
+	maps.DeleteFunc(seen, func(h string, _ time.Time) bool { return strings.EqualFold(h, host) })
+	if len(seen) == n {
+		return false, nil
+	}
+	return true, writeSeen(seenPath, seen)
 }
 
 // ReplicaSeen reports whether host (exactly) is in the replicas-seen file
@@ -418,14 +471,24 @@ func (d *Driver) recordSeen(hosts []string, ports []int, now time.Time) error {
 }
 
 // observeReplicas reads the hosts (processlist) and ports (SHOW REPLICAS) of
-// the replicas connected to db's server now and records them (recordSeen),
-// returning what it saw. A SHOW REPLICAS failure is logged (once per
-// distinct message) and the hosts are recorded all the same. Without a
-// replica nothing is read further and nothing written.
-func (d *Driver) observeReplicas(ctx context.Context, db *sql.DB, now time.Time) ([]string, []int, error) {
+// the replicas connected to db's server now and records them (recordSeen)
+// with the hosts of also (a replica's address this agent matched against a
+// Binlog Dump thread a moment ago), returning what it saw. A SHOW REPLICAS
+// failure is logged (once per distinct message) and the hosts are recorded
+// all the same. Without a replica nothing is read further and nothing
+// written.
+func (d *Driver) observeReplicas(ctx context.Context, db *sql.DB, now time.Time, also ...string) ([]string, []int, error) {
 	hosts, err := binlogDumpHosts(ctx, db)
-	if err != nil || len(hosts) == 0 {
+	if err != nil {
 		return nil, nil, err
+	}
+	for _, h := range also {
+		if !slices.Contains(hosts, h) {
+			hosts = append(hosts, h)
+		}
+	}
+	if len(hosts) == 0 {
+		return nil, nil, nil
 	}
 	ports, perr := replicaPorts(ctx, db)
 	d.seenMu.Lock()

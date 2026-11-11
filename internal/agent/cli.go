@@ -44,6 +44,8 @@ const usage = `Penggunaan:
   dbpanel agent lock-master [--dir DIR]                  kunci master (super_read_only, juga
                                                          setelah restart) tanpa kandidat promosi
   dbpanel agent unlock-master [--dir DIR]                buka kunci master dan hapus kunci promosi
+  dbpanel agent forget-replica <host> [--dir DIR]        hapus replika dari catatan dan dari kunci
+                                                         promosi yang sedang berdiri
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -62,6 +64,8 @@ const (
 	credFile       = "mysql.cred"
 )
 
+// cliSeenPath is the replicas-seen file forget-replica edits; tests
+// replace it.
 var cliSeenPath = mysql.SeenFile
 
 // getenv and stdin are replaced by tests.
@@ -86,7 +90,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		case "unlock-master":
 			return mainUnlockMaster(args[1:], stdout, stderr)
 		case "forget-replica":
-			return 1 // TDD stub
+			return mainForgetReplica(args[1:], stdout, stderr)
 		case "version":
 			fmt.Fprintf(stdout, "dbpanel agent %s\n", version.Version)
 			return 0
@@ -422,6 +426,34 @@ func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stdout, "master dibuka: MySQL bisa ditulis dan kunci promosi dihapus")
+	return 0
+}
+
+// mainForgetReplica is "agent forget-replica HOST": host leaves the
+// replicas-seen file and the readable replicas of the standing promote
+// lock, whose guard then no longer waits for it. It is local only: the
+// panel has no command for it.
+func mainForgetReplica(args []string, stdout, stderr io.Writer) int {
+	dir, host, ok := parsePinArgs("agent forget-replica", args, stderr)
+	if !ok {
+		return 2
+	}
+	p, _ := mysql.LoadPins(dir) // the lock does not depend on the role or source pins
+	n, err := p.ForgetLockHost(host)
+	if err != nil {
+		fmt.Fprintf(stderr, "kunci promosi tidak bisa diubah: %v\n", err)
+		return 1
+	}
+	seen, err := mysql.ForgetReplica(cliSeenPath, host)
+	if err != nil {
+		fmt.Fprintf(stderr, "catatan replika tidak bisa diubah (%d entri kunci promosi sudah dihapus): %v\n", n, err)
+		return 1
+	}
+	if !seen && n == 0 {
+		fmt.Fprintf(stderr, "%s tidak ada di catatan\n", host)
+		return 1
+	}
+	fmt.Fprintf(stdout, "replika %s dihapus dari catatan (%d entri kunci promosi ikut dihapus)\n", host, n)
 	return 0
 }
 

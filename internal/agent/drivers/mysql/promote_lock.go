@@ -5,8 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
@@ -20,13 +24,18 @@ import (
 // at its deadline, and mysql.unlockPromote cancels it before then. The
 // guard never opens writes while the candidate may already be a master:
 // it opens them only after reading the candidate read-only twice, a grace
-// apart, and then reading every replica of the replicas-seen file with the
-// same account: one that is writable and holds this server's transactions
-// was promoted instead of the candidate (an emergency promotion while the
-// lock stood), and the guard quarantines this server under it rather than
-// open it. It quarantines this server too once the candidate is writable
-// and holds this server's transactions; otherwise the lock stays. A lock
-// set by the local CLI (CLILockCandidate) is never touched.
+// apart, and then reading, with the same account, every other replica the
+// lock lists as readable when it was set (PromoteLock.Readable,
+// readableAtLock). One that is writable and holds this server's
+// transactions was promoted instead of the candidate (an emergency
+// promotion while the lock stood), and the guard quarantines this server
+// under it rather than open it. One that cannot be read now may be such a
+// master out of reach: the lock stays, and is read again every
+// lockRecheck, until every listed replica reads read-only or "dbpanel agent
+// forget-replica" drops it. It quarantines this server too once the
+// candidate is writable and holds this server's transactions; otherwise
+// the lock stays. A lock set by the local CLI (CLILockCandidate) is never
+// touched.
 
 const (
 	// minLockSec and maxLockSec bound mysql.lockForPromote's timeout.
@@ -41,6 +50,12 @@ const (
 	lockRecheck = time.Minute
 	// keptEvery is how often, at most, the guard reports a lock it keeps.
 	keptEvery = time.Hour
+	// unlockTimeout bounds the guard's unlock (MySQL opened, lock file
+	// removed), which runs on its own context: never on what the replica
+	// reads left of the tick's.
+	unlockTimeout = 10 * time.Second
+	// maxPeerReads is how many replicas are read at once (readPeers).
+	maxPeerReads = 16
 )
 
 // Emitter sends an event to the panel (the agent's connection).
@@ -176,9 +191,12 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 			"kandidat %s tidak sedang tersambung ke master ini sebagai replika (tidak ada thread Binlog Dump dari alamatnya); master tidak dikunci", key)}
 	}
 	// The candidate is a replica from now on whatever the monitor has seen:
-	// record every replica connected now (hosts and ports) before the lock
-	// is written. A failed record never fails the lock.
-	if _, _, err := d.observeReplicas(ctx, db, d.now()); err != nil && d.Logger != nil {
+	// record every replica connected now (hosts and ports), and the
+	// candidate's matched address even when its thread is gone by now,
+	// before the lock is written. A failed record never fails the lock.
+	beforeLockRecord()
+	seenHosts, seenPorts, err := d.observeReplicas(ctx, db, d.now(), addr)
+	if err != nil && d.Logger != nil {
 		d.Logger.Warn("replicas seen not recorded at promote lock", "err", err)
 	}
 	// The credential must log in to the candidate now: unlockPromote, the
@@ -189,13 +207,19 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 			"kandidat %s tidak bisa dibaca dengan akun replikasi (%s); periksa akun %s dan sandinya di kandidat. Master tidak dikunci",
 			key, st.Err, p.Candidate.User)}
 	}
+	readable := readableAtLock(ctx, p.Candidate, addr, p.Candidate.Port, d.recordedHosts(seenHosts), d.recordedPorts(seenPorts))
+	if err := ctx.Err(); err != nil {
+		// The reads did not all finish: a list cut short would let the
+		// guard open writes past a replica it never tried.
+		return res, fmt.Errorf("replika lain belum selesai dibaca (%w); master tidak dikunci", err)
+	}
 	// The lock file first: a failure or a crash after it leaves a lock
 	// the guard turns into super_read_only on its next tick, never a
 	// read-only master without a lock nothing automatic would open. The
 	// lock file keeps whole seconds.
 	res.LockedAt = d.now().UTC().Truncate(time.Second)
 	res.Deadline = res.LockedAt.Add(time.Duration(p.TimeoutSec) * time.Second)
-	if err := writeLock(d.pins, PromoteLock{Candidate: key, Addr: addr, Deadline: res.Deadline}); err != nil {
+	if err := writeLock(d.pins, PromoteLock{Candidate: key, Addr: addr, Deadline: res.Deadline, Readable: readable}); err != nil {
 		return res, fmt.Errorf("kunci promosi gagal ditulis, master tidak dikunci: %w", err)
 	}
 	d.guard.reset(&p.Candidate)
@@ -216,6 +240,138 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 
 // writeLock is Pins.WriteLock; tests replace it.
 var writeLock = (*Pins).WriteLock
+
+// beforeLockRecord runs in lockForPromote between matching the candidate's
+// Binlog Dump thread and recording the replicas; tests replace it.
+var beforeLockRecord = func() {}
+
+// recordedHosts is every host of the replicas-seen file, with also (just
+// observed) added: a file that cannot be read is logged and only also is
+// used.
+func (d *Driver) recordedHosts(also []string) []string {
+	seen, err := readSeen(d.seenPath())
+	if err != nil {
+		d.warn("replicas seen not read at promote lock; reading the connected replicas only", "err", err)
+	}
+	hosts := slices.Collect(maps.Keys(seen))
+	return append(hosts, also...)
+}
+
+// recordedPorts is every port of the replica-ports file, with also (just
+// observed) added: a file that cannot be read is logged and only also is
+// used.
+func (d *Driver) recordedPorts(also []int) []int {
+	seen, err := readSeenPorts(d.seenPortsPath())
+	if err != nil {
+		d.warn("replica ports seen not read at promote lock; reading the connected replicas' ports only", "err", err)
+	}
+	ports := slices.Collect(maps.Keys(seen))
+	return append(ports, also...)
+}
+
+// readableAtLock reads, with the candidate's account cred, every host of
+// hosts at the candidate's port candPort and at every port of ports
+// (readPeers), except the candidate itself (candAddr at candPort, just
+// read), and returns those that answered, as sorted host:port. With
+// certificate verification the host as recorded is the name verified. A
+// replica that cannot be read now (no account for cred, or long gone) is
+// left out: the guard never waits for it (spec 5.4).
+func readableAtLock(ctx context.Context, cred proto.PeerCred, candAddr string, candPort int, hosts []string, ports []int) []string {
+	portSet := slices.Compact(slices.Sorted(slices.Values(append([]int{candPort}, ports...))))
+	hostSet := slices.Compact(slices.Sorted(slices.Values(hosts)))
+	var creds []proto.PeerCred
+	for _, h := range hostSet {
+		if !validSeenHost(h) {
+			continue
+		}
+		for _, port := range portSet {
+			if !validSeenPort(port) || (port == candPort && strings.EqualFold(h, candAddr)) {
+				continue
+			}
+			c := cred
+			c.Host, c.Port, c.ServerName = h, port, ""
+			creds = append(creds, c)
+		}
+	}
+	var list []string
+	for i, st := range readPeers(ctx, creds) {
+		if st.Reachable {
+			list = append(list, peerKey(creds[i]))
+		}
+	}
+	slices.Sort(list)
+	return slices.Compact(list)
+}
+
+// readListed reads every entry (host:port) of list with the candidate's
+// account cred (readPeers). unreadable is, in list order, every entry not
+// read: unreachable, refused, not a host:port, or not started before ctx
+// ended. writable is the first entry, in list order, that is writable
+// (super_read_only off) and whose gtid_executed holds a transaction of
+// uuid, this server's: a replica of this server promoted to master.
+func readListed(ctx context.Context, cred proto.PeerCred, list []string, uuid string) (unreadable []string, writable string) {
+	var creds []proto.PeerCred
+	var at []int // at[i]: the index in list of creds[i]
+	bad := make([]bool, len(list))
+	for i, e := range list {
+		h, ps, err := net.SplitHostPort(e)
+		port, perr := strconv.Atoi(ps)
+		if err != nil || perr != nil || !validSeenHost(h) || !validSeenPort(port) {
+			bad[i] = true
+			continue
+		}
+		c := cred
+		c.Host, c.Port, c.ServerName = h, port, ""
+		creds, at = append(creds, c), append(at, i)
+	}
+	sts := make([]PeerState, len(list))
+	for j, st := range readPeers(ctx, creds) {
+		sts[at[j]] = st
+	}
+	for i, e := range list {
+		st := sts[i]
+		switch {
+		case bad[i] || !st.Reachable:
+			unreadable = append(unreadable, e)
+		case writable == "" && !st.SuperReadOnly && gtidHasUUID(st.GTIDExecuted, uuid):
+			writable = e
+		}
+	}
+	return unreadable, writable
+}
+
+// readPeers reads every cred with readPeer, each within peerTimeout, at
+// most maxPeerReads at a time, and returns the states in creds' order. A
+// read not started before ctx ends is not made: its state is unreachable.
+// Every read has ended when it returns.
+func readPeers(ctx context.Context, creds []proto.PeerCred) []PeerState {
+	sts := make([]PeerState, len(creds))
+	sem := make(chan struct{}, maxPeerReads)
+	var wg sync.WaitGroup
+	for i, c := range creds {
+		acquired := false
+		if ctx.Err() == nil {
+			select {
+			case sem <- struct{}{}:
+				acquired = true
+			case <-ctx.Done():
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			if acquired {
+				<-sem
+			}
+			sts[i] = PeerState{Err: fmt.Sprintf("%s: tidak dibaca: %v", peerKey(c), err)}
+			continue
+		}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			sts[i] = readPeer(ctx, c, peerTimeout)
+		})
+	}
+	wg.Wait()
+	return sts
+}
 
 // now is Now, or time.Now when it is nil.
 func (d *Driver) now() time.Time {
@@ -419,24 +575,30 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		// Read-only at both reads, a grace apart: the promotion to the
 		// candidate did not happen. Another replica may have been
 		// promoted instead (emergency, with this server out of the
-		// panel's reach): checked before writes open here.
+		// panel's reach): every replica readable when the lock was set is
+		// read before writes open here.
 		uuid, err := serverUUID(ctx, db)
 		if err != nil {
 			return err
 		}
-		other, found, err := writableSeenReplica(ctx, d.seenPath(), *g.cred, addr, uuid)
+		unreadable, writable := readListed(ctx, *g.cred, l.Readable, uuid)
 		switch {
-		case err != nil:
-			g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
-			d.keepLock(now, key, "replika yang pernah tersambung tidak bisa diperiksa: "+err.Error())
-			return nil
-		case found:
+		case writable != "":
 			d.warn("promote lock expired but another replica is a writable master with this server's transactions; quarantining",
-				"candidate", key, "new_source", other)
-			_, err := d.selfQuarantine(ctx, other, "")
+				"candidate", key, "new_source", writable)
+			_, err := d.selfQuarantine(ctx, writable, "")
 			return err
+		case len(unreadable) > 0:
+			g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
+			d.keepLock(now, key, "replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang: "+strings.Join(unreadable, ", "), unreadable...)
+			return nil
 		}
-		if err := unlockMaster(ctx, db); err != nil {
+		// Every listed replica read read-only (or writable without this
+		// server's transactions): open, on a context of its own so that
+		// what the reads left of the tick's never cuts the unlock short.
+		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unlockTimeout)
+		defer cancel()
+		if err := unlockMaster(uctx, db); err != nil {
 			return err
 		}
 		if err := d.pins.ClearLock(); err != nil {
@@ -458,50 +620,18 @@ func serverUUID(ctx context.Context, db *sql.DB) (string, error) {
 	return uuid, nil
 }
 
-// writableSeenReplica reads every host of the replicas-seen file at path
-// (as a Binlog Dump thread showed it) with the lock's account cred, at
-// cred's port, skipping the candidate's verified address candAddr (just
-// read). It returns the first, as host:port, that is writable
-// (super_read_only off) and whose gtid_executed holds a transaction of
-// uuid, this server's: a replica of this server promoted to master. One
-// that cannot be read is passed over (the candidate's account may not log
-// in there, or it is down); only a writable master that holds this
-// server's data stops the unlock. With certificate verification the
-// replica's host as recorded is the name verified.
-func writableSeenReplica(ctx context.Context, path string, cred proto.PeerCred, candAddr, uuid string) (string, bool, error) {
-	seen, err := readSeen(path)
-	if err != nil {
-		return "", false, err
-	}
-	hosts := make([]string, 0, len(seen))
-	for h := range seen {
-		if !strings.EqualFold(h, candAddr) {
-			hosts = append(hosts, h)
-		}
-	}
-	slices.Sort(hosts)
-	for _, h := range hosts {
-		c := cred
-		c.Host, c.ServerName = h, ""
-		st := readPeer(ctx, c, peerTimeout)
-		if st.Reachable && !st.SuperReadOnly && gtidHasUUID(st.GTIDExecuted, uuid) {
-			return peerKey(c), true, nil
-		}
-	}
-	return "", false, nil
-}
-
 // keepLock records that the lock stays past its deadline, reporting it
-// the first time and then at most every keptEvery. The caller holds
-// promoteMu.
-func (d *Driver) keepLock(now time.Time, key, reason string) {
+// the first time and then at most every keptEvery; hosts are the listed
+// replicas (host:port) that could not be read, when that is why. The
+// caller holds promoteMu.
+func (d *Driver) keepLock(now time.Time, key, reason string, hosts ...string) {
 	g := &d.guard
 	if !g.keptAt.IsZero() && now.Sub(g.keptAt) < keptEvery {
 		return
 	}
 	g.keptAt = now
 	d.warn("promote lock expired but kept", "candidate", key, "reason", reason)
-	d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "kept", Candidate: key, Reason: reason})
+	d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "kept", Candidate: key, Reason: reason, Hosts: hosts})
 }
 
 // selfQuarantine makes this server read-only for good (PERSIST, both
@@ -566,21 +696,3 @@ func (d *Driver) warn(msg string, args ...any) {
 		d.Logger.Warn(msg, args...)
 	}
 }
-
-// TDD stubs (replaced by the implementation).
-const unlockTimeout = 10 * time.Second
-const maxPeerReads = 16
-
-func readableAtLock(ctx context.Context, cred proto.PeerCred, candAddr string, candPort int, hosts []string, ports []int) []string {
-	return nil
-}
-
-func readListed(ctx context.Context, cred proto.PeerCred, list []string, uuid string) (unreadable []string, writable string) {
-	return nil, ""
-}
-
-func (p *Pins) ForgetLockHost(host string) (removed int, err error) { return 0, nil }
-
-func ForgetReplica(seenPath, host string) (bool, error) { return false, nil }
-
-var beforeLockRecord = func() {}
