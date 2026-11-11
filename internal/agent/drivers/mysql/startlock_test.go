@@ -435,14 +435,17 @@ func TestQuarantinedWhileDownStartsReadOnlyUnderWrites(t *testing.T) {
 	close(stop)
 	<-finished
 
-	if attempts[0].Load() == 0 || attempts[1].Load() < 10 || refused[1].Load() == 0 {
-		t.Fatalf("writes attempted before ready %d, after %d (refused read-only %d): the test proves nothing",
-			attempts[0].Load(), attempts[1].Load(), refused[1].Load())
-	}
-	t.Logf("writes attempted: %d before ready, %d after (%d refused read-only after, %d before)",
-		attempts[0].Load(), attempts[1].Load(), refused[1].Load(), refused[0].Load())
+	t.Logf("writes attempted: %d before ready, %d after (%d refused read-only after, %d before; %d inserted)",
+		attempts[0].Load(), attempts[1].Load(), refused[1].Load(), refused[0].Load(), inserted.Load())
 	if n := inserted.Load(); n != 0 {
 		t.Errorf("%d INSERTs succeeded on the quarantined master", n)
+	}
+	// Writes reached the server from before it started until after it
+	// was ready, and those after were refused for read-only (not lost to
+	// connection errors), or the test proves nothing.
+	if attempts[0].Load() == 0 || attempts[1].Load() < 10 || (inserted.Load() == 0 && refused[1].Load() == 0) {
+		t.Fatalf("writes attempted before ready %d, after %d (refused read-only %d): the test proves nothing",
+			attempts[0].Load(), attempts[1].Load(), refused[1].Load())
 	}
 	var rows int
 	if err := r.db.QueryRow("SELECT COUNT(*) FROM w.t").Scan(&rows); err != nil || rows != 0 {
