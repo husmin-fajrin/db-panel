@@ -39,7 +39,11 @@ const (
 // MySQL's own threads such as compress_gtid_table, which have no user), with
 // no filter on the thread name, so a connection of a kind the agent does
 // not know is counted. Left out: MySQL's 'system user', the event
-// scheduler, replicas reading the binary log and this very connection. An
+// scheduler, replicas reading the binary log and this very connection. On a
+// replica, performance_schema shows the replication threads under the
+// account that ran START REPLICA, not as 'system user': they are counted
+// (as local admin sessions of the agent's account) rather than hidden by
+// name. An
 // 'unauthenticated user' (a session logging in) is a connection. Columns:
 // thread name, host, user, default database, whether the user is the one the
 // agent logs in as, and whether the session carries the agent's
