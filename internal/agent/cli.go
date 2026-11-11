@@ -62,6 +62,8 @@ const (
 	credFile       = "mysql.cred"
 )
 
+var cliSeenPath = mysql.SeenFile
+
 // getenv and stdin are replaced by tests.
 var (
 	getenv           = os.Getenv
@@ -83,6 +85,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			return mainLockMaster(args[1:], stdout, stderr)
 		case "unlock-master":
 			return mainUnlockMaster(args[1:], stdout, stderr)
+		case "forget-replica":
+			return 1 // TDD stub
 		case "version":
 			fmt.Fprintf(stdout, "dbpanel agent %s\n", version.Version)
 			return 0

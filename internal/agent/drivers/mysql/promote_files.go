@@ -74,6 +74,7 @@ type PromoteLock struct {
 	Candidate string
 	Addr      string
 	Deadline  time.Time
+	Readable  []string
 }
 
 // lockAddr is the address the candidate of l is read at: Addr, else the

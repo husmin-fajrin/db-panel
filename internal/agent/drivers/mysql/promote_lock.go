@@ -566,3 +566,21 @@ func (d *Driver) warn(msg string, args ...any) {
 		d.Logger.Warn(msg, args...)
 	}
 }
+
+// TDD stubs (replaced by the implementation).
+const unlockTimeout = 10 * time.Second
+const maxPeerReads = 16
+
+func readableAtLock(ctx context.Context, cred proto.PeerCred, candAddr string, candPort int, hosts []string, ports []int) []string {
+	return nil
+}
+
+func readListed(ctx context.Context, cred proto.PeerCred, list []string, uuid string) (unreadable []string, writable string) {
+	return nil, ""
+}
+
+func (p *Pins) ForgetLockHost(host string) (removed int, err error) { return 0, nil }
+
+func ForgetReplica(seenPath, host string) (bool, error) { return false, nil }
+
+var beforeLockRecord = func() {}

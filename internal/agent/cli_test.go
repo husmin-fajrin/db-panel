@@ -730,3 +730,59 @@ func TestSetRoleMasterRefusedWhileConfigLocked(t *testing.T) {
 		t.Errorf("after the refusal: line=%v file=%v", line, file)
 	}
 }
+
+// TestForgetReplicaCLI: "agent forget-replica HOST" removes the host from
+// the replicas-seen file and its entries from the standing promote lock's
+// readable replicas, saying how many lock entries went; a host recorded
+// nowhere is said so. It never needs MySQL.
+func TestForgetReplicaCLI(t *testing.T) {
+	dir := t.TempDir()
+	seen := filepath.Join(t.TempDir(), "replicas-seen")
+	oldSeen, oldHost := cliSeenPath, cliMySQLHost
+	cliSeenPath = seen
+	cliMySQLHost = func(string) (mysql.Host, error) { t.Error("forget-replica opened MySQL"); return nil, errors.New("no") }
+	t.Cleanup(func() { cliSeenPath, cliMySQLHost = oldSeen, oldHost })
+	run := func(args ...string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		code := Main(args, &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+	if err := mysql.RecordReplicasSeen(seen, []string{"10.0.0.3", "10.0.0.4"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if err := p.WriteLock(mysql.PromoteLock{Candidate: "10.0.0.2:3306", Addr: "10.0.0.2", Deadline: deadline,
+		Readable: []string{"10.0.0.3:3306", "10.0.0.3:3307", "10.0.0.4:3306"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := run("forget-replica", "10.0.0.3", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "replika 10.0.0.3 dihapus dari catatan (2 entri kunci promosi ikut dihapus)") {
+		t.Errorf("forget-replica = %d, %q, %q", code, out, errOut)
+	}
+	if ok, err := mysql.ReplicaSeen(seen, "10.0.0.3"); ok || err != nil {
+		t.Errorf("10.0.0.3 still seen: %v, %v", ok, err)
+	}
+	if ok, err := mysql.ReplicaSeen(seen, "10.0.0.4"); !ok || err != nil {
+		t.Errorf("10.0.0.4 no longer seen: %v, %v", ok, err)
+	}
+	l, ok, err := p.ReadLock()
+	if !ok || err != nil || strings.Join(l.Readable, ",") != "10.0.0.4:3306" || l.Candidate != "10.0.0.2:3306" || !l.Deadline.Equal(deadline) {
+		t.Errorf("lock after forget-replica = %+v, %v, %v", l, ok, err)
+	}
+
+	code, out, errOut = run("forget-replica", "--dir", dir, "10.0.0.3")
+	if code != 1 || !strings.Contains(errOut, "10.0.0.3 tidak ada di catatan") {
+		t.Errorf("forget-replica again = %d, %q, %q", code, out, errOut)
+	}
+	if code, _, errOut := run("forget-replica", "--dir", dir); code != 2 || !strings.Contains(errOut, "forget-replica <host>") {
+		t.Errorf("forget-replica without a host = %d, %q", code, errOut)
+	}
+	if _, out, _ := run("help"); !strings.Contains(out, "dbpanel agent forget-replica <host> [--dir DIR]") {
+		t.Errorf("usage lacks forget-replica: %s", out)
+	}
+}

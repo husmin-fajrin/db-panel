@@ -394,3 +394,20 @@ var (
 	ReadSeenPorts = readSeenPorts
 	ReplicaPorts  = replicaPorts
 )
+
+// The promote lock's replica reads (R-033).
+var (
+	ReadableAtLock = readableAtLock
+	ReadListed     = readListed
+)
+
+// MaxPeerReads bounds the replica reads made at once.
+const MaxPeerReads = maxPeerReads
+
+// SetBeforeLockRecord calls f in mysql.lockForPromote after the candidate's
+// Binlog Dump thread was found and before the replicas are recorded.
+func SetBeforeLockRecord(f func()) (restore func()) {
+	old := beforeLockRecord
+	beforeLockRecord = f
+	return func() { beforeLockRecord = old }
+}

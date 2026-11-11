@@ -607,9 +607,10 @@ type QuarantineStartFailedEvent struct {
 
 // LockExpiredEvent is the payload of EventLockExpired.
 type LockExpiredEvent struct {
-	Action    string `json:"action"`    // "unlocked" | "kept"
-	Candidate string `json:"candidate"` // host:port
-	Reason    string `json:"reason,omitempty"`
+	Action    string   `json:"action"`    // "unlocked" | "kept"
+	Candidate string   `json:"candidate"` // host:port
+	Reason    string   `json:"reason,omitempty"`
+	Hosts     []string `json:"hosts,omitempty"`
 }
 
 // ConnectionsResult is the answer to mysql.connections: the client

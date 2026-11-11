@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -647,29 +648,28 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 	}
 }
 
-// TestGuardChecksSeenReplicasBeforeUnlock (SEC-66): with the candidate
-// read-only at both reads, the guard reads every replica of the
-// replicas-seen file with the lock's account before it opens the master.
-// A writable replica without this server's transactions does not stop the
-// unlock; one that is writable and holds them (a replica promoted in an
-// emergency while the lock stood) quarantines this server under it.
-func TestGuardChecksSeenReplicasBeforeUnlock(t *testing.T) {
-	// The other replica, a real MySQL; the seen file names it by the
-	// address its Binlog Dump thread would show, and the guard reads it at
-	// the candidate's port, so the candidate's account names its port.
+// TestGuardChecksListedReplicasBeforeUnlock (SEC-66, R-033): with the
+// candidate read-only at both reads, the guard reads every replica the lock
+// lists as readable when it was set, with the lock's account, before it
+// opens the master. A writable replica without this server's transactions
+// does not stop the unlock; one that is writable and holds them (a replica
+// promoted in an emergency while the lock stood) quarantines this server
+// under it.
+func TestGuardChecksListedReplicasBeforeUnlock(t *testing.T) {
+	// The other replica, a real MySQL, listed by the address and port it
+	// was read at when the lock was set.
 	other := testmysql.Start(t, testmysql.Options{})
 	replUser(t, other)
 	odb := rootDB(t, other)
 	key := "10.9.9.9:" + strconv.Itoa(other.Port)
 	cand := guardCandidate
 	cand.Port = other.Port
+	want := "127.0.0.1:" + strconv.Itoa(other.Port)
 	r := newLockRig(t, key)
-	r.d.ArmGuard(cand)
-	seen := filepath.Join(t.TempDir(), "replicas-seen")
-	if err := mysql.RecordReplicasSeen(seen, []string{"127.0.0.1"}, time.Now()); err != nil {
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: key, Deadline: r.deadline, Readable: []string{want}}); err != nil {
 		t.Fatal(err)
 	}
-	r.d.SeenPath = seen
+	r.d.ArmGuard(cand)
 	// The candidate (fake) stays a read-only replica; anything else is
 	// read for real.
 	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true, GTIDExecuted: r.uuid + ":1-3"})
@@ -711,7 +711,7 @@ func TestGuardChecksSeenReplicasBeforeUnlock(t *testing.T) {
 	// Lock again; the other replica now holds this server's transactions
 	// and takes writes: quarantined under it, never opened.
 	execAll(t, r.db, "SET PERSIST super_read_only = ON")
-	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: key, Deadline: r.deadline}); err != nil {
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: key, Deadline: r.deadline, Readable: []string{want}}); err != nil {
 		t.Fatal(err)
 	}
 	r.d.ArmGuard(cand)
@@ -725,7 +725,6 @@ func TestGuardChecksSeenReplicasBeforeUnlock(t *testing.T) {
 		t.Errorf("quarantined: persisted super_read_only=%q read_only=%q",
 			persisted(t, r.db, "super_read_only"), persisted(t, r.db, "read_only"))
 	}
-	want := "127.0.0.1:" + strconv.Itoa(other.Port)
 	if role, src := pinFile(t, r.dir, mysql.RoleFile), pinFile(t, r.dir, mysql.SourceFile); role != "quarantined" || src != want {
 		t.Errorf("pins = %q, %q; want quarantined, %s", role, src, want)
 	}
@@ -769,7 +768,9 @@ func TestGuardTickSkipsWhileBusy(t *testing.T) {
 // TestLockForPromoteRecordsCandidate: with nothing recorded yet and no
 // monitor tick, a successful lockForPromote has put the candidate's host
 // and port in the seen files; a refused lock records nothing, and a failing
-// record (an unusable seen directory) never fails the lock.
+// record (an unusable seen directory) never fails the lock. The address the
+// candidate was matched at is recorded even when its Binlog Dump thread is
+// gone by the time the replicas are recorded.
 func TestLockForPromoteRecordsCandidate(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{})
 	replica := testmysql.Start(t, testmysql.Options{})
@@ -820,5 +821,285 @@ func TestLockForPromoteRecordsCandidate(t *testing.T) {
 	ports, err := mysql.ReadSeenPorts(filepath.Join(seenDir, "replica-ports-seen"))
 	if err != nil || ports[replica.Port].IsZero() {
 		t.Errorf("ports after the lock = %v, %v; want %d", ports, err, replica.Port)
+	}
+
+	// The candidate's Binlog Dump thread drops after it was matched and
+	// before the replicas are recorded: the address it was matched at is
+	// recorded all the same.
+	dir3 := pinDir(t, "master", "")
+	r3 := newPinRig(t, master.Host(), dir3)
+	r3.d.SeenPath = filepath.Join(t.TempDir(), "replicas-seen")
+	rdb := rootDB(t, replica)
+	t.Cleanup(mysql.SetBeforeLockRecord(func() {
+		execAll(t, rdb, "STOP REPLICA")
+		deadline := time.Now().Add(time.Minute)
+		for count(t, mdb, "SELECT COUNT(*) FROM information_schema.processlist WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')") > 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("dump thread never left")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	decode[proto.LockForPromoteResult](t, r3.dispatch("mysql.lockForPromote", p))
+	if ok, err := mysql.ReplicaSeen(r3.d.SeenPath, "127.0.0.1"); !ok || err != nil {
+		t.Errorf("candidate address seen after its dump thread dropped = %v, %v; want true", ok, err)
+	}
+}
+
+// lockEvent is event i as a lockExpired payload.
+func (e *eventLog) lockEvent(t *testing.T, i int) proto.LockExpiredEvent {
+	t.Helper()
+	evs := e.all()
+	if i >= len(evs) || evs[i].Type != proto.EventLockExpired {
+		t.Fatalf("event %d of %v is not %s", i, evs, proto.EventLockExpired)
+	}
+	var ev proto.LockExpiredEvent
+	if err := json.Unmarshal(evs[i].Payload, &ev); err != nil {
+		t.Fatal(err)
+	}
+	return ev
+}
+
+// countingReadPeer makes the driver read peers for real and counts the
+// reads; it returns the count.
+func countingReadPeer(t *testing.T) func() int {
+	var mu sync.Mutex
+	n := 0
+	t.Cleanup(mysql.SetReadPeer(func(ctx context.Context, c proto.PeerCred, timeout time.Duration) mysql.PeerState {
+		mu.Lock()
+		n++
+		mu.Unlock()
+		return mysql.ReadPeer(ctx, c, timeout)
+	}))
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
+// TestLockKeptWhileListedReplicaDownThenOpens (spec 5.10): a replica that
+// was readable when the lock was set and is down at the deadline keeps the
+// lock, reported once with its host:port; the guard does not read again
+// before the recheck, and opens the master once the replica answers
+// read-only again (two candidate reads a grace apart, as always).
+func TestLockKeptWhileListedReplicaDownThenOpens(t *testing.T) {
+	b := testmysql.Start(t, testmysql.Options{})
+	c := testmysql.Start(t, testmysql.Options{})
+	replUser(t, b)
+	replUser(t, c)
+	execAll(t, rootDB(t, b), "SET PERSIST super_read_only = ON")
+	execAll(t, rootDB(t, c), "SET PERSIST super_read_only = ON")
+	keyB := "127.0.0.1:" + strconv.Itoa(b.Port)
+	keyC := "127.0.0.1:" + strconv.Itoa(c.Port)
+	r := newLockRig(t, keyB)
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: keyB, Deadline: r.deadline, Readable: []string{keyC}}); err != nil {
+		t.Fatal(err)
+	}
+	r.d.ArmGuard(proto.PeerCred{Host: "127.0.0.1", Port: b.Port, User: "dbpanel_repl", Password: replPassword})
+	reads := countingReadPeer(t)
+
+	r.tick(0)
+	c.Stop(t)
+	r.tick(lockGrace)
+	r.wantLocked("listed replica down")
+	r.wantEvents(proto.EventLockExpired)
+	if ev := r.ev.lockEvent(t, 0); ev.Action != "kept" || strings.Join(ev.Hosts, ",") != keyC {
+		t.Errorf("lockExpired = %+v, want kept with hosts [%s]", ev, keyC)
+	}
+	n := reads()
+	r.tick(lockGrace + 30*time.Second)
+	if got := reads(); got != n {
+		t.Errorf("%d reads 30 s after the lock was kept, want none", got-n)
+	}
+	r.wantEvents(proto.EventLockExpired)
+
+	c.Restart(t)
+	r.tick(lockGrace + time.Minute)
+	r.wantLocked("first read after the recheck")
+	r.tick(lockGrace + time.Minute + lockGrace)
+	if sro, ro := readOnly(t, r.db); sro || ro {
+		t.Errorf("listed replica back read-only: super_read_only=%v read_only=%v, want unlocked", sro, ro)
+	}
+	if got := pinFile(t, r.dir, mysql.LockFile); got != "" {
+		t.Errorf("lock file after the unlock = %q", got)
+	}
+	r.wantEvents(proto.EventLockExpired, proto.EventLockExpired)
+	if ev := r.ev.lockEvent(t, 1); ev.Action != "unlocked" {
+		t.Errorf("second lockExpired = %+v, want unlocked", ev)
+	}
+}
+
+// lockGrace is the guard's grace between two read-only reads.
+const lockGrace = proto.PromoteLockGrace
+
+// TestPartialReplicaUnreadableAtLockDoesNotHoldLock (spec 5.10): a replica
+// the candidate's account cannot log in to (a partial replica) is not
+// readable when the lock is set, so it is not listed and the lock opens at
+// its deadline as before.
+func TestPartialReplicaUnreadableAtLockDoesNotHoldLock(t *testing.T) {
+	b := testmysql.Start(t, testmysql.Options{})
+	c := testmysql.Start(t, testmysql.Options{}) // no dbpanel_repl
+	replUser(t, b)
+	execAll(t, rootDB(t, b), "SET GLOBAL super_read_only = ON")
+	keyB := "127.0.0.1:" + strconv.Itoa(b.Port)
+	cand := proto.PeerCred{Host: "127.0.0.1", Port: b.Port, User: "dbpanel_repl", Password: replPassword}
+	r := newLockRig(t, keyB)
+	countingReadPeer(t)
+	list := mysql.ReadableAtLock(context.Background(), cand, "127.0.0.1", b.Port, []string{"127.0.0.1"}, []int{c.Port})
+	if len(list) != 0 {
+		t.Fatalf("readable at lock = %v, want none (the partial replica cannot be read)", list)
+	}
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: keyB, Deadline: r.deadline, Readable: list}); err != nil {
+		t.Fatal(err)
+	}
+	r.d.ArmGuard(cand)
+	r.tick(0)
+	r.tick(lockGrace)
+	if sro, ro := readOnly(t, r.db); sro || ro {
+		t.Errorf("super_read_only=%v read_only=%v, want unlocked", sro, ro)
+	}
+	r.wantEvents(proto.EventLockExpired)
+	if ev := r.ev.lockEvent(t, 0); ev.Action != "unlocked" {
+		t.Errorf("lockExpired = %+v, want unlocked", ev)
+	}
+}
+
+// TestReadableAtLockParallel: every recorded host is read at the
+// candidate's port and every recorded port (the candidate itself only at
+// its own port is skipped), at most MaxPeerReads at once: 20 reads of 5 s
+// each take two rounds, not 100 s. Only the readable ones are listed,
+// sorted.
+func TestReadableAtLockParallel(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	tried := map[string]bool{}
+	t.Cleanup(mysql.SetReadPeer(func(ctx context.Context, c proto.PeerCred, timeout time.Duration) mysql.PeerState {
+		key := net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
+		mu.Lock()
+		tried[key] = true
+		inFlight++
+		maxInFlight = max(maxInFlight, inFlight)
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}()
+		select {
+		case <-time.After(5 * time.Second):
+		case <-ctx.Done():
+			return mysql.PeerState{Err: ctx.Err().Error()}
+		}
+		if c.Host == "10.0.0.1" || c.ServerName != "" {
+			return mysql.PeerState{Err: "refused"}
+		}
+		return mysql.PeerState{Reachable: true, SuperReadOnly: true}
+	}))
+	cand := proto.PeerCred{Host: "db-b.example", Port: 3306, User: "dbpanel_repl", Password: replPassword}
+	hosts := []string{"10.0.0.7", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.1"}
+	start := time.Now()
+	got := mysql.ReadableAtLock(context.Background(), cand, "10.0.0.7", 3306, hosts, []int{3308, 3307, 3306})
+	if el := time.Since(start); el >= 15*time.Second {
+		t.Errorf("ReadableAtLock took %v, want < 15 s (parallel)", el)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(tried) != 20 {
+		t.Errorf("tried %d peers, want 20: %v", len(tried), tried)
+	}
+	if tried["10.0.0.7:3306"] {
+		t.Error("the candidate was read at its own port")
+	}
+	for _, k := range []string{"10.0.0.2:3306", "10.0.0.2:3307", "10.0.0.2:3308", "10.0.0.7:3307"} {
+		if !tried[k] {
+			t.Errorf("%s not tried", k)
+		}
+	}
+	if maxInFlight > mysql.MaxPeerReads {
+		t.Errorf("%d reads at once, want at most %d", maxInFlight, mysql.MaxPeerReads)
+	}
+	var want []string
+	for _, h := range []string{"10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7"} {
+		for _, p := range []string{"3306", "3307", "3308"} {
+			if h == "10.0.0.7" && p == "3306" {
+				continue
+			}
+			want = append(want, h+":"+p)
+		}
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("readable = %v, want %v", got, want)
+	}
+}
+
+// TestUnlockUsesOwnContext: the tick's context ends as the last replica
+// read returns; the master is opened all the same with the unlock's own
+// context, never left half open.
+func TestUnlockUsesOwnContext(t *testing.T) {
+	r := newLockRig(t, guardCandidateKey)
+	const other = "10.9.9.8:3306"
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: guardCandidateKey, Deadline: r.deadline, Readable: []string{other}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Cleanup(mysql.SetReadPeer(func(_ context.Context, c proto.PeerCred, _ time.Duration) mysql.PeerState {
+		if c.Host == "10.9.9.8" {
+			defer cancel()
+		}
+		return mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true}
+	}))
+	r.tick(0)
+	if err := r.d.GuardTick(ctx, r.deadline.Add(lockGrace)); err != nil {
+		t.Fatalf("GuardTick: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the listed replica was not read")
+	}
+	if sro, ro := readOnly(t, r.db); sro || ro {
+		t.Errorf("super_read_only=%v read_only=%v, want unlocked", sro, ro)
+	}
+	if got := pinFile(t, r.dir, mysql.LockFile); got != "" {
+		t.Errorf("lock file = %q, want removed", got)
+	}
+	r.wantEvents(proto.EventLockExpired)
+}
+
+// TestLockRefusedWhenCandidateUnreadable (spec 5.4): a connected candidate
+// the replication account cannot log in to refuses the lock at once:
+// nothing is locked and no lock file is left.
+func TestLockRefusedWhenCandidateUnreadable(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	replUser(t, master) // not on the replica: the candidate cannot be read
+	mdb := rootDB(t, master)
+	follow(t, master, replica)
+	waitDumpThread(t, mdb)
+	dir := pinDir(t, "master", "")
+	r := newPinRig(t, master.Host(), dir)
+	cand := proto.PeerCred{Host: "127.0.0.1", Port: replica.Port, User: "dbpanel_repl", Password: replPassword}
+	resp := r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600})
+	wantRefused(t, "lock with an unreadable candidate", resp, "127.0.0.1:"+strconv.Itoa(replica.Port), "tidak bisa dibaca", "Master tidak dikunci")
+	if resp.Error != nil && strings.Contains(resp.Error.Message, replPassword) {
+		t.Errorf("error shows the password: %s", resp.Error.Message)
+	}
+	if sro, ro := readOnly(t, mdb); sro || ro {
+		t.Errorf("refused lock: super_read_only=%v read_only=%v", sro, ro)
+	}
+	if got := pinFile(t, dir, mysql.LockFile); got != "" {
+		t.Errorf("refused lock left lock file %q", got)
+	}
+}
+
+// waitDumpThread waits until a replica reads db's binary log.
+func waitDumpThread(t *testing.T, db *sql.DB) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for count(t, db, "SELECT COUNT(*) FROM information_schema.processlist WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("replica never connected")
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

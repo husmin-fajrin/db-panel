@@ -371,3 +371,83 @@ func TestRecordReplicasCommandTakesNoData(t *testing.T) {
 		t.Errorf("mysql.recordReplicas without MySQL = %+v", res)
 	}
 }
+
+// TestLockReadableFile: the lock keeps the replicas readable when it was
+// set under "readable"; a lock without them (an older agent's) reads as
+// an empty list, and ForgetLockHost removes one host's entries, at every
+// port, leaving the rest of the lock as it was.
+func TestLockReadableFile(t *testing.T) {
+	dir := pinDir(t, "master", "")
+	p := mustPins(t, dir)
+	deadline := time.Date(2026, 11, 6, 11, 0, 0, 0, time.UTC)
+	if n, err := p.ForgetLockHost("10.0.0.3"); n != 0 || err != nil {
+		t.Errorf("ForgetLockHost without a lock = %d, %v", n, err)
+	}
+	if err := p.WriteLock(mysql.PromoteLock{Candidate: "10.0.0.2:3306", Addr: "10.0.0.2", Deadline: deadline}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pinFile(t, dir, mysql.LockFile); strings.Contains(got, "readable") {
+		t.Errorf("lock without readable replicas = %s", got)
+	}
+	if l, ok, err := p.ReadLock(); !ok || err != nil || len(l.Readable) != 0 {
+		t.Errorf("ReadLock = %+v, %v, %v; want no readable replicas", l, ok, err)
+	}
+	list := []string{"10.0.0.3:3306", "10.0.0.3:3307", "DB-4.example:3306", "[::1]:3306"}
+	if err := p.WriteLock(mysql.PromoteLock{Candidate: "10.0.0.2:3306", Addr: "10.0.0.2", Deadline: deadline, Readable: list}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pinFile(t, dir, mysql.LockFile); !strings.Contains(got, `"readable":["10.0.0.3:3306","10.0.0.3:3307","DB-4.example:3306","[::1]:3306"]`) {
+		t.Errorf("lock file = %s", got)
+	}
+	l, ok, err := p.ReadLock()
+	if !ok || err != nil || strings.Join(l.Readable, ",") != strings.Join(list, ",") {
+		t.Fatalf("ReadLock = %+v, %v, %v", l, ok, err)
+	}
+	for _, c := range []struct {
+		host string
+		n    int
+		left string
+	}{
+		{"10.0.0.3", 2, "DB-4.example:3306,[::1]:3306"},
+		{"10.0.0.9", 0, "DB-4.example:3306,[::1]:3306"},
+		{"db-4.EXAMPLE", 1, "[::1]:3306"},
+		{"::1", 1, ""},
+	} {
+		if n, err := p.ForgetLockHost(c.host); n != c.n || err != nil {
+			t.Errorf("ForgetLockHost(%q) = %d, %v; want %d", c.host, n, err, c.n)
+		}
+		l, ok, err := p.ReadLock()
+		if !ok || err != nil || strings.Join(l.Readable, ",") != c.left || l.Candidate != "10.0.0.2:3306" || l.Addr != "10.0.0.2" || !l.Deadline.Equal(deadline) {
+			t.Errorf("after ForgetLockHost(%q): %+v, %v, %v; want readable %q, the rest unchanged", c.host, l, ok, err, c.left)
+		}
+	}
+}
+
+// TestForgetReplica: ForgetReplica removes one host (any case) from the
+// replicas-seen file and keeps the others with their times; a host that is
+// not there, or no file, changes nothing.
+func TestForgetReplica(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replicas-seen")
+	if ok, err := mysql.ForgetReplica(path, "10.0.0.3"); ok || err != nil {
+		t.Errorf("ForgetReplica without a file = %v, %v", ok, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("ForgetReplica without a file created it: %v", err)
+	}
+	t1 := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
+	if err := mysql.RecordReplicasSeen(path, []string{"10.0.0.3", "db-4.example", "10.0.0.5"}, t1); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := mysql.ForgetReplica(path, "10.0.0.3"); !ok || err != nil {
+		t.Errorf("ForgetReplica(10.0.0.3) = %v, %v; want true", ok, err)
+	}
+	if ok, err := mysql.ForgetReplica(path, "DB-4.example"); !ok || err != nil {
+		t.Errorf("ForgetReplica(DB-4.example) = %v, %v; want true", ok, err)
+	}
+	if ok, err := mysql.ForgetReplica(path, "10.0.0.3"); ok || err != nil {
+		t.Errorf("ForgetReplica again = %v, %v; want false", ok, err)
+	}
+	if got, want := pinFile(t, filepath.Dir(path), "replicas-seen"), "10.0.0.5 2026-10-01T08:00:00Z"; got != want {
+		t.Errorf("replicas-seen = %q, want %q", got, want)
+	}
+}
