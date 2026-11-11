@@ -1206,3 +1206,108 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	}
 	t.Logf("emergency promote flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }
+
+// TestE2EAddDatabaseExistingOnReplica (spec 5.6, 5.10, R-058): a partial
+// replica that follows a gets "Tambah database" of rekap, which already
+// exists on the replica with objects of its own (a table, a view, a
+// procedure, written there with read-only lifted as root). The job waits
+// and shows the spec's text; an approval with the token but without the
+// typed name is refused and drops nothing; with the name the job drops
+// rekap without binary logging and copies the master's. The replica's own
+// GTID history stays.
+func TestE2EAddDatabaseExistingOnReplica(t *testing.T) {
+	skipWithoutE2E(t)
+	e := startE2ETopology(t)
+	execSQL(t, e.masterDB, "CREATE DATABASE rekap", "CREATE TABLE rekap.t (id INT PRIMARY KEY, v VARCHAR(64))",
+		"INSERT INTO rekap.t VALUES (1, 'dari-master')")
+	// The replica follows a only: rekap of the master never reached it.
+	execSQL(t, e.replicaDB, "SET GLOBAL super_read_only = OFF",
+		"CREATE DATABASE rekap", "CREATE TABLE rekap.t_lama (x INT)", "INSERT INTO rekap.t_lama VALUES (7)",
+		"CREATE VIEW rekap.v_lama AS SELECT x FROM rekap.t_lama", "CREATE PROCEDURE rekap.p_lama() SELECT 1",
+		"SET GLOBAL super_read_only = ON")
+	var uuid, gtidBefore string
+	if err := e.replicaDB.QueryRow("SELECT @@GLOBAL.server_uuid, @@GLOBAL.gtid_executed").Scan(&uuid, &gtidBefore); err != nil {
+		t.Fatal(err)
+	}
+	gtidBefore = strings.ReplaceAll(gtidBefore, "\n", "")
+	// The writes above were binary-logged: the replica has a history of
+	// its own, which the add must keep.
+	if !strings.Contains(gtidBefore, uuid) {
+		t.Fatalf("replica gtid_executed %s lacks its own uuid %s after writing there", gtidBefore, uuid)
+	}
+	countOld := func() int {
+		var n, m int
+		if err := e.replicaDB.QueryRow("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'rekap' " +
+			"AND table_name IN ('t_lama', 'v_lama')").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.replicaDB.QueryRow("SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = 'rekap' " +
+			"AND routine_name = 'p_lama'").Scan(&m); err != nil {
+			t.Fatal(err)
+		}
+		return n + m
+	}
+	if n := countOld(); n != 3 {
+		t.Fatalf("replica's own rekap objects = %d, want 3", n)
+	}
+
+	// The master's inventory learns rekap, then Tambah database.
+	e.ui.postRedirect(serverPath(e.masterSrv)+"/mysql/refresh", nil)
+	addID := e.ui.postJob(fmt.Sprintf("/replicas/%d/databases/add", e.replicaSrv), url.Values{"databases": {"rekap"}})
+	const text = "Database rekap sudah ada di replika ini. Panel tidak bisa memastikan isinya sama dengan master. " +
+		"Isinya di replika akan dibuang permanen, lalu diganti salinan dari master."
+	waited := false
+	job := waitJob(t, e.p, addID, e2eAddTimeout, func(j store.Job) bool {
+		if j.CurrentStep != 0 || !strings.Contains(j.ParamsJSON, `"wait_reason":"add_existing"`) {
+			t.Fatalf("add job waits at step %d (%s):\n%s", j.CurrentStep, j.ParamsJSON, jobLogText(t, e.p, addID))
+		}
+		page := e.ui.get("/jobs/" + j.ID)
+		for _, want := range []string{text, "Ya, buang dan salin dari master", "Ketik nama database rekap",
+			`name="confirm_db[]"`, `data-confirm-action="job_approve:` + j.ID + `"`} {
+			if !strings.Contains(page, want) {
+				t.Fatalf("job page lacks %q:\n%s", want, page)
+			}
+		}
+		// The token alone does not approve: the name must be typed.
+		token := e.ui.confirmToken("job_approve:"+j.ID, "job", j.ServerID)
+		status, body := e.ui.post("/jobs/"+j.ID+"/approve", url.Values{"confirm_token": {token}})
+		if status != http.StatusBadRequest || !strings.Contains(body,
+			"Nama database yang diketik tidak cocok dengan daftar; ketik nama setiap database persis") {
+			t.Fatalf("approve without the typed name = %d:\n%s", status, textOf(body))
+		}
+		if cur, _, err := e.p.Store.GetJob(j.ID); err != nil || cur.Status != store.JobWaiting {
+			t.Fatalf("job after the refused approval = %+v, %v", cur, err)
+		}
+		if n := countOld(); n != 3 {
+			t.Fatalf("a refused approval dropped rekap objects on the replica (%d left)", n)
+		}
+		token = e.ui.confirmToken("job_approve:"+j.ID, "job", j.ServerID)
+		e.ui.postRedirect("/jobs/"+j.ID+"/approve", url.Values{"confirm_token": {token}, "confirm_db[]": {"rekap"}})
+		waited = true
+		return true
+	})
+	if job.Status != store.JobSucceeded {
+		t.Fatalf("add_databases ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, e.p, addID))
+	}
+	if !waited {
+		t.Fatal("the add job never waited for the existing rekap")
+	}
+	if n := countOld(); n != 0 {
+		t.Fatalf("%d of the replica's own rekap objects survived", n)
+	}
+	waitRow(t, e.replicaDB, "rekap", 1, "dari-master")
+	execSQL(t, e.masterDB, "INSERT INTO rekap.t VALUES (2, 'sekarang-diikuti')")
+	waitRow(t, e.replicaDB, "rekap", 2, "sekarang-diikuti")
+	var gtidAfter string
+	if err := e.replicaDB.QueryRow("SELECT @@GLOBAL.gtid_executed").Scan(&gtidAfter); err != nil {
+		t.Fatal(err)
+	}
+	gtidAfter = strings.ReplaceAll(gtidAfter, "\n", "")
+	if !strings.Contains(gtidAfter, uuid) {
+		t.Fatalf("replica gtid_executed lost its own history: before %s, after %s", gtidBefore, gtidAfter)
+	}
+	if rep, err := e.p.Store.GetReplicaByServer(e.replicaSrv); err != nil || rep.State != store.ReplicaReady ||
+		strings.Join(rep.Databases, ",") != "a,rekap" {
+		t.Fatalf("replica after add = %+v, %v", rep, err)
+	}
+}
