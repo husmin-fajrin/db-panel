@@ -201,7 +201,9 @@ type Notifier struct {
 	passMu sync.Mutex // one pass at a time, so nothing is sent twice
 	// wasSnoozed holds the servers found snoozed by the last pass that
 	// looked at them; guarded by passMu. Kept in memory only: after a
-	// restart a snooze that ended meanwhile sends no reminder.
+	// restart a snooze that ended meanwhile sends no reminder of its open
+	// alerts. Its digest does not depend on this: it is owed in the store
+	// (snooze_from) and sent by sendDigests.
 	wasSnoozed map[int64]bool
 	// flapSent is when the last "berkedip" message of a server's alert
 	// kind went out; guarded by passMu, in memory only.

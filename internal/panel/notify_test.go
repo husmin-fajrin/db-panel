@@ -89,7 +89,11 @@ func TestNotifierWiredToMonitor(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.Notifier.Pass(context.Background())
-	if len(sent()) != 3 {
-		t.Fatalf("after the snooze: messages %q", sent())
+	// The held alert goes out, and so does the digest of the snooze that
+	// the cancel ended (it opened no new alert besides that one).
+	got := sent()
+	if len(got) != 4 || !strings.Contains(got[2], "pekerjaan gagal berkedip") ||
+		!strings.HasPrefix(got[3], "Jangan ganggu untuk ") {
+		t.Fatalf("after the snooze: messages %q", got)
 	}
 }
