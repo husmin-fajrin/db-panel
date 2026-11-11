@@ -504,3 +504,30 @@ func TestConfigureKeepsStaleStartLockLine(t *testing.T) {
 		t.Errorf("stale lock file after release: %v", err)
 	}
 }
+
+// TestReleaseProofLostOnceWritesOpen: this agent run's proof (it PERSISTed
+// read-only ON on the quarantined server) no longer releases the start
+// lock once read-only is opened afterwards; persisted ON again does.
+func TestReleaseProofLostOnceWritesOpen(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+	now := time.Now()
+	r.tickAt(now)
+	if line, file := r.lineAndFile(); !line || !file {
+		t.Fatalf("after the quarantined tick: line=%v file=%v", line, file)
+	}
+	if err := r.d.Pins().SetRole("unassigned"); err != nil {
+		t.Fatal(err)
+	}
+	execAll(t, db, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+	r.tickAt(now.Add(5 * time.Second))
+	if line, file := r.lineAndFile(); !line || !file {
+		t.Errorf("with writes opened after the proof: line=%v file=%v; want the lock kept", line, file)
+	}
+	execAll(t, db, "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+	r.tickAt(now.Add(10 * time.Second))
+	if line, file := r.lineAndFile(); line || file {
+		t.Errorf("with the flags persisted again: line=%v file=%v; want released", line, file)
+	}
+}

@@ -23,9 +23,9 @@ import (
 // open the lock file is reported from its error log. Once the role is
 // master the lock is released at once (root decided); on a replica or an
 // unassigned server only once MySQL answers with read_only and
-// super_read_only PERSISTed ON (or this agent run PERSISTed them), so the
-// server still starts read-only without it. The guard never runs a SET in
-// that branch.
+// super_read_only PERSISTed ON (or this agent run PERSISTed them and
+// they are still on), so the server still starts read-only without it.
+// The guard never runs a SET in that branch.
 
 const (
 	// startLockRetry is how long after a failed write of the start lock
@@ -167,8 +167,9 @@ func (d *Driver) guardStartLock(ctx context.Context, h Host, now time.Time) {
 
 // readOnlyProvedNow reports whether MySQL answers and either this agent
 // run PERSISTed read_only and super_read_only ON since the quarantine
-// (startLockProved) or performance_schema shows both PERSISTed ON. It
-// only reads.
+// (startLockProved) and both are still on (writes opened since, by
+// mysql.setReadOnly or a promotion, PERSISTed them off: the proof is
+// gone), or performance_schema shows both PERSISTed ON. It only reads.
 func (d *Driver) readOnlyProvedNow(ctx context.Context, h Host) bool {
 	db, err := h.Open(ctx)
 	if err != nil {
@@ -176,7 +177,10 @@ func (d *Driver) readOnlyProvedNow(ctx context.Context, h Host) bool {
 	}
 	defer db.Close()
 	if d.startLockProved {
-		return db.PingContext(ctx) == nil
+		var sro, ro bool
+		if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only").Scan(&sro, &ro); err == nil && sro && ro {
+			return true
+		}
 	}
 	on, err := persistedReadOnlyOn(ctx, db)
 	return err == nil && on
