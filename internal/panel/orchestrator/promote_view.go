@@ -81,6 +81,10 @@ type PromoteView struct {
 const (
 	reasonAgentOffline  = "Agent offline"
 	reasonAgentOutdated = "Agent perlu dimutakhirkan"
+	// reasonStartLock: a start lock left by an earlier quarantine is still
+	// in place on the candidate; promoting it would leave a master that
+	// turns read-only on at its next start.
+	reasonStartLock = "Kunci start dari karantina lama masih terpasang di server ini; agent-nya belum bisa melepasnya"
 )
 
 const (
@@ -262,6 +266,8 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 			c.Reason = reasonAgentOffline
 		case r.agentOutdated(srv):
 			c.Reason = reasonAgentOutdated
+		case rv.Snap != nil && rv.Snap.StartLock != nil && rv.Snap.StartLock.Present:
+			c.Reason = reasonStartLock
 		case rep.State != store.ReplicaReady && rep.State != store.ReplicaAttention:
 			c.Reason = "Replika " + replicaStateText(rep.State)
 		case rep.Paused || c.Status == monitor.StatusPaused:

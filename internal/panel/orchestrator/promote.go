@@ -711,7 +711,7 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 		return skipped("tertunda: agent master lama offline; dikirim saat tersambung lagi"), nil
 	}
 	jr.r.repointMu.Lock()
-	err = jr.r.sendQuarantine(ctx, jr.st.PromotionID, old, jr.candidate(), host, port, topo.ReplUser, password)
+	qres, err := jr.r.sendQuarantine(ctx, jr.st.PromotionID, old, jr.candidate(), host, port, topo.ReplUser, password)
 	jr.r.repointMu.Unlock()
 	if errors.Is(err, proto.ErrOffline) {
 		jr.logf("warn", "Agent master lama %s terputus: karantina tertunda dan dikirim saat agent tersambung lagi.", jr.serverName(old))
@@ -724,6 +724,13 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 		return outcome{store.StepFailed, msg}, nil
 	}
 	jr.logf("info", "Master lama %s dikarantina di bawah master baru.", jr.serverName(old))
+	if !qres.StartLocked {
+		// Pinned all the same, but an older agent or a refused lock leaves
+		// MySQL free to start writable: say so in the job log. The reason
+		// is the agent's free text, shown as given.
+		jr.logf("warn", "Master lama dipin dikarantina, tetapi belum terjamin terkunci saat MySQL menyala: %s.%s",
+			startLockReasonText(qres.StartLockReason), operatorInitFilesText(qres.OperatorInitFiles))
+	}
 	return done("dikarantina"), nil
 }
 
@@ -1122,11 +1129,11 @@ func (r *Runner) replPassword(topo store.Topology) (string, error) {
 // sendQuarantine sends mysql.quarantine to the old master and records the
 // outcome on the promotion. A failure keeps the quarantine pending.
 // Callers hold repointMu.
-func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64, host string, port int, user, password string) error {
+func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64, host string, port int, user, password string) (proto.QuarantineResult, error) {
+	var res proto.QuarantineResult
 	cred, err := r.peerCred(ctx, oldID, newID, host, port, user, password)
 	if err == nil {
 		cctx, cancel := context.WithTimeout(ctx, callTimeout)
-		var res proto.QuarantineResult
 		err = r.promoteCmdErr(oldID, r.d.Hub.Call(cctx, oldID, "mysql.quarantine", proto.QuarantineParams{NewMaster: cred}, &res))
 		cancel()
 		if err == nil && !res.Applied {
@@ -1135,11 +1142,11 @@ func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64,
 	}
 	if err != nil {
 		r.markQuarantine(promID, oldID, true, truncate(logErr(err), maxLogLine))
-		return err
+		return res, err
 	}
 	r.markQuarantine(promID, oldID, false, "")
 	r.log.Info("old master quarantined", "server_id", oldID, "new_master", newID)
-	return nil
+	return res, nil
 }
 
 // repointOutcome is how mysql.repoint of one replica ended.
@@ -1221,7 +1228,13 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 			o.ioErr = "penerima replikasi belum tersambung"
 		}
 	}
-	return set(o, "")
+	out := set(o, "")
+	if res.IORunning {
+		// The receiver is connected to the new master: have it record the
+		// connection now.
+		r.recordReplicas(ctx, topo.MasterServerID)
+	}
+	return out
 }
 
 // ErrNeedsRebuild answers RepointNow for a replica that holds transactions
@@ -1320,7 +1333,7 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 			r.log.Warn("pending quarantine", "server_id", serverID, "err", err)
 			return
 		}
-		if err := r.sendQuarantine(ctx, prom.ID, serverID, topo.MasterServerID, topo.SourceHost, topo.SourcePort,
+		if _, err := r.sendQuarantine(ctx, prom.ID, serverID, topo.MasterServerID, topo.SourceHost, topo.SourcePort,
 			topo.ReplUser, password); err != nil {
 			r.log.Warn("pending quarantine failed", "server_id", serverID, "err", logErr(err))
 		}

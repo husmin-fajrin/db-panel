@@ -406,6 +406,7 @@ func (jr *jobRun) changeVerify(timeoutSec int) func(context.Context, bool) (outc
 		}
 		jr.setReplicaState(store.ReplicaReady, "")
 		jr.logf("info", "Replika sinkron dengan master dan sekarang mengikuti: %s.", strings.Join(dbs, ", "))
+		jr.r.recordReplicas(ctx, jr.master())
 		return done("sinkron; mengikuti %s", strings.Join(dbs, ", ")), nil
 	}
 }

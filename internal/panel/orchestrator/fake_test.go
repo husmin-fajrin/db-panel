@@ -50,7 +50,7 @@ var agentCommands = []string{
 	"mysql.createDumpUser", "mysql.dropUser", "mysql.sweepDumpUsers", "mysql.releaseRole",
 	"mysql.tlsRequest", "mysql.tlsInstall", "mysql.tlsTrust",
 	"mysql.lockForPromote", "mysql.unlockPromote", "mysql.promote", "mysql.probeSource", "mysql.binlogTail",
-	"mysql.quarantine", "mysql.repoint",
+	"mysql.quarantine", "mysql.repoint", "mysql.recordReplicas",
 	"mysql.leftover", "mysql.salvage", "mysql.connections", "mysql.salvageList", "mysql.salvageRead", "mysql.salvageDelete",
 }
 
@@ -92,6 +92,10 @@ func newFakeAgent(t *testing.T, e *env, id int64, name string) *fakeAgent {
 			fa.mu.Lock()
 			h := fa.script[cmd]
 			fa.mu.Unlock()
+			if h == nil && cmd == "mysql.recordReplicas" {
+				// Best effort and without data: an unscripted call is fine.
+				return proto.RecordReplicasResult{}, nil
+			}
 			if h == nil {
 				t.Errorf("%s: unscripted command %s %s", name, cmd, params)
 				return nil, fmt.Errorf("tidak diskrip: %s", cmd)

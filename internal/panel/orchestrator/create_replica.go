@@ -886,6 +886,7 @@ func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 		jr.r.replicaChanged(jr.target())
 	}
 	jr.logf("info", "Replika sinkron dengan master.")
+	jr.r.recordReplicas(ctx, jr.master())
 	return done("sinkron"), nil
 }
 
