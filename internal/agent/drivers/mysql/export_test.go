@@ -347,3 +347,30 @@ func SetReadXattr(f func(path, name string) (string, error)) (restore func()) {
 	readXattr = f
 	return func() { readXattr = old }
 }
+
+// The start lock's guard and release (startlock_guard.go).
+var ScanBootstrapFailure = scanBootstrapFailure
+
+// SetWriteConfigHook makes every write of the managed config first call f,
+// failing with its error; it returns the function that restores it.
+func SetWriteConfigHook(f func(content string) error) (restore func()) {
+	old := writeConfigHook
+	writeConfigHook = f
+	return func() { writeConfigHook = old }
+}
+
+// SetRemoveStartLockFile replaces the removal of a start lock file; it
+// returns the function that restores it.
+func SetRemoveStartLockFile(f func(path string) error) (restore func()) {
+	old := removeStartLockFile
+	removeStartLockFile = f
+	return func() { removeStartLockFile = old }
+}
+
+// SetClearLock replaces Pins.ClearLock where a quarantine calls it; it
+// returns the function that restores it.
+func SetClearLock(f func(*Pins) error) (restore func()) {
+	old := clearLock
+	clearLock = f
+	return func() { clearLock = old }
+}

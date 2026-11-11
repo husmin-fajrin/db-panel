@@ -573,3 +573,126 @@ func TestCLILockUnlockMaster(t *testing.T) {
 		t.Errorf("lock-master with an argument = %d, %q; want 2", code, errOut)
 	}
 }
+
+// startLockRig is a quarantined agent directory over a running MySQL whose
+// start lock the guard has written.
+type startLockRig struct {
+	t    *testing.T
+	inst *testmysql.Instance
+	dir  string
+	d    *mysql.Driver
+	lock string
+}
+
+func newStartLockRig(t *testing.T) *startLockRig {
+	t.Helper()
+	r := &startLockRig{t: t, inst: testmysql.Start(t, testmysql.Options{}), dir: t.TempDir()}
+	if code, _, errOut := runCLI("set-role", "quarantined", "--dir", r.dir); code != 0 {
+		t.Fatalf("set-role quarantined = %d, %q", code, errOut)
+	}
+	r.d = &mysql.Driver{Host: r.inst.Host(), PinDir: r.dir, SeenPath: filepath.Join(t.TempDir(), "seen"),
+		SalvageDir: filepath.Join(t.TempDir(), "salvage")}
+	r.d.Register(commands.NewRegistry())
+	var err error
+	if r.lock, err = mysql.StartLockPath(r.inst.Layout()); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if line, file := r.lineAndFile(); !line || !file {
+		t.Fatalf("start lock after the first tick: line=%v file=%v", line, file)
+	}
+	return r
+}
+
+func (r *startLockRig) tick() {
+	r.t.Helper()
+	if err := r.d.GuardTick(context.Background(), time.Now()); err != nil {
+		r.t.Fatalf("GuardTick: %v", err)
+	}
+}
+
+// lineAndFile reports whether my.cnf holds the agent's init_file line and
+// the lock file exists, failing on a line without its file.
+func (r *startLockRig) lineAndFile() (line, file bool) {
+	r.t.Helper()
+	b, err := os.ReadFile(r.inst.ConfigFile)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	line = strings.Contains(string(b), "\ninit_file="+r.lock+"\n")
+	_, err = os.Stat(r.lock)
+	file = err == nil
+	if line && !file {
+		r.t.Errorf("init_file line names %s, which does not exist", r.lock)
+	}
+	return line, file
+}
+
+func runCLI(args ...string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := Main(args, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+// failingConfigHost refuses every config write.
+type failingConfigHost struct{ mysql.Host }
+
+func (failingConfigHost) WriteConfig(string) (string, error) {
+	return "", errors.New("disk penuh (test)")
+}
+
+// TestSetRoleReplicaWhileDownKeepsStartLock: set-role replica on a
+// quarantined server whose MySQL is down only changes the pin; the guard
+// keeps the start lock while MySQL cannot show read-only persisted.
+func TestSetRoleReplicaWhileDownKeepsStartLock(t *testing.T) {
+	r := newStartLockRig(t)
+	old := cliMySQLHost
+	cliMySQLHost = func(string) (mysql.Host, error) { return nil, errors.New("set-role replica must not look up MySQL") }
+	t.Cleanup(func() { cliMySQLHost = old })
+	r.inst.Stop(t)
+	if code, _, errOut := runCLI("set-role", "replica", "--dir", r.dir); code != 0 {
+		t.Fatalf("set-role replica = %d, %q", code, errOut)
+	}
+	for range 3 {
+		r.tick()
+	}
+	if line, file := r.lineAndFile(); !line || !file {
+		t.Errorf("after three ticks as a replica with MySQL down: line=%v file=%v", line, file)
+	}
+}
+
+// TestSetRoleMasterReleasesFirst: set-role master releases the start lock
+// (line, then file) before it pins master; when the lock cannot be
+// released the role stays as it was.
+func TestSetRoleMasterReleasesFirst(t *testing.T) {
+	r := newStartLockRig(t)
+	old := cliMySQLHost
+	t.Cleanup(func() { cliMySQLHost = old })
+	role := func() string {
+		b, _ := os.ReadFile(filepath.Join(r.dir, mysql.RoleFile))
+		return strings.TrimSpace(string(b))
+	}
+
+	cliMySQLHost = func(string) (mysql.Host, error) { return failingConfigHost{r.inst.Host()}, nil }
+	code, _, errOut := runCLI("set-role", "master", "--dir", r.dir)
+	if code != 1 || !strings.Contains(errOut, "kunci start tidak bisa dilepas (") || !strings.Contains(errOut, "); peran tidak diubah") {
+		t.Errorf("set-role master with the config unwritable = %d, %q; want 1 and the refusal", code, errOut)
+	}
+	if got := role(); got != "quarantined" {
+		t.Errorf("role after the refusal = %q", got)
+	}
+	if line, file := r.lineAndFile(); !line || !file {
+		t.Errorf("after the refusal: line=%v file=%v", line, file)
+	}
+
+	cliMySQLHost = func(string) (mysql.Host, error) { return r.inst.Host(), nil }
+	if code, _, errOut := runCLI("set-role", "master", "--dir", r.dir); code != 0 {
+		t.Fatalf("set-role master = %d, %q", code, errOut)
+	}
+	if got := role(); got != "master" {
+		t.Errorf("role = %q, want master", got)
+	}
+	if line, file := r.lineAndFile(); line || file {
+		t.Errorf("after set-role master: line=%v file=%v; want released", line, file)
+	}
+}

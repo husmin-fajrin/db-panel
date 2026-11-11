@@ -480,8 +480,8 @@ type QuarantineResult struct {
 	OperatorInitFiles []string `json:"operator_init_files,omitempty"`
 }
 
-// StartLockState is the start lock of a quarantined server as the agent
-// last checked it. Present: the agent's init_file line is in the managed
+// StartLockState is the start lock of a quarantined server (or of one
+// whose lock is not released yet) as the agent last checked it. Present: the agent's init_file line is in the managed
 // config. Locked: the line, the file, the agent's file being the last
 // init_file mysqld reads, the file readable by mysqld's user and, under
 // AppArmor or SELinux, in a place mysqld's profile allows. Reason says
@@ -557,6 +557,44 @@ const (
 // QuarantinedEvent is the payload of EventQuarantined.
 type QuarantinedEvent struct {
 	NewSource string `json:"new_source"` // host:port of the new master
+}
+
+// EventQuarantineStart: the guard of a quarantined server saw its MySQL
+// start (or the agent start beside it) and reports how it came up
+// (QuarantineStartEvent). An older panel ignores it.
+const EventQuarantineStart = "monitor.quarantineStart"
+
+// Results of QuarantineStartEvent; late wins over bypassed when both hold.
+const (
+	// QuarantineStartLate: read_only or super_read_only was off when the
+	// guard first read them: the server was writable for a while.
+	QuarantineStartLate = "late"
+	// QuarantineStartBypassed: MySQL started after the start lock file
+	// was written, but not with it (@@init_file is another file or none).
+	QuarantineStartBypassed = "bypassed"
+	// QuarantineStartOK: neither.
+	QuarantineStartOK = "ok"
+)
+
+// QuarantineStartEvent is the payload of EventQuarantineStart. Bypassed:
+// @@init_file is not the agent's file although that file is older than
+// the running mysqld. InitFile is @@init_file as read.
+type QuarantineStartEvent struct {
+	Result   string `json:"result"`
+	Bypassed bool   `json:"bypassed"`
+	InitFile string `json:"init_file"`
+}
+
+// EventQuarantineStartFailed: MySQL of a quarantined server failed to
+// start because it could not open the start lock file
+// (QuarantineStartFailedEvent). An older panel ignores it.
+const EventQuarantineStartFailed = "monitor.quarantineStartFailed"
+
+// QuarantineStartFailedEvent is the payload of EventQuarantineStartFailed:
+// the start lock file and the time of the error log line.
+type QuarantineStartFailedEvent struct {
+	File string    `json:"file"`
+	At   time.Time `json:"at"`
 }
 
 // LockExpiredEvent is the payload of EventLockExpired.

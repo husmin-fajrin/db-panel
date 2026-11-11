@@ -431,3 +431,22 @@ func TestSnapshotReportsPins(t *testing.T) {
 		}
 	})
 }
+
+// TestSnapshotReportsStartLock: the start lock is in the health report
+// while the role is quarantined (even before the guard first checked it),
+// and not on a master without the agent's init_file line.
+func TestSnapshotReportsStartLock(t *testing.T) {
+	for _, c := range []struct {
+		role string
+		want bool
+	}{{"quarantined", true}, {"master", false}, {"replica", false}} {
+		d := &mysql.Driver{PinDir: pinDir(t, c.role, "10.0.0.1:3306")}
+		d.Register(commands.NewRegistry())
+		s := d.Snapshot(context.Background())
+		if got := s.StartLock != nil; got != c.want {
+			t.Errorf("%s: StartLock = %+v, want present %v", c.role, s.StartLock, c.want)
+		} else if c.want && (s.StartLock.Locked || s.StartLock.Reason == "") {
+			t.Errorf("%s before any check: StartLock = %+v, want not locked with a reason", c.role, s.StartLock)
+		}
+	}
+}

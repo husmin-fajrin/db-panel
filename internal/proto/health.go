@@ -45,6 +45,11 @@ type HealthSnapshot struct {
 	RolePin   string `json:"role_pin,omitempty"`
 	SourcePin string `json:"source_pin,omitempty"`
 	PinError  string `json:"pin_error,omitempty"`
+
+	// StartLock is the start lock as the agent last checked it, set while
+	// the role pin is quarantined or the agent's init_file line is still
+	// in the MySQL config; nil otherwise, and from an older agent.
+	StartLock *StartLockState `json:"start_lock,omitempty"`
 }
 
 // EventHealth is the event an agent's monitor sends with a HealthEvent

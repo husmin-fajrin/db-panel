@@ -785,3 +785,26 @@ func TestPromoteRefusesNearLockDeadline(t *testing.T) {
 		t.Errorf("logs = %q; want replication restarted", r.ev.logs)
 	}
 }
+
+// TestPromoteRefusedWhileStartLockCannotBeReleased: a replica that still
+// carries the start lock of a quarantine releases it before the promote
+// job starts; when it cannot, mysql.promote is refused and the lock stays.
+func TestPromoteRefusedWhileStartLockCannotBeReleased(t *testing.T) {
+	r := newPromoteRig(t)
+	h := r.replica.Host()
+	if err := mysql.WriteStartLock(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	lock, _ := mysql.StartLockPath(h.Layout())
+	restore := mysql.SetWriteConfigHook(func(string) error { return errors.New("disk penuh (test)") })
+	wantRefused(t, "promote with the start lock stuck", r.dispatch("mysql.promote", r.params(proto.PromoteEmergency)),
+		"server ini masih membawa kunci start dari karantina dan kunci itu tidak bisa dilepas: ", "disk penuh (test)", "; promote ditolak")
+	restore()
+	if line, file := lineAndFile(t, h, lock); !line || !file {
+		t.Errorf("after the refusal: line=%v file=%v", line, file)
+	}
+	r.wantFailed(r.run(r.params(proto.PromoteEmergency)), "bukan keadaan darurat")
+	if line, file := lineAndFile(t, h, lock); line || file {
+		t.Errorf("after the promote started: line=%v file=%v; want released", line, file)
+	}
+}
