@@ -39,6 +39,10 @@ type Driver struct {
 	// SeenPath is the replicas-seen file (RecordReplicas); empty means
 	// SeenFile. Tests point it elsewhere.
 	SeenPath string
+	// SeenPortsPath is the replica ports file (RecordReplicas); empty means
+	// replica-ports-seen beside SeenPath, or SeenPortsFile when that is
+	// empty too.
+	SeenPortsPath string
 	// Events, when set, sends the promote lock guard's events to the
 	// panel (the agent's connection).
 	Events Emitter
@@ -72,10 +76,14 @@ type Driver struct {
 	// never both see no account and both CREATE, ALTER and GRANT it.
 	replUserMu sync.Mutex
 
-	// RecordReplicas: the hosts it last wrote and when.
-	seenMu    sync.Mutex
-	seenHosts []string
-	seenAt    time.Time
+	// RecordReplicas: the hosts and ports it last wrote and when, and the
+	// text of the last SHOW REPLICAS error it logged.
+	seenMu      sync.Mutex
+	seenHosts   []string
+	seenAt      time.Time
+	seenPorts   []int
+	seenPortsAt time.Time
+	portsErr    string
 
 	// The promote lock (promote_lock.go): lockForPromote, unlockPromote,
 	// quarantine, repoint and the guard run one at a time.
@@ -162,6 +170,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerConnections(reg)
 	d.registerLeftover(reg)
 	d.registerSalvage(reg)
+	d.registerRecordReplicas(reg)
 }
 
 // Pins is the driver's pinned role and source; nil without PinDir. The

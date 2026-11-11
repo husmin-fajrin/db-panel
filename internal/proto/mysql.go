@@ -391,6 +391,14 @@ type LockForPromoteResult struct {
 	GTIDExecuted string    `json:"gtid_executed"`
 }
 
+// RecordReplicasResult is the answer to mysql.recordReplicas (which takes
+// no parameters): how many replica hosts and ports this master's agent
+// observed locally.
+type RecordReplicasResult struct {
+	Hosts int `json:"hosts"`
+	Ports int `json:"ports"`
+}
+
 // UnlockPromoteParams are the parameters of mysql.unlockPromote: the
 // lock's candidate, which must still be a replica.
 type UnlockPromoteParams struct {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -762,5 +763,62 @@ func TestGuardTickSkipsWhileBusy(t *testing.T) {
 	r.tick(0)
 	if n := r.peer.count(); n != 1 {
 		t.Errorf("tick after the command read the candidate %d times, want 1", n)
+	}
+}
+
+// TestLockForPromoteRecordsCandidate: with nothing recorded yet and no
+// monitor tick, a successful lockForPromote has put the candidate's host
+// and port in the seen files; a refused lock records nothing, and a failing
+// record (an unusable seen directory) never fails the lock.
+func TestLockForPromoteRecordsCandidate(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	replUser(t, master)
+	replUser(t, replica)
+	mdb := rootDB(t, master)
+	follow(t, master, replica)
+	deadline := time.Now().Add(time.Minute)
+	for count(t, mdb, "SELECT COUNT(*) FROM information_schema.processlist WHERE COMMAND IN ('Binlog Dump GTID', 'Binlog Dump')") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("replica never connected")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	var host string
+	if err := mdb.QueryRow(`SELECT HOST FROM information_schema.PROCESSLIST WHERE COMMAND LIKE 'Binlog Dump%'`).Scan(&host); err != nil {
+		t.Fatal(err)
+	}
+	host = mysql.HostWithoutPort(host)
+	cand := proto.PeerCred{Host: "127.0.0.1", Port: replica.Port, User: "dbpanel_repl", Password: replPassword}
+	p := proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600}
+
+	// A record that cannot be written does not fail the lock.
+	dir := pinDir(t, "master", "")
+	r := newPinRig(t, master.Host(), dir)
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.d.SeenPath = filepath.Join(blocker, "sub", "replicas-seen")
+	decode[proto.LockForPromoteResult](t, r.dispatch("mysql.lockForPromote", p))
+	if _, ok, _ := r.d.Pins().ReadLock(); !ok {
+		t.Fatal("no lock file after a lock whose record failed")
+	}
+
+	seenDir := t.TempDir()
+	dir2 := pinDir(t, "master", "")
+	r2 := newPinRig(t, master.Host(), dir2)
+	r2.d.SeenPath = filepath.Join(seenDir, "replicas-seen")
+	if ok, err := mysql.ReplicaSeen(r2.d.SeenPath, host); ok || err != nil {
+		t.Fatalf("host seen before the lock: %v, %v", ok, err)
+	}
+	execAll(t, mdb, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+	decode[proto.LockForPromoteResult](t, r2.dispatch("mysql.lockForPromote", p))
+	if ok, err := mysql.ReplicaSeen(r2.d.SeenPath, host); !ok || err != nil {
+		t.Errorf("ReplicaSeen(%q) after the lock = %v, %v; want true", host, ok, err)
+	}
+	ports, err := mysql.ReadSeenPorts(filepath.Join(seenDir, "replica-ports-seen"))
+	if err != nil || ports[replica.Port].IsZero() {
+		t.Errorf("ports after the lock = %v, %v; want %d", ports, err, replica.Port)
 	}
 }

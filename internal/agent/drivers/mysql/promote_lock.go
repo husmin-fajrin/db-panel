@@ -175,6 +175,12 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 		return res, &commands.ParamError{Msg: fmt.Sprintf(
 			"kandidat %s tidak sedang tersambung ke master ini sebagai replika (tidak ada thread Binlog Dump dari alamatnya); master tidak dikunci", key)}
 	}
+	// The candidate is a replica from now on whatever the monitor has seen:
+	// record every replica connected now (hosts and ports) before the lock
+	// is written. A failed record never fails the lock.
+	if _, _, err := d.observeReplicas(ctx, db, d.now()); err != nil && d.Logger != nil {
+		d.Logger.Warn("replicas seen not recorded at promote lock", "err", err)
+	}
 	// The credential must log in to the candidate now: unlockPromote, the
 	// guard, the quarantine and the repoints all read it with this
 	// account, and a wrong one would only show after writes moved.

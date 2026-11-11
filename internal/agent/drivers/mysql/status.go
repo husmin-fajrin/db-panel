@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -230,6 +231,43 @@ func binlogDumpHosts(ctx context.Context, db *sql.DB) ([]string, error) {
 		return nil, fmt.Errorf("baca daftar proses: %w", err)
 	}
 	return hosts, nil
+}
+
+// replicaPorts lists the ports (1..65535, each once, sorted) the replicas
+// of this server reported (SHOW REPLICAS, column Port).
+func replicaPorts(ctx context.Context, db *sql.DB) ([]int, error) {
+	rows, err := db.QueryContext(ctx, "SHOW REPLICAS")
+	if err != nil {
+		return nil, fmt.Errorf("SHOW REPLICAS: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("SHOW REPLICAS: %w", err)
+	}
+	at := slices.IndexFunc(cols, func(c string) bool { return strings.EqualFold(c, "Port") })
+	if at < 0 {
+		return nil, errors.New("SHOW REPLICAS: no Port column")
+	}
+	var ports []int
+	vals := make([]sql.NullString, len(cols))
+	dest := make([]any, len(cols))
+	for i := range vals {
+		dest[i] = &vals[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return nil, fmt.Errorf("SHOW REPLICAS: %w", err)
+		}
+		if p, err := strconv.Atoi(vals[at].String); err == nil && validSeenPort(p) && !slices.Contains(ports, p) {
+			ports = append(ports, p)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("SHOW REPLICAS: %w", err)
+	}
+	slices.Sort(ports)
+	return ports, nil
 }
 
 // hostWithoutPort is a processlist HOST ("host:port", an IPv6 address

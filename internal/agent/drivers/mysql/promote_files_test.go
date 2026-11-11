@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // TestReplicasSeenPrune: RecordReplicasSeen keeps one line per host with
@@ -189,5 +191,183 @@ func TestDriverRecordsReplicasSeen(t *testing.T) {
 	}
 	if _, err := os.Stat(lonePath); !os.IsNotExist(err) {
 		t.Errorf("replicas-seen written without replicas: %v", err)
+	}
+}
+
+// TestSeenPortsFileFormatAndPrune: the port file has one "<port> <RFC3339>"
+// line per port, sorted, an entry older than a year is dropped, a line that
+// is not a port is skipped, and the file is 0644.
+func TestSeenPortsFileFormatAndPrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lib", "replica-ports-seen")
+	now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	if m, err := mysql.ReadSeenPorts(path); err != nil || len(m) != 0 {
+		t.Fatalf("ReadSeenPorts without a file = %v, %v; want empty, nil", m, err)
+	}
+	if err := mysql.RecordReplicaPortsSeen(path, []int{3307}, now.AddDate(-1, 0, -1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mysql.RecordReplicaPortsSeen(path, []int{3310, 3308}, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// An older reading never moves a port's time back; out-of-range ports
+	// are ignored.
+	if err := mysql.RecordReplicaPortsSeen(path, []int{3308, 0, 65536, -1}, now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "3308 2026-11-06T09:00:00Z\n3310 2026-11-06T09:00:00Z\n"; string(b) != want {
+		t.Errorf("replica-ports-seen =\n%s\nwant\n%s", b, want)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Errorf("replica-ports-seen: %v, %v; want mode 0644", fi, err)
+	}
+	// A broken line is skipped; the next write drops it.
+	junk := "abc x\n0 2026-11-06T09:00:00Z\n70000 2026-11-06T09:00:00Z\n3309 not-a-time\n3308 2026-11-06T09:00:00Z\n"
+	if err := os.WriteFile(path, []byte(junk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := mysql.ReadSeenPorts(path)
+	if err != nil || len(m) != 1 || !m[3308].Equal(now.Add(-time.Hour)) {
+		t.Fatalf("ReadSeenPorts = %v, %v; want only 3308", m, err)
+	}
+	if err := mysql.RecordReplicaPortsSeen(path, []int{3311}, now); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "3308 2026-11-06T09:00:00Z\n3311 2026-11-06T10:00:00Z\n" {
+		t.Errorf("replica-ports-seen after a write = %q", b)
+	}
+	// A file others can write is not trusted.
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mysql.ReadSeenPorts(path); err == nil {
+		t.Error("ReadSeenPorts trusted a world-writable file")
+	}
+}
+
+// TestOldSeenFileReadUnchanged: a replicas-seen file in the old format is
+// read as before and merged in place; with the same replicas connected the
+// host file and the (new) port file are not rewritten again, however often
+// the guard loop records.
+func TestOldSeenFileReadUnchanged(t *testing.T) {
+	master, replica := sourceWithReplica(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "replicas-seen")
+	now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	old := "10.9.9.9 2026-10-01T08:00:00Z\n"
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := mysql.ReplicaSeen(path, "10.9.9.9"); !ok || err != nil {
+		t.Fatalf("ReplicaSeen on an old-format file = %v, %v", ok, err)
+	}
+	d := &mysql.Driver{Host: master.Host(), SeenPath: path}
+	if err := d.RecordReplicas(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	var host string
+	if err := rootDB(t, master).QueryRow(`SELECT HOST FROM information_schema.PROCESSLIST
+		WHERE COMMAND LIKE 'Binlog Dump%'`).Scan(&host); err != nil {
+		t.Fatal(err)
+	}
+	host = mysql.HostWithoutPort(host)
+	if b, _ := os.ReadFile(path); string(b) != old+host+" 2026-11-06T10:00:00Z\n" && string(b) != host+" 2026-11-06T10:00:00Z\n10.9.9.9 2026-10-01T08:00:00Z\n" {
+		t.Errorf("replicas-seen after merging = %q", b)
+	}
+	portsPath := filepath.Join(dir, "replica-ports-seen")
+	ports, err := mysql.ReadSeenPorts(portsPath)
+	if err != nil || ports[replica.Port].IsZero() {
+		t.Fatalf("ports = %v, %v; want the replica's port %d", ports, err, replica.Port)
+	}
+	// Mark both files with an old mtime; a round with the same set must
+	// leave them alone.
+	mark := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, p := range []string{path, portsPath} {
+		if err := os.Chtimes(p, mark, mark); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		if err := d.RecordReplicas(context.Background(), now.Add(time.Duration(i*5)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{path, portsPath} {
+		if fi, err := os.Stat(p); err != nil || !fi.ModTime().Equal(mark) {
+			t.Errorf("%s rewritten for the same replicas: %v, %v", filepath.Base(p), fi, err)
+		}
+	}
+}
+
+// TestRecordReplicasStoresPortsFromShowReplicas: the port of a connected
+// replica (SHOW REPLICAS) is recorded beside its host; an account that can
+// list processes but not SHOW REPLICAS still gets the host recorded.
+func TestRecordReplicasStoresPortsFromShowReplicas(t *testing.T) {
+	master, replica := sourceWithReplica(t)
+	dir := t.TempDir()
+	d := &mysql.Driver{Host: master.Host(), SeenPath: filepath.Join(dir, "replicas-seen"), SeenPortsPath: filepath.Join(dir, "ports")}
+	now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	if err := d.RecordReplicas(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(d.SeenPortsPath); string(b) != strconv.Itoa(replica.Port)+" 2026-11-06T10:00:00Z\n" {
+		t.Errorf("replica-ports-seen = %q, want port %d", b, replica.Port)
+	}
+	ports, err := mysql.ReplicaPorts(context.Background(), rootDB(t, master))
+	if err != nil || len(ports) != 1 || ports[0] != replica.Port {
+		t.Errorf("ReplicaPorts = %v, %v; want [%d]", ports, err, replica.Port)
+	}
+
+	// PROCESS alone: SHOW REPLICAS is refused, the hosts are recorded all
+	// the same and nothing fails.
+	execAll(t, rootDB(t, master), "CREATE USER 'adm'@'localhost' IDENTIFIED BY 'Adm-pw-1'", "GRANT PROCESS ON *.* TO 'adm'@'localhost'")
+	weak := &mysql.Driver{Host: master.HostWith(&memCreds{p: proto.ConnectParams{User: "adm", Password: "Adm-pw-1"}}),
+		SeenPath: filepath.Join(dir, "weak-seen"), SeenPortsPath: filepath.Join(dir, "weak-ports")}
+	if err := weak.RecordReplicas(context.Background(), now); err != nil {
+		t.Fatalf("RecordReplicas without the right to SHOW REPLICAS = %v", err)
+	}
+	if b, _ := os.ReadFile(weak.SeenPath); len(b) == 0 {
+		t.Error("hosts not recorded when SHOW REPLICAS fails")
+	}
+	if _, err := os.Stat(weak.SeenPortsPath); !os.IsNotExist(err) {
+		t.Errorf("port file written without ports: %v", err)
+	}
+}
+
+// TestRecordReplicasCommandTakesNoData: mysql.recordReplicas runs the
+// observation now and accepts no parameter; a host sent by the panel is
+// refused and never reaches the file.
+func TestRecordReplicasCommandTakesNoData(t *testing.T) {
+	master, replica := sourceWithReplica(t)
+	r := newPinRig(t, master.Host(), pinDir(t, "master", ""))
+	for _, bad := range []string{`{"hosts":["10.0.0.9"]}`, `{"ports":[3306]}`, `["10.0.0.9"]`, `"x"`, `1`} {
+		resp := r.reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.recordReplicas", Params: []byte(bad)})
+		if resp.OK || resp.Error == nil || resp.Error.Code != proto.CodeBadParams {
+			t.Errorf("mysql.recordReplicas %s = %+v, want a parameter error", bad, resp)
+		}
+	}
+	if _, err := os.Stat(r.d.SeenPath); !os.IsNotExist(err) {
+		t.Fatalf("a refused command wrote the host file: %v", err)
+	}
+	for _, ok := range []string{``, `null`, `{}`, ` { } `} {
+		resp := r.reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.recordReplicas", Params: []byte(ok)})
+		res := decode[proto.RecordReplicasResult](t, resp)
+		if res.Hosts != 1 || res.Ports != 1 {
+			t.Errorf("mysql.recordReplicas %q = %+v, want 1 host and 1 port", ok, res)
+		}
+	}
+	if b, _ := os.ReadFile(r.d.SeenPath); strings.Contains(string(b), "10.0.0.9") || len(b) == 0 {
+		t.Errorf("replicas-seen = %q; want the replica's host only", b)
+	}
+	if ports, err := mysql.ReadSeenPorts(filepath.Join(filepath.Dir(r.d.SeenPath), "replica-ports-seen")); err != nil || ports[replica.Port].IsZero() {
+		t.Errorf("ports = %v, %v; want %d", ports, err, replica.Port)
+	}
+	// Without MySQL the command answers an empty result.
+	lone := newPinRig(t, nil, pinDir(t, "master", ""))
+	if res := decode[proto.RecordReplicasResult](t, lone.dispatch("mysql.recordReplicas", nil)); res.Hosts != 0 || res.Ports != 0 {
+		t.Errorf("mysql.recordReplicas without MySQL = %+v", res)
 	}
 }

@@ -2,7 +2,9 @@ package mysql
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // Files of a promotion (spec 5.1), beside the pins in the agent directory
@@ -33,6 +39,11 @@ const (
 // SeenFile is where the agent records the replicas that read this
 // server's binary log (Driver.SeenPath overrides it).
 const SeenFile = "/var/lib/dbpanel/replicas-seen"
+
+// SeenPortsFile is where the agent records the ports those replicas
+// reported (Driver.SeenPortsPath overrides it), one "<port> <RFC3339>"
+// line per port.
+const SeenPortsFile = "/var/lib/dbpanel/replica-ports-seen"
 
 const (
 	// maxRecordSize bounds what is read from the lock and the promotion
@@ -304,40 +315,177 @@ func (d *Driver) seenPath() string {
 	return SeenFile
 }
 
-// RecordReplicas records the hosts of the replicas reading this server's
-// binary log now in the replicas-seen file (monitor.ReplicaRecorder). It
-// does nothing without MySQL, a stored account, or such a replica, and
-// writes only when the set of hosts changed since its last write or that
-// write is seenRefresh old.
-func (d *Driver) RecordReplicas(ctx context.Context, now time.Time) error {
-	h, err := d.host()
-	if errors.Is(err, ErrNoHost) {
-		return nil
-	}
+// RecordReplicaPortsSeen merges ports (1..65535; others are ignored), seen
+// at now, into the replica-ports file at path: one line per port,
+// "<port> <RFC3339>", sorted, with each port's newest time. Entries older
+// than a year are dropped. The file's directory is created when missing.
+func RecordReplicaPortsSeen(path string, ports []int, now time.Time) error {
+	seen, err := readSeenPorts(path)
 	if err != nil {
 		return err
+	}
+	for _, p := range ports {
+		if !validSeenPort(p) {
+			continue
+		}
+		if t, ok := seen[p]; !ok || now.After(t) {
+			seen[p] = now
+		}
+	}
+	cutoff := seenCutoff(now)
+	var lines []string
+	for _, p := range slices.Sorted(maps.Keys(seen)) {
+		if seen[p].Before(cutoff) {
+			continue
+		}
+		lines = append(lines, strconv.Itoa(p)+" "+seen[p].UTC().Format(time.RFC3339))
+	}
+	if err := os.MkdirAll(filepath.Dir(path), seenDirMode); err != nil {
+		return fmt.Errorf("buat %s: %w", filepath.Dir(path), err)
+	}
+	return writePin(path, strings.Join(lines, "\n"))
+}
+
+// readSeenPorts parses the replica-ports file; lines it cannot parse (and
+// ports outside 1..65535) are skipped, a missing file is empty.
+func readSeenPorts(path string) (map[int]time.Time, error) {
+	seen := map[int]time.Time{}
+	content, ok, err := readTrustedFile(path, maxSeenSize)
+	if err != nil || !ok {
+		return seen, err
+	}
+	sc := bufio.NewScanner(strings.NewReader(content))
+	for sc.Scan() {
+		field, ts, ok := strings.Cut(strings.TrimSpace(sc.Text()), " ")
+		if !ok {
+			continue
+		}
+		port, err := strconv.Atoi(field)
+		if err != nil || !validSeenPort(port) {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(ts))
+		if err != nil {
+			continue
+		}
+		if old, ok := seen[port]; !ok || t.After(old) {
+			seen[port] = t
+		}
+	}
+	return seen, nil
+}
+
+func validSeenPort(p int) bool { return p >= 1 && p <= 65535 }
+
+// seenPortsPath is SeenPortsPath; else replica-ports-seen beside SeenPath
+// (so a test that moves SeenPath never touches the system's file); else
+// SeenPortsFile.
+func (d *Driver) seenPortsPath() string {
+	switch {
+	case d.SeenPortsPath != "":
+		return d.SeenPortsPath
+	case d.SeenPath != "":
+		return filepath.Join(filepath.Dir(d.SeenPath), filepath.Base(SeenPortsFile))
+	}
+	return SeenPortsFile
+}
+
+// recordSeen records hosts and ports in their files at now, under seenMu.
+// Each file is written only when its set differs from what this driver
+// last wrote to it, or that write is seenRefresh old; an empty set writes
+// nothing. A set whose write failed is tried again at the next call.
+func (d *Driver) recordSeen(hosts []string, ports []int, now time.Time) error {
+	hosts, ports = slices.Sorted(slices.Values(hosts)), slices.Sorted(slices.Values(ports))
+	d.seenMu.Lock()
+	defer d.seenMu.Unlock()
+	var errs []error
+	if len(hosts) > 0 && (!slices.Equal(hosts, d.seenHosts) || now.Sub(d.seenAt) >= seenRefresh) {
+		if err := RecordReplicasSeen(d.seenPath(), hosts, now); err != nil {
+			errs = append(errs, err)
+		} else {
+			d.seenHosts, d.seenAt = hosts, now
+		}
+	}
+	if len(ports) > 0 && (!slices.Equal(ports, d.seenPorts) || now.Sub(d.seenPortsAt) >= seenRefresh) {
+		if err := RecordReplicaPortsSeen(d.seenPortsPath(), ports, now); err != nil {
+			errs = append(errs, err)
+		} else {
+			d.seenPorts, d.seenPortsAt = ports, now
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// observeReplicas reads the hosts (processlist) and ports (SHOW REPLICAS) of
+// the replicas connected to db's server now and records them (recordSeen),
+// returning what it saw. A SHOW REPLICAS failure is logged (once per
+// distinct message) and the hosts are recorded all the same. Without a
+// replica nothing is read further and nothing written.
+func (d *Driver) observeReplicas(ctx context.Context, db *sql.DB, now time.Time) ([]string, []int, error) {
+	hosts, err := binlogDumpHosts(ctx, db)
+	if err != nil || len(hosts) == 0 {
+		return nil, nil, err
+	}
+	ports, perr := replicaPorts(ctx, db)
+	d.seenMu.Lock()
+	msg := ""
+	if perr != nil {
+		msg = perr.Error()
+	}
+	logIt := msg != "" && msg != d.portsErr
+	d.portsErr = msg
+	d.seenMu.Unlock()
+	if logIt && d.Logger != nil {
+		d.Logger.Warn("replica ports not read; recording the hosts only", "err", perr)
+	}
+	return hosts, ports, d.recordSeen(hosts, ports, now)
+}
+
+// RecordReplicas records the hosts and ports of the replicas reading this
+// server's binary log now in the replicas-seen and replica-ports files
+// (monitor.ReplicaRecorder, run by the guard loop). It does nothing without
+// MySQL, a stored account, or such a replica, and writes a file only when
+// its set changed since this driver's last write or that write is
+// seenRefresh old.
+func (d *Driver) RecordReplicas(ctx context.Context, now time.Time) error {
+	_, err := d.recordReplicasNow(ctx, now)
+	return err
+}
+
+// recordReplicasNow is RecordReplicas with the counts it saw.
+func (d *Driver) recordReplicasNow(ctx context.Context, now time.Time) (proto.RecordReplicasResult, error) {
+	var res proto.RecordReplicasResult
+	h, err := d.host()
+	if errors.Is(err, ErrNoHost) {
+		return res, nil
+	}
+	if err != nil {
+		return res, err
 	}
 	db, err := h.Open(ctx)
 	if errors.Is(err, ErrNotConnected) {
-		return nil
+		return res, nil
 	}
 	if err != nil {
-		return err
+		return res, err
 	}
 	defer db.Close()
-	hosts, err := binlogDumpHosts(ctx, db)
-	if err != nil || len(hosts) == 0 {
-		return err
-	}
-	slices.Sort(hosts)
-	d.seenMu.Lock()
-	defer d.seenMu.Unlock()
-	if slices.Equal(hosts, d.seenHosts) && now.Sub(d.seenAt) < seenRefresh {
-		return nil
-	}
-	if err := RecordReplicasSeen(d.seenPath(), hosts, now); err != nil {
-		return err
-	}
-	d.seenHosts, d.seenAt = hosts, now
-	return nil
+	hosts, ports, err := d.observeReplicas(ctx, db, now)
+	res.Hosts, res.Ports = len(hosts), len(ports)
+	return res, err
+}
+
+// registerRecordReplicas registers mysql.recordReplicas: it takes no
+// parameters and only makes the agent observe its replicas now. The agent
+// never accepts replica hosts or ports from the panel.
+func (d *Driver) registerRecordReplicas(reg *commands.Registry) {
+	reg.Register("mysql.recordReplicas", func(ctx context.Context, params json.RawMessage) (any, error) {
+		var extra map[string]json.RawMessage
+		if len(bytes.TrimSpace(params)) > 0 {
+			if err := json.Unmarshal(params, &extra); err != nil || len(extra) > 0 {
+				return nil, &commands.ParamError{Msg: "mysql.recordReplicas tidak menerima parameter"}
+			}
+		}
+		return d.recordReplicasNow(ctx, d.now())
+	})
 }

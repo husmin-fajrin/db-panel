@@ -388,3 +388,9 @@ func (d *Driver) SetStartLockProved(v bool) {
 	d.startLockProved = v
 	d.promoteMu.Unlock()
 }
+
+// Replica port record (seen_ports).
+var (
+	ReadSeenPorts = readSeenPorts
+	ReplicaPorts  = replicaPorts
+)
