@@ -1493,10 +1493,10 @@ func TestMasterUnpinnedAlertAfterThreeReports(t *testing.T) {
 
 // The Indonesian texts of plan 5a (spec 5.2), letter for letter.
 const (
-	startUnguardedText = "master lama belum terjamin terkunci saat MySQL menyala; jangan nyalakan MySQL-nya sebelum agent tersambung"
-	startLateText      = "master lama sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal"
-	startBypassedText  = "kunci start tidak dipakai MySQL; periksa opsi layanan"
-	startBlockedText   = "MySQL master lama gagal menyala karena berkas kunci tidak terbaca"
+	wantStartUnguardedText = "master lama belum terjamin terkunci saat MySQL menyala; jangan nyalakan MySQL-nya sebelum agent tersambung"
+	wantStartLateText      = "master lama sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal"
+	wantStartBypassedText  = "kunci start tidak dipakai MySQL; periksa opsi layanan"
+	wantStartBlockedText   = "MySQL master lama gagal menyala karena berkas kunci tidak terbaca"
 )
 
 // quarSnap is the report of an old master's agent: pinned quarantined,
@@ -1561,7 +1561,7 @@ func closedWithReason(t *testing.T, as []store.Alert) {
 func TestStartUnguardedFromSnapshot(t *testing.T) {
 	r := newRig(t)
 	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: false, Reason: "x"}))
-	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != startUnguardedText+" (x)" {
+	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != wantStartUnguardedText+" (x)" {
 		t.Fatalf("message = %q", a.Message)
 	}
 
@@ -1571,7 +1571,7 @@ func TestStartUnguardedFromSnapshot(t *testing.T) {
 	})
 	ma.send()
 	as := r.alerts(mID, KindMasterStartUnguarded)
-	if len(as) != 1 || as[0].ClosedAt != nil || as[0].Message != startUnguardedText+" (baris init_file agent tidak dibaca mysqld)" {
+	if len(as) != 1 || as[0].ClosedAt != nil || as[0].Message != wantStartUnguardedText+" (baris init_file agent tidak dibaca mysqld)" {
 		t.Fatalf("after a new reason = %+v", as)
 	}
 
@@ -1595,7 +1595,7 @@ func TestStartUnguardedFromSnapshot(t *testing.T) {
 	// Without a reason the message is the bare text.
 	ma.setSnap(func(s *proto.HealthSnapshot) { s.StartLock = &proto.StartLockState{} })
 	ma.send()
-	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != startUnguardedText {
+	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != wantStartUnguardedText {
 		t.Fatalf("message without a reason = %q", a.Message)
 	}
 
@@ -1637,7 +1637,7 @@ func TestOldAgentQuarantineUnguarded(t *testing.T) {
 	// An agent that sends no start_lock at all.
 	ma := r.agent(mID, true, quarSnap(nil)).attach()
 	ma.send()
-	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != startUnguardedText {
+	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != wantStartUnguardedText {
 		t.Fatalf("message = %q", a.Message)
 	}
 }
@@ -1647,14 +1647,14 @@ func TestQuarantineStartLateAndBypassed(t *testing.T) {
 	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
 
 	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
-	if a := r.openAlert(mID, KindMasterStartLate); a.Message != startLateText {
+	if a := r.openAlert(mID, KindMasterStartLate); a.Message != wantStartLateText {
 		t.Fatalf("late message = %q", a.Message)
 	}
 	if r.isOpen(mID, KindMasterStartBypassed) {
 		t.Fatal("late opened bypassed")
 	}
 	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
-	if a := r.openAlert(mID, KindMasterStartBypassed); a.Message != startBypassedText {
+	if a := r.openAlert(mID, KindMasterStartBypassed); a.Message != wantStartBypassedText {
 		t.Fatalf("bypassed message = %q", a.Message)
 	}
 	// A repeated event is the same alert.
@@ -1796,7 +1796,7 @@ func TestStartBlockedOpensAndStartCloses(t *testing.T) {
 	if !r.m.HandleEvent(mID, startFailedEvent(t, "/etc/mysql/conf.d/dbpanel-start-lock.sql")) {
 		t.Fatal("HandleEvent did not take monitor.quarantineStartFailed")
 	}
-	want := startBlockedText + " (/etc/mysql/conf.d/dbpanel-start-lock.sql). Pastikan berkas itu ada dan boleh dibaca " +
+	want := wantStartBlockedText + " (/etc/mysql/conf.d/dbpanel-start-lock.sql). Pastikan berkas itu ada dan boleh dibaca " +
 		"pengguna mysql (juga oleh AppArmor/SELinux), lalu pastikan agent berjalan: agent menulis ulang berkas itu dalam " +
 		"beberapa detik. Jangan menghapus baris init_file dari konfigurasi MySQL."
 	if a := r.openAlert(mID, KindMasterStartBlocked); a.Message != want {
@@ -1834,7 +1834,7 @@ func TestStartBlockedOpensAndStartCloses(t *testing.T) {
 
 	// No file name: the text still reads.
 	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantineStartFailed, Payload: []byte(`{}`)})
-	if a := r.openAlert(mID, KindMasterStartBlocked); !strings.HasPrefix(a.Message, startBlockedText+". Pastikan") {
+	if a := r.openAlert(mID, KindMasterStartBlocked); !strings.HasPrefix(a.Message, wantStartBlockedText+". Pastikan") {
 		t.Fatalf("message without a file = %q", a.Message)
 	}
 }
@@ -1849,7 +1849,7 @@ func TestStartAndKeptMessagesBoundAgentText(t *testing.T) {
 		t.Fatalf("unguarded message not bounded: %d bytes %q", len(a.Message), a.Message[:200])
 	}
 	_ = ma
-	r.m.HandleEvent(mID, startFailedEvent(t, "/a\n/b"+strings.Repeat("q", 5000)))
+	r.m.HandleEvent(mID, startFailedEvent(t, "/a\n/b"+strings.Repeat("q", 1500)))
 	b := r.openAlert(mID, KindMasterStartBlocked)
 	if strings.Contains(b.Message, "\n") || len(b.Message) > 1200 {
 		t.Fatalf("blocked message not bounded: %d bytes", len(b.Message))

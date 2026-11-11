@@ -238,10 +238,11 @@ func (m *Monitor) Run(ctx context.Context) {
 // HandleEvent takes an agent's health report, its lag sample
 // (monitor.sample, stored for the chart only) and the promote lock
 // guard's events (monitor.quarantined, monitor.lockExpired: one-time
-// notices). It reports whether ev was one of them (handled, possibly by
+// notices, and a kept lock's hosts) and the start lock guard's
+// (monitor.quarantineStart, monitor.quarantineStartFailed). It reports whether ev was one of them (handled, possibly by
 // ignoring it).
 func (m *Monitor) HandleEvent(serverID int64, ev proto.Event) bool {
-	if m.handlePromoteEvent(serverID, ev) {
+	if m.handlePromoteEvent(serverID, ev) || m.handleStartEvent(serverID, ev) {
 		return true
 	}
 	if ev.Type == proto.EventSample {
@@ -610,6 +611,7 @@ func (m *Monitor) tick() {
 	alerts = append(alerts, m.checkTLSExpiry(now)...)
 	alerts = append(alerts, m.checkPromotions(now)...)
 	alerts = append(alerts, m.closeNotices(now)...)
+	alerts = append(alerts, m.closeStartAlerts(now)...)
 	m.mu.Unlock()
 	m.forgetSamples(func(id int64) bool { return seen[id] })
 	m.emit(ups)

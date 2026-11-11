@@ -29,6 +29,10 @@ const (
 	maxPromoteEventPayload  = 4 << 10
 	noticeFor               = 24 * time.Hour // master_quarantined, master_lock_expired
 	lockExpiredUnlocked     = "unlocked"
+	lockExpiredKept         = "kept"
+	lockKeptUnlockedReason  = "agent membuka kunci promote"
+	startBlockedOverReason  = "MySQL master lama menyala lagi"
+	leftoverCheckedReason   = "Periksa data tertinggal sudah dijalankan"
 	noticeExpiredReason     = "ditutup otomatis setelah 24 jam"
 	lockExpiredChangeReason = "diganti laporan kunci yang lebih baru"
 )
@@ -356,6 +360,15 @@ func (m *Monitor) handlePromoteEvent(serverID int64, ev proto.Event) bool {
 			m.log.Warn("monitor.lockExpired unreadable; ignored", "server_id", serverID, "err", err)
 			return true
 		}
+		if le.Action == lockExpiredUnlocked {
+			m.closeAlert(serverID, KindMasterLockKept, lockKeptUnlockedReason)
+		}
+		if hosts := keptHosts(le.Hosts); le.Action == lockExpiredKept && len(hosts) > 0 {
+			// The lock is kept for replicas that cannot be read: one alert
+			// that stays while the lock holds, its hosts kept current.
+			m.raise(serverID, KindMasterLockKept, lockKeptMessage(hosts))
+			return true
+		}
 		kind, msg = KindMasterLockExpired, lockExpiredMessage(le)
 	}
 	m.notice(serverID, kind, msg)
@@ -425,7 +438,7 @@ func (m *Monitor) notice(serverID int64, kind, msg string) {
 }
 
 // closeNotices closes the one-time notices open for noticeFor, and a lock
-// kept (master_lock_expired) once it is over: the server was quarantined
+// kept (master_lock_expired, master_lock_kept) once it is over: the server was quarantined
 // or the master can be written again. The caller holds mu.
 func (m *Monitor) closeNotices(now time.Time) []alertUpdate {
 	open, err := m.st.ListOpenAlerts()
@@ -441,14 +454,16 @@ func (m *Monitor) closeNotices(now time.Time) []alertUpdate {
 	}
 	var ups []alertUpdate
 	for _, a := range open {
-		if a.Kind != KindMasterQuarantined && a.Kind != KindMasterLockExpired {
+		if a.Kind != KindMasterQuarantined && a.Kind != KindMasterLockExpired && a.Kind != KindMasterLockKept {
 			continue
 		}
 		reason := ""
 		switch {
-		case now.Sub(a.OpenedAt) >= noticeFor:
+		// master_lock_kept has no age limit: the lock may hold for days,
+		// and the agent keeps its hosts current.
+		case a.Kind != KindMasterLockKept && now.Sub(a.OpenedAt) >= noticeFor:
 			reason = noticeExpiredReason
-		case a.Kind == KindMasterLockExpired && strings.HasPrefix(a.Message, lockKeptPrefix):
+		case a.Kind == KindMasterLockKept || (a.Kind == KindMasterLockExpired && strings.HasPrefix(a.Message, lockKeptPrefix)):
 			reason = m.lockKeptOver(a, quarantined[a.ServerID])
 		}
 		if reason == "" {
@@ -463,7 +478,8 @@ func (m *Monitor) closeNotices(now time.Time) []alertUpdate {
 	return ups
 }
 
-// lockKeptOver says why the lock kept that a (master_lock_expired) reports
+// lockKeptOver says why the lock kept that a (master_lock_expired or
+// master_lock_kept) reports
 // is over; "" while it may still hold. quarantined: master_quarantined is
 // open for the server. The caller holds mu.
 func (m *Monitor) lockKeptOver(a store.Alert, quarantined bool) string {
@@ -482,4 +498,184 @@ func (m *Monitor) lockKeptOver(a store.Alert, quarantined bool) string {
 		return "master sudah bisa ditulisi lagi"
 	}
 	return ""
+}
+
+// raise opens an alert of kind for serverID with msg, or, when one is
+// open already, puts msg in it (the agent repeats its events, and what
+// they name can change). The alert stays one.
+func (m *Monitor) raise(serverID int64, kind, msg string) {
+	m.mu.Lock()
+	ups := m.raiseLocked(serverID, kind, msg, nil)
+	m.mu.Unlock()
+	m.emitAlerts(ups)
+}
+
+// raiseLocked is raise with mu held; it appends to ups what it opened.
+func (m *Monitor) raiseLocked(serverID int64, kind, msg string, ups []alertUpdate) []alertUpdate {
+	a, err := m.st.GetOpenAlert(kind, serverID)
+	switch {
+	case err == nil:
+		if a.Message != msg {
+			if err := m.st.SetAlertMessage(a.ID, msg); err != nil {
+				m.log.Warn("update alert message", "server_id", serverID, "kind", kind, "err", err)
+			}
+		}
+		return ups
+	case !errors.Is(err, store.ErrNotFound):
+		m.log.Warn("read open alert", "server_id", serverID, "kind", kind, "err", err)
+		return ups
+	}
+	s := m.state(serverID)
+	if !s.resolvedOK {
+		if err := m.resolve(serverID, s, time.Time{}); err != nil {
+			m.log.Warn("raise: resolve role", "server_id", serverID, "err", err)
+		}
+	}
+	id, err := m.st.OpenAlert(store.Alert{Kind: kind, ServerID: serverID, TopologyID: s.topoID, OpenedAt: m.now(), Message: msg})
+	if err != nil {
+		m.log.Warn("open alert", "server_id", serverID, "kind", kind, "err", err)
+		return ups
+	}
+	return append(ups, alertUpdate{id, kind, serverID, true})
+}
+
+// closeAlert closes the open alert of kind for serverID, if any; reason
+// "" is a recovery.
+func (m *Monitor) closeAlert(serverID int64, kind, reason string) {
+	m.mu.Lock()
+	ups := m.closeAlertLocked(serverID, kind, reason, nil)
+	m.mu.Unlock()
+	m.emitAlerts(ups)
+}
+
+// closeAlertLocked is closeAlert with mu held; it appends to ups what it
+// closed.
+func (m *Monitor) closeAlertLocked(serverID int64, kind, reason string, ups []alertUpdate) []alertUpdate {
+	a, err := m.st.GetOpenAlert(kind, serverID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			m.log.Warn("read open alert", "server_id", serverID, "kind", kind, "err", err)
+		}
+		return ups
+	}
+	if err := m.st.CloseAlertWithReason(a.ID, m.now(), reason); err != nil {
+		m.log.Warn("close alert", "server_id", serverID, "kind", kind, "err", err)
+		return ups
+	}
+	return append(ups, alertUpdate{a.ID, kind, serverID, false})
+}
+
+// handleStartEvent takes the start lock guard's events of a quarantined
+// server (proto EventQuarantineStart, EventQuarantineStartFailed); false
+// for any other event. An event that cannot be read, or whose result is
+// not one of the three, changes nothing: only a result the panel knows
+// closes an alert about a server that may have been writable.
+func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
+	if ev.Type != proto.EventQuarantineStart && ev.Type != proto.EventQuarantineStartFailed {
+		return false
+	}
+	if len(ev.Payload) > maxPromoteEventPayload {
+		m.log.Warn("start lock event too large; ignored", "server_id", serverID, "type", ev.Type, "bytes", len(ev.Payload))
+		return true
+	}
+	if ev.Type == proto.EventQuarantineStartFailed {
+		var fe proto.QuarantineStartFailedEvent
+		if err := json.Unmarshal(ev.Payload, &fe); err != nil {
+			m.log.Warn("monitor.quarantineStartFailed unreadable; ignored", "server_id", serverID, "err", err)
+			return true
+		}
+		m.raise(serverID, KindMasterStartBlocked, startBlockedMessage(fe.File))
+		return true
+	}
+	var qe proto.QuarantineStartEvent
+	if err := json.Unmarshal(ev.Payload, &qe); err != nil {
+		m.log.Warn("monitor.quarantineStart unreadable; ignored", "server_id", serverID, "err", err)
+		return true
+	}
+	known := qe.Result == proto.QuarantineStartLate || qe.Result == proto.QuarantineStartBypassed ||
+		qe.Result == proto.QuarantineStartOK
+	bypassed := qe.Bypassed || qe.Result == proto.QuarantineStartBypassed
+	if !known && !bypassed {
+		m.log.Warn("monitor.quarantineStart with an unknown result; ignored", "server_id", serverID, "result", qe.Result)
+		return true
+	}
+	var ups []alertUpdate
+	m.mu.Lock()
+	if known {
+		// MySQL started: a start that failed on the lock file is over. A
+		// bypass of an earlier start is over when this one used the lock.
+		ups = m.closeAlertLocked(serverID, KindMasterStartBlocked, startBlockedOverReason, ups)
+		if !bypassed {
+			ups = m.closeAlertLocked(serverID, KindMasterStartBypassed, "", ups)
+		}
+	}
+	if qe.Result == proto.QuarantineStartLate {
+		ups = m.raiseLocked(serverID, KindMasterStartLate, startLateText, ups)
+	}
+	if bypassed {
+		ups = m.raiseLocked(serverID, KindMasterStartBypassed, startBypassedText, ups)
+	}
+	m.mu.Unlock()
+	m.emitAlerts(ups)
+	return true
+}
+
+// closeStartAlerts closes the event alerts of the start lock (late,
+// bypassed, blocked) that are over: the server is no longer quarantined,
+// or, for late, "Periksa data tertinggal" stored a result after the alert
+// opened. The caller holds mu.
+func (m *Monitor) closeStartAlerts(now time.Time) []alertUpdate {
+	open, err := m.st.ListOpenAlerts()
+	if err != nil {
+		m.log.Warn("close start alerts: list open alerts", "err", err)
+		return nil
+	}
+	var ups []alertUpdate
+	for _, a := range open {
+		if a.Kind != KindMasterStartLate && a.Kind != KindMasterStartBypassed && a.Kind != KindMasterStartBlocked {
+			continue
+		}
+		s, ok := m.servers[a.ServerID]
+		if !ok || !s.resolvedOK {
+			continue // the role is not known: nothing is closed on a guess
+		}
+		reason := ""
+		switch {
+		case s.role != store.RoleQuarantined:
+			reason = notQuarantinedReason
+		case a.Kind == KindMasterStartLate && m.leftoverCheckedAfter(a):
+			reason = leftoverCheckedReason
+		}
+		if reason == "" {
+			continue
+		}
+		if err := m.st.CloseAlertWithReason(a.ID, now, reason); err != nil {
+			m.log.Warn("close alert", "server_id", a.ServerID, "kind", a.Kind, "err", err)
+			continue
+		}
+		ups = append(ups, alertUpdate{a.ID, a.Kind, a.ServerID, false})
+	}
+	return ups
+}
+
+// leftoverCheckedAfter: the newest promotion that replaced the server
+// holds a "Periksa data tertinggal" result taken after a opened. The
+// orchestrator keeps it in promotions.leftover_json, which this package
+// cannot read through the orchestrator (it imports this one), so it reads
+// the time itself; a result it cannot read says nothing.
+func (m *Monitor) leftoverCheckedAfter(a store.Alert) bool {
+	p, err := m.st.PromotionByOldMaster(a.ServerID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			m.log.Warn("start alerts: promotion", "server_id", a.ServerID, "err", err)
+		}
+		return false
+	}
+	var check struct {
+		CheckedAt time.Time `json:"checked_at"`
+	}
+	if p.LeftoverJSON == "" || json.Unmarshal([]byte(p.LeftoverJSON), &check) != nil {
+		return false
+	}
+	return check.CheckedAt.After(a.OpenedAt)
 }

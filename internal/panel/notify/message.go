@@ -41,6 +41,13 @@ var critKinds = map[string]bool{
 	monitor.KindJobFailed:           true,
 	monitor.KindPromotePartial:      true,
 	monitor.KindReplicaNeedsRebuild: true,
+	// Plan 5a: an old master that may start writable, or a promote lock
+	// held for replicas that cannot be read.
+	monitor.KindMasterStartUnguarded: true,
+	monitor.KindMasterStartLate:      true,
+	monitor.KindMasterStartBypassed:  true,
+	monitor.KindMasterStartBlocked:   true,
+	monitor.KindMasterLockKept:       true,
 }
 
 // infoKinds only inform: nothing is wrong (spec 5.14, "Info").
@@ -71,6 +78,12 @@ var kindNames = map[string]string{
 	monitor.KindMasterQuarantined:   "master lama dikarantina",
 	monitor.KindMasterLockExpired:   "batas waktu kunci promote",
 	monitor.KindMasterUnpinned:      "master tidak dipin",
+
+	monitor.KindMasterStartUnguarded: "master lama belum terjamin terkunci saat menyala",
+	monitor.KindMasterStartLate:      "master lama sempat bisa ditulis saat menyala",
+	monitor.KindMasterStartBypassed:  "kunci start master lama tidak dipakai MySQL",
+	monitor.KindMasterStartBlocked:   "MySQL master lama gagal menyala karena kunci start",
+	monitor.KindMasterLockKept:       "kunci promote master dipertahankan",
 }
 
 // masterKinds and replicaKinds link to the master's or the replica's page;
@@ -78,7 +91,7 @@ var kindNames = map[string]string{
 // other kinds link to the server's page.
 var (
 	masterKinds = map[string]bool{monitor.KindMasterLocked: true, monitor.KindMasterDown: true,
-		monitor.KindMasterLockExpired: true}
+		monitor.KindMasterLockExpired: true, monitor.KindMasterLockKept: true}
 	replicaKinds = map[string]bool{
 		monitor.KindReplicaStopped: true, monitor.KindReplicaDisconnected: true, monitor.KindReplicaLagging: true,
 		monitor.KindReplicaUnlocked: true, monitor.KindMySQLUnreachable: true, monitor.KindBinlogDeadline: true,

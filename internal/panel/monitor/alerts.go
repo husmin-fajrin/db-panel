@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -340,6 +341,134 @@ var alertRules = []alertRule{
 			return !isReplica(v) || v.Status.Code == StatusSynced || v.Status.Code == StatusLagging
 		},
 	},
+	{
+		// The last report of a quarantined old master says its start lock
+		// is not in place (Locked false), or says nothing of one (an agent
+		// too old to know it): MySQL could start writable. A server with
+		// no report yet is not judged. It is judged whatever the role, so
+		// that leaving quarantine closes it here with a reason of its own
+		// (ruleApplies would close it as "master lama").
+		kind: KindMasterStartUnguarded,
+		open: func(v View, _ ruleCtx) (bool, string) {
+			if v.Role != store.RoleQuarantined || v.Snap == nil || startLocked(v.Snap) {
+				return false, ""
+			}
+			return true, startUnguardedMessage(v.Snap.StartLock)
+		},
+		close: func(v View, _ ruleCtx) bool {
+			return v.Role != store.RoleQuarantined || (v.Snap != nil && startLocked(v.Snap))
+		},
+		closeReason: func(v View, _ ruleCtx) string {
+			if v.Role != store.RoleQuarantined {
+				return notQuarantinedReason
+			}
+			return ""
+		},
+		judgedWhile: func(View, ruleCtx) bool { return true },
+	},
+}
+
+// notQuarantinedReason closes the start alerts of a server that is no
+// longer an old master.
+const notQuarantinedReason = "server tidak lagi menjadi master lama (dikarantina)"
+
+// startLocked: the report says the start lock holds.
+func startLocked(snap *proto.HealthSnapshot) bool {
+	return snap.StartLock != nil && snap.StartLock.Locked
+}
+
+// Texts of plan 5a (spec 5.2), word for word.
+const (
+	startUnguardedText = "master lama belum terjamin terkunci saat MySQL menyala; jangan nyalakan MySQL-nya sebelum agent tersambung"
+	startLateText      = "master lama sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal"
+	startBypassedText  = "kunci start tidak dipakai MySQL; periksa opsi layanan"
+	startBlockedText   = "MySQL master lama gagal menyala karena berkas kunci tidak terbaca"
+)
+
+// Bounds on the agent's own words in an alert message (they end up in
+// Telegram texts too).
+const (
+	maxAgentReason = 300 // StartLockState.Reason
+	maxAgentFile   = 300 // a file name
+	maxAgentHost   = 120 // a host:port
+	maxKeptHosts   = 10  // hosts named in master_lock_kept; the rest are counted
+)
+
+// agentText is text from an agent as data for a message: invalid UTF-8,
+// control and format characters (newlines, bidi overrides) become single
+// spaces, and it is cut at limit characters. The words are otherwise
+// shown as given. Escaping for HTML and Telegram is left to the templates
+// and the notifier.
+func agentText(s string, limit int) string {
+	var b strings.Builder
+	n, gap := 0, false
+	for _, r := range strings.ToValidUTF8(s, "") {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			gap = b.Len() > 0
+			continue
+		}
+		if n == limit {
+			b.WriteString("…")
+			break
+		}
+		if gap {
+			b.WriteByte(' ')
+			gap = false
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
+
+// startUnguardedMessage words master_start_unguarded: spec 5.2's text and,
+// when the agent gave one, its reason in parentheses.
+func startUnguardedMessage(sl *proto.StartLockState) string {
+	if sl != nil {
+		if reason := agentText(sl.Reason, maxAgentReason); reason != "" {
+			return startUnguardedText + " (" + reason + ")"
+		}
+	}
+	return startUnguardedText
+}
+
+// startBlockedMessage words master_start_blocked: spec 5.2's text, the
+// lock file and what to do.
+func startBlockedMessage(file string) string {
+	where := ""
+	if f := agentText(file, maxAgentFile); f != "" {
+		where = " (" + f + ")"
+	}
+	return startBlockedText + where + ". Pastikan berkas itu ada dan boleh dibaca pengguna mysql (juga oleh AppArmor/SELinux), " +
+		"lalu pastikan agent berjalan: agent menulis ulang berkas itu dalam beberapa detik. " +
+		"Jangan menghapus baris init_file dari konfigurasi MySQL."
+}
+
+// keptHosts are the hosts a kept promote lock names, cleaned, without
+// duplicates and in a fixed order (so the same set in another order is
+// no change).
+func keptHosts(hosts []string) []string {
+	var out []string
+	for _, h := range hosts {
+		if h = agentText(h, maxAgentHost); h != "" && !slices.Contains(out, h) {
+			out = append(out, h)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// lockKeptMessage words master_lock_kept for hosts (keptHosts, not
+// empty).
+func lockKeptMessage(hosts []string) string {
+	list := strings.Join(hosts[:min(len(hosts), maxKeptHosts)], ", ")
+	if len(hosts) > maxKeptHosts {
+		list += fmt.Sprintf(", dan %d lainnya", len(hosts)-maxKeptHosts)
+	}
+	return lockKeptPrefix + "replika berikut tidak terbaca: " + list + ". " +
+		"Kunci terbuka sendiri setelah semua replika itu terbaca dan masih hanya-baca. " +
+		"Bila replika itu sudah tidak dipakai, jalankan di server master: sudo dbpanel agent forget-replica <host>. " +
+		"Untuk membuka kunci sekarang: sudo dbpanel agent unlock-master"
 }
 
 func diskMessage(pct int) string { return fmt.Sprintf("Disk data terpakai %d%%.", pct) }
