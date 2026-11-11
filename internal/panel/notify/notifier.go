@@ -44,6 +44,37 @@ var (
 	quietKinds = map[string]bool{monitor.KindMasterQuarantined: true, monitor.KindMasterLockExpired: true}
 )
 
+// unsnoozableKinds are the alerts a snooze never silences (spec 5.7): each
+// still sends its first message and its recovery while the server is
+// snoozed; only its repeats wait. They are the ones that can mean data
+// loss or two writable masters.
+var unsnoozableKinds = map[string]bool{
+	monitor.KindMasterDown:           true,
+	monitor.KindDiskCrit:             true,
+	monitor.KindReplicaUnlocked:      true,
+	monitor.KindPromotePartial:       true,
+	monitor.KindMasterLockExpired:    true,
+	monitor.KindMasterQuarantined:    true,
+	monitor.KindMasterUnpinned:       true,
+	monitor.KindMasterLockKept:       true,
+	monitor.KindMasterStartUnguarded: true,
+	monitor.KindMasterStartLate:      true,
+	monitor.KindMasterStartBypassed:  true,
+	monitor.KindMasterStartBlocked:   true,
+}
+
+// UnsnoozableKinds lists the kinds a snooze never silences, in AllKinds
+// order; the snooze dialog names them.
+func UnsnoozableKinds() []string {
+	var out []string
+	for _, k := range monitor.AllKinds() {
+		if unsnoozableKinds[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // flapKey is one server's alert kind.
 type flapKey struct {
 	serverID int64
@@ -267,9 +298,12 @@ func (n *Notifier) Wake() {
 // Pass sends what is due, oldest alert first:
 //   - an open alert never sent, or whose last send failed;
 //   - an open alert sent longer than Repeat ago;
-//   - one recovery message for a closed alert that had been sent.
+//   - one recovery message for a closed alert that had been sent;
+//   - the digest of each snooze that has ended (sendDigests).
 //
-// A snoozed server's alerts wait until the snooze ends (spec 5.3). The
+// A snoozed server's alerts wait until the snooze ends (spec 5.3), except
+// those of unsnoozableKinds: they send their first message and their
+// recovery during the snooze, and only their repeats wait. The
 // first pass after that sends each of its alerts still open once, as a
 // reminder, whether or not a repeat is due, and the repeat clock restarts
 // from that send; the recovery messages of alerts that closed meanwhile go
@@ -316,6 +350,10 @@ func (n *Notifier) Pass(ctx context.Context) {
 			n.notify(ctx, cfg, a, s, !s && n.wasSnoozed[a.ServerID])
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
+	n.sendDigests(ctx, cfg)
 	for id, s := range snoozed {
 		if s {
 			n.wasSnoozed[id] = true
@@ -338,7 +376,10 @@ func (n *Notifier) notify(ctx context.Context, cfg Config, a store.Alert, snooze
 		}
 		return
 	}
-	if snoozed {
+	if snoozed && (!unsnoozableKinds[a.Kind] || a.NotifyCount > 0) {
+		// A snooze holds back everything but the first message of an
+		// unsnoozable kind: it falls through to the normal path (flap
+		// control, a failed send retried on the next pass).
 		return
 	}
 	repeat, fixed := kindRepeat[a.Kind]
@@ -413,7 +454,7 @@ func (n *Notifier) notifyRecovered(ctx context.Context, cfg Config, a store.Aler
 		n.setState(a, store.TelegramRecovered)
 		return
 	}
-	if snoozed {
+	if snoozed && !unsnoozableKinds[a.Kind] {
 		return
 	}
 	name := n.serverName(a.ServerID)
@@ -445,6 +486,38 @@ func (n *Notifier) notifyRecovered(ctx context.Context, cfg Config, a store.Aler
 	}
 	if n.deliver(ctx, cfg, a, FormatRecovered(a, name, *a.ClosedAt), store.TelegramRecovered) {
 		delete(n.flapSent, key)
+	}
+}
+
+// sendDigests sends one message per snooze that has ended, listing the
+// alerts opened during it (FormatSnoozeDigest). What is owed lives in the
+// store (snooze_from), so a snooze that ended while the panel was down is
+// still answered; a failed send leaves it owed for the next pass, and it
+// is cleared only after Telegram accepted the message.
+func (n *Notifier) sendDigests(ctx context.Context, cfg Config) {
+	spans, err := n.st.EndedSnoozes(n.now())
+	if err != nil {
+		n.log.Warn("notify: ended snoozes", "err", err)
+		return
+	}
+	for _, sp := range spans {
+		alerts, err := n.st.AlertsOpenedBetween(sp.ServerID, sp.From, sp.Until)
+		if err != nil {
+			n.log.Warn("notify: alerts of a snooze", "server_id", sp.ServerID, "err", err)
+			continue
+		}
+		text := FormatSnoozeDigest(n.serverName(sp.ServerID), sp.From, sp.Until, alerts, cfg.BaseURL)
+		if err := n.sender.Send(ctx, cfg.Token, cfg.ChatID, text); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			n.log.Warn("notify: snooze digest failed", "server_id", sp.ServerID, "err", scrub(err.Error(), cfg.Token))
+			continue
+		}
+		n.log.Info("notify: snooze digest sent", "server_id", sp.ServerID, "alerts", len(alerts))
+		if err := n.st.ClearSnoozeFrom(sp.ServerID); err != nil {
+			n.log.Warn("notify: clear snooze start", "server_id", sp.ServerID, "err", err)
+		}
 	}
 }
 

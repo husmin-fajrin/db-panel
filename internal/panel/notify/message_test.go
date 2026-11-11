@@ -168,3 +168,35 @@ func TestNewKindsHaveLabels(t *testing.T) {
 		t.Errorf("Format =\n%s\nwant\n%s", got, want)
 	}
 }
+
+func TestFormatSnoozeDigest(t *testing.T) {
+	loc := time.Local
+	from := time.Date(2026, 11, 10, 22, 0, 0, 0, loc)
+	until := time.Date(2026, 11, 11, 8, 0, 0, 0, loc)
+	closed := until.Add(30 * time.Minute)
+	alerts := []store.Alert{
+		{Kind: monitor.KindMasterDown, OpenedAt: from.Add(time.Hour), ClosedAt: &closed},
+		{Kind: monitor.KindDiskWarn, OpenedAt: until.Add(-time.Hour)},
+	}
+	got := FormatSnoozeDigest("DB-1", from, until, alerts, "http://panel.local/")
+	want := "Jangan ganggu untuk DB-1 berakhir (10-11 22:00–11-11 08:00). Selama senyap terbuka 2 peringatan:\n" +
+		"• master diduga tumbang · 10-11 23:00 · pulih 08:30\n" +
+		"• disk hampir penuh · 07:00\n" +
+		"http://panel.local/alerts"
+	if got != want {
+		t.Errorf("digest =\n%s\nwant\n%s", got, want)
+	}
+	if got := FormatSnoozeDigest("DB-1", from, until, nil, ""); got !=
+		"Jangan ganggu untuk DB-1 berakhir (10-11 22:00–11-11 08:00). Selama senyap tidak ada peringatan baru." {
+		t.Errorf("empty digest = %q", got)
+	}
+	many := make([]store.Alert, 45)
+	for i := range many {
+		many[i] = store.Alert{Kind: monitor.KindDiskWarn, OpenedAt: from.Add(time.Minute)}
+	}
+	lines := strings.Split(FormatSnoozeDigest("DB-1", from, until, many, ""), "\n")
+	if len(lines) != 1+maxDigestAlerts+1 || !strings.Contains(lines[0], "terbuka 45 peringatan") ||
+		!strings.HasPrefix(lines[len(lines)-1], "… dan 15 peringatan lain") {
+		t.Errorf("capped digest has %d lines:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+}

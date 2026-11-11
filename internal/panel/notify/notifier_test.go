@@ -81,9 +81,16 @@ func newRig(t *testing.T) *rig {
 	}
 	r := &rig{t: t, st: st, box: box, api: newBotAPI(t), logs: &syncBuffer{},
 		clk: &fakeClock{t: time.Date(2026, 11, 2, 9, 0, 0, 0, time.Local)}, snoozed: map[int64]bool{}}
-	r.n = New(Deps{
-		Store:  st,
-		Box:    box,
+	r.n = New(r.deps())
+	return r
+}
+
+// deps are the Notifier's dependencies over the rig's store, Bot API and
+// clock.
+func (r *rig) deps() Deps {
+	return Deps{
+		Store:  r.st,
+		Box:    r.box,
 		Sender: &Telegram{BaseURL: r.api.srv.URL},
 		Logger: slog.New(slog.NewTextHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Now:    r.clk.Now,
@@ -93,15 +100,18 @@ func newRig(t *testing.T) *rig {
 			return r.snoozed[id]
 		},
 		ServerName: func(id int64) string {
-			srv, err := st.GetServer(id)
+			srv, err := r.st.GetServer(id)
 			if err != nil {
 				return "?"
 			}
 			return srv.Name
 		},
-	})
-	return r
+	}
 }
+
+// restart replaces the Notifier by a new one over the same store: a panel
+// restart, with nothing kept in memory.
+func (r *rig) restart() { r.n = New(r.deps()) }
 
 // configure stores the bot token, chat id and panel address.
 func (r *rig) configure() {

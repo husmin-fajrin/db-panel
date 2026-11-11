@@ -275,3 +275,47 @@ func duration(d time.Duration) string {
 	}
 	return two(int(d/(24*time.Hour)), "hari", int(d%(24*time.Hour)/time.Hour), "jam")
 }
+
+// maxDigestAlerts caps the alert lines of a snooze digest, so a long
+// snooze on a noisy server stays inside Telegram's message size limit
+// (a message it refuses would be retried forever).
+const maxDigestAlerts = 30
+
+// FormatSnoozeDigest is the message sent when a server's "Jangan ganggu"
+// ends (spec 5.7): the span, the number of alerts opened during it and one
+// line each, the recovered ones included:
+//
+//	Jangan ganggu untuk DB-1 berakhir (09:00–11:00). Selama senyap terbuka 2 peringatan:
+//	• master diduga tumbang · 09:10 · pulih 09:40
+//	• replika ketinggalan · 09:51
+//	http://panel.local/alerts
+//
+// With no alerts the second sentence reads "Selama senyap tidak ada
+// peringatan baru." baseURL may be "" (no link). Times are on the panel's
+// clock, with the date where it is not the day the snooze ended.
+func FormatSnoozeDigest(serverName string, from, until time.Time, alerts []store.Alert, baseURL string) string {
+	span := clock(from, until) + "–" + clock(until, until)
+	if fl, ul := from.In(time.Local), until.In(time.Local); fl.YearDay() != ul.YearDay() || fl.Year() != ul.Year() {
+		span = fl.Format("02-01 15:04") + "–" + ul.Format("02-01 15:04")
+	}
+	head := fmt.Sprintf("Jangan ganggu untuk %s berakhir (%s).", serverName, span)
+	lines := []string{head + " Selama senyap tidak ada peringatan baru."}
+	if n := len(alerts); n > 0 {
+		lines = []string{fmt.Sprintf("%s Selama senyap terbuka %d peringatan:", head, n)}
+		for i, a := range alerts {
+			if i == maxDigestAlerts {
+				lines = append(lines, fmt.Sprintf("… dan %d peringatan lain (lihat daftar peringatan di panel).", n-i))
+				break
+			}
+			line := "• " + kindName(a.Kind) + sep + clock(a.OpenedAt, until)
+			if a.ClosedAt != nil {
+				line += sep + "pulih " + clock(*a.ClosedAt, until)
+			}
+			lines = append(lines, line)
+		}
+	}
+	if base := strings.TrimRight(baseURL, "/"); base != "" {
+		lines = append(lines, base+"/alerts")
+	}
+	return strings.Join(lines, "\n")
+}
