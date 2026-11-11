@@ -67,7 +67,7 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 	}
 	wantCmds(t, "replica", r.cmds(0), replicaCmds("mysql.cloneFrom"))
 	// Siapkan replika sweeps leftover dump accounts also before a CLONE.
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status"})
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status", "mysql.recordReplicas"})
 
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
@@ -705,7 +705,7 @@ func TestRetryFromVerifyRestartsReplication(t *testing.T) {
 	}
 	e.waitJob(id, store.JobSucceeded)
 	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.startReplica", "mysql.waitSynced"})
-	wantCmds(t, "master after retry", m.cmds(mmark), []string{"mysql.status"})
+	wantCmds(t, "master after retry", m.cmds(mmark), []string{"mysql.status", "mysql.recordReplicas"})
 	if rep, _ := e.st.GetReplicaByServer(r.id); rep.State != store.ReplicaReady {
 		t.Fatalf("replica = %+v", rep)
 	}

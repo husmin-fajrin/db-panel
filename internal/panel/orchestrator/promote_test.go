@@ -189,7 +189,7 @@ func TestPromotePlannedStepsAndCommands(t *testing.T) {
 	}
 	e.seqMu.Unlock()
 	wantCmds(t, "all agents", seq, []string{"cand mysql.status", "db-master mysql.lockForPromote", "cand mysql.waitSynced",
-		"cand mysql.promote", "db-master mysql.quarantine", "cand mysql.inventory", "rep-b mysql.repoint"})
+		"cand mysql.promote", "db-master mysql.quarantine", "cand mysql.inventory", "rep-b mysql.repoint", "cand mysql.recordReplicas"})
 
 	var lock proto.LockForPromoteParams
 	g.m.params("mysql.lockForPromote", &lock)

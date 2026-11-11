@@ -145,7 +145,7 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 	// Leftover dump accounts are swept at the start of Siapkan replika,
 	// before the target is configured and before the dump's own account.
 	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.createDumpUser",
-		"mysql.dropUser", "mysql.status"})
+		"mysql.dropUser", "mysql.status", "mysql.recordReplicas"})
 	wantCmds(t, "replica before the sweep", sweptAfter, []string{"probe", "mysql.preflight"})
 	var sw proto.SweepDumpUsersParams
 	m.params("mysql.sweepDumpUsers", &sw)
@@ -220,7 +220,7 @@ func TestResyncUsesCloneForAllDatabases(t *testing.T) {
 		t.Fatalf("replica commands = %v", r.cmds(0))
 	}
 	// A CLONE resync sweeps leftover dump accounts too.
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status"})
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status", "mysql.recordReplicas"})
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
 	if !pre.Resync || len(pre.Databases) != 0 || pre.ReclaimBytes != 300 {

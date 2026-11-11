@@ -89,7 +89,7 @@ func TestAddDatabasesSequence(t *testing.T) {
 	// The sweep of leftover dump accounts first, catch-up, TLS for the
 	// dump, the dump account around the dump, verify.
 	wantCmds(t, "master", m.cmds(0), []string{"mysql.sweepDumpUsers", "mysql.status", "mysql.status", "mysql.createDumpUser",
-		"mysql.dropUser", "mysql.status"})
+		"mysql.dropUser", "mysql.status", "mysql.recordReplicas"})
 	wantCmds(t, "replica", r.cmds(0), addDatabasesCmds())
 
 	// Step 0 first puts back the filter of the databases followed now.
@@ -196,7 +196,7 @@ func TestAddDatabasesRetryAfterReplayFailure(t *testing.T) {
 	}
 	e.waitJob(id, store.JobSucceeded)
 	wantCmds(t, "replica", r.cmds(rr), []string{"mysql.startUntil", "mysql.setReplicationFilter", "mysql.startReplica", "mysql.waitSynced"})
-	wantCmds(t, "master", m.cmds(mr), []string{"mysql.status"})
+	wantCmds(t, "master", m.cmds(mr), []string{"mysql.status", "mysql.recordReplicas"})
 	var until proto.StartUntilParams
 	r.params("mysql.startUntil", &until)
 	if until.GTIDSet != dumpGTID {
