@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -599,6 +600,9 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 	}
 	peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true})
 	decode[proto.LockForPromoteResult](t, r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600}))
+	// The replica's processlist name is a recorded host too: the lock
+	// reads it as another replica (no name to verify beyond itself).
+	peer.creds = slices.DeleteFunc(peer.creds, func(c proto.PeerCred) bool { return c.Host == "localhost" && c.ServerName == "" })
 	wantAt("lockForPromote")
 	peer.creds, peer.reads = nil, 0
 	l, ok, err := r.d.Pins().ReadLock()
