@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"net"
@@ -410,4 +411,9 @@ func SetBeforeLockRecord(f func()) (restore func()) {
 	old := beforeLockRecord
 	beforeLockRecord = f
 	return func() { beforeLockRecord = old }
+}
+
+// ObserveReplicas is d.observeReplicas.
+func ObserveReplicas(d *Driver, ctx context.Context, db *sql.DB, now time.Time, also ...string) ([]string, []int, error) {
+	return d.observeReplicas(ctx, db, now, also...)
 }

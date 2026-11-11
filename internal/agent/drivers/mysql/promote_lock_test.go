@@ -817,6 +817,11 @@ func TestLockForPromoteRecordsCandidate(t *testing.T) {
 	if ok, err := mysql.ReplicaSeen(r2.d.SeenPath, host); ok || err != nil {
 		t.Fatalf("host seen before the lock: %v, %v", ok, err)
 	}
+	// A port recorded earlier: the master's own, where the replication
+	// account logs in too, so 127.0.0.1 at it reads as another replica.
+	if err := mysql.RecordReplicaPortsSeen(filepath.Join(seenDir, "replica-ports-seen"), []int{master.Port}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	execAll(t, mdb, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
 	decode[proto.LockForPromoteResult](t, r2.dispatch("mysql.lockForPromote", p))
 	if ok, err := mysql.ReplicaSeen(r2.d.SeenPath, host); !ok || err != nil {
@@ -825,6 +830,35 @@ func TestLockForPromoteRecordsCandidate(t *testing.T) {
 	ports, err := mysql.ReadSeenPorts(filepath.Join(seenDir, "replica-ports-seen"))
 	if err != nil || ports[replica.Port].IsZero() {
 		t.Errorf("ports after the lock = %v, %v; want %d", ports, err, replica.Port)
+	}
+	// The lock lists what was readable: the recorded host at the recorded
+	// port, never the candidate at its own port.
+	readableAt := "127.0.0.1:" + strconv.Itoa(master.Port)
+	candAt := "127.0.0.1:" + strconv.Itoa(replica.Port)
+	if l, ok, err := r2.d.Pins().ReadLock(); !ok || err != nil || !slices.Contains(l.Readable, readableAt) || slices.Contains(l.Readable, candAt) {
+		t.Errorf("lock = %+v, %v, %v; want readable to hold %s and not %s", l, ok, err, readableAt, candAt)
+	}
+
+	// The command's context ends while the other replicas are read: the
+	// lock is refused and no lock file is left.
+	dir4 := pinDir(t, "master", "")
+	r4 := newPinRig(t, master.Host(), dir4)
+	r4.d.SeenPath = filepath.Join(seenDir, "replicas-seen")
+	cctx, ccancel := context.WithCancel(context.Background())
+	defer ccancel()
+	restore := mysql.SetReadPeer(func(ctx context.Context, c proto.PeerCred, timeout time.Duration) mysql.PeerState {
+		if c.Port == master.Port {
+			ccancel()
+		}
+		return mysql.ReadPeer(ctx, c, timeout)
+	})
+	resp := r4.reg.Dispatch(cctx, proto.Request{ID: "1", Cmd: "mysql.lockForPromote", Params: mustJSON(t, p)})
+	restore()
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "belum selesai dibaca") {
+		t.Errorf("lock whose replica reads were cut short = %+v, want refused", resp)
+	}
+	if got := pinFile(t, dir4, mysql.LockFile); got != "" {
+		t.Errorf("refused lock left lock file %q", got)
 	}
 
 	// The candidate's Binlog Dump thread drops after it was matched and

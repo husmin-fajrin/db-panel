@@ -2,6 +2,7 @@ package mysql_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -449,5 +450,28 @@ func TestForgetReplica(t *testing.T) {
 	}
 	if got, want := pinFile(t, filepath.Dir(path), "replicas-seen"), "10.0.0.5 2026-10-01T08:00:00Z"; got != want {
 		t.Errorf("replicas-seen = %q, want %q", got, want)
+	}
+}
+
+// TestObserveReplicasRecordsAlsoWhenProcesslistFails (ruling 10): the
+// candidate's matched address given to observeReplicas is recorded even
+// when the processlist cannot be read; the error is still returned.
+func TestObserveReplicasRecordsAlsoWhenProcesslistFails(t *testing.T) {
+	db, err := sql.Open("mysql", "root@unix(/nonexistent/mysql.sock)/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	seen := filepath.Join(t.TempDir(), "replicas-seen")
+	d := &mysql.Driver{SeenPath: seen}
+	hosts, _, err := mysql.ObserveReplicas(d, context.Background(), db, time.Now(), "10.0.0.8")
+	if err == nil {
+		t.Error("ObserveReplicas on a closed connection: no error")
+	}
+	if len(hosts) != 1 || hosts[0] != "10.0.0.8" {
+		t.Errorf("hosts = %v, want [10.0.0.8]", hosts)
+	}
+	if ok, err := mysql.ReplicaSeen(seen, "10.0.0.8"); !ok || err != nil {
+		t.Errorf("ReplicaSeen(10.0.0.8) = %v, %v; want true", ok, err)
 	}
 }

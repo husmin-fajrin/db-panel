@@ -475,12 +475,18 @@ func (d *Driver) recordSeen(hosts []string, ports []int, now time.Time) error {
 // with the hosts of also (a replica's address this agent matched against a
 // Binlog Dump thread a moment ago), returning what it saw. A SHOW REPLICAS
 // failure is logged (once per distinct message) and the hosts are recorded
-// all the same. Without a replica nothing is read further and nothing
-// written.
+// all the same; a processlist that cannot be read still records also.
+// Without a replica nothing is read further and nothing written.
 func (d *Driver) observeReplicas(ctx context.Context, db *sql.DB, now time.Time, also ...string) ([]string, []int, error) {
 	hosts, err := binlogDumpHosts(ctx, db)
 	if err != nil {
-		return nil, nil, err
+		// The processlist cannot be read: the hosts of also are recorded
+		// all the same.
+		if len(also) == 0 {
+			return nil, nil, err
+		}
+		hosts = slices.Compact(slices.Sorted(slices.Values(also)))
+		return hosts, nil, errors.Join(err, d.recordSeen(hosts, nil, now))
 	}
 	for _, h := range also {
 		if !slices.Contains(hosts, h) {
