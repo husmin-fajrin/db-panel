@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -694,5 +695,38 @@ func TestSetRoleMasterReleasesFirst(t *testing.T) {
 	}
 	if line, file := r.lineAndFile(); line || file {
 		t.Errorf("after set-role master: line=%v file=%v; want released", line, file)
+	}
+}
+
+// TestSetRoleMasterRefusedWhileConfigLocked: while another process holds
+// the managed config's lock (the agent mid-write), set-role master does
+// not release around it: it waits, then refuses and leaves the role and
+// the start lock as they were.
+func TestSetRoleMasterRefusedWhileConfigLocked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the config lock (30 s)")
+	}
+	r := newStartLockRig(t)
+	old := cliMySQLHost
+	cliMySQLHost = func(string) (mysql.Host, error) { return r.inst.Host(), nil }
+	t.Cleanup(func() { cliMySQLHost = old })
+	f, err := os.OpenFile(filepath.Join(filepath.Dir(r.inst.ConfigFile), mysql.ConfigLockFile), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := runCLI("set-role", "master", "--dir", r.dir)
+	if code != 1 || !strings.Contains(errOut, "kunci start tidak bisa dilepas (") || !strings.Contains(errOut, "kunci konfigurasi") ||
+		!strings.Contains(errOut, "); peran tidak diubah") {
+		t.Errorf("set-role master with the config locked = %d, %q; want 1 and the refusal", code, errOut)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.dir, mysql.RoleFile)); strings.TrimSpace(string(b)) != "quarantined" {
+		t.Errorf("role after the refusal = %q", b)
+	}
+	if line, file := r.lineAndFile(); !line || !file {
+		t.Errorf("after the refusal: line=%v file=%v", line, file)
 	}
 }
