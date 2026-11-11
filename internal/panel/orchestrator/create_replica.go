@@ -397,6 +397,13 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	if err != nil {
 		return outcome{}, err
 	}
+	// Before anything reaches the target (preflight, and with it every later
+	// drop): a replica-only database must have been acknowledged.
+	if len(jr.st.WipeList) > 0 {
+		if err := jr.enforceWipeOnly(ctx); err != nil {
+			return outcome{}, err
+		}
+	}
 	var reclaim uint64
 	if jr.st.Resync {
 		reclaim = jr.replicaDataBytes()
@@ -1017,4 +1024,33 @@ func (jr *jobRun) stopReplicaAfter(ctx context.Context) {
 	if err := jr.r.d.Hub.Call(ctx, jr.job.ServerID, "mysql.stopReplica", nil, nil); err != nil {
 		jr.r.log.Warn("stop replica after failure", "job", jr.job.ID, "err", logErr(err))
 	}
+}
+
+// enforceWipeOnly refuses a job that would drop a database that exists only
+// on the replica unless the user acknowledged exactly that (spec 5.6, R-035).
+// It reads the master's databases from the master's agent now, never from the
+// stored inventory, which may be stale, and fails closed: an unreadable master
+// refuses the job. A name of WipeList that the master lacks and WipeOnly does
+// not hold is refused; a WipeOnly name the master does have is harmless.
+// Names are compared exactly (case-sensitive), as the wipe list is validated
+// everywhere. On success PeerDatabases is what the master has right now.
+func (jr *jobRun) enforceWipeOnly(ctx context.Context) error {
+	res, err := jr.r.RefreshInventory(ctx, jr.master())
+	if err != nil {
+		jr.logf("error", "Inventaris master tidak bisa dibaca: %v", err)
+		return errors.New("inventaris master tidak bisa dibaca; pekerjaan ditolak agar tidak ada database yang dibuang tanpa dicek")
+	}
+	names := make([]string, 0, len(res.Databases))
+	for _, d := range res.Databases {
+		names = append(names, d.Name)
+	}
+	slices.Sort(names)
+	for _, d := range jr.st.WipeList {
+		if !slices.Contains(names, d) && !slices.Contains(jr.st.WipeOnly, d) {
+			return fmt.Errorf("database %s hanya ada di replika dan belum diakui akan dibuang; mulai Resync ulang lagi dari halaman replika", d)
+		}
+	}
+	jr.st.PeerDatabases = names
+	jr.save()
+	return nil
 }

@@ -25,6 +25,9 @@ type ResyncParams struct {
 	ForceDump bool // dump even when CLONE is possible
 	// WipeList is the replica's databases the modal listed as dropped.
 	WipeList []string
+	// WipeOnly is the part of WipeList the user acknowledged as existing only
+	// on the replica: their content is lost for good (spec 5.6).
+	WipeOnly []string
 }
 
 // installStep is the index of "Pasang MySQL" in createReplicaStepNames,
@@ -75,8 +78,11 @@ func (r *Runner) StartResync(ctx context.Context, p ResyncParams) (string, error
 	wipe := slices.Clone(p.WipeList)
 	slices.Sort(wipe)
 	wipe = slices.Compact(wipe)
+	only := slices.Clone(p.WipeOnly)
+	slices.Sort(only)
+	only = slices.Compact(only)
 	st := jobState{MasterServerID: topo.MasterServerID, Databases: rep.Databases, ForceDump: p.ForceDump,
-		ConfirmWipe: true, WipeList: wipe, Resync: true}
+		ConfirmWipe: true, WipeList: wipe, WipeOnly: only, ConfirmedAt: r.now(), Resync: true}
 	if err := r.d.Store.SetReplicaState(p.ServerID, store.ReplicaResyncing, ""); err != nil {
 		return "", err
 	}

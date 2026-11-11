@@ -933,6 +933,12 @@ type jobState struct {
 	// Resync: a resync_replica job. Its WipeList starts as the replica's
 	// databases the user agreed to drop when starting it.
 	Resync bool `json:"resync,omitempty"`
+	// WipeOnly: the databases of WipeList the user acknowledged as existing
+	// only on the replica (sorted, unique); enforceWipeOnly checks the list
+	// against a fresh read of the master. ConfirmedAt is when the user
+	// confirmed the drop.
+	WipeOnly    []string  `json:"wipe_only,omitempty"`
+	ConfirmedAt time.Time `json:"confirmed_at,omitempty"`
 
 	// create_replica, learned.
 	MasterUUID      string   `json:"master_uuid,omitempty"`

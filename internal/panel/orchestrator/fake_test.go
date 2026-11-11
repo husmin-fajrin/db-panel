@@ -553,6 +553,8 @@ func (e *env) connectedMaster(name string) *fakeAgent {
 		e.t.Fatal(err)
 	}
 	fa.reply("mysql.status", masterStatus())
+	// The fresh read of the master's databases (enforceWipeOnly).
+	fa.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs})
 	fa.reply("mysql.createDumpUser", nil)
 	fa.reply("mysql.dropUser", nil)
 	fa.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})

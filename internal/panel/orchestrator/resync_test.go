@@ -89,7 +89,7 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 		return proto.SweepDumpUsersResult{Dropped: []string{"'dbpanel_dump_0badc0de'@'10.0.0.2'"}}, nil
 	})
 
-	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id, WipeList: []string{"x", "a"}})
+	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id, WipeList: []string{"x", "a"}, WipeOnly: []string{"x"}})
 	if err != nil {
 		t.Fatalf("StartResync: %v", err)
 	}
@@ -144,7 +144,9 @@ func TestResyncHappyPathOneConfirmation(t *testing.T) {
 	}
 	// Leftover dump accounts are swept at the start of Siapkan replika,
 	// before the target is configured and before the dump's own account.
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.createDumpUser",
+	// The fresh read of the master's databases comes right before the
+	// replica's preflight (enforceWipeOnly).
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.inventory", "mysql.sweepDumpUsers", "mysql.createDumpUser",
 		"mysql.dropUser", "mysql.status", "mysql.recordReplicas"})
 	wantCmds(t, "replica before the sweep", sweptAfter, []string{"probe", "mysql.preflight"})
 	var sw proto.SweepDumpUsersParams
@@ -220,7 +222,7 @@ func TestResyncUsesCloneForAllDatabases(t *testing.T) {
 		t.Fatalf("replica commands = %v", r.cmds(0))
 	}
 	// A CLONE resync sweeps leftover dump accounts too.
-	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status", "mysql.recordReplicas"})
+	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.inventory", "mysql.sweepDumpUsers", "mysql.status", "mysql.recordReplicas"})
 	var pre proto.PreflightParams
 	r.params("mysql.preflight", &pre)
 	if !pre.Resync || len(pre.Databases) != 0 || pre.ReclaimBytes != 300 {
@@ -465,5 +467,136 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 	check("after the grace", deadline.Add(proto.PromoteLockGrace+time.Second), false)
 	if rep := e.replica(g.b.id); rep.State != store.ReplicaReady {
 		t.Fatalf("b after the refusals = %s, want ready", rep.State)
+	}
+}
+
+// failedResync starts a resync of r with wipe and only, and waits until the
+// job fails at "Periksa server tujuan" (step 1), where the replica's
+// preflight runs. Neither mysql.preflight nor mysql.dropDatabases may have
+// reached the replica. It returns the job's error.
+func failedResync(t *testing.T, e *env, r *fakeAgent, wipe, only []string) string {
+	t.Helper()
+	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id, WipeList: wipe, WipeOnly: only})
+	if err != nil {
+		t.Fatalf("StartResync: %v", err)
+	}
+	j, steps := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != 1 || steps[1].Status != store.StepFailed {
+		t.Fatalf("job %+v steps %+v, want a failure at step 1", j, steps)
+	}
+	for _, cmd := range []string{"mysql.preflight", "mysql.dropDatabases", "mysql.dumpFrom", "mysql.cloneFrom"} {
+		if n := r.count(cmd); n != 0 {
+			t.Errorf("%s sent %d times to the replica of a refused resync", cmd, n)
+		}
+	}
+	return j.Error
+}
+
+func TestPreflightRefusesUnacknowledgedReplicaOnly(t *testing.T) {
+	e := newEnv(t)
+	_, topo := e.readyMaster("db-master") // the master has a and b
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "laporan", Bytes: 50}}, "a")
+
+	got := failedResync(t, e, r, []string{"a", "laporan"}, nil)
+	want := "database laporan hanya ada di replika dan belum diakui akan dibuang; mulai Resync ulang lagi dari halaman replika"
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("job error = %q, want %q", got, want)
+	}
+	if rep, _ := e.st.GetReplicaByServer(r.id); rep.State != store.ReplicaFailed {
+		t.Fatalf("replica state = %q", rep.State)
+	}
+}
+
+func TestPreflightRefusesWhenMasterInventoryUnreadable(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}}, "a")
+	// The stored inventory of the master is fine and lists a; only the
+	// fresh read fails, and it is the only one that counts.
+	m.fail("mysql.inventory", "login MySQL gagal: 1045 Access denied")
+
+	got := failedResync(t, e, r, []string{"a"}, nil)
+	if !strings.Contains(got, "inventaris master tidak bisa dibaca; pekerjaan ditolak agar tidak ada database yang dibuang tanpa dicek") {
+		t.Fatalf("job error = %q", got)
+	}
+	if n := m.count("mysql.inventory"); n != 1 {
+		t.Fatalf("master inventory read %d times, want 1", n)
+	}
+}
+
+func TestPreflightUsesFreshMasterInventory(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	// The stored inventory is stale: it still lists laporan, which the
+	// master no longer has (the agent's answer, below, is what counts).
+	stale := []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "laporan", Bytes: 50}}
+	if err := e.st.SetInventory(store.Inventory{ServerID: m.id, Connected: true, Version: "8.4.3", Series: "8.4",
+		Databases: stale, MasterReady: true, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "laporan", Bytes: 50}}, "a")
+
+	got := failedResync(t, e, r, []string{"a", "laporan"}, nil)
+	if !strings.Contains(got, "database laporan hanya ada di replika") {
+		t.Fatalf("job error = %q", got)
+	}
+	if inv, _ := e.st.GetInventory(m.id); len(inv.Databases) != 2 || inv.Databases[0].Name != "a" || inv.Databases[1].Name != "b" {
+		t.Fatalf("stored master inventory after the fresh read = %+v", inv.Databases)
+	}
+}
+
+func TestPreflightAcceptsAcknowledgedReplicaOnly(t *testing.T) {
+	e := newEnv(t)
+	_, topo := e.readyMaster("db-master")
+	// a is on the master too: acknowledging it (a stale acknowledgement) is
+	// harmless; a repeated name is stored once.
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "laporan", Bytes: 50}}, "a")
+
+	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id,
+		WipeList: []string{"a", "laporan"}, WipeOnly: []string{"laporan", "a", "laporan"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	var pre proto.PreflightParams
+	r.params("mysql.preflight", &pre)
+	if !slices.Equal(pre.PeerDatabases, []string{"a", "b"}) {
+		t.Fatalf("PeerDatabases = %v, want the fresh read [a b]", pre.PeerDatabases)
+	}
+	var dr proto.DropDatabasesParams
+	r.params("mysql.dropDatabases", &dr)
+	if !slices.Equal(dr.Databases, []string{"a", "laporan"}) {
+		t.Fatalf("dropDatabases = %v", dr.Databases)
+	}
+	j, _, _ := e.st.GetJob(id)
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(st.WipeOnly, []string{"a", "laporan"}) {
+		t.Fatalf("stored WipeOnly = %v, want sorted and unique", st.WipeOnly)
+	}
+	if st.ConfirmedAt.IsZero() || time.Since(st.ConfirmedAt) > time.Minute {
+		t.Fatalf("ConfirmedAt = %v", st.ConfirmedAt)
+	}
+}
+
+// Names are data and are compared exactly (byte for byte, like the wipe
+// list's own validation): case, spaces, quotes, backticks, dots and unicode
+// all count.
+func TestPreflightComparesNamesExactly(t *testing.T) {
+	odd := []string{"A", "my db", `it's`, "back`tick", "dot.ted", "ünï", "a ", " a", "a​"}
+	for _, name := range odd {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			e := newEnv(t)
+			_, topo := e.readyMaster("db-master")
+			r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: name, Bytes: 5}}, "a")
+			// The master has a and b; name differs from them, so it is
+			// replica-only and refused unacknowledged.
+			got := failedResync(t, e, r, []string{"a", name}, nil)
+			if !strings.Contains(got, "database "+name+" hanya ada di replika") {
+				t.Fatalf("job error = %q", got)
+			}
+		})
 	}
 }
