@@ -5,14 +5,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -529,5 +533,122 @@ func TestReleaseProofLostOnceWritesOpen(t *testing.T) {
 	r.tickAt(now.Add(10 * time.Second))
 	if line, file := r.lineAndFile(); line || file {
 		t.Errorf("with the flags persisted again: line=%v file=%v; want released", line, file)
+	}
+}
+
+// releaseHelperEnv carries the layout (JSON) to the helper process that
+// releases the start lock as "dbpanel agent set-role master" would.
+const releaseHelperEnv = "DBPANEL_TEST_RELEASE_LAYOUT"
+
+// TestReleaseHelperProcess is the other process of
+// TestStartLockReleaseRaceAcrossProcesses; it does nothing otherwise. It
+// releases the start lock, pausing before it removes the file so the
+// guard of the first process has time to act, and prints the outcome.
+func TestReleaseHelperProcess(t *testing.T) {
+	raw := os.Getenv(releaseHelperEnv)
+	if raw == "" {
+		t.Skip("helper process only")
+	}
+	var l mysql.Layout
+	if err := json.Unmarshal([]byte(raw), &l); err != nil {
+		t.Fatal(err)
+	}
+	mysql.SetRemoveStartLockFile(func(path string) error {
+		time.Sleep(150 * time.Millisecond)
+		return os.Remove(path)
+	})
+	h := mysql.NewHost(l, nil, nil, probe.RealSystem(), nil)
+	if err := mysql.ReleaseStartLock(context.Background(), h); err != nil {
+		fmt.Println("release-error:", err)
+		return
+	}
+	fmt.Println("released")
+}
+
+// TestStartLockReleaseRaceAcrossProcesses: the guard of a quarantined
+// server keeps its start lock while another process (as the CLI would)
+// releases it again and again; at no point does the managed config name
+// the lock file while that file is missing.
+func TestStartLockReleaseRaceAcrossProcesses(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+	base := time.Now()
+	r.tickAt(base)
+	if line, file := r.lineAndFile(); !line || !file {
+		t.Fatalf("after the first tick: line=%v file=%v", line, file)
+	}
+	layout, err := json.Marshal(inst.Layout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := inst.Layout()
+	exists := func() bool { _, err := os.Stat(r.lock); return err == nil }
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var violations, ticks, rewrites atomic.Int32
+	wg.Add(2)
+	go func() { // the agent's guard; each round a minute later, so no retry waits
+		defer wg.Done()
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			if err := r.d.GuardTick(context.Background(), base.Add(time.Duration(i)*61*time.Second)); err != nil {
+				t.Errorf("GuardTick: %v", err)
+			}
+			ticks.Add(1)
+		}
+	}()
+	go func() { // the observer: a line while the file is missing before and after reading it
+		defer wg.Done()
+		was := true
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			before := exists()
+			line, err := mysql.StartLockLinePresent(l)
+			if err != nil {
+				continue
+			}
+			if line && !before && !exists() {
+				violations.Add(1)
+			}
+			if line && !was {
+				rewrites.Add(1)
+			}
+			was = line
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	outcomes := map[string]int{}
+	for range 20 {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestReleaseHelperProcess$", "-test.count=1")
+		cmd.Env = append(os.Environ(), releaseHelperEnv+"="+string(layout))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper process: %v\n%s", err, out)
+		}
+		switch {
+		case strings.Contains(string(out), "\nreleased\n"), strings.HasPrefix(string(out), "released\n"):
+			outcomes["released"]++
+		default:
+			outcomes["refused"]++
+		}
+	}
+	close(stop)
+	wg.Wait()
+	t.Logf("helper outcomes %v, guard ticks %d, line written again %d times", outcomes, ticks.Load(), rewrites.Load())
+	if n := violations.Load(); n != 0 {
+		t.Errorf("observed the init_file line without its file %d times", n)
+	}
+	if outcomes["released"] == 0 || rewrites.Load() == 0 {
+		t.Error("no release, or no rewrite by the guard: the race was not exercised")
 	}
 }

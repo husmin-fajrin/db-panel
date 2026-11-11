@@ -42,8 +42,89 @@ const printDefaultsTimeout = 30 * time.Second
 
 // managedConfigMu is held by every writer of the managed config in this
 // process (writeStartLock, releaseStartLock, configure), from reading the
-// content to writing it, so none overwrites another's change.
+// content to writing it, so none overwrites another's change. Across
+// processes (the agent and "dbpanel agent set-role master") the same
+// writers also hold ConfigLockFile: lockManagedConfig takes both.
 var managedConfigMu sync.Mutex
+
+// ConfigLockFile is the file flocked by every writer of the managed config
+// or the start lock file, in the directory of ConfigFile (symlinks
+// followed): the agent and the CLI find the same place from the MySQL
+// layout they both discover. It is never a .cnf (no option file reads
+// it), never in DataDir or IncludeDir, and never removed.
+const ConfigLockFile = "dbpanel-config.lock"
+
+// configLockWait bounds how long a writer waits for another process's
+// hold of ConfigLockFile (a context ending sooner ends it sooner).
+const configLockWait = 30 * time.Second
+
+// configLockPath is the ConfigLockFile of l.
+func configLockPath(l Layout) (string, error) {
+	if l.ConfigFile == "" {
+		return "", errors.New("file konfigurasi MySQL tidak diketahui; kunci konfigurasi tidak bisa ditempatkan")
+	}
+	p := l.ConfigFile
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	dir := filepath.Dir(p)
+	switch {
+	case !filepath.IsAbs(dir):
+		return "", fmt.Errorf("direktori konfigurasi MySQL %s bukan path absolut; kunci konfigurasi tidak bisa ditempatkan", dir)
+	case l.DataDir != "" && insideDir(dir, l.DataDir), l.IncludeDir != "" && insideDir(dir, l.IncludeDir):
+		return "", fmt.Errorf("direktori konfigurasi MySQL %s ada di dalam datadir atau direktori include; kunci konfigurasi tidak ditempatkan di sana", dir)
+	}
+	return filepath.Join(dir, ConfigLockFile), nil
+}
+
+// flockConfig takes an exclusive flock on path (created 0600 when
+// missing), waiting while another holder has it, until ctx ends or
+// configLockWait passes; it returns the function that releases it.
+func flockConfig(ctx context.Context, path string) (unlock func(), err error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("kunci konfigurasi %s: %w", path, err)
+	}
+	deadline := time.Now().Add(configLockWait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() { f.Close() }, nil // closing the last descriptor drops the flock
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			f.Close()
+			return nil, fmt.Errorf("kunci konfigurasi %s: %w", path, err)
+		}
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, fmt.Errorf("kunci konfigurasi %s masih dipegang proses lain setelah %s", path, configLockWait)
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, fmt.Errorf("kunci konfigurasi %s masih dipegang proses lain: %w", path, ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// lockManagedConfig takes managedConfigMu, then the flock on l's
+// ConfigLockFile, for one read-to-write of the managed config or of the
+// start lock file; it returns the function that releases both. Failing
+// to take the flock is the operation's error.
+func lockManagedConfig(ctx context.Context, l Layout) (unlock func(), err error) {
+	path, err := configLockPath(l)
+	if err != nil {
+		return nil, err
+	}
+	managedConfigMu.Lock()
+	unflock, err := flockConfig(ctx, path)
+	if err != nil {
+		managedConfigMu.Unlock()
+		return nil, err
+	}
+	return func() { unflock(); managedConfigMu.Unlock() }, nil
+}
 
 // StartLockPath is where the start lock file goes for l: IncludeDir, else
 // the directory of ConfigFile with symlinks followed. A place inside
@@ -268,8 +349,11 @@ func writeStartLock(ctx context.Context, h Host) error {
 	if err != nil {
 		return err
 	}
-	managedConfigMu.Lock()
-	defer managedConfigMu.Unlock()
+	unlock, err := lockManagedConfig(ctx, l)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := writeStartLockFile(path); err != nil {
 		return fmt.Errorf("berkas kunci start: %w", err)
 	}

@@ -316,11 +316,14 @@ func renderConfig(role string, serverID uint32, bindAll bool, bl binlogBlock) st
 // drops a lock not yet released (only releaseStartLock removes it). Each
 // such line stays only with its file: the file is written again first,
 // and when it cannot be, nothing is written. Reading and writing happen
-// under managedConfigMu.
+// under lockManagedConfig.
 func writeConfigBlock(ctx context.Context, h Host, render func() string) (string, error) {
-	managedConfigMu.Lock()
-	defer managedConfigMu.Unlock()
 	l := h.Layout()
+	unlock, err := lockManagedConfig(ctx, l)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	content, _, err := readManagedContent(l)
 	if err != nil {
 		return "", err
@@ -349,7 +352,7 @@ var writeConfigHook func(content string) error
 // writeValidConfigLocked writes content with Host.WriteConfig and has
 // mysqld validate the result. When validation fails the file is put back
 // as it was, so MySQL never starts from a config it refuses. The caller
-// holds managedConfigMu.
+// holds lockManagedConfig.
 func writeValidConfigLocked(ctx context.Context, h Host, content string) (string, error) {
 	path, _, err := managedConfigPath(h.Layout())
 	if err != nil {

@@ -374,3 +374,9 @@ func SetClearLock(f func(*Pins) error) (restore func()) {
 	clearLock = f
 	return func() { clearLock = old }
 }
+
+// The managed config's cross-process lock (startlock.go).
+var (
+	ConfigLockPath = configLockPath
+	FlockConfig    = flockConfig
+)

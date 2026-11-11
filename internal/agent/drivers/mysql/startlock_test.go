@@ -517,3 +517,61 @@ func fileOwner(fi os.FileInfo) (uid, gid int) {
 	}
 	return int(st.Uid), int(st.Gid)
 }
+
+// TestConfigLockExcludesAcrossOpens: the managed config's cross-process
+// lock is a flock, so two holders exclude each other even within one
+// process (each open is its own open file description); a release waiting
+// on it touches neither line nor file until it is free, and gives up with
+// the lock's error when its context ends first.
+func TestConfigLockExcludesAcrossOpens(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	h := inst.Host()
+	ctx := context.Background()
+	if err := mysql.WriteStartLock(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	lock, _ := mysql.StartLockPath(h.Layout())
+	path, err := mysql.ConfigLockPath(h.Layout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasSuffix(path, ".cnf") || strings.HasPrefix(path, inst.DataDir) {
+		t.Errorf("config lock path %s", path)
+	}
+	unlock, err := mysql.FlockConfig(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("config lock file: %v, %v; want mode 0600", fi, err)
+	}
+	short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	if u, err := mysql.FlockConfig(short, path); err == nil {
+		u()
+		t.Error("a second holder took the lock while the first held it")
+	}
+	if err := mysql.ReleaseStartLock(short, h); err == nil {
+		t.Error("release succeeded while another holder had the lock")
+	}
+	cancel()
+	if line, file := lineAndFile(t, h, lock); !line || !file {
+		t.Errorf("after a release refused by the lock: line=%v file=%v", line, file)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- mysql.ReleaseStartLock(ctx, h) }()
+	time.Sleep(300 * time.Millisecond)
+	if line, file := lineAndFile(t, h, lock); !line || !file {
+		t.Errorf("while the release waits for the lock: line=%v file=%v", line, file)
+	}
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("release once the lock is free: %v", err)
+	}
+	if line, file := lineAndFile(t, h, lock); line || file {
+		t.Errorf("after the release: line=%v file=%v", line, file)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("config lock file removed: %v", err)
+	}
+}

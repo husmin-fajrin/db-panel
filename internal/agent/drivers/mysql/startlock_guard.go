@@ -48,11 +48,16 @@ var (
 // first (the config validated by mysqld, put back otherwise), then the
 // files they named and the file at StartLockPath. With no line it only
 // removes the files. A file is removed only once the managed config, read
-// again, no longer names it. Idempotent.
+// again, no longer names it. All of it is one critical section under
+// lockManagedConfig (the agent's guard and the CLI exclude each other).
+// Idempotent.
 func releaseStartLock(ctx context.Context, h Host) error {
 	l := h.Layout()
-	managedConfigMu.Lock()
-	defer managedConfigMu.Unlock()
+	unlock, err := lockManagedConfig(ctx, l)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	content, _, err := readManagedContent(l)
 	if err != nil {
 		return err
@@ -70,8 +75,9 @@ func releaseStartLock(ctx context.Context, h Host) error {
 	if p, err := StartLockPath(l); err == nil && !slices.Contains(paths, p) {
 		paths = append(paths, p)
 	}
-	// Another process (the agent's guard while "dbpanel agent set-role"
-	// runs) may have written the line again meanwhile.
+	// Read again under the same lock: a writer that does not take it (an
+	// older agent while "dbpanel agent set-role" runs) may have written
+	// the line again meanwhile.
 	if content, _, err = readManagedContent(l); err != nil {
 		return err
 	}
