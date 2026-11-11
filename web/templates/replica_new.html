@@ -76,15 +76,7 @@
       </label>
     </div>
 
-    {{with .Rebuild}}{{if .AcceptLabel}}
-    <div role="alert" class="alert alert-error flex-col items-start gap-2">
-      <span>Aplikasi yang masih tersambung ke {{.Server.Name}} akan kehilangan semua yang ditulisnya ke sini.</span>
-      <label class="label text-base-content">
-        <input type="checkbox" class="checkbox checkbox-sm" name="accept_connections" value="1" required>
-        <span>{{.AcceptLabel}}</span>
-      </label>
-    </div>
-    {{end}}{{end}}
+    {{with .Rebuild}}{{template "accept-connections" .}}{{end}}
 
     <div class="card-actions justify-between">
       <a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Batal</a>

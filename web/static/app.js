@@ -286,7 +286,8 @@
     // Formulir "Lepas database" (x-ref="form") di halaman database replika:
     // tombolnya membuka dialog konfirmasi (x-ref="dialog") yang menyebut
     // database terpilih dan apakah datanya ikut dihapus. Tombol "Ya, lepas"
-    // di dialog mengirim formulir itu.
+    // di dialog mengirim formulir itu; bila datanya ikut dihapus, tombol itu
+    // meminta nama replika (data-server-name formulir) diketik.
     window.Alpine.data("removeDatabases", () => ({
       names: "",
       dropData: false,
@@ -309,6 +310,11 @@
       },
       get dropClass() {
         return { hidden: !this.dropData };
+      },
+      // Nama replika yang harus diketik di dialog konfirmasi, hanya bila
+      // datanya ikut dihapus (spec 5.6); kosong: tidak ada nama diminta.
+      get confirmName() {
+        return this.dropData ? this.$refs.form.dataset.serverName || "" : "";
       },
     }));
 

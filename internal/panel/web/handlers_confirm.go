@@ -53,6 +53,11 @@ const (
 // jobConfirmAction is the confirmation action of act on job jobID.
 func jobConfirmAction(act, jobID string) string { return act + ":" + jobID }
 
+// jobActions are the confirmActions issued only for one job, as
+// jobConfirmAction(action, jobID), with target kind auditJob and the job's
+// server as target id.
+var jobActions = []string{ActJobRetry, ActJobApprove}
+
 // confirmActions are the actions POST /confirm issues tokens for.
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,
 	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActPromote, ActCertUpload, ActCertRevert, ActCertNames,
@@ -66,13 +71,24 @@ var fileActions = []string{ActSalvageDownload, ActSalvageDelete}
 func salvageAction(act, name string) string { return act + ":" + name }
 
 // confirmAction checks an action posted to /confirm: one of
-// confirmActions, a fileActions one only with a valid salvage file name.
+// confirmActions, a fileActions one only with a valid salvage file name, a
+// jobActions one only with a well-formed job id (jobIDPattern; anything
+// else never reaches a lookup or a log line).
 func confirmAction(action string) bool {
 	base, name, perFile := strings.Cut(action, ":")
 	if slices.Contains(fileActions, base) {
 		return perFile && orchestrator.ValidSalvageName(name)
 	}
+	if slices.Contains(jobActions, base) {
+		return perFile && jobIDPattern.MatchString(name)
+	}
 	return !perFile && slices.Contains(confirmActions, action)
+}
+
+// isJobAction reports whether action is a jobActions one (for one job).
+func isJobAction(action string) bool {
+	base, _, _ := strings.Cut(action, ":")
+	return slices.Contains(jobActions, base)
 }
 
 // settingsActions are the actions bound to the settings (target id 0)
@@ -80,7 +96,7 @@ func confirmAction(action string) bool {
 var settingsActions = []string{ActCertUpload, ActCertRevert, ActCertNames}
 
 // confirmKinds are the target kinds a token can be bound to.
-var confirmKinds = []string{auditServer, auditMaster, auditReplica, auditSettings}
+var confirmKinds = []string{auditServer, auditMaster, auditReplica, auditSettings, auditJob}
 
 const (
 	// confirmTTL is how long a token can be used.
@@ -128,7 +144,8 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PostFormValue("target_id"), 10, 64)
 	settings := slices.Contains(settingsActions, action)
 	if err != nil || !confirmAction(action) || !slices.Contains(confirmKinds, kind) ||
-		settings != (kind == auditSettings) || (settings && id != 0) || (!settings && id <= 0) {
+		settings != (kind == auditSettings) || isJobAction(action) != (kind == auditJob) ||
+		(settings && id != 0) || (!settings && id <= 0) {
 		writeJSONError(w, http.StatusBadRequest, msgConfirmBadInput)
 		return
 	}
@@ -231,8 +248,13 @@ func (a *app) requireConfirmToken(w http.ResponseWriter, r *http.Request, token,
 // confirmRefused shows msgConfirmInvalid with 403 on the page the
 // action's button is on.
 func (a *app) confirmRefused(w http.ResponseWriter, r *http.Request, action, targetKind string, targetID int64) {
-	if targetKind == auditSettings {
+	switch targetKind {
+	case auditSettings:
 		a.renderStoredSettings(w, r, http.StatusForbidden, msgConfirmInvalid)
+		return
+	case auditJob:
+		// The buttons are on the job page of {id}.
+		a.renderJob(w, r, http.StatusForbidden, msgConfirmInvalid)
 		return
 	}
 	srv, err := a.Store.GetServer(targetID)

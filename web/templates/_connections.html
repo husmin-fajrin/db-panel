@@ -21,7 +21,7 @@
 {{end}}
 {{if .Indistinct}}<p class="help mt-1">tidak bisa dibedakan dari agent: performance_schema mati, jadi semua sesi akun admin dari server ini ikut terhitung.</p>{{end}}
 {{if .Uncertain}}<p class="text-warning-text mt-1"><strong>tidak bisa dipastikan</strong>: {{.Uncertain}}</p>
-{{else if not .Rows}}<p class="text-success-text">{{.Empty}}</p>{{end}}
+{{else if .CompleteAndEmpty}}<p class="text-success-text">{{.Empty}}</p>{{end}}
 {{end}}
 {{if not .TakenAt.IsZero}}<p class="help mt-1">Dibaca <span class="mono">{{fmtDateTime .TakenAt}}</span></p>{{end}}
 {{end}}

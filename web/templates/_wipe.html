@@ -1,0 +1,38 @@
+{{define "wipe-groups"}}
+{{/* Database yang dibuang, dikelompokkan seperti dialog Resync ulang
+     (wipeGroups): "ada di master" disalin ulang; "hanya di replika"
+     hilang permanen, masing-masing dengan centang wipe_only[] yang wajib.
+     Dipakai dialog Resync ulang dan dialog Ulangi pekerjaan. */}}
+{{if .OnMaster}}
+<fieldset class="flex flex-col gap-1">
+  <legend class="font-semibold">ada di master, disalin ulang</legend>
+  <ul class="list-disc ml-6">
+    {{range .OnMaster}}<li>{{.}}<input type="hidden" name="wipe_list[]" value="{{.}}"></li>{{end}}
+  </ul>
+</fieldset>
+{{end}}
+{{if .ReplicaOnly}}
+<fieldset class="flex flex-col gap-1 border border-error rounded p-2">
+  <legend class="font-semibold text-error">hanya di replika, isinya hilang permanen</legend>
+  <p>Master tidak punya database ini, jadi isinya tidak bisa disalin ulang. Centang setiap database untuk mengakui bahwa isinya hilang permanen.</p>
+  {{range .ReplicaOnly}}
+  <label class="label justify-start gap-2"><input type="hidden" name="wipe_list[]" value="{{.}}"><input type="checkbox" name="wipe_only[]" value="{{.}}" class="checkbox checkbox-sm" required> <span>{{.}}</span></label>
+  {{end}}
+</fieldset>
+{{end}}
+{{end}}
+
+{{define "accept-connections"}}
+{{/* Pengakuan koneksi ke master lama (spec 5.5): .Server dan .AcceptLabel
+     ("" bila daftar koneksi lengkap dan kosong; tidak ada yang ditampilkan).
+     Dipakai form Bangun ulang sebagai replika dan dialog Ulangi-nya. */}}
+{{if .AcceptLabel}}
+<div role="alert" class="alert alert-error flex-col items-start gap-2">
+  <span>Aplikasi yang masih tersambung ke {{.Server.Name}} akan kehilangan semua yang ditulisnya ke sini.</span>
+  <label class="label text-base-content">
+    <input type="checkbox" class="checkbox checkbox-sm" name="accept_connections" value="1" required>
+    <span>{{.AcceptLabel}}</span>
+  </label>
+</div>
+{{end}}
+{{end}}

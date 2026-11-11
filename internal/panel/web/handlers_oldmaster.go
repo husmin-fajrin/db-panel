@@ -99,12 +99,29 @@ type connectionsView struct {
 	// from other sessions of its account.
 	Uncertain  string
 	Indistinct bool
+	// clear: orchestrator.ConnectionsClear of the answer read.
+	clear bool
 }
 
 // CompleteAndEmpty: the connections were read, the list is complete and
-// there is none. The only state that may say "no connections".
+// there is none (orchestrator.ConnectionsClear, the one definition the
+// form, its handler and the orchestrator share). The only state that may
+// say "no connections".
 func (v connectionsView) CompleteAndEmpty() bool {
-	return v.Unreadable == "" && v.Uncertain == "" && v.Total == 0
+	return v.clear && v.Unreadable == "" && v.Uncertain == ""
+}
+
+// acceptLabel is the acknowledgement the rebuild of the old master (and its
+// retry) asks for with conns, its connections: "" only for a complete,
+// empty list.
+func acceptLabel(conns connectionsView) string {
+	switch {
+	case conns.CompleteAndEmpty():
+		return ""
+	case conns.NotKnown():
+		return "Saya paham koneksi ke server ini tidak bisa dipastikan dan tulisan yang masih masuk hilang"
+	}
+	return fmt.Sprintf("Saya paham %d koneksi masih ada dan tulisannya hilang", conns.Total)
 }
 
 // NotKnown: the list cannot be trusted to be complete (it could not be
@@ -138,6 +155,7 @@ func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsVi
 		return v
 	}
 	v.Rows, v.TakenAt, v.Indistinct = res.Rows, res.TakenAt, res.AgentIndistinct
+	v.clear = orchestrator.ConnectionsClear(res)
 	for _, row := range res.Rows {
 		v.Total += row.Count
 		if row.AdminAccount {
@@ -699,14 +717,7 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) 
 				"aplikasi sudah memakai master baru.", srv.Name, strings.TrimSuffix(conns.Uncertain, ".")))
 		}
 	}
-	// Anything but a complete, empty list needs the acknowledgement.
-	switch {
-	case conns.CompleteAndEmpty():
-	case conns.NotKnown():
-		info.AcceptLabel = "Saya paham koneksi ke server ini tidak bisa dipastikan dan tulisan yang masih masuk hilang"
-	default:
-		info.AcceptLabel = fmt.Sprintf("Saya paham %d koneksi masih ada dan tulisannya hilang", conns.Total)
-	}
+	info.AcceptLabel = acceptLabel(conns)
 	prom, err := a.Store.PromotionByOldMaster(id)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, err

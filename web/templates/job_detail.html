@@ -49,21 +49,26 @@
               <p class="py-2 whitespace-pre-line">{{.Approval.Impact}}</p>
               <div class="modal-action">
                 <form method="dialog"><button class="btn">Batal</button></form>
-                <form method="post" action="/jobs/{{.Job.ID}}/approve"><button type="submit" class="btn btn-error">{{.Approval.Label}}</button></form>
+                <form method="post" action="/jobs/{{.Job.ID}}/approve"><button type="submit" class="btn btn-error"{{if .DropsData}} data-confirm-action="job_approve:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.Approval.Label}}: {{.Server.Name}}."{{end}}>{{.Approval.Label}}</button></form>
               </div>
             </div>
             <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
           </dialog>
         </div>
         {{else}}
-        <form method="post" action="/jobs/{{.Job.ID}}/approve"><button type="submit" class="btn btn-primary">{{.Approval.Label}}</button></form>
+        <form method="post" action="/jobs/{{.Job.ID}}/approve"><button type="submit" class="btn btn-primary"{{if .DropsData}} data-confirm-action="job_approve:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.Approval.Label}}: {{.Server.Name}}."{{end}}>{{.Approval.Label}}</button></form>
         {{end}}
         {{with .Approval.Recheck}}
         <form method="post" action="/jobs/{{$.Job.ID}}/retry"><button type="submit" class="btn btn-primary">{{.}}</button></form>
         {{end}}
         {{end}}
         {{if .CanRetry}}
+        {{if .DropsData}}
+        {{/* A job that drops data: the fresh lists first, then the dialog. */}}
+        <form method="post" action="/jobs/{{.Job.ID}}/retry/prepare"><button type="submit" class="btn btn-primary">Ulangi dari tahap ini</button></form>
+        {{else}}
         <form method="post" action="/jobs/{{.Job.ID}}/retry"><button type="submit" class="btn btn-primary">Ulangi dari tahap ini</button></form>
+        {{end}}
         {{end}}
         {{if .CanCancel}}
         <form method="post" action="/jobs/{{.Job.ID}}/cancel"><button type="submit" class="btn btn-error btn-outline">Batalkan</button></form>
@@ -84,6 +89,28 @@
     </div>
   </section>
 </div>
+
+{{if and .CanRetry .DropsData}}
+<dialog id="modal-ulangi" class="modal" x-data="openDialog" data-open="{{.OpenRetry}}">
+  <form method="post" action="/jobs/{{.Job.ID}}/retry" class="modal-box flex flex-col gap-2">
+    <h2>Ulangi {{kindLabel .Job.Kind}} di {{.Server.Name}}?</h2>
+    <p>Pekerjaan ini membuang data di {{.Server.Name}}. Sebelum ada yang dibuang, panel memeriksa server itu lagi.</p>
+    {{with .Retry}}
+    {{if or .Wipe.OnMaster .Wipe.ReplicaOnly}}
+    <p>Database berikut DIBUANG dari {{.Server.Name}} lalu disalin ulang dari master:</p>
+    {{template "wipe-groups" .Wipe}}
+    {{end}}
+    {{template "accept-connections" .}}
+    {{end}}
+    <!-- The confirming button comes first, so Enter uses it. -->
+    <div class="modal-action flex-row-reverse justify-start">
+      <button type="submit" class="btn btn-error" data-confirm-action="job_retry:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="Ulangi {{kindLabel .Job.Kind}} di {{.Server.Name}}: data di server itu dibuang lagi.">Ya, ulangi</button>
+      <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
+    </div>
+  </form>
+  <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
+</dialog>
+{{end}}
 
 <section class="card bg-base-100 mb-4">
   <div class="card-body p-6">

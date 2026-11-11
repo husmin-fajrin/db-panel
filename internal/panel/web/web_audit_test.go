@@ -94,7 +94,7 @@ func TestEveryPostWritesAudit(t *testing.T) {
 			"create_replica", "replica", 3},
 		// Refused (already followed): audited with the refusal as outcome.
 		{"/replicas/2/databases/add", url.Values{"databases": {"gudang"}}, "add_databases", "replica", 2},
-		{"/replicas/2/databases/remove", url.Values{"databases": {"gudang"}, "drop_data": {"1"}},
+		{"/replicas/2/databases/remove", url.Values{"databases": {"gudang"}, "drop_data": {"1"}, "confirm_name": {"db-replika"}},
 			"remove_databases", "replica", 2},
 		{"/jobs/" + jobID + "/approve", noForm, "job_approve", "job", 2},
 		{"/jobs/" + jobID + "/retry", noForm, "job_retry", "job", 2},
@@ -633,7 +633,8 @@ func TestOutcomeOfRedactsAgentErrors(t *testing.T) {
 // auditActionPatterns find the action strings the panel's code writes to
 // the audit log through helpers that pass their action on to audit.
 var auditActionPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\.(?:replicaControl|jobAction|startOldMasterJob|changeReplicaDatabases)\(\s*\w+,\s*\w+,\s*"([a-z_]+)"`),
+	regexp.MustCompile(`\.(?:replicaControl|confirmedJobAction|startOldMasterJob|changeReplicaDatabases)\(\s*\w+,\s*\w+,\s*"([a-z_]+)"`),
+	regexp.MustCompile(`\.jobAction\(\s*\w+,\s*\w+,\s*\w+,\s*"([a-z_]+)"`),
 }
 
 // auditCallStart finds every place that writes to the audit log: a call
@@ -659,7 +660,7 @@ var (
 // whose callers auditActionPatterns cover (file:variable).
 var auditVariableActionsKnown = map[string]bool{
 	"audit.go:action":              true, // audit → auditAs → AuditEntry
-	"handlers_jobs.go:name":        true, // jobAction
+	"handlers_jobs.go:name":        true, // jobAction, confirmedJobAction
 	"handlers_controls.go:action":  true, // replicaControl
 	"handlers_mysql.go:action":     true, // changeReplicaDatabases
 	"handlers_oldmaster.go:action": true, // startOldMasterJob

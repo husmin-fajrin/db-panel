@@ -451,7 +451,7 @@ func TestPrepareMasterAgainNeedsTokenOnlyWithTopology(t *testing.T) {
 func TestRemoveDatabasesNeedsToken(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	c := e.cookie()
-	form := url.Values{"databases": {"gudang"}, "drop_data": {"1"}}
+	form := url.Values{"databases": {"gudang"}, "drop_data": {"1"}, "confirm_name": {"db-replika"}}
 	rec := e.do("POST", "/replicas/2/databases/remove", form, c)
 	wantCode(t, rec, http.StatusForbidden)
 	wantBody(t, rec, msgConfirmInvalid, "Lepas database")

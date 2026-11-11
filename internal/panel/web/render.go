@@ -170,7 +170,7 @@ var templateFuncs = template.FuncMap{
 // own by the fragment endpoint.
 var partials = []string{"templates/layout.html", "templates/_ui.html", "templates/_gauge.html",
 	"templates/_chart.html", "templates/_status.html", "templates/_timeline.html",
-	"templates/_confirm.html", "templates/_connections.html"}
+	"templates/_confirm.html", "templates/_connections.html", "templates/_wipe.html"}
 
 // NewRenderer parses the layout and the shared partials together with each
 // page into its own template set, plus one set of the partials alone for

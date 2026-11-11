@@ -942,8 +942,8 @@ func TestReplicaDatabasesPageListsAndPosts(t *testing.T) {
 		{"/replicas/2/databases/add", url.Values{"databases": {"x;DROP"}}, "Database x;DROP tidak ada di master"},
 		{"/replicas/2/databases/remove", url.Values{}, "Pilih minimal satu database."},
 		{"/replicas/2/databases/remove", url.Values{"databases": {"arsip"}}, "Database arsip tidak diikuti replika ini"},
-		{"/replicas/2/databases/remove", url.Values{"databases": {"toko", "gudang"}, "drop_data": {"1"}},
-			"Lepas semua database tidak didukung; hapus replika"},
+		{"/replicas/2/databases/remove", url.Values{"databases": {"toko", "gudang"}, "drop_data": {"1"},
+			"confirm_name": {"db-replika"}}, "Lepas semua database tidak didukung; hapus replika"},
 	}
 	for _, b := range bad {
 		rec := post(b.path, b.form)
@@ -955,7 +955,7 @@ func TestReplicaDatabasesPageListsAndPosts(t *testing.T) {
 	rec = post("/replicas/2/databases/add", url.Values{"databases": {"arsip"}})
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/jobs/"+f.nextID)
-	rec = post("/replicas/2/databases/remove", url.Values{"databases": {"gudang"}, "drop_data": {"1"}})
+	rec = post("/replicas/2/databases/remove", url.Values{"databases": {"gudang"}, "drop_data": {"1"}, "confirm_name": {"db-replika"}})
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/jobs/"+f.nextID)
 	rec = post("/replicas/2/databases/remove", url.Values{"databases": {"toko"}})

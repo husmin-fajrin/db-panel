@@ -689,6 +689,10 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 			fail(msgRebuildAccept)
 			return
 		}
+		// Only an acknowledgement the form asked for reaches the
+		// orchestrator; otherwise it reads the connections again itself
+		// (ruling 14).
+		acceptConnections = acceptConnections && p.Rebuild.AcceptLabel != ""
 	}
 	// Only a server the form offers (a stale form or a crafted post may
 	// name another one).
@@ -1009,6 +1013,10 @@ func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 	}
 	dropData := r.PostFormValue("drop_data") != ""
 	a.changeReplicaDatabases(w, r, "remove_databases", map[string]any{"drop_data": dropData}, func(p replicaDatabasesPage, selected []string) (string, string) {
+		// Dropping the data also needs the replica's name typed (spec 5.6).
+		if dropData && !typedName(r, p.Server) {
+			return "", msgNameMismatch
+		}
 		for _, d := range selected {
 			if !slices.Contains(p.Replica.Databases, d) {
 				return "", "Database " + d + " tidak diikuti replika ini"

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 const (
@@ -137,6 +139,41 @@ type jobPage struct {
 	Approval   approval
 	Superseded string
 	StatusJSON string
+	// DropsData: approving or retrying the job drops data, behind a
+	// job_approve or job_retry token (spec 5.6). "Ulangi" then goes
+	// through /retry/prepare and opens the retry dialog (OpenRetry, after
+	// ?buka=ulangi), filled with Retry.
+	DropsData bool
+	OpenRetry bool
+	Retry     *retryView
+}
+
+// retryView is what the retry dialog of a job that drops data shows: the
+// job's wipe list grouped on the master's inventory (as Resync ulang shows
+// it), and the acknowledgement of the old master's connections a rebuild
+// needs ("" when its list is complete and empty).
+type retryView struct {
+	Server      store.Server
+	Wipe        wipeGroups
+	AcceptLabel string
+}
+
+// jobParams are the fields of a job's params the job page reads.
+type jobParams struct {
+	MasterServerID   int64    `json:"master_server_id"`
+	Databases        []string `json:"databases"`
+	Change           []string `json:"change_databases"`
+	DropData         bool     `json:"drop_data"`
+	WaitReason       string   `json:"wait_reason"`
+	WipeList         []string `json:"wipe_list"`
+	RebuildOldMaster bool     `json:"rebuild_old_master"`
+}
+
+// paramsOf reads job's params; unreadable params read as none.
+func paramsOf(job store.Job) jobParams {
+	var p jobParams
+	_ = json.Unmarshal([]byte(job.ParamsJSON), &p)
+	return p
 }
 
 // approval is what the job page offers for the step that waits.
@@ -242,14 +279,11 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 			p.Waiting = &steps[i]
 		}
 	}
-	var state struct {
-		WaitReason string `json:"wait_reason"`
-	}
-	_ = json.Unmarshal([]byte(job.ParamsJSON), &state)
+	params := paramsOf(job)
 	switch job.Status {
 	case store.JobWaiting:
 		p.CanApprove, p.CanCancel = true, true
-		p.Approval = approvalFor(state.WaitReason, srv)
+		p.Approval = approvalFor(params.WaitReason, srv)
 	case store.JobFailed, store.JobPartial:
 		p.CanRetry = true
 	case store.JobQueued, store.JobRunning:
@@ -262,22 +296,31 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 			p.CanApprove, p.CanRetry = false, false
 		}
 	}
+	if p.CanApprove || p.CanRetry {
+		drops, err := a.Orchestrator.DropsData(job.ID)
+		if err != nil {
+			// The orchestrator refuses it unconfirmed anyway: ask for the token.
+			a.Logger.Warn("drops data check", "job", job.ID, "err", logErr(err))
+		}
+		p.DropsData = drops || err != nil
+	}
+	if p.CanRetry && p.DropsData && r.URL.Query().Get("buka") == "ulangi" {
+		p.OpenRetry = true
+		v, err := a.retryView(r, srv, params)
+		if err != nil {
+			a.internalError(w, "retry dialog", err)
+			return
+		}
+		p.Retry = v
+	}
 	switch job.Kind {
 	case orchestrator.KindCreateReplica, orchestrator.KindAddDatabases, orchestrator.KindRemoveDatabases:
-		var params struct {
-			MasterServerID int64    `json:"master_server_id"`
-			Databases      []string `json:"databases"`
-			Change         []string `json:"change_databases"`
-			DropData       bool     `json:"drop_data"`
+		if job.Kind == orchestrator.KindCreateReplica {
+			p.Databases = params.Databases
 		}
-		if err := json.Unmarshal([]byte(job.ParamsJSON), &params); err == nil {
-			if job.Kind == orchestrator.KindCreateReplica {
-				p.Databases = params.Databases
-			}
-			p.Changed, p.DropData = params.Change, params.DropData
-			if m, err := a.Store.GetServer(params.MasterServerID); err == nil {
-				p.Master = &m
-			}
+		p.Changed, p.DropData = params.Change, params.DropData
+		if m, err := a.Store.GetServer(params.MasterServerID); err == nil {
+			p.Master = &m
 		}
 	}
 	for len(p.Log) < jobLogMaxLines {
@@ -353,39 +396,169 @@ func (a *app) jobFromPath(w http.ResponseWriter, r *http.Request) (store.Job, []
 }
 
 func (a *app) approveJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "job_approve", func(id string) error { return a.Orchestrator.Approve(id, orchestrator.JobAck{}) })
+	a.confirmedJobAction(w, r, "job_approve", a.Orchestrator.Approve)
 }
 
 func (a *app) retryJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "job_retry", func(id string) error { return a.Orchestrator.Retry(id, orchestrator.JobAck{}) })
+	a.confirmedJobAction(w, r, "job_retry", a.Orchestrator.Retry)
 }
 
-// prepareRetry: stub.
+func (a *app) cancelJob(w http.ResponseWriter, r *http.Request) {
+	job, _, ok := a.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	a.jobAction(w, r, job, "job_cancel", a.Orchestrator.Cancel)
+}
+
+const msgRetryRefresh = "Daftar database tidak bisa disegarkan, jadi dialog Ulangi tidak dibuka: "
+
+// confirmedJobAction is Setujui (name "job_approve", ActJobApprove) or
+// Ulangi ("job_retry", ActJobRetry) of the job of {id}; name is also the
+// audit action. A job that drops data (spec 5.6) needs a fresh token for
+// name on that job and its server, then, for a retry, the
+// acknowledgements of its dialog: every database of the job's wipe list
+// that the master lacks ticked in wipe_only[] (only names of that list),
+// and accept_connections for a rebuild whose connections remain (the
+// orchestrator reads them again). A refusal leaves the job as it was: 403
+// for the token, 400 for an acknowledgement, on the job page.
+func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name string, do func(string, orchestrator.JobAck) error) {
+	job, _, ok := a.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	drops, err := a.Orchestrator.DropsData(job.ID)
+	if err != nil {
+		a.internalError(w, "drops data check", err)
+		return
+	}
+	var ack orchestrator.JobAck
+	if drops {
+		if !a.requireConfirm(w, r, jobConfirmAction(name, job.ID), auditJob, job.ServerID) {
+			return
+		}
+		ack.Confirmed = true
+		if name == ActJobRetry {
+			params := paramsOf(job)
+			ack.WipeOnly = r.PostForm["wipe_only[]"]
+			ack.AcceptConnections = params.RebuildOldMaster && r.PostFormValue("accept_connections") == "1"
+			refused, err := a.retryAckRefused(params, ack.WipeOnly)
+			if err != nil {
+				a.internalError(w, "get inventory", err)
+				return
+			}
+			if refused != "" {
+				a.audit(r, name, auditJob, job.ServerID, map[string]any{"job_id": job.ID, "kind": job.Kind,
+					"wipe_only": ack.WipeOnly}, refused)
+				a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", refused)
+				a.renderJob(w, r, http.StatusBadRequest, refused)
+				return
+			}
+		}
+	}
+	a.jobAction(w, r, job, name, func(id string) error { return do(id, ack) })
+}
+
+// retryAckRefused checks the wipe_only[] of a retry against the job's wipe
+// list and the master's stored inventory (which /retry/prepare refreshed
+// for the dialog): each name once and on the list, and every listed name
+// the master lacks among them. The orchestrator checks the list against a
+// fresh read of the master again before anything is dropped.
+func (a *app) retryAckRefused(params jobParams, only []string) (string, error) {
+	seen := make(map[string]bool, len(only))
+	for _, d := range only {
+		if seen[d] || !slices.Contains(params.WipeList, d) {
+			return msgWipeList, nil
+		}
+		seen[d] = true
+	}
+	if len(params.WipeList) == 0 {
+		return "", nil
+	}
+	g, err := a.retryWipeGroups(params)
+	if err != nil {
+		return "", err
+	}
+	for _, d := range g.ReplicaOnly {
+		if !seen[d] {
+			return msgWipeList, nil
+		}
+	}
+	return "", nil
+}
+
+// retryWipeGroups groups the job's wipe list on the master's stored
+// inventory, as the Resync dialog groups the replica's databases.
+func (a *app) retryWipeGroups(params jobParams) (wipeGroups, error) {
+	masterInv, err := a.inventory(params.MasterServerID)
+	if err != nil {
+		return wipeGroups{}, err
+	}
+	list := make([]proto.DatabaseInfo, 0, len(params.WipeList))
+	for _, d := range params.WipeList {
+		list = append(list, proto.DatabaseInfo{Name: d})
+	}
+	return groupWipe(list, masterInv.Databases), nil
+}
+
+// retryView fills the retry dialog of a job on srv with params.
+func (a *app) retryView(r *http.Request, srv store.Server, params jobParams) (*retryView, error) {
+	v := &retryView{Server: srv}
+	if len(params.WipeList) > 0 {
+		g, err := a.retryWipeGroups(params)
+		if err != nil {
+			return nil, err
+		}
+		v.Wipe = g
+	}
+	if params.RebuildOldMaster {
+		v.AcceptLabel = acceptLabel(a.connectionsOf(r.Context(), srv))
+	}
+	return v, nil
+}
+
+// prepareRetry reads the databases of the job's server and of its master
+// again when the job drops a list of databases (the retry dialog groups
+// them on fresh lists, spec 5.6) and returns to the job page with the
+// retry dialog open. A failed read is shown there and opens nothing.
 func (a *app) prepareRetry(w http.ResponseWriter, r *http.Request) {
 	job, _, ok := a.jobFromPath(w, r)
 	if !ok {
 		return
 	}
+	if params := paramsOf(job); len(params.WipeList) > 0 {
+		_, err := a.Orchestrator.RefreshInventory(r.Context(), job.ServerID)
+		if err == nil {
+			_, err = a.Orchestrator.RefreshInventory(r.Context(), params.MasterServerID)
+		}
+		a.audit(r, "mysql_refresh", auditJob, job.ServerID, map[string]any{"reason": "retry", "job_id": job.ID}, outcomeOf(err))
+		if err != nil {
+			a.Logger.Warn("refresh inventories for retry", "job", job.ID, "err", logErr(err))
+			a.renderJob(w, r, http.StatusBadRequest, msgRetryRefresh+err.Error())
+			return
+		}
+	}
 	http.Redirect(w, r, jobURL(job.ID)+"?buka=ulangi", http.StatusSeeOther)
 }
 
-func (a *app) cancelJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "job_cancel", a.Orchestrator.Cancel)
-}
-
-// jobAction runs do on the job of {id} and returns to its page; a refusal
-// (the job is not in a state that allows it) is shown there with 409. name
-// is the audit action; the entry's target is the job's server.
-func (a *app) jobAction(w http.ResponseWriter, r *http.Request, name string, do func(jobID string) error) {
-	job, _, ok := a.jobFromPath(w, r)
-	if !ok {
-		return
-	}
+// jobAction runs do on job and returns to its page; a refusal is shown
+// there: 400 for connections the rebuild's retry must acknowledge, 403 for
+// a job that needs a confirmation, 409 otherwise (the job is not in a state
+// that allows it). name is the audit action; the entry's target is the
+// job's server.
+func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, name string, do func(jobID string) error) {
 	err := do(job.ID)
 	a.audit(r, name, auditJob, job.ServerID, map[string]any{"job_id": job.ID, "kind": job.Kind}, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", logErr(err))
-		a.renderJob(w, r, http.StatusConflict, err.Error())
+		status := http.StatusConflict
+		switch {
+		case errors.Is(err, orchestrator.ErrConnectionsRemain):
+			status = http.StatusBadRequest
+		case errors.Is(err, orchestrator.ErrJobNeedsConfirm):
+			status = http.StatusForbidden
+		}
+		a.renderJob(w, r, status, err.Error())
 		return
 	}
 	a.Logger.Info("job action", "action", name, "job", job.ID, "by", auth.UsernameFrom(r.Context()))
