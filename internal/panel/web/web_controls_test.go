@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
@@ -479,5 +480,69 @@ func TestControlRefusalLogCensored(t *testing.T) {
 	out := logs.String()
 	if !strings.Contains(out, "replica control refused") || strings.Contains(out, "Budi") {
 		t.Errorf("panel log:\n%s", out)
+	}
+}
+
+// snoozeKindLabels are the labels the snooze dialog lists: the kinds a
+// snooze never silences (spec 5.7), in AllKinds order.
+var snoozeKindLabels = []string{
+	"Kunci replika terlepas", "Master diduga tumbang", "Disk kritis", "Promote selesai sebagian",
+	"Batas waktu kunci promote", "Master lama dikarantina", "Master tidak dipin",
+	"Master lama belum terjamin terkunci saat menyala", "Master lama sempat bisa ditulis saat menyala",
+	"Kunci start master lama tidak dipakai MySQL", "MySQL master lama gagal menyala karena kunci start",
+	"Kunci promote master dipertahankan",
+}
+
+// TestSnoozeDialogListsKinds: the pages with a Jangan ganggu button carry
+// the confirmation dialog with every kind that is never silenced; the
+// button opens it (Alpine component, no inline script) and the form stays
+// a plain POST with no per-command token. Cancelling a snooze opens no
+// dialog.
+func TestSnoozeDialogListsKinds(t *testing.T) {
+	e, _, _ := controlEnv(t)
+	c := e.cookie()
+	if got := notify.UnsnoozableKinds(); len(got) != len(snoozeKindLabels) {
+		t.Fatalf("UnsnoozableKinds has %d kinds, the test lists %d labels", len(got), len(snoozeKindLabels))
+	}
+	until := time.Now().Add(2 * time.Hour)
+	if err := e.st.SetSnooze(2, &until, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []struct{ path, server string }{
+		{"/servers/2", "db-replika"}, {"/replicas/2", "db-replika"}, {"/masters/1", "db-master"},
+	} {
+		rec := e.do("GET", p.path, nil, c)
+		wantCode(t, rec, http.StatusOK)
+		body := rec.Body.String()
+		wantBody(t, rec,
+			`x-data="confirmSnooze"`, `<dialog class="modal" x-ref="dialog">`,
+			"Jangan ganggu "+p.server+"?",
+			"Pemberitahuan Telegram untuk server ini ditunda selama waktu yang dipilih, kecuali peringatan berikut yang tetap dikirim sekali saat muncul dan saat pulih:",
+			"Saat senyap berakhir, panel mengirim ringkasan.")
+		form := between(body, `x-data="confirmSnooze"`, "</form>")
+		for _, l := range snoozeKindLabels {
+			if !strings.Contains(form, "<li>"+l+"</li>") {
+				t.Errorf("%s: the dialog lacks %q", p.path, l)
+			}
+		}
+		if !strings.Contains(form, `@click="open"`) || !strings.Contains(form, `<button type="submit" class="btn btn-primary">Jangan ganggu</button>`) {
+			t.Errorf("%s: no button that opens the dialog, or no submit in it:\n%s", p.path, form)
+		}
+		if strings.Contains(form, "confirm_token") || strings.Contains(form, "confirm_name") || strings.Contains(form, "onclick") {
+			t.Errorf("%s: the snooze form carries a token or an inline handler:\n%s", p.path, form)
+		}
+		if !strings.Contains(body, `action="/servers/`+strings.TrimPrefix(p.path[strings.LastIndex(p.path, "/"):], "/")+`/snooze"`) {
+			t.Errorf("%s: the snooze form does not post to /servers/<id>/snooze", p.path)
+		}
+	}
+
+	// The cancel button of a running snooze is a plain form: no dialog.
+	body := e.do("GET", "/servers/2", nil, c).Body.String()
+	cancel := between(body, `<input type="hidden" name="hours" value="0">`, "</form>")
+	if !strings.Contains(cancel, "Batalkan") || strings.Contains(cancel, "dialog") || strings.Contains(cancel, "x-data") {
+		t.Errorf("cancel form = %q", cancel)
+	}
+	if n := strings.Count(strings.Split(body, `value="0"`)[0], `x-data="confirmSnooze"`); n != 1 {
+		t.Errorf("confirmSnooze components before the cancel form = %d, want 1", n)
 	}
 }

@@ -30,11 +30,12 @@ var snoozeHours = []int{0, 1, 2, 8, 24}
 // server, master and replica pages.
 type serverControls struct {
 	ServerID    int64
+	ServerName  string
 	SnoozeUntil *time.Time // nil when no snooze is active
 }
 
 func (a *app) controls(srv store.Server) serverControls {
-	c := serverControls{ServerID: srv.ID}
+	c := serverControls{ServerID: srv.ID, ServerName: srv.Name}
 	if srv.SnoozeUntil != nil && srv.SnoozeUntil.After(a.Now()) {
 		c.SnoozeUntil = srv.SnoozeUntil
 	}

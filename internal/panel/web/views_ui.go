@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 )
 
 // Shared components (design spec 5.5): the data of the templates in
@@ -300,4 +302,23 @@ var uiFuncs = map[string]any{
 	"badgeOf":      func(tone, text string) Badge { return Badge{Tone: tone, Text: text} },
 	"cardHead":     func(title, action, href string) CardHead { return CardHead{Title: title, Action: action, Href: href} },
 	"emptyOf":      func(text, action, href string) Empty { return Empty{Text: text, Action: action, Href: href} },
+	"snoozeOf":     snoozeOf,
+}
+
+// snoozeForm is what the "snooze-form" component shows: the select with
+// its label, and the dialog that names the alert kinds a snooze never
+// silences.
+type snoozeForm struct {
+	ServerID   int64
+	ServerName string
+	Aria       string   // label of the duration select
+	Kinds      []string // labels of notify.UnsnoozableKinds
+}
+
+func snoozeOf(serverID int64, serverName, aria string) snoozeForm {
+	f := snoozeForm{ServerID: serverID, ServerName: serverName, Aria: aria}
+	for _, k := range notify.UnsnoozableKinds() {
+		f.Kinds = append(f.Kinds, alertKindLabel(k))
+	}
+	return f
 }

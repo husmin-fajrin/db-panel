@@ -124,18 +124,40 @@
 {{end}}
 {{end}}
 
-{{define "server-controls"}}
-<div class="flex flex-wrap items-center gap-2">
-  <form method="post" action="/servers/{{.ServerID}}/check"><button type="submit" class="btn btn-sm">Periksa sekarang</button></form>
-  <form method="post" action="/servers/{{.ServerID}}/snooze" class="join">
-    <select name="hours" class="select select-sm join-item w-24 pe-8" aria-label="Lama Jangan ganggu">
+{{define "snooze-form"}}
+<form method="post" action="/servers/{{.ServerID}}/snooze" x-data="confirmSnooze">
+  <div class="join">
+    <select name="hours" class="select select-sm join-item w-24 pe-8" aria-label="{{.Aria}}">
       <option value="1">1 jam</option>
       <option value="2">2 jam</option>
       <option value="8">8 jam</option>
       <option value="24">24 jam</option>
     </select>
-    <button type="submit" class="btn btn-sm join-item">Jangan ganggu</button>
-  </form>
+    <button type="button" class="btn btn-sm join-item whitespace-nowrap" @click="open">Jangan ganggu</button>
+  </div>
+  <dialog class="modal" x-ref="dialog">
+    <div class="modal-box">
+      <h3 class="text-lg font-bold">Jangan ganggu {{.ServerName}}?</h3>
+      <p class="py-2">Pemberitahuan Telegram untuk server ini ditunda selama waktu yang dipilih, kecuali peringatan berikut yang tetap dikirim sekali saat muncul dan saat pulih:</p>
+      <ul class="list-disc ps-6 text-sm">
+        {{range .Kinds}}<li>{{.}}</li>
+        {{end}}
+      </ul>
+      <p class="py-2">Saat senyap berakhir, panel mengirim ringkasan.</p>
+      <div class="modal-action">
+        <button type="submit" formmethod="dialog" class="btn">Batal</button>
+        <button type="submit" class="btn btn-primary">Jangan ganggu</button>
+      </div>
+    </div>
+    <button type="submit" formmethod="dialog" class="modal-backdrop">tutup</button>
+  </dialog>
+</form>
+{{end}}
+
+{{define "server-controls"}}
+<div class="flex flex-wrap items-center gap-2">
+  <form method="post" action="/servers/{{.ServerID}}/check"><button type="submit" class="btn btn-sm">Periksa sekarang</button></form>
+  {{template "snooze-form" (snoozeOf .ServerID .ServerName "Lama Jangan ganggu")}}
   {{with .SnoozeUntil}}
   <span class="text-sm">Jangan ganggu sampai {{fmtTime .}}</span>
   <form method="post" action="/servers/{{$.ServerID}}/snooze">

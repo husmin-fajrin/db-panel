@@ -32,15 +32,7 @@
                 <button type="submit" class="btn btn-ghost btn-sm">Batalkan</button>
               </form>
               {{else}}
-              <form method="post" action="/servers/{{.ServerID}}/snooze" class="join">
-                <select name="hours" class="select select-sm join-item w-24 pe-8" aria-label="Lama Jangan ganggu untuk {{.ServerName}}">
-                  <option value="1">1 jam</option>
-                  <option value="2">2 jam</option>
-                  <option value="8">8 jam</option>
-                  <option value="24">24 jam</option>
-                </select>
-                <button type="submit" class="btn btn-sm join-item whitespace-nowrap">Jangan ganggu</button>
-              </form>
+              {{template "snooze-form" (snoozeOf .ServerID .ServerName (print "Lama Jangan ganggu untuk " .ServerName))}}
               {{end}}
               {{end}}
             </td>

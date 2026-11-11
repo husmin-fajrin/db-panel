@@ -808,7 +808,19 @@ func TestOldMasterPageShowsStartLockAndOperatorInitFiles(t *testing.T) {
 	rec := e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "Detail teknis", "Kunci start: Terkunci")
-	wantNoBody(t, rec, "belum terjamin", "tidak dijalankan selama karantina")
+	// The snooze dialog names the alert kind "...belum terjamin terkunci
+	// saat menyala" in its list; the warning is looked for outside it.
+	page := rec.Body.String()
+	if i := strings.Index(page, `x-data="confirmSnooze"`); i >= 0 {
+		if j := strings.Index(page[i:], "</form>"); j >= 0 {
+			page = page[:i] + page[i+j:]
+		}
+	}
+	for _, s := range []string{"belum terjamin", "tidak dijalankan selama karantina"} {
+		if strings.Contains(page, s) {
+			t.Errorf("body contains %q", s)
+		}
+	}
 
 	// Not guaranteed: the agent's reason as given (any text, escaped), and
 	// the operator's own init_file options.

@@ -219,3 +219,17 @@ func TestAlertsFilterChips(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "Replika berhenti karena data ganda.", "Replika ketinggalan 900", `name="tingkat" value="" aria-pressed="true"`)
 }
+
+// TestAlertsPageSnoozeDialog: a row of the alerts page opens the same
+// confirmation dialog, naming the server and the kinds never silenced.
+func TestAlertsPageSnoozeDialog(t *testing.T) {
+	e := newEnv(t)
+	c := e.cookie()
+	replica := e.pairedOnline(t, "db-replika")
+	e.openAlert(t, monitor.KindDiskWarn, replica.ID, time.Hour, "Disk terpakai 87%.")
+	rec := e.do("GET", "/alerts", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `x-data="confirmSnooze"`, "Jangan ganggu db-replika?", "<li>Master diduga tumbang</li>",
+		"<li>Kunci promote master dipertahankan</li>", "Saat senyap berakhir, panel mengirim ringkasan.")
+	wantNoBody(t, rec, "confirm_token")
+}

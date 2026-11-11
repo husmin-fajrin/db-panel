@@ -321,6 +321,17 @@
       },
     }));
 
+    // "Jangan ganggu" (spec 5.7, R-043): tombolnya membuka dialog
+    // (x-ref="dialog") yang menyebut peringatan yang tetap dikirim selama
+    // senyap. Dialog ada di dalam formulir senyap; tombol kirimnya
+    // mengirim formulir itu (POST biasa, tanpa token), "Batal" menutup
+    // dialog lewat formmethod="dialog". Membatalkan senyap tidak lewat sini.
+    window.Alpine.data("confirmSnooze", () => ({
+      open() {
+        this.$refs.dialog.showModal();
+      },
+    }));
+
     // Konfirmasi kata sandi (spec 5.7), satu dialog per halaman
     // (_confirm.html). Tombol destruktif membawa data-confirm-action,
     // data-confirm-kind, data-confirm-id, data-confirm-text dan, bila nama
