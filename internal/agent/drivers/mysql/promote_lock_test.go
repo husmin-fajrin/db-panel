@@ -1071,21 +1071,23 @@ func TestUnlockUsesOwnContext(t *testing.T) {
 }
 
 // TestLockRefusedWhenCandidateUnreadable (spec 5.4): a connected candidate
-// the replication account cannot log in to refuses the lock at once:
+// the given credential cannot log in to refuses the lock at once:
 // nothing is locked and no lock file is left.
 func TestLockRefusedWhenCandidateUnreadable(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{})
 	replica := testmysql.Start(t, testmysql.Options{})
-	replUser(t, master) // not on the replica: the candidate cannot be read
+	replUser(t, master) // replicated to the candidate too
 	mdb := rootDB(t, master)
 	follow(t, master, replica)
 	waitDumpThread(t, mdb)
 	dir := pinDir(t, "master", "")
 	r := newPinRig(t, master.Host(), dir)
-	cand := proto.PeerCred{Host: "127.0.0.1", Port: replica.Port, User: "dbpanel_repl", Password: replPassword}
+	// A password the candidate refuses: it cannot be read with the account.
+	const wrong = "sandi-yang-salah"
+	cand := proto.PeerCred{Host: "127.0.0.1", Port: replica.Port, User: "dbpanel_repl", Password: wrong}
 	resp := r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600})
 	wantRefused(t, "lock with an unreadable candidate", resp, "127.0.0.1:"+strconv.Itoa(replica.Port), "tidak bisa dibaca", "Master tidak dikunci")
-	if resp.Error != nil && strings.Contains(resp.Error.Message, replPassword) {
+	if resp.Error != nil && strings.Contains(resp.Error.Message, wrong) {
 		t.Errorf("error shows the password: %s", resp.Error.Message)
 	}
 	if sro, ro := readOnly(t, mdb); sro || ro {
