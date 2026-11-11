@@ -205,9 +205,13 @@ func TestQuarantineIdempotent(t *testing.T) {
 		"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
 	r.tick()
 	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
-	r.wantEvents(proto.EventQuarantined, proto.EventQuarantined)
+	// The restart is reported as a start: late, the flags were off.
+	r.wantEvents(proto.EventQuarantined, proto.EventQuarantineStart, proto.EventQuarantined)
+	if st := startEvents(t, r.ev); len(st) != 1 || st[0].Result != proto.QuarantineStartLate {
+		t.Errorf("start events = %+v, want one late", st)
+	}
 	r.tick()
-	r.wantEvents(proto.EventQuarantined, proto.EventQuarantined)
+	r.wantEvents(proto.EventQuarantined, proto.EventQuarantineStart, proto.EventQuarantined)
 }
 
 // TestQuarantineDownReportedOnceWhenAlreadyReadOnly: a quarantine written
@@ -226,9 +230,12 @@ func TestQuarantineDownReportedOnceWhenAlreadyReadOnly(t *testing.T) {
 	r.inst.Restart(t)
 	r.tick()
 	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
-	r.wantEvents(proto.EventQuarantined)
+	r.wantEvents(proto.EventQuarantineStart, proto.EventQuarantined)
+	if st := startEvents(t, r.ev); len(st) != 1 || st[0].Result != proto.QuarantineStartOK {
+		t.Errorf("start events = %+v, want one ok", st)
+	}
 	r.tick()
-	r.wantEvents(proto.EventQuarantined)
+	r.wantEvents(proto.EventQuarantineStart, proto.EventQuarantined)
 }
 
 // TestQuarantineGuardLeavesRebuildAlone: the rebuild of a quarantined
@@ -257,6 +264,10 @@ func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
 		}
 	}
 	tick()
+	// The first tick reports how MySQL started (this agent's start).
+	if evs := ev.all(); len(evs) != 1 || evs[0].Type != proto.EventQuarantineStart {
+		t.Fatalf("events of the first tick = %+v, want one %s", evs, proto.EventQuarantineStart)
+	}
 
 	stop := make(chan struct{})
 	ticked := make(chan int)
@@ -282,8 +293,8 @@ func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
 	if got := count(t, tdb, "SELECT COUNT(*) FROM toko.t"); got != 3 {
 		t.Errorf("rows loaded = %d, want 3", got)
 	}
-	if len(ev.all()) != 0 {
-		t.Errorf("guard reported %d events during the rebuild", len(ev.all()))
+	if n := len(ev.all()) - 1; n != 0 {
+		t.Errorf("guard reported %d events during the rebuild", n)
 	}
 	if d.RebuildLoadMarked() {
 		t.Error("the rebuild-load mark outlived the dump job")
@@ -342,12 +353,15 @@ func TestQuarantineWhenMySQLDownWritesPinThenLocksOnStart(t *testing.T) {
 	execAll(t, r.db, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
 	r.tick()
 	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
-	r.wantEvents(proto.EventQuarantined)
-	if src := r.ev.payload(t, 0)["new_source"]; src != guardCandidateKey {
+	r.wantEvents(proto.EventQuarantineStart, proto.EventQuarantined)
+	if st := startEvents(t, r.ev); len(st) != 1 || st[0].Result != proto.QuarantineStartLate {
+		t.Errorf("start events = %+v, want one late", st)
+	}
+	if src := r.ev.payload(t, 1)["new_source"]; src != guardCandidateKey {
 		t.Errorf("quarantined event new_source = %q", src)
 	}
 	r.tick()
-	r.wantEvents(proto.EventQuarantined)
+	r.wantEvents(proto.EventQuarantineStart, proto.EventQuarantined)
 }
 
 // TestQuarantineUnlockedMasterNeedsReplicaSeen: a master not locked for
@@ -555,6 +569,10 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 		execAll(t, db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
 	}
 	tick()
+	// The first tick reports how MySQL started (this agent's start).
+	if evs := ev.all(); len(evs) != 1 || evs[0].Type != proto.EventQuarantineStart {
+		t.Fatalf("events of the first tick = %+v, want one %s", evs, proto.EventQuarantineStart)
+	}
 
 	if _, ok := d.MarkRebuildLoad("10.0.0.2", 3306); ok {
 		t.Fatal("a rebuild mark toward another source was set")
@@ -575,8 +593,8 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	if n := strings.Count(logs.String(), "quarantine guard deferring: a rebuild load from the pinned source is running"); n != 1 {
 		t.Errorf("deferral logged %d times, want once:\n%s", n, logs.String())
 	}
-	if len(ev.all()) != 0 {
-		t.Errorf("guard reported %d events during the load", len(ev.all()))
+	if n := len(ev.all()) - 1; n != 0 {
+		t.Errorf("guard reported %d events during the load", n)
 	}
 
 	// The load is over (its restore failed to put read-only back here):
