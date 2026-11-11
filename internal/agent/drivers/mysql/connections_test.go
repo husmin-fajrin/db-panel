@@ -89,18 +89,28 @@ func TestConnectionsHidesPanelAndReplicationThreads(t *testing.T) {
 			t.Errorf("rows not sorted by count desc then host: %+v", res.Rows)
 		}
 	}
-	// On the replica, performance_schema shows the receiver, applier and
-	// workers under the account that ran START REPLICA (root here, the
-	// agent's account), from the server itself, without the agent's tag and
-	// under a thread name that is not a client's ("lain"). They are not
-	// application connections, but the list takes no name filter and does
-	// not hide what it cannot classify: they are counted as local admin
-	// sessions. Nothing else is listed.
+	// On the replica, the receiver, applier and workers are not
+	// connections: performance_schema lists them under the account that ran
+	// START REPLICA (root, the agent's), so they are excluded by their
+	// instrument names. The test's own sessions are the agent's (tagged).
 	rres := readConns(t, replica)
-	for _, r := range rres.Rows {
-		if !r.LocalAdmin || r.Kind != "lain" || r.User != "root" {
-			t.Errorf("replica row %+v, want only local admin rows of the replication threads", r)
-		}
+	if len(rres.Rows) != 0 || rres.LocalAdmin != 0 {
+		t.Errorf("replica result = %+v, want no rows and no local admin", rres)
+	}
+	// An untagged local session of the agent's account on a running replica
+	// is still counted: the exclusion is by thread name only.
+	plain, err := sql.Open("mysql", "root@unix("+replica.Socket+")/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { plain.Close() })
+	pc, err := plain.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	if rres := readConns(t, replica); len(rres.Rows) != 1 || !rres.Rows[0].LocalAdmin || rres.Rows[0].Kind != "sql" || rres.LocalAdmin != 1 {
+		t.Errorf("replica with an untagged root session = %+v, want one local admin sql row", rres)
 	}
 	if len(app) != 2 || app[0].DB != "toko" || app[0].Count != 3 || app[1].DB != "gudang" || app[1].Count != 1 || app[0].Host != app[1].Host {
 		t.Errorf("app rows = %+v, want toko x3 then gudang x1 from one host", app)
@@ -325,13 +335,17 @@ func TestGroupConnectionsHidesOnlyWhatIsAllowed(t *testing.T) {
 		{Name: sql, Host: "10.0.0.9", User: "dbpanel_dump_0123abcdef"},                     // not the pattern: counted
 		{Name: sql, Host: "10.0.0.9", User: "dbpanel_admin"},                               // admin account
 		{Name: "", Host: "10.0.0.9", User: "unauthenticated user"},                         // counted
+		{Name: "thread/sql/replica_worker_x", Host: "10.0.0.8", User: "app"},               // not an excluded instrument: counted
 	}, false)
 	got := map[string]proto.ConnectionRow{}
 	for _, r := range rows {
 		got[r.Host+"|"+r.User] = r
 	}
-	if len(rows) != 6 || local != 1 {
-		t.Errorf("rows = %+v, local = %d; want 6 rows and 1 local admin session", rows, local)
+	if len(rows) != 7 || local != 1 {
+		t.Errorf("rows = %+v, local = %d; want 7 rows and 1 local admin session", rows, local)
+	}
+	if r := got["10.0.0.8|app"]; r.Count != 1 || r.Kind != "lain" {
+		t.Errorf("row of an unlisted replica-like instrument = %+v, want counted as lain", r)
 	}
 	if r := got["|root"]; !r.LocalAdmin || r.Count != 1 {
 		t.Errorf("untagged local row = %+v, want local admin", r)

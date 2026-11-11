@@ -8,6 +8,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
@@ -34,6 +35,18 @@ const (
 	incompleteLostUnread  = "jumlah thread yang tidak tercatat di performance_schema tidak bisa dibaca"
 )
 
+// replicationThreadNames are the performance_schema instruments of a
+// replica's receiver, applier and workers. START REPLICA gives these threads
+// the account of the session that ran it in performance_schema (not 'system
+// user'), so they would show as sessions of the agent's account. Instrument
+// names are set by the server and a client cannot choose one, so excluding
+// these exact names cannot hide an application session. Keep it an exact
+// list: no LIKE, no prefix.
+var replicationThreadNames = []string{
+	"thread/sql/replica_io", "thread/sql/replica_sql", "thread/sql/replica_worker",
+	"thread/sql/slave_io", "thread/sql/slave_sql", "thread/sql/slave_worker",
+}
+
 // connectionsPSQuery lists the client threads from performance_schema: the
 // foreground threads that have a processlist id and a user (this drops
 // MySQL's own threads such as compress_gtid_table, which have no user), with
@@ -43,22 +56,26 @@ const (
 // replica, performance_schema shows the replication threads under the
 // account that ran START REPLICA, not as 'system user': they are counted
 // (as local admin sessions of the agent's account) rather than hidden by
-// name. An
+// name (the instruments listed in replicationThreadNames). An
 // 'unauthenticated user' (a session logging in) is a connection. Columns:
 // thread name, host, user, default database, whether the user is the one the
 // agent logs in as, and whether the session carries the agent's
 // program_name attribute (the single parameter).
-const connectionsPSQuery = `SELECT IFNULL(t.NAME, ''), IFNULL(t.PROCESSLIST_HOST, ''), t.PROCESSLIST_USER, IFNULL(t.PROCESSLIST_DB, ''),
+var connectionsPSQuery = `SELECT IFNULL(t.NAME, ''), IFNULL(t.PROCESSLIST_HOST, ''), t.PROCESSLIST_USER, IFNULL(t.PROCESSLIST_DB, ''),
 		t.PROCESSLIST_USER = ` + agentUserExpr + `,
 		EXISTS (SELECT 1 FROM performance_schema.session_connect_attrs a
 			WHERE a.PROCESSLIST_ID = t.PROCESSLIST_ID AND a.ATTR_NAME = 'program_name' AND a.ATTR_VALUE = ?)
 	FROM performance_schema.threads t
 	WHERE t.TYPE = 'FOREGROUND'
+	  AND IFNULL(t.NAME, '') NOT IN (` + placeholders(len(replicationThreadNames)) + `)
 	  AND t.PROCESSLIST_ID IS NOT NULL
 	  AND t.PROCESSLIST_USER IS NOT NULL
 	  AND t.PROCESSLIST_USER NOT IN ('system user', 'event_scheduler')
 	  AND IFNULL(t.PROCESSLIST_COMMAND, '') NOT LIKE 'Binlog Dump%'
 	  AND t.PROCESSLIST_ID <> CONNECTION_ID()`
+
+// placeholders is n comma-separated "?".
+func placeholders(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
 
 // connectionsISQuery is the same list from information_schema.PROCESSLIST,
 // for a server without performance_schema: no thread name (kind "lain") and
@@ -99,7 +116,7 @@ func readConnections(ctx context.Context, db *sql.DB) proto.ConnectionsResult {
 	var on bool
 	if err := db.QueryRowContext(ctx, `SELECT @@performance_schema = 1`).Scan(&on); err == nil && on {
 		var ts []connThread
-		if ts, psErr = queryThreads(ctx, db, connectionsPSQuery, agentProgramName); psErr == nil {
+		if ts, psErr = queryThreads(ctx, db, connectionsPSQuery, psArgs()...); psErr == nil {
 			res.Source = "performance_schema"
 			res.Rows, res.LocalAdmin = groupConnections(ts, false)
 			res.Incomplete = threadsLost(ctx, db)
@@ -119,6 +136,16 @@ func readConnections(ctx context.Context, db *sql.DB) proto.ConnectionsResult {
 	res.AgentIndistinct = true
 	res.Rows, res.LocalAdmin = groupConnections(ts, true)
 	return res
+}
+
+// psArgs are the parameters of connectionsPSQuery in order: the program name
+// of the tag, then the excluded instruments.
+func psArgs() []any {
+	args := []any{agentProgramName}
+	for _, n := range replicationThreadNames {
+		args = append(args, n)
+	}
+	return args
 }
 
 // queryThreads runs one of the thread queries.
