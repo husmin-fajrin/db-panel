@@ -586,10 +586,9 @@ func TestDestructiveCommandsRefusedOnSource(t *testing.T) {
 	if d := rig.run(t, "mysql.cloneFrom", cloneParams(other)); d.OK || !strings.Contains(d.Error, refused) {
 		t.Errorf("cloneFrom on a source = %+v, want refused", d)
 	}
-	dp := dumpParams(other, "keep")
-	dp.DropExisting = true
-	if d := rig.run(t, "mysql.dumpFrom", dp); d.OK || !strings.Contains(d.Error, refused) {
-		t.Errorf("dumpFrom DropExisting on a source = %+v, want refused", d)
+	// A dump into a source would reset its binary logs (ON mode).
+	if d := rig.run(t, "mysql.dumpFrom", dumpParams(other, "keep")); d.OK || !strings.Contains(d.Error, refused) {
+		t.Errorf("dumpFrom on a source = %+v, want refused", d)
 	}
 	if n := count(t, mdb, "SELECT COUNT(*) FROM keep.t"); n != 1 {
 		t.Errorf("keep.t rows on the master = %d, want 1", n)

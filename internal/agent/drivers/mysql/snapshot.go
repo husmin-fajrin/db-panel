@@ -99,7 +99,7 @@ func (d *Driver) registerSnapshotJob(reg *commands.Registry, cmd, method string,
 		}
 		if d.Logger != nil {
 			d.Logger.Info("mysql snapshot started", "method", method, "job", id, "source", source, "user", p.User,
-				"databases", p.Databases, "drop_existing", p.DropExisting)
+				"databases", p.Databases)
 		}
 		return proto.StartedJob{JobID: id}, nil
 	})
@@ -129,6 +129,10 @@ func validateSnapshot(p *proto.SnapshotParams, method string) error {
 		return bad("password user master tidak boleh berisi karakter kontrol")
 	case method == methodClone && len(p.Databases) > 0:
 		return bad("CLONE menyalin seluruh server; untuk sebagian database pakai dump")
+	case method == methodDump && p.DropExisting:
+		// A dump never drops: the panel drops databases with
+		// mysql.dropDatabases, after the user approved the list (spec 5.6).
+		return bad("drop_existing tidak didukung; panel memakai mysql.dropDatabases")
 	}
 	if err := validateVerify(p.VerifyIdentity, p.SSL, &p.SSLCA); err != nil {
 		return err

@@ -223,7 +223,7 @@ type SnapshotParams struct {
 	Password      string   `json:"password"`
 	Databases     []string `json:"databases"`      // dump only; empty = every database
 	EstimateBytes uint64   `json:"estimate_bytes"` // expected size, for progress
-	DropExisting  bool     `json:"drop_existing"`  // dump: drop the local copies of Databases before loading
+	DropExisting  bool     `json:"drop_existing"`  // refused by mysql.dumpFrom; the panel drops with mysql.dropDatabases
 	SSL           bool     `json:"ssl"`            // the master offers TLS: the copy must be encrypted
 	// VerifyIdentity: the master's certificate must chain to the CA file
 	// SSLCA (a path on this server, normally <datadir>/dbpanel-tls/mysql-ca.crt)

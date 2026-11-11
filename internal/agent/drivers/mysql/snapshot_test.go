@@ -522,7 +522,10 @@ func TestDumpAllDatabases(t *testing.T) {
 	}
 }
 
-func TestDumpDropExistingReplaces(t *testing.T) {
+// TestDumpFromRefusesDropExisting (spec 5.6): mysql.dumpFrom no longer
+// drops databases; the panel drops them with mysql.dropDatabases. The
+// parameter is refused before anything on the server changes.
+func TestDumpFromRefusesDropExisting(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{})
 	replica := testmysql.Start(t, testmysql.Options{})
 	mdb := rootDB(t, master)
@@ -532,22 +535,18 @@ func TestDumpDropExistingReplaces(t *testing.T) {
 	execAll(t, rdb,
 		"CREATE DATABASE a",
 		"CREATE TABLE a.stale (x INT)",
-		"CREATE TABLE a.t (id INT PRIMARY KEY, v VARCHAR(20))",
-		"INSERT INTO a.t VALUES (99, 'lama')",
 	)
 
 	rig := rootRig(replica)
 	p := dumpParams(master, "a")
 	p.DropExisting = true
-	snapshotResult(t, rig.run(t, "mysql.dumpFrom", p))
-	if n := count(t, rdb, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'a' AND table_name = 'stale'"); n != 0 {
-		t.Error("a.stale survived DropExisting")
+	r := rig.reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "mysql.dumpFrom", Params: mustJSON(t, p)})
+	const want = "drop_existing tidak didukung; panel memakai mysql.dropDatabases"
+	if r.OK || r.Error == nil || r.Error.Code != proto.CodeBadParams || r.Error.Message != want {
+		t.Fatalf("dumpFrom with drop_existing = %+v, want bad_params %q", r.Error, want)
 	}
-	if n := count(t, rdb, "SELECT COUNT(*) FROM a.t WHERE id = 99"); n != 0 {
-		t.Error("the replica's own row survived DropExisting")
-	}
-	if n := count(t, rdb, "SELECT COUNT(*) FROM a.t"); n != 3 {
-		t.Errorf("a.t rows = %d, want the master's 3", n)
+	if n := count(t, rdb, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'a' AND table_name = 'stale'"); n != 1 {
+		t.Error("a.stale was dropped by a refused dump")
 	}
 }
 
@@ -798,7 +797,6 @@ func TestDumpVerifiesMasterCert(t *testing.T) {
 func TestDumpGTIDMode(t *testing.T) {
 	sel := proto.SnapshotParams{Databases: []string{"a"}}
 	all := proto.SnapshotParams{}
-	drop := proto.SnapshotParams{Databases: []string{"a"}, DropExisting: true}
 	for _, c := range []struct {
 		name       string
 		executed   string
@@ -810,7 +808,6 @@ func TestDumpGTIDMode(t *testing.T) {
 		{"replica with its own transactions", "uuid:1-3", false, sel, "ON"},
 		{"stopped replica adds a database", "uuid:1-30", true, sel, "COMMENTED"},
 		{"stopped replica, every database", "uuid:1-30", true, all, "ON"},
-		{"stopped replica, database replaced", "uuid:1-30", true, drop, "ON"},
 		{"configured replica without history", "", true, sel, "ON"},
 	} {
 		if got := mysql.DumpGTIDMode(c.executed, c.configured, c.p); got != c.want {
@@ -986,7 +983,6 @@ func TestDumpFailsBeforeChangingData(t *testing.T) {
 
 	rig := rootRig(replica)
 	p := dumpParams(master, "a")
-	p.DropExisting = true
 	p.Password = "wrong"
 	d = rig.run(t, "mysql.dumpFrom", p)
 	if d.OK || !strings.Contains(d.Error, "uji dump dari master gagal") || !strings.Contains(d.Error, "1045") {
@@ -996,7 +992,6 @@ func TestDumpFailsBeforeChangingData(t *testing.T) {
 
 	// A database the master does not have.
 	p = dumpParams(master, "a", "nosuch")
-	p.DropExisting = true
 	d = rig.run(t, "mysql.dumpFrom", p)
 	if d.OK || !strings.Contains(d.Error, "uji dump dari master gagal") {
 		t.Errorf("dump of a missing database = %+v", d)

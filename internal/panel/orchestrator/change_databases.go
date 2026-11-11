@@ -17,16 +17,22 @@ import (
 //
 // add_databases:
 //
-//	0 catch_up       the filter is set to the databases followed now (an
-//	                 earlier failed or canceled change may have left another
-//	                 one, or replication stopped; setting it starts
-//	                 replication), then the replica executes the master's
-//	                 current GTID set
+//	0 catch_up       the replica's databases are read fresh: when new ones
+//	                 already exist there (compared without case), the job
+//	                 waits (WaitAddExisting) until the user approves exactly
+//	                 that list by typing each name; then the filter is set
+//	                 to the databases followed now (an earlier failed or
+//	                 canceled change may have left another one, or
+//	                 replication stopped; setting it starts replication),
+//	                 then the replica executes the master's current GTID set
 //	1 stop           replication stops (a dump refuses a running replica)
-//	2 dump           the new databases are dumped from the master; the
-//	                 replica keeps its own GTID history (no DropExisting, so
-//	                 the agent dumps in COMMENTED mode) and the dump's header
-//	                 gives the master's set at the dump, P2
+//	2 dump           the approved existing databases (AddDrop) are dropped
+//	                 without binary logging (read again first unless step 0
+//	                 ran in this run; another list waits again); the new
+//	                 databases are dumped from the master; the replica keeps
+//	                 its own GTID history (no DropExisting, so the agent
+//	                 dumps in COMMENTED mode) and the dump's header gives
+//	                 the master's set at the dump, P2
 //	3 replay_until   the applier runs with the old filter until P2: the old
 //	                 databases reach the dump point, and the new databases'
 //	                 transactions up to P2, which the dump holds, are

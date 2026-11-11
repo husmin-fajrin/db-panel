@@ -45,9 +45,10 @@ var errLoadEnded = errors.New("mysql load ended")
 // files are written, the local login is tried and a schema-only dry run of
 // the same dump is read from the master (login, privileges, database
 // names). Then a configured but stopped replica is stopped (a running one
-// is refused), read-only is lifted until the load ends, DropExisting drops
-// the local copies of the databases, and, in ON mode, the binary logs and
-// GTID history are reset so the dump's SET @@GLOBAL.GTID_PURGED applies.
+// is refused), read-only is lifted until the load ends, and, in ON mode,
+// the binary logs and GTID history are reset so the dump's SET
+// @@GLOBAL.GTID_PURGED applies. A dump drops no database: DropExisting is
+// refused (validateSnapshot); the panel uses mysql.dropDatabases.
 //
 // The real run takes a brief FLUSH TABLES WITH READ LOCK on the master
 // until its consistent snapshot opens (mysqldump does so to read the GTID
@@ -94,9 +95,9 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		return res, err
 	}
 	gtidMode := dumpGTIDMode(executed, rs != nil, p)
-	// Dropping databases, or resetting the binary logs (ON mode), on a
-	// server replicas read from would break them.
-	if p.DropExisting || gtidMode == "ON" {
+	// Resetting the binary logs (ON mode) on a server replicas read from
+	// would break them.
+	if gtidMode == "ON" {
 		if err := refuseOnSource(ctx, db); err != nil {
 			return res, err
 		}
@@ -129,11 +130,6 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		return res, err
 	}
 	defer restore()
-	if p.DropExisting {
-		if err := dropDatabases(ctx, db, p.Databases); err != nil {
-			return res, err
-		}
-	}
 	if gtidMode == "ON" {
 		if err := resetBinaryLogs(ctx, db); err != nil {
 			return res, err
@@ -220,12 +216,11 @@ func probeArgs(defaultsFile string, databases []string, tls clientTLS) []string 
 // ON writes SET @@GLOBAL.GTID_PURGED, which needs an empty gtid_executed:
 // the caller resets the binary logs first. That is right for a first
 // snapshot (whatever the server ran by itself is dropped) and when every
-// database or a replaced database is loaded. A replica that already
-// replicates and takes one more database (DropExisting false) must keep
-// its history instead: COMMENTED leaves the dump's GTID set as a comment,
+// database is loaded. A replica that already replicates and takes one
+// more database must keep its history instead: COMMENTED leaves the dump's GTID set as a comment,
 // nothing is reset, and the result's GTIDExecuted is the replica's own.
 func dumpGTIDMode(executed string, configuredReplica bool, p proto.SnapshotParams) string {
-	if executed != "" && configuredReplica && !p.DropExisting && len(p.Databases) > 0 {
+	if executed != "" && configuredReplica && len(p.Databases) > 0 {
 		return "COMMENTED"
 	}
 	return "ON"
@@ -453,7 +448,7 @@ func liftReadOnly(ctx context.Context, logf func(level, format string, args ...a
 }
 
 // dropDatabases drops the local copies of databases, without binary
-// logging. The names are validated.
+// logging (mysql.dropDatabases). The names are validated.
 func dropDatabases(ctx context.Context, db *sql.DB, databases []string) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
