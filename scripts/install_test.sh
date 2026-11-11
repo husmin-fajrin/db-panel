@@ -195,6 +195,7 @@ install_case() {
 		# shellcheck source=/dev/null
 		source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
 		# shellcheck disable=SC2034 # read by install_binary
+		# shellcheck disable=SC2030 # BIN is set in this subshell on purpose
 		BIN="$tmp/case-$1/dbpanel"
 		AGENT_TMP="$tmp/case-$1/dl"
 		mkdir -p "$AGENT_TMP"
@@ -300,9 +301,13 @@ run_install() { # ROOT UI_PORT AGENT_PORT [svc:SERVICE|fn:FUNCTION: stop right b
 		PANEL_USER=nobody
 		# shellcheck disable=SC2034 # read by install_binary
 		DBPANEL_BIN=$live_bin
+		# shellcheck disable=SC2329 # called by the sourced install.sh
 		svc_pid() { echo "$ROOT/run/$1.pid"; }
+		# shellcheck disable=SC2329 # called by the sourced install.sh
 		svc_running() { [ -f "$(svc_pid "$1")" ] && kill -0 "$(cat "$(svc_pid "$1")")" 2>/dev/null; }
+		# shellcheck disable=SC2329 # called by the sourced install.sh
 		svc_stop() { kill_root_one "$(svc_pid "$1")"; }
+		# shellcheck disable=SC2329 # called by the sourced install.sh
 		kill_root_one() {
 			[ -f "$1" ] || return 0
 			local pid
@@ -314,16 +319,19 @@ run_install() { # ROOT UI_PORT AGENT_PORT [svc:SERVICE|fn:FUNCTION: stop right b
 			done
 			rm -f "$1"
 		}
+		# shellcheck disable=SC2329 # called by the sourced install.sh
 		svc_start() {
 			mkdir -p "$ROOT/run"
 			case $1 in
 			dbpanel-panel)
+				# shellcheck disable=SC2031 # BIN comes from the sourced install.sh here; the install_case assignment is a separate subshell
 				setpriv --reuid="$PANEL_USER" --regid="$(id -g "$PANEL_USER")" --clear-groups \
 					"$BIN" panel --data-dir "$PANEL_DATA_DIR" --config-dir "$PANEL_CONFIG_DIR" \
 					--http "127.0.0.1:$2" --agent-listen "127.0.0.1:$3" --public-host 127.0.0.1 \
 					</dev/null >>"$ROOT/panel.log" 2>&1 &
 				;;
 			dbpanel-agent)
+				# shellcheck disable=SC2031 # BIN comes from the sourced install.sh, as above
 				"$BIN" agent --dir "$CONFIG_DIR" --panel "https://127.0.0.1:$2" </dev/null >>"$ROOT/agent.log" 2>&1 &
 				;;
 			esac
@@ -515,12 +523,13 @@ else
 			# shellcheck source=/dev/null
 			source <(sed '/^main "\$@"$/d' "$PANEL_SCRIPT")
 			PANEL_USER=nobody
+			# shellcheck disable=SC2034 # read by hand_local_token in the sourced install.sh
 			TOKEN_WAIT=1
 			prepare_dirs
 			case $1 in
 			bins) copy_agent_binaries "$tmp/rel1" && copy_agent_binaries "$tmp/rel2" ;;
 			bin-link)
-				rm -rf "$PANEL_DATA_DIR/bin"
+				rm -rf "${PANEL_DATA_DIR:?}/bin"
 				ln -s "$victim" "$PANEL_DATA_DIR/bin"
 				copy_agent_binaries "$tmp/rel1"
 				;;
@@ -540,7 +549,7 @@ else
 			bin-special)
 				# A bin/ the panel user owns (as after the move from the
 				# old layout) holding a FIFO and a link to /dev/zero.
-				rm -rf "$PANEL_DATA_DIR/bin"
+				rm -rf "${PANEL_DATA_DIR:?}/bin"
 				mkdir "$PANEL_DATA_DIR/bin"
 				mkfifo "$PANEL_DATA_DIR/bin/dbpanel_linux_amd64"
 				ln -s /dev/zero "$PANEL_DATA_DIR/bin/dbpanel_linux_arm64"

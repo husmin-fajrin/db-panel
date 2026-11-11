@@ -115,6 +115,7 @@ as_panel() {
 # user. Only a regular file is read, and within 60 s, so a FIFO or device
 # put there cannot hang the script or fill the disk.
 panel_read() {
+	# shellcheck disable=SC2016 # $1 and $2 are meant for the inner sh, not this shell
 	as_panel timeout 60 sh -c '[ -f "$2" ] && exec head -c "$1" -- "$2"' sh "$1" "$2"
 }
 
