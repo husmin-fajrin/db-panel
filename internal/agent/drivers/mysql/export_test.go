@@ -437,3 +437,21 @@ func SetLockFlockWait(d time.Duration) (restore func()) {
 	lockFlockWait = d
 	return func() { lockFlockWait = old }
 }
+
+// Connection list internals.
+var (
+	ConnKind       = connKind
+	ServiceAccount = serviceAccount
+)
+
+// ConnThread is one client thread as the connection list reads it.
+type ConnThread = connThread
+
+// GroupConnections groups threads into rows (no server).
+var GroupConnections = groupConnections
+
+// AgentProgramName is the connection attribute value of the agent's sessions.
+const AgentProgramName = agentProgramName
+
+// ReadConnections reads the connection list from db.
+var ReadConnections = readConnections

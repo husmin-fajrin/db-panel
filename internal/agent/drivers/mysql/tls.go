@@ -697,6 +697,7 @@ func checkServedCert(ctx context.Context, l Layout, creds CredentialStore, in tl
 		c.Net, c.Addr = "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	}
 	c.Timeout, c.ReadTimeout, c.WriteTimeout = tlsCheckTimeout, tlsCheckTimeout, tlsCheckTimeout
+	tagAgent(c)
 	served := ""
 	c.TLS = &tls.Config{
 		RootCAs:    pool,

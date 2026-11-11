@@ -21,6 +21,16 @@ var ErrNotConnected = errors.New("MySQL belum dihubungkan dan root tanpa sandi t
 
 const maxOpenConns = 4
 
+// agentProgramName is the program_name connection attribute of every
+// session the agent opens, so the connection list can tell its own sessions
+// from a person using the same account. The mysql, mysqldump and mysqlbinlog
+// child processes are not tagged (the 8.0 clients have no attribute
+// option): their sessions count as sessions of the admin account.
+const agentProgramName = "dbpanel-agent"
+
+// tagAgent marks the sessions opened with c as the agent's.
+func tagAgent(c *drv.Config) { c.ConnectionAttributes = "program_name:" + agentProgramName }
+
 // DSN builds the driver DSN for p; Port 0 with Host "" or "localhost" uses socket.
 func DSN(p proto.ConnectParams, socket string) string {
 	c := drv.NewConfig()
@@ -43,6 +53,7 @@ func DSN(p proto.ConnectParams, socket string) string {
 	c.ReadTimeout = 10 * time.Minute
 	c.WriteTimeout = 10 * time.Minute
 	c.InterpolateParams = false
+	tagAgent(c)
 	return c.FormatDSN()
 }
 

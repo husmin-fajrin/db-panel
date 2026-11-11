@@ -619,14 +619,35 @@ type LockExpiredEvent struct {
 
 // ConnectionsResult is the answer to mysql.connections: the client
 // connections to this server grouped by host (without port), user and
-// default database, most connections first, read at TakenAt. The panel's
-// own accounts (dbpanel_*), replicas reading the binary log, MySQL's own
-// threads, the agent's own connection and the sessions of the agent's
-// admin account from this server itself (socket, localhost, 127.0.0.1,
-// ::1) are left out.
+// default database, most connections first, read at TakenAt. Left out:
+// the agent's replication and dump accounts (dbpanel_repl and
+// dbpanel_dump_<8 hex>), replicas reading the binary log, MySQL's own
+// threads, the agent's own connection and the agent's tagged sessions
+// (program_name=dbpanel-agent) of its admin account from this server
+// itself. Everything else is counted, including sessions the agent cannot
+// classify; an older panel reads Rows and ignores the other fields.
 type ConnectionsResult struct {
 	Rows    []ConnectionRow `json:"rows"`
 	TakenAt time.Time       `json:"taken_at"`
+	// Typed: the rows carry Kind (agent 5a). False from an older agent; the
+	// panel then treats the list as incomplete.
+	Typed bool `json:"typed"`
+	// Source is what was read: "performance_schema" or "information_schema".
+	Source string `json:"source,omitempty"`
+	// Unreadable: neither source could be read; the reason. Rows is empty
+	// and says nothing about who is connected.
+	Unreadable string `json:"unreadable,omitempty"`
+	// Incomplete: some threads are not recorded
+	// (Performance_schema_thread_instances_lost > 0, or the counter could
+	// not be read); the reason.
+	Incomplete string `json:"incomplete,omitempty"`
+	// LocalAdmin counts the sessions of the agent's account from this
+	// server itself that the agent cannot tell from its own.
+	LocalAdmin int `json:"local_admin"`
+	// AgentIndistinct: performance_schema is off, so the agent's own
+	// sessions cannot be told apart and every local session of its account
+	// is counted.
+	AgentIndistinct bool `json:"agent_indistinct,omitempty"`
 }
 
 // ConnectionRow is one group of mysql.connections: Count connections of
@@ -636,9 +657,15 @@ type ConnectionRow struct {
 	User  string `json:"user"`
 	DB    string `json:"db"`
 	Count int    `json:"count"`
-	// AdminAccount: User is the account the agent logs in as (the panel's
-	// admin account), connected from another host.
+	// AdminAccount: User is the account the agent logs in as, or
+	// dbpanel_admin, connected from another host.
 	AdminAccount bool `json:"admin_account,omitempty"`
+	// Kind is the connection type: "sql", "x" (X Protocol) or "lain" (not
+	// recognised).
+	Kind string `json:"kind"`
+	// LocalAdmin: the agent's account from this server itself, without the
+	// agent's tag (an admin session on the server, not the agent's).
+	LocalAdmin bool `json:"local_admin,omitempty"`
 }
 
 // LeftoverParams are the parameters of mysql.leftover, run on a

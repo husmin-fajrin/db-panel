@@ -60,6 +60,7 @@ func ReadPeer(ctx context.Context, c proto.PeerCred, timeout time.Duration) Peer
 	cfg.User, cfg.Passwd = c.User, c.Password
 	cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = timeout, timeout, timeout
+	tagAgent(cfg)
 	if c.Verify {
 		pem, err := os.ReadFile(c.SSLCA)
 		if err != nil {
