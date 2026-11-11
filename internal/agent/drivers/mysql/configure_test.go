@@ -82,23 +82,23 @@ func variable(t *testing.T, db *sql.DB, name string) string {
 
 func TestRenderConfig(t *testing.T) {
 	fresh := mysql.BinlogBlock{LogBin: "binlog", ExpireSeconds: "604800"}
-	master := mysql.RenderConfig("master", 1234, false, fresh, "")
+	master := mysql.RenderConfig("master", 1234, false, fresh)
 	want := "[mysqld]\nlog_bin=binlog\nbinlog_expire_logs_seconds=604800\ngtid_mode=ON\nenforce_gtid_consistency=ON\n" +
 		"server_id=1234\nbinlog_format=ROW\n"
 	if master != want {
 		t.Errorf("master config =\n%s\nwant\n%s", master, want)
 	}
-	if got := mysql.RenderConfig("master", 1234, true, fresh, ""); got != want+"bind_address=0.0.0.0\n" {
+	if got := mysql.RenderConfig("master", 1234, true, fresh); got != want+"bind_address=0.0.0.0\n" {
 		t.Errorf("master config with bindAll =\n%s", got)
 	}
-	replica := mysql.RenderConfig("replica", 99, false, fresh, "")
+	replica := mysql.RenderConfig("replica", 99, false, fresh)
 	want = "[mysqld]\nlog_bin=binlog\nbinlog_expire_logs_seconds=604800\ngtid_mode=ON\nenforce_gtid_consistency=ON\n" +
 		"server_id=99\nbinlog_format=ROW\nread_only=ON\nsuper_read_only=ON\nrelay_log=relay\nlog_replica_updates=ON\n"
 	if replica != want {
 		t.Errorf("replica config =\n%s\nwant\n%s", replica, want)
 	}
 	// A server that already logs keeps its base name and its retention.
-	kept := mysql.RenderConfig("master", 7, false, mysql.BinlogBlock{LogBin: "/www/server/data/mysql-bin"}, "")
+	kept := mysql.RenderConfig("master", 7, false, mysql.BinlogBlock{LogBin: "/www/server/data/mysql-bin"})
 	if want := "[mysqld]\nlog_bin=/www/server/data/mysql-bin\ngtid_mode=ON\nenforce_gtid_consistency=ON\n" +
 		"server_id=7\nbinlog_format=ROW\n"; kept != want {
 		t.Errorf("config keeping the binlog =\n%s\nwant\n%s", kept, want)
@@ -211,7 +211,7 @@ func TestConfigureMasterSetsGTIDAndWritesBlock(t *testing.T) {
 	// The binary log keeps its name and retention: no stranded mysql-bin.*
 	// files and no changed expiry at the next restart.
 	base := filepath.Join(inst.DataDir, "mysql-bin")
-	block := "# BEGIN dbpanel\n" + mysql.RenderConfig("master", inst.ServerID, true, mysql.BinlogBlock{LogBin: base}, "") + "# END dbpanel\n"
+	block := "# BEGIN dbpanel\n" + mysql.RenderConfig("master", inst.ServerID, true, mysql.BinlogBlock{LogBin: base}) + "# END dbpanel\n"
 	if !strings.HasSuffix(string(cnf), block) {
 		t.Errorf("my.cnf does not end with the block:\n%s", cnf)
 	}

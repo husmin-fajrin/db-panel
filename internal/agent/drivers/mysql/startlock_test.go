@@ -510,17 +510,6 @@ func TestConfigureKeepsPresentStartLockLine(t *testing.T) {
 	}
 }
 
-func TestRenderConfigKeepsStartLockLine(t *testing.T) {
-	bl := mysql.BinlogBlock{LogBin: "binlog"}
-	got := mysql.RenderConfig("replica", 9, false, bl, "/p/dbpanel-start-lock.sql")
-	if !strings.HasSuffix(got, "\nlog_replica_updates=ON\ninit_file=/p/dbpanel-start-lock.sql\n") {
-		t.Errorf("replica with start lock =\n%s", got)
-	}
-	if got := mysql.RenderConfig("master", 9, true, bl, ""); strings.Contains(got, "init_file") {
-		t.Errorf("without start lock =\n%s", got)
-	}
-}
-
 func fileOwner(fi os.FileInfo) (uid, gid int) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {

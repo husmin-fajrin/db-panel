@@ -245,6 +245,14 @@ func mainSetRole(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "peran harus master, replica, quarantined atau unassigned: %q\n", role)
 		return 2
 	}
+	// A master never keeps a quarantine's start lock: it goes first, and
+	// the role stays as it was when it cannot.
+	if role == "master" {
+		if err := cliReleaseStartLock(dir); err != nil {
+			fmt.Fprintf(stderr, "kunci start tidak bisa dilepas (%v); peran tidak diubah\n", err)
+			return 1
+		}
+	}
 	if err := loadPinsForCLI(dir, stderr).SetRole(role); err != nil {
 		fmt.Fprintf(stderr, "gagal mengubah peran: %v\n", err)
 		return 1
@@ -269,6 +277,24 @@ func mainSetSource(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "sumber "+pinsUpdated)
 	return 0
+}
+
+// cliReleaseStartLock releases the start lock of the MySQL of the agent in
+// dir. A directory without an agent configuration (never paired) has no
+// agent that could have written one.
+func cliReleaseStartLock(dir string) error {
+	h, err := cliMySQLHost(dir)
+	if errors.Is(err, config.ErrNotPaired) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return mysql.ReleaseStartLock(ctx, h)
 }
 
 // cliMySQLHost is the MySQL of the agent in dir, logged in to with the

@@ -123,6 +123,12 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
+		// A replica rebuilt from a quarantine may still carry its start
+		// lock: a master must never start read-only through it.
+		if err := d.releaseForPromote(ctx, h); err != nil {
+			return nil, &commands.ParamError{Msg: "server ini masih membawa kunci start dari karantina dan kunci itu tidak bisa dilepas: " +
+				err.Error() + "; promote ditolak"}
+		}
 		lockBy := promoteLockBy(p, d.now())
 		id, err := d.Jobs.Start("mysql.promote", func(j *jobs.Job) (any, error) {
 			res, err := d.promote(j, h, p, lockBy)

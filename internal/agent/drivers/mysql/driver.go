@@ -92,10 +92,30 @@ type Driver struct {
 	// server (rebuild_load.go); it has its own lock, never promoteMu.
 	rebuild rebuildLoad
 
-	// startLockState is the start lock (startlock.go) as last checked;
-	// startLockMu guards it.
+	// qUp is whether MySQL answered guardQuarantined's last tick;
+	// qStartPending: a start of MySQL it has not reported yet.
+	qUp           bool
+	qStartPending bool
+
+	// startLockState is the start lock (startlock.go) as last checked,
+	// reported while startLockSet; startLockMu guards both.
 	startLockMu    sync.Mutex
 	startLockState proto.StartLockState
+	startLockSet   bool
+	// The start lock's guard (startlock_guard.go); the caller holds
+	// promoteMu. startLockProved: this agent run PERSISTed read_only and
+	// super_read_only ON on a live MySQL since the quarantine.
+	// startLockNextTry: a write of the lock (or its release) failed, the
+	// next is not tried before then. startLockCheckedAt: when
+	// startLockStatus last ran. bootFailAt: the time of the last
+	// "bootstrap file" error log line reported; bootLog and bootLogAt:
+	// the error log as --print-defaults named it, and when it was read.
+	startLockProved    bool
+	startLockNextTry   time.Time
+	startLockCheckedAt time.Time
+	bootFailAt         time.Time
+	bootLog            string
+	bootLogAt          time.Time
 
 	salvageMu sync.Mutex // a salvage rename, a delete or the sweep; never held across mysqlbinlog
 	// salvageRun is held by the one mysql.salvage that may run; another

@@ -35,7 +35,10 @@ const (
 // one connection across calls (dropped and reopened after a failure). A
 // MySQL that does not answer within 5 s yields MySQLOK=false with the error
 // text, not an error. ErrNoHost / no stored credential: MySQLError = "belum terhubung".
-// The pins are reported whatever MySQL answers (Pins.Report).
+// The pins are reported whatever MySQL answers (Pins.Report), and so is
+// the start lock while the role is quarantined or its line is still there
+// (StartLock; before the guard first checked it on a quarantined server,
+// a state saying so).
 func (d *Driver) Snapshot(ctx context.Context) proto.HealthSnapshot {
 	h, err := d.host()
 	var s proto.HealthSnapshot
@@ -46,6 +49,9 @@ func (d *Driver) Snapshot(ctx context.Context) proto.HealthSnapshot {
 	}
 	s.AgentVersion = version.Version
 	s.RolePin, s.SourcePin, s.PinError = d.pins.Report()
+	if s.StartLock = d.StartLock(); s.StartLock == nil && d.pins.RoleIs(roleQuarantined) {
+		s.StartLock = &proto.StartLockState{Reason: "kunci start belum diperiksa agent"}
+	}
 	if d.Sys != nil {
 		datadir := ""
 		if h != nil {

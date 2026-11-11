@@ -2,6 +2,7 @@ package mysql_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -425,12 +426,12 @@ func TestReleasedServerRestartsWithoutInitFile(t *testing.T) {
 	}
 	execAll(t, r.db, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
 	r.inst.Restart(t)
-	var initFile string
+	var initFile sql.NullString
 	if err := r.db.QueryRow("SELECT @@global.init_file").Scan(&initFile); err != nil {
 		t.Fatal(err)
 	}
-	if initFile != "" {
-		t.Errorf("@@init_file after the restart = %q", initFile)
+	if initFile.String != "" {
+		t.Errorf("@@init_file after the restart = %q", initFile.String)
 	}
 	execAll(t, r.db, "CREATE DATABASE ditulis")
 	if _, err := os.Stat(lock); !errors.Is(err, os.ErrNotExist) {

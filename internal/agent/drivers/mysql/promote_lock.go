@@ -15,7 +15,8 @@ import (
 
 // The promote lock on a master (spec 5.1): mysql.lockForPromote makes the
 // master read-only for the promotion of one connected replica, the guard
-// (GuardTick, run by the health monitor after every check) ends the lock
+// (GuardTick, run by the monitor's guard loop every monitor.GuardEvery)
+// ends the lock
 // at its deadline, and mysql.unlockPromote cancels it before then. The
 // guard never opens writes while the candidate may already be a master:
 // it opens them only after reading the candidate read-only twice, a grace
@@ -291,13 +292,15 @@ func candidateConnected(ctx context.Context, db *sql.DB, host string) (string, b
 	return addr, ok, nil
 }
 
-// GuardTick is the promote lock's guard, run by the health monitor after
-// every check (monitor.PromoteGuard) at now. On a quarantined server it
-// only keeps read_only and super_read_only on (guardQuarantined). While
-// the lock exists on a pinned master it first makes sure super_read_only
-// is on (again after a MySQL restart, before anything else). At or past the deadline of a lock
-// with a candidate it reads the candidate (see the package comment above);
-// it never acts on a lock-master lock.
+// GuardTick is the guard, run by the monitor's guard loop every
+// monitor.GuardEvery (monitor.PromoteGuard) at now. First, whatever the
+// role, it keeps or releases the start lock (guardStartLock). On a
+// quarantined server it then only keeps read_only and super_read_only on
+// (guardQuarantined). While the promote lock exists on a pinned master it
+// first makes sure super_read_only is on (again after a MySQL restart,
+// before anything else). At or past the deadline of a lock with a
+// candidate it reads the candidate (see the package comment above); it
+// never acts on a lock-master lock.
 func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	if d.pins == nil {
 		return nil
@@ -307,8 +310,8 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	// A promote command (a repoint probes for up to a minute) holds the
-	// lock: this tick is skipped rather than stall the health loop; the
-	// next check runs the guard again.
+	// lock: this tick is skipped rather than stall the guard loop; its
+	// next round runs the guard again.
 	if !d.promoteMu.TryLock() {
 		if d.Logger != nil {
 			d.Logger.Debug("promote guard tick skipped: a promote command is running")
@@ -316,6 +319,7 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	defer d.promoteMu.Unlock()
+	d.guardStartLock(ctx, h, now)
 	// A quarantined server is read-only before anything else, lock or
 	// not.
 	if d.pins.Role() == roleQuarantined {
@@ -500,8 +504,9 @@ func (d *Driver) keepLock(now time.Time, key, reason string) {
 // addr, the address that host was verified at, for the agent's own reads
 // of it (Pins.SourceDial); it removes the promote lock. Last it writes
 // the start lock (startlock.go) and returns its state; a start lock that
-// cannot be written leaves the quarantine in place. The caller holds
-// promoteMu.
+// cannot be written leaves the quarantine in place. Once the pin is
+// written the start lock is written even when removing the promote lock
+// fails. The caller holds promoteMu.
 func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) (proto.StartLockState, error) {
 	var lock proto.StartLockState
 	if d.pins == nil {
@@ -522,7 +527,10 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) (pr
 	if err := d.pins.SetQuarantinedAt(newSource, addr); err != nil {
 		return lock, fmt.Errorf("MySQL sudah read-only, tetapi pin quarantined gagal ditulis: %w", err)
 	}
-	if err := d.pins.ClearLock(); err != nil {
+	// MySQL is up and was not quarantined: there is no start to report.
+	d.startLockProved, d.qUp = true, true
+	if err := clearLock(d.pins); err != nil {
+		d.lockStart(ctx, h)
 		return lock, fmt.Errorf("server sudah dikarantina, tetapi kunci promosi gagal dihapus: %w", err)
 	}
 	d.guard.reset(nil)

@@ -158,7 +158,10 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	if err := d.pins.SetQuarantinedAt(key, addr); err != nil {
 		return res, fmt.Errorf("pin quarantined gagal ditulis: %w", err)
 	}
-	if err := d.pins.ClearLock(); err != nil {
+	// Read-only is proved again once MySQL answers (guardQuarantined).
+	d.startLockProved = false
+	if err := clearLock(d.pins); err != nil {
+		d.lockStart(ctx, h)
 		return res, fmt.Errorf("server sudah dipin quarantined, tetapi kunci promosi gagal dihapus: %w", err)
 	}
 	d.guard.reset(nil)
@@ -185,13 +188,15 @@ func (d *Driver) requarantine(ctx context.Context, h Host, nm proto.PeerCred, up
 	}
 	if up {
 		db, err := openAdmin(ctx, h)
+		if err == nil {
+			defer db.Close()
+			err = persistReadOnly(ctx, db)
+		}
 		if err != nil {
+			d.lockStart(ctx, h)
 			return res, err
 		}
-		defer db.Close()
-		if err := persistReadOnly(ctx, db); err != nil {
-			return res, err
-		}
+		d.startLockProved = true
 		res.Applied = true
 	}
 	return withStartLock(res, d.lockStart(ctx, h)), nil
@@ -225,26 +230,36 @@ func localServerUUID(ctx context.Context, h Host) (string, error) {
 // last reading plus the time since predicts within one run of mysqld.
 const mysqlUptimeSlack = 2
 
-// guardQuarantined is GuardTick on a quarantined server. It acts only on
-// a transition: MySQL answers after the guard last saw it down, or it
-// restarted since the last reading (its Uptime fell short), which covers
-// agent start, MySQL back after a restart, and MySQL back after a
-// quarantine written while it was down. It then PERSISTs read_only and
-// super_read_only on, before anything else, when either is off. While
-// MySQL stays up it does nothing, so the rebuild from the pinned source,
-// which lifts read-only for its load (liftReadOnly), is not undone.
+// guardQuarantined is GuardTick on a quarantined server, after the start
+// lock's guard. It acts only on a transition: MySQL answers after the
+// guard last saw it down, or it restarted since the last reading (its
+// Uptime fell short), which covers agent start, MySQL back after a
+// restart, and MySQL back after a quarantine written while it was down;
+// and after a rebuild load ended. It then PERSISTs read_only and
+// super_read_only on, before anything else, whether or not either is off
+// (which proves the start lock may go once the server is a replica:
+// startLockProved). While MySQL stays up it does nothing, so the rebuild
+// from the pinned source, which lifts read-only for its load
+// (liftReadOnly), is not undone. On a start (not after a load) it reports
+// how MySQL came up (monitor.quarantineStart: reportQuarantineStart).
 // monitor.quarantined (under the pinned source) is reported once a
 // quarantine written while MySQL was down takes effect, read-only or not,
 // and whenever the flags had to be put back. A MySQL that starts writable
-// stays so until the guard's next tick (no write to mysqld-auto.cnf while
-// it is down). The caller holds promoteMu.
+// (the start lock bypassed) stays so until the guard's next tick. The
+// caller holds promoteMu.
 func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 	db, err := h.Open(ctx)
 	if err != nil {
-		d.guard.up = false
+		d.guard.up, d.qUp = false, false
 		return nil
 	}
 	defer db.Close()
+	// MySQL answers after it did not (or at agent start): a start to
+	// report, unless it ends a rebuild load.
+	if !d.qUp {
+		d.qStartPending = true
+	}
+	d.qUp = true
 	// A rebuild load from the pinned source runs with read-only lifted:
 	// the guard leaves it be, and checks again once the load is over.
 	if src, first, ok := d.deferringToRebuild(); ok {
@@ -257,7 +272,7 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 	// A load just ended: read the flags again (its restore may have
 	// failed), whether or not a tick deferred during it.
 	if d.takeRecheck() {
-		d.guard.up = false
+		d.guard.up, d.qStartPending = false, false
 	}
 	// A restart between two ticks is a transition too.
 	var name string
@@ -270,21 +285,30 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 	now := time.Now()
 	expected := d.qUptime + int64(now.Sub(d.qUptimeAt)/time.Second)
 	sameRun := uptime >= expected-mysqlUptimeSlack
+	// Without an earlier reading (the first tick after this agent run
+	// quarantined a live server) a short Uptime is no start.
+	if !sameRun && !d.qUptimeAt.IsZero() {
+		d.qStartPending = true
+	}
 	d.qUptime, d.qUptimeAt = uptime, now
 	if d.guard.up && sameRun {
 		return nil
 	}
 	var sro, ro bool
-	if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only").Scan(&sro, &ro); err != nil {
+	var initFile sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only, @@global.init_file").Scan(&sro, &ro, &initFile); err != nil {
 		return fmt.Errorf("baca super_read_only: %w", err)
 	}
 	put := !sro || !ro
-	if put {
-		if err := persistReadOnly(ctx, db); err != nil {
-			return err
-		}
+	if err := persistReadOnly(ctx, db); err != nil {
+		return err
 	}
+	d.startLockProved = true
 	d.guard.up = true
+	if d.qStartPending {
+		d.qStartPending = false
+		d.reportQuarantineStart(h, now, put, initFile.String, uptime)
+	}
 	if !put && !d.quarantinePending {
 		return nil
 	}

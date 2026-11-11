@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,8 +25,8 @@ import (
 // (mysqld-auto.cnf, where a once-promoted server holds read_only OFF) are
 // loaded and before any client gets a handshake.
 //
-// Order: the file is written before the line, and (Task 3) the line is
-// removed before the file, so the config never names an init_file that
+// Order: the file is written before the line, and the line is removed
+// before the file (releaseStartLock), so the config never names an init_file that
 // does not exist (mysqld refuses to start on one, and --validate-config
 // does not notice). The file is never in the data directory and never a
 // .cnf, so no !includedir reads it as an option file.
@@ -40,7 +41,7 @@ const startLockContent = "SET GLOBAL super_read_only=ON;\nSET PERSIST read_only=
 const printDefaultsTimeout = 30 * time.Second
 
 // managedConfigMu is held by every writer of the managed config in this
-// process (writeValidConfig, writeStartLock, configure), from reading the
+// process (writeStartLock, releaseStartLock, configure), from reading the
 // content to writing it, so none overwrites another's change.
 var managedConfigMu sync.Mutex
 
@@ -150,6 +151,29 @@ func optionLine(ln string) (name, value string, ok bool) {
 func isStartLockLine(ln, path string) bool {
 	name, value, ok := optionLine(ln)
 	return ok && name == "init_file" && value == path
+}
+
+// agentStartLockPaths are the files named by the agent's init_file lines
+// in content: every init_file whose file name is StartLockFile, wherever
+// it is (a line written under an earlier layout too), each once.
+func agentStartLockPaths(content string) []string {
+	var out []string
+	for _, ln := range strings.Split(content, "\n") {
+		if p, ok := agentStartLockLine(ln); ok && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// agentStartLockLine returns the file of ln when ln is an init_file option
+// naming a file called StartLockFile.
+func agentStartLockLine(ln string) (string, bool) {
+	name, value, ok := optionLine(ln)
+	if !ok || name != "init_file" || filepath.Base(value) != StartLockFile {
+		return "", false
+	}
+	return value, true
 }
 
 // hasStartLockLine reports whether content holds an init_file line
@@ -305,7 +329,10 @@ func printDefaultsArgs(l Layout) []string {
 // readEffectiveOptions runs mysqld --print-defaults (which reads the
 // option files only, never the data directory) and parses its answer.
 // User is the last --user, else mysql when the agent runs as root, else
-// the agent's own user.
+// the agent's own user. --print-defaults runs as the agent (root), so it
+// may read option files mysqld's own user could not; that can only add
+// init_file entries after the agent's line, which makes the start lock
+// look broken, never held: the result is conservative.
 func readEffectiveOptions(ctx context.Context, h Host) (effectiveOpts, error) {
 	var o effectiveOpts
 	l := h.Layout()
@@ -480,9 +507,11 @@ func readableBy(path, name string) (bool, error) {
 }
 
 // startLockStatus checks whether the start lock holds for the next start
-// of MySQL: the agent's line in the managed config, its file, that file
-// the last init_file mysqld reads (--print-defaults), readable by mysqld's
-// user and, under AppArmor or SELinux, in a place its profile allows.
+// of MySQL: the agent's line in the managed config, its file with exactly
+// startLockContent, that file the last init_file mysqld reads
+// (--print-defaults, run as the agent: see readEffectiveOptions), readable
+// by mysqld's user and, under AppArmor or SELinux, in a place its profile
+// allows.
 func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
 	var st proto.StartLockState
 	l := h.Layout()
@@ -501,8 +530,11 @@ func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
 		st.Reason = "baris init_file belum ada di konfigurasi MySQL"
 		return st
 	}
-	if _, err := os.Stat(path); err != nil {
+	if b, err := os.ReadFile(path); err != nil {
 		st.Reason = fmt.Sprintf("berkas kunci %s tidak ada", path)
+		return st
+	} else if string(b) != startLockContent {
+		st.Reason = fmt.Sprintf("isi berkas kunci %s bukan isi kunci start", path)
 		return st
 	}
 	opts, err := readEffectiveOptions(ctx, h)
@@ -549,8 +581,28 @@ func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
 // setStartLockState records st as the start lock's last known state.
 func (d *Driver) setStartLockState(st proto.StartLockState) {
 	d.startLockMu.Lock()
-	d.startLockState = st
+	d.startLockState, d.startLockSet = st, true
 	d.startLockMu.Unlock()
+}
+
+// clearStartLockState records that there is no start lock to report.
+func (d *Driver) clearStartLockState() {
+	d.startLockMu.Lock()
+	d.startLockState, d.startLockSet = proto.StartLockState{}, false
+	d.startLockMu.Unlock()
+}
+
+// StartLock is the start lock as last checked, for the health reports;
+// nil when there is none to report (not quarantined, no line left).
+func (d *Driver) StartLock() *proto.StartLockState {
+	d.startLockMu.Lock()
+	defer d.startLockMu.Unlock()
+	if !d.startLockSet {
+		return nil
+	}
+	st := d.startLockState
+	st.OperatorInitFiles = slices.Clone(st.OperatorInitFiles)
+	return &st
 }
 
 // lockStart writes the start lock and checks it, for a quarantine: a
