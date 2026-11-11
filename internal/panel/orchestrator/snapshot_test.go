@@ -59,7 +59,7 @@ func TestCloneAdminReplacedWaitsInSnapshot(t *testing.T) {
 	}
 
 	// "Lanjutkan" before reconnecting: it still waits.
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("re-check", func() bool { return r.count("mysql.status") >= 2 })
@@ -69,7 +69,7 @@ func TestCloneAdminReplacedWaitsInSnapshot(t *testing.T) {
 
 	reconnected.Store(true)
 	mark := r.mark()
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -100,7 +100,7 @@ func TestCloneAdminReplacedIncompleteFails(t *testing.T) {
 	}
 	e.waitJob(id, store.JobWaiting)
 	reconnected.Store(true)
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	j, _ := e.waitJob(id, store.JobFailed)
@@ -138,7 +138,7 @@ func TestSnapshotRetryWaitsForEarlierDump(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobWaiting)
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("dump started", func() bool { return r.startedJobs() == 1 })
@@ -147,7 +147,7 @@ func TestSnapshotRetryWaitsForEarlierDump(t *testing.T) {
 		t.Fatalf("job = %+v", j)
 	}
 	r.attach()
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("retry polls the earlier dump", func() bool { return r.count("job.status") >= 2 })
@@ -355,7 +355,7 @@ func TestForeignSourceNamedBeforeReset(t *testing.T) {
 	if r.count("mysql.resetReplica") != 0 {
 		t.Fatal("reset before the approval")
 	}
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -418,7 +418,7 @@ func TestOfflineMasterLogWording(t *testing.T) {
 		defer e.r.mu.Unlock()
 		return e.r.live[id] == nil
 	})
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	if j, _ := e.waitJob(id, store.JobFailed); !strings.Contains(j.Error, "master db-master tidak terhubung") ||
@@ -432,7 +432,7 @@ func TestOfflineMasterLogWording(t *testing.T) {
 		defer e.r.mu.Unlock()
 		return e.r.live[id] == nil
 	})
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)

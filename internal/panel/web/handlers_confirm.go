@@ -44,7 +44,14 @@ const (
 	ActCertUpload = "cert_upload"
 	ActCertRevert = "cert_revert"
 	ActCertNames  = "cert_names"
+	// Approve and Retry of a job that drops data: issued for one job, as
+	// jobConfirmAction(act, jobID), and bound to the job's server.
+	ActJobRetry   = "job_retry"
+	ActJobApprove = "job_approve"
 )
+
+// jobConfirmAction is the confirmation action of act on job jobID.
+func jobConfirmAction(act, jobID string) string { return act + ":" + jobID }
 
 // confirmActions are the actions POST /confirm issues tokens for.
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,

@@ -353,11 +353,20 @@ func (a *app) jobFromPath(w http.ResponseWriter, r *http.Request) (store.Job, []
 }
 
 func (a *app) approveJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "job_approve", a.Orchestrator.Approve)
+	a.jobAction(w, r, "job_approve", func(id string) error { return a.Orchestrator.Approve(id, orchestrator.JobAck{}) })
 }
 
 func (a *app) retryJob(w http.ResponseWriter, r *http.Request) {
-	a.jobAction(w, r, "job_retry", a.Orchestrator.Retry)
+	a.jobAction(w, r, "job_retry", func(id string) error { return a.Orchestrator.Retry(id, orchestrator.JobAck{}) })
+}
+
+// prepareRetry: stub.
+func (a *app) prepareRetry(w http.ResponseWriter, r *http.Request) {
+	job, _, ok := a.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	http.Redirect(w, r, jobURL(job.ID)+"?buka=ulangi", http.StatusSeeOther)
 }
 
 func (a *app) cancelJob(w http.ResponseWriter, r *http.Request) {

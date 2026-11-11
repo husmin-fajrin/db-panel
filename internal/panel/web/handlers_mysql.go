@@ -43,8 +43,12 @@ type Orchestrator interface {
 	// quarantine never arrived (a dead server); guard it with a typed
 	// confirmation.
 	DeleteUnquarantined(ctx context.Context, serverID int64) error
-	Approve(jobID string) error
-	Retry(jobID string) error
+	// Approve and Retry refuse a job that drops data (DropsData) without
+	// ack.Confirmed: the handler consumes a job_approve or job_retry token
+	// for that job first.
+	Approve(jobID string, ack orchestrator.JobAck) error
+	Retry(jobID string, ack orchestrator.JobAck) error
+	DropsData(jobID string) (bool, error)
 	Cancel(jobID string) error
 	// Superseded says why a job may no longer be approved or retried; "".
 	Superseded(jobID string) string

@@ -288,7 +288,7 @@ func TestPromotePlannedCatchUpTimeoutUnlocks(t *testing.T) {
 	if p := g.promotion(); p.Status != "failed" {
 		t.Fatalf("promotion status = %s", p.Status)
 	}
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry of a failed promote before the point of no return: %v", err)
 	}
 	e.waitJob(id, store.JobFailed)
@@ -326,7 +326,7 @@ func TestPromotePartialThenRetryResumes(t *testing.T) {
 	}
 
 	g.m.reply("mysql.quarantine", proto.QuarantineResult{Applied: true})
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -717,7 +717,7 @@ func TestPromoteFailureAtNewMasterUnlocksOrGoesPartial(t *testing.T) {
 	// It fails again, but the candidate answers writable this time: past
 	// the point of no return, nothing is undone and the job is partial.
 	g.c.reply("mysql.status", proto.MySQLStatus{Port: 3306})
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	j, _ = e.waitJob(id, store.JobPartial)
@@ -735,7 +735,7 @@ func TestPromoteFailureAtNewMasterUnlocksOrGoesPartial(t *testing.T) {
 	g.c.job("mysql.promote", func(j *jobs.Job, _ json.RawMessage) (any, error) {
 		return proto.PromoteResult{GTIDExecuted: masterGTID, Resumed: true, Mode: proto.PromotePlanned}, nil
 	})
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -761,7 +761,7 @@ func TestPromoteRetrySupersededByTopologyChange(t *testing.T) {
 	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.r.Retry(id); err == nil || !strings.Contains(err.Error(), "sudah berganti") {
+	if err := e.r.Retry(id, JobAck{}); err == nil || !strings.Contains(err.Error(), "sudah berganti") {
 		t.Fatalf("Retry after the master changed: %v", err)
 	}
 	if reason := e.r.Superseded(id); reason == "" {
@@ -803,7 +803,7 @@ func TestPromoteRetryAfterDeadlineSkipsRelock(t *testing.T) {
 	g.c.job("mysql.promote", func(j *jobs.Job, _ json.RawMessage) (any, error) {
 		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Resumed: true, Mode: proto.PromotePlanned}, nil
 	})
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	e.waitJob(id, store.JobSucceeded)

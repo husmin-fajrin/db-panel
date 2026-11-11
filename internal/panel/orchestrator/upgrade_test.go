@@ -67,7 +67,7 @@ func TestOldCreateReplicaJobResumesAndRetries(t *testing.T) {
 	if j, _ := e.waitJob("old-create", store.JobFailed); j.CurrentStep != 5 {
 		t.Fatalf("after Resume: %+v", j)
 	}
-	if err := e.r.Retry("old-create"); err != nil {
+	if err := e.r.Retry("old-create", JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	_, steps := e.waitJob("old-create", store.JobSucceeded)
@@ -107,7 +107,7 @@ func TestOldPrepareMasterJobApproves(t *testing.T) {
 	st := jobState{MasterPort: 3306, NeedsRestart: true, RestartReasons: []string{"log_bin masih OFF"}, WaitReason: WaitRestart}
 	// Waiting at the old "Mulai ulang MySQL" (index 2).
 	e.storeOldJob("old-prepare", KindPrepareMaster, m.id, 0, oldPrepareMasterSteps, st, 2, store.JobWaiting)
-	if err := e.r.Approve("old-prepare"); err != nil {
+	if err := e.r.Approve("old-prepare", JobAck{}); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
 	_, steps := e.waitJob("old-prepare", store.JobSucceeded)
@@ -126,7 +126,7 @@ func TestUnknownStepListFailsVisibly(t *testing.T) {
 	e.storeOldJob("odd", KindPrepareMaster, m.id, 0, []string{"a", "b"}, jobState{}, 1, store.JobRunning)
 	e.r.Resume(context.Background())
 	e.waitJob("odd", store.JobFailed)
-	if err := e.r.Retry("odd"); err != nil {
+	if err := e.r.Retry("odd", JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	e.waitFor("job failed again", func() bool {

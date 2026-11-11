@@ -191,7 +191,7 @@ func TestAddDatabasesRetryAfterReplayFailure(t *testing.T) {
 
 	r.reply("mysql.startUntil", proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "No"})
 	mr, rr := m.mark(), r.mark()
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	e.waitJob(id, store.JobSucceeded)

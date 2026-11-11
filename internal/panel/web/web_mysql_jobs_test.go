@@ -47,6 +47,11 @@ type fakeOrch struct {
 	nextID     string
 	// superseded answers Superseded per job id.
 	superseded map[string]string
+	// drops answers DropsData per job id; acks are what Approve and Retry
+	// received, in order. Like the orchestrator, Approve and Retry refuse a
+	// dropping job without ack.Confirmed.
+	drops map[string]bool
+	acks  []orchestrator.JobAck
 	// view is what PromoteView answers; promoteErr what StartPromote
 	// refuses with; promotes the parameters StartPromote received.
 	view       orchestrator.PromoteView
@@ -221,9 +226,31 @@ func (f *fakeOrch) StartTightenTLS(_ context.Context, masterServerID int64) (str
 	return f.nextID, nil
 }
 
-func (f *fakeOrch) Approve(id string) error { f.record("approve " + id); return f.err }
-func (f *fakeOrch) Retry(id string) error   { f.record("retry " + id); return f.err }
-func (f *fakeOrch) Cancel(id string) error  { f.record("cancel " + id); return f.err }
+func (f *fakeOrch) Approve(id string, ack orchestrator.JobAck) error {
+	return f.jobAck("approve "+id, id, ack)
+}
+func (f *fakeOrch) Retry(id string, ack orchestrator.JobAck) error {
+	return f.jobAck("retry "+id, id, ack)
+}
+func (f *fakeOrch) Cancel(id string) error { f.record("cancel " + id); return f.err }
+
+func (f *fakeOrch) jobAck(call, id string, ack orchestrator.JobAck) error {
+	f.record(call)
+	f.mu.Lock()
+	f.acks = append(f.acks, ack)
+	drops := f.drops[id]
+	f.mu.Unlock()
+	if drops && !ack.Confirmed {
+		return orchestrator.ErrJobNeedsConfirm
+	}
+	return f.err
+}
+
+func (f *fakeOrch) DropsData(id string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.drops[id], nil
+}
 func (f *fakeOrch) PromoteView(_ context.Context, masterServerID int64) (orchestrator.PromoteView, error) {
 	f.record(fmt.Sprintf("promote-view %d", masterServerID))
 	f.mu.Lock()
@@ -1255,4 +1282,37 @@ func TestTightenTLSBoxShownByCondition(t *testing.T) {
 	rec = e.do("POST", "/masters/1/tighten-tls", withToken(t, e, url.Values{}, web.ActTightenTLS, "server", 1), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "replika db-replika masih punya pekerjaan yang belum selesai")
+}
+
+// TestRemoveDatabasesDropNeedsTypedName (spec 5.6): dropping the data of
+// released databases needs the replica's name typed besides the token;
+// releasing them without dropping does not. The dialog's button asks for
+// the name only while "Hapus datanya juga" is ticked.
+func TestRemoveDatabasesDropNeedsTypedName(t *testing.T) {
+	e, f, _ := newMySQLEnv(t)
+	c := e.cookie()
+	e.subsetReplica(t, []string{"gudang", "toko"}, archiveDatabases...)
+
+	rec := e.do("GET", "/replicas/2/databases", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `data-server-name="db-replika"`, `:data-confirm-name="confirmName"`)
+	wantNoBody(t, rec, `data-confirm-name="db-replika"`)
+
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		return e.do("POST", "/replicas/2/databases/remove", withToken(t, e, form, web.ActRemoveDatabases, "replica", 2), c)
+	}
+	for _, name := range []string{"", "db-replik", "DB-REPLIKA"} {
+		form := url.Values{"databases": {"gudang"}, "drop_data": {"1"}}
+		if name != "" {
+			form.Set("confirm_name", name)
+		}
+		rec := post(form)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, "Nama server tidak cocok", `action="/replicas/2/databases/remove"`)
+	}
+	wantCalls(t, f)
+
+	wantCode(t, post(url.Values{"databases": {"gudang"}}), http.StatusSeeOther)
+	wantCode(t, post(url.Values{"databases": {"gudang"}, "drop_data": {"1"}, "confirm_name": {"db-replika"}}), http.StatusSeeOther)
+	wantCalls(t, f, "remove-databases 2 gudang drop=false", "remove-databases 2 gudang drop=true")
 }

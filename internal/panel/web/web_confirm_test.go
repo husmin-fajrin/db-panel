@@ -3,6 +3,7 @@ package web_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
@@ -477,5 +478,87 @@ func TestConfirmModalOnEveryPage(t *testing.T) {
 		rec := e.do("GET", p.path, nil, c)
 		wantCode(t, rec, http.StatusOK)
 		wantBody(t, rec, append(p.attrs, `x-data="confirmModal"`, `name="password"`)...)
+	}
+}
+
+// TestJobTokenBoundToJob (Review Focus 5): a job_retry token works once,
+// for its job and its server only, and only for a retry; a refusal changes
+// nothing and consumes no other job's token.
+func TestJobTokenBoundToJob(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	failedResyncJob(t, e, f, resyncJob, "gudang", "toko")
+	failedResyncJob(t, e, f, resyncJob2, "gudang", "toko")
+	retry := func(id, tok string) *httptest.ResponseRecorder {
+		return e.do("POST", "/jobs/"+id+"/retry", url.Values{"confirm_token": {tok}}, c)
+	}
+
+	tokA := confirmToken(t, e, "job_retry:"+resyncJob, "job", 2)
+	rec := retry(resyncJob2, tokA)
+	wantCode(t, rec, http.StatusForbidden)
+	wantBody(t, rec, msgConfirmInvalid, `data-job-id="`+resyncJob2+`"`)
+	for name, tok := range map[string]string{
+		"other server":  confirmToken(t, e, "job_retry:"+resyncJob, "job", 1),
+		"approve token": confirmToken(t, e, "job_approve:"+resyncJob, "job", 2),
+		"replica kind":  confirmToken(t, e, web.ActResync, "replica", 2),
+	} {
+		if rec := retry(resyncJob, tok); rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403", name, rec.Code)
+		}
+	}
+	wantCalls(t, f)
+	for _, id := range []string{resyncJob, resyncJob2} {
+		if s := jobStatus(t, e.st, id); s != store.JobFailed {
+			t.Fatalf("job %s after refusals = %s", id, s)
+		}
+	}
+
+	// The token tried on job B is still good for job A, once.
+	wantCode(t, retry(resyncJob, tokA), http.StatusSeeOther)
+	wantCalls(t, f, "retry "+resyncJob)
+	wantCode(t, retry(resyncJob, tokA), http.StatusForbidden)
+	wantCalls(t, f, "retry "+resyncJob)
+
+	// /confirm issues job tokens only for a well-formed job id and kind job.
+	for _, form := range []url.Values{
+		confirmForm("job_retry", "job", 2, testPassword),
+		confirmForm("job_retry:", "job", 2, testPassword),
+		confirmForm("job_retry:"+strings.ToUpper(resyncJob), "job", 2, testPassword),
+		confirmForm("job_retry:"+resyncJob+"0", "job", 2, testPassword),
+		confirmForm("job_retry:../"+resyncJob, "job", 2, testPassword),
+		confirmForm("job_cancel:"+resyncJob, "job", 2, testPassword),
+		confirmForm("job_retry:"+resyncJob, "job", 0, testPassword),
+		confirmForm(web.ActResync+":"+resyncJob, "replica", 2, testPassword),
+	} {
+		rec := e.do("POST", "/confirm", form, c)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("POST /confirm %v: status %d, want 400", form, rec.Code)
+		}
+	}
+
+	// The audit names the action and the server, never the token.
+	entries, err := e.st.ListAudit(0, time.Time{}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, rejected := 0, 0
+	for _, en := range entries {
+		if strings.Contains(en.DetailJSON+en.Outcome, tokA) {
+			t.Errorf("audit entry holds the token: %+v", en)
+		}
+		switch en.Action {
+		case "confirm_issued":
+			if en.TargetKind == "job" {
+				issued++
+			}
+		case "confirm_rejected":
+			if en.TargetKind != "job" || !strings.Contains(en.DetailJSON, `"action":"job_retry:`) {
+				t.Errorf("confirm_rejected = %+v", en)
+			}
+			rejected++
+		}
+	}
+	if issued != 3 || rejected != 5 {
+		t.Errorf("job confirmations issued %d, rejected %d; want 3 and 5", issued, rejected)
 	}
 }

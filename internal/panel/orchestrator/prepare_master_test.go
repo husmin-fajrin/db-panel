@@ -214,7 +214,7 @@ func TestPrepareMasterWaitsForRestartApproval(t *testing.T) {
 		t.Fatal("MasterReady before the restart")
 	}
 
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
 	_, steps = e.waitJob(id, store.JobSucceeded)
@@ -229,7 +229,7 @@ func TestPrepareMasterWaitsForRestartApproval(t *testing.T) {
 	if inv, _ := e.st.GetInventory(fa.id); !inv.MasterReady {
 		t.Fatal("MasterReady not set")
 	}
-	if err := e.r.Approve(id); err == nil {
+	if err := e.r.Approve(id, JobAck{}); err == nil {
 		t.Fatal("Approve of a finished job succeeded")
 	}
 }
@@ -258,7 +258,7 @@ func TestPrepareMasterRecheckAfterOwnRestart(t *testing.T) {
 
 	// Not restarted yet: it waits again and says what is still pending.
 	mark := fa.mark()
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("second status read", func() bool { return fa.count("mysql.status") >= 2 })
@@ -272,7 +272,7 @@ func TestPrepareMasterRecheckAfterOwnRestart(t *testing.T) {
 	}
 
 	restarted.Store(true) // the user restarts MySQL at 2 am
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	_, steps := e.waitJob(id, store.JobSucceeded)
@@ -358,16 +358,16 @@ func TestPrepareMasterFailsOnPreflight(t *testing.T) {
 		!strings.Contains(j.Error, "Periksa master") {
 		t.Fatalf("job %+v steps %+v", j, steps)
 	}
-	if err := e.r.Approve(id); err == nil {
+	if err := e.r.Approve(id, JobAck{}); err == nil {
 		t.Fatal("Approve of a failed job succeeded")
 	}
 	// Retry runs the step again with the same params.
 	scriptPrepare(fa)
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	e.waitJob(id, store.JobSucceeded)
-	if err := e.r.Retry(id); !errors.Is(err, store.ErrJobFinished) {
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, store.ErrJobFinished) {
 		t.Fatalf("Retry of a succeeded job: err = %v", err)
 	}
 }

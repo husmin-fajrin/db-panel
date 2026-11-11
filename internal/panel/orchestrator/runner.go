@@ -545,9 +545,45 @@ func (r *Runner) failUnrunnable(j store.Job, rows []store.JobStep, cause error) 
 	r.jobFailed(j.ServerID, j.ID, j.Kind, step, msg)
 }
 
+// JobAck is what the user confirmed for an Approve or a Retry. A job that
+// drops data (dropsData) is refused without Confirmed, whatever calls it.
+type JobAck struct {
+	// Confirmed: the web consumed a fresh job_retry or job_approve token
+	// bound to this job and its server.
+	Confirmed bool
+	// WipeOnly: the databases of the job's WipeList acknowledged again as
+	// existing only on the replica (replaces jobState.WipeOnly on Retry).
+	WipeOnly []string
+	// TypedDatabases: the database names typed for add_databases.
+	TypedDatabases []string
+	// AcceptConnections: the connections to the old master are acknowledged
+	// (Retry of a rebuild).
+	AcceptConnections bool
+}
+
+// confirmMaxAge is how long the last confirmation of a job that drops data
+// lets it be retried.
+const confirmMaxAge = 24 * time.Hour
+
+var (
+	ErrConfirmStale    = errors.New("konfirmasi terakhir pekerjaan ini lebih dari 24 jam lalu; mulai tindakan baru dari halaman servernya")
+	ErrJobNeedsConfirm = errors.New("pekerjaan ini membuang data; ulangi atau setujui lewat dialog konfirmasi")
+)
+
+// dropsData reports whether a job of kind with st drops data on a server
+// when it runs on: its Approve and Retry need a fresh confirmation.
+func dropsData(kind string, st jobState) bool {
+	return false
+}
+
+// DropsData reports whether the job drops data (see dropsData).
+func (r *Runner) DropsData(jobID string) (bool, error) {
+	return false, nil
+}
+
 // Approve lets a job waiting for the user continue: the waiting step runs
 // again with the approval. A superseded job (see supersededBy) is refused.
-func (r *Runner) Approve(jobID string) error {
+func (r *Runner) Approve(jobID string, ack JobAck) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
@@ -566,7 +602,7 @@ func (r *Runner) Approve(jobID string) error {
 // Retry runs a failed job again from the step that failed, with the same
 // params; a waiting job re-checks its waiting step. A superseded job (see
 // supersededBy) is refused.
-func (r *Runner) Retry(jobID string) error {
+func (r *Runner) Retry(jobID string, ack JobAck) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
@@ -1106,6 +1142,10 @@ type jobRun struct {
 	// an answer from the agent (a timeout, a dropped link), so the agent
 	// may have started the job anyway.
 	promoteStartUnknown bool
+	// preflightFresh: replicaPreflight succeeded in this run. Never stored:
+	// a new run (an Approve, a Retry, a restart) runs the preflight again
+	// before anything is dropped.
+	preflightFresh bool
 }
 
 func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun, error) {

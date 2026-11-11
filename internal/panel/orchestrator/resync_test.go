@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,7 +190,7 @@ func TestResyncStopsForUnknownLeftover(t *testing.T) {
 	if n := r.count("mysql.dropDatabases"); n != 0 {
 		t.Fatal("databases dropped before approval")
 	}
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -420,8 +421,8 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 			return err
 		}, "tidak diikuti replika ini"},
 		// Ulangi of a failed job of those kinds loads data the same way.
-		{"Resync ulang", func() error { return e.r.Retry(failedResync) }, "pekerjaan lain"},
-		{"Lepas database", func() error { return e.r.Retry(failedDrop) }, "pekerjaan lain"},
+		{"Resync ulang", func() error { return e.r.Retry(failedResync, JobAck{}) }, "pekerjaan lain"},
+		{"Lepas database", func() error { return e.r.Retry(failedDrop, JobAck{}) }, "pekerjaan lain"},
 	}
 	check := func(when string, now time.Time, refused bool) {
 		t.Helper()
@@ -617,4 +618,176 @@ func TestResyncWithEmptyWipeListDoesNotReadMasterInventory(t *testing.T) {
 	if n := m.count("mysql.inventory"); n != 0 {
 		t.Fatalf("master inventory read %d times with an empty wipe list", n)
 	}
+}
+
+// failingCopyResync is a resync of a replica holding a and x (x only on
+// the replica, acknowledged) whose first dump fails: the job fails at
+// "Salin data" after the old databases were dropped.
+func failingCopyResync(t *testing.T, e *env) (m, r *fakeAgent, id string) {
+	t.Helper()
+	m, topo := e.readyMaster("db-master")
+	r = e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "x", Bytes: 50}}, "a")
+	var dumps atomic.Int32
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		if dumps.Add(1) == 1 {
+			return nil, errors.New("disk penuh")
+		}
+		return proto.SnapshotResult{Method: "dump", Bytes: 100, GTIDExecuted: masterGTID}, nil
+	})
+	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id, WipeList: []string{"a", "x"}, WipeOnly: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps := e.waitJob(id, store.JobFailed)
+	if steps[j.CurrentStep].Name != "Salin data" {
+		t.Fatalf("job failed at %q, want Salin data", steps[j.CurrentStep].Name)
+	}
+	e.waitIdle(id)
+	return m, r, id
+}
+
+// TestRetryResyncFailedAtCopyNeedsToken (spec 5.10): "Ulangi" of a resync
+// that failed while copying needs a fresh confirmation; with it, the
+// master's databases are read fresh and the preflight runs again before
+// anything is dropped, although the job resumes at "Salin data".
+func TestRetryResyncFailedAtCopyNeedsToken(t *testing.T) {
+	e := newEnv(t)
+	m, r, id := failingCopyResync(t, e)
+	rmark, mmark := r.mark(), m.mark()
+
+	if err := e.r.Retry(id, JobAck{WipeOnly: []string{"x"}}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Retry without confirmation = %v, want ErrJobNeedsConfirm", err)
+	}
+	// An acknowledgement of a database the job does not drop is refused.
+	if err := e.r.Retry(id, JobAck{Confirmed: true, WipeOnly: []string{"x", "lain"}}); err == nil {
+		t.Fatal("Retry acknowledging a database outside the wipe list was accepted")
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+		t.Fatalf("job after refused retries = %+v", j)
+	}
+	if st := e.storedState(id); !slices.Equal(st.WipeOnly, []string{"x"}) {
+		t.Fatalf("refused retry changed WipeOnly to %v", st.WipeOnly)
+	}
+	wantCmds(t, "replica", r.cmds(rmark), nil)
+	wantCmds(t, "master", m.cmds(mmark), nil)
+
+	// The master's databases are read before the replica's preflight.
+	var replicaBeforeInventory []string
+	m.on("mysql.inventory", func(json.RawMessage) (any, error) {
+		replicaBeforeInventory = r.cmds(rmark)
+		return proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs}, nil
+	})
+	if err := e.r.Retry(id, JobAck{Confirmed: true, WipeOnly: []string{"x"}}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if n := m.count("mysql.inventory"); n != 2 {
+		t.Fatalf("master inventory read %d times, want 2 (start and retry)", n)
+	}
+	for _, c := range replicaBeforeInventory {
+		if c == "mysql.preflight" || c == "mysql.dropDatabases" {
+			t.Fatalf("replica got %s before the fresh master read: %v", c, replicaBeforeInventory)
+		}
+	}
+	cmds := r.cmds(rmark)
+	pre, drop := slices.Index(cmds, "mysql.preflight"), slices.Index(cmds, "mysql.dropDatabases")
+	if pre < 0 || drop < 0 || pre > drop {
+		t.Fatalf("replica commands after the retry = %v, want mysql.preflight before mysql.dropDatabases", cmds)
+	}
+	if slices.Contains(cmds, "probe") {
+		t.Fatalf("the retry ran Periksa server tujuan again instead of resuming: %v", cmds)
+	}
+	if st := e.storedState(id); st.ConfirmedAt.IsZero() || time.Since(st.ConfirmedAt) > time.Minute {
+		t.Fatalf("ConfirmedAt after the retry = %v", st.ConfirmedAt)
+	}
+}
+
+// A retry whose fresh read finds the acknowledged database on the master
+// no longer, and not acknowledged again, drops nothing.
+func TestRetryResyncNeedsWipeOnlyAgain(t *testing.T) {
+	e := newEnv(t)
+	_, r, id := failingCopyResync(t, e)
+	rmark := r.mark()
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if !strings.Contains(j.Error, "database x hanya ada di replika dan belum diakui") {
+		t.Fatalf("job error = %q", j.Error)
+	}
+	for _, c := range r.cmds(rmark) {
+		if c == "mysql.dropDatabases" || c == "mysql.dumpFrom" || c == "mysql.preflight" {
+			t.Fatalf("replica got %s although x was not acknowledged again", c)
+		}
+	}
+}
+
+// TestRetryRefusedAfter24h: a job that drops data is not retried more than
+// 24 hours after its last confirmation; a job stored without ConfirmedAt
+// counts from its creation.
+func TestRetryRefusedAfter24h(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		created, confirmed time.Time
+		stale              bool
+	}{
+		{"confirmed 25 h ago", time.Now().Add(-26 * time.Hour), time.Now().Add(-25 * time.Hour), true},
+		{"no ConfirmedAt, created 25 h ago", time.Now().Add(-25 * time.Hour), time.Time{}, true},
+		{"confirmed 23 h ago", time.Now().Add(-30 * time.Hour), time.Now().Add(-23 * time.Hour), false},
+		{"no ConfirmedAt, created 23 h ago", time.Now().Add(-23 * time.Hour), time.Time{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			_, topo := e.readyMaster("db-master")
+			r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}}, "a")
+			if err := e.st.SetReplicaState(r.id, store.ReplicaFailed, "gagal"); err != nil {
+				t.Fatal(err)
+			}
+			const id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+			b, _ := json.Marshal(jobState{MasterServerID: topo.MasterServerID, Databases: []string{"a"}, ConfirmWipe: true,
+				Resync: true, WipeList: []string{"a"}, ConfirmedAt: tc.confirmed})
+			if err := e.st.CreateJob(store.Job{ID: id, Kind: KindResyncReplica, ServerID: r.id, TopologyID: topo.ID,
+				ParamsJSON: string(b), CreatedAt: tc.created}, resyncSteps()); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.st.UpdateJob(id, store.JobFailed, 0, "gagal", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			mark := r.mark()
+			err := e.r.Retry(id, JobAck{Confirmed: true})
+			if !tc.stale {
+				if err != nil {
+					t.Fatalf("Retry = %v, want accepted", err)
+				}
+				e.waitJob(id, store.JobSucceeded)
+				return
+			}
+			if !errors.Is(err, ErrConfirmStale) {
+				t.Fatalf("Retry = %v, want ErrConfirmStale", err)
+			}
+			if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+				t.Fatalf("job after a refused retry = %+v", j)
+			}
+			if st := e.storedState(id); !st.ConfirmedAt.Equal(tc.confirmed) {
+				t.Fatalf("refused retry stored ConfirmedAt %v", st.ConfirmedAt)
+			}
+			wantCmds(t, "replica", r.cmds(mark), nil)
+		})
+	}
+}
+
+// Ruling 15: StartResync keeps only acknowledgements of listed databases.
+func TestResyncStoresOnlyListedWipeOnly(t *testing.T) {
+	e := newEnv(t)
+	_, topo := e.readyMaster("db-master")
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "x", Bytes: 50}}, "a")
+	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id, WipeList: []string{"a", "x"},
+		WipeOnly: []string{"x", "lain", "X"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := e.storedState(id); !slices.Equal(st.WipeOnly, []string{"x"}) {
+		t.Fatalf("stored WipeOnly = %v, want [x]", st.WipeOnly)
+	}
+	e.waitJob(id, store.JobSucceeded)
 }

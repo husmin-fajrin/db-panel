@@ -31,7 +31,7 @@ func (e *env) failedJob(id, kind string, serverID, topologyID int64, params stri
 func (e *env) wantRefused(fa *fakeAgent, id, reason string) {
 	e.t.Helper()
 	mark := fa.mark()
-	err := e.r.Retry(id)
+	err := e.r.Retry(id, JobAck{})
 	if err == nil || !strings.Contains(err.Error(), "tidak berlaku") || !strings.Contains(err.Error(), reason) {
 		e.t.Fatalf("Retry(%s) = %v, want refused for %q", id, err, reason)
 	}
@@ -122,7 +122,7 @@ func TestApproveRefusesSupersededPrepareMaster(t *testing.T) {
 	if err := e.st.SetServerRole(fa.id, store.RoleReplica); err != nil {
 		t.Fatal(err)
 	}
-	err := e.r.Approve("prep")
+	err := e.r.Approve("prep", JobAck{})
 	if err == nil || !strings.Contains(err.Error(), "sekarang menjadi replika") {
 		t.Fatalf("Approve = %v", err)
 	}
@@ -180,7 +180,7 @@ func TestRetryReopensBeforeNewJobs(t *testing.T) {
 	// Real scheduling: a Start right after Retry returns is refused.
 	e.waitFor("job goroutine gone", gone)
 	hold.Store(true)
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	wantRefusedNew()
@@ -196,7 +196,7 @@ func TestRetryReopensBeforeNewJobs(t *testing.T) {
 	e.r.mu.Lock()
 	e.r.live[id] = held
 	e.r.mu.Unlock()
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	wantRefusedNew()
@@ -259,7 +259,7 @@ func TestCancelBetweenReopenAndLaunchIsCanceled(t *testing.T) {
 
 			var cancelErr error
 			e.r.afterReopen = func(string) { cancelErr = e.r.Cancel(id) }
-			retryErr := e.r.Retry(id)
+			retryErr := e.r.Retry(id, JobAck{})
 			e.r.afterReopen = nil
 			if cancelErr != nil {
 				t.Fatalf("Cancel = %v", cancelErr)

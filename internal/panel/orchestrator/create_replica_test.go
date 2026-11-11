@@ -58,7 +58,7 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 	if n := r.count("mysql.cloneFrom"); n != 0 {
 		t.Fatal("CLONE started before Approve")
 	}
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
 	j, steps = e.waitJob(id, store.JobSucceeded)
@@ -187,7 +187,7 @@ func TestCreateReplicaSubsetUsesDumpWithFilter(t *testing.T) {
 	if want := "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: a, b"; steps[1].Message != want {
 		t.Fatalf("waiting message = %q, want %q", steps[1].Message, want)
 	}
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	_, steps = e.waitJob(id, store.JobSucceeded)
@@ -372,7 +372,7 @@ func TestFailsWhenAgentDropsDuringSnapshot(t *testing.T) {
 	})
 	r.attach()
 	mark := r.mark()
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	_, steps = e.waitJob(id, store.JobSucceeded)
@@ -569,7 +569,7 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 	leftMu.Lock()
 	left = []string{"a", "b"} // changed before the user approved
 	leftMu.Unlock()
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("second waiting message", func() bool {
@@ -583,7 +583,7 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 		}
 	}
 
-	if err := e.r.Approve(id); err != nil {
+	if err := e.r.Approve(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -646,7 +646,7 @@ func TestConnectWaitsWhenReplicaAdminReplaced(t *testing.T) {
 		t.Fatalf("server_tls recorded for a refused install: %v", err)
 	}
 	reconnected.Store(true)
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -700,7 +700,7 @@ func TestRetryFromVerifyRestartsReplication(t *testing.T) {
 		return proto.WaitSyncedResult{Synced: true, Executed: masterGTID}, nil
 	})
 	mark, mmark := r.mark(), m.mark()
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -906,7 +906,7 @@ func TestJobFailedReachesAlerts(t *testing.T) {
 		t.Fatalf("JobEnded on a failure: %v", ended)
 	}
 	r.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckOK, Method: "dump"})
-	if err := e.r.Retry(id); err != nil {
+	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -1037,10 +1037,16 @@ func TestStartRebuildRechecksConnections(t *testing.T) {
 	g.c.reply("mysql.createDumpUser", nil)
 	g.c.reply("mysql.dropUser", nil)
 	g.c.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})
+	reads := g.m.count("mysql.connections")
 	rebuildID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
 		RebuildOldMaster: true, ConfirmWipe: true, AcceptConnections: true})
 	if err != nil {
 		t.Fatalf("acknowledged rebuild: %v", err)
+	}
+	// The acknowledged start does not read the connections: the
+	// acknowledgement covers whatever is there (ruling 14).
+	if n := g.m.count("mysql.connections"); n != reads {
+		t.Fatalf("acknowledged start read the connections %d times, want 0", n-reads)
 	}
 	j, _, err := e.st.GetJob(rebuildID)
 	if err != nil || !strings.Contains(j.ParamsJSON, `"accept_connections":true`) {

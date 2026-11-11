@@ -236,6 +236,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /jobs/{id}/log", authed(a.jobLog))
 	mux.Handle("POST /jobs/{id}/approve", authedPost(a.approveJob))
 	mux.Handle("POST /jobs/{id}/retry", authedPost(a.retryJob))
+	mux.Handle("POST /jobs/{id}/retry/prepare", authedPost(a.prepareRetry))
 	mux.Handle("POST /jobs/{id}/cancel", authedPost(a.cancelJob))
 	mux.Handle("GET /alerts", authed(a.alertsPage))
 	mux.Handle("GET /alerts/count", authed(a.alertCount))
