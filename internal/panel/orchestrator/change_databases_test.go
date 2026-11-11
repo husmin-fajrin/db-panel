@@ -34,6 +34,9 @@ func (e *env) followingReplica(topo store.Topology, dbs ...string) *fakeAgent {
 	})
 	r.reply("mysql.startUntil", proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "No"})
 	r.reply("mysql.setReplicationFilter", proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"})
+	// The fresh read of the replica's databases (addExisting): the ones it
+	// follows.
+	replicaHas(r, dbs...)
 	return r
 }
 
@@ -47,7 +50,7 @@ func (e *env) replica(serverID int64) store.Replica {
 }
 
 func addDatabasesCmds() []string {
-	return []string{"mysql.setReplicationFilter", "mysql.waitSynced", "mysql.stopReplica", "mysql.dumpFrom", "mysql.startUntil",
+	return []string{"mysql.inventory", "mysql.setReplicationFilter", "mysql.waitSynced", "mysql.stopReplica", "mysql.dumpFrom", "mysql.startUntil",
 		"mysql.setReplicationFilter", "mysql.startReplica", "mysql.waitSynced"}
 }
 
@@ -154,7 +157,7 @@ func TestAddDatabasesFailsIfReplicaLagging(t *testing.T) {
 		t.Fatalf("job = %+v, steps %+v", j, steps)
 	}
 	wantCmds(t, "master", m.cmds(0), []string{"mysql.sweepDumpUsers", "mysql.status"})
-	wantCmds(t, "replica", r.cmds(0), []string{"mysql.setReplicationFilter", "mysql.waitSynced"})
+	wantCmds(t, "replica", r.cmds(0), []string{"mysql.inventory", "mysql.setReplicationFilter", "mysql.waitSynced"})
 	rep := e.replica(r.id)
 	if rep.State != store.ReplicaAttention || !strings.HasPrefix(rep.LastError, "gagal saat Menunggu replika menyusul: ") ||
 		!strings.Contains(rep.LastError, lag) || !slices.Equal(rep.Databases, []string{"a"}) {
@@ -476,4 +479,244 @@ func TestResumeMarksChangingReplicaAttention(t *testing.T) {
 		rep.LastError != "gagal saat Salin database baru: "+resumeError {
 		t.Fatalf("replica = %+v", rep)
 	}
+}
+
+// existingText is the spec's 5.6 text for a database X that already
+// exists on the replica.
+func existingText(x string) string {
+	return "Database " + x + " sudah ada di replika ini. Panel tidak bisa memastikan isinya sama dengan master. " +
+		"Isinya di replika akan dibuang permanen, lalu diganti salinan dari master."
+}
+
+// masterHas adds dbs to the master's stored inventory.
+func (e *env) masterHas(masterID int64, dbs ...string) {
+	e.t.Helper()
+	inv, err := e.st.GetInventory(masterID)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, d := range dbs {
+		inv.Databases = append(inv.Databases, proto.DatabaseInfo{Name: d, Bytes: 10})
+	}
+	if err := e.st.SetInventory(inv); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// replicaHas scripts the replica's fresh inventory (mysql.inventory).
+func replicaHas(r *fakeAgent, dbs ...string) {
+	var infos []proto.DatabaseInfo
+	for _, d := range dbs {
+		infos = append(infos, proto.DatabaseInfo{Name: d})
+	}
+	r.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: infos})
+}
+
+func (e *env) jobState(id string) jobState {
+	e.t.Helper()
+	j, _, err := e.st.GetJob(id)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		e.t.Fatal(err)
+	}
+	return st
+}
+
+// wantNoDrop fails when the replica got a drop or a dump since mark.
+func wantNoDrop(t *testing.T, r *fakeAgent, mark int) {
+	t.Helper()
+	for _, c := range r.cmds(mark) {
+		if c == "mysql.dropDatabases" || c == "mysql.dumpFrom" {
+			t.Fatalf("replica got %s while the job waits: %v", c, r.cmds(mark))
+		}
+	}
+}
+
+// waitingAddExisting starts adding rekap to a replica following a whose
+// MySQL already has rekap; the job waits at step 0.
+func waitingAddExisting(t *testing.T, e *env, add ...string) (m, r *fakeAgent, id string) {
+	t.Helper()
+	m, topo := e.readyMaster("db-master")
+	e.masterHas(m.id, "rekap", "rekap2")
+	r = e.followingReplica(topo, "a")
+	replicaHas(r, "a", "rekap")
+	if len(add) == 0 {
+		add = []string{"rekap"}
+	}
+	id, err := e.r.StartAddDatabases(context.Background(), r.id, add)
+	if err != nil {
+		t.Fatalf("StartAddDatabases: %v", err)
+	}
+	e.waitJob(id, store.JobWaiting)
+	return m, r, id
+}
+
+// TestAddExistingWaitsBoundToHash (spec 5.6, R-058): adding a database the
+// replica already has (compared without case) waits before anything else,
+// with the spec's text per database, bound to the hash of that list; a
+// list that changed by the approval waits again with the new list.
+func TestAddExistingWaitsBoundToHash(t *testing.T) {
+	e := newEnv(t)
+	_, r, id := waitingAddExisting(t, e, "rekap", "rekap2")
+	j, steps, _ := e.st.GetJob(id)
+	if j.CurrentStep != 0 || steps[0].Status != store.StepWaiting || steps[0].Message != existingText("rekap") {
+		t.Fatalf("job = %+v, step 0 = %+v", j, steps[0])
+	}
+	st := e.jobState(id)
+	if st.WaitReason != WaitAddExisting || !slices.Equal(st.AddExisting, []string{"rekap"}) ||
+		st.AddExistingHash != hashList([]string{"rekap"}) || len(st.AddDrop) != 0 {
+		t.Fatalf("state = %+v", st)
+	}
+	// Nothing but the fresh read reached the replica.
+	wantCmds(t, "replica", r.cmds(0), []string{"mysql.inventory"})
+	if drops, err := e.r.DropsData(id); err != nil || !drops {
+		t.Fatalf("DropsData = %v, %v; want true", drops, err)
+	}
+
+	// By the approval the replica also has Rekap2: the approval of [rekap]
+	// does not cover it; the job waits again with both, in the requested
+	// spelling.
+	replicaHas(r, "a", "rekap", "Rekap2")
+	mark := r.mark()
+	if err := e.r.Approve(id, JobAck{Confirmed: true, TypedDatabases: []string{"rekap"}}); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	e.waitFor("the second wait", func() bool { return len(e.jobState(id).AddExisting) == 2 })
+	_, steps = e.waitJob(id, store.JobWaiting)
+	if want := existingText("rekap") + "\n\n" + existingText("rekap2"); steps[0].Message != want {
+		t.Fatalf("step 0 message = %q, want %q", steps[0].Message, want)
+	}
+	st = e.jobState(id)
+	if !slices.Equal(st.AddExisting, []string{"rekap", "rekap2"}) || st.AddExistingHash != hashList([]string{"rekap", "rekap2"}) ||
+		len(st.AddDrop) != 0 {
+		t.Fatalf("state = %+v", st)
+	}
+	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.inventory"})
+	wantNoDrop(t, r, 0)
+}
+
+// TestApproveAddExistingNeedsTypedNames (spec 5.10): the approval needs a
+// fresh token and every database of the list typed exactly; a refusal
+// changes nothing.
+func TestApproveAddExistingNeedsTypedNames(t *testing.T) {
+	e := newEnv(t)
+	_, r, id := waitingAddExisting(t, e)
+	mark := r.mark()
+	const wrong = "Nama database yang diketik tidak cocok dengan daftar; ketik nama setiap database persis"
+	if err := e.r.Approve(id, JobAck{TypedDatabases: []string{"rekap"}}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Approve without a token = %v, want ErrJobNeedsConfirm", err)
+	}
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Retry without a token = %v, want ErrJobNeedsConfirm", err)
+	}
+	for _, typed := range [][]string{nil, {""}, {"Rekap"}, {"rekap", "lain"}, {"lain"}, {"rekap2"}} {
+		err := e.r.Approve(id, JobAck{Confirmed: true, TypedDatabases: typed})
+		if err == nil || err.Error() != wrong {
+			t.Fatalf("Approve typing %q = %v, want %q", typed, err, wrong)
+		}
+	}
+	j, _, _ := e.st.GetJob(id)
+	if st := e.jobState(id); j.Status != store.JobWaiting || !st.ConfirmedAt.IsZero() || len(st.AddDrop) != 0 {
+		t.Fatalf("after refusals: job %s, state %+v", j.Status, st)
+	}
+	if got := r.cmds(mark); len(got) != 0 {
+		t.Fatalf("refused approvals reached the replica: %v", got)
+	}
+
+	if err := e.r.Approve(id, JobAck{Confirmed: true, TypedDatabases: []string{" rekap "}}); err != nil {
+		t.Fatalf("Approve with the typed name: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if st := e.jobState(id); !slices.Equal(st.AddDrop, []string{"rekap"}) || st.ConfirmedAt.IsZero() {
+		t.Fatalf("state = %+v", st)
+	}
+}
+
+// TestAddExistingDropsBeforeDump: after the approval, replication stops,
+// exactly the approved list is dropped, and the dump loads without
+// DropExisting.
+func TestAddExistingDropsBeforeDump(t *testing.T) {
+	e := newEnv(t)
+	_, r, id := waitingAddExisting(t, e)
+	mark := r.mark()
+	if err := e.r.Approve(id, JobAck{Confirmed: true, TypedDatabases: []string{"rekap"}}); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.inventory", "mysql.setReplicationFilter", "mysql.waitSynced",
+		"mysql.stopReplica", "mysql.dropDatabases", "mysql.dumpFrom", "mysql.startUntil", "mysql.setReplicationFilter",
+		"mysql.startReplica", "mysql.waitSynced"})
+	var drop proto.DropDatabasesParams
+	r.params("mysql.dropDatabases", &drop)
+	if !slices.Equal(drop.Databases, []string{"rekap"}) {
+		t.Fatalf("dropDatabases = %+v", drop)
+	}
+	var snap proto.SnapshotParams
+	r.params("mysql.dumpFrom", &snap)
+	if snap.DropExisting || !slices.Equal(snap.Databases, []string{"rekap"}) {
+		t.Fatalf("dumpFrom = %+v", snap)
+	}
+	if log := e.jobLog(id); !strings.Contains(log, "rekap") || !strings.Contains(log, "dibuang") {
+		t.Fatalf("job log does not name the drop:\n%s", log)
+	}
+}
+
+// TestAddExistingRetryRechecks: a retry from the dump reads the replica's
+// databases again; a list other than the approved one waits again, also
+// on a retry of that wait, and nothing is dropped meanwhile.
+func TestAddExistingRetryRechecks(t *testing.T) {
+	e := newEnv(t)
+	_, r, id := waitingAddExisting(t, e, "rekap", "rekap2")
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		return nil, errors.New("koneksi ke master terputus")
+	})
+	if err := e.r.Approve(id, JobAck{Confirmed: true, TypedDatabases: []string{"rekap"}}); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != stepAddDump {
+		t.Fatalf("job = %+v", j)
+	}
+	// The failed dump left rekap2 on the replica as well.
+	replicaHas(r, "a", "rekap", "rekap2")
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		return proto.SnapshotResult{Method: "dump", Bytes: 200, GTIDExecuted: dumpGTID}, nil
+	})
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Retry without a token = %v", err)
+	}
+	mark := r.mark()
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	j, steps := e.waitJob(id, store.JobWaiting)
+	want := existingText("rekap") + "\n\n" + existingText("rekap2")
+	if j.CurrentStep != stepAddDump || steps[stepAddDump].Message != want {
+		t.Fatalf("job = %+v, step = %+v", j, steps[stepAddDump])
+	}
+	wantNoDrop(t, r, mark)
+	// A retry of that wait (no typed names) waits again.
+	again := r.mark()
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatalf("Retry of the wait: %v", err)
+	}
+	e.waitFor("the retried wait", func() bool { return slices.Contains(r.cmds(again), "mysql.inventory") })
+	e.waitJob(id, store.JobWaiting)
+	wantNoDrop(t, r, mark)
+
+	if err := e.r.Approve(id, JobAck{Confirmed: true, TypedDatabases: []string{"rekap2", "rekap"}}); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	var drop proto.DropDatabasesParams
+	r.params("mysql.dropDatabases", &drop)
+	if !slices.Equal(drop.Databases, []string{"rekap", "rekap2"}) {
+		t.Fatalf("dropDatabases = %+v", drop)
+	}
+	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.inventory", "mysql.inventory", "mysql.inventory",
+		"mysql.dropDatabases", "mysql.dumpFrom", "mysql.startUntil", "mysql.setReplicationFilter", "mysql.startReplica",
+		"mysql.waitSynced"})
 }

@@ -576,7 +576,8 @@ var (
 // CLONE, or that can still run mysql.cloneFrom (method clone and no copy
 // made yet: CLONE replaces everything on the target, and the agent does
 // not check for user databases again, ruling 16); a remove_databases that
-// drops the data. Its Approve and Retry need a fresh confirmation
+// drops the data; an add_databases that waited for, or has, the drop of
+// added databases that already exist on the replica (AddDrop). Its Approve and Retry need a fresh confirmation
 // (JobAck.Confirmed).
 func dropsData(kind string, st jobState) bool {
 	switch kind {
@@ -589,6 +590,8 @@ func dropsData(kind string, st jobState) bool {
 		return len(st.WipeList) > 0 || st.RebuildOldMaster || st.WaitReason == WaitWipe || st.WaitReason == WaitClone || cloneLeft
 	case KindRemoveDatabases:
 		return st.DropData
+	case KindAddDatabases:
+		return len(st.AddDrop) > 0 || st.WaitReason == WaitAddExisting
 	}
 	return false
 }
@@ -615,6 +618,10 @@ func (r *Runner) DropsData(jobID string) (bool, error) {
 	return drops, err
 }
 
+// ErrAddExistingNames refuses the approval of WaitAddExisting unless the
+// names typed are exactly the job's AddExisting.
+var ErrAddExistingNames = errors.New("Nama database yang diketik tidak cocok dengan daftar; ketik nama setiap database persis")
+
 var errWipeOnlyUnlisted = errors.New("database yang diakui hanya ada di replika tidak ada di daftar yang dibuang pekerjaan ini; " +
 	"buka lagi dialog Ulangi dari halaman pekerjaan")
 
@@ -634,6 +641,9 @@ func (r *Runner) confirmDrop(j store.Job, ack JobAck, retry, connsClear bool) er
 	if err != nil {
 		// newRun cannot read it either and fails the job with the reason.
 		return nil
+	}
+	if !retry && j.Kind == KindAddDatabases && st.WaitReason == WaitAddExisting && !sameTypedNames(ack.TypedDatabases, st.AddExisting) {
+		return ErrAddExistingNames
 	}
 	now := r.now()
 	if retry {
@@ -666,6 +676,20 @@ func (r *Runner) confirmDrop(j store.Job, ack JobAck, retry, connsClear bool) er
 		return err
 	}
 	return r.d.Store.SetJobParams(j.ID, string(b))
+}
+
+// sameTypedNames reports whether typed, each name trimmed of spaces, is
+// exactly the set want (compared with case).
+func sameTypedNames(typed, want []string) bool {
+	got := make([]string, 0, len(typed))
+	for _, d := range typed {
+		got = append(got, strings.TrimSpace(d))
+	}
+	slices.Sort(got)
+	got = slices.Compact(got)
+	w := slices.Clone(want)
+	slices.Sort(w)
+	return len(w) > 0 && slices.Equal(got, w)
 }
 
 // retryConnectionsClear reads the connections of the old master a
@@ -725,7 +749,9 @@ func (r *Runner) launchRefused(id string) error {
 // again with the approval. A superseded job (see supersededBy) is refused,
 // and so is a job that drops data without ack.Confirmed; a confirmed
 // approval of one is stored (ConfirmedAt) before the job runs on.
-// ack.WipeOnly and ack.AcceptConnections are not used by an approval.
+// ack.WipeOnly and ack.AcceptConnections are not used by an approval. The
+// approval of an add_databases waiting for WaitAddExisting also needs
+// ack.TypedDatabases to be exactly its AddExisting (ErrAddExistingNames).
 func (r *Runner) Approve(jobID string, ack JobAck) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -1152,6 +1178,13 @@ type jobState struct {
 	// replica followed when the job started.
 	Change   []string `json:"change_databases,omitempty"` // added or removed
 	DropData bool     `json:"drop_data,omitempty"`        // remove: drop them on the replica too
+	// add_databases: AddExisting is the list of added databases that
+	// already exist on the replica, as last shown (WaitAddExisting), and
+	// AddExistingHash its hashList; AddDrop is the list the user approved
+	// with the typed names, dropped on the replica before the dump.
+	AddExisting     []string `json:"add_existing,omitempty"`
+	AddExistingHash string   `json:"add_existing_hash,omitempty"`
+	AddDrop         []string `json:"add_drop,omitempty"`
 
 	// create_replica, learned: the master offers TLS (replication and the
 	// copy are encrypted) and its lower_case_table_names.
@@ -1173,8 +1206,8 @@ type jobState struct {
 	RestartReasons []string `json:"restart_reasons,omitempty"`
 
 	// WaitReason names what the job waits for (the job page labels its
-	// button after it): waitRestart, waitWipe, waitForeignSource,
-	// waitClone or waitReconnect.
+	// button after it): WaitRestart, WaitWipe, WaitForeignSource,
+	// WaitClone, WaitReconnect or WaitAddExisting.
 	WaitReason string `json:"wait_reason,omitempty"`
 
 	// TLSVerify: the master has the panel's certificate (server_tls), so
@@ -1279,6 +1312,7 @@ const (
 	WaitForeignSource = "foreign_source" // create_replica: reset the target's replication from elsewhere
 	WaitClone         = "clone"          // create_replica: CLONE replaces everything on the target
 	WaitReconnect     = "reconnect"      // create_replica: reconnect the target's MySQL after the copy
+	WaitAddExisting   = "add_existing"   // add_databases: database yang ditambahkan sudah ada di replika
 )
 
 // jobRun is one pass of a job's goroutine over its steps.
@@ -1303,6 +1337,10 @@ type jobRun struct {
 	// a new run (an Approve, a Retry, a restart) runs the preflight again
 	// before anything is dropped.
 	preflightFresh bool
+	// addFresh: add_databases read the replica's existing databases in
+	// this run (addCatchUp). Never stored: a run that starts at the dump
+	// reads them again before anything is dropped.
+	addFresh bool
 }
 
 func (r *Runner) newRun(lj *liveJob, j store.Job, rows []store.JobStep) (*jobRun, error) {

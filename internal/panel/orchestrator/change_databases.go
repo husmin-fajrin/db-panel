@@ -253,7 +253,24 @@ func (jr *jobRun) removeDatabasesSteps() []step {
 	}
 }
 
-func (jr *jobRun) addCatchUp(ctx context.Context, _ bool) (outcome, error) {
+func (jr *jobRun) addCatchUp(ctx context.Context, approved bool) (outcome, error) {
+	// Added databases that already exist on the replica are dropped
+	// before the dump, and only once the user approved exactly that list
+	// (spec 5.6, R-058).
+	list, err := jr.addExisting(ctx)
+	if err != nil {
+		return outcome{}, err
+	}
+	jr.addFresh = true
+	if len(list) == 0 {
+		jr.st.AddExisting, jr.st.AddExistingHash, jr.st.AddDrop = nil, "", nil
+		jr.save()
+	} else {
+		if !approved || hashList(list) != jr.st.AddExistingHash {
+			return jr.waitAddExisting(list), nil
+		}
+		jr.approveAddDrop(list)
+	}
 	jr.sweepDumpAccounts(ctx)
 	// The stored list is the filter the replica must have before the
 	// replay in step 3; the agent stops, sets it and starts replication.
@@ -279,19 +296,25 @@ func (jr *jobRun) addStop(ctx context.Context, _ bool) (outcome, error) {
 	return done("replikasi berhenti"), nil
 }
 
-func (jr *jobRun) addDump(ctx context.Context, _ bool) (outcome, error) {
+func (jr *jobRun) addDump(ctx context.Context, approved bool) (outcome, error) {
 	topo, err := jr.r.d.Store.GetTopology(jr.job.TopologyID)
 	if err != nil {
 		return outcome{}, err
+	}
+	reattach := jr.earlierAgentJob(ctx, jr.target(), "mysql.dumpFrom")
+	if len(jr.st.AddDrop) > 0 && !reattach {
+		if out, ok, err := jr.dropAddExisting(ctx, approved); !ok {
+			return out, err
+		}
 	}
 	var ms proto.MySQLStatus
 	if err := jr.call(ctx, jr.master(), "mysql.status", nil, &ms); err != nil {
 		return outcome{}, err
 	}
-	// DropExisting would put the dump in ON mode, which resets the
-	// replica's GTID history; the new databases were never followed, so
-	// there is nothing of theirs to drop. The account is a temporary one
-	// (copySnapshot).
+	// DropExisting (refused by the agent) would put the dump in ON mode,
+	// which resets the replica's GTID history; what of the new databases
+	// existed was dropped above with mysql.dropDatabases. The account is a
+	// temporary one (copySnapshot).
 	p := proto.SnapshotParams{Host: topo.SourceHost, Port: topo.SourcePort, Databases: jr.st.Change,
 		EstimateBytes: jr.st.DataBytes, SSL: ms.TLSAvailable}
 	// The dump verifies the master's certificate when it has the panel's.
@@ -304,7 +327,6 @@ func (jr *jobRun) addDump(ctx context.Context, _ bool) (outcome, error) {
 	jr.logf("info", "Menyalin database %s dengan dump; master dikunci sesaat (FLUSH TABLES WITH READ LOCK) saat dump dimulai.",
 		strings.Join(jr.st.Change, ", "))
 	var res proto.SnapshotResult
-	reattach := jr.earlierAgentJob(ctx, jr.target(), "mysql.dumpFrom")
 	if err := jr.copySnapshot(ctx, "mysql.dumpFrom", p, reattach, &res); err != nil {
 		return outcome{}, err
 	}
@@ -444,4 +466,92 @@ func (jr *jobRun) logChangeFailure() {
 		jr.logf("warn", "Replikasi berhenti. Database %s sudah tersalin ke replika tetapi belum direplikasi; "+
 			"datanya dibiarkan."+retry, names)
 	}
+}
+
+// addExisting is the databases being added that already exist on the
+// replica, read fresh from its agent (RefreshInventory), compared without
+// case (with lower_case_table_names the replica may hold Rekap for rekap);
+// sorted, in the spelling of the job's list (st.Change), so a drop names
+// only databases the job adds.
+func (jr *jobRun) addExisting(ctx context.Context) ([]string, error) {
+	res, err := jr.r.RefreshInventory(ctx, jr.target())
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range jr.st.Change {
+		if slices.ContainsFunc(res.Databases, func(i proto.DatabaseInfo) bool { return strings.EqualFold(i.Name, d) }) {
+			out = append(out, d)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// addExistingText tells, one paragraph per database, that it exists on the
+// replica and is replaced (spec 5.6).
+func addExistingText(names []string) string {
+	paras := make([]string, 0, len(names))
+	for _, x := range names {
+		paras = append(paras, "Database "+x+" sudah ada di replika ini. Panel tidak bisa memastikan isinya sama dengan "+
+			"master. Isinya di replika akan dibuang permanen, lalu diganti salinan dari master.")
+	}
+	return strings.Join(paras, "\n\n")
+}
+
+// waitAddExisting stores list as the one shown and waits for the user to
+// approve its drop (Approve checks the typed names against it).
+func (jr *jobRun) waitAddExisting(list []string) outcome {
+	jr.st.AddExisting, jr.st.AddExistingHash = list, hashList(list)
+	jr.st.WaitReason = WaitAddExisting
+	jr.save()
+	return wait(addExistingText(list))
+}
+
+// approveAddDrop makes the approved list the one dropped before the dump.
+func (jr *jobRun) approveAddDrop(list []string) {
+	jr.st.AddDrop = list
+	jr.save()
+	jr.logf("warn", "Pengguna menyetujui pembuangan database yang sudah ada di replika: %s.", strings.Join(list, ", "))
+}
+
+// dropAddExisting drops AddDrop on the replica, whose replication step 1
+// stopped, before the dump. A run that did not read the replica's
+// databases itself (a Retry or Approve from this step, a restart) reads
+// them again: a list other than the approved AddDrop waits for a new
+// approval, and nothing is dropped. ok is false when the step must end
+// with out and err.
+func (jr *jobRun) dropAddExisting(ctx context.Context, approved bool) (out outcome, ok bool, err error) {
+	if !jr.addFresh {
+		list, err := jr.addExisting(ctx)
+		if err != nil {
+			return outcome{}, false, err
+		}
+		h := hashList(list)
+		switch {
+		case len(list) == 0:
+			// An earlier attempt dropped them and loaded nothing yet.
+			jr.logf("info", "Database %s tidak ada lagi di replika; tidak ada yang dibuang.", strings.Join(jr.st.AddDrop, ", "))
+			return outcome{}, true, nil
+		case slices.Equal(list, jr.st.AddDrop):
+		case approved && jr.st.WaitReason == WaitAddExisting && h == jr.st.AddExistingHash:
+			jr.approveAddDrop(list)
+		default:
+			return jr.waitAddExisting(list), false, nil
+		}
+		jr.addFresh = true
+	}
+	// mysql.dropDatabases drops without binary logging (sql_log_bin=0),
+	// so the replica's GTID history is not touched, and refuses while
+	// replication runs.
+	var dr proto.DropDatabasesResult
+	if err := jr.call(ctx, jr.target(), "mysql.dropDatabases", proto.DropDatabasesParams{Databases: jr.st.AddDrop}, &dr); err != nil {
+		return outcome{}, false, err
+	}
+	if len(dr.Dropped) == 0 {
+		jr.logf("info", "Database %s sudah tidak ada di replika.", strings.Join(jr.st.AddDrop, ", "))
+	} else {
+		jr.logf("warn", "Database dibuang dari replika sebelum disalin dari master: %s.", strings.Join(dr.Dropped, ", "))
+	}
+	return outcome{}, true, nil
 }
