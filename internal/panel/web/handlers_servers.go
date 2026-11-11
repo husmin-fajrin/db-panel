@@ -165,6 +165,9 @@ type serverDetailPage struct {
 	// Pins is what the agent's last report says of its pins (Detail
 	// teknis); nil before a report that carries them.
 	Pins *pinFacts
+	// StartLock is the start lock as the agent last reported it (Detail
+	// teknis); nil without one.
+	StartLock *startLockFacts
 	// ReportsDropped says how many health reports the hub dropped over its
 	// rate limit in the last hour (Detail teknis); "" when none.
 	ReportsDropped string
@@ -645,6 +648,27 @@ func newPinFacts(snap *proto.HealthSnapshot) *pinFacts {
 	return f
 }
 
+// startLockFacts is the start lock of a quarantined server in words.
+type startLockFacts struct {
+	Locked bool
+	// Reason is the agent's own text for a lock that is not guaranteed,
+	// shown as given.
+	Reason string
+	// OperatorInitFiles are the operator's init_file options MySQL does not
+	// run while the lock is in place; data from the agent.
+	OperatorInitFiles []string
+}
+
+// newStartLockFacts reads the start lock of snap; nil without a report or
+// from an agent that reports none.
+func newStartLockFacts(snap *proto.HealthSnapshot) *startLockFacts {
+	if snap == nil || snap.StartLock == nil {
+		return nil
+	}
+	sl := snap.StartLock
+	return &startLockFacts{Locked: sl.Locked, Reason: sl.Reason, OperatorInitFiles: sl.OperatorInitFiles}
+}
+
 // renderServer renders the server page with v's status and messages.
 func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView) {
 	p := serverDetailPage{Page: a.page(r), Server: srv, Local: a.isLocal(srv), Connect: v.Form}
@@ -703,6 +727,7 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 		}
 		if v, ok := a.Monitor.View(srv.ID); ok {
 			p.Pins = newPinFacts(v.Snap)
+			p.StartLock = newStartLockFacts(v.Snap)
 			p.ReportsDropped = reportsDroppedText(v.ReportsDropped)
 			if p.Probe != nil && v.Snap != nil && v.Snap.MySQLError != mysqlNotConnected {
 				sl := serviceLineOf(p.Probe.MySQL.ServiceName, p.Probe.MySQL.ServiceActive, v.Snap.MySQLOK)

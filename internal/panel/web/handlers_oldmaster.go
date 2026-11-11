@@ -414,6 +414,10 @@ func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []str
 				"setelah server ini dihapus dari panel, data itu tidak bisa diamankan lagi lewat panel.",
 				box.Leftover.Transactions, srv.Name))
 		}
+		// The agent keeps the quarantine and its start lock when MySQL is
+		// down at the deletion (releaseRole needs a running MySQL).
+		out = append(out, "Bila MySQL server ini sedang mati, karantina dan kunci start-nya tetap ada di server itu "+
+			"setelah dihapus dari panel; MySQL-nya akan menyala hanya-baca sampai seseorang mengubah perannya di server itu.")
 	}
 	if sf == nil {
 		return out

@@ -131,7 +131,7 @@
     </section>
   </div>
 </div>
-{{if or .Pins .ReportsDropped}}
+{{if or .Pins .ReportsDropped .StartLock}}
 <section class="card bg-base-100 mb-4">
   <div class="card-body p-6">
     <details>
@@ -141,6 +141,13 @@
         <p>Peran dipin: {{.Role}}</p>
         <p>Sumber dipin: {{.Source}}</p>
         {{with .Error}}<p>Berkas pin tidak bisa dibaca (di direktori agent, biasanya <code>/etc/dbpanel</code>): <code class="break-all">{{.}}</code></p>{{end}}
+        {{end}}
+        {{with .StartLock}}
+        <p data-start-lock>Kunci start: {{if .Locked}}Terkunci{{else}}belum terjamin{{with .Reason}}: {{.}}{{end}}{{end}}</p>
+        {{with .OperatorInitFiles}}
+        <p>init_file milik operator berikut tidak dijalankan selama karantina:</p>
+        <ul class="list-disc pl-5">{{range .}}<li><code class="break-all">{{.}}</code></li>{{end}}</ul>
+        {{end}}
         {{end}}
         {{with .ReportsDropped}}<p>{{.}}</p>{{end}}
       </div>

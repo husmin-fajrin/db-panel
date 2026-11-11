@@ -470,11 +470,12 @@ func TestDeleteOldMasterWarnsOnLeftover(t *testing.T) {
 	wantBody(t, rec, `data-open-modal="modal-hapus"`, "Perhatikan sebelum menghapus",
 		"<li>Data tertinggal di db-master belum diperiksa", confirm+"Data tertinggal di db-master belum diperiksa")
 
-	// Nothing left over and no files: no warning.
+	// Nothing left over and no files: only the sentence about the start
+	// lock (TestDeleteQuarantinedDialogSaysLockStays) remains.
 	setLeftover(t, e, topo, proto.LeftoverResult{})
 	rec = e.do("GET", "/servers/1", nil, c)
-	wantBody(t, rec, `data-confirm-text="Hapus server db-master dari panel.">`)
-	wantNoBody(t, rec, "Perhatikan sebelum menghapus", "belum diperiksa:")
+	wantBody(t, rec, confirm+"Bila MySQL server ini sedang mati")
+	wantNoBody(t, rec, "belum diperiksa", "yang tidak sampai ke master baru", "berkas data tertinggal di db-master")
 
 	// Three transactions found and two salvage files never downloaded.
 	setLeftover(t, e, topo, threeLeftover())
@@ -755,4 +756,57 @@ func TestExplainBannerTone(t *testing.T) {
 	if !regexp.MustCompile(`class="banner banner-error[^"]*" data-explain`).MatchString(body) {
 		t.Errorf("stopped replica's explanation is not pink:\n%s", body)
 	}
+}
+
+// The delete dialog of a quarantined server says that, with MySQL down,
+// the quarantine and its start lock stay on the server after the panel
+// forgets it.
+func TestDeleteQuarantinedDialogSaysLockStays(t *testing.T) {
+	e, _, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	const sentence = "Bila MySQL server ini sedang mati, karantina dan kunci start-nya tetap ada di server itu setelah dihapus " +
+		"dari panel; MySQL-nya akan menyala hanya-baca sampai seseorang mengubah perannya di server itu."
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "<li>"+sentence, `data-confirm-text="Hapus server db-master dari panel.`, sentence)
+
+	// A server that is no longer a quarantined old master has no lock to
+	// speak of: not said on its page.
+	rec = e.do("GET", "/servers/2", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, "kunci start-nya tetap ada")
+}
+
+func TestOldMasterPageShowsStartLockAndOperatorInitFiles(t *testing.T) {
+	mon := &fakeMonitor{}
+	e, _, _ := promotedEnv(t, func(d *web.Deps) { d.Monitor = mon })
+	c := e.cookie()
+	view := func(sl *proto.StartLockState) {
+		mon.setView(monitor.View{ServerID: 1, Role: store.RoleQuarantined, ReceivedAt: time.Now(),
+			Status: monitor.DeriveQuarantined(false), Snap: &proto.HealthSnapshot{MySQLOK: true, StartLock: sl}})
+	}
+
+	view(&proto.StartLockState{Present: true, Locked: true})
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Detail teknis", "Kunci start: Terkunci")
+	wantNoBody(t, rec, "belum terjamin", "tidak dijalankan selama karantina")
+
+	// Not guaranteed: the agent's reason as given (any text, escaped), and
+	// the operator's own init_file options.
+	view(&proto.StartLockState{Present: true, Locked: false, Reason: "alasan <b>bebas</b> dari agent",
+		OperatorInitFiles: []string{"/etc/mysql/conf.d/ops<init>.sql", "/srv/mysql/init2.sql"}})
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, "Kunci start: belum terjamin: alasan &lt;b&gt;bebas&lt;/b&gt; dari agent",
+		"init_file milik operator berikut tidak dijalankan selama karantina:",
+		"/etc/mysql/conf.d/ops&lt;init&gt;.sql", "/srv/mysql/init2.sql")
+	wantNoBody(t, rec, "<b>bebas</b>", "ops<init>", "Kunci start: Terkunci")
+
+	// An agent that reports no start lock: no row.
+	view(nil)
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantNoBody(t, rec, "Kunci start:")
 }
