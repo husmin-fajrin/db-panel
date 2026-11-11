@@ -417,3 +417,23 @@ func SetBeforeLockRecord(f func()) (restore func()) {
 func ObserveReplicas(d *Driver, ctx context.Context, db *sql.DB, now time.Time, also ...string) ([]string, []int, error) {
 	return d.observeReplicas(ctx, db, now, also...)
 }
+
+// SetAfterForgetRead calls f in ForgetLockHost between its read of the
+// lock and its write.
+func SetAfterForgetRead(f func()) (restore func()) {
+	old := afterForgetRead
+	afterForgetRead = f
+	return func() { afterForgetRead = old }
+}
+
+// HoldLockFlock takes p's LockFlockFile, as a writer of the promote lock
+// file does; release gives it back.
+func HoldLockFlock(p *Pins) (release func(), err error) { return p.flockLock() }
+
+// SetLockFlockWait changes how long a promote lock writer waits for the
+// flock; it returns the function that restores it.
+func SetLockFlockWait(d time.Duration) (restore func()) {
+	old := lockFlockWait
+	lockFlockWait = d
+	return func() { lockFlockWait = old }
+}

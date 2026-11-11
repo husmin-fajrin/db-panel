@@ -87,11 +87,19 @@ func configLockPath(l Layout) (string, error) {
 // missing), waiting while another holder has it, until ctx ends or
 // configLockWait passes; it returns the function that releases it.
 func flockConfig(ctx context.Context, path string) (unlock func(), err error) {
+	return flockFile(ctx, path, configLockWait, "kunci konfigurasi")
+}
+
+// flockFile takes an exclusive flock on path (created 0600 when missing,
+// never through a symlink, never removed), waiting while another holder
+// has it, until ctx ends or wait passes; what names the lock in errors. It
+// returns the function that releases it.
+func flockFile(ctx context.Context, path string, wait time.Duration, what string) (unlock func(), err error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("kunci konfigurasi %s: %w", path, err)
+		return nil, fmt.Errorf("%s %s: %w", what, path, err)
 	}
-	deadline := time.Now().Add(configLockWait)
+	deadline := time.Now().Add(wait)
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
@@ -99,16 +107,16 @@ func flockConfig(ctx context.Context, path string) (unlock func(), err error) {
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			f.Close()
-			return nil, fmt.Errorf("kunci konfigurasi %s: %w", path, err)
+			return nil, fmt.Errorf("%s %s: %w", what, path, err)
 		}
 		if time.Now().After(deadline) {
 			f.Close()
-			return nil, fmt.Errorf("kunci konfigurasi %s masih dipegang proses lain setelah %s", path, configLockWait)
+			return nil, fmt.Errorf("%s %s masih dipegang proses lain setelah %s", what, path, wait)
 		}
 		select {
 		case <-ctx.Done():
 			f.Close()
-			return nil, fmt.Errorf("kunci konfigurasi %s masih dipegang proses lain: %w", path, ctx.Err())
+			return nil, fmt.Errorf("%s %s masih dipegang proses lain: %w", what, path, ctx.Err())
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

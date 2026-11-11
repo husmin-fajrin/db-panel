@@ -453,10 +453,10 @@ func TestForgetReplica(t *testing.T) {
 	}
 }
 
-// TestObserveReplicasRecordsAlsoWhenProcesslistFails (ruling 10): the
+// TestObserveReplicasRecordsSeenWhenProcesslistFails (ruling 10): the
 // candidate's matched address given to observeReplicas is recorded even
 // when the processlist cannot be read; the error is still returned.
-func TestObserveReplicasRecordsAlsoWhenProcesslistFails(t *testing.T) {
+func TestObserveReplicasRecordsSeenWhenProcesslistFails(t *testing.T) {
 	db, err := sql.Open("mysql", "root@unix(/nonexistent/mysql.sock)/")
 	if err != nil {
 		t.Fatal(err)
@@ -473,5 +473,95 @@ func TestObserveReplicasRecordsAlsoWhenProcesslistFails(t *testing.T) {
 	}
 	if ok, err := mysql.ReplicaSeen(seen, "10.0.0.8"); !ok || err != nil {
 		t.Errorf("ReplicaSeen(10.0.0.8) = %v, %v; want true", ok, err)
+	}
+}
+
+// TestForgetLockHostKeepsLockReplacedMeanwhile: a new lock written (by
+// another process: another Pins over the same directory) while
+// ForgetLockHost is between its read and its write survives unchanged:
+// the new candidate, deadline and list are never overwritten with the old
+// lock's.
+func TestForgetLockHostKeepsLockReplacedMeanwhile(t *testing.T) {
+	dir := pinDir(t, "master", "")
+	cli, agent := mustPins(t, dir), mustPins(t, dir)
+	old := mysql.PromoteLock{Candidate: "10.0.0.2:3306", Addr: "10.0.0.2", Deadline: time.Date(2026, 11, 6, 11, 0, 0, 0, time.UTC),
+		Readable: []string{"10.0.0.3:3306", "10.0.0.4:3306"}}
+	if err := agent.WriteLock(old); err != nil {
+		t.Fatal(err)
+	}
+	repl := mysql.PromoteLock{Candidate: "10.0.0.5:3306", Addr: "10.0.0.5", Deadline: time.Date(2026, 11, 6, 13, 0, 0, 0, time.UTC),
+		Readable: []string{"10.0.0.3:3306", "10.0.0.6:3306"}}
+	done := make(chan error, 1)
+	t.Cleanup(mysql.SetAfterForgetRead(func() {
+		go func() { done <- agent.WriteLock(repl) }()
+		time.Sleep(300 * time.Millisecond)
+	}))
+	if _, err := cli.ForgetLockHost("10.0.0.3"); err != nil {
+		t.Fatalf("ForgetLockHost: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("WriteLock of the new lock: %v", err)
+	}
+	l, ok, err := agent.ReadLock()
+	if !ok || err != nil || l.Candidate != repl.Candidate || l.Addr != repl.Addr || !l.Deadline.Equal(repl.Deadline) ||
+		strings.Join(l.Readable, ",") != strings.Join(repl.Readable, ",") {
+		t.Errorf("lock = %+v, %v, %v; want the new lock unchanged %+v", l, ok, err, repl)
+	}
+}
+
+// TestPromoteLockFlockExcludesAcrossOpens: while one holder (another open
+// of LockFlockFile, as another process has) holds the flock, WriteLock,
+// ClearLock and ForgetLockHost of another Pins wait and change nothing;
+// past the wait they fail and leave the lock file as it was. The flock
+// file is 0600 and stays.
+func TestPromoteLockFlockExcludesAcrossOpens(t *testing.T) {
+	dir := pinDir(t, "master", "")
+	holder, other := mustPins(t, dir), mustPins(t, dir)
+	l0 := mysql.PromoteLock{Candidate: "10.0.0.2:3306", Deadline: time.Date(2026, 11, 6, 11, 0, 0, 0, time.UTC), Readable: []string{"10.0.0.3:3306"}}
+	if err := other.WriteLock(l0); err != nil {
+		t.Fatal(err)
+	}
+	before := pinFile(t, dir, mysql.LockFile)
+	release, err := mysql.HoldLockFlock(holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flock := filepath.Join(dir, mysql.LockFlockFile)
+	if fi, err := os.Lstat(flock); err != nil || fi.Mode().Perm() != 0o600 || !fi.Mode().IsRegular() {
+		t.Errorf("flock file: %v, %v; want a regular file, mode 0600", fi, err)
+	}
+
+	// Past the wait: each write fails and the file is as it was.
+	restore := mysql.SetLockFlockWait(200 * time.Millisecond)
+	if err := other.WriteLock(mysql.PromoteLock{Candidate: "10.0.0.9:3306", Deadline: l0.Deadline}); err == nil {
+		t.Error("WriteLock succeeded while another holder had the flock")
+	}
+	if err := other.ClearLock(); err == nil {
+		t.Error("ClearLock succeeded while another holder had the flock")
+	}
+	if _, err := other.ForgetLockHost("10.0.0.3"); err == nil {
+		t.Error("ForgetLockHost succeeded while another holder had the flock")
+	}
+	if got := pinFile(t, dir, mysql.LockFile); got != before {
+		t.Errorf("lock file after refused writes = %s, want %s", got, before)
+	}
+	restore()
+
+	// Within the wait: the write waits for the holder, then happens.
+	done := make(chan error, 1)
+	go func() { done <- other.ClearLock() }()
+	time.Sleep(300 * time.Millisecond)
+	if got := pinFile(t, dir, mysql.LockFile); got != before {
+		t.Errorf("lock file while ClearLock waits = %q", got)
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("ClearLock once the flock is free: %v", err)
+	}
+	if got := pinFile(t, dir, mysql.LockFile); got != "" {
+		t.Errorf("lock file after ClearLock = %q", got)
+	}
+	if _, err := os.Lstat(flock); err != nil {
+		t.Errorf("flock file removed: %v", err)
 	}
 }

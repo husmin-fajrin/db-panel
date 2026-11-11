@@ -36,6 +36,17 @@ const (
 	PromotingFile = "promoting"
 )
 
+// LockFlockFile, beside LockFile, is flocked by every writer of the promote
+// lock file (WriteLock, ClearLock, ForgetLockHost), in the agent and the
+// CLI alike, so that a read-modify-write of the lock is never interleaved
+// with another write. It is never removed.
+const LockFlockFile = "promote-lock.flock"
+
+// lockFlockWait bounds how long a writer of the promote lock file waits
+// for another process's hold of LockFlockFile; past it the write fails
+// and nothing is written. Tests shorten it.
+var lockFlockWait = 10 * time.Second
+
 // SeenFile is where the agent records the replicas that read this
 // server's binary log (Driver.SeenPath overrides it).
 const SeenFile = "/var/lib/dbpanel/replicas-seen"
@@ -170,11 +181,28 @@ func (p *Pins) ClearPromoting() error {
 	return nil
 }
 
-// WriteLock writes the promote lock, replacing any.
+// flockLock takes LockFlockFile for one write of the promote lock file;
+// it returns the function that releases it.
+func (p *Pins) flockLock() (unlock func(), err error) {
+	return flockFile(context.Background(), p.path(LockFlockFile), lockFlockWait, "kunci berkas kunci promosi")
+}
+
+// WriteLock writes the promote lock, replacing any, under LockFlockFile;
+// when the flock cannot be had nothing is written.
 func (p *Pins) WriteLock(l PromoteLock) error {
 	if l.Candidate == "" || l.Deadline.IsZero() {
 		return errors.New("kunci promosi butuh kandidat dan tenggat")
 	}
+	unlock, err := p.flockLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return p.writeLockFile(l)
+}
+
+// writeLockFile writes l to the lock file; the caller holds LockFlockFile.
+func (p *Pins) writeLockFile(l PromoteLock) error {
 	return writeJSON(p.path(LockFile), lockJSON{Candidate: l.Candidate, Addr: l.Addr, Deadline: l.Deadline.UTC().Format(time.RFC3339),
 		Readable: l.Readable})
 }
@@ -194,15 +222,30 @@ func (p *Pins) ReadLock() (PromoteLock, bool, error) {
 	return PromoteLock{Candidate: v.Candidate, Addr: v.Addr, Deadline: d, Readable: v.Readable}, true, nil
 }
 
+// afterForgetRead runs in ForgetLockHost between reading the lock and
+// writing it back; tests replace it.
+var afterForgetRead = func() {}
+
 // ForgetLockHost removes every entry of host (any port; names compare
 // case-insensitively) from the readable replicas of the promote lock and
 // reports how many went. Without a lock, or an entry of host, nothing is
-// written.
+// written. The read and the write are one critical section under
+// LockFlockFile: no other writer's lock is overwritten, and a lock removed
+// meanwhile is not written back.
 func (p *Pins) ForgetLockHost(host string) (removed int, err error) {
+	if _, ok, err := p.ReadLock(); err != nil || !ok {
+		return 0, err
+	}
+	unlock, err := p.flockLock()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	l, ok, err := p.ReadLock()
 	if err != nil || !ok {
 		return 0, err
 	}
+	afterForgetRead()
 	kept := slices.DeleteFunc(slices.Clone(l.Readable), func(e string) bool {
 		h, _, err := net.SplitHostPort(e)
 		return err == nil && strings.EqualFold(h, host)
@@ -212,14 +255,23 @@ func (p *Pins) ForgetLockHost(host string) (removed int, err error) {
 		return 0, nil
 	}
 	l.Readable = kept
-	if err := p.WriteLock(l); err != nil {
+	if err := p.writeLockFile(l); err != nil {
 		return 0, err
 	}
 	return removed, nil
 }
 
-// ClearLock removes the promote lock; no lock is not an error.
+// ClearLock removes the promote lock under LockFlockFile; no lock is not
+// an error. When the flock cannot be had the lock stays.
 func (p *Pins) ClearLock() error {
+	if _, err := os.Lstat(p.path(LockFile)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	unlock, err := p.flockLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := os.Remove(p.path(LockFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("hapus %s: %w", p.path(LockFile), err)
 	}
