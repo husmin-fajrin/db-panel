@@ -600,3 +600,21 @@ func TestPreflightComparesNamesExactly(t *testing.T) {
 		})
 	}
 }
+
+// With nothing to drop there is nothing to acknowledge: the master's agent
+// is not asked for its databases, and an unreadable master does not stop it.
+func TestResyncWithEmptyWipeListDoesNotReadMasterInventory(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	m.fail("mysql.inventory", "login MySQL gagal: 1045 Access denied")
+	r := e.resyncReplica(topo, nil, "a")
+
+	id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if n := m.count("mysql.inventory"); n != 0 {
+		t.Fatalf("master inventory read %d times with an empty wipe list", n)
+	}
+}
