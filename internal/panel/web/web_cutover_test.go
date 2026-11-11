@@ -183,3 +183,22 @@ func TestCutoverBadges(t *testing.T) {
 	rec = e.do("GET", "/servers/1/connections-fragment", nil, c)
 	wantNoBody(t, rec, "X Protocol", "jenis koneksi tidak dikenal", "sesi akun admin dari server ini", "tidak bisa dibedakan dari agent")
 }
+
+// TestCutoverEscapesAgentText: host, user, database and the agent's reasons
+// are data; they reach the page escaped, on the screen and in the rebuild
+// form.
+func TestCutoverEscapesAgentText(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	f.setConnectionsResult(1, proto.ConnectionsResult{Typed: true, Incomplete: "<script>alert(1)</script>",
+		Rows: []proto.ConnectionRow{{Host: "<b>h</b>", User: "<i>u</i>", DB: "<u>d</u>", Count: 1, Kind: "sql"}}})
+	for _, path := range []string{"/servers/1/connections-fragment", "/masters/2/replicas/new?bangun-ulang=1"} {
+		rec := e.do("GET", path, nil, c)
+		wantCode(t, rec, http.StatusOK)
+		wantNoBody(t, rec, "<script>alert", "<b>h</b>", "<i>u</i>", "<u>d</u>")
+	}
+	wantBody(t, e.do("GET", "/servers/1/connections-fragment", nil, c), "&lt;script&gt;alert(1)&lt;/script&gt;", "&lt;b&gt;h&lt;/b&gt;")
+}
