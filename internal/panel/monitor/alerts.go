@@ -123,8 +123,10 @@ type alertRule struct {
 }
 
 // alertRules are the status rules, in AllKinds order; job_failed is
-// opened and closed by the orchestrator, and tls_expiring by
-// CheckTLSExpiry, not by a rule.
+// opened and closed by the orchestrator, tls_expiring by CheckTLSExpiry,
+// and the event alerts of the start lock (late, bypassed, blocked) and
+// the kept promote lock by HandleEvent, closeStartAlerts and
+// closeNotices, not by a rule.
 var alertRules = []alertRule{
 	{
 		kind: KindReplicaStopped,
