@@ -1118,13 +1118,15 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	e.wantPromoteMessage(t, tgMark, ra)
 
 	// The old master returns with a write that slipped in before its agent
-	// locked it: agent stopped, mysqld restarted (writable: the quarantine
-	// found it down), a row written, then the agent starts and locks.
+	// locked it: agent stopped, mysqld restarted (read-only: the quarantine
+	// found it down and wrote the start lock), opened by hand, a row
+	// written, then the agent starts and locks.
 	m.agent.stop(t)
 	restartMySQL(t, m.inst)
-	if v := globalVar(t, m.db, "super_read_only"); v != "OFF" {
-		t.Fatalf("super_read_only on the old master restarted without its agent = %s, want OFF", v)
+	if v := globalVar(t, m.db, "super_read_only"); v != "ON" {
+		t.Fatalf("super_read_only on the old master restarted without its agent = %s, want ON (start lock)", v)
 	}
+	execSQL(t, m.db, "SET GLOBAL super_read_only = OFF")
 	const secret = "isi-baris-tertinggal"
 	execSQL(t, m.db, "INSERT INTO a.t VALUES (100, '"+secret+"')")
 	m.agent.start(t)

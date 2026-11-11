@@ -490,7 +490,14 @@ func TestConfigureKeepsPresentStartLockLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	lock, _ := mysql.StartLockPath(h.Layout())
+	// Even with its file gone, the line kept by configure has its file.
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
 	configure(t, h, proto.ConfigureParams{Role: "replica"})
+	if line, file := lineAndFile(t, h, lock); !line || !file {
+		t.Errorf("after configure: line=%v file=%v", line, file)
+	}
 	content, _, err := mysql.ReadManagedContent(h.Layout())
 	if err != nil {
 		t.Fatal(err)

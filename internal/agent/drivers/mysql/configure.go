@@ -317,7 +317,8 @@ func renderConfig(role string, serverID uint32, bindAll bool, bl binlogBlock, st
 // the start lock: when the managed config holds the agent's init_file
 // line as the block is replaced, whatever the role, render gets the lock
 // file's path, so no other write of the block drops a lock not yet
-// released. Reading and writing happen under managedConfigMu.
+// released; the file is written again first, so the line it keeps never
+// names a missing file. Reading and writing happen under managedConfigMu.
 func writeConfigBlock(ctx context.Context, h Host, render func(startLock string) string) (string, error) {
 	managedConfigMu.Lock()
 	defer managedConfigMu.Unlock()
@@ -328,6 +329,10 @@ func writeConfigBlock(ctx context.Context, h Host, render func(startLock string)
 			return "", err
 		}
 		if hasStartLockLine(content, path) {
+			// The line stays only with its file in place.
+			if err := writeStartLockFile(path); err != nil {
+				return "", fmt.Errorf("berkas kunci start: %w", err)
+			}
 			startLock = path
 		}
 	}
