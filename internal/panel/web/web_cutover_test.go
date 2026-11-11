@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -95,4 +96,90 @@ func TestCutoverDoneClearsPendingAndAudits(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Pengalihan aplikasi dicatat") {
 		t.Errorf("no notice: %s", rec.Body.String())
 	}
+}
+
+const cutoverGreen = "Tidak ada koneksi aplikasi tersisa"
+
+// TestCutoverNoConnectionsOnlyWhenCompleteAndEmpty: the green sentence is
+// shown only for a typed, complete, empty result; every doubt says "tidak
+// bisa dipastikan" with its reason instead (spec 5.5).
+func TestCutoverNoConnectionsOnlyWhenCompleteAndEmpty(t *testing.T) {
+	e, f, _ := promotedEnv(t)
+	c := e.cookie()
+	read := func() string {
+		rec := e.do("GET", "/servers/1/connections-fragment", nil, c)
+		wantCode(t, rec, http.StatusOK)
+		return rec.Body.String()
+	}
+
+	f.setConnectionsResult(1, proto.ConnectionsResult{Typed: true, Source: "performance_schema"})
+	wantBody(t, e.do("GET", "/servers/1/connections-fragment", nil, c), cutoverGreen)
+	wantNoBody(t, e.do("GET", "/servers/1/connections-fragment", nil, c), "tidak bisa dipastikan")
+
+	for name, tc := range map[string]struct {
+		res  proto.ConnectionsResult
+		want []string
+	}{
+		"old agent: empty but not typed": {proto.ConnectionsResult{},
+			[]string{"agent perlu dimutakhirkan: daftar koneksinya belum lengkap"}},
+		"incomplete": {proto.ConnectionsResult{Typed: true, Incomplete: "thread_instances_lost 3 <i>"},
+			[]string{"thread_instances_lost 3 &lt;i&gt;"}},
+		"unreadable": {proto.ConnectionsResult{Typed: true, Unreadable: "kedua sumber gagal"},
+			[]string{"kedua sumber gagal"}},
+		"only local admin sessions": {proto.ConnectionsResult{Typed: true,
+			Rows: []proto.ConnectionRow{{Host: "localhost", User: "dbpanel_admin", Count: 2, Kind: "sql", LocalAdmin: true}}, LocalAdmin: 2},
+			[]string{"sesi akun admin dari server ini", "Jumlah koneksi: <strong>2</strong>"}},
+	} {
+		f.setConnectionsResult(1, tc.res)
+		body := read()
+		if strings.Contains(body, cutoverGreen) {
+			t.Errorf("%s: shows the green sentence:\n%s", name, body)
+		}
+		if tc.res.Unreadable != "" || tc.res.Incomplete != "" || !tc.res.Typed {
+			tc.want = append(tc.want, "tidak bisa dipastikan")
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(body, w) {
+				t.Errorf("%s: missing %q in:\n%s", name, w, body)
+			}
+		}
+	}
+
+	// Any command error (offline, timeout, a failed admin login) is "not
+	// known", never "none".
+	for name, err := range map[string]error{"offline": proto.ErrOffline, "command error": errors.New("login admin gagal")} {
+		f.setConnErr(1, err)
+		body := read()
+		if strings.Contains(body, cutoverGreen) || !strings.Contains(body, "tidak bisa dipastikan") {
+			t.Errorf("%s: fragment = %s", name, body)
+		}
+	}
+}
+
+// TestCutoverBadges: the row badges and the note about sessions the agent
+// cannot tell from its own.
+func TestCutoverBadges(t *testing.T) {
+	e, f, _ := promotedEnv(t)
+	c := e.cookie()
+	f.setConnectionsResult(1, proto.ConnectionsResult{Typed: true, Source: "information_schema", AgentIndistinct: true, LocalAdmin: 1,
+		Rows: []proto.ConnectionRow{
+			{Host: "10.0.0.50", User: "app_sql", DB: "simrs", Count: 1, Kind: "sql"},
+			{Host: "10.0.0.51", User: "app_x", DB: "simrs", Count: 1, Kind: "x"},
+			{Host: "10.0.0.52", User: "app_aneh", DB: "simrs", Count: 1, Kind: "lain"},
+			{Host: "10.0.0.53", User: "dbpanel_admin", Count: 1, Kind: "sql", AdminAccount: true},
+			{Host: "localhost", User: "dbpanel_admin", Count: 1, Kind: "sql", LocalAdmin: true},
+		}})
+	rec := e.do("GET", "/servers/1/connections-fragment", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "X Protocol", "jenis koneksi tidak dikenal", "akun admin panel", "sesi akun admin dari server ini",
+		"tidak bisa dibedakan dari agent", "Jumlah koneksi: <strong>5</strong>")
+	if n := strings.Count(rec.Body.String(), "X Protocol"); n != 1 {
+		t.Errorf("X Protocol badge shown %d times, want 1 (the sql row has none)", n)
+	}
+	wantNoBody(t, rec, cutoverGreen)
+
+	// A complete result without those rows shows none of them.
+	f.setConnections(1, proto.ConnectionRow{Host: "10.0.0.50", User: "app_sql", DB: "simrs", Count: 1, Kind: "sql"})
+	rec = e.do("GET", "/servers/1/connections-fragment", nil, c)
+	wantNoBody(t, rec, "X Protocol", "jenis koneksi tidak dikenal", "sesi akun admin dari server ini", "tidak bisa dibedakan dari agent")
 }

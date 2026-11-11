@@ -27,6 +27,7 @@ const (
 	msgNewUnreachable = "Master baru tidak terjangkau, tidak bisa membaca koneksinya"
 	msgOldNoConns     = "Tidak ada koneksi aplikasi tersisa"
 	msgNewNoConns     = "Belum ada koneksi aplikasi ke master baru"
+	msgConnsOldAgent  = "agent perlu dimutakhirkan: daftar koneksinya belum lengkap"
 	msgConnsFailed    = "Koneksi tidak bisa dibaca; rinciannya ada di log panel."
 	msgNotOldMaster   = "Server ini bukan master lama yang dikarantina."
 
@@ -35,6 +36,10 @@ const (
 		"dan aplikasi yang belum dialihkan bisa menulis ke sini"
 	msgDeleteCutover = "Master lama ini tidak bisa dihapus sebelum aplikasi dinyatakan dialihkan: tekan 'Sudah saya alihkan' " +
 		"di layar pengalihan dulu (menghapusnya melepas penjagaan baca-saja saat MySQL-nya hidup lagi)."
+	// msgRebuildAccept: the rebuild form was posted without the
+	// acknowledgement of the connections to the old master.
+	msgRebuildAccept = "Centang pernyataan bahwa Anda paham koneksi ke master lama masih ada atau tidak bisa dipastikan, " +
+		"dan tulisannya hilang, lalu kirim lagi."
 	msgRebuildTarget = "Server ini bukan master lama yang dikarantina dari topologi master ini."
 
 	msgSalvageName    = "Nama berkas data tertinggal tidak valid."
@@ -81,11 +86,30 @@ type connectionsView struct {
 	// account (the one the agent logs in as) from other hosts.
 	AdminTotal int
 	TakenAt    time.Time
+	// LocalAdminTotal is how many of Total are sessions of the agent's
+	// account from the server itself that the agent cannot tell from its own.
+	LocalAdminTotal int
 	// Unreadable says why the connections could not be read ("" when
 	// they were); Empty what to say when there are none.
 	Unreadable string
 	Empty      string
+	// Uncertain is "" only for a complete list; otherwise the reason it is
+	// "tidak bisa dipastikan" (an old agent, or threads the agent did not
+	// record). Indistinct: the agent's own sessions cannot be told apart
+	// from other sessions of its account.
+	Uncertain  string
+	Indistinct bool
 }
+
+// CompleteAndEmpty: the connections were read, the list is complete and
+// there is none. The only state that may say "no connections".
+func (v connectionsView) CompleteAndEmpty() bool {
+	return v.Unreadable == "" && v.Uncertain == "" && v.Total == 0
+}
+
+// NotKnown: the list cannot be trusted to be complete (it could not be
+// read, or it is not complete).
+func (v connectionsView) NotKnown() bool { return v.Unreadable != "" || v.Uncertain != "" }
 
 // connectionsOf reads srv's client connections; the side follows its
 // role (the quarantined old master or the new one). An unreachable agent
@@ -113,12 +137,24 @@ func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsVi
 	if err != nil {
 		return v
 	}
-	v.Rows, v.TakenAt = res.Rows, res.TakenAt
+	v.Rows, v.TakenAt, v.Indistinct = res.Rows, res.TakenAt, res.AgentIndistinct
 	for _, row := range res.Rows {
 		v.Total += row.Count
 		if row.AdminAccount {
 			v.AdminTotal += row.Count
 		}
+		if row.LocalAdmin {
+			v.LocalAdminTotal += row.Count
+		}
+	}
+	// The agent's own words, shown as given and never matched on.
+	switch {
+	case res.Unreadable != "":
+		v.Unreadable = res.Unreadable
+	case !res.Typed:
+		v.Uncertain = msgConnsOldAgent
+	case res.Incomplete != "":
+		v.Uncertain = res.Incomplete
 	}
 	return v
 }
@@ -617,6 +653,9 @@ type rebuildInfo struct {
 	// Warnings are shown on the form and in the confirmation.
 	Warnings    []string
 	ConfirmText string
+	// AcceptLabel is the label of the acknowledgement the form requires
+	// ("" when the connection list is complete and empty and none is).
+	AcceptLabel string
 }
 
 // rebuildTarget checks that id is the quarantined old master of master's
@@ -645,14 +684,28 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) 
 	case conns.Unreadable != "":
 		info.Warnings = append(info.Warnings, fmt.Sprintf("Koneksi aplikasi ke %s tidak bisa dibaca (%s); pastikan semua "+
 			"aplikasi sudah memakai master baru.", srv.Name, strings.TrimSuffix(conns.Unreadable, ".")))
-	case conns.Total > 0:
-		admin := ""
-		if conns.AdminTotal > 0 {
-			admin = fmt.Sprintf(" (%d di antaranya sesi akun admin panel dari host lain: orang atau aplikasi yang memakai akun itu)",
-				conns.AdminTotal)
+	default:
+		if conns.Total > 0 {
+			admin := ""
+			if conns.AdminTotal > 0 {
+				admin = fmt.Sprintf(" (%d di antaranya sesi akun admin panel dari host lain: orang atau aplikasi yang memakai akun itu)",
+					conns.AdminTotal)
+			}
+			info.Warnings = append(info.Warnings, fmt.Sprintf("Masih ada %d koneksi aplikasi ke %s%s: aplikasi itu belum dialihkan "+
+				"dan tulisannya ke server ini akan hilang.", conns.Total, srv.Name, admin))
 		}
-		info.Warnings = append(info.Warnings, fmt.Sprintf("Masih ada %d koneksi aplikasi ke %s%s: aplikasi itu belum dialihkan "+
-			"dan tulisannya ke server ini akan hilang.", conns.Total, srv.Name, admin))
+		if conns.Uncertain != "" {
+			info.Warnings = append(info.Warnings, fmt.Sprintf("Daftar koneksi ke %s tidak bisa dipastikan lengkap (%s); pastikan semua "+
+				"aplikasi sudah memakai master baru.", srv.Name, strings.TrimSuffix(conns.Uncertain, ".")))
+		}
+	}
+	// Anything but a complete, empty list needs the acknowledgement.
+	switch {
+	case conns.CompleteAndEmpty():
+	case conns.NotKnown():
+		info.AcceptLabel = "Saya paham koneksi ke server ini tidak bisa dipastikan dan tulisan yang masih masuk hilang"
+	default:
+		info.AcceptLabel = fmt.Sprintf("Saya paham %d koneksi masih ada dan tulisannya hilang", conns.Total)
 	}
 	prom, err := a.Store.PromotionByOldMaster(id)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {

@@ -4,21 +4,24 @@
      15 detik. */}}
 {{define "connections"}}
 {{if .Unreadable}}
-<p class="text-warning-text">{{.Unreadable}}</p>
-{{else if not .Rows}}
-<p class="text-success-text">{{.Empty}}</p>
+<p class="text-warning-text"><strong>tidak bisa dipastikan</strong>: {{.Unreadable}}</p>
 {{else}}
+{{if .Rows}}
 <div class="overflow-x-auto">
   <table class="table table-sm">
     <thead><tr><th>Dari host</th><th>Akun</th><th>Database</th><th class="text-right">Jumlah</th></tr></thead>
     <tbody>
       {{range .Rows}}
-      <tr class="align-top"><td class="mono text-xs whitespace-nowrap">{{.Host}}</td><td><span class="whitespace-nowrap">{{.User}}</span>{{if .AdminAccount}}<div class="mt-1">{{template "badge" (badgeOf "warning" "akun admin panel")}}</div>{{end}}</td><td>{{or .DB "-"}}</td><td class="mono text-right">{{.Count}}</td></tr>
+      <tr class="align-top"><td class="mono text-xs whitespace-nowrap">{{.Host}}</td><td><span class="whitespace-nowrap">{{.User}}</span>{{if or (eq .Kind "x") (eq .Kind "lain") .AdminAccount .LocalAdmin}}<div class="mt-1 flex flex-wrap gap-1">{{if eq .Kind "x"}}{{template "badge" (badgeOf "info" "X Protocol")}}{{end}}{{if eq .Kind "lain"}}{{template "badge" (badgeOf "warning" "jenis koneksi tidak dikenal")}}{{end}}{{if .AdminAccount}}{{template "badge" (badgeOf "warning" "akun admin panel")}}{{end}}{{if .LocalAdmin}}{{template "badge" (badgeOf "warning" "sesi akun admin dari server ini")}}{{end}}</div>{{end}}</td><td>{{or .DB "-"}}</td><td class="mono text-right">{{.Count}}</td></tr>
       {{end}}
     </tbody>
   </table>
 </div>
 <p class="mt-2 text-sm">Jumlah koneksi: <strong>{{.Total}}</strong></p>
+{{end}}
+{{if .Indistinct}}<p class="help mt-1">tidak bisa dibedakan dari agent: performance_schema mati, jadi semua sesi akun admin dari server ini ikut terhitung.</p>{{end}}
+{{if .Uncertain}}<p class="text-warning-text mt-1"><strong>tidak bisa dipastikan</strong>: {{.Uncertain}}</p>
+{{else if not .Rows}}<p class="text-success-text">{{.Empty}}</p>{{end}}
 {{end}}
 {{if not .TakenAt.IsZero}}<p class="help mt-1">Dibaca <span class="mono">{{fmtDateTime .TakenAt}}</span></p>{{end}}
 {{end}}

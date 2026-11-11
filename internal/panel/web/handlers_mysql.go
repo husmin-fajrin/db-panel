@@ -636,6 +636,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	target, _ := strconv.ParseInt(r.PostFormValue("target"), 10, 64)
 	rebuild := r.PostFormValue("rebuild") == "1"
+	acceptConnections := rebuild && r.PostFormValue("accept_connections") == "1"
 	if rebuild && !a.requireConfirm(w, r, ActRebuildOldMaster, auditServer, target) {
 		return
 	}
@@ -678,6 +679,11 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		case !typedName(r, p.Rebuild.Server):
 			fail(msgNameMismatch)
 			return
+		// After the token and the name: what the rebuild throws away
+		// (the form's list was read again just now).
+		case p.Rebuild.AcceptLabel != "" && !acceptConnections:
+			fail(msgRebuildAccept)
+			return
 		}
 	}
 	// Only a server the form offers (a stale form or a crafted post may
@@ -711,6 +717,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	id, err := a.Orchestrator.StartCreateReplica(r.Context(), orchestrator.CreateReplicaParams{
 		MasterServerID: master.ID, TargetServerID: p.Target,
 		Databases: selected, ForceDump: p.ForceDump, ConfirmWipe: true, RebuildOldMaster: rebuild,
+		AcceptConnections: acceptConnections,
 	})
 	if err != nil {
 		a.Logger.Warn("create replica refused", "master", master.ID, "target", p.Target, "err", logErr(err))

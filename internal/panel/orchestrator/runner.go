@@ -927,6 +927,9 @@ type jobState struct {
 	ConfirmWipe    bool     `json:"confirm_wipe,omitempty"` // the form's; pre-approves the CLONE wait only
 	// RebuildOldMaster: create_replica of a quarantined old master.
 	RebuildOldMaster bool `json:"rebuild_old_master,omitempty"`
+	// AcceptConnections: the user acknowledged the connections to the old
+	// master when starting the rebuild (kept for a retry).
+	AcceptConnections bool `json:"accept_connections,omitempty"`
 	// Resync: a resync_replica job. Its WipeList starts as the replica's
 	// databases the user agreed to drop when starting it.
 	Resync bool `json:"resync,omitempty"`

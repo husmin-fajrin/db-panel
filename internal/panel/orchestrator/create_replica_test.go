@@ -967,3 +967,84 @@ func TestCancelAfterConnectResetsReplication(t *testing.T) {
 	e.waitJob(id, store.JobCanceled)
 	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.stopReplica", "mysql.resetReplica", "mysql.releaseRole"})
 }
+
+// TestStartRebuildRechecksConnections: starting the rebuild of the old
+// master reads its connections again; anything but a complete, empty,
+// typed list is refused without AcceptConnections (spec 5.5), and an
+// agent that cannot be read counts as not clear.
+func TestStartRebuildRechecksConnections(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	ctx := context.Background()
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	row := proto.ConnectionRow{Host: "10.0.0.9", User: "app", DB: "simrs", Count: 1, Kind: "sql"}
+	typed := func(rows ...proto.ConnectionRow) proto.ConnectionsResult {
+		return proto.ConnectionsResult{Rows: rows, Typed: true, TakenAt: time.Now()}
+	}
+	states := map[string]func(){
+		"one connection": func() { g.m.reply("mysql.connections", typed(row)) },
+		"only local admin sessions": func() {
+			g.m.reply("mysql.connections", typed(proto.ConnectionRow{Host: "localhost", User: "dbpanel_admin", Count: 1, Kind: "sql", LocalAdmin: true}))
+		},
+		"old agent (not typed)": func() {
+			g.m.reply("mysql.connections", proto.ConnectionsResult{TakenAt: time.Now()})
+		},
+		"incomplete": func() {
+			r := typed()
+			r.Incomplete = "thread hilang"
+			g.m.reply("mysql.connections", r)
+		},
+		"unreadable": func() {
+			r := typed()
+			r.Unreadable = "tidak bisa membaca"
+			g.m.reply("mysql.connections", r)
+		},
+		"command error": func() { g.m.fail("mysql.connections", "login admin gagal") },
+	}
+	for name, set := range states {
+		set()
+		_, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+			RebuildOldMaster: true, ConfirmWipe: true})
+		if !errors.Is(err, ErrConnectionsRemain) {
+			t.Errorf("%s: StartCreateReplica = %v, want ErrConnectionsRemain", name, err)
+		}
+	}
+	// An offline agent is not "no connections" either.
+	g.m.detach()
+	if _, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+		RebuildOldMaster: true, ConfirmWipe: true}); !errors.Is(err, ErrConnectionsRemain) {
+		t.Errorf("offline agent: StartCreateReplica = %v, want ErrConnectionsRemain", err)
+	}
+	g.m.attach()
+	if n := g.m.count("mysql.preflight"); n != 0 {
+		t.Fatalf("%d preflights after refusals: nothing may run on the old master", n)
+	}
+	if _, err := e.st.GetReplicaByServer(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("refused rebuild registered a replica: %v", err)
+	}
+
+	// Acknowledged: the job is created and keeps the acknowledgement.
+	g.m.reply("mysql.connections", typed(row))
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	g.c.reply("mysql.status", masterStatus())
+	g.c.reply("mysql.createDumpUser", nil)
+	g.c.reply("mysql.dropUser", nil)
+	g.c.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})
+	rebuildID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+		RebuildOldMaster: true, ConfirmWipe: true, AcceptConnections: true})
+	if err != nil {
+		t.Fatalf("acknowledged rebuild: %v", err)
+	}
+	j, _, err := e.st.GetJob(rebuildID)
+	if err != nil || !strings.Contains(j.ParamsJSON, `"accept_connections":true`) {
+		t.Fatalf("job params = %q, %v; want the acknowledgement kept", j.ParamsJSON, err)
+	}
+	e.waitJob(rebuildID, store.JobSucceeded)
+}

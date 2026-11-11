@@ -97,7 +97,21 @@ func (f *fakeOrch) setConnections(id int64, rows ...proto.ConnectionRow) {
 	if f.connections == nil {
 		f.connections = map[int64]proto.ConnectionsResult{}
 	}
-	f.connections[id] = proto.ConnectionsResult{Rows: rows, TakenAt: time.Now()}
+	f.connections[id] = proto.ConnectionsResult{Rows: rows, TakenAt: time.Now(), Typed: true, Source: "performance_schema"}
+}
+
+// setConnectionsResult scripts a whole result (an old agent, Incomplete,
+// Unreadable, ...).
+func (f *fakeOrch) setConnectionsResult(id int64, res proto.ConnectionsResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.connections == nil {
+		f.connections = map[int64]proto.ConnectionsResult{}
+	}
+	if res.TakenAt.IsZero() {
+		res.TakenAt = time.Now()
+	}
+	f.connections[id] = res
 }
 
 func (f *fakeOrch) setConnErr(id int64, err error) {
@@ -347,7 +361,8 @@ func TestRebuildWarnsOnLeftoverAndConnections(t *testing.T) {
 	wantCode(t, rec, http.StatusBadRequest)
 	wantCalls(t, f)
 
-	rec = e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm(), web.ActRebuildOldMaster, "server", 1), c)
+	// The old master cannot be read: the rebuild needs the acknowledgement.
+	rec = e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm("accept_connections", "1"), web.ActRebuildOldMaster, "server", 1), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantCalls(t, f, "create-replica 2->1")
 	if p := f.replicas[0]; !p.RebuildOldMaster || p.MasterServerID != 2 || p.TargetServerID != 1 || !p.ConfirmWipe {
@@ -809,4 +824,102 @@ func TestOldMasterPageShowsStartLockAndOperatorInitFiles(t *testing.T) {
 	view(nil)
 	rec = e.do("GET", "/servers/1", nil, c)
 	wantNoBody(t, rec, "Kunci start:")
+}
+
+// TestRebuildRefusedWithoutAcceptConnections: the rebuild form of an old
+// master with connections carries the acknowledgement; a post with token
+// and typed name but without it is refused by the server (spec 5.5).
+func TestRebuildRefusedWithoutAcceptConnections(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	f.setConnections(1, proto.ConnectionRow{Host: "10.0.0.50", User: "app", DB: "simrs", Count: 3, Kind: "sql"})
+	setLeftover(t, e, topo, threeLeftover())
+
+	rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `name="accept_connections"`, "Saya paham 3 koneksi masih ada dan tulisannya hilang")
+	wantNoBody(t, rec, "tidak bisa dipastikan dan tulisan yang masih masuk hilang")
+
+	post := func(extra ...string) *httptest.ResponseRecorder {
+		return e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm(extra...), web.ActRebuildOldMaster, "server", 1), c)
+	}
+	// Token and name are right; the tick is missing, or not the form's.
+	for _, extra := range [][]string{nil, {"accept_connections", ""}, {"accept_connections", "0"}} {
+		rec = post(extra...)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, "Centang pernyataan")
+	}
+	wantCalls(t, f)
+	// Token and name still come first: a wrong name is the name's error.
+	rec = e.do("POST", "/masters/2/replicas",
+		withToken(t, e, rebuildForm("confirm_name", "salah", "accept_connections", "1"), web.ActRebuildOldMaster, "server", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantCalls(t, f)
+	wantCode(t, e.do("POST", "/masters/2/replicas", rebuildForm("accept_connections", "1"), c), http.StatusForbidden)
+
+	rec = post("accept_connections", "1")
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "create-replica 2->1")
+	if p := f.replicas[0]; !p.RebuildOldMaster || !p.AcceptConnections {
+		t.Fatalf("create replica params = %+v", p)
+	}
+}
+
+// TestRebuildAcceptanceByConnectionState: whether the form and the server
+// ask for the acknowledgement, for every state of the connection list.
+func TestRebuildAcceptanceByConnectionState(t *testing.T) {
+	const (
+		countLabel   = "Saya paham 3 koneksi masih ada dan tulisannya hilang"
+		unknownLabel = "Saya paham koneksi ke server ini tidak bisa dipastikan dan tulisan yang masih masuk hilang"
+	)
+	app := proto.ConnectionRow{Host: "10.0.0.50", User: "app", DB: "simrs", Count: 3, Kind: "sql"}
+	local := proto.ConnectionRow{Host: "localhost", User: "dbpanel_admin", Count: 1, Kind: "sql", LocalAdmin: true}
+	cases := []struct {
+		name  string
+		res   *proto.ConnectionsResult // nil when the command fails with err
+		err   error
+		label string // "" = no acknowledgement asked
+	}{
+		{name: "complete and empty", res: &proto.ConnectionsResult{Typed: true}},
+		{name: "rows", res: &proto.ConnectionsResult{Typed: true, Rows: []proto.ConnectionRow{app}}, label: countLabel},
+		{name: "only local admin sessions", res: &proto.ConnectionsResult{Typed: true, Rows: []proto.ConnectionRow{local}, LocalAdmin: 1},
+			label: "Saya paham 1 koneksi masih ada dan tulisannya hilang"},
+		{name: "old agent", res: &proto.ConnectionsResult{}, label: unknownLabel},
+		{name: "incomplete", res: &proto.ConnectionsResult{Typed: true, Incomplete: "thread hilang"}, label: unknownLabel},
+		{name: "unreadable", res: &proto.ConnectionsResult{Typed: true, Unreadable: "gagal"}, label: unknownLabel},
+		{name: "offline", err: proto.ErrOffline, label: unknownLabel},
+		{name: "command error", err: errors.New("login admin gagal"), label: unknownLabel},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, f, topo := promotedEnv(t)
+			c := e.cookie()
+			if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			setLeftover(t, e, topo, threeLeftover())
+			if tc.err != nil {
+				f.setConnErr(1, tc.err)
+			} else {
+				f.setConnectionsResult(1, *tc.res)
+			}
+			rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+			wantCode(t, rec, http.StatusOK)
+			if tc.label == "" {
+				wantNoBody(t, rec, `name="accept_connections"`, "Saya paham")
+			} else {
+				wantBody(t, rec, `name="accept_connections"`, tc.label)
+			}
+			rec = e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm(), web.ActRebuildOldMaster, "server", 1), c)
+			if tc.label == "" {
+				wantCode(t, rec, http.StatusSeeOther)
+				return
+			}
+			wantCode(t, rec, http.StatusBadRequest)
+			wantCalls(t, f)
+		})
+	}
 }

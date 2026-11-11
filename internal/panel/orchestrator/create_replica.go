@@ -33,7 +33,18 @@ type CreateReplicaParams struct {
 	// topology, rebuilt as a replica of the new master ("Bangun ulang
 	// sebagai replika", spec 5.4). Refused while the cutover is pending.
 	RebuildOldMaster bool
+	// AcceptConnections: the user ticked, on the rebuild form, that they
+	// understand connections to the old master are still there (or cannot
+	// be counted) and what they wrote is lost. Without it a rebuild is
+	// refused unless the connection list is complete and empty.
+	AcceptConnections bool
 }
+
+// ErrConnectionsRemain refuses rebuilding the old master while
+// connections to it remain or cannot be counted, without the user's
+// acknowledgement (spec 5.5).
+var ErrConnectionsRemain = errors.New("masih ada koneksi ke master lama atau jumlahnya tidak bisa dipastikan; " +
+	"centang pernyataan di form bila Anda paham tulisannya hilang")
 
 // errRebuildCutoverPending refuses rebuilding the old master before the
 // applications are confirmed on the new one.
@@ -70,6 +81,20 @@ func connectIndex(rows []store.JobStep) int {
 func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) (string, error) {
 	if p.MasterServerID == p.TargetServerID {
 		return "", errors.New("server tujuan tidak boleh sama dengan master")
+	}
+	// What the rebuild throws away is read again now, before the start
+	// lock (an agent call), not taken from the form: connections can have
+	// come back since it was drawn.
+	if p.RebuildOldMaster && !p.AcceptConnections {
+		clear, total, err := r.oldMasterConnectionsClear(ctx, p.TargetServerID)
+		if err != nil {
+			r.log.Warn("old master connections not readable; rebuild needs the acknowledgement",
+				"server_id", p.TargetServerID, "err", err)
+		}
+		if err != nil || !clear {
+			r.log.Info("rebuild refused: connections remain or are unknown", "server_id", p.TargetServerID, "connections", total)
+			return "", ErrConnectionsRemain
+		}
 	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -153,7 +178,7 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		return "", err
 	}
 	st := jobState{MasterServerID: p.MasterServerID, Databases: dbs, ForceDump: p.ForceDump, ConfirmWipe: p.ConfirmWipe,
-		RebuildOldMaster: p.RebuildOldMaster}
+		RebuildOldMaster: p.RebuildOldMaster, AcceptConnections: p.RebuildOldMaster && p.AcceptConnections}
 	id, err := r.createJob(KindCreateReplica, target.ID, topo.ID, st, createReplicaStepNames())
 	if err != nil {
 		if rerr := r.d.Store.RemoveReplica(target.ID); rerr != nil {
@@ -163,6 +188,22 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		return "", err
 	}
 	return id, nil
+}
+
+// oldMasterConnectionsClear reads the connections of serverID (the old
+// master) straight from its agent. clear is true only for a complete,
+// typed answer with no connection at all; total is how many connections
+// were seen. Anything else (an old agent, an incomplete or unreadable
+// list, an offline agent, any command error) is not clear.
+func (r *Runner) oldMasterConnectionsClear(ctx context.Context, serverID int64) (clear bool, total int, err error) {
+	res, err := r.Connections(ctx, serverID)
+	if err != nil {
+		return false, 0, err
+	}
+	for _, row := range res.Rows {
+		total += row.Count
+	}
+	return res.Typed && res.Unreadable == "" && res.Incomplete == "" && len(res.Rows) == 0, total, nil
 }
 
 // keepQuarantined puts the quarantined role back on an old master whose

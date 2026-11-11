@@ -926,6 +926,7 @@ func TestPromoteNewMasterReadyForReplicas(t *testing.T) {
 	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	g.m.reply("mysql.connections", proto.ConnectionsResult{Typed: true})
 	rebuildID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
 		RebuildOldMaster: true})
 	if err != nil {
@@ -1115,6 +1116,7 @@ func TestRebuiltOldMasterIsNoLongerOldMaster(t *testing.T) {
 	g.c.reply("mysql.createDumpUser", nil)
 	g.c.reply("mysql.dropUser", nil)
 	g.c.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})
+	g.m.reply("mysql.connections", proto.ConnectionsResult{Typed: true})
 	rebuildID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
 		RebuildOldMaster: true, ConfirmWipe: true})
 	if err != nil {
