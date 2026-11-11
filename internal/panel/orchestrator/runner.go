@@ -572,15 +572,21 @@ var (
 
 // dropsData reports whether a job of kind with st drops data on a server
 // when it runs on (spec 5.6): a resync; a create_replica with leftovers to
-// drop, of a quarantined old master, or that waited to drop leftovers or
-// for CLONE; a remove_databases that drops the data. Its Approve and Retry
-// need a fresh confirmation (JobAck.Confirmed).
+// drop, of a quarantined old master, that waited to drop leftovers or for
+// CLONE, or that can still run mysql.cloneFrom (method clone and no copy
+// made yet: CLONE replaces everything on the target, and the agent does
+// not check for user databases again, ruling 16); a remove_databases that
+// drops the data. Its Approve and Retry need a fresh confirmation
+// (JobAck.Confirmed).
 func dropsData(kind string, st jobState) bool {
 	switch kind {
 	case KindResyncReplica:
 		return true
 	case KindCreateReplica:
-		return len(st.WipeList) > 0 || st.RebuildOldMaster || st.WaitReason == WaitWipe || st.WaitReason == WaitClone
+		// The copy is made once SnapshotGTID is known or the copy is
+		// waiting for the reconnect (AdminReplaced).
+		cloneLeft := st.Method == "clone" && st.SnapshotGTID == "" && !st.AdminReplaced
+		return len(st.WipeList) > 0 || st.RebuildOldMaster || st.WaitReason == WaitWipe || st.WaitReason == WaitClone || cloneLeft
 	case KindRemoveDatabases:
 		return st.DropData
 	}
