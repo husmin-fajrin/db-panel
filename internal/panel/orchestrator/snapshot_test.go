@@ -138,7 +138,7 @@ func TestSnapshotRetryWaitsForEarlierDump(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobWaiting)
-	if err := e.r.Approve(id, JobAck{}); err != nil {
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("dump started", func() bool { return r.startedJobs() == 1 })
@@ -147,7 +147,7 @@ func TestSnapshotRetryWaitsForEarlierDump(t *testing.T) {
 		t.Fatalf("job = %+v", j)
 	}
 	r.attach()
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("retry polls the earlier dump", func() bool { return r.count("job.status") >= 2 })

@@ -571,18 +571,155 @@ var (
 )
 
 // dropsData reports whether a job of kind with st drops data on a server
-// when it runs on: its Approve and Retry need a fresh confirmation.
+// when it runs on (spec 5.6): a resync; a create_replica with leftovers to
+// drop, of a quarantined old master, or that waited to drop leftovers or
+// for CLONE; a remove_databases that drops the data. Its Approve and Retry
+// need a fresh confirmation (JobAck.Confirmed).
 func dropsData(kind string, st jobState) bool {
+	switch kind {
+	case KindResyncReplica:
+		return true
+	case KindCreateReplica:
+		return len(st.WipeList) > 0 || st.RebuildOldMaster || st.WaitReason == WaitWipe || st.WaitReason == WaitClone
+	case KindRemoveDatabases:
+		return st.DropData
+	}
 	return false
 }
 
-// DropsData reports whether the job drops data (see dropsData).
+// jobDropsData is dropsData of j; a job whose params cannot be read counts
+// as dropping (fail closed), with the error.
+func jobDropsData(j store.Job) (jobState, bool, error) {
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		return st, true, err
+	}
+	return st, dropsData(j.Kind, st), nil
+}
+
+// DropsData reports whether the job drops data (dropsData): its Approve and
+// Retry need ack.Confirmed. A job whose params cannot be read answers true
+// with the error.
 func (r *Runner) DropsData(jobID string) (bool, error) {
-	return false, nil
+	j, _, err := r.d.Store.GetJob(jobID)
+	if err != nil {
+		return true, err
+	}
+	_, drops, err := jobDropsData(j)
+	return drops, err
+}
+
+var errWipeOnlyUnlisted = errors.New("database yang diakui hanya ada di replika tidak ada di daftar yang dibuang pekerjaan ini; " +
+	"buka lagi dialog Ulangi dari halaman pekerjaan")
+
+// confirmDrop checks ack for an Approve (retry false) or a Retry of j and,
+// for a job that drops data, stores the new confirmation (ConfirmedAt and,
+// on a Retry, the WipeOnly acknowledged again) before the caller launches
+// it. connsClear is retryConnectionsClear's answer. Nothing is stored when
+// it refuses. Callers hold startMu.
+func (r *Runner) confirmDrop(j store.Job, ack JobAck, retry, connsClear bool) error {
+	st, drops, err := jobDropsData(j)
+	if !drops {
+		return nil
+	}
+	if !ack.Confirmed {
+		return ErrJobNeedsConfirm
+	}
+	if err != nil {
+		// newRun cannot read it either and fails the job with the reason.
+		return nil
+	}
+	now := r.now()
+	if retry {
+		last := st.ConfirmedAt
+		if last.IsZero() {
+			last = j.CreatedAt
+		}
+		if now.Sub(last) > confirmMaxAge {
+			return ErrConfirmStale
+		}
+		only := slices.Clone(ack.WipeOnly)
+		slices.Sort(only)
+		only = slices.Compact(only)
+		for _, d := range only {
+			if !slices.Contains(st.WipeList, d) {
+				return errWipeOnlyUnlisted
+			}
+		}
+		st.WipeOnly = only
+		if j.Kind == KindCreateReplica && st.RebuildOldMaster && !ack.AcceptConnections && !connsClear {
+			return ErrConnectionsRemain
+		}
+	}
+	if err := r.launchRefused(j.ID); err != nil {
+		return err
+	}
+	st.ConfirmedAt = now
+	b, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return r.d.Store.SetJobParams(j.ID, string(b))
+}
+
+// retryConnectionsClear reads the connections of the old master a
+// confirmed Retry of its rebuild would throw away, before startMu (an
+// agent call), as StartCreateReplica does. It is true when no reading is
+// needed (another job, an unconfirmed Retry, connections acknowledged).
+// The acknowledgement stored when the job started never counts.
+func (r *Runner) retryConnectionsClear(jobID string, ack JobAck) bool {
+	if !ack.Confirmed || ack.AcceptConnections {
+		return true
+	}
+	j, _, err := r.d.Store.GetJob(jobID)
+	if err != nil || j.Kind != KindCreateReplica {
+		return true
+	}
+	switch j.Status {
+	case store.JobFailed, store.JobPartial, store.JobWaiting:
+	default:
+		return true
+	}
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil || !st.RebuildOldMaster {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(r.base, callTimeout)
+	defer cancel()
+	clear, total, err := r.oldMasterConnectionsClear(ctx, j.ServerID)
+	if err != nil {
+		r.log.Warn("old master connections not readable; retry of the rebuild needs the acknowledgement",
+			"job", jobID, "server_id", j.ServerID, "err", logErr(err))
+	}
+	if err != nil || !clear {
+		r.log.Info("rebuild retry: connections remain or are unknown", "job", jobID, "connections", total)
+		return false
+	}
+	return true
+}
+
+// launchRefused is what launch would refuse act with now, checked before
+// a confirmation is stored for it.
+func (r *Runner) launchRefused(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return errClosed
+	}
+	if lj := r.live[id]; lj != nil && lj.pending != nil {
+		if lj.pending.kind == actCancel {
+			return errCanceling
+		}
+		return errBusy
+	}
+	return nil
 }
 
 // Approve lets a job waiting for the user continue: the waiting step runs
-// again with the approval. A superseded job (see supersededBy) is refused.
+// again with the approval. A superseded job (see supersededBy) is refused,
+// and so is a job that drops data without ack.Confirmed; a confirmed
+// approval of one is stored (ConfirmedAt) before the job runs on.
+// ack.WipeOnly and ack.AcceptConnections are not used by an approval.
 func (r *Runner) Approve(jobID string, ack JobAck) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -596,13 +733,22 @@ func (r *Runner) Approve(jobID string, ack JobAck) error {
 	if err := r.refuseSuperseded(j); err != nil {
 		return err
 	}
+	if err := r.confirmDrop(j, ack, false, true); err != nil {
+		return err
+	}
 	return r.launch(jobID, action{kind: actApprove, step: j.CurrentStep})
 }
 
 // Retry runs a failed job again from the step that failed, with the same
 // params; a waiting job re-checks its waiting step. A superseded job (see
-// supersededBy) is refused.
+// supersededBy) is refused. A job that drops data also needs ack.Confirmed
+// and a last confirmation (ConfirmedAt, else its creation) at most
+// confirmMaxAge old; ack.WipeOnly replaces the acknowledged replica-only
+// databases, and the rebuild of an old master reads its connections again
+// (ErrConnectionsRemain without ack.AcceptConnections). The new
+// confirmation is stored before the job runs.
 func (r *Runner) Retry(jobID string, ack JobAck) error {
+	connsClear := r.retryConnectionsClear(jobID, ack)
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
@@ -620,6 +766,9 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 			return errors.New("server ini sudah menjalankan pekerjaan lain")
 		}
 		if err := r.refuseSuperseded(j); err != nil {
+			return err
+		}
+		if err := r.confirmDrop(j, ack, true, connsClear); err != nil {
 			return err
 		}
 		// A failed (or partial) job is reopened before startMu is
@@ -964,15 +1113,17 @@ type jobState struct {
 	// RebuildOldMaster: create_replica of a quarantined old master.
 	RebuildOldMaster bool `json:"rebuild_old_master,omitempty"`
 	// AcceptConnections: the user acknowledged the connections to the old
-	// master when starting the rebuild (kept for a retry).
+	// master when starting the rebuild (a record only: a Retry reads the
+	// connections again and needs its own acknowledgement, JobAck).
 	AcceptConnections bool `json:"accept_connections,omitempty"`
 	// Resync: a resync_replica job. Its WipeList starts as the replica's
 	// databases the user agreed to drop when starting it.
 	Resync bool `json:"resync,omitempty"`
 	// WipeOnly: the databases of WipeList the user acknowledged as existing
-	// only on the replica (sorted, unique); enforceWipeOnly checks the list
-	// against a fresh read of the master. ConfirmedAt is when the user
-	// confirmed the drop.
+	// only on the replica (sorted, unique, a subset of WipeList);
+	// enforceWipeOnly checks the list against a fresh read of the master.
+	// ConfirmedAt is when the user last confirmed the drop (start, Approve
+	// or Retry); a Retry more than confirmMaxAge later is refused.
 	WipeOnly    []string  `json:"wipe_only,omitempty"`
 	ConfirmedAt time.Time `json:"confirmed_at,omitempty"`
 

@@ -139,6 +139,10 @@ func (r *Runner) StartRemoveDatabases(ctx context.Context, replicaServerID int64
 		return "", errors.New("lepas semua database tidak didukung; hapus replika ini bila tidak diperlukan lagi")
 	}
 	st := jobState{MasterServerID: topo.MasterServerID, Databases: rep.Databases, Change: remove, DropData: dropData}
+	if dropData {
+		// The token and typed name the user gave confirm the drop now.
+		st.ConfirmedAt = r.now()
+	}
 	return r.createJob(KindRemoveDatabases, replicaServerID, topo.ID, st, removeDatabasesStepNames())
 }
 

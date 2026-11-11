@@ -190,7 +190,7 @@ func TestResyncStopsForUnknownLeftover(t *testing.T) {
 	if n := r.count("mysql.dropDatabases"); n != 0 {
 		t.Fatal("databases dropped before approval")
 	}
-	if err := e.r.Approve(id, JobAck{}); err != nil {
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)

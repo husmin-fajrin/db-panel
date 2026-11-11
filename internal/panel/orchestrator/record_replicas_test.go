@@ -37,7 +37,7 @@ func TestRecordReplicasCalledAfterVerify(t *testing.T) {
 			t.Fatal(err)
 		}
 		e.waitJob(id, store.JobWaiting)
-		if err := e.r.Approve(id, JobAck{}); err != nil {
+		if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 			t.Fatal(err)
 		}
 		e.waitJob(id, store.JobSucceeded)

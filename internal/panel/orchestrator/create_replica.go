@@ -203,7 +203,15 @@ func (r *Runner) oldMasterConnectionsClear(ctx context.Context, serverID int64) 
 	for _, row := range res.Rows {
 		total += row.Count
 	}
-	return res.Typed && res.Unreadable == "" && res.Incomplete == "" && len(res.Rows) == 0, total, nil
+	return ConnectionsClear(res), total, nil
+}
+
+// ConnectionsClear is the one definition of "no connections" (spec 5.5):
+// a typed, readable, complete list without a row. The rebuild form, its
+// handler and the orchestrator all use it, so the form never omits an
+// acknowledgement the orchestrator then demands.
+func ConnectionsClear(res proto.ConnectionsResult) bool {
+	return res.Typed && res.Unreadable == "" && res.Incomplete == "" && len(res.Rows) == 0
 }
 
 // keepQuarantined puts the quarantined role back on an old master whose
@@ -507,6 +515,7 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	}
 	jr.st.Method = method
 	jr.save()
+	jr.preflightFresh = true
 	jr.logf("info", "Metode salinan awal: %s.", method)
 	return done("metode salinan: %s", method), nil
 }
@@ -676,6 +685,9 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 		// The copy is done; it waits for the user to reconnect.
 		return jr.verifyCopyAfterReconnect(ctx)
 	}
+	if out, ok, err := jr.preflightBeforeDrop(ctx, approved); !ok {
+		return out, err
+	}
 	name := jr.serverName(jr.target())
 	// A clone target has no user databases (the agent picks clone only
 	// then); the form's ConfirmWipe pre-approves replacing the rest.
@@ -747,6 +759,38 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 		jr.logf("warn", "Replika sekarang membawa akun-akun MySQL dari master (ikut tersalin).")
 	}
 	return done("%s selesai (%d byte)", jr.st.Method, res.Bytes), nil
+}
+
+// snapshotCmd is the agent command that copies the data by jr.st.Method.
+func (jr *jobRun) snapshotCmd() string {
+	if jr.st.Method == "dump" {
+		return "mysql.dumpFrom"
+	}
+	return "mysql.cloneFrom"
+}
+
+// preflightBeforeDrop runs the preflight (and with it enforceWipeOnly's
+// fresh read of the master) again before the snapshot step of a job that
+// drops data drops or clones anything, when this run has not run it yet:
+// an Approve, a Retry from any step, or a restart starts a new run (spec
+// 5.6). An earlier attempt's copy still running is waited for instead
+// (nothing is dropped under it). ok is false when the step must end with
+// out and err (a failure, or a wait for the user).
+//
+// approved passes to the preflight only when the wait this step returned
+// last was the preflight's own (leftovers or a foreign source): approving
+// the CLONE wait approves no list.
+func (jr *jobRun) preflightBeforeDrop(ctx context.Context, approved bool) (out outcome, ok bool, err error) {
+	if jr.preflightFresh || !dropsData(jr.job.Kind, jr.st) || jr.earlierAgentJob(ctx, jr.target(), jr.snapshotCmd()) {
+		return outcome{}, true, nil
+	}
+	jr.logf("info", "Pemeriksaan server tujuan dijalankan lagi sebelum data dibuang.")
+	approved = approved && (jr.st.WaitReason == WaitWipe || jr.st.WaitReason == WaitForeignSource)
+	out, err = jr.replicaPreflight(ctx, approved)
+	if err != nil || out.status != store.StepDone {
+		return out, false, err
+	}
+	return outcome{}, true, nil
 }
 
 // reconnectMessage asks the user, in plain words, to reconnect the

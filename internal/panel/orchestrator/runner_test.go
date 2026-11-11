@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -344,24 +345,24 @@ func TestRetryRebuildRechecksConnections(t *testing.T) {
 // A remove_databases that drops the data is confirmed when it is created
 // (its Retry counts 24 hours from then); one that keeps the data is not.
 func TestRemoveDatabasesDropConfirmedAtStart(t *testing.T) {
-	e := newEnv(t)
-	_, topo := e.readyMaster("db-master")
-	r := e.followingReplica(topo, "a", "b")
-	r.reply("mysql.dropDatabases", proto.DropDatabasesResult{Dropped: []string{"b"}})
-	before := time.Now()
-	id, err := e.r.StartRemoveDatabases(context.Background(), r.id, []string{"b"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := e.storedState(id).ConfirmedAt; got.Before(before) || got.After(time.Now()) {
-		t.Fatalf("ConfirmedAt = %v, want the start time", got)
-	}
-	e.waitJob(id, store.JobSucceeded)
-	keep, err := e.r.StartRemoveDatabases(context.Background(), r.id, []string{"a"}, false)
-	if err == nil {
-		if got := e.storedState(keep).ConfirmedAt; !got.IsZero() {
-			t.Fatalf("ConfirmedAt of a remove keeping the data = %v", got)
-		}
-		e.waitJob(keep, store.JobSucceeded)
+	for _, drop := range []bool{true, false} {
+		t.Run(fmt.Sprintf("drop %v", drop), func(t *testing.T) {
+			e := newEnv(t)
+			_, topo := e.readyMaster("db-master")
+			r := e.followingReplica(topo, "a", "b")
+			before := time.Now()
+			id, err := e.r.StartRemoveDatabases(context.Background(), r.id, []string{"b"}, drop)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := e.storedState(id).ConfirmedAt
+			if drop && (got.Before(before) || got.After(time.Now())) {
+				t.Fatalf("ConfirmedAt = %v, want the start time", got)
+			}
+			if !drop && !got.IsZero() {
+				t.Fatalf("ConfirmedAt of a remove keeping the data = %v", got)
+			}
+			e.waitJob(id, store.JobSucceeded)
+		})
 	}
 }

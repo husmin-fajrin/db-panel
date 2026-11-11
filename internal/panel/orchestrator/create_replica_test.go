@@ -58,14 +58,18 @@ func TestCreateReplicaHappyPathClone(t *testing.T) {
 	if n := r.count("mysql.cloneFrom"); n != 0 {
 		t.Fatal("CLONE started before Approve")
 	}
-	if err := e.r.Approve(id, JobAck{}); err != nil {
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
 	j, steps = e.waitJob(id, store.JobSucceeded)
 	if got := stepStatuses(steps); !slices.Equal(got, allDone(store.StepSkipped)) {
 		t.Fatalf("steps = %v", got)
 	}
-	wantCmds(t, "replica", r.cmds(0), replicaCmds("mysql.cloneFrom"))
+	// The approval of the CLONE starts a new run: the preflight runs again
+	// before CLONE replaces the target's data (spec 5.6).
+	want := replicaCmds("mysql.cloneFrom")
+	clone := slices.Index(want, "mysql.cloneFrom")
+	wantCmds(t, "replica", r.cmds(0), slices.Insert(want, clone, "mysql.preflight"))
 	// Siapkan replika sweeps leftover dump accounts also before a CLONE.
 	wantCmds(t, "master", m.cmds(0), []string{"mysql.status", "mysql.sweepDumpUsers", "mysql.status", "mysql.recordReplicas"})
 
@@ -187,7 +191,7 @@ func TestCreateReplicaSubsetUsesDumpWithFilter(t *testing.T) {
 	if want := "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: a, b"; steps[1].Message != want {
 		t.Fatalf("waiting message = %q, want %q", steps[1].Message, want)
 	}
-	if err := e.r.Approve(id, JobAck{}); err != nil {
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	_, steps = e.waitJob(id, store.JobSucceeded)
@@ -569,7 +573,7 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 	leftMu.Lock()
 	left = []string{"a", "b"} // changed before the user approved
 	leftMu.Unlock()
-	if err := e.r.Approve(id, JobAck{}); err != nil {
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitFor("second waiting message", func() bool {
@@ -583,7 +587,7 @@ func TestLeftoverConfirmationBoundToList(t *testing.T) {
 		}
 	}
 
-	if err := e.r.Approve(id, JobAck{}); err != nil {
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)

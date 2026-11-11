@@ -78,7 +78,8 @@ func (r *Runner) StartResync(ctx context.Context, p ResyncParams) (string, error
 	wipe := slices.Clone(p.WipeList)
 	slices.Sort(wipe)
 	wipe = slices.Compact(wipe)
-	only := slices.Clone(p.WipeOnly)
+	// Only acknowledgements of listed databases are kept (ruling 15).
+	only := slices.DeleteFunc(slices.Clone(p.WipeOnly), func(d string) bool { return !slices.Contains(wipe, d) })
 	slices.Sort(only)
 	only = slices.Compact(only)
 	st := jobState{MasterServerID: topo.MasterServerID, Databases: rep.Databases, ForceDump: p.ForceDump,
