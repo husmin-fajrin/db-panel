@@ -270,9 +270,12 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 		return nil
 	}
 	// A load just ended: read the flags again (its restore may have
-	// failed), whether or not a tick deferred during it.
-	if d.takeRecheck() {
-		d.guard.up, d.qStartPending = false, false
+	// failed), whether or not a tick deferred during it. A restart the
+	// load made is not a start to report (cleared below, after the Uptime
+	// reading, which still predates the load).
+	afterLoad := d.takeRecheck()
+	if afterLoad {
+		d.guard.up = false
 	}
 	// A restart between two ticks is a transition too.
 	var name string
@@ -289,6 +292,9 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 	// quarantined a live server) a short Uptime is no start.
 	if !sameRun && !d.qUptimeAt.IsZero() {
 		d.qStartPending = true
+	}
+	if afterLoad {
+		d.qStartPending = false
 	}
 	d.qUptime, d.qUptimeAt = uptime, now
 	if d.guard.up && sameRun {

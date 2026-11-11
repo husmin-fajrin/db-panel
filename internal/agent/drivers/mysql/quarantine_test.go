@@ -605,11 +605,18 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	if sro, ro := readOnly(t, db); !sro || !ro {
 		t.Fatalf("guard after the load: super_read_only=%v read_only=%v, want both on", sro, ro)
 	}
-	// And the next restart is a transition again.
+	// The load's restart is not a start of the quarantined server.
+	if got := startEvents(t, ev); len(got) != 1 {
+		t.Errorf("start events after the load = %+v, want only the agent's start", got)
+	}
+	// And the next restart is a transition again, reported.
 	restartAndLift()
 	tick()
 	if sro, ro := readOnly(t, db); !sro || !ro {
 		t.Fatalf("guard after a restart without a load: super_read_only=%v read_only=%v", sro, ro)
+	}
+	if got := startEvents(t, ev); len(got) != 2 || got[1].Result != proto.QuarantineStartLate {
+		t.Errorf("start events after a restart without a load = %+v, want a second, late", got)
 	}
 
 	// A load the guard never saw (no tick while marked) whose restore
@@ -623,6 +630,9 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	tick()
 	if sro, ro := readOnly(t, db); !sro || !ro {
 		t.Fatalf("guard after an unseen load: super_read_only=%v read_only=%v, want both on", sro, ro)
+	}
+	if got := startEvents(t, ev); len(got) != 2 {
+		t.Errorf("start events after an unseen load = %+v, want still two", got)
 	}
 
 	// A mark is honoured only while its source is the source pin.
