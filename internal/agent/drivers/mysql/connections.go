@@ -47,30 +47,34 @@ var replicationThreadNames = []string{
 	"thread/sql/slave_io", "thread/sql/slave_sql", "thread/sql/slave_worker",
 }
 
+// midLoginUser is how the list shows a session that has not finished
+// logging in: performance_schema has its thread (NAME one_connection) with
+// a NULL user, information_schema shows 'unauthenticated user'.
+const midLoginUser = "unauthenticated user"
+
 // connectionsPSQuery lists the client threads from performance_schema: the
-// foreground threads that have a processlist id and a user (this drops
-// MySQL's own threads such as compress_gtid_table, which have no user), with
-// no filter on the thread name, so a connection of a kind the agent does
-// not know is counted. Left out: MySQL's 'system user', the event
-// scheduler, replicas reading the binary log and this very connection. On a
-// replica, performance_schema shows the replication threads under the
-// account that ran START REPLICA, not as 'system user': they are counted
-// (as local admin sessions of the agent's account) rather than hidden by
-// name (the instruments listed in replicationThreadNames). An
-// 'unauthenticated user' (a session logging in) is a connection. Columns:
-// thread name, host, user, default database, whether the user is the one the
-// agent logs in as, and whether the session carries the agent's
-// program_name attribute (the single parameter).
-var connectionsPSQuery = `SELECT IFNULL(t.NAME, ''), IFNULL(t.PROCESSLIST_HOST, ''), t.PROCESSLIST_USER, IFNULL(t.PROCESSLIST_DB, ''),
-		t.PROCESSLIST_USER = ` + agentUserExpr + `,
+// foreground threads that have a processlist id and a user. A thread without
+// a user is MySQL's own (such as compress_gtid_table) and is left out, except
+// a thread named exactly thread/sql/one_connection: that is a client
+// connection that is still logging in, counted as midLoginUser. The thread
+// name is filtered only for the exact names in replicationThreadNames
+// (excluded) and that one name (kept when its user is NULL); a connection of
+// a kind the agent does not know is counted. Left out: MySQL's 'system user',
+// the event scheduler, replicas reading the binary log and this very
+// connection. Columns: thread name, host, user, default database, whether the
+// user is the one the agent logs in as, and whether the session carries the
+// agent's program_name attribute (the first parameter; the rest are
+// replicationThreadNames).
+var connectionsPSQuery = `SELECT IFNULL(t.NAME, ''), IFNULL(t.PROCESSLIST_HOST, ''), IFNULL(t.PROCESSLIST_USER, '` + midLoginUser + `'), IFNULL(t.PROCESSLIST_DB, ''),
+		t.PROCESSLIST_USER <=> ` + agentUserExpr + `,
 		EXISTS (SELECT 1 FROM performance_schema.session_connect_attrs a
 			WHERE a.PROCESSLIST_ID = t.PROCESSLIST_ID AND a.ATTR_NAME = 'program_name' AND a.ATTR_VALUE = ?)
 	FROM performance_schema.threads t
 	WHERE t.TYPE = 'FOREGROUND'
 	  AND IFNULL(t.NAME, '') NOT IN (` + placeholders(len(replicationThreadNames)) + `)
 	  AND t.PROCESSLIST_ID IS NOT NULL
-	  AND t.PROCESSLIST_USER IS NOT NULL
-	  AND t.PROCESSLIST_USER NOT IN ('system user', 'event_scheduler')
+	  AND (t.PROCESSLIST_USER IS NOT NULL OR t.NAME = '` + sqlThreadName + `')
+	  AND IFNULL(t.PROCESSLIST_USER, '') NOT IN ('system user', 'event_scheduler')
 	  AND IFNULL(t.PROCESSLIST_COMMAND, '') NOT LIKE 'Binlog Dump%'
 	  AND t.PROCESSLIST_ID <> CONNECTION_ID()`
 
@@ -192,12 +196,15 @@ type connThread struct {
 	AgentAcct, Tagged    bool
 }
 
+// sqlThreadName is the instrument of a classic client connection's thread.
+const sqlThreadName = "thread/sql/one_connection"
+
 // connKind is the kind of a connection from its thread name: "sql" for a
 // classic connection, "x" for an X Protocol worker, "lain" for anything the
 // agent does not know.
 func connKind(threadName string) string {
 	switch threadName {
-	case "thread/sql/one_connection":
+	case sqlThreadName:
 		return "sql"
 	case "thread/mysqlx/worker":
 		return "x"
