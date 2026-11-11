@@ -374,6 +374,19 @@ func (u *uiClient) confirmToken(action, kind string, id int64) string {
 	return out.Token
 }
 
+// approveJob is "Setujui" of the waiting job j as the user gives it on the
+// job page: when the button asks for a confirmation (a job that drops
+// data, spec 5.6), the password dialog's job_approve token for j and its
+// server goes with it.
+func (u *uiClient) approveJob(j store.Job) {
+	u.t.Helper()
+	form := url.Values{}
+	if strings.Contains(u.get("/jobs/"+j.ID), `data-confirm-action="job_approve:`+j.ID+`"`) {
+		form.Set("confirm_token", u.confirmToken("job_approve:"+j.ID, "job", j.ServerID))
+	}
+	u.postRedirect("/jobs/"+j.ID+"/approve", form)
+}
+
 // tail is the last n lines of s.
 func tail(s string, n int) string {
 	lines := strings.Split(s, "\n")
@@ -717,7 +730,7 @@ func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode
 		if strings.Contains(j.ParamsJSON, `"wait_reason":"reconnect"`) {
 			e.connectRoot(t, target)
 		}
-		e.ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
+		e.ui.approveJob(j)
 		return true
 	})
 	if job.Status != store.JobSucceeded {
