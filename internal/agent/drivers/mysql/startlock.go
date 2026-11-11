@@ -370,10 +370,26 @@ func writeStartLock(ctx context.Context, h Host) error {
 	return nil
 }
 
-// writeStartLockFile replaces path with the start lock content, owned by
-// root (when the agent is root) with mode 0644.
+// writeStartLockFile makes path the start lock file: startLockContent,
+// owned by root (when the agent is root) with mode 0644. A regular file
+// that already holds that content is not rewritten, only its owner and
+// mode corrected, so its mtime still says when the lock was written
+// (reportQuarantineStart compares it with mysqld's start).
 func writeStartLockFile(path string) error {
 	root := os.Geteuid() == 0
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+		if b, err := os.ReadFile(path); err == nil && string(b) == startLockContent {
+			if uid, gid := fileOwnerIDs(fi); root && (uid != 0 || gid != 0) {
+				if err := os.Lchown(path, 0, 0); err != nil {
+					return err
+				}
+			}
+			if fi.Mode().Perm() != 0o644 {
+				return os.Chmod(path, 0o644)
+			}
+			return nil
+		}
+	}
 	// writeFileAtomic keeps an existing file's owner: make it root's first.
 	if fi, err := os.Lstat(path); root && err == nil && fi.Mode().IsRegular() {
 		if err := os.Chown(path, 0, 0); err != nil {
@@ -713,4 +729,13 @@ func withStartLock(res proto.QuarantineResult, st proto.StartLockState) proto.Qu
 	res.StartLocked, res.StartLockReason = st.Locked, st.Reason
 	res.MACConfined, res.OperatorInitFiles = st.MACConfined, st.OperatorInitFiles
 	return res
+}
+
+// fileOwnerIDs is the owner of fi; -1 when the platform does not say.
+func fileOwnerIDs(fi os.FileInfo) (uid, gid int) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return -1, -1
+	}
+	return int(st.Uid), int(st.Gid)
 }

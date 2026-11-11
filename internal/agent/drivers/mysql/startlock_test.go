@@ -575,3 +575,53 @@ func TestConfigLockExcludesAcrossOpens(t *testing.T) {
 		t.Errorf("config lock file removed: %v", err)
 	}
 }
+
+// TestStartLockFileKeptWhenIntact: a lock file with the right content is
+// not rewritten (its mtime is what tells a start that bypassed it), by a
+// repeated quarantine nor by configure; one whose content changed is.
+func TestStartLockFileKeptWhenIntact(t *testing.T) {
+	r := newQuarantineRig(t)
+	r.seenHosts("10.9.9.9")
+	r.promoted()
+	if res := decode[proto.QuarantineResult](t, r.quarantine(quarantineParams)); !res.StartLocked {
+		t.Fatalf("quarantine = %+v", res)
+	}
+	h := r.inst.Host()
+	lock, _ := mysql.StartLockPath(h.Layout())
+	hourAgo := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(lock, hourAgo, hourAgo); err != nil {
+		t.Fatal(err)
+	}
+	mtime := func() time.Time {
+		t.Helper()
+		fi, err := os.Stat(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.ModTime()
+	}
+	if res := decode[proto.QuarantineResult](t, r.quarantine(quarantineParams)); !res.Already || !res.StartLocked {
+		t.Fatalf("quarantine again = %+v", res)
+	}
+	if got := mtime(); !got.Equal(hourAgo) {
+		t.Errorf("lock file mtime after a repeated quarantine = %v, want %v", got, hourAgo)
+	}
+	configure(t, h, proto.ConfigureParams{Role: "replica"})
+	if got := mtime(); !got.Equal(hourAgo) {
+		t.Errorf("lock file mtime after configure = %v, want %v", got, hourAgo)
+	}
+
+	if err := os.WriteFile(lock, []byte("SELECT 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(lock, hourAgo, hourAgo); err != nil {
+		t.Fatal(err)
+	}
+	configure(t, h, proto.ConfigureParams{Role: "replica"})
+	if b, err := os.ReadFile(lock); err != nil || string(b) != mysql.StartLockContent {
+		t.Errorf("changed lock file after configure = %q, %v", b, err)
+	}
+	if got := mtime(); got.Equal(hourAgo) {
+		t.Error("changed lock file not rewritten by configure")
+	}
+}
