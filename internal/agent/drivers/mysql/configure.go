@@ -157,7 +157,9 @@ func configure(ctx context.Context, h Host, p proto.ConfigureParams, keepServerI
 	if err != nil {
 		return res, err
 	}
-	if res.ConfigPath, err = writeValidConfig(ctx, h, renderConfig(p.Role, res.ServerID, bindAll, bl)); err != nil {
+	if res.ConfigPath, err = writeConfigBlock(ctx, h, func(startLock string) string {
+		return renderConfig(p.Role, res.ServerID, bindAll, bl, startLock)
+	}); err != nil {
 		return res, err
 	}
 
@@ -286,7 +288,9 @@ func isDigits(s string) bool {
 
 // renderConfig is the managed [mysqld] block for role. bindAll makes a
 // master listen on every address (its bind-address is loopback only).
-func renderConfig(role string, serverID uint32, bindAll bool, bl binlogBlock) string {
+// startLock, when set, is the start lock file (startlock.go), named by an
+// init_file line at the end of the block.
+func renderConfig(role string, serverID uint32, bindAll bool, bl binlogBlock, startLock string) string {
 	lines := []string{"[mysqld]", "log_bin=" + bl.LogBin}
 	if bl.ExpireSeconds != "" {
 		lines = append(lines, "binlog_expire_logs_seconds="+bl.ExpireSeconds)
@@ -303,13 +307,46 @@ func renderConfig(role string, serverID uint32, bindAll bool, bl binlogBlock) st
 	if role == roleReplica {
 		lines = append(lines, "read_only=ON", "super_read_only=ON", "relay_log=relay", "log_replica_updates=ON")
 	}
+	if startLock != "" {
+		lines = append(lines, "init_file="+startLock)
+	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// writeConfigBlock writes render's block with writeValidConfig, keeping
+// the start lock: when the managed config holds the agent's init_file
+// line as the block is replaced, whatever the role, render gets the lock
+// file's path, so no other write of the block drops a lock not yet
+// released. Reading and writing happen under managedConfigMu.
+func writeConfigBlock(ctx context.Context, h Host, render func(startLock string) string) (string, error) {
+	managedConfigMu.Lock()
+	defer managedConfigMu.Unlock()
+	startLock := ""
+	if path, err := StartLockPath(h.Layout()); err == nil {
+		content, _, err := readManagedContent(h.Layout())
+		if err != nil {
+			return "", err
+		}
+		if hasStartLockLine(content, path) {
+			startLock = path
+		}
+	}
+	return writeValidConfigLocked(ctx, h, render(startLock))
 }
 
 // writeValidConfig writes content with Host.WriteConfig and has mysqld
 // validate the result. When validation fails the file is put back as it
-// was, so MySQL never starts from a config it refuses.
+// was, so MySQL never starts from a config it refuses. It holds
+// managedConfigMu.
 func writeValidConfig(ctx context.Context, h Host, content string) (string, error) {
+	managedConfigMu.Lock()
+	defer managedConfigMu.Unlock()
+	return writeValidConfigLocked(ctx, h, content)
+}
+
+// writeValidConfigLocked is writeValidConfig; the caller holds
+// managedConfigMu.
+func writeValidConfigLocked(ctx context.Context, h Host, content string) (string, error) {
 	path, _, err := managedConfigPath(h.Layout())
 	if err != nil {
 		return "", err
@@ -484,34 +521,9 @@ func Restart(ctx context.Context, h Host) (proto.RestartResult, error) {
 // managedOptions reads the options in the managed config block (or file);
 // none when it was never written.
 func managedOptions(l Layout) (map[string]string, error) {
-	path, block, err := managedConfigPath(l)
+	content, _, err := readManagedContent(l)
 	if err != nil {
 		return nil, err
-	}
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("baca %s: %w", path, err)
-	}
-	content := string(b)
-	if block {
-		var in []string
-		inside := false
-		for _, ln := range strings.Split(content, "\n") {
-			switch strings.TrimSpace(ln) {
-			case blockBegin:
-				inside = true
-				continue
-			case blockEnd:
-				inside = false
-			}
-			if inside {
-				in = append(in, ln)
-			}
-		}
-		content = strings.Join(in, "\n")
 	}
 	return parseOptions(content), nil
 }

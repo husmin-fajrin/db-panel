@@ -36,11 +36,14 @@ import (
 //
 // With MySQL up it then runs selfQuarantine (PERSIST read_only and
 // super_read_only ON, pin quarantined, remove the lock, monitor.
-// quarantined). With MySQL down only the pins are written (Applied
-// false): the guard (GuardTick, guardQuarantined) puts read-only on as
-// soon as MySQL answers again and reports monitor.quarantined then. On a
-// server already quarantined under the same new master it only makes sure
-// read-only is on (Already).
+// quarantined, the start lock). With MySQL down the pins are written
+// first, then the start lock (startlock.go), so that MySQL starts
+// read-only (Applied false); the guard (GuardTick, guardQuarantined)
+// reports monitor.quarantined once MySQL answers again. On a server
+// already quarantined under the same new master it only makes sure
+// read-only is on and the start lock written (Already). Every answer
+// says whether the start lock holds (StartLocked); a start lock that
+// could not be written never undoes the quarantine.
 
 func (d *Driver) registerQuarantine(reg *commands.Registry) {
 	reg.Register("mysql.quarantine", func(ctx context.Context, params json.RawMessage) (any, error) {
@@ -67,7 +70,8 @@ func (d *Driver) registerQuarantine(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		d.log("mysql quarantine", "new_source", peerKey(p.NewMaster), "applied", res.Applied, "already", res.Already)
+		d.log("mysql quarantine", "new_source", peerKey(p.NewMaster), "applied", res.Applied, "already", res.Already,
+			"start_locked", res.StartLocked)
 		return res, nil
 	})
 }
@@ -142,14 +146,15 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	}
 
 	if up {
-		if err := d.selfQuarantine(ctx, key, addr); err != nil {
+		lock, err := d.selfQuarantine(ctx, key, addr)
+		if err != nil {
 			return res, err
 		}
 		res.Applied = true
-		return res, nil
+		return withStartLock(res, lock), nil
 	}
-	// MySQL is down: the pins now, read-only once MySQL answers again
-	// (guardQuarantined).
+	// MySQL is down: the pins now, then the start lock that makes MySQL
+	// start read-only; guardQuarantined reports once MySQL answers.
 	if err := d.pins.SetQuarantinedAt(key, addr); err != nil {
 		return res, fmt.Errorf("pin quarantined gagal ditulis: %w", err)
 	}
@@ -159,12 +164,13 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	d.guard.reset(nil)
 	d.guard.up, d.quarantinePending = false, true
 	d.warn("server pinned quarantined while MySQL is down; read-only follows once MySQL answers", "new_source", key, "verified_addr", addr)
-	return res, nil
+	return withStartLock(res, d.lockStart(ctx, h)), nil
 }
 
 // requarantine is mysql.quarantine on a server already quarantined: it
-// makes sure read-only is on when MySQL is up. A new master other than
-// the pinned source is refused (only root moves that pin).
+// makes sure read-only is on when MySQL is up and the start lock is
+// written. A new master other than the pinned source is refused (only
+// root moves that pin).
 func (d *Driver) requarantine(ctx context.Context, h Host, nm proto.PeerCred, up bool) (proto.QuarantineResult, error) {
 	res := proto.QuarantineResult{Already: true}
 	host, port, ok := d.pins.Source()
@@ -177,19 +183,18 @@ func (d *Driver) requarantine(ctx context.Context, h Host, nm proto.PeerCred, up
 			"server ini sudah dikarantina mengikuti sumber %s; karantina di bawah %s ditolak. Untuk mengubah sumber jalankan di server ini: sudo dbpanel agent set-source <host:port>",
 			pinned, peerKey(nm))}}
 	}
-	if !up {
-		return res, nil
+	if up {
+		db, err := openAdmin(ctx, h)
+		if err != nil {
+			return res, err
+		}
+		defer db.Close()
+		if err := persistReadOnly(ctx, db); err != nil {
+			return res, err
+		}
+		res.Applied = true
 	}
-	db, err := openAdmin(ctx, h)
-	if err != nil {
-		return res, err
-	}
-	defer db.Close()
-	if err := persistReadOnly(ctx, db); err != nil {
-		return res, err
-	}
-	res.Applied = true
-	return res, nil
+	return withStartLock(res, d.lockStart(ctx, h)), nil
 }
 
 // persistReadOnly turns read_only and super_read_only on for good.

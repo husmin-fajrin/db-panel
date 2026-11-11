@@ -316,3 +316,34 @@ func (d *Driver) HoldPromoteMu() (release func()) {
 // LeftoverSetFile is the file under the salvage directory that keeps the
 // last mysql.leftover set.
 const LeftoverSetFile = leftoverSetFile
+
+// The start lock (startlock.go).
+var (
+	WithStartLockLine    = withStartLockLine
+	WithoutStartLockLine = withoutStartLockLine
+	PrintDefaultsArgs    = printDefaultsArgs
+	StartLockStatus      = startLockStatus
+	WriteStartLock       = writeStartLock
+	StartLockLinePresent = startLockLinePresent
+	ReadManagedContent   = readManagedContent
+	MACAllows            = macAllows
+)
+
+// StartLockContent is what the start lock file holds.
+const StartLockContent = startLockContent
+
+// SetMACConfinement replaces the AppArmor/SELinux detection; it returns
+// the function that restores it.
+func SetMACConfinement(f func(Layout) string) (restore func()) {
+	old := macConfinement
+	macConfinement = f
+	return func() { macConfinement = old }
+}
+
+// SetReadXattr replaces the extended attribute reader; it returns the
+// function that restores it.
+func SetReadXattr(f func(path, name string) (string, error)) (restore func()) {
+	old := readXattr
+	readXattr = f
+	return func() { readXattr = old }
+}

@@ -397,7 +397,8 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 			return err
 		}
 		if gtidHasUUID(st.GTIDExecuted, uuid) {
-			return d.selfQuarantine(ctx, key, addr)
+			_, err := d.selfQuarantine(ctx, key, addr)
+			return err
 		}
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
 		d.keepLock(now, key, "kandidat bisa ditulis tetapi gtid_executed-nya tidak memuat transaksi server ini")
@@ -422,7 +423,8 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		case found:
 			d.warn("promote lock expired but another replica is a writable master with this server's transactions; quarantining",
 				"candidate", key, "new_source", other)
-			return d.selfQuarantine(ctx, other, "")
+			_, err := d.selfQuarantine(ctx, other, "")
+			return err
 		}
 		if err := unlockMaster(ctx, db); err != nil {
 			return err
@@ -496,34 +498,37 @@ func (d *Driver) keepLock(now time.Time, key, reason string) {
 // flags) and pins it quarantined under newSource (host:port, as the
 // panel names its new master, which rebuild commands match), recording
 // addr, the address that host was verified at, for the agent's own reads
-// of it (Pins.SourceDial); it removes the promote lock. The caller holds
+// of it (Pins.SourceDial); it removes the promote lock. Last it writes
+// the start lock (startlock.go) and returns its state; a start lock that
+// cannot be written leaves the quarantine in place. The caller holds
 // promoteMu.
-func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) error {
+func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) (proto.StartLockState, error) {
+	var lock proto.StartLockState
 	if d.pins == nil {
-		return fmt.Errorf("karantina butuh pin peran")
+		return lock, fmt.Errorf("karantina butuh pin peran")
 	}
 	h, err := d.host()
 	if err != nil {
-		return err
+		return lock, err
 	}
 	db, err := openAdmin(ctx, h)
 	if err != nil {
-		return err
+		return lock, err
 	}
 	defer db.Close()
 	if err := persistReadOnly(ctx, db); err != nil {
-		return err
+		return lock, err
 	}
 	if err := d.pins.SetQuarantinedAt(newSource, addr); err != nil {
-		return fmt.Errorf("MySQL sudah read-only, tetapi pin quarantined gagal ditulis: %w", err)
+		return lock, fmt.Errorf("MySQL sudah read-only, tetapi pin quarantined gagal ditulis: %w", err)
 	}
 	if err := d.pins.ClearLock(); err != nil {
-		return fmt.Errorf("server sudah dikarantina, tetapi kunci promosi gagal dihapus: %w", err)
+		return lock, fmt.Errorf("server sudah dikarantina, tetapi kunci promosi gagal dihapus: %w", err)
 	}
 	d.guard.reset(nil)
 	d.warn("server quarantined under its new master", "new_source", newSource, "verified_addr", addr)
 	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: newSource})
-	return nil
+	return d.lockStart(ctx, h), nil
 }
 
 // emit sends an event to the panel when the driver has an Emitter; one

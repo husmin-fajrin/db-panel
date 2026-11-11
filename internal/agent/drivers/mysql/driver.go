@@ -92,6 +92,11 @@ type Driver struct {
 	// server (rebuild_load.go); it has its own lock, never promoteMu.
 	rebuild rebuildLoad
 
+	// startLockState is the start lock (startlock.go) as last checked;
+	// startLockMu guards it.
+	startLockMu    sync.Mutex
+	startLockState proto.StartLockState
+
 	salvageMu sync.Mutex // a salvage rename, a delete or the sweep; never held across mysqlbinlog
 	// salvageRun is held by the one mysql.salvage that may run; another
 	// is refused (TryLock).

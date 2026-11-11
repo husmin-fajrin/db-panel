@@ -463,9 +463,36 @@ type QuarantineParams struct {
 // when MySQL was down: the pins are written and read-only is put on once
 // MySQL answers again (monitor.quarantined then). Already is true when the
 // server was quarantined before.
+//
+// StartLocked says whether the start lock (an init_file in the managed
+// config that turns read-only on before any client can log in) will hold
+// the next time MySQL starts; StartLockReason says why not, in words for
+// the UI. MACConfined: mysqld runs under AppArmor or SELinux.
+// OperatorInitFiles are other init_file options read before the agent's
+// line, which MySQL does not run while the lock is in place. An older
+// agent sends none of these.
 type QuarantineResult struct {
-	Applied bool `json:"applied"`
-	Already bool `json:"already"`
+	Applied           bool     `json:"applied"`
+	Already           bool     `json:"already"`
+	StartLocked       bool     `json:"start_locked"`
+	StartLockReason   string   `json:"start_lock_reason,omitempty"`
+	MACConfined       bool     `json:"mac_confined,omitempty"`
+	OperatorInitFiles []string `json:"operator_init_files,omitempty"`
+}
+
+// StartLockState is the start lock of a quarantined server as the agent
+// last checked it. Present: the agent's init_file line is in the managed
+// config. Locked: the line, the file, the agent's file being the last
+// init_file mysqld reads, the file readable by mysqld's user and, under
+// AppArmor or SELinux, in a place mysqld's profile allows. Reason says
+// why Locked is false (Indonesian, for the UI).
+type StartLockState struct {
+	Present           bool     `json:"present"`
+	Locked            bool     `json:"locked"`
+	Reason            string   `json:"reason,omitempty"`
+	MACConfined       bool     `json:"mac_confined,omitempty"`
+	File              string   `json:"file,omitempty"`
+	OperatorInitFiles []string `json:"operator_init_files,omitempty"`
 }
 
 // RepointParams are the parameters of mysql.repoint, run on a replica of

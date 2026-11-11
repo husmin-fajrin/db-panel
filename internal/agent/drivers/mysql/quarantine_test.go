@@ -153,6 +153,7 @@ func TestQuarantineRequiresPromotedPeer(t *testing.T) {
 // the pinned new master only makes sure read-only is on (Already), also
 // after the flags were lost; another new master is refused and the pin
 // stays. The guard keeps a quarantined server read-only and reports it.
+// A restart comes back read-only through the start lock.
 func TestQuarantineIdempotent(t *testing.T) {
 	r := newQuarantineRig(t)
 	r.seenHosts("10.9.9.9")
@@ -195,9 +196,13 @@ func TestQuarantineIdempotent(t *testing.T) {
 	r.wantEvents(proto.EventQuarantined)
 	execAll(t, r.db, "RESET PERSIST super_read_only", "RESET PERSIST read_only")
 	r.inst.Restart(t)
-	if sro, _ := readOnly(t, r.db); sro {
-		t.Fatal("MySQL came back read-only by itself; the test proves nothing")
+	// The start lock written by the quarantine locks it at start; opened
+	// by hand before the guard's tick, the guard locks it again.
+	if sro, ro := readOnly(t, r.db); !sro || !ro {
+		t.Fatalf("MySQL came back with super_read_only=%v read_only=%v; the start lock should have locked it", sro, ro)
 	}
+	execAll(t, r.db, "RESET PERSIST super_read_only", "RESET PERSIST read_only",
+		"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
 	r.tick()
 	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
 	r.wantEvents(proto.EventQuarantined, proto.EventQuarantined)
@@ -295,16 +300,17 @@ func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
 // TestQuarantineWhenMySQLDownWritesPinThenLocksOnStart: with MySQL down
 // the GTID check is impossible, so the replicas-seen file is required
 // even under a lock for the new master; once it holds the new master the
-// pins are written (Applied false), and the guard makes MySQL read-only
-// as soon as it answers again, reporting monitor.quarantined then.
+// pins and the start lock are written (Applied false, StartLocked): MySQL
+// starts read-only by itself. Opened by hand before the guard's first
+// tick, it is made read-only again by the guard, which reports
+// monitor.quarantined then.
 func TestQuarantineWhenMySQLDownWritesPinThenLocksOnStart(t *testing.T) {
 	r := newQuarantineRig(t)
 	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: guardCandidateKey, Deadline: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	r.promoted()
-	// The lock file never reached MySQL (no guard tick): it comes back
-	// writable.
+	// The promote lock never reached MySQL (no guard tick).
 	r.inst.Stop(t)
 
 	wantRefused(t, "quarantine with MySQL down, new master never seen", r.quarantine(quarantineParams),
@@ -312,8 +318,8 @@ func TestQuarantineWhenMySQLDownWritesPinThenLocksOnStart(t *testing.T) {
 	wantMaster(t, r.dir, "refused while down")
 	r.seenHosts("10.9.9.9")
 	res := decode[proto.QuarantineResult](t, r.quarantine(quarantineParams))
-	if res.Applied || res.Already {
-		t.Errorf("quarantine with MySQL down = %+v, want not applied", res)
+	if res.Applied || res.Already || !res.StartLocked {
+		t.Errorf("quarantine with MySQL down = %+v, want not applied, start locked", res)
 	}
 	if role, s := pinFile(t, r.dir, mysql.RoleFile), pinFile(t, r.dir, mysql.SourceFile); role != "quarantined" || s != guardCandidateKey {
 		t.Errorf("pins = %q, %q", role, s)
@@ -324,14 +330,16 @@ func TestQuarantineWhenMySQLDownWritesPinThenLocksOnStart(t *testing.T) {
 	r.tick() // still down: nothing to do
 	r.wantEvents()
 	res = decode[proto.QuarantineResult](t, r.quarantine(quarantineParams))
-	if !res.Already || res.Applied {
-		t.Errorf("quarantine again while down = %+v, want already, not applied", res)
+	if !res.Already || res.Applied || !res.StartLocked {
+		t.Errorf("quarantine again while down = %+v, want already, not applied, start locked", res)
 	}
 
 	r.inst.Restart(t)
-	if sro, _ := readOnly(t, r.db); sro {
-		t.Fatal("MySQL came back read-only by itself; the test proves nothing")
+	if sro, ro := readOnly(t, r.db); !sro || !ro {
+		t.Fatalf("MySQL came back with super_read_only=%v read_only=%v; the start lock should have locked it", sro, ro)
 	}
+	// Someone opens it before the guard's first tick.
+	execAll(t, r.db, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
 	r.tick()
 	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
 	r.wantEvents(proto.EventQuarantined)
