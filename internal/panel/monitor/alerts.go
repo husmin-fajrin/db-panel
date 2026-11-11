@@ -49,6 +49,17 @@ const (
 	// KindMasterUnpinned: a topology's master whose agent reports a role
 	// pin other than master (spec 5.12, 5.14).
 	KindMasterUnpinned = "master_unpinned"
+
+	// Plan 5a: the start lock of a quarantined old master and the promote
+	// lock kept for a replica that cannot be read. All are critical.
+	// master_start_unguarded follows the agent's report (rules); the
+	// others are opened from the agent's events (HandleEvent) and closed
+	// by the rules in closeStartAlerts and closeNotices.
+	KindMasterStartUnguarded = "master_start_unguarded"
+	KindMasterStartLate      = "master_start_late"
+	KindMasterStartBypassed  = "master_start_bypassed"
+	KindMasterStartBlocked   = "master_start_blocked"
+	KindMasterLockKept       = "master_lock_kept"
 )
 
 // AllKinds returns every alert kind, in the order of spec 5.3.
@@ -57,7 +68,9 @@ func AllKinds() []string {
 		KindMasterLocked, KindMasterDown, KindMySQLUnreachable, KindAgentOffline, KindDiskWarn, KindDiskCrit,
 		KindConnectionsHigh, KindBinlogDeadline, KindJobFailed, KindTLSExpiring, KindWebTLSExpiring,
 		KindPromoteCutover, KindPromotePartial, KindReplicaNeedsRepoint, KindReplicaNeedsRebuild,
-		KindMasterQuarantined, KindMasterLockExpired, KindMasterUnpinned}
+		KindMasterQuarantined, KindMasterLockExpired, KindMasterUnpinned,
+		KindMasterStartUnguarded, KindMasterStartLate, KindMasterStartBypassed, KindMasterStartBlocked,
+		KindMasterLockKept}
 }
 
 // Fixed delays and hysteresis of the rules (plan 3, Global Constraints);

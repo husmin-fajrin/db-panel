@@ -148,3 +148,23 @@ func TestPromoteMessageHasNewAddress(t *testing.T) {
 		}
 	}
 }
+
+// TestNewKindsHaveLabels: the five kinds of plan 5a are critical, named
+// for the recovery message, and the lock kept links to the master's page.
+func TestNewKindsHaveLabels(t *testing.T) {
+	kinds := []string{monitor.KindMasterStartUnguarded, monitor.KindMasterStartLate, monitor.KindMasterStartBypassed,
+		monitor.KindMasterStartBlocked, monitor.KindMasterLockKept}
+	for _, k := range kinds {
+		if n, ok := kindNames[k]; !ok || n == "" || n == k {
+			t.Errorf("kind %s has no plain name", k)
+		}
+		if !Critical(k) || icon(k) != iconCrit {
+			t.Errorf("kind %s is not critical", k)
+		}
+	}
+	a := store.Alert{Kind: monitor.KindMasterLockKept, ServerID: 7, OpenedAt: at(5, 9, 30), Message: "x"}
+	if got, want := Format(a, "DB-2", "", "http://p", at(5, 10, 0)),
+		"⛔ x\nServer: DB-2 · Sejak: 09:30 · http://p/masters/7"; got != want {
+		t.Errorf("Format =\n%s\nwant\n%s", got, want)
+	}
+}

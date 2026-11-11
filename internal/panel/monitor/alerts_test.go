@@ -85,7 +85,8 @@ func running(s *proto.HealthSnapshot) {
 func TestAllKinds(t *testing.T) {
 	want := "replica_stopped replica_disconnected replica_lagging replica_unlocked master_locked master_down " +
 		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring web_tls_expiring " +
-		"promote_cutover promote_partial replica_needs_repoint replica_needs_rebuild master_quarantined master_lock_expired master_unpinned"
+		"promote_cutover promote_partial replica_needs_repoint replica_needs_rebuild master_quarantined master_lock_expired master_unpinned " +
+		"master_start_unguarded master_start_late master_start_bypassed master_start_blocked master_lock_kept"
 	if got := strings.Join(AllKinds(), " "); got != want {
 		t.Fatalf("AllKinds = %s", got)
 	}
@@ -1487,5 +1488,492 @@ func TestMasterUnpinnedAlertAfterThreeReports(t *testing.T) {
 	ra.send()
 	if r.isOpen(rID, KindMasterUnpinned) {
 		t.Fatal("the new master's reports as a replica counted towards master_unpinned")
+	}
+}
+
+// The Indonesian texts of plan 5a (spec 5.2), letter for letter.
+const (
+	startUnguardedText = "master lama belum terjamin terkunci saat MySQL menyala; jangan nyalakan MySQL-nya sebelum agent tersambung"
+	startLateText      = "master lama sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal"
+	startBypassedText  = "kunci start tidak dipakai MySQL; periksa opsi layanan"
+	startBlockedText   = "MySQL master lama gagal menyala karena berkas kunci tidak terbaca"
+)
+
+// quarSnap is the report of an old master's agent: pinned quarantined,
+// with the start lock sl (nil: an agent too old to report one).
+func quarSnap(sl *proto.StartLockState) proto.HealthSnapshot {
+	s := masterSnap(srcUUID + ":1-100")
+	s.SuperReadOnly, s.ReadOnly = true, true
+	s.RolePin, s.StartLock = "quarantined", sl
+	return s
+}
+
+// quarantined makes db-lama the old master of a promotion that is done
+// and attaches its agent, reporting snap.
+func (r *rig) quarantined(snap proto.HealthSnapshot) (mID int64, pid int64, ma *fakeAgent) {
+	r.t.Helper()
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	pid = r.promoted(topo, mID, rID, "done", "")
+	r.m.tick()
+	if r.view(mID).Role != store.RoleQuarantined {
+		r.t.Fatalf("db-lama role = %q, want quarantined", r.view(mID).Role)
+	}
+	ma = r.agent(mID, true, snap).attach()
+	return mID, pid, ma
+}
+
+func startEvent(t *testing.T, result string, bypassed bool) proto.Event {
+	t.Helper()
+	b, err := json.Marshal(proto.QuarantineStartEvent{Result: result, Bypassed: bypassed, InitFile: "/etc/mysql/x.sql"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proto.Event{Type: proto.EventQuarantineStart, Payload: b}
+}
+
+func startFailedEvent(t *testing.T, file string) proto.Event {
+	t.Helper()
+	b, err := json.Marshal(proto.QuarantineStartFailedEvent{File: file, At: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proto.Event{Type: proto.EventQuarantineStartFailed, Payload: b}
+}
+
+func keptEvent(t *testing.T, hosts ...string) proto.Event {
+	t.Helper()
+	b, err := json.Marshal(proto.LockExpiredEvent{Action: "kept", Candidate: "10.0.0.2:3306", Hosts: hosts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proto.Event{Type: proto.EventLockExpired, Payload: b}
+}
+
+// closedAs reports whether the only alert of kind is closed with a reason.
+func closedWithReason(t *testing.T, as []store.Alert) {
+	t.Helper()
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason == "" {
+		t.Fatalf("alerts = %+v, want one closed with a reason", as)
+	}
+}
+
+func TestStartUnguardedFromSnapshot(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: false, Reason: "x"}))
+	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != startUnguardedText+" (x)" {
+		t.Fatalf("message = %q", a.Message)
+	}
+
+	// A new reason updates the open alert in place.
+	ma.setSnap(func(s *proto.HealthSnapshot) {
+		s.StartLock = &proto.StartLockState{Reason: "baris init_file agent tidak dibaca mysqld"}
+	})
+	ma.send()
+	as := r.alerts(mID, KindMasterStartUnguarded)
+	if len(as) != 1 || as[0].ClosedAt != nil || as[0].Message != startUnguardedText+" (baris init_file agent tidak dibaca mysqld)" {
+		t.Fatalf("after a new reason = %+v", as)
+	}
+
+	// MySQL down does not matter: the report still says the lock is missing.
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = false })
+	ma.send()
+	if !r.isOpen(mID, KindMasterStartUnguarded) {
+		t.Fatal("alert closed when MySQL stopped answering")
+	}
+
+	// A lock that holds closes it as recovered.
+	ma.setSnap(func(s *proto.HealthSnapshot) {
+		s.MySQLOK, s.StartLock = true, &proto.StartLockState{Present: true, Locked: true}
+	})
+	ma.send()
+	as = r.alerts(mID, KindMasterStartUnguarded)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "" {
+		t.Fatalf("after Locked = %+v, want closed as recovered", as)
+	}
+
+	// Without a reason the message is the bare text.
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.StartLock = &proto.StartLockState{} })
+	ma.send()
+	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != startUnguardedText {
+		t.Fatalf("message without a reason = %q", a.Message)
+	}
+
+	// The server is no longer quarantined: closed with a reason.
+	if err := r.st.SetServerRole(mID, store.RoleUnassigned); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	as = r.alerts(mID, KindMasterStartUnguarded)
+	if len(as) != 2 || as[1].ClosedAt == nil || as[1].CloseReason == "" {
+		t.Fatalf("after leaving quarantine = %+v, want the second closed with a reason", as)
+	}
+}
+
+func TestStartUnguardedNeverForNormalMaster(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ma.send()
+	// A master whose start lock is not released yet is not judged.
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.StartLock = &proto.StartLockState{Present: true, Reason: "x"} })
+	ma.send()
+	r.m.tick()
+	if as := r.alerts(mID, KindMasterStartUnguarded); len(as) != 0 {
+		t.Fatalf("alerts for a normal master = %+v", as)
+	}
+}
+
+func TestOldAgentQuarantineUnguarded(t *testing.T) {
+	r := newRig(t)
+	// No report yet: nothing to judge.
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	r.promoted(topo, mID, rID, "done", "")
+	r.m.tick()
+	if len(r.alerts(mID, KindMasterStartUnguarded)) != 0 {
+		t.Fatal("opened before any report")
+	}
+	// An agent that sends no start_lock at all.
+	ma := r.agent(mID, true, quarSnap(nil)).attach()
+	ma.send()
+	if a := r.openAlert(mID, KindMasterStartUnguarded); a.Message != startUnguardedText {
+		t.Fatalf("message = %q", a.Message)
+	}
+}
+
+func TestQuarantineStartLateAndBypassed(t *testing.T) {
+	r := newRig(t)
+	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	if a := r.openAlert(mID, KindMasterStartLate); a.Message != startLateText {
+		t.Fatalf("late message = %q", a.Message)
+	}
+	if r.isOpen(mID, KindMasterStartBypassed) {
+		t.Fatal("late opened bypassed")
+	}
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	if a := r.openAlert(mID, KindMasterStartBypassed); a.Message != startBypassedText {
+		t.Fatalf("bypassed message = %q", a.Message)
+	}
+	// A repeated event is the same alert.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	if n := len(r.alerts(mID, KindMasterStartBypassed)); n != 1 {
+		t.Fatalf("bypassed alerts = %d, want 1", n)
+	}
+
+	// The next start came up with the lock: bypassed closes, late does not.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartOK, false))
+	as := r.alerts(mID, KindMasterStartBypassed)
+	if len(as) != 1 || as[0].ClosedAt == nil {
+		t.Fatalf("bypassed after ok = %+v", as)
+	}
+	if as := r.alerts(mID, KindMasterStartLate); len(as) != 1 || as[0].ClosedAt != nil {
+		t.Fatalf("late after ok = %+v, want still open", as)
+	}
+
+	// Late with the lock bypassed too opens both.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, true))
+	r.openAlert(mID, KindMasterStartBypassed)
+
+	// A later late event closes nothing: bypassed false closes only bypassed.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	if r.isOpen(mID, KindMasterStartBypassed) || !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatal("late with bypassed=false must close bypassed and keep late")
+	}
+
+	// The server leaves quarantine: both close with a reason.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	if err := r.st.SetServerRole(mID, store.RoleUnassigned); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	if r.isOpen(mID, KindMasterStartLate) || r.isOpen(mID, KindMasterStartBypassed) {
+		t.Fatal("start alerts still open for a server that is no longer quarantined")
+	}
+	for _, k := range []string{KindMasterStartLate, KindMasterStartBypassed} {
+		as := r.alerts(mID, k)
+		if last := as[len(as)-1]; last.CloseReason == "" {
+			t.Errorf("%s closed without a reason: %+v", k, last)
+		}
+	}
+}
+
+// An event that cannot be judged opens and closes nothing, and never
+// panics.
+func TestQuarantineStartUnjudgedEventsChangeNothing(t *testing.T) {
+	r := newRig(t)
+	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, true))
+	r.m.HandleEvent(mID, startFailedEvent(t, "/etc/mysql/x.sql"))
+	for _, ev := range []proto.Event{
+		{Type: proto.EventQuarantineStart, Payload: []byte("{")},
+		{Type: proto.EventQuarantineStart, Payload: nil},
+		{Type: proto.EventQuarantineStart, Payload: []byte("null")},
+		{Type: proto.EventQuarantineStart, Payload: []byte(`{"result":"entah","bypassed":false}`)},
+		{Type: proto.EventQuarantineStart, Payload: []byte(`{"result":"","bypassed":false}`)},
+		{Type: proto.EventQuarantineStart, Payload: []byte(strings.Repeat("a", 8<<10))},
+		{Type: proto.EventQuarantineStartFailed, Payload: []byte("{")},
+	} {
+		if !r.m.HandleEvent(mID, ev) {
+			t.Errorf("HandleEvent did not take %s (%d bytes)", ev.Type, len(ev.Payload))
+		}
+	}
+	for _, k := range []string{KindMasterStartLate, KindMasterStartBypassed, KindMasterStartBlocked} {
+		if !r.isOpen(mID, k) {
+			t.Errorf("%s was closed by an event that cannot be judged", k)
+		}
+	}
+	// An unknown result with Bypassed true is still a bypass: the safe side.
+	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantineStart, Payload: []byte(`{"result":"entah","bypassed":true}`)})
+	if !r.isOpen(mID, KindMasterStartBypassed) {
+		t.Error("an unknown result with bypassed=true did not open master_start_bypassed")
+	}
+}
+
+func TestStartLateClosesAfterLeftoverCheck(t *testing.T) {
+	r := newRig(t)
+	mID, pid, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	setCheck := func(at time.Time) {
+		t.Helper()
+		p, err := r.st.GetPromotion(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(map[string]any{"transactions": 0, "checked_at": at})
+		p.LeftoverJSON = string(b)
+		if err := r.st.UpdatePromotion(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A check from before the alert says nothing about this start.
+	setCheck(r.clk.Now())
+	r.clk.Add(time.Minute)
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatal("a check older than the alert closed it")
+	}
+	// A check at the very moment of the alert is not after it.
+	setCheck(r.clk.Now())
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatal("a check at the alert's own time closed it")
+	}
+	// An unreadable check closes nothing.
+	p, _ := r.st.GetPromotion(pid)
+	p.LeftoverJSON = `{"checked_at":"bukan waktu"}`
+	if err := r.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatal("an unreadable check closed it")
+	}
+	r.clk.Add(time.Minute)
+	setCheck(r.clk.Now())
+	r.m.tick()
+	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+
+	// The check does not close bypassed or blocked.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	r.m.HandleEvent(mID, startFailedEvent(t, "/x"))
+	r.clk.Add(time.Minute)
+	setCheck(r.clk.Now())
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterStartBypassed) || !r.isOpen(mID, KindMasterStartBlocked) {
+		t.Fatal("a leftover check closed bypassed or blocked")
+	}
+}
+
+func TestStartBlockedOpensAndStartCloses(t *testing.T) {
+	r := newRig(t)
+	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	var changed atomic.Int32
+	r.m.onAlertsChanged = func() { changed.Add(1) }
+
+	if !r.m.HandleEvent(mID, startFailedEvent(t, "/etc/mysql/conf.d/dbpanel-start-lock.sql")) {
+		t.Fatal("HandleEvent did not take monitor.quarantineStartFailed")
+	}
+	want := startBlockedText + " (/etc/mysql/conf.d/dbpanel-start-lock.sql). Pastikan berkas itu ada dan boleh dibaca " +
+		"pengguna mysql (juga oleh AppArmor/SELinux), lalu pastikan agent berjalan: agent menulis ulang berkas itu dalam " +
+		"beberapa detik. Jangan menghapus baris init_file dari konfigurasi MySQL."
+	if a := r.openAlert(mID, KindMasterStartBlocked); a.Message != want {
+		t.Fatalf("message =\n%q\nwant\n%q", a.Message, want)
+	}
+	if changed.Load() != 1 {
+		t.Fatalf("OnAlertsChanged called %d times, want 1", changed.Load())
+	}
+	// Repeated: one alert.
+	r.m.HandleEvent(mID, startFailedEvent(t, "/etc/mysql/conf.d/dbpanel-start-lock.sql"))
+	if n := len(r.alerts(mID, KindMasterStartBlocked)); n != 1 {
+		t.Fatalf("blocked alerts = %d", n)
+	}
+	// Any start event closes it, whatever its result says.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartOK, false))
+	as := r.alerts(mID, KindMasterStartBlocked)
+	if len(as) != 1 || as[0].ClosedAt == nil {
+		t.Fatalf("blocked after a start = %+v", as)
+	}
+
+	// A bypassed start closes it too; so does leaving quarantine.
+	r.m.HandleEvent(mID, startFailedEvent(t, "/x"))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	if r.isOpen(mID, KindMasterStartBlocked) {
+		t.Fatal("blocked open after a start event")
+	}
+	r.m.HandleEvent(mID, startFailedEvent(t, "/x"))
+	if err := r.st.SetServerRole(mID, store.RoleUnassigned); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	if r.isOpen(mID, KindMasterStartBlocked) {
+		t.Fatal("blocked open for a server that is no longer quarantined")
+	}
+
+	// No file name: the text still reads.
+	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantineStartFailed, Payload: []byte(`{}`)})
+	if a := r.openAlert(mID, KindMasterStartBlocked); !strings.HasPrefix(a.Message, startBlockedText+". Pastikan") {
+		t.Fatalf("message without a file = %q", a.Message)
+	}
+}
+
+// Text from an agent is data: control characters and length are bounded
+// before it reaches an alert message.
+func TestStartAndKeptMessagesBoundAgentText(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Reason: "baris\nkedua\x00‮" + strings.Repeat("z", 5000)}))
+	a := r.openAlert(mID, KindMasterStartUnguarded)
+	if strings.ContainsAny(a.Message, "\n\x00‮") || len(a.Message) > 1200 || !strings.Contains(a.Message, "baris kedua") {
+		t.Fatalf("unguarded message not bounded: %d bytes %q", len(a.Message), a.Message[:200])
+	}
+	_ = ma
+	r.m.HandleEvent(mID, startFailedEvent(t, "/a\n/b"+strings.Repeat("q", 5000)))
+	b := r.openAlert(mID, KindMasterStartBlocked)
+	if strings.Contains(b.Message, "\n") || len(b.Message) > 1200 {
+		t.Fatalf("blocked message not bounded: %d bytes", len(b.Message))
+	}
+
+	m2, _ := r.master("db-master")
+	hosts := make([]string, 0, 40)
+	for i := range 40 {
+		hosts = append(hosts, "r"+itoa(int64(i))+".db:3306")
+	}
+	hosts = append(hosts, "x\ny:3306")
+	r.m.HandleEvent(m2, keptEvent(t, hosts...))
+	k := r.openAlert(m2, KindMasterLockKept)
+	if strings.Contains(k.Message, "\n") || len(k.Message) > 2000 || !strings.Contains(k.Message, "dan ") ||
+		!strings.Contains(k.Message, "sudo dbpanel agent unlock-master") {
+		t.Fatalf("kept message not bounded: %d bytes %q", len(k.Message), k.Message)
+	}
+}
+
+func TestLockKeptWithHostsIsCritical(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	var changed atomic.Int32
+	r.m.onAlertsChanged = func() { changed.Add(1) }
+
+	r.m.HandleEvent(mID, keptEvent(t, "10.0.0.5:3306", "10.0.0.6:3307"))
+	want := "Batas waktu kunci promote di master habis, tetapi master tetap dikunci karena replika berikut tidak terbaca: " +
+		"10.0.0.5:3306, 10.0.0.6:3307. Kunci terbuka sendiri setelah semua replika itu terbaca dan masih hanya-baca. " +
+		"Bila replika itu sudah tidak dipakai, jalankan di server master: sudo dbpanel agent forget-replica <host>. " +
+		"Untuk membuka kunci sekarang: sudo dbpanel agent unlock-master"
+	a := r.openAlert(mID, KindMasterLockKept)
+	if a.Message != want || a.TopologyID != topo.ID {
+		t.Fatalf("kept alert = %+v\nwant message %q", a, want)
+	}
+	if r.isOpen(mID, KindMasterLockExpired) {
+		t.Fatal("a kept event with hosts opened master_lock_expired")
+	}
+	if changed.Load() != 1 {
+		t.Fatalf("OnAlertsChanged called %d times, want 1", changed.Load())
+	}
+
+	// The same hosts, in another order, hourly: nothing changes.
+	r.clk.Add(time.Hour)
+	r.m.HandleEvent(mID, keptEvent(t, "10.0.0.6:3307", "10.0.0.5:3306", "10.0.0.5:3306"))
+	if as := r.alerts(mID, KindMasterLockKept); len(as) != 1 || as[0].Message != want {
+		t.Fatalf("after the same hosts = %+v", as)
+	}
+	// Past the 24 hours of the one-time notices it stays: the lock holds.
+	r.clk.Add(30 * time.Hour)
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterLockKept) {
+		t.Fatal("master_lock_kept closed by age while the lock may still hold")
+	}
+
+	// A different host set updates the open alert's message in place.
+	r.m.HandleEvent(mID, keptEvent(t, "10.0.0.7:3306"))
+	as := r.alerts(mID, KindMasterLockKept)
+	if len(as) != 1 || as[0].ClosedAt != nil || !strings.Contains(as[0].Message, "tidak terbaca: 10.0.0.7:3306.") ||
+		strings.Contains(as[0].Message, "10.0.0.5") {
+		t.Fatalf("after another host set = %+v", as)
+	}
+
+	// A kept without hosts is master_lock_expired as before and closes nothing.
+	r.m.HandleEvent(mID, lockExpired(t, "kept", ""))
+	if !r.isOpen(mID, KindMasterLockExpired) || !r.isOpen(mID, KindMasterLockKept) {
+		t.Fatal("kept without hosts must open master_lock_expired and leave master_lock_kept")
+	}
+
+	// The guard unlocked the master: closed with a reason.
+	r.m.HandleEvent(mID, lockExpired(t, "unlocked", ""))
+	closedWithReason(t, r.alerts(mID, KindMasterLockKept))
+	_ = topo
+}
+
+func TestLockKeptClosesWhenOverLikeLockExpired(t *testing.T) {
+	// The master quarantines itself.
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	r.m.HandleEvent(mID, keptEvent(t, "10.0.0.5:3306"))
+	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantined, Payload: []byte(`{"new_source":"10.0.0.2:3306"}`)})
+	as := r.alerts(mID, KindMasterLockKept)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "master sudah dikarantina sebagai master lama" {
+		t.Fatalf("kept after quarantine = %+v", as)
+	}
+
+	// Unlocked from the panel: the next report shows the master writable.
+	r = newRig(t)
+	mID, _ = r.master("db-master")
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.SuperReadOnly, s.ReadOnly = true, true })
+	ma.send()
+	r.clk.Add(time.Second)
+	r.m.HandleEvent(mID, keptEvent(t, "10.0.0.5:3306"))
+	r.clk.Add(time.Second)
+	ma.send()
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterLockKept) {
+		t.Fatal("kept closed while the master is still locked")
+	}
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.SuperReadOnly, s.ReadOnly = false, false })
+	r.clk.Add(time.Second)
+	ma.send()
+	r.m.tick()
+	as = r.alerts(mID, KindMasterLockKept)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "master sudah bisa ditulisi lagi" {
+		t.Fatalf("kept after unlock = %+v", as)
+	}
+
+	// The server became the old master through a finished promote.
+	r = newRig(t)
+	mID, topo := r.master("db-lama")
+	rID := r.replica("db-baru", topo)
+	r.m.HandleEvent(mID, keptEvent(t, "10.0.0.5:3306"))
+	r.promoted(topo, mID, rID, "done", "")
+	r.m.tick()
+	closedWithReason(t, r.alerts(mID, KindMasterLockKept))
+}
+
+// A kept event naming no usable host is a plain kept.
+func TestLockKeptWithEmptyHostsIsLockExpired(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	r.m.HandleEvent(mID, keptEvent(t, "", "  "))
+	if r.isOpen(mID, KindMasterLockKept) || !r.isOpen(mID, KindMasterLockExpired) {
+		t.Fatal("hosts without a name must be a plain master_lock_expired")
 	}
 }
