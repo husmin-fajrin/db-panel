@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -928,6 +929,18 @@ func TestRebuildAcceptanceByConnectionState(t *testing.T) {
 			rec = e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm(), web.ActRebuildOldMaster, "server", 1), c)
 			if tc.label == "" {
 				wantCode(t, rec, http.StatusSeeOther)
+				// A tick the form did not ask for never reaches the
+				// orchestrator, which then reads the connections again
+				// itself (ruling 14 (1)).
+				rec = e.do("POST", "/masters/2/replicas",
+					withToken(t, e, rebuildForm("accept_connections", "1"), web.ActRebuildOldMaster, "server", 1), c)
+				wantCode(t, rec, http.StatusSeeOther)
+				f.mu.Lock()
+				got := slices.Clone(f.replicas)
+				f.mu.Unlock()
+				if len(got) != 2 || !got[1].RebuildOldMaster || got[1].AcceptConnections || got[0].AcceptConnections {
+					t.Fatalf("create replica params = %+v; want no AcceptConnections the form did not ask for", got)
+				}
 				return
 			}
 			wantCode(t, rec, http.StatusBadRequest)

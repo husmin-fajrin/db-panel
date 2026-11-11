@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -117,6 +119,13 @@ func TestDropsData(t *testing.T) {
 		{"create, foreign source wait", KindCreateReplica, jobState{WaitReason: WaitForeignSource}, false},
 		{"create, reconnect wait", KindCreateReplica, jobState{WaitReason: WaitReconnect}, false},
 		{"create, plain", KindCreateReplica, jobState{}, false},
+		// Ruling 16: a create that can still run mysql.cloneFrom (method
+		// clone, copy not done) drops data; a dump onto an empty target
+		// with no wipe list, or a clone already copied, does not.
+		{"create, clone not copied", KindCreateReplica, jobState{Method: "clone", ConfirmWipe: true}, true},
+		{"create, clone copied", KindCreateReplica, jobState{Method: "clone", SnapshotGTID: "uuid:1-5"}, false},
+		{"create, clone copied, reconnect wait", KindCreateReplica, jobState{Method: "clone", AdminReplaced: true}, false},
+		{"create, dump onto empty target", KindCreateReplica, jobState{Method: "dump", ConfirmWipe: true}, false},
 		{"remove, drop", KindRemoveDatabases, jobState{DropData: true}, true},
 		{"remove, keep", KindRemoveDatabases, jobState{}, false},
 		{"add", KindAddDatabases, jobState{WipeList: []string{"a"}}, false},
@@ -365,4 +374,108 @@ func TestRemoveDatabasesDropConfirmedAtStart(t *testing.T) {
 			e.waitJob(id, store.JobSucceeded)
 		})
 	}
+}
+
+// failedCloneCreate is a create_replica by CLONE (the form's ConfirmWipe
+// pre-approves it) whose first CLONE fails: the job fails at "Salin data".
+func failedCloneCreate(t *testing.T, e *env) (r *fakeAgent, id string) {
+	t.Helper()
+	m, _ := e.readyMaster("db-master")
+	r = e.replicaAgent("replica1", "clone")
+	var clones atomic.Int32
+	r.job("mysql.cloneFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		if clones.Add(1) == 1 {
+			return nil, errors.New("koneksi ke donor terputus")
+		}
+		return proto.SnapshotResult{Method: "clone", Bytes: 300, GTIDExecuted: masterGTID}, nil
+	})
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, ConfirmWipe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps := e.waitJob(id, store.JobFailed)
+	if steps[j.CurrentStep].Name != "Salin data" {
+		t.Fatalf("job failed at %q, want Salin data", steps[j.CurrentStep].Name)
+	}
+	e.waitIdle(id)
+	return r, id
+}
+
+// TestRetryCloneCreateFailedAtCopyNeedsToken (ruling 16): mysql.cloneFrom
+// replaces everything on the target, so "Ulangi" of a clone create that
+// failed while copying needs a fresh confirmation, and the preflight runs
+// again before the CLONE.
+func TestRetryCloneCreateFailedAtCopyNeedsToken(t *testing.T) {
+	e := newEnv(t)
+	r, id := failedCloneCreate(t, e)
+	if drops, err := e.r.DropsData(id); err != nil || !drops {
+		t.Fatalf("DropsData = %v, %v; want true", drops, err)
+	}
+	before, _, _ := e.st.GetJob(id)
+	mark := r.mark()
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Retry without confirmation = %v, want ErrJobNeedsConfirm", err)
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed || j.ParamsJSON != before.ParamsJSON {
+		t.Fatalf("job changed by a refused retry: %+v", j)
+	}
+	wantCmds(t, "replica", r.cmds(mark), nil)
+
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	cmds := r.cmds(mark)
+	pre, clone := slices.Index(cmds, "mysql.preflight"), slices.Index(cmds, "mysql.cloneFrom")
+	if pre < 0 || clone < 0 || pre > clone {
+		t.Fatalf("replica commands after the retry = %v, want mysql.preflight before mysql.cloneFrom", cmds)
+	}
+	if st := e.storedState(id); st.ConfirmedAt.IsZero() || time.Since(st.ConfirmedAt) > time.Minute {
+		t.Fatalf("ConfirmedAt after the retry = %v", st.ConfirmedAt)
+	}
+}
+
+// A clone create left by a failed CLONE holding some of the master's
+// databases: the fresh preflight shows them as leftovers and waits for an
+// approval (with a token), then copies by dump; no dead end.
+func TestRetryHalfClonedTargetWaitsForApproval(t *testing.T) {
+	e := newEnv(t)
+	r, id := failedCloneCreate(t, e)
+	scriptLeftovers(r, "dump", "a")
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	_, steps := e.waitJob(id, store.JobWaiting)
+	if want := "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: a"; steps[4].Message != want {
+		t.Fatalf("waiting message = %q, want %q", steps[4].Message, want)
+	}
+	e.waitIdle(id)
+	if err := e.r.Approve(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Approve without confirmation = %v", err)
+	}
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	var drop proto.DropDatabasesParams
+	r.params("mysql.dropDatabases", &drop)
+	if !slices.Equal(drop.Databases, []string{"a"}) || r.count("mysql.dumpFrom") != 1 {
+		t.Fatalf("dropDatabases = %v, dumps %d", drop.Databases, r.count("mysql.dumpFrom"))
+	}
+}
+
+// The 24-hour limit holds for a clone create too.
+func TestRetryCloneCreateRefusedAfter24h(t *testing.T) {
+	e := newEnv(t)
+	r, id := failedCloneCreate(t, e)
+	e.setState(id, func(st *jobState) { st.ConfirmedAt = time.Now().Add(-25 * time.Hour) })
+	mark := r.mark()
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); !errors.Is(err, ErrConfirmStale) {
+		t.Fatalf("Retry = %v, want ErrConfirmStale", err)
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+		t.Fatalf("job after a refused retry = %+v", j)
+	}
+	wantCmds(t, "replica", r.cmds(mark), nil)
 }
