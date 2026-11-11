@@ -104,7 +104,9 @@ type Driver struct {
 	startLockSet   bool
 	// The start lock's guard (startlock_guard.go); the caller holds
 	// promoteMu. startLockProved: this agent run PERSISTed read_only and
-	// super_read_only ON on a live MySQL since the quarantine.
+	// super_read_only ON on a live MySQL since the quarantine; the guard
+	// trusts it only while both are still on (readOnlyProvedNow), and a
+	// promotion PERSISTs them again whatever it says (releaseForPromote).
 	// startLockNextTry: a write of the lock (or its release) failed, the
 	// next is not tried before then. startLockCheckedAt: when
 	// startLockStatus last ran. bootFailAt: the time of the last

@@ -240,8 +240,9 @@ const mysqlUptimeSlack = 2
 // (which proves the start lock may go once the server is a replica:
 // startLockProved). While MySQL stays up it does nothing, so the rebuild
 // from the pinned source, which lifts read-only for its load
-// (liftReadOnly), is not undone. On a start (not after a load) it reports
-// how MySQL came up (monitor.quarantineStart: reportQuarantineStart).
+// (liftReadOnly), is not undone. On a start it reports how MySQL came up
+// (monitor.quarantineStart: reportQuarantineStart); a restart a rebuild
+// load made is no such start, even when no tick saw it deferring.
 // monitor.quarantined (under the pinned source) is reported once a
 // quarantine written while MySQL was down takes effect, read-only or not,
 // and whenever the flags had to be put back. A MySQL that starts writable
