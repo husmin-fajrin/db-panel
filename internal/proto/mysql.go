@@ -607,10 +607,14 @@ type QuarantineStartFailedEvent struct {
 
 // LockExpiredEvent is the payload of EventLockExpired.
 type LockExpiredEvent struct {
-	Action    string   `json:"action"`    // "unlocked" | "kept"
-	Candidate string   `json:"candidate"` // host:port
-	Reason    string   `json:"reason,omitempty"`
-	Hosts     []string `json:"hosts,omitempty"`
+	Action    string `json:"action"`    // "unlocked" | "kept"
+	Candidate string `json:"candidate"` // host:port
+	Reason    string `json:"reason,omitempty"`
+	// Hosts are the replicas (host:port), readable when the lock was set,
+	// that the guard cannot read now: the lock stays until each reads
+	// read-only again, "dbpanel agent forget-replica" drops it, or
+	// "dbpanel agent unlock-master" is run. An older panel ignores it.
+	Hosts []string `json:"hosts,omitempty"`
 }
 
 // ConnectionsResult is the answer to mysql.connections: the client
