@@ -380,3 +380,11 @@ var (
 	ConfigLockPath = configLockPath
 	FlockConfig    = flockConfig
 )
+
+// SetStartLockProved sets the proof that this agent run PERSISTed
+// read-only ON (startLockProved), as a quarantine would.
+func (d *Driver) SetStartLockProved(v bool) {
+	d.promoteMu.Lock()
+	d.startLockProved = v
+	d.promoteMu.Unlock()
+}

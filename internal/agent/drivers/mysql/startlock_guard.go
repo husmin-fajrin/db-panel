@@ -386,8 +386,9 @@ func (d *Driver) reportQuarantineStart(h Host, now time.Time, flagsOff bool, ini
 }
 
 // releaseForPromote releases the start lock a replica still carries
-// before it is promoted: read-only is PERSISTed first unless this agent
-// run already did, so a failed release leaves it as safe as before.
+// before it is promoted: read-only is PERSISTed first, always (an earlier
+// proof may be stale), so a promote job that fails after the release
+// leaves the replica starting read-only without the lock.
 func (d *Driver) releaseForPromote(ctx context.Context, h Host) error {
 	d.promoteMu.Lock()
 	defer d.promoteMu.Unlock()
@@ -398,18 +399,16 @@ func (d *Driver) releaseForPromote(ctx context.Context, h Host) error {
 	if len(agentStartLockPaths(content)) == 0 {
 		return nil
 	}
-	if !d.startLockProved {
-		db, err := openAdmin(ctx, h)
-		if err != nil {
-			return err
-		}
-		err = persistReadOnly(ctx, db)
-		db.Close()
-		if err != nil {
-			return err
-		}
-		d.startLockProved = true
+	db, err := openAdmin(ctx, h)
+	if err != nil {
+		return err
 	}
+	err = persistReadOnly(ctx, db)
+	db.Close()
+	if err != nil {
+		return err
+	}
+	d.startLockProved = true
 	if err := releaseStartLock(ctx, h); err != nil {
 		return err
 	}

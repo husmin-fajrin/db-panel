@@ -808,3 +808,28 @@ func TestPromoteRefusedWhileStartLockCannotBeReleased(t *testing.T) {
 		t.Errorf("after the promote started: line=%v file=%v; want released", line, file)
 	}
 }
+
+// TestPromotePersistsReadOnlyBeforeReleasingStartLock: the start lock of a
+// replica goes before its promotion only after read_only and
+// super_read_only are PERSISTed ON again, even with this run's proof from
+// earlier: a promote job that fails after the release never leaves the
+// replica without its lock and with the flags persisted OFF.
+func TestPromotePersistsReadOnlyBeforeReleasingStartLock(t *testing.T) {
+	r := newPromoteRig(t)
+	h := r.replica.Host()
+	if err := mysql.WriteStartLock(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	lock, _ := mysql.StartLockPath(h.Layout())
+	r.d.SetStartLockProved(true)
+	execAll(t, r.rdb, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+	done := r.run(r.params(proto.PromoteEmergency))
+	if line, file := lineAndFile(t, h, lock); line || file {
+		t.Errorf("after the promote started: line=%v file=%v; want released", line, file)
+	}
+	if ro, sro := persisted(t, r.rdb, "read_only"), persisted(t, r.rdb, "super_read_only"); ro != "ON" || sro != "ON" {
+		t.Errorf("persisted read_only=%q super_read_only=%q after the release; want both ON", ro, sro)
+	}
+	// Read-only again, the job goes on to its own checks (the master is up).
+	r.wantFailed(done, "bukan keadaan darurat")
+}
