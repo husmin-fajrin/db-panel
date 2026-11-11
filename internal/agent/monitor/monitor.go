@@ -1,5 +1,6 @@
 // Package monitor is the agent's health monitor: it reads a HealthSnapshot
-// every CheckEvery, reports to the panel at once when something that matters
+// every CheckEvery (a separate guard loop runs the safety guards every
+// GuardEvery), reports to the panel at once when something that matters
 // changed and otherwise sends a summary every SummaryEvery. While the panel
 // is unreachable, change reports wait in a ring buffer and are sent, oldest
 // first, once it is back; summaries are not kept.
@@ -46,21 +47,21 @@ type SalvageSweeper interface {
 // DumpLockGuard is a Source that can also end the session of a per-job
 // dump account that has held the global read lock (FLUSH TABLES WITH READ
 // LOCK, which stops every write) for maxHold or longer
-// (mysql.Driver.KillDumpLocks). The monitor runs it after every check.
+// (mysql.Driver.KillDumpLocks). The guard loop runs it every GuardEvery.
 type DumpLockGuard interface {
 	KillDumpLocks(ctx context.Context, maxHold time.Duration) (killed int, err error)
 }
 
 // ReplicaRecorder is a Source that can also record the hosts of the
 // replicas reading its binary log, seen at now, in the replicas-seen file
-// (mysql.Driver.RecordReplicas). The monitor runs it after every check.
+// (mysql.Driver.RecordReplicas). The guard loop runs it every GuardEvery.
 type ReplicaRecorder interface {
 	RecordReplicas(ctx context.Context, now time.Time) error
 }
 
 // PromoteGuard is a Source that also guards a promote lock
 // (mysql.Driver.GuardTick): it keeps a locked master read-only and ends
-// the lock at its deadline, at now. The monitor runs it after every check.
+// the lock at its deadline, at now. The guard loop runs it every GuardEvery.
 type PromoteGuard interface {
 	GuardTick(ctx context.Context, now time.Time) error
 }
@@ -100,10 +101,20 @@ const (
 )
 
 // Bounds of the intervals monitor.configure accepts, in seconds.
+// check_every_sec up to maxIntervalSec is accepted (an older panel sends up
+// to 3600) and applied as at most maxCheckEverySec.
 const (
-	minIntervalSec = 10
-	maxIntervalSec = 3600
+	minIntervalSec   = 10
+	maxIntervalSec   = 3600
+	maxCheckEverySec = 300
 )
+
+// GuardEvery is the pause of the guard loop after one round has finished.
+// The panel cannot change it.
+const GuardEvery = 5 * time.Second
+
+// warnEvery is how often the same guard warning may be logged.
+const warnEvery = time.Minute
 
 // Pinner pins the role of a server configured before role pins existed,
 // from a reading MySQL answered and the panel's role hint
@@ -120,6 +131,8 @@ type Options struct {
 	// After returns a channel that receives once d has passed; it paces
 	// the loop. Default time.After; tests replace it to step the loop.
 	After func(d time.Duration) <-chan time.Time
+	// GuardAfter paces the guard loop the same way; default time.After.
+	GuardAfter func(d time.Duration) <-chan time.Time
 	// Pins, when set, gets every reading MySQL answered (Pinner).
 	Pins Pinner
 	// SweepEvery paces the dump-account sweep when the Source is a
@@ -137,11 +150,14 @@ type Monitor struct {
 	logger *slog.Logger
 	now    func() time.Time
 	after  func(d time.Duration) <-chan time.Time
+	gafter func(d time.Duration) <-chan time.Time
+	warns  warnLimiter
 	reconf chan struct{} // wakes the loop to pause again with new options
 
 	mu       sync.Mutex // guards opts and roleHint
 	opts     Options
 	roleHint string
+	clamped  bool // the clamp of check_every_sec was logged already
 
 	checkMu  sync.Mutex // held for a whole check; guards the fields below
 	seq      uint64
@@ -173,11 +189,14 @@ func New(src Source, em Emitter, logger *slog.Logger, o Options) *Monitor {
 	if o.After == nil {
 		o.After = time.After
 	}
+	if o.GuardAfter == nil {
+		o.GuardAfter = time.After
+	}
 	if o.SweepEvery <= 0 {
 		o.SweepEvery = DefaultSweepEvery
 	}
 	return &Monitor{
-		src: src, em: em, pins: o.Pins, logger: logger, now: o.Now, after: o.After,
+		src: src, em: em, pins: o.Pins, logger: logger, now: o.Now, after: o.After, gafter: o.GuardAfter,
 		reconf: make(chan struct{}, 1), opts: o,
 	}
 }
@@ -212,27 +231,37 @@ func (m *Monitor) Register(reg *commands.Registry) {
 // pause uses the new check interval.
 func (m *Monitor) Configure(p proto.MonitorConfigureParams) error {
 	if !validInterval(p.CheckEverySec) {
-		return rangeError("check_every_sec")
+		return rangeError("check_every_sec", maxCheckEverySec)
 	}
 	if !validInterval(p.SummaryEverySec) {
-		return rangeError("summary_every_sec")
+		return rangeError("summary_every_sec", maxIntervalSec)
 	}
 	if p.LagThresholdSec != 0 && !validInterval(p.LagThresholdSec) {
-		return rangeError("lag_threshold_sec")
+		return rangeError("lag_threshold_sec", maxIntervalSec)
 	}
 	switch p.RoleHint {
 	case "", "master", "replica":
 	default:
 		return &commands.ParamError{Msg: "role_hint harus master, replica atau kosong"}
 	}
+	checkSec := p.CheckEverySec
 	m.mu.Lock()
-	m.opts.CheckEvery = time.Duration(p.CheckEverySec) * time.Second
+	logClamp := false
+	if checkSec > maxCheckEverySec {
+		checkSec = maxCheckEverySec
+		logClamp, m.clamped = !m.clamped, true
+	}
+	m.opts.CheckEvery = time.Duration(checkSec) * time.Second
 	m.opts.SummaryEvery = time.Duration(p.SummaryEverySec) * time.Second
 	if p.LagThresholdSec != 0 {
 		m.opts.LagThreshold = time.Duration(p.LagThresholdSec) * time.Second
 	}
 	m.roleHint = p.RoleHint
 	m.mu.Unlock()
+	if logClamp {
+		m.logger.Info("check_every_sec above the maximum applied as the maximum",
+			"asked", p.CheckEverySec, "applied", maxCheckEverySec)
+	}
 	select {
 	case m.reconf <- struct{}{}:
 	default:
@@ -242,8 +271,8 @@ func (m *Monitor) Configure(p proto.MonitorConfigureParams) error {
 
 func validInterval(sec int) bool { return sec >= minIntervalSec && sec <= maxIntervalSec }
 
-func rangeError(field string) error {
-	return &commands.ParamError{Msg: fmt.Sprintf("%s harus %d sampai %d detik", field, minIntervalSec, maxIntervalSec)}
+func rangeError(field string, max int) error {
+	return &commands.ParamError{Msg: fmt.Sprintf("%s harus %d sampai %d detik", field, minIntervalSec, max)}
 }
 
 // LastRoleHint is the RoleHint of the last accepted monitor.configure.
@@ -259,22 +288,76 @@ func (m *Monitor) options() Options {
 	return m.opts
 }
 
-// Run checks at once, then every CheckEvery, until ctx is done. After a
-// check it guards against dump locks, guards the promote lock, records
-// the replicas seen, sweeps the dump accounts when SweepEvery has passed
-// since the last sweep and the salvage files when SalvageSweepEvery has
-// (the first sweeps at once).
+// Run runs two loops until ctx is done and returns when both have. The
+// check loop checks at once, then every CheckEvery, sweeping the dump
+// accounts when SweepEvery has passed since the last sweep and the salvage
+// files when SalvageSweepEvery has (the first sweeps at once). The guard
+// loop (guardLoop) runs the safety guards every GuardEvery, whatever
+// CheckEvery is.
 func (m *Monitor) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.guardLoop(ctx)
+	}()
 	for {
 		m.tick(ctx)
-		m.guardDumpLocks(ctx)
-		m.guardPromote(ctx)
-		m.recordReplicas(ctx)
 		m.sweep(ctx)
 		m.sweepSalvage(ctx)
 		if !m.pause(ctx) {
-			return
+			break
 		}
+	}
+	wg.Wait()
+}
+
+// guardLoop runs the guards, then pauses GuardEvery after the round has
+// finished (never a ticker, so rounds cannot overlap). It touches none of
+// the check loop's state.
+func (m *Monitor) guardLoop(ctx context.Context) {
+	for {
+		m.guardDumpLocks(ctx)
+		m.guardPromote(ctx)
+		m.recordReplicas(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.gafter(GuardEvery):
+		}
+	}
+}
+
+// warnLimiter lets the same warning through at most once a minute.
+type warnLimiter struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// allow reports whether the warning with this key may be logged at now, and
+// counts it as logged when it is.
+func (l *warnLimiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t, ok := l.last[key]; ok && now.Sub(t) < warnEvery {
+		return false
+	}
+	if l.last == nil {
+		l.last = make(map[string]time.Time)
+	}
+	for k, t := range l.last {
+		if now.Sub(t) >= warnEvery {
+			delete(l.last, k)
+		}
+	}
+	l.last[key] = now
+	return true
+}
+
+// warn logs msg with err at Warn, at most once a minute per msg and error text.
+func (m *Monitor) warn(msg string, err error) {
+	if m.warns.allow(msg+"\x00"+err.Error(), m.now()) {
+		m.logger.Warn(msg, "err", err)
 	}
 }
 
@@ -351,7 +434,7 @@ func (m *Monitor) guardPromote(ctx context.Context) {
 	gctx, cancel := context.WithTimeout(ctx, promoteGuardTimeout)
 	defer cancel()
 	if err := g.GuardTick(gctx, m.now()); err != nil {
-		m.logger.Warn("promote lock guard", "err", err)
+		m.warn("promote lock guard", err)
 	}
 }
 
@@ -364,7 +447,7 @@ func (m *Monitor) recordReplicas(ctx context.Context) {
 	rctx, cancel := context.WithTimeout(ctx, recordTimeout)
 	defer cancel()
 	if err := r.RecordReplicas(rctx, m.now()); err != nil {
-		m.logger.Warn("replicas seen not recorded", "err", err)
+		m.warn("replicas seen not recorded", err)
 	}
 }
 

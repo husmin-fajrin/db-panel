@@ -231,6 +231,7 @@ func TestSettingsValidatesRanges(t *testing.T) {
 	}{
 		{"check_every", "9", "Interval pemeriksaan"},
 		{"check_every", "3601", "Interval pemeriksaan"},
+		{"check_every", "301", "Interval pemeriksaan harus 10 sampai 300 detik"},
 		{"check_every", "abc", "Interval pemeriksaan"},
 		{"summary_every", "3601", "Interval ringkasan"},
 		{"summary_every", "20", "tidak boleh lebih kecil dari interval pemeriksaan"}, // check is 30
@@ -622,4 +623,20 @@ func TestSettingsNoOverflowStructure(t *testing.T) {
 	if strings.Contains(content, "shadow") || strings.Contains(content, `class="input w-auto`) || strings.Contains(content, `class="select w-auto`) {
 		t.Error("settings page still has a card shadow or a w-auto field")
 	}
+}
+
+// TestSettingsFormRejectsCheckEveryAbove300: the check interval is 10-300 s
+// (the form says so too); the summary interval keeps 10-3600.
+func TestSettingsFormRejectsCheckEveryAbove300(t *testing.T) {
+	e := settingsEnv(t)
+	c := e.cookie()
+	rec := e.do("POST", "/settings", with(validSettings(), "check_every", "301"), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Interval pemeriksaan harus 10 sampai 300 detik")
+	page := e.do("GET", "/settings", nil, c)
+	wantBody(t, page, `name="check_every" value="15" min="10" max="300"`,
+		"10–300. Seberapa sering agent memeriksa MySQL.",
+		`name="summary_every" value="120" min="10" max="3600"`)
+	form := with(with(validSettings(), "check_every", "300"), "summary_every", "3600")
+	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
 }

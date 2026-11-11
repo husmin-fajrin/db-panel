@@ -105,7 +105,8 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 		mutate func(s *Settings)
 		want   string
 	}{
-		{"check too short", func(s *Settings) { s.CheckEvery = 5 * time.Second }, "10 sampai 3600"},
+		{"check too short", func(s *Settings) { s.CheckEvery = 5 * time.Second }, "10 sampai 300"},
+		{"check over 300", func(s *Settings) { s.CheckEvery = 301 * time.Second }, "10 sampai 300"},
 		{"summary too long", func(s *Settings) { s.SummaryEvery = 2 * time.Hour }, "10 sampai 3600"},
 		{"disk order", func(s *Settings) { s.DiskWarn, s.DiskCrit = 95, 90 }, "disk"},
 		{"weekly time", func(s *Settings) { s.WeeklySummaryAt = "Senin pagi" }, "Mon 07:00"},
@@ -121,6 +122,27 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 		err := SaveSettings(st, s)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: SaveSettings err = %v, want one mentioning %q", c.name, err, c.want)
+		}
+	}
+}
+
+// TestStoredCheckEveryAbove300ReadAs300: a value saved before the cap is
+// read as 300 s; one below 10 or unreadable takes the default.
+func TestStoredCheckEveryAbove300ReadAs300(t *testing.T) {
+	st := openStore(t)
+	for _, c := range []struct {
+		stored string
+		want   time.Duration
+	}{{"3600", 300 * time.Second}, {"301", 300 * time.Second}, {"300", 300 * time.Second}, {"9", 15 * time.Second}, {"abc", 15 * time.Second}} {
+		if err := st.SetSetting(store.SettingMonitorCheckEvery, c.stored); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadSettings(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CheckEvery != c.want {
+			t.Errorf("stored %q: CheckEvery = %v, want %v", c.stored, got.CheckEvery, c.want)
 		}
 	}
 }

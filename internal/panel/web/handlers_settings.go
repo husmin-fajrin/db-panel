@@ -143,7 +143,7 @@ func (f settingsForm) validate(base monitor.Settings) (monitor.Settings, string)
 	secs := func(raw string, lo, hi int, name string) time.Duration {
 		return time.Duration(num(raw, lo, hi, name, "detik")) * time.Second
 	}
-	set.CheckEvery = secs(f.CheckEvery, 10, 3600, "Interval pemeriksaan")
+	set.CheckEvery = secs(f.CheckEvery, 10, 300, "Interval pemeriksaan")
 	set.SummaryEvery = secs(f.SummaryEvery, 10, 3600, "Interval ringkasan")
 	if msg == "" && set.SummaryEvery < set.CheckEvery {
 		msg = "Interval ringkasan tidak boleh lebih kecil dari interval pemeriksaan."

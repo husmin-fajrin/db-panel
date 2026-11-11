@@ -64,6 +64,10 @@ const (
 	// Bounds monitor.configure accepts for its intervals, in seconds.
 	minIntervalSec = 10
 	maxIntervalSec = 3600
+	// maxCheckEverySec caps the check interval: the agent's guards run on
+	// their own fixed loop, but a check this rare would still leave the
+	// panel blind too long. A stored value above it is read as it.
+	maxCheckEverySec = 300
 
 	weeklyLayout = "Mon 15:04"
 )
@@ -121,6 +125,9 @@ func LoadSettings(s *store.Store) (Settings, error) {
 		}
 	}
 	secs(store.SettingMonitorCheckEvery, minIntervalSec, maxIntervalSec, &st.CheckEvery)
+	if st.CheckEvery > maxCheckEverySec*time.Second {
+		st.CheckEvery = maxCheckEverySec * time.Second
+	}
 	secs(store.SettingMonitorSummaryEvery, minIntervalSec, maxIntervalSec, &st.SummaryEvery)
 	secs(store.SettingLagThreshold, minIntervalSec, maxIntervalSec, &st.Lag)
 	secs(store.SettingDisconnectAlert, 1, maxDurationSec, &st.DisconnectAlert)
@@ -176,17 +183,22 @@ func validWeekly(at string) bool {
 
 // Validate reports the first setting out of range, in words for the user.
 func (st Settings) Validate() error {
-	interval := func(name string, d time.Duration) error {
-		if d%time.Second != 0 || d < minIntervalSec*time.Second || d > maxIntervalSec*time.Second {
-			return fmt.Errorf("%s harus %d sampai %d detik", name, minIntervalSec, maxIntervalSec)
+	interval := func(name string, d time.Duration, max int) error {
+		if d%time.Second != 0 || d < minIntervalSec*time.Second || d > time.Duration(max)*time.Second {
+			return fmt.Errorf("%s harus %d sampai %d detik", name, minIntervalSec, max)
 		}
 		return nil
 	}
 	for _, c := range []struct {
 		name string
 		d    time.Duration
-	}{{"interval pemeriksaan", st.CheckEvery}, {"interval ringkasan", st.SummaryEvery}, {"ambang ketinggalan", st.Lag}} {
-		if err := interval(c.name, c.d); err != nil {
+		max  int
+	}{
+		{"interval pemeriksaan", st.CheckEvery, maxCheckEverySec},
+		{"interval ringkasan", st.SummaryEvery, maxIntervalSec},
+		{"ambang ketinggalan", st.Lag, maxIntervalSec},
+	} {
+		if err := interval(c.name, c.d, c.max); err != nil {
 			return err
 		}
 	}

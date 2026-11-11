@@ -250,7 +250,7 @@ func TestHoldExpiresAtCap(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Reports stay current for hours: only the hold's bound is tested.
-		s.CheckEvery, s.SummaryEvery = 3600*time.Second, 3600*time.Second
+		s.CheckEvery, s.SummaryEvery = 300*time.Second, 3600*time.Second
 		if err := SaveSettings(st, s); err != nil {
 			t.Fatal(err)
 		}

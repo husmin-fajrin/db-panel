@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -164,6 +165,10 @@ type rig struct {
 	ctx   context.Context
 	waits chan wait
 	cur   wait
+	// gwaits and gcur are the same for the guard loop.
+	gwaits chan wait
+	gcur   wait
+	logs   *logBuf
 }
 
 func newRig(t *testing.T, snap proto.HealthSnapshot) *rig {
@@ -184,21 +189,31 @@ func startRig(t *testing.T, src *fakeSource, monSrc Source, pins Pinner) *rig {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &rig{
-		t:     t,
-		src:   src,
-		em:    &fakeEmitter{acceptLeft: -1},
-		clock: &fakeClock{t: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)},
-		reg:   commands.NewRegistry(),
-		ctx:   ctx,
-		waits: make(chan wait),
+		t:      t,
+		src:    src,
+		em:     &fakeEmitter{acceptLeft: -1},
+		clock:  &fakeClock{t: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)},
+		reg:    commands.NewRegistry(),
+		ctx:    ctx,
+		waits:  make(chan wait),
+		gwaits: make(chan wait),
+		logs:   &logBuf{},
 	}
-	r.m = New(monSrc, r.em, slog.New(slog.DiscardHandler), Options{
+	r.m = New(monSrc, r.em, slog.New(slog.NewTextHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug})), Options{
 		Pins: pins,
 		Now:  r.clock.Now,
 		After: func(d time.Duration) <-chan time.Time {
 			w := wait{d: d, ch: make(chan time.Time, 1)}
 			select {
 			case r.waits <- w:
+			case <-ctx.Done():
+			}
+			return w.ch
+		},
+		GuardAfter: func(d time.Duration) <-chan time.Time {
+			w := wait{d: d, ch: make(chan time.Time, 1)}
+			select {
+			case r.gwaits <- w:
 			case <-ctx.Done():
 			}
 			return w.ch
@@ -218,8 +233,53 @@ func startRig(t *testing.T, src *fakeSource, monSrc Source, pins Pinner) *rig {
 			t.Error("Run did not return after cancel")
 		}
 	})
-	r.idle() // the first tick runs at once
+	r.idle()  // the first tick runs at once
+	r.gidle() // so does the first guard round
 	return r
+}
+
+// logBuf is a log sink the test can read while the monitor writes to it.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+// count is the number of log lines containing sub.
+func (l *logBuf) count(sub string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, line := range strings.Split(l.b.String(), "\n") {
+		if strings.Contains(line, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+// gidle waits until the guard loop pauses again.
+func (r *rig) gidle() {
+	r.t.Helper()
+	select {
+	case r.gcur = <-r.gwaits:
+	case <-time.After(5 * time.Second):
+		r.t.Fatal("guard loop did not pause")
+	}
+}
+
+// gtick advances the clock by d, ends the guard loop's pause and waits for
+// its round to finish.
+func (r *rig) gtick(d time.Duration) {
+	r.t.Helper()
+	r.clock.advance(d)
+	r.gcur.ch <- r.clock.Now()
+	r.gidle()
 }
 
 // idle waits until the loop pauses again.
@@ -727,16 +787,16 @@ func (s *guardSource) guards() []time.Duration {
 	return append([]time.Duration(nil), s.calls...)
 }
 
-// TestMonitorGuardsDumpLocksEveryCheck: the guard runs after every check
+// TestMonitorGuardsDumpLocksEveryRound: the guard runs every guard round
 // (not hourly like the sweep), with a one-minute bound (SEC-56).
-func TestMonitorGuardsDumpLocksEveryCheck(t *testing.T) {
+func TestMonitorGuardsDumpLocksEveryRound(t *testing.T) {
 	src := &guardSource{fakeSource: &fakeSource{snap: base()}}
 	r := startRig(t, src.fakeSource, src, nil)
 	if got := src.guards(); len(got) != 1 || got[0] != time.Minute {
 		t.Fatalf("guards after the first check = %v, want [1m]", got)
 	}
 	for i := 0; i < 3; i++ {
-		r.tick(15 * time.Second)
+		r.gtick(GuardEvery)
 	}
 	if n := len(src.guards()); n != 4 {
 		t.Fatalf("guards after four checks = %d, want 4", n)
@@ -764,16 +824,16 @@ func (s *seenSource) records() []time.Time {
 	return append([]time.Time(nil), s.calls...)
 }
 
-// TestMonitorRecordsReplicasSeenEveryCheck: the replicas reading the
-// binary log are recorded after every check, at the monitor's time.
-func TestMonitorRecordsReplicasSeenEveryCheck(t *testing.T) {
+// TestMonitorRecordsReplicasSeenEveryRound: the replicas reading the
+// binary log are recorded every guard round, at the monitor's time.
+func TestMonitorRecordsReplicasSeenEveryRound(t *testing.T) {
 	src := &seenSource{fakeSource: &fakeSource{snap: base()}}
 	r := startRig(t, src.fakeSource, src, nil)
 	if got := src.records(); len(got) != 1 || !got[0].Equal(r.clock.Now()) {
 		t.Fatalf("records after the first check = %v, want [%v]", got, r.clock.Now())
 	}
 	for i := 0; i < 3; i++ {
-		r.tick(15 * time.Second)
+		r.gtick(GuardEvery)
 	}
 	got := src.records()
 	if len(got) != 4 || !got[3].Equal(r.clock.Now()) {
@@ -802,16 +862,16 @@ func (s *promoteSource) ticks() []time.Time {
 	return append([]time.Time(nil), s.calls...)
 }
 
-// TestMonitorRunsPromoteGuardEveryCheck: the promote-lock guard runs after
+// TestMonitorRunsPromoteGuardEveryRound: the promote-lock guard runs after
 // every check, at the monitor's (injectable) time.
-func TestMonitorRunsPromoteGuardEveryCheck(t *testing.T) {
+func TestMonitorRunsPromoteGuardEveryRound(t *testing.T) {
 	src := &promoteSource{fakeSource: &fakeSource{snap: base()}}
 	r := startRig(t, src.fakeSource, src, nil)
 	if got := src.ticks(); len(got) != 1 || !got[0].Equal(r.clock.Now()) {
 		t.Fatalf("guard ticks after the first check = %v, want [%v]", got, r.clock.Now())
 	}
 	for i := 0; i < 3; i++ {
-		r.tick(15 * time.Second)
+		r.gtick(GuardEvery)
 	}
 	got := src.ticks()
 	if len(got) != 4 || !got[3].Equal(r.clock.Now()) {
@@ -897,7 +957,7 @@ func TestMonitorRetriesBusySalvageSweep(t *testing.T) {
 // one monitor.sample, whether or not a health report goes out; a sample
 // carries the lag, the thread states and MySQLOK, stays within 200 bytes
 // and is never kept in the backlog while the panel is away.
-func TestAgentEmitsSampleEveryCheck(t *testing.T) {
+func TestAgentEmitsSampleEveryRound(t *testing.T) {
 	r := newRig(t, base())
 	r.tick(15 * time.Second)
 	r.tick(15 * time.Second)
@@ -973,5 +1033,199 @@ func TestAgentEmitsSampleEveryCheck(t *testing.T) {
 	}
 	if s := samples[len(samples)-3]; s.IORunning != "ConnectingConnec" || s.SQLRunning != "x"+strings.Repeat("é", 7) {
 		t.Errorf("long states = %q, %q; want 16 bytes cut on a rune boundary", s.IORunning, s.SQLRunning)
+	}
+}
+
+// countingSource is a guard source that counts each guard call and, for
+// GuardTick, can hold for a fake-clock duration and return an error.
+type countingSource struct {
+	*fakeSource
+	mu    sync.Mutex
+	kills []time.Duration
+	ticks int
+	recs  int
+	gate  chan struct{} // when set, GuardTick waits for it
+	err   error
+	cur   int
+	max   int
+}
+
+func (s *countingSource) KillDumpLocks(_ context.Context, maxHold time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kills = append(s.kills, maxHold)
+	return 0, nil
+}
+
+func (s *countingSource) GuardTick(_ context.Context, _ time.Time) error {
+	s.mu.Lock()
+	s.ticks++
+	s.cur++
+	if s.cur > s.max {
+		s.max = s.cur
+	}
+	gate, err := s.gate, s.err
+	s.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	s.mu.Lock()
+	s.cur--
+	s.mu.Unlock()
+	return err
+}
+
+func (s *countingSource) RecordReplicas(_ context.Context, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs++
+	return nil
+}
+
+func (s *countingSource) counts() (kills, ticks, recs int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.kills), s.ticks, s.recs
+}
+
+func newCountingRig(t *testing.T) (*rig, *countingSource) {
+	t.Helper()
+	src := &countingSource{fakeSource: &fakeSource{snap: base()}}
+	r := startRig(t, src.fakeSource, src, nil)
+	return r, src
+}
+
+// TestGuardLoopRunsEveryFiveSecondsAtCheckEvery300: with the check interval
+// at its 300 s maximum, the guards still run every 5 s.
+func TestGuardLoopRunsEveryFiveSecondsAtCheckEvery300(t *testing.T) {
+	r, src := newCountingRig(t)
+	if err := r.m.Configure(proto.MonitorConfigureParams{CheckEverySec: 300, SummaryEverySec: 300}); err != nil {
+		t.Fatal(err)
+	}
+	r.tick(15 * time.Second) // the loop pauses again with the new interval
+	if r.cur.d != 300*time.Second {
+		t.Fatalf("check loop asks for a pause of %v, want 300s", r.cur.d)
+	}
+	k0, t0, c0 := src.counts()
+	for i := 0; i < 10; i++ {
+		if r.gcur.d != 5*time.Second {
+			t.Fatalf("step %d: guard loop asks for %v, want 5s", i, r.gcur.d)
+		}
+		r.gtick(5 * time.Second)
+		k, tk, c := src.counts()
+		if k != k0+i+1 || tk != t0+i+1 || c != c0+i+1 {
+			t.Fatalf("step %d: kills/ticks/records = %d/%d/%d, want %d each", i, k, tk, c, k0+i+1)
+		}
+	}
+	if src.kills[0] != time.Minute {
+		t.Errorf("KillDumpLocks maxHold = %v, want 1m", src.kills[0])
+	}
+}
+
+// TestGuardLoopSleepsAfterCompletion: the pause is asked for only after the
+// round has finished, and rounds never overlap.
+func TestGuardLoopSleepsAfterCompletion(t *testing.T) {
+	r, src := newCountingRig(t)
+	gate := make(chan struct{})
+	src.mu.Lock()
+	src.gate = gate
+	src.mu.Unlock()
+	r.gcur.ch <- r.clock.Now() // starts a round that stops inside GuardTick
+	select {
+	case w := <-r.gwaits:
+		t.Fatalf("guard loop asked for a pause of %v while GuardTick was still running", w.d)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(gate)
+	r.gidle()
+	if r.gcur.d != GuardEvery {
+		t.Errorf("pause = %v, want %v", r.gcur.d, GuardEvery)
+	}
+	r.gtick(5 * time.Second)
+	_, ticks, _ := src.counts()
+	if ticks != 3 {
+		t.Fatalf("GuardTick ran %d times, want 3", ticks)
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if src.max != 1 {
+		t.Errorf("GuardTick ran %d at once, want 1", src.max)
+	}
+}
+
+// TestGuardWarningsRateLimited: the same guard warning is logged once a
+// minute; a different error text is logged at once.
+func TestGuardWarningsRateLimited(t *testing.T) {
+	r, src := newCountingRig(t)
+	src.mu.Lock()
+	src.err = errors.New("kunci gagal")
+	src.mu.Unlock()
+	for i := 0; i < 20; i++ { // 40 s of rounds: inside one minute
+		r.gtick(2 * time.Second)
+	}
+	if n := r.logs.count("promote lock guard"); n != 1 {
+		t.Fatalf("%d warnings in 40+ s, want 1", n)
+	}
+	r.gtick(61 * time.Second)
+	if n := r.logs.count("promote lock guard"); n != 2 {
+		t.Fatalf("%d warnings after 61 s more, want 2", n)
+	}
+	src.mu.Lock()
+	src.err = errors.New("kunci lain")
+	src.mu.Unlock()
+	r.gtick(time.Second)
+	if n := r.logs.count("kunci lain"); n != 1 {
+		t.Fatalf("a different error was logged %d times, want 1", n)
+	}
+}
+
+func TestWarnLimiter(t *testing.T) {
+	var l warnLimiter
+	t0 := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	if !l.allow("a", t0) || l.allow("a", t0.Add(59*time.Second)) || !l.allow("b", t0.Add(time.Second)) {
+		t.Fatal("first use must pass, repeat within a minute must not, other key must")
+	}
+	if !l.allow("a", t0.Add(time.Minute)) {
+		t.Fatal("a minute later must pass")
+	}
+}
+
+// TestConfigureClampsCheckEveryTo300: an older panel's 3600 is applied as
+// 300; below 10 is refused; the summary interval keeps its 3600 bound.
+func TestConfigureClampsCheckEveryTo300(t *testing.T) {
+	r := newRig(t, base())
+	if err := r.m.Configure(proto.MonitorConfigureParams{CheckEverySec: 3600, SummaryEverySec: 3600}); err != nil {
+		t.Fatalf("3600 refused: %v", err)
+	}
+	if o := r.m.options(); o.CheckEvery != 300*time.Second || o.SummaryEvery != time.Hour {
+		t.Fatalf("options = %+v, want check 300s summary 1h", o)
+	}
+	r.tick(15 * time.Second)
+	if r.cur.d != 300*time.Second {
+		t.Errorf("check loop pauses %v, want 300s", r.cur.d)
+	}
+	if n := r.logs.count("applied as the maximum"); n != 1 {
+		t.Errorf("clamp logged %d times, want 1", n)
+	}
+	r.m.Configure(proto.MonitorConfigureParams{CheckEverySec: 3600, SummaryEverySec: 120})
+	if n := r.logs.count("applied as the maximum"); n != 1 {
+		t.Errorf("clamp logged %d times after a second configure, want 1", n)
+	}
+	err := r.m.Configure(proto.MonitorConfigureParams{CheckEverySec: 9, SummaryEverySec: 120})
+	var pe *commands.ParamError
+	if !errors.As(err, &pe) || pe.Msg != "check_every_sec harus 10 sampai 300 detik" {
+		t.Fatalf("Configure(9) = %v", err)
+	}
+}
+
+// TestSnapshotCommandRunsNoGuard: monitor.snapshot and monitor.configure
+// run none of the guards.
+func TestSnapshotCommandRunsNoGuard(t *testing.T) {
+	r, src := newCountingRig(t)
+	k0, t0, c0 := src.counts()
+	r.dispatch("monitor.snapshot", nil)
+	r.dispatch("monitor.configure", proto.MonitorConfigureParams{CheckEverySec: 20, SummaryEverySec: 120})
+	if k, tk, c := src.counts(); k != k0 || tk != t0 || c != c0 {
+		t.Fatalf("guards ran for a command: %d/%d/%d, was %d/%d/%d", k, tk, c, k0, t0, c0)
 	}
 }
