@@ -351,6 +351,79 @@ func TestRetryRebuildRechecksConnections(t *testing.T) {
 	e.waitJob(id, store.JobSucceeded)
 }
 
+// TestApproveRebuildRechecksConnections (SP-1): approving the rebuild of
+// the old master (here its wait to drop leftovers) reads its connections
+// again, as job start and Retry do: with connections left and no
+// acknowledgement the approval is refused, the job keeps waiting and
+// nothing but the read reaches the old master; acknowledged, it runs.
+func TestApproveRebuildRechecksConnections(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	ctx := context.Background()
+	pid, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(pid, store.JobSucceeded)
+	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	g.m.reply("mysql.connections", proto.ConnectionsResult{Typed: true, TakenAt: time.Now()})
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	g.m.fail("mysql.preflight", "pemeriksaan gagal")
+	g.c.reply("mysql.status", masterStatus())
+	g.c.reply("mysql.createDumpUser", nil)
+	g.c.reply("mysql.dropUser", nil)
+	g.c.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})
+	id, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+		RebuildOldMaster: true, ConfirmWipe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	// The job waits at its preflight to drop leftovers, for any length of
+	// time; meanwhile an application connects again.
+	j, _, _ := e.st.GetJob(id)
+	if err := e.st.ReopenJob(id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobWaiting, j.CurrentStep, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	e.setState(id, func(st *jobState) { st.WaitReason = WaitWipe })
+	row := proto.ConnectionRow{Host: "10.0.0.9", User: "app", DB: "simrs", Count: 2, Kind: "sql"}
+	g.m.reply("mysql.connections", proto.ConnectionsResult{Rows: []proto.ConnectionRow{row}, Typed: true, TakenAt: time.Now()})
+
+	reads := g.m.count("mysql.connections")
+	mark := g.m.mark()
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); !errors.Is(err, ErrConnectionsRemain) {
+		t.Fatalf("Approve without acknowledging the connections = %v, want ErrConnectionsRemain", err)
+	}
+	if n := g.m.count("mysql.connections"); n != reads+1 {
+		t.Fatalf("connections read %d times by the approval, want 1", n-reads)
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobWaiting {
+		t.Fatalf("job after a refused approval = %+v", j)
+	}
+	for _, c := range g.m.cmds(mark) {
+		if c != "mysql.connections" {
+			t.Fatalf("refused approval sent %s to the old master", c)
+		}
+	}
+	// An unreadable list is not clear either.
+	g.m.fail("mysql.connections", "login admin gagal")
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); !errors.Is(err, ErrConnectionsRemain) {
+		t.Fatalf("Approve with unreadable connections = %v, want ErrConnectionsRemain", err)
+	}
+
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	if err := e.r.Approve(id, JobAck{Confirmed: true, AcceptConnections: true}); err != nil {
+		t.Fatalf("acknowledged approval: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+}
+
 // A remove_databases that drops the data is confirmed when it is created
 // (its Retry counts 24 hours from then); one that keeps the data is not.
 func TestRemoveDatabasesDropConfirmedAtStart(t *testing.T) {

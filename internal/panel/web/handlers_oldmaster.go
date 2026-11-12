@@ -674,6 +674,8 @@ type rebuildInfo struct {
 	// AcceptLabel is the label of the acknowledgement the form requires
 	// ("" when the connection list is complete and empty and none is).
 	AcceptLabel string
+	// Form: see retryView.Form; always "" here.
+	Form string
 }
 
 // rebuildTarget checks that id is the quarantined old master of master's

@@ -324,6 +324,45 @@ func TestRetryRebuildRechecksConnections(t *testing.T) {
 	}
 }
 
+// TestApproveRebuildRechecksConnections (SP-1): the approve dialog of the
+// old master's rebuild reads its connections and asks for the
+// acknowledgement while any remain, tied to the approve form; the
+// approval forwards it, and the orchestrator's refusal comes back as 400.
+func TestApproveRebuildRechecksConnections(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	const id = "3333333333333333333333333333333b"
+	storeJob(t, e.st, id, orchestrator.KindCreateReplica, 1, `{"master_server_id":2,"rebuild_old_master":true,"wait_reason":"wipe"}`,
+		store.JobWaiting, "Periksa master", "Periksa server tujuan")
+	f.drops = map[string]bool{id: true}
+	f.connections = map[int64]proto.ConnectionsResult{1: {Typed: true, TakenAt: time.Now(),
+		Rows: []proto.ConnectionRow{{Host: "10.0.0.9", User: "app", Count: 2, Kind: "sql"}}}}
+
+	rec := e.do("GET", "/jobs/"+id, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `name="accept_connections" value="1" form="form-setujui" required`,
+		"Saya paham 2 koneksi masih ada dan tulisannya hilang")
+
+	// A complete, empty list asks for nothing.
+	f.connections[1] = proto.ConnectionsResult{Typed: true, TakenAt: time.Now()}
+	rec = e.do("GET", "/jobs/"+id, nil, c)
+	wantNoBody(t, rec, `name="accept_connections"`)
+
+	f.err = orchestrator.ErrConnectionsRemain
+	rec = e.do("POST", "/jobs/"+id+"/approve", withToken(t, e, url.Values{}, "job_approve:"+id, "job", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, orchestrator.ErrConnectionsRemain.Error())
+	if ack := f.lastAck(t); !ack.Confirmed || ack.AcceptConnections {
+		t.Fatalf("ack = %+v", ack)
+	}
+	f.err = nil
+	form := withToken(t, e, url.Values{"accept_connections": {"1"}}, "job_approve:"+id, "job", 1)
+	wantCode(t, e.do("POST", "/jobs/"+id+"/approve", form, c), http.StatusSeeOther)
+	if ack := f.lastAck(t); !ack.Confirmed || !ack.AcceptConnections {
+		t.Fatalf("ack = %+v", ack)
+	}
+}
+
 // TestPromoteRetryStillTokenless and TestTightenTLSRetryTokenless: jobs
 // that drop nothing keep their plain buttons and need no token.
 func TestPromoteRetryStillTokenless(t *testing.T) {

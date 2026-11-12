@@ -56,6 +56,7 @@
               </label>
               {{end}}
               {{end}}
+              {{with .ApproveConns}}{{template "accept-connections" .}}{{end}}
               <div class="modal-action">
                 <form method="dialog"><button class="btn">Batal</button></form>
                 <form method="post" action="/jobs/{{.Job.ID}}/approve" id="form-setujui"><button type="submit" class="btn btn-error"{{if .DropsData}} data-confirm-action="job_approve:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.Approval.Label}}: {{.Server.Name}}."{{end}}>{{.Approval.Label}}</button></form>
@@ -65,7 +66,8 @@
           </dialog>
         </div>
         {{else}}
-        <form method="post" action="/jobs/{{.Job.ID}}/approve"><button type="submit" class="btn btn-primary"{{if .DropsData}} data-confirm-action="job_approve:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.Approval.Label}}: {{.Server.Name}}."{{end}}>{{.Approval.Label}}</button></form>
+        {{with .ApproveConns}}{{template "accept-connections" .}}{{end}}
+        <form method="post" action="/jobs/{{.Job.ID}}/approve" id="form-setujui"><button type="submit" class="btn btn-primary"{{if .DropsData}} data-confirm-action="job_approve:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.Approval.Label}}: {{.Server.Name}}."{{end}}>{{.Approval.Label}}</button></form>
         {{end}}
         {{with .Approval.Recheck}}
         <form method="post" action="/jobs/{{$.Job.ID}}/retry"><button type="submit" class="btn btn-primary">{{.}}</button></form>

@@ -150,6 +150,10 @@ type jobPage struct {
 	// WaitAddExisting drops once approved; the approve dialog asks for
 	// each name typed (confirm_db[]), which the orchestrator compares.
 	TypeDatabases []string
+	// ApproveConns: the approval of the old master's rebuild reads its
+	// connections again (SP-1); the acknowledgement it needs, tied to the
+	// approve form.
+	ApproveConns *retryView
 }
 
 // retryView is what the retry dialog of a job that drops data shows: the
@@ -160,6 +164,9 @@ type retryView struct {
 	Server      store.Server
 	Wipe        wipeGroups
 	AcceptLabel string
+	// Form is the id of the form the acknowledgement belongs to when it
+	// is not inside it ("" for the retry dialog).
+	Form string
 }
 
 // jobParams are the fields of a job's params the job page reads.
@@ -315,6 +322,9 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 		}
 		p.DropsData = drops || err != nil
 	}
+	if p.CanApprove && p.DropsData && params.RebuildOldMaster && job.Kind == orchestrator.KindCreateReplica {
+		p.ApproveConns = &retryView{Server: srv, AcceptLabel: acceptLabel(a.connectionsOf(r.Context(), srv)), Form: "form-setujui"}
+	}
 	if p.CanRetry && p.DropsData && r.URL.Query().Get("buka") == "ulangi" {
 		p.OpenRetry = true
 		v, err := a.retryView(r, srv, params)
@@ -432,7 +442,8 @@ const msgRetryRefresh = "Daftar database tidak bisa disegarkan, jadi dialog Ulan
 // that the master lacks ticked in wipe_only[] (only names of that list),
 // and accept_connections for a rebuild whose connections remain (the
 // orchestrator reads them again); for an approval, the database names
-// typed in confirm_db[] (the orchestrator compares them). A refusal leaves the job as it was: 403
+// typed in confirm_db[] (the orchestrator compares them) and, for a
+// rebuild, accept_connections as for a retry. A refusal leaves the job as it was: 403
 // for the token, 400 for an acknowledgement, on the job page.
 func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name string, do func(string, orchestrator.JobAck) error) {
 	job, _, ok := a.jobFromPath(w, r)
@@ -452,6 +463,7 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 		ack.Confirmed = true
 		if name == ActJobApprove {
 			ack.TypedDatabases = r.PostForm["confirm_db[]"]
+			ack.AcceptConnections = paramsOf(job).RebuildOldMaster && r.PostFormValue("accept_connections") == "1"
 		}
 		if name == ActJobRetry {
 			params := paramsOf(job)

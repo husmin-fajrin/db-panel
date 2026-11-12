@@ -628,8 +628,8 @@ var errWipeOnlyUnlisted = errors.New("database yang diakui hanya ada di replika 
 // confirmDrop checks ack for an Approve (retry false) or a Retry of j and,
 // for a job that drops data, stores the new confirmation (ConfirmedAt and,
 // on a Retry, the WipeOnly acknowledged again) before the caller launches
-// it. connsClear is retryConnectionsClear's answer. Nothing is stored when
-// it refuses. Callers hold startMu.
+// it. connsClear is retryConnectionsClear's answer, for an Approve as for
+// a Retry. Nothing is stored when it refuses. Callers hold startMu.
 func (r *Runner) confirmDrop(j store.Job, ack JobAck, retry, connsClear bool) error {
 	st, drops, err := jobDropsData(j)
 	if !drops {
@@ -663,9 +663,12 @@ func (r *Runner) confirmDrop(j store.Job, ack JobAck, retry, connsClear bool) er
 			}
 		}
 		st.WipeOnly = only
-		if j.Kind == KindCreateReplica && st.RebuildOldMaster && !ack.AcceptConnections && !connsClear {
-			return ErrConnectionsRemain
-		}
+	}
+	// The rebuild of an old master drops what its applications still
+	// write: an Approve, like a Retry and the job's start, needs its
+	// connections read again and clear, or acknowledged (SP-1).
+	if j.Kind == KindCreateReplica && st.RebuildOldMaster && !ack.AcceptConnections && !connsClear {
+		return ErrConnectionsRemain
 	}
 	if err := r.launchRefused(j.ID); err != nil {
 		return err
@@ -693,10 +696,11 @@ func sameTypedNames(typed, want []string) bool {
 }
 
 // retryConnectionsClear reads the connections of the old master a
-// confirmed Retry of its rebuild would throw away, before startMu (an
-// agent call), as StartCreateReplica does. It is true when no reading is
-// needed (another job, an unconfirmed Retry, connections acknowledged).
-// The acknowledgement stored when the job started never counts.
+// confirmed Retry or Approve of its rebuild would throw away, before
+// startMu (an agent call), as StartCreateReplica does. It is true when no
+// reading is needed (another job, an unconfirmed action, connections
+// acknowledged). The acknowledgement stored when the job started never
+// counts.
 func (r *Runner) retryConnectionsClear(jobID string, ack JobAck) bool {
 	if !ack.Confirmed || ack.AcceptConnections {
 		return true
@@ -749,10 +753,13 @@ func (r *Runner) launchRefused(id string) error {
 // again with the approval. A superseded job (see supersededBy) is refused,
 // and so is a job that drops data without ack.Confirmed; a confirmed
 // approval of one is stored (ConfirmedAt) before the job runs on.
-// ack.WipeOnly and ack.AcceptConnections are not used by an approval. The
-// approval of an add_databases waiting for WaitAddExisting also needs
-// ack.TypedDatabases to be exactly its AddExisting (ErrAddExistingNames).
+// ack.WipeOnly is not used by an approval. The rebuild of an old master
+// reads its connections again, as a Retry does (ErrConnectionsRemain
+// without ack.AcceptConnections). The approval of an add_databases
+// waiting for WaitAddExisting also needs ack.TypedDatabases to be exactly
+// its AddExisting (ErrAddExistingNames).
 func (r *Runner) Approve(jobID string, ack JobAck) error {
+	connsClear := r.retryConnectionsClear(jobID, ack)
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
@@ -765,7 +772,7 @@ func (r *Runner) Approve(jobID string, ack JobAck) error {
 	if err := r.refuseSuperseded(j); err != nil {
 		return err
 	}
-	if err := r.confirmDrop(j, ack, false, true); err != nil {
+	if err := r.confirmDrop(j, ack, false, connsClear); err != nil {
 		return err
 	}
 	return r.launch(jobID, action{kind: actApprove, step: j.CurrentStep})
