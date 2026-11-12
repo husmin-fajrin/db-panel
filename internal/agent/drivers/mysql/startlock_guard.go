@@ -337,8 +337,9 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 // maxPendingStart is how many start reports wait for the panel at most.
 const maxPendingStart = 16
 
-// emitStart sends a start report (EventQuarantineStart,
-// EventQuarantineStartFailed) after the ones still waiting, in order. A
+// emitStart queues a start report (EventQuarantineStart,
+// EventQuarantineStartFailed) after the ones still waiting, in order; the
+// guard round sends them once its own work is done (sendRoundEvents). A
 // report the panel does not get (not connected: at agent start the first
 // guard round runs before the session is up, or the server is cut off)
 // is kept and sent again each guard round (flushStartEvents) until one is
@@ -366,7 +367,18 @@ func (d *Driver) emitStart(typ string, payload any) {
 		d.warn("start report dropped: too many waiting for the panel", "type", d.pendingStart[drop].Type)
 		d.pendingStart = slices.Delete(d.pendingStart, drop, drop+1)
 	}
+}
+
+// sendRoundEvents sends what a guard round has for the panel, after the
+// round's work: the start reports still waiting, then the quarantine that
+// took effect in the round (qNotice), which is not kept when not sent. The
+// caller holds promoteMu.
+func (d *Driver) sendRoundEvents() {
 	d.flushStartEvents()
+	if n := d.qNotice; n != nil {
+		d.qNotice = nil
+		d.emit(proto.EventQuarantined, *n)
+	}
 }
 
 // flushStartEvents sends the start reports still waiting, oldest first,

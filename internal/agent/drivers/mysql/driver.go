@@ -111,6 +111,10 @@ type Driver struct {
 	// The caller holds promoteMu.
 	pendingStart    []proto.Event
 	startSendWarned bool
+	// qNotice: the quarantine took effect in this guard round
+	// (guardQuarantined), sent once the round's work is done
+	// (sendRoundEvents). The caller holds promoteMu.
+	qNotice *proto.QuarantinedEvent
 
 	// startLockState is the start lock (startlock.go) as last checked,
 	// reported while startLockSet; startLockMu guards both.

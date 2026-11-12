@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -884,8 +885,11 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 	if err := mysql.RecordReplicaPortsSeen(ports, many, time.Now()); err == nil {
 		t.Fatal("20 ports recorded without the full mark")
 	}
+	// What forgetting a port loses (R-119): a replica on it that is not
+	// connected now is not recorded again by itself.
+	const caution = "tidak dicatat lagi dengan sendirinya"
 	code, out, errOut := run("forget-replica-port", "20000", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "port 20000 dihapus") {
+	if code != 0 || !strings.Contains(out, "port 20000 dihapus") || !strings.Contains(out, caution) {
 		t.Errorf("forget-replica-port 20000 = %d, %q, %q", code, out, errOut)
 	}
 	if code, _, errOut := run("forget-replica-port", "20000", "--dir", dir); code != 1 || !strings.Contains(errOut, "port 20000 tidak ada di catatan") {
@@ -898,10 +902,46 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "semua port replika dihapus") {
 		t.Errorf("forget-replica-port semua = %d, %q, %q", code, out, errOut)
 	}
+	// semua names what it removed: each port (the cap kept 20000-20007,
+	// 20000 is gone already), the full mark, the file, and the caution.
+	for p := 20001; p <= 20007; p++ {
+		if !strings.Contains(out, fmt.Sprint(p)) {
+			t.Errorf("forget-replica-port semua does not name removed port %d: %q", p, out)
+		}
+	}
+	for _, want := range []string{ports, "penuh", caution, "promosi terencana berikutnya"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("forget-replica-port semua lacks %q: %q", want, out)
+		}
+	}
 	if b, err := os.ReadFile(ports); err != nil || strings.TrimSpace(string(b)) != "" {
 		t.Errorf("replica-ports-seen after semua = %q, %v; want empty", b, err)
 	}
-	if _, out, _ := run("help"); !strings.Contains(out, "dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]") {
+	// An empty record: nothing removed, said plainly.
+	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
+	if code != 1 || out != "" || !strings.Contains(errOut, "sudah kosong") || !strings.Contains(errOut, "tidak ada yang dihapus") ||
+		!strings.Contains(errOut, ports) {
+		t.Errorf("forget-replica-port semua on an empty record = %d, %q, %q", code, out, errOut)
+	}
+	// A file holding more ports than the cap (written by hand or by an
+	// older agent): the list printed is bounded, the rest counted.
+	var lines []string
+	for p := 30001; p <= 30010; p++ {
+		lines = append(lines, fmt.Sprintf("%d %s", p, time.Now().UTC().Format(time.RFC3339)))
+	}
+	if err := os.WriteFile(ports, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "30001") || !strings.Contains(out, "30008") || strings.Contains(out, "30009") ||
+		strings.Contains(out, "30010") || !strings.Contains(out, "2 port lain") || !strings.Contains(out, caution) {
+		t.Errorf("forget-replica-port semua of 10 ports = %d, %q, %q", code, out, errOut)
+	}
+	_, out, _ = run("help")
+	if !strings.Contains(out, "dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]") {
 		t.Errorf("usage lacks forget-replica-port: %s", out)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(out), " "), "port replika yang tidak tersambung tidak dicatat lagi dengan sendirinya") {
+		t.Errorf("usage of forget-replica-port lacks the caution: %s", out)
 	}
 }

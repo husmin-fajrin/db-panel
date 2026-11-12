@@ -50,7 +50,9 @@ const usage = `Penggunaan:
                                                          diterima; portnya diabaikan)
   dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]
                                                          hapus port replika dari catatan; semua juga
-                                                         menghapus tanda catatan port penuh
+                                                         menghapus tanda catatan port penuh; port
+                                                         replika yang tidak tersambung tidak dicatat
+                                                         lagi dengan sendirinya
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -512,23 +514,60 @@ func mainForgetReplicaPort(args []string, stdout, stderr io.Writer) int {
 		}
 		port = n
 	}
+	if port == 0 {
+		return forgetAllReplicaPorts(stdout, stderr)
+	}
 	changed, err := mysql.ForgetReplicaPort(cliSeenPortsPath, port)
 	if err != nil {
 		fmt.Fprintf(stderr, "catatan port replika tidak bisa diubah: %v\n", err)
 		return 1
 	}
-	switch {
-	case !changed && port == 0:
-		fmt.Fprintln(stderr, "catatan port replika sudah kosong")
-		return 1
-	case !changed:
+	if !changed {
 		fmt.Fprintf(stderr, "port %d tidak ada di catatan\n", port)
 		return 1
-	case port == 0:
-		fmt.Fprintln(stdout, "semua port replika dihapus dari catatan; port replika yang tersambung dicatat lagi oleh agent dalam beberapa detik")
-	default:
-		fmt.Fprintf(stdout, "port %d dihapus dari catatan port replika\n", port)
 	}
+	fmt.Fprintf(stdout, "port %d dihapus dari catatan port replika; bila replika di port itu sekarang tidak tersambung "+
+		"ke master ini, port itu tidak dicatat lagi dengan sendirinya dan replika itu tidak dibaca sebelum master "+
+		"dibuka pada promosi terencana berikutnya\n", port)
+	return 0
+}
+
+// forgetAllReplicaPorts is "forget-replica-port semua": it names the file,
+// the ports it removed and what is lost with them (R-119): a replica on one
+// of those ports that is not connected now is not recorded again, so it is
+// not read before the master is opened at the next planned promotion.
+func forgetAllReplicaPorts(stdout, stderr io.Writer) int {
+	f, err := mysql.ForgetAllReplicaPorts(cliSeenPortsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "catatan port replika tidak bisa diubah: %v\n", err)
+		return 1
+	}
+	if !f.Changed() {
+		fmt.Fprintf(stderr, "catatan port replika sudah kosong (%s); tidak ada yang dihapus\n", cliSeenPortsPath)
+		return 1
+	}
+	fmt.Fprintf(stdout, "catatan port replika: %s\n", cliSeenPortsPath)
+	if len(f.Ports) == 0 {
+		fmt.Fprintln(stdout, "port yang dihapus: tidak ada")
+	} else {
+		list := make([]string, len(f.Ports))
+		for i, p := range f.Ports {
+			list[i] = strconv.Itoa(p)
+		}
+		more := ""
+		if f.More > 0 {
+			more = fmt.Sprintf(", dan %d port lain", f.More)
+		}
+		fmt.Fprintf(stdout, "port yang dihapus: %s%s\n", strings.Join(list, ", "), more)
+	}
+	if f.Full {
+		fmt.Fprintln(stdout, "tanda catatan port penuh ikut dihapus")
+	}
+	fmt.Fprintln(stdout, "semua port replika dihapus dari catatan; port replika yang tersambung dicatat lagi oleh agent dalam beberapa detik")
+	fmt.Fprintln(stdout, "Perhatian: port replika yang sekarang tidak tersambung ke master ini tidak dicatat lagi dengan sendirinya. "+
+		"Replika di port seperti itu tidak dibaca sebelum master dibuka pada promosi terencana berikutnya. "+
+		"Bila ada replika yang memakai salah satu port di atas dan sekarang tidak tersambung, sambungkan lagi "+
+		"(atau pastikan replika itu sudah dipensiunkan) sebelum promosi berikutnya.")
 	return 0
 }
 

@@ -570,6 +570,154 @@ func TestGuardEnforcesReadOnlyBeforeStartLockHousekeeping(t *testing.T) {
 	}
 }
 
+// stateAtSend is an eventLog that records, at each delivered Emit, whether
+// MySQL's super_read_only was on and whether the start lock file existed:
+// what the guard round had done by the time it talked to the panel.
+type stateAtSend struct {
+	eventLog
+	db   *sql.DB
+	lock string
+	mu   sync.Mutex
+	seen []sendState
+}
+
+type sendState struct {
+	typ        string
+	readOnly   bool
+	lockExists bool
+}
+
+func (e *stateAtSend) Emit(ev proto.Event) error {
+	var sro bool
+	err := e.db.QueryRow("SELECT @@global.super_read_only").Scan(&sro)
+	_, serr := os.Lstat(e.lock)
+	if eerr := e.eventLog.Emit(ev); eerr != nil {
+		return eerr
+	}
+	e.mu.Lock()
+	e.seen = append(e.seen, sendState{typ: ev.Type, readOnly: err == nil && sro, lockExists: serr == nil})
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *stateAtSend) sends() []sendState {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]sendState(nil), e.seen...)
+}
+
+// TestGuardSendsReportsAfterReadOnlyAndHousekeeping (R-117): a start
+// report still waiting for the panel is sent only after the round has made
+// the quarantined server read-only again and done the start lock's
+// housekeeping; a send to a panel whose socket does not drain blocks, and
+// must not delay either.
+func TestGuardSendsReportsAfterReadOnlyAndHousekeeping(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+	db := rootDB(t, inst)
+	ev := &stateAtSend{db: db, lock: r.lock}
+	r.d.Events = ev
+	// Round 1, panel not connected: MySQL is writable, a late start is
+	// kept for the panel.
+	ev.setOffline(true)
+	r.tickAt(time.Now())
+	if n := len(ev.all()); n != 0 {
+		t.Fatalf("delivered while offline: %d events", n)
+	}
+	// MySQL restarts (the start lock locks it), is opened by hand and the
+	// lock file is removed before the next round.
+	execAll(t, db, "RESET PERSIST super_read_only", "RESET PERSIST read_only")
+	inst.Restart(t)
+	execAll(t, db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+	if err := os.Remove(r.lock); err != nil {
+		t.Fatal(err)
+	}
+	ev.setOffline(false)
+	r.tickAt(time.Now())
+	sends := ev.sends()
+	var starts int
+	for _, s := range sends {
+		if s.typ == proto.EventQuarantineStart {
+			starts++
+		}
+		if !s.readOnly || !s.lockExists {
+			t.Errorf("%s sent with super_read_only=%v, start lock file present=%v; want both before any send",
+				s.typ, s.readOnly, s.lockExists)
+		}
+	}
+	// The report kept from round 1 and this round's own go out in this
+	// round, not 5 s later.
+	if starts != 2 {
+		t.Errorf("start reports sent in the round = %d (%+v), want 2", starts, sends)
+	}
+	if got := startEvents(t, &ev.eventLog); len(got) != 2 || got[0].Result != proto.QuarantineStartLate || got[1].Result != proto.QuarantineStartLate {
+		t.Errorf("start events = %+v, want two late", got)
+	}
+}
+
+// TestGuardFlushesStartReportsOnEveryPath (R-117, FR-1): a start report
+// still waiting is sent in every round that runs the guard, whatever path
+// the round leaves by; on a locked master only once super_read_only is on.
+func TestGuardFlushesStartReportsOnEveryPath(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		role    string
+		lock    bool
+		garbage bool
+		wantErr bool
+	}{
+		{name: "not locked", role: "replica"},
+		{name: "role not master", role: "replica", lock: true},
+		{name: "locked master", role: "master", lock: true},
+		{name: "lock unreadable", role: "replica", garbage: true, wantErr: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inst := testmysql.Start(t, testmysql.Options{})
+			r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+			db := rootDB(t, inst)
+			ev := &stateAtSend{db: db, lock: r.lock}
+			r.d.Events = ev
+			ev.setOffline(true)
+			now := time.Now()
+			r.tickAt(now)
+			if n := len(ev.all()); n != 0 {
+				t.Fatalf("delivered while offline: %d events", n)
+			}
+			if err := r.d.Pins().SetRole(c.role); err != nil {
+				t.Fatal(err)
+			}
+			if c.lock {
+				if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: guardCandidateKey, Deadline: now.Add(time.Hour)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.garbage {
+				if err := os.WriteFile(filepath.Join(r.dir, mysql.LockFile), []byte("{bukan json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.role == "master" {
+				execAll(t, db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+			}
+			ev.setOffline(false)
+			err := r.d.GuardTick(context.Background(), now.Add(5*time.Second))
+			if (err != nil) != c.wantErr {
+				t.Fatalf("GuardTick = %v, want error %v", err, c.wantErr)
+			}
+			if got := startEvents(t, &ev.eventLog); len(got) != 1 || got[0].Result != proto.QuarantineStartLate {
+				t.Fatalf("start events = %+v, want the kept late report", got)
+			}
+			if c.role == "master" {
+				for _, s := range ev.sends() {
+					if !s.readOnly {
+						t.Errorf("%s sent before the locked master's super_read_only was put back", s.typ)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestQuarantineGuardMakesNoAbortedHandshake (FR-13 a): the guard of a
 // quarantined server learns whether MySQL is up from its own login, not
 // from a greeting probe each round that MySQL counts as an aborted

@@ -325,7 +325,7 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 		src = net.JoinHostPort(host, fmt.Sprint(port))
 	}
 	d.warn("quarantine in effect: read-only on", "new_source", src, "flags_put_back", put)
-	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: src})
+	d.qNotice = &proto.QuarantinedEvent{NewSource: src}
 	return nil
 }
 

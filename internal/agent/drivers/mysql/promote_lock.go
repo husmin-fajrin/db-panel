@@ -535,7 +535,8 @@ func candidateConnected(ctx context.Context, db *sql.DB, host string) (string, b
 // first makes sure super_read_only is on (again after a MySQL restart,
 // before anything else). At or past the deadline of a lock with a
 // candidate it reads the candidate (see the package comment above); it
-// never acts on a lock-master lock.
+// never acts on a lock-master lock. Reports for the panel are sent last
+// (sendRoundEvents), on every path of a round that ran.
 func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	if d.pins == nil {
 		return nil
@@ -554,7 +555,11 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	defer d.promoteMu.Unlock()
-	d.flushStartEvents()
+	// What the round has for the panel goes last, on every path: a send
+	// can block on a panel connection that does not drain, and must not
+	// delay read-only, the start lock's housekeeping or the promote lock
+	// (R-117).
+	defer d.sendRoundEvents()
 	// A quarantined server is read-only before anything else, lock or
 	// not; the start lock's housekeeping (which may run --print-defaults)
 	// comes after it, whatever it answered (FR-13 b).
