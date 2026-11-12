@@ -393,8 +393,17 @@ func mainLockMaster(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gagal mengunci MySQL: %v\n", err)
 		return 1
 	}
-	if err := p.WriteLock(mysql.PromoteLock{Candidate: mysql.CLILockCandidate, Deadline: time.Now().Add(cliLockFor)}); err != nil {
+	// The check above and this write are not one step: write only when
+	// no lock appeared meanwhile (a planned promotion's), under the lock
+	// file's flock (FR-14).
+	l, written, err := p.WriteLockIfNone(mysql.PromoteLock{Candidate: mysql.CLILockCandidate, Deadline: time.Now().Add(cliLockFor)})
+	if err != nil {
 		fmt.Fprintf(stderr, "MySQL sudah read-only, tetapi kunci promosi gagal ditulis: %v\n", err)
+		return 1
+	}
+	if !written {
+		fmt.Fprintf(stderr, "MySQL sudah read-only, tetapi sementara itu master dikunci untuk promosi (kandidat %s, sampai %s); "+
+			"kunci itu dibiarkan dan kunci lock-master tidak ditulis\n", l.Candidate, l.Deadline.Local().Format(time.RFC3339))
 		return 1
 	}
 	fmt.Fprintln(stdout, "master dikunci (super_read_only, juga setelah restart); buka dengan: sudo dbpanel agent unlock-master")

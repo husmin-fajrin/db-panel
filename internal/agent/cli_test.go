@@ -436,6 +436,37 @@ func TestRunPairsWithLocalTokenFirst(t *testing.T) {
 	}
 }
 
+// TestLockMasterKeepsLockWrittenMeanwhile (FR-14): a promote lock written
+// between lock-master's check and its write (lockForPromote of a planned
+// promotion) is not replaced by the CLI's lock.
+func TestLockMasterKeepsLockWrittenMeanwhile(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	dir := t.TempDir()
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	old := cliMySQLHost
+	cliMySQLHost = func(string) (mysql.Host, error) {
+		// After lock-master checked for a lock, before it writes one.
+		if err := p.WriteLock(mysql.PromoteLock{Candidate: "10.0.0.2:3306", Addr: "10.0.0.2", Deadline: deadline}); err != nil {
+			t.Error(err)
+		}
+		return inst.Host(), nil
+	}
+	t.Cleanup(func() { cliMySQLHost = old })
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"lock-master", "--dir", dir}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "10.0.0.2:3306") {
+		t.Errorf("lock-master racing a promote lock = %d, %q, %q; want 1 naming the other lock", code, stdout.String(), stderr.String())
+	}
+	l, ok, err := p.ReadLock()
+	if !ok || err != nil || l.Candidate != "10.0.0.2:3306" || !l.Deadline.Equal(deadline) {
+		t.Errorf("lock after the race = %+v, %v, %v; want the promote lock kept", l, ok, err)
+	}
+}
+
 // TestCLILockUnlockMaster: lock-master makes MySQL super_read_only, also
 // across a restart (SET PERSIST), and writes the promote lock with no
 // candidate ("cli") for 24 hours; a second lock-master is refused;

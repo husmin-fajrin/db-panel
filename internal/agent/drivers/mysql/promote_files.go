@@ -218,6 +218,29 @@ func (p *Pins) WriteLock(l PromoteLock) error {
 	return p.writeLockFile(l)
 }
 
+// WriteLockIfNone writes the promote lock l only when there is none, the
+// check and the write in one critical section under LockFlockFile (FR-14):
+// a lock written meanwhile by another writer (lockForPromote) is returned
+// with written false and kept.
+func (p *Pins) WriteLockIfNone(l PromoteLock) (cur PromoteLock, written bool, err error) {
+	if l.Candidate == "" || l.Deadline.IsZero() {
+		return PromoteLock{}, false, errors.New("kunci promosi butuh kandidat dan tenggat")
+	}
+	unlock, err := p.flockLock()
+	if err != nil {
+		return PromoteLock{}, false, err
+	}
+	defer unlock()
+	cur, ok, err := p.ReadLock()
+	if err != nil || ok {
+		return cur, false, err
+	}
+	if err := p.writeLockFile(l); err != nil {
+		return PromoteLock{}, false, err
+	}
+	return l, true, nil
+}
+
 // writeLockFile writes l to the lock file; the caller holds LockFlockFile.
 func (p *Pins) writeLockFile(l PromoteLock) error {
 	return writeJSON(p.path(LockFile), lockJSON{Candidate: l.Candidate, Addr: l.Addr, Deadline: l.Deadline.UTC().Format(time.RFC3339),
