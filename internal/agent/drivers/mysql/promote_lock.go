@@ -643,7 +643,9 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 			return err
 		case len(unreadable) > 0:
 			g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
-			d.keepLock(now, key, "replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang: "+strings.Join(unreadable, ", "), unreadable...)
+			// The hosts travel in the event's Hosts only, not again in its
+			// reason (SP-9: an event over the panel's size is not judged).
+			d.keepLock(now, key, "replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang", unreadable...)
 			return nil
 		}
 		// Every listed replica read read-only (or writable without this
@@ -687,7 +689,7 @@ func (d *Driver) keepLock(now time.Time, key, reason string, hosts ...string) {
 	if !g.keptAt.IsZero() && now.Sub(g.keptAt) < keptEvery && slices.Equal(hosts, g.keptHosts) {
 		return
 	}
-	d.warn("promote lock expired but kept", "candidate", key, "reason", reason)
+	d.warn("promote lock expired but kept", "candidate", key, "reason", reason, "hosts", hosts)
 	if d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "kept", Candidate: key, Reason: reason, Hosts: hosts}) != nil {
 		return
 	}

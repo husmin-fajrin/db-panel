@@ -1066,12 +1066,13 @@ func TestMasterLockExpiredFromEvent(t *testing.T) {
 		t.Fatalf("alerts after 24 h = %+v", as)
 	}
 
-	// An unreadable payload is taken (ignored), never passed on.
+	// An unreadable payload is taken, never passed on, and opens the
+	// generic kept notice (SP-9: not judging it must not mean silence).
 	if !r.m.HandleEvent(mID, proto.Event{Type: proto.EventLockExpired, Payload: []byte("{")}) {
 		t.Fatal("unreadable monitor.lockExpired not taken")
 	}
-	if len(r.alerts(mID, KindMasterLockExpired)) != 2 {
-		t.Fatal("unreadable payload opened an alert")
+	if as := r.alerts(mID, KindMasterLockExpired); len(as) != 3 || as[2].ClosedAt != nil || !strings.HasPrefix(as[2].Message, lockKeptPrefix) {
+		t.Fatalf("alerts after an unreadable payload = %+v, want the generic kept notice open", as)
 	}
 }
 
@@ -1827,6 +1828,44 @@ func TestStartLateSurvivesRebuildUntilCopied(t *testing.T) {
 	}
 	r.m.tick()
 	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+}
+
+// TestLockKeptOversizeStillAlerts (SP-9): a kept-lock event too large or
+// unreadable to judge still opens the lock-expired notice (the generic
+// kept text) instead of nothing.
+func TestLockKeptOversizeStillAlerts(t *testing.T) {
+	for _, payload := range [][]byte{[]byte(`{"action":"kept","hosts":["` + strings.Repeat("h", 5<<10) + `"]}`), []byte("{")} {
+		r := newRig(t)
+		mID, _ := r.master("db-master")
+		if !r.m.HandleEvent(mID, proto.Event{Type: proto.EventLockExpired, Payload: payload}) {
+			t.Fatal("HandleEvent did not take monitor.lockExpired")
+		}
+		if a := r.openAlert(mID, KindMasterLockExpired); !strings.HasPrefix(a.Message, lockKeptPrefix) {
+			t.Fatalf("%d-byte event: message = %q", len(payload), a.Message)
+		}
+	}
+}
+
+// TestUnreadableStartEventsStillAlert (SP-9): a start report that cannot
+// be read is taken as the worst it could be: a late start (run "Periksa
+// data tertinggal"), a failed start; an open alert keeps its message.
+func TestUnreadableStartEventsStillAlert(t *testing.T) {
+	r := newRig(t)
+	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantineStart, Payload: []byte("{")})
+	if a := r.openAlert(mID, KindMasterStartLate); !strings.Contains(a.Message, "Periksa data tertinggal") {
+		t.Fatalf("late message = %q", a.Message)
+	}
+	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantineStartFailed, Payload: []byte(strings.Repeat("a", 8<<10))})
+	r.openAlert(mID, KindMasterStartBlocked)
+
+	r2 := newRig(t)
+	m2, _, _ := r2.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r2.m.HandleEvent(m2, startEvent(t, proto.QuarantineStartLate, false))
+	r2.m.HandleEvent(m2, proto.Event{Type: proto.EventQuarantineStart, Payload: []byte("{")})
+	if a := r2.openAlert(m2, KindMasterStartLate); a.Message != wantStartLateText {
+		t.Fatalf("an unreadable event rewrote the open late alert: %q", a.Message)
+	}
 }
 
 func TestStartBlockedOpensAndStartCloses(t *testing.T) {

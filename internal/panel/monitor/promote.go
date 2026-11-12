@@ -341,8 +341,16 @@ func (m *Monitor) handlePromoteEvent(serverID int64, ev proto.Event) bool {
 	if ev.Type != proto.EventQuarantined && ev.Type != proto.EventLockExpired {
 		return false
 	}
+	// A kept lock's event too large or unreadable to judge still says the
+	// lock expired: the generic kept notice opens (SP-9).
+	keptAnyway := func() {
+		if ev.Type == proto.EventLockExpired {
+			m.notice(serverID, KindMasterLockExpired, lockExpiredMessage(proto.LockExpiredEvent{Action: lockExpiredKept}))
+		}
+	}
 	if len(ev.Payload) > maxPromoteEventPayload {
-		m.log.Warn("promote event too large; ignored", "server_id", serverID, "type", ev.Type, "bytes", len(ev.Payload))
+		m.log.Warn("promote event too large", "server_id", serverID, "type", ev.Type, "bytes", len(ev.Payload))
+		keptAnyway()
 		return true
 	}
 	var kind, msg string
@@ -357,7 +365,8 @@ func (m *Monitor) handlePromoteEvent(serverID int64, ev proto.Event) bool {
 	default:
 		var le proto.LockExpiredEvent
 		if err := json.Unmarshal(ev.Payload, &le); err != nil {
-			m.log.Warn("monitor.lockExpired unreadable; ignored", "server_id", serverID, "err", err)
+			m.log.Warn("monitor.lockExpired unreadable", "server_id", serverID, "err", err)
+			keptAnyway()
 			return true
 		}
 		if le.Action == lockExpiredUnlocked {
@@ -567,21 +576,35 @@ func (m *Monitor) closeAlertLocked(serverID int64, kind, reason string, ups []al
 
 // handleStartEvent takes the start lock guard's events of a quarantined
 // server (proto EventQuarantineStart, EventQuarantineStartFailed); false
-// for any other event. An event that cannot be read, or whose result is
-// not one of the three, changes nothing: only a result the panel knows
-// closes an alert about a server that may have been writable.
+// for any other event. An event that cannot be read opens the worst it
+// could say and closes nothing; one whose result is not one of the three
+// changes nothing: only a result the panel knows closes an alert about a
+// server that may have been writable.
 func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 	if ev.Type != proto.EventQuarantineStart && ev.Type != proto.EventQuarantineStartFailed {
 		return false
 	}
+	// A report too large or unreadable to judge is taken as the worst it
+	// could say (SP-9): a failed start, or a late one (whose remedy,
+	// "Periksa data tertinggal", is what closes it). It closes nothing and
+	// never rewrites an open alert.
+	worst := func() {
+		if ev.Type == proto.EventQuarantineStartFailed {
+			m.raiseIfNone(serverID, KindMasterStartBlocked, startBlockedMessage(""))
+			return
+		}
+		m.raiseIfNone(serverID, KindMasterStartLate, startUnreadableText)
+	}
 	if len(ev.Payload) > maxPromoteEventPayload {
-		m.log.Warn("start lock event too large; ignored", "server_id", serverID, "type", ev.Type, "bytes", len(ev.Payload))
+		m.log.Warn("start lock event too large", "server_id", serverID, "type", ev.Type, "bytes", len(ev.Payload))
+		worst()
 		return true
 	}
 	if ev.Type == proto.EventQuarantineStartFailed {
 		var fe proto.QuarantineStartFailedEvent
 		if err := json.Unmarshal(ev.Payload, &fe); err != nil {
-			m.log.Warn("monitor.quarantineStartFailed unreadable; ignored", "server_id", serverID, "err", err)
+			m.log.Warn("monitor.quarantineStartFailed unreadable", "server_id", serverID, "err", err)
+			worst()
 			return true
 		}
 		m.raise(serverID, KindMasterStartBlocked, startBlockedMessage(fe.File))
@@ -589,7 +612,8 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 	}
 	var qe proto.QuarantineStartEvent
 	if err := json.Unmarshal(ev.Payload, &qe); err != nil {
-		m.log.Warn("monitor.quarantineStart unreadable; ignored", "server_id", serverID, "err", err)
+		m.log.Warn("monitor.quarantineStart unreadable", "server_id", serverID, "err", err)
+		worst()
 		return true
 	}
 	known := qe.Result == proto.QuarantineStartLate || qe.Result == proto.QuarantineStartBypassed ||
@@ -618,6 +642,24 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 	m.mu.Unlock()
 	m.emitAlerts(ups)
 	return true
+}
+
+// startUnreadableText words master_start_late opened for a start report
+// the panel could not read (SP-9).
+const startUnreadableText = "laporan menyala master lama dari agent tidak terbaca; anggap master lama sempat bisa ditulis dan " +
+	"jalankan Periksa data tertinggal"
+
+// raiseIfNone opens kind on serverID with msg unless one is open already
+// (which keeps its message).
+func (m *Monitor) raiseIfNone(serverID int64, kind, msg string) {
+	_, err := m.st.GetOpenAlert(kind, serverID)
+	switch {
+	case err == nil:
+		return
+	case !errors.Is(err, store.ErrNotFound):
+		m.log.Warn("read open alert", "server_id", serverID, "kind", kind, "err", err)
+	}
+	m.raise(serverID, kind, msg)
 }
 
 // closeStartAlerts closes the event alerts of the start lock (late,

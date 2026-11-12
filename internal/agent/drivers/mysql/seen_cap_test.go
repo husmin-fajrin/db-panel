@@ -1,9 +1,11 @@
 package mysql_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -207,4 +209,43 @@ func TestLockForPromoteFanOutBounded(t *testing.T) {
 		resp := r.dispatch("mysql.lockForPromote", params)
 		refused(t, r, dir, resp, "penuh", ports, "forget-replica-port semua")
 	})
+}
+
+// TestReadPeerBoundsAnswer (SA-10): a peer that answers with a huge error
+// message (a squatter at a recorded address) adds at most a few hundred
+// bytes to the read's error, which goes to the logs and the kept event.
+func TestReadPeerBoundsAnswer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				msg := bytes.Repeat([]byte("x"), 2<<20)
+				payload := append([]byte{0xff, 0x10, 0x04}, msg...)
+				n := len(payload)
+				hdr := []byte{byte(n), byte(n >> 8), byte(n >> 16), 0}
+				c.Write(append(hdr, payload...))
+			}()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	start := time.Now()
+	st := mysql.ReadPeer(context.Background(), proto.PeerCred{Host: "127.0.0.1", Port: port, User: "u", Password: "p"}, 5*time.Second)
+	if st.Reachable {
+		t.Fatal("a fake server was read")
+	}
+	if len(st.Err) > 512 {
+		t.Errorf("Err is %d bytes, want at most 512", len(st.Err))
+	}
+	if took := time.Since(start); took > 6*time.Second {
+		t.Errorf("ReadPeer took %v", took)
+	}
 }

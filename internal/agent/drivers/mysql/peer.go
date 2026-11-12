@@ -54,12 +54,23 @@ func ReadPeer(ctx context.Context, c proto.PeerCred, timeout time.Duration) Peer
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	fail := func(err error) PeerState {
-		return PeerState{Err: fmt.Sprintf("%s: %v", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), err)}
+		// The driver's error carries the server's own text: bounded, as
+		// it goes to the logs and into the kept event (SA-10).
+		return PeerState{Err: cutText(fmt.Sprintf("%s: %v", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), err), maxPeerErr)}
 	}
 	cfg := drv.NewConfig()
 	cfg.User, cfg.Passwd = c.User, c.Password
 	cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = timeout, timeout, timeout
+	// What a peer can send is bounded too (a squatter at a recorded
+	// address could stream for the whole timeout).
+	cfg.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &limitedConn{Conn: conn, left: maxPeerAnswer}, nil
+	}
 	tagAgent(cfg)
 	if c.Verify {
 		pem, err := os.ReadFile(c.SSLCA)
@@ -93,6 +104,44 @@ func ReadPeer(ctx context.Context, c proto.PeerCred, timeout time.Duration) Peer
 	}
 	st.Reachable = true
 	return st
+}
+
+// maxPeerAnswer bounds what one ReadPeer reads from the peer (TLS
+// included); maxPeerErr bounds its error text.
+const (
+	maxPeerAnswer = 256 << 10
+	maxPeerErr    = 300
+)
+
+// limitedConn fails a read once left bytes were read.
+type limitedConn struct {
+	net.Conn
+	left int
+}
+
+func (c *limitedConn) Read(p []byte) (int, error) {
+	if c.left <= 0 {
+		return 0, fmt.Errorf("jawaban server lebih dari %d KiB; berhenti dibaca", maxPeerAnswer>>10)
+	}
+	if len(p) > c.left {
+		p = p[:c.left]
+	}
+	n, err := c.Conn.Read(p)
+	c.left -= n
+	return n, err
+}
+
+// cutText is s cut to at most n bytes on a rune boundary, marked.
+func cutText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const mark = " …(dipotong)"
+	cut := n - len(mark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + mark
 }
 
 // mysqlProtocolV10 is the first payload byte of a MySQL server greeting;
