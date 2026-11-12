@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
-	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -132,11 +131,9 @@ func TestLockTooLargeNotWritten(t *testing.T) {
 // call timeout, and a full port record refuses the lock: each refusal
 // writes no lock file and leaves the master writable.
 func TestLockForPromoteFanOutBounded(t *testing.T) {
-	master := testmysql.Start(t, testmysql.Options{})
-	replica := testmysql.Start(t, testmysql.Options{})
-	replUser(t, master)
+	// Synced: the replication account has reached the candidate.
+	master, replica := sourceWithReplica(t)
 	mdb := rootDB(t, master)
-	follow(t, master, replica)
 	waitDumpThread(t, mdb)
 	cand := proto.PeerCred{Host: "127.0.0.1", Port: replica.Port, User: "dbpanel_repl", Password: replPassword}
 	params := proto.LockForPromoteParams{Candidate: cand, TimeoutSec: 600}

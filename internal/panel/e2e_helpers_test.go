@@ -380,9 +380,25 @@ func (u *uiClient) confirmToken(action, kind string, id int64) string {
 // server goes with it.
 func (u *uiClient) approveJob(j store.Job) {
 	u.t.Helper()
+	u.approveJobAck(j, false)
+}
+
+// approveJobAck is approveJob that, with accept, also ticks the
+// acknowledgement of the old master's connections when the approve dialog
+// of its rebuild asks for it (it reads them again, SP-1); without accept a
+// dialog that asks for it fails the test.
+func (u *uiClient) approveJobAck(j store.Job, accept bool) {
+	u.t.Helper()
 	form := url.Values{}
-	if strings.Contains(u.get("/jobs/"+j.ID), `data-confirm-action="job_approve:`+j.ID+`"`) {
+	page := u.get("/jobs/" + j.ID)
+	if strings.Contains(page, `data-confirm-action="job_approve:`+j.ID+`"`) {
 		form.Set("confirm_token", u.confirmToken("job_approve:"+j.ID, "job", j.ServerID))
+	}
+	if strings.Contains(page, `name="accept_connections" value="1" form="form-setujui"`) {
+		if !accept {
+			u.t.Fatalf("the approval of job %s asks to acknowledge connections:\n%s", j.ID, textOf(page))
+		}
+		form.Set("accept_connections", "1")
 	}
 	u.postRedirect("/jobs/"+j.ID+"/approve", form)
 }
@@ -723,7 +739,7 @@ func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode
 		if strings.Contains(j.ParamsJSON, `"wait_reason":"reconnect"`) {
 			e.connectRoot(t, target)
 		}
-		e.ui.approveJob(j)
+		e.ui.approveJobAck(j, rebuild && accept)
 		return true
 	})
 	if job.Status != store.JobSucceeded {
