@@ -249,3 +249,33 @@ func TestReadPeerBoundsAnswer(t *testing.T) {
 		t.Errorf("ReadPeer took %v", took)
 	}
 }
+
+// TestStartLockFileFixNeverFollowsLink (SA-7): the owner and mode of an
+// existing start lock file are fixed on the file that was checked, never
+// on whatever a symlink put at its path in between points to.
+func TestStartLockFileFixNeverFollowsLink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dbpanel-start-lock.sql")
+	victim := filepath.Join(dir, "rahasia")
+	if err := os.WriteFile(victim, []byte("rahasia"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(mysql.StartLockContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mysql.SetAfterStartLockOpen(func(p string) {
+		// Swapped for a link to another file after the check.
+		if err := os.Remove(p); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(victim, p); err != nil {
+			t.Error(err)
+		}
+	}))
+	if err := mysql.WriteStartLockFile(path); err != nil {
+		t.Logf("WriteStartLockFile: %v", err)
+	}
+	if fi, err := os.Stat(victim); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("victim after the fix: %v, %v; want mode 0600 untouched", fi, err)
+	}
+}

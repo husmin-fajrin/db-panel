@@ -31,3 +31,14 @@ func ManagedConfigPath(l Layout) (string, error) {
 	p, _, err := managedConfigPath(l)
 	return p, err
 }
+
+// WriteStartLockFile writes the start lock file at path (SA-7).
+var WriteStartLockFile = writeStartLockFile
+
+// SetAfterStartLockOpen runs f between the start lock file's check and its
+// owner and mode fix; it returns the function that restores the hook.
+func SetAfterStartLockOpen(f func(path string)) (restore func()) {
+	old := afterStartLockOpen
+	afterStartLockOpen = f
+	return func() { afterStartLockOpen = old }
+}

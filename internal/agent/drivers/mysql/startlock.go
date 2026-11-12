@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -391,22 +392,13 @@ func writeStartLock(ctx context.Context, h Host) error {
 // (reportQuarantineStart compares it with mysqld's start).
 func writeStartLockFile(path string) error {
 	root := os.Geteuid() == 0
-	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
-		if b, err := os.ReadFile(path); err == nil && string(b) == startLockContent {
-			if uid, gid := fileOwnerIDs(fi); root && (uid != 0 || gid != 0) {
-				if err := os.Lchown(path, 0, 0); err != nil {
-					return err
-				}
-			}
-			if fi.Mode().Perm() != 0o644 {
-				return os.Chmod(path, 0o644)
-			}
-			return nil
-		}
-	}
-	// writeFileAtomic keeps an existing file's owner: make it root's first.
-	if fi, err := os.Lstat(path); root && err == nil && fi.Mode().IsRegular() {
-		if err := os.Chown(path, 0, 0); err != nil {
+	// The owner and mode are fixed on the file opened here (never through
+	// a symlink, and on the descriptor, not the path), so a link put at
+	// path in between never makes root change another file (SA-7).
+	if f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0); err == nil {
+		done, err := fixStartLockFile(f, root)
+		f.Close()
+		if err != nil || done {
 			return err
 		}
 	}
@@ -419,6 +411,36 @@ func writeStartLockFile(path string) error {
 		}
 	}
 	return nil
+}
+
+// afterStartLockOpen runs in writeStartLockFile between opening the file
+// and fixing it; tests replace it.
+var afterStartLockOpen = func(string) {}
+
+// fixStartLockFile works on f, the start lock file opened without
+// following a symlink: a regular file that holds startLockContent gets
+// root as owner (when root) and mode 0644, and done is true; any other
+// regular file is made root's (writeFileAtomic keeps an existing file's
+// owner) and done is false, so the caller writes the content.
+func fixStartLockFile(f *os.File, root bool) (done bool, err error) {
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return false, nil
+	}
+	b, err := io.ReadAll(io.LimitReader(f, int64(len(startLockContent))+1))
+	afterStartLockOpen(f.Name())
+	if uid, gid := fileOwnerIDs(fi); root && (uid != 0 || gid != 0) {
+		if err := f.Chown(0, 0); err != nil {
+			return false, err
+		}
+	}
+	if err != nil || string(b) != startLockContent {
+		return false, nil
+	}
+	if fi.Mode().Perm() != 0o644 {
+		return true, f.Chmod(0o644)
+	}
+	return true, nil
 }
 
 // effectiveOpts is what mysqld --print-defaults says mysqld reads: every
