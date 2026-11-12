@@ -504,10 +504,10 @@ func candidateConnected(ctx context.Context, db *sql.DB, host string) (string, b
 }
 
 // GuardTick is the guard, run by the monitor's guard loop every
-// monitor.GuardEvery (monitor.PromoteGuard) at now. First, whatever the
-// role, it keeps or releases the start lock (guardStartLock). On a
-// quarantined server it then only keeps read_only and super_read_only on
-// (guardQuarantined). While the promote lock exists on a pinned master it
+// monitor.GuardEvery (monitor.PromoteGuard) at now. On a quarantined
+// server it keeps read_only and super_read_only on (guardQuarantined) and
+// then keeps the start lock (guardStartLock); on any other role it keeps
+// or releases the start lock first. While the promote lock exists on a pinned master it
 // first makes sure super_read_only is on (again after a MySQL restart,
 // before anything else). At or past the deadline of a lock with a
 // candidate it reads the candidate (see the package comment above); it
@@ -531,12 +531,15 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	}
 	defer d.promoteMu.Unlock()
 	d.flushStartEvents()
-	d.guardStartLock(ctx, h, now)
 	// A quarantined server is read-only before anything else, lock or
-	// not.
+	// not; the start lock's housekeeping (which may run --print-defaults)
+	// comes after it, whatever it answered (FR-13 b).
 	if d.pins.Role() == roleQuarantined {
-		return d.guardQuarantined(ctx, h)
+		err := d.guardQuarantined(ctx, h)
+		d.guardStartLock(ctx, h, now)
+		return err
 	}
+	d.guardStartLock(ctx, h, now)
 	l, locked, err := d.pins.ReadLock()
 	if err != nil {
 		return err
@@ -576,7 +579,7 @@ func (d *Driver) ensureLocked(ctx context.Context, db *sql.DB) error {
 		if on {
 			return nil
 		}
-		d.warn("promote lock present but super_read_only was off; locking again")
+		d.warnLimited("promote lock present but super_read_only was off; locking again")
 	}
 	if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {
 		return fmt.Errorf("pasang lagi kunci promosi (SET PERSIST super_read_only = ON): %w", err)
@@ -634,7 +637,7 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		unreadable, writable := readListed(ctx, *g.cred, l.Readable, uuid)
 		switch {
 		case writable != "":
-			d.warn("promote lock expired but another replica is a writable master with this server's transactions; quarantining",
+			d.warnLimited("promote lock expired but another replica is a writable master with this server's transactions; quarantining",
 				"candidate", key, "new_source", writable)
 			_, err := d.selfQuarantine(ctx, writable, "")
 			return err
@@ -754,4 +757,26 @@ func (d *Driver) warn(msg string, args ...any) {
 	if d.Logger != nil {
 		d.Logger.Warn(msg, args...)
 	}
+}
+
+// warnEvery is how often warnLimited logs the same message at most.
+const warnEvery = time.Minute
+
+// warnLimited is warn at most once per warnEvery for the same msg: for
+// the guard's warnings that repeat every round while a fault lasts or
+// flaps (FR-11; the monitor limits its own the same way).
+func (d *Driver) warnLimited(msg string, args ...any) {
+	now := time.Now()
+	d.warnMu.Lock()
+	last, seen := d.warnAt[msg]
+	if seen && now.Sub(last) < warnEvery {
+		d.warnMu.Unlock()
+		return
+	}
+	if d.warnAt == nil {
+		d.warnAt = map[string]time.Time{}
+	}
+	d.warnAt[msg] = now
+	d.warnMu.Unlock()
+	d.warn(msg, args...)
 }

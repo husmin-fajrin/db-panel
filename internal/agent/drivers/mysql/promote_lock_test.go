@@ -1,10 +1,12 @@
 package mysql_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -1215,4 +1217,43 @@ func waitDumpThread(t *testing.T, db *sql.DB) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// TestGuardFaultWarningsLimited (FR-11): a guard warning that repeats every
+// round while its fault lasts (here super_read_only turned off again and
+// again under a promote lock) is logged at most once a minute; the lock
+// is put back every round all the same.
+func TestGuardFaultWarningsLimited(t *testing.T) {
+	r := newLockRig(t, guardCandidateKey)
+	var logs syncBuffer
+	r.d.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	r.tick(-time.Hour)
+	for i := 1; i <= 3; i++ {
+		execAll(t, r.db, "SET GLOBAL super_read_only = OFF")
+		r.tick(-time.Hour + time.Duration(i)*5*time.Second)
+		if sro, _ := readOnly(t, r.db); !sro {
+			t.Fatalf("round %d: super_read_only not put back", i)
+		}
+	}
+	if n := strings.Count(logs.String(), "super_read_only was off"); n != 1 {
+		t.Errorf("warning logged %d times in three rounds, want 1:\n%s", n, logs.String())
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

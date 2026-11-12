@@ -25,3 +25,9 @@ func SetLockReadBudget(d time.Duration) (restore func()) {
 
 // ReadTail is how the guard reads the end of MySQL's error log (SA-6).
 var ReadTail = readTail
+
+// ManagedConfigPath is the file holding the agent's MySQL options.
+func ManagedConfigPath(l Layout) (string, error) {
+	p, _, err := managedConfigPath(l)
+	return p, err
+}

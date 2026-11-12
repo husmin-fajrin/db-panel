@@ -76,14 +76,16 @@ type Driver struct {
 	// never both see no account and both CREATE, ALTER and GRANT it.
 	replUserMu sync.Mutex
 
-	// RecordReplicas: the hosts and ports it last wrote and when, and the
-	// text of the last SHOW REPLICAS error it logged.
+	// RecordReplicas: the hosts and ports it last wrote and when.
 	seenMu      sync.Mutex
 	seenHosts   []string
 	seenAt      time.Time
 	seenPorts   []int
 	seenPortsAt time.Time
-	portsErr    string
+
+	// warnLimited: when each limited warning was last logged.
+	warnMu sync.Mutex
+	warnAt map[string]time.Time
 
 	// The promote lock (promote_lock.go): lockForPromote, unlockPromote,
 	// quarantine, repoint and the guard run one at a time.
@@ -132,7 +134,11 @@ type Driver struct {
 	bootLog            string
 	bootLogAt          time.Time
 	// bootLogWarnAt: when an unreadable error log was last logged.
+	// bootSince: the guard wrote a missing or changed lock file again
+	// while MySQL was down; the log is read from then (the managed
+	// config's mtime) until MySQL answers.
 	bootLogWarnAt time.Time
+	bootSince     time.Time
 
 	salvageMu sync.Mutex // a salvage rename, a delete or the sweep; never held across mysqlbinlog
 	// salvageRun is held by the one mysql.salvage that may run; another

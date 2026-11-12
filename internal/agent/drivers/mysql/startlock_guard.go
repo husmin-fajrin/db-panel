@@ -124,8 +124,13 @@ func (d *Driver) guardStartLock(ctx context.Context, h Host, now time.Time) {
 	l := h.Layout()
 	if role == roleQuarantined {
 		d.keepStartLock(ctx, h, now)
-		if localGreeting(ctx, l) != nil {
+		// Whether MySQL answers is what guardQuarantined, run just
+		// before, learned from its own login: no greeting probe of our
+		// own each round (FR-13 a).
+		if !d.qUp {
 			d.watchBootFailure(ctx, h, now)
+		} else {
+			d.bootSince = time.Time{}
 		}
 		return
 	}
@@ -238,6 +243,15 @@ func (d *Driver) keepStartLock(ctx context.Context, h Host, now time.Time) {
 		d.checkStartLock(ctx, h, now, false)
 		return
 	}
+	// A MySQL that failed to start on the missing (or changed) file did
+	// so before the file written now: its error log is read from when the
+	// managed config was last written instead of from the new file's
+	// mtime (FR-4).
+	if p, _, err := managedConfigPath(l); err == nil {
+		if fi, err := os.Stat(p); err == nil && (d.bootSince.IsZero() || fi.ModTime().Before(d.bootSince)) {
+			d.bootSince = fi.ModTime()
+		}
+	}
 	d.lockStart(ctx, h)
 	d.startLockCheckedAt = now
 	if startLockIntact(l, path) {
@@ -268,7 +282,8 @@ func (d *Driver) warnStartLock(now time.Time, msg string, err error) {
 
 // watchBootFailure reads the end of MySQL's error log while a quarantined
 // server's MySQL does not answer, and reports a line newer than the lock
-// file (and than the last one reported) saying mysqld could not open it
+// file, or than bootSince when the guard had to write the file again (and
+// newer than the last one reported) saying mysqld could not open it
 // (EventQuarantineStartFailed). Without a log_error option the log is not
 // watched. The caller holds promoteMu.
 func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
@@ -306,7 +321,11 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 		}
 		return
 	}
-	at, ok := scanBootstrapFailure(tail, path, fi.ModTime())
+	since := fi.ModTime()
+	if !d.bootSince.IsZero() && d.bootSince.Before(since) {
+		since = d.bootSince
+	}
+	at, ok := scanBootstrapFailure(tail, path, since)
 	if !ok || !at.After(d.bootFailAt) {
 		return
 	}

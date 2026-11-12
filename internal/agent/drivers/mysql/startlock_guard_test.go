@@ -504,6 +504,100 @@ func TestReadTailOnlyRegularFiles(t *testing.T) {
 	}
 }
 
+// TestBootstrapFailureReportedWhenGuardRecreatesFile (FR-4): the lock file
+// was deleted while the agent was down and MySQL then refused to start;
+// the guard writes the file again (a new mtime) and still reports the
+// failed start from the log, which predates the new file.
+func TestBootstrapFailureReportedWhenGuardRecreatesFile(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	if err := mysql.WriteStartLock(context.Background(), inst.Host()); err != nil {
+		t.Fatal(err)
+	}
+	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+	inst.Stop(t)
+	written := time.Date(2026, 11, 11, 3, 0, 0, 0, time.UTC)
+	cfg, err := mysql.ManagedConfigPath(inst.Layout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cfg, written, written); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(r.lock); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(inst.ErrorLog, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString("2026-11-11T03:18:19.026539Z 0 [ERROR] [MY-010455] [Server] Failed to open the bootstrap file " + r.lock + "\n")
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.tickAt(time.Now())
+	if _, file := r.lineAndFile(); !file {
+		t.Fatal("the guard did not write the lock file again")
+	}
+	evs := r.ev.all()
+	if len(evs) != 1 || evs[0].Type != proto.EventQuarantineStartFailed {
+		t.Fatalf("events = %+v, want one %s", evs, proto.EventQuarantineStartFailed)
+	}
+}
+
+// TestGuardEnforcesReadOnlyBeforeStartLockHousekeeping (FR-13 b): on a
+// quarantined server the guard puts read-only back before it runs the start
+// lock's housekeeping, which may run --print-defaults.
+func TestGuardEnforcesReadOnlyBeforeStartLockHousekeeping(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+	db := rootDB(t, inst)
+	var roAtFirstWrite atomic.Int32
+	t.Cleanup(mysql.SetWriteConfigHook(func(string) error {
+		if roAtFirstWrite.Load() == 0 {
+			var sro bool
+			if err := db.QueryRow("SELECT @@global.super_read_only").Scan(&sro); err == nil && sro {
+				roAtFirstWrite.Store(1)
+			} else {
+				roAtFirstWrite.Store(2)
+			}
+		}
+		return nil
+	}))
+	r.tickAt(time.Now())
+	if got := roAtFirstWrite.Load(); got != 1 {
+		t.Fatalf("super_read_only when the start lock was first written: state %d, want on (1)", got)
+	}
+}
+
+// TestQuarantineGuardMakesNoAbortedHandshake (FR-13 a): the guard of a
+// quarantined server learns whether MySQL is up from its own login, not
+// from a greeting probe each round that MySQL counts as an aborted
+// connection.
+func TestQuarantineGuardMakesNoAbortedHandshake(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+	db := rootDB(t, inst)
+	aborted := func() int {
+		t.Helper()
+		var name string
+		var n int
+		if err := db.QueryRow("SHOW GLOBAL STATUS LIKE 'Aborted_connects'").Scan(&name, &n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	now := time.Now()
+	r.tickAt(now)
+	before := aborted()
+	for i := 1; i <= 3; i++ {
+		r.tickAt(now.Add(time.Duration(i) * 5 * time.Second))
+	}
+	if after := aborted(); after != before {
+		t.Errorf("Aborted_connects grew by %d over three guard rounds, want 0", after-before)
+	}
+}
+
 func TestScanBootstrapFailure(t *testing.T) {
 	const file = "/etc/mysql/dbpanel-start-lock.sql"
 	since := time.Date(2026, 11, 11, 3, 0, 0, 0, time.UTC)

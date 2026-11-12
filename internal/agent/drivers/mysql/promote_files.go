@@ -697,16 +697,9 @@ func (d *Driver) observeReplicas(ctx context.Context, db *sql.DB, now time.Time,
 		return nil, nil, nil
 	}
 	ports, perr := replicaPorts(ctx, db)
-	d.seenMu.Lock()
-	msg := ""
 	if perr != nil {
-		msg = perr.Error()
-	}
-	logIt := msg != "" && msg != d.portsErr
-	d.portsErr = msg
-	d.seenMu.Unlock()
-	if logIt && d.Logger != nil {
-		d.Logger.Warn("replica ports not read; recording the hosts only", "err", perr)
+		// At most once a minute, however often the error flips (FR-11).
+		d.warnLimited("replica ports not read; recording the hosts only", "err", perr)
 	}
 	return hosts, ports, d.recordSeen(hosts, ports, now)
 }
