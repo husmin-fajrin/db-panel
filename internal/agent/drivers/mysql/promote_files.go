@@ -83,8 +83,8 @@ const (
 // the oldest hosts left the replicas-seen file so that it stays readable.
 // Either write did happen.
 var (
-	errSeenPortsFull = fmt.Errorf("port replika tidak dicatat: sudah ada %d port tercatat", maxSeenPorts)
-	errSeenTrimmed   = errors.New("host replika tertua dibuang dari catatan agar berkasnya tetap terbaca")
+	errSeenPortsFull = fmt.Errorf("port replika tidak masuk daftar: sudah ada %d port di daftar port replika", maxSeenPorts)
+	errSeenTrimmed   = errors.New("host replika tertua dibuang dari daftar replika agar berkasnya tetap terbaca")
 )
 
 // PromoteLock is the promote lock: the server stays read-only for the

@@ -217,17 +217,17 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 	if !fullAt.IsZero() {
 		// A replica's port was not recorded: the reads below would miss
 		// it, and the guard would open writes past it.
-		return res, &commands.ParamError{Msg: fmt.Sprintf("catatan port replika %s penuh (%d port; port lain tidak dicatat sejak %s), "+
+		return res, &commands.ParamError{Msg: fmt.Sprintf("daftar port replika %s penuh (%d port; port lain tidak masuk daftar sejak %s), "+
 			"jadi tidak semua replika bisa dibaca; master tidak dikunci. Periksa berkas itu, lalu jalankan di server ini: "+
-			"sudo dbpanel agent forget-replica-port semua (port replika yang tersambung dicatat lagi dalam beberapa detik)",
+			"sudo dbpanel agent forget-replica-port semua (port replika yang tersambung masuk daftar lagi dalam beberapa detik)",
 			d.seenPortsPath(), maxSeenPorts, fullAt.Local().Format(time.RFC3339))}
 	}
 	targets := lockReadTargets(p.Candidate, addr, p.Candidate.Port, d.recordedHosts(seenHosts), ports)
 	if len(targets) > maxLockReads {
-		return res, &commands.ParamError{Msg: fmt.Sprintf("terlalu banyak replika tercatat untuk dibaca sebelum master dikunci "+
+		return res, &commands.ParamError{Msg: fmt.Sprintf("terlalu banyak replika di daftar untuk dibaca sebelum master dikunci "+
 			"(%d pembacaan host:port, paling banyak %d); master tidak dikunci. Hapus replika yang sudah tidak dipakai dengan: "+
-			"sudo dbpanel agent forget-replica <host> (catatan %s) dan port yang tidak dipakai dengan: "+
-			"sudo dbpanel agent forget-replica-port <port> (catatan %s)",
+			"sudo dbpanel agent forget-replica <host> (daftar replika %s) dan port yang tidak dipakai dengan: "+
+			"sudo dbpanel agent forget-replica-port <port> (daftar port replika %s)",
 			len(targets), maxLockReads, d.seenPath(), d.seenPortsPath())}
 	}
 	rctx, cancel := context.WithTimeout(ctx, lockReadBudget)
@@ -241,7 +241,7 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 	}
 	if rerr != nil {
 		return res, &commands.ParamError{Msg: fmt.Sprintf("replika lain belum selesai dibaca dalam %s; master tidak dikunci. "+
-			"Replika yang tercatat ada di %s dan %s; hapus yang sudah tidak dipakai dengan: sudo dbpanel agent forget-replica <host>",
+			"Replika yang terdaftar ada di %s dan %s; hapus yang sudah tidak dipakai dengan: sudo dbpanel agent forget-replica <host>",
 			lockReadBudget, d.seenPath(), d.seenPortsPath())}
 	}
 	// The lock file first: a failure or a crash after it leaves a lock

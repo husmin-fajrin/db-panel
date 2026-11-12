@@ -45,14 +45,14 @@ const usage = `Penggunaan:
   dbpanel agent lock-master [--dir DIR]                  kunci master (super_read_only, juga
                                                          setelah restart) tanpa kandidat promosi
   dbpanel agent unlock-master [--dir DIR]                buka kunci master dan hapus kunci promosi
-  dbpanel agent forget-replica <host> [--dir DIR]        hapus replika dari catatan dan dari kunci
+  dbpanel agent forget-replica <host> [--dir DIR]        hapus replika dari daftar replika dan dari kunci
                                                          promosi yang sedang berdiri (host:port juga
                                                          diterima; portnya diabaikan)
   dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]
-                                                         hapus port replika dari catatan; semua juga
-                                                         menghapus tanda catatan port penuh; port
-                                                         replika yang tidak tersambung tidak dicatat
-                                                         lagi dengan sendirinya
+                                                         hapus port dari daftar port replika; semua juga
+                                                         menghapus tanda daftar port penuh; port replika
+                                                         yang tidak tersambung tidak masuk daftar lagi
+                                                         dengan sendirinya
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -481,14 +481,14 @@ func mainForgetReplica(args []string, stdout, stderr io.Writer) int {
 	}
 	seen, err := mysql.ForgetReplica(cliSeenPath, host)
 	if err != nil {
-		fmt.Fprintf(stderr, "catatan replika tidak bisa diubah (%d entri kunci promosi sudah dihapus): %v\n", n, err)
+		fmt.Fprintf(stderr, "daftar replika tidak bisa diubah (%d entri kunci promosi sudah dihapus): %v\n", n, err)
 		return 1
 	}
 	if !seen && n == 0 {
-		fmt.Fprintf(stderr, "%s tidak ada di catatan\n", host)
+		fmt.Fprintf(stderr, "%s tidak ada di daftar replika\n", host)
 		return 1
 	}
-	fmt.Fprintf(stdout, "replika %s dihapus dari catatan (%d entri kunci promosi ikut dihapus)\n", host, n)
+	fmt.Fprintf(stdout, "replika %s dihapus dari daftar replika (%d entri kunci promosi ikut dihapus)\n", host, n)
 	// What it bypasses (SA-11).
 	fmt.Fprintf(stdout, "Penjaga kunci promosi tidak lagi menunggu %s terbaca: bila replika itu sudah menjadi master, "+
 		"master ini bisa terbuka dalam beberapa menit dan ada dua master yang bisa ditulis.\n", host)
@@ -519,15 +519,15 @@ func mainForgetReplicaPort(args []string, stdout, stderr io.Writer) int {
 	}
 	changed, err := mysql.ForgetReplicaPort(cliSeenPortsPath, port)
 	if err != nil {
-		fmt.Fprintf(stderr, "catatan port replika tidak bisa diubah: %v\n", err)
+		fmt.Fprintf(stderr, "daftar port replika tidak bisa diubah: %v\n", err)
 		return 1
 	}
 	if !changed {
-		fmt.Fprintf(stderr, "port %d tidak ada di catatan\n", port)
+		fmt.Fprintf(stderr, "port %d tidak ada di daftar port replika\n", port)
 		return 1
 	}
-	fmt.Fprintf(stdout, "port %d dihapus dari catatan port replika; bila replika di port itu sekarang tidak tersambung "+
-		"ke master ini, port itu tidak dicatat lagi dengan sendirinya dan replika itu tidak dibaca sebelum master "+
+	fmt.Fprintf(stdout, "port %d dihapus dari daftar port replika; bila replika di port itu sekarang tidak tersambung "+
+		"ke master ini, port itu tidak masuk daftar lagi dengan sendirinya dan replika itu tidak dibaca sebelum master "+
 		"dibuka pada promosi terencana berikutnya\n", port)
 	return 0
 }
@@ -539,17 +539,17 @@ func mainForgetReplicaPort(args []string, stdout, stderr io.Writer) int {
 func forgetAllReplicaPorts(stdout, stderr io.Writer) int {
 	f, err := mysql.ForgetAllReplicaPorts(cliSeenPortsPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "catatan port replika tidak bisa diubah: %v\n", err)
+		fmt.Fprintf(stderr, "daftar port replika tidak bisa diubah: %v\n", err)
 		return 1
 	}
 	if !f.Changed() {
-		fmt.Fprintf(stderr, "catatan port replika sudah kosong (%s); tidak ada yang dihapus\n", cliSeenPortsPath)
+		fmt.Fprintf(stderr, "daftar port replika sudah kosong (%s); tidak ada yang dihapus\n", cliSeenPortsPath)
 		return 1
 	}
-	fmt.Fprintf(stdout, "catatan port replika: %s\n", cliSeenPortsPath)
+	fmt.Fprintf(stdout, "daftar port replika: %s\n", cliSeenPortsPath)
 	if len(f.Ports) == 0 {
 		// Only the full mark: no port was lost.
-		fmt.Fprintln(stdout, "tidak ada port di catatan; hanya tanda catatan port penuh yang dihapus")
+		fmt.Fprintln(stdout, "tidak ada port di daftar; hanya tanda daftar port penuh yang dihapus")
 		return 0
 	}
 	list := make([]string, len(f.Ports))
@@ -558,10 +558,10 @@ func forgetAllReplicaPorts(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "port yang dihapus: %s\n", strings.Join(list, ", "))
 	if f.Full {
-		fmt.Fprintln(stdout, "tanda catatan port penuh ikut dihapus")
+		fmt.Fprintln(stdout, "tanda daftar port penuh ikut dihapus")
 	}
-	fmt.Fprintln(stdout, "semua port replika dihapus dari catatan; port replika yang tersambung dicatat lagi oleh agent dalam beberapa detik")
-	fmt.Fprintln(stdout, "Perhatian: port replika yang sekarang tidak tersambung ke master ini tidak dicatat lagi dengan sendirinya. "+
+	fmt.Fprintln(stdout, "semua port dihapus dari daftar port replika; port replika yang tersambung dimasukkan lagi oleh agent dalam beberapa detik")
+	fmt.Fprintln(stdout, "Perhatian: port replika yang sekarang tidak tersambung ke master ini tidak masuk daftar lagi dengan sendirinya. "+
 		"Replika di port seperti itu tidak dibaca sebelum master dibuka pada promosi terencana berikutnya. "+
 		"Bila ada replika yang memakai salah satu port di atas dan sekarang tidak tersambung, sambungkan lagi "+
 		"(atau pastikan replika itu sudah dipensiunkan) sebelum promosi berikutnya.")

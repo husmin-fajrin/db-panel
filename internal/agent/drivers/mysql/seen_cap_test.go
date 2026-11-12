@@ -166,7 +166,7 @@ func TestLockForPromoteFanOutBounded(t *testing.T) {
 		}
 		start := time.Now()
 		resp := r.dispatch("mysql.lockForPromote", params)
-		refused(t, r, dir, resp, "terlalu banyak replika tercatat", r.d.SeenPath, "forget-replica")
+		refused(t, r, dir, resp, "terlalu banyak replika di daftar", r.d.SeenPath, "forget-replica")
 		if took := time.Since(start); took > 20*time.Second {
 			t.Errorf("refusal took %v, want at once", took)
 		}

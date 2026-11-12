@@ -824,7 +824,7 @@ func TestForgetReplicaCLI(t *testing.T) {
 	}
 
 	code, out, errOut := run("forget-replica", "10.0.0.3", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "replika 10.0.0.3 dihapus dari catatan (2 entri kunci promosi ikut dihapus)") ||
+	if code != 0 || !strings.Contains(out, "replika 10.0.0.3 dihapus dari daftar replika (2 entri kunci promosi ikut dihapus)") ||
 		!strings.Contains(out, "Penjaga kunci promosi tidak lagi menunggu 10.0.0.3") {
 		t.Errorf("forget-replica = %d, %q, %q", code, out, errOut)
 	}
@@ -840,7 +840,7 @@ func TestForgetReplicaCLI(t *testing.T) {
 	}
 
 	code, out, errOut = run("forget-replica", "--dir", dir, "10.0.0.3")
-	if code != 1 || !strings.Contains(errOut, "10.0.0.3 tidak ada di catatan") {
+	if code != 1 || !strings.Contains(errOut, "10.0.0.3 tidak ada di daftar replika") {
 		t.Errorf("forget-replica again = %d, %q, %q", code, out, errOut)
 	}
 	if code, _, errOut := run("forget-replica", "--dir", dir); code != 2 || !strings.Contains(errOut, "forget-replica <host>") {
@@ -852,7 +852,7 @@ func TestForgetReplicaCLI(t *testing.T) {
 
 	// host:port as the master_lock_kept alert names it (FR-9 a).
 	code, out, errOut = run("forget-replica", "10.0.0.4:3306", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "replika 10.0.0.4 dihapus dari catatan (1 entri kunci promosi ikut dihapus)") {
+	if code != 0 || !strings.Contains(out, "replika 10.0.0.4 dihapus dari daftar replika (1 entri kunci promosi ikut dihapus)") {
 		t.Errorf("forget-replica host:port = %d, %q, %q", code, out, errOut)
 	}
 	if ok, err := mysql.ReplicaSeen(seen, "10.0.0.4"); ok || err != nil {
@@ -887,19 +887,19 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 	}
 	// What forgetting a port loses (R-119): a replica on it that is not
 	// connected now is not recorded again by itself.
-	const caution = "tidak dicatat lagi dengan sendirinya"
+	const caution = "tidak masuk daftar lagi dengan sendirinya"
 	code, out, errOut := run("forget-replica-port", "20000", "--dir", dir)
 	if code != 0 || !strings.Contains(out, "port 20000 dihapus") || !strings.Contains(out, caution) {
 		t.Errorf("forget-replica-port 20000 = %d, %q, %q", code, out, errOut)
 	}
-	if code, _, errOut := run("forget-replica-port", "20000", "--dir", dir); code != 1 || !strings.Contains(errOut, "port 20000 tidak ada di catatan") {
+	if code, _, errOut := run("forget-replica-port", "20000", "--dir", dir); code != 1 || !strings.Contains(errOut, "port 20000 tidak ada di daftar port replika") {
 		t.Errorf("forget-replica-port again = %d, %q", code, errOut)
 	}
 	if code, _, errOut := run("forget-replica-port", "bukan", "--dir", dir); code != 2 || !strings.Contains(errOut, "bukan port") {
 		t.Errorf("forget-replica-port bukan = %d, %q", code, errOut)
 	}
 	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "semua port replika dihapus") {
+	if code != 0 || !strings.Contains(out, "semua port dihapus") {
 		t.Errorf("forget-replica-port semua = %d, %q, %q", code, out, errOut)
 	}
 	// semua names what it removed: each port (the cap kept 20000-20007,
@@ -948,7 +948,7 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "tidak ada port di catatan; hanya tanda catatan port penuh yang dihapus") ||
+	if code != 0 || !strings.Contains(out, "tidak ada port di daftar; hanya tanda daftar port penuh yang dihapus") ||
 		strings.Contains(out, "di atas") || strings.Contains(out, caution) || !strings.Contains(out, ports) {
 		t.Errorf("forget-replica-port semua with only the full mark = %d, %q, %q", code, out, errOut)
 	}
@@ -956,7 +956,7 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 	if !strings.Contains(out, "dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]") {
 		t.Errorf("usage lacks forget-replica-port: %s", out)
 	}
-	if !strings.Contains(strings.Join(strings.Fields(out), " "), "port replika yang tidak tersambung tidak dicatat lagi dengan sendirinya") {
+	if !strings.Contains(strings.Join(strings.Fields(out), " "), "port replika yang tidak tersambung tidak masuk daftar lagi dengan sendirinya") {
 		t.Errorf("usage of forget-replica-port lacks the caution: %s", out)
 	}
 }
