@@ -16,13 +16,13 @@
 
 ## 1. Ringkasan eksekutif
 
-Rencana 5a menutup jalur dua master dan kehilangan data yang dicatat inventaris risiko (R-029..R-036, R-043, R-058) dan delapan dari sembilan jalur tambahan spesifikasi §5.9. Yang ditambahkan: kunci start lewat `init_file` sehingga master lama yang dikarantina menyala baca-saja walau agent mati; loop penjaga tetap 5 detik; catatan replika (host × port) yang dibaca sebelum kunci promosi dibuka; kunci promosi yang dipertahankan bila replika tercatat tidak terbaca; daftar koneksi yang jujur; token baru untuk Ulangi dan Setujui job pembuang; dan "Jangan ganggu" yang tidak membungkam jenis berbahaya.
+Rencana 5a menutup jalur dua master dan kehilangan data yang dicatat inventaris risiko (R-029..R-036, R-043, R-058) dan, menurut tabel spesifikasi §5.9, delapan dari sembilan jalur tambahannya (yang kesembilan, replika sebagian yang tidak terbaca penjaga, tetap terbuka sebagai R-108). Yang ditambahkan: kunci start lewat `init_file` sehingga master lama yang dikarantina menyala baca-saja walau agent mati; loop penjaga tetap 5 detik; catatan replika (host × port) yang dibaca sebelum kunci promosi dibuka; kunci promosi yang dipertahankan bila replika tercatat tidak terbaca; daftar koneksi yang jujur; token baru untuk Ulangi dan Setujui job pembuang; dan "Jangan ganggu" yang tidak membungkam jenis berbahaya.
 
 Hasil keseluruhan: tidak ada temuan Kritis. Tidak ada jalur ke `mysql.dropDatabases` tanpa konfirmasi yang sah. Kunci start dibangun sesuai urutan yang dituntut spesifikasi (berkas sebelum baris, baris sebelum berkas). Tiga celah pada pengiriman peringatan, yang justru menjadi andalan operator saat failover, ditemukan review dan sudah diperbaiki.
 
 Jumlah temuan (40 nomor, SEC-85..SEC-124, setelah SA-5 = FR-1 dan SP-7 = FR-15 digabung):
 
-| Tingkat (seperti diberikan pemeriksanya) | Sebelum gelombang perbaikan | Terbuka atau sebagian sesudahnya |
+| Tingkat (pemeriksa; SEC-87 dinaikkan, lihat catatan) | Sebelum gelombang perbaikan | Terbuka atau sebagian sesudahnya |
 |---|---|---|
 | Tinggi | 3 | 3 |
 | Sedang | 6 | 0 |
@@ -32,6 +32,8 @@ Jumlah temuan (40 nomor, SEC-85..SEC-124, setelah SA-5 = FR-1 dan SP-7 = FR-15 d
 | Tidak dinilai (review, "declined to judge") | 2 | 1 |
 | Info | 4 | 3 |
 | **Jumlah** | **40** | **16** |
+
+Aturan tingkat di dokumen ini: setiap temuan memakai tingkat yang diberikan pemeriksanya sendiri. Satu-satunya pengecualian adalah SEC-87 (SA-3): pemeriksa memberi Sedang, dan dokumen ini mencatatnya sebagai Tinggi atas keputusan pengendali karena kredensial bocor. Menurut tingkat pemeriksa saja, hitungan "Sebelum" menjadi Tinggi 2 dan Sedang 7. Temuan lain tidak dinilai ulang di sini, walau prioritasnya di inventaris bisa berbeda.
 
 Status: **Diperbaiki 24, Diperbaiki sebagian 3, Terbuka 13, Diterima 0.** Tingkat di tabel ini adalah tingkat pemeriksa (dampak dan kemungkinan). Prioritas di inventaris risiko hanya menilai dampak, jadi beberapa butir yang di sini Rendah menjadi Tinggi di sana (misalnya SEC-103: kemungkinannya kecil, tetapi akibatnya data hilang). Peta nomor ada di §4.0.
 
@@ -124,7 +126,7 @@ Kolom "Asal" menyebut nomor asli: SA = audit keamanan sisi agent, SP = audit kea
 |---|---|---|---|---|---|
 | SEC-85 | SA-1 | **Tinggi** | Panel yang dibobol membuka master lama yang dikarantina lewat `releaseRole`; kunci start ikut lepas | **Terbuka** | R-109 (Rencana 5b) |
 | SEC-86 | SA-2 | **Tinggi** | Panel pemegang sandi replikasi mengarantina master sehat di bawah server miliknya, lalu membuang datanya | **Terbuka** | R-110 (Rencana 5b) |
-| SEC-87 | SA-3 | **Tinggi** (pemeriksa: Sedang) | Sandi replikasi ditawarkan tanpa verifikasi ke setiap host × port tercatat setahun | **Terbuka** | R-111 (Rencana 5c); R-039 |
+| SEC-87 | SA-3 | **Tinggi** (dinaikkan; pemeriksa: Sedang) | Sandi replikasi ditawarkan tanpa verifikasi ke setiap host × port tercatat setahun | **Terbuka** | R-111 (Rencana 5c); R-039 |
 | SEC-88 | SA-4 | Sedang | Port tercatat dari replika tanpa batas; pembacaan saat kunci 10 menit, kunci terlambat, kunci yang tidak terbaca | Diperbaiki | 8d9be83, ee3ab70; sisa R-118, R-119 |
 | SEC-89 | SA-5 = FR-1 | Sedang / Penting | Laporan start sekali kirim hilang bila sesi panel belum tersambung | Diperbaiki | a9545a2; sisa R-116, R-117 |
 | SEC-90 | SA-6 | Sedang | Penjaga membuka log error MySQL sebagai root dengan `open` biasa (FIFO menggantung loop penjaga) | Diperbaiki | b7dd3db; sisa R-122 |
@@ -203,7 +205,7 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 - **Status: Terbuka.** Masuk Rencana 5b (persetujuan root lokal sebelum bangun ulang yang menyusul karantina, yaitu "mode ketat" untuk satu kelompok perintah). Baris inventaris R-110 (kelas B, Tinggi). **Saran sementara:** lindungi host panel.
 
 ### SEC-87 — Sandi replikasi ditawarkan tanpa verifikasi ke setiap host × port tercatat (SA-3)
-- **Tingkat:** Tinggi. Pemeriksa memberi Sedang. Keputusan pengendali menaikkannya ke Tinggi karena kredensial bocor (definisi Tinggi di inventaris), dan pemeriksa sendiri menyebut Tinggi untuk baris inventarisnya.
+- **Tingkat:** Tinggi, satu-satunya tingkat yang dinaikkan dalam dokumen ini. Pemeriksa memberi Sedang. Keputusan pengendali menaikkannya ke Tinggi karena kredensial bocor (definisi Tinggi di inventaris), dan pemeriksa sendiri menyebut Tinggi untuk baris inventarisnya.
 - **Penyerang:** (a) perangkat yang mengambil IP bekas replika (dalam setahun terakhir), atau (b) pengguna lokal tanpa hak di host yang tercatat, pada port tercatat yang tidak dipakai. Tidak perlu akun MySQL atau posisi on-path.
 - **Lokasi:**
   - `promote_lock.go:225`, `:335-353` (`lockReadTargets`: setiap host tercatat × setiap port tercatat ditambah port kandidat, dengan akun kandidat);
@@ -241,7 +243,7 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 ### SEC-89 — Laporan start sekali kirim hilang bila panel belum tersambung (SA-5 = FR-1)
 - **Tingkat:** Sedang (audit agent) / Penting (review).
 - **Masalah di `343898c`:** `monitor.quarantineStart` (`late`, `bypassed`) dan `monitor.quarantineStartFailed` dikirim sekali. Bila sesi WebSocket belum ada, misalnya saat boot (tik penjaga pertama berlomba dengan dial) atau saat jaringan terbelah, laporan itu hilang. Panel tidak membuka `master_start_late`, sehingga operator bisa membangun ulang master lama tanpa menyelamatkan tulisan dari jendela itu. README menjanjikan sebaliknya.
-- **Perbaikan:** a9545a2. Laporan start masuk antrean memori `pendingStart` (paling banyak 16; lewat dari itu, `ok` tertua dibuang lebih dulu) lewat `emitStart` (`startlock_guard.go:349-367`). `flushStartEvents` (`:375-392`) mengirimnya di awal setiap `GuardTick` dan berhenti pada penolakan pertama.
+- **Perbaikan:** a9545a2. Laporan start masuk antrean memori `pendingStart` (paling banyak 16; lewat dari itu dibuang satu laporan: `ok` tertua, atau bila tidak ada `ok`, laporan tertua, yang bisa saja `late`) lewat `emitStart` (`startlock_guard.go:349-367`). `flushStartEvents` (`:375-392`) mengirimnya di awal setiap `GuardTick` dan berhenti pada penolakan pertama.
 - **Test pin:** `TestQuarantineStartReportRetriedUntilDelivered` (late, start failed).
 - **Putusan pemeriksaan ulang:** ADDRESSED.
 - **Status: Diperbaiki.**
@@ -305,7 +307,7 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 - **Perbaikan:** 33ad13f. `changed()` membandingkan `StartLock` (nil, `Present`, `Locked`, `Reason`). `Snapshot` menghitung `startLockStatus` sendiri bila penjaga belum memeriksanya pada server yang dikarantina.
 - **Test pin:** `TestChangedOnStartLock`, `TestFirstSnapshotOfQuarantinedServerCarriesCheckedStartLock`.
 - **Putusan pemeriksaan ulang:** ADDRESSED.
-- **Status: Diperbaiki.** (R-107 ditulis ulang: setengah pertamanya kini hanya kasus agent yang tidak pernah melapor sama sekali.)
+- **Status: Diperbaiki.** Perbaikan ini tidak mengubah R-107: server yang dikarantina tetapi belum pernah mengirim laporan tetap tidak dinilai aturan `master_start_unguarded` (`monitor/alerts.go:355`).
 
 ### SEC-95 — Host kunci yang dipertahankan bisa tertahan sejam (FR-3)
 - **Tingkat:** Penting.
@@ -675,10 +677,10 @@ Semuanya membawa set penuh dengan `no-store`. 404 statis kehilangan `Cache-Contr
 | **R-032** (master mati di interval pertama tidak bisa dikarantina) | **Dikonfirmasi tertutup, dengan sisa** | Pencatatan 5 detik dan `mysql.recordReplicas` dikonfirmasi. **Sisa:** R-094; gerbang "pernah tercatat" bisa diisi server milik panel (SEC-86, R-110); `forget-replica` pada replika yang masih tersambung (SEC-114 b, R-120); host tertua dibuang di atas 1 MiB (R-118). |
 | **R-033** bagian port (penjaga hanya membaca port kandidat) | **Dikonfirmasi tertutup untuk bagian port** | Semua host × port tercatat dibaca saat kunci dan sebelum dibuka. Fan-out kini dibatasi (SEC-88). `unlockPromote` juga membaca daftar itu (SEC-119). **Sisa:** R-108 (akun lain; ditambah kasus nama host processlist di bawah verifikasi sertifikat), R-098, R-102, R-103. **Diperlebar:** sandi replikasi kini dikirim ke semua port tercatat (SEC-87, R-111, R-039). |
 | **R-035** (Resync membuang database "hanya di replika" dengan satu ketik-nama) | **Dikonfirmasi tertutup** | `enforceWipeOnly` atas bacaan segar master, gagal tertutup; kini juga menolak inventaris terpotong (SEC-112). |
-| **R-036** (Ulangi resync tanpa konfirmasi) | **Dikonfirmasi tertutup, dengan sisa** | Token per job, batas 24 jam, preflight ulang; diperluas ke semua create_replica sebelum salinan (SEC-104, b9ec203). **Sisa:** SEC-103 (R-124). Review mencatat (tanpa menilai) bahwa restart panel melanjutkan job pembuang tanpa token dan tanpa batas 24 jam, walau preflight tetap berjalan lagi; spesifikasi §5.6 hanya menyebut Ulangi dan Setujui. |
+| **R-036** (Ulangi resync tanpa konfirmasi) | **Dikonfirmasi tertutup, dengan sisa** | Token per job, batas 24 jam, preflight ulang; diperluas ke semua create_replica sebelum salinan (SEC-104, b9ec203). **Sisa:** SEC-103 (R-124). Review seluruh cabang menyebut (tanpa menilai) bahwa restart panel melanjutkan job pembuang tanpa token; kode di `e138d86` membantahnya: `Runner.Resume` (`orchestrator/runner.go:1010-1048`) menggagalkan job yang berjalan atau mengantre di langkahnya, job yang menunggu tetap menunggu, dan lanjutan apa pun butuh Ulangi atau Setujui bertoken. |
 | **R-043** ("Jangan ganggu" membungkam bahaya) | **Dikonfirmasi tertutup, dengan sisa** | Himpunan yang tidak pernah dibungkam = dua belas jenis spesifikasi; ringkasan berutang di store. Pembukuan ringkasan diperbaiki (SEC-113). **Sisa:** R-106, R-107, SEC-122 (R-129). |
 | **R-058** (Tambah database meninggalkan tabel lama) | **Dikonfirmasi tertutup** | Penantian ketik-nama bertoken. Pembacaan ulang di langkah dump (SEC-111) dan nama beda huruf (SEC-118) diperbaiki. |
-| Jalur tambahan spesifikasi §5.9 | Delapan dari sembilan dikonfirmasi tertutup | Jalur kesembilan (replika sebagian yang tidak terbaca penjaga) tetap R-108. |
+| Jalur tambahan spesifikasi §5.9 | Delapan dari sembilan ditutup menurut spesifikasi; tidak dikonfirmasi satu per satu oleh pemeriksa | Sembilan jalur di tabel spesifikasi: nilai `OFF` tersimpan; `dbpanel_admin` tersembunyi; daftar kosong tanpa `performance_schema`; Ulangi/Setujui tanpa token; senyap membungkam `replica_unlocked`/`promote_partial`; deteksi tumbang mengikuti interval; anggaran baca habis diam-diam; `DropExisting`; replika sebagian tidak terbaca penjaga. Yang terakhir tetap terbuka (R-108). Temuan audit yang menyentuh jalur-jalur itu (SEC-88, SEC-104) sudah diperbaiki. |
 
 ## 6. Peta OWASP Top 10 dan ASVS
 
@@ -758,7 +760,12 @@ Dua kegagalan pada `2fc63a4`:
 - `TestLockForPromoteFanOutBounded/count` (test baru): kandidat belum menerapkan akun `dbpanel_repl` yang direplikasi (`Access denied`). Test kini menunggu replika yang sudah sinkron. Perubahan hanya di test.
 - `TestE2EPromotePlanned`: Setujui bangun ulang kini membaca ulang koneksi master lama (SEC-91). E2e yang menjaga satu aplikasi tetap tersambung dan menyetujui tanpa pengakuan mendapat 400. Ini perilaku baru yang memang dimaksud. Helper `approveJob` menjadi `approveJobAck`, yang mencentang `accept_connections` bila bangun ulang dimulai dengan pengakuan, dan menggagalkan test bila persetujuan memintanya tanpa diduga.
 
-Selain itu, setiap perbaikan menjalankan test paket yang tersentuh (RED pada kode lama, GREEN sesudahnya). Untuk SA-4, SP-3, dan SP-5, RED-nya berupa kegagalan build karena API baru. Untuk FR-7, SA-11, SA-12, dan ledger Task 11, RED tidak dijalankan terpisah (pernyataan baru atas teks yang sebelumnya tidak ada).
+Selain itu, setiap perbaikan menjalankan test paket yang tersentuh (RED pada kode lama, GREEN sesudahnya). Menurut laporan gelombang perbaikan:
+- RED berupa kegagalan perilaku pada kode lama: FR-1/SA-5, FR-2, FR-3, SP-1, SP-2, SA-6, FR-5, FR-6, ledger Task 13 m3, FR-14, FR-12, FR-8 (a), FR-4, FR-13 (a)(b), FR-11 (dengan pembalikan sementara satu baris), SP-4, SP-9, SA-10, SP-11 (butir 1–2), `unlockPromote`, FR-15/SP-7.
+- RED berupa kegagalan build atau kompilasi (API atau tanda tangan baru): SA-4, SP-3, SP-5 (orkestrator; sisi web gagal perilaku), FR-8 (b), SA-7.
+- RED tidak dijalankan terpisah (pernyataan baru atas teks yang sebelumnya tidak ada): FR-7, SA-11 (baris `forget-replica`), SA-12, ledger Task 11.
+- RED berupa test teks persis yang diperbarui lalu gagal pada kode lama: FR-10.
+- Tidak dinyatakan dalam laporan: SA-11 selain baris `forget-replica` (`unlock-master`, pesan berkas tak valid).
 
 ### 8.2 Dependensi dan govulncheck
 
@@ -787,7 +794,7 @@ Pemeriksaan ulang menilai setiap perubahan itu dibenarkan oleh temuannya, dan ti
   2. *`startLockProved` bertahan melewati perubahan peran lewat CLI.* Bukti hanya diatur ulang oleh karantina yang ditulis saat MySQL mati. Urutan quarantine → rebuilt → promoted → `set-role quarantined` → `set-role replica` dalam satu run agent bisa membuat penjaga menerima bukti lama, bila kedua bendera kebetulan ON tetapi nilai tersimpannya OFF. Pemeriksa tidak bisa menyusun urutan realistis yang membuat bendera ON tanpa tersimpan.
   3. *`set-role master` berlomba dengan penjaga.* CLI melepas kunci start lalu menulis peran. Putaran penjaga di antaranya masih melihat `quarantined` dan menulis kunci lagi. Bila MySQL restart di jendela itu (sekitar 5 detik), berkas init mem-PERSIST baca-saja pada server yang baru dipin root sebagai master. Dibaca dari kode, tidak didemonstrasikan.
   4. *Penjaga yang ditahan panel.* `GuardTick` melewati putarannya selama `promoteMu` dipegang. Pada server yang dikarantina, satu-satunya perintah panel yang mengambilnya adalah `mysql.quarantine`, yang sendiri mem-PERSIST baca-saja lagi. Pada master, `lockForPromote` dulu bisa memegangnya sampai 10 menit; kini dibatasi anggaran 60 detik (SEC-88). Lamanya loop perintah ketat bisa menahan penjaga tidak diukur.
-  5. *Tenggat jam dinding.* Tenggat kunci promosi dibandingkan dengan jam dinding. Lompatan jam maju di master selama promote terencana membuat penjaga mulai membaca lebih awal. Pemeriksa tidak menelusuri sisi kandidat. Bawaan sejak 4b.
+  5. *Tenggat jam dinding.* Tenggat kunci promosi dibandingkan dengan jam dinding. Lompatan jam maju di master selama promote terencana membuat penjaga mulai membaca lebih awal. Pemeriksa menilai ini tidak membuka dua master (kandidat dibaca dua kali berselang semenit, dan agent kandidat sendiri memeriksa master lama sebelum membuka), tetapi sisi kandidat tidak ditelusuri. Bawaan sejak 4b.
 - **Kecurigaan audit panel yang belum dikonfirmasi:**
   1. *Journald membuang salinan audit saat banjir log* (bagian SEC-93). Baris Warn yang tidak dibatasi dan salinan audit di logger yang sama sudah dikonfirmasi. Bahwa journald lalu membuang baris layanan itu diambil dari batas laju yang terdokumentasi, tidak diamati.
   2. *`master_lock_kept` ditutup oleh laporan backlog.* Tidak ditelusuri apakah laporan backlog yang diambil sebelum kunci tetapi tiba sesudahnya bisa menetapkan status itu. Agent mengulang kejadian `kept`-nya, dan `raise` akan membuka peringatan lagi.
