@@ -241,6 +241,12 @@ func TestPromoteViewRefusesCandidateWithStartLock(t *testing.T) {
 			t.Fatalf("StartLock %+v: eligible=%v reason=%q", sl, c.Eligible, c.Reason)
 		}
 	}
+	// The refusal says what can be done (FR-7).
+	for _, want := range []string{"performance_schema", "restart MySQL", "kandidat lain"} {
+		if !strings.Contains(reasonStartLock, want) {
+			t.Errorf("reason %q does not say %q", reasonStartLock, want)
+		}
+	}
 	// Not present, or an old agent that reports none: eligible.
 	for _, sl := range []*proto.StartLockState{nil, {Present: false}} {
 		set(sl)

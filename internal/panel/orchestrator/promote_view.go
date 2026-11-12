@@ -84,7 +84,14 @@ const (
 	// reasonStartLock: a start lock left by an earlier quarantine is still
 	// in place on the candidate; promoting it would leave a master that
 	// turns read-only on at its next start.
-	reasonStartLock = "Kunci start dari karantina lama masih terpasang di server ini; agent-nya belum bisa melepasnya"
+	// reasonStartLock: the agent releases a replica's start lock once it
+	// proves read_only and super_read_only PERSISTed ON
+	// (readOnlyProvedNow): from performance_schema.persisted_variables, or
+	// its own PERSIST in this agent run (FR-7).
+	reasonStartLock = "Kunci start dari karantina lama masih terpasang di server ini; agent-nya belum bisa melepasnya. " +
+		"Agent melepasnya sendiri dalam semenit setelah performance_schema menunjukkan read_only dan super_read_only " +
+		"tersimpan ON (SET PERSIST); bila performance_schema dimatikan di server ini, nyalakan lalu restart MySQL-nya, " +
+		"atau pilih kandidat lain"
 )
 
 const (
