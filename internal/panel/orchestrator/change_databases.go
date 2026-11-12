@@ -308,7 +308,10 @@ func (jr *jobRun) addDump(ctx context.Context, approved bool) (outcome, error) {
 		return outcome{}, err
 	}
 	reattach := jr.earlierAgentJob(ctx, jr.target(), "mysql.dumpFrom")
-	if len(jr.st.AddDrop) > 0 && !reattach {
+	// A run that did not read the replica itself (a Retry or Approve from
+	// here, a restart) reads it again, whatever the first run found: a
+	// database of that name may exist by now (FR-5).
+	if (len(jr.st.AddDrop) > 0 || !jr.addFresh) && !reattach {
 		if out, ok, err := jr.dropAddExisting(ctx, approved); !ok {
 			return out, err
 		}
@@ -478,15 +481,25 @@ func (jr *jobRun) logChangeFailure() {
 // replica, read fresh from its agent (RefreshInventory), compared without
 // case (with lower_case_table_names the replica may hold Rekap for rekap);
 // sorted, in the spelling of the job's list (st.Change), so a drop names
-// only databases the job adds.
+// only databases the job adds. It fails closed when the replica's list was
+// cut (FR-6), and when a database to drop equals, ignoring case, one the
+// replica already follows (st.Databases): dropping it there could drop the
+// followed one (ledger Task 13 m3).
 func (jr *jobRun) addExisting(ctx context.Context) ([]string, error) {
-	res, err := jr.r.RefreshInventory(ctx, jr.target())
+	res, cut, err := jr.r.refreshInventory(ctx, jr.target())
 	if err != nil {
 		return nil, err
+	}
+	if cut {
+		return nil, errInventoryCut("replika")
 	}
 	var out []string
 	for _, d := range jr.st.Change {
 		if slices.ContainsFunc(res.Databases, func(i proto.DatabaseInfo) bool { return strings.EqualFold(i.Name, d) }) {
+			if i := slices.IndexFunc(jr.st.Databases, func(f string) bool { return strings.EqualFold(f, d) }); i >= 0 {
+				return nil, fmt.Errorf("database %s sama dengan database %s yang sudah diikuti replika ini bila huruf besar-kecil "+
+					"tidak dibedakan; pekerjaan ditolak agar database itu tidak ikut dibuang", d, jr.st.Databases[i])
+			}
 			out = append(out, d)
 		}
 	}
@@ -536,8 +549,11 @@ func (jr *jobRun) dropAddExisting(ctx context.Context, approved bool) (out outco
 		h := hashList(list)
 		switch {
 		case len(list) == 0:
-			// An earlier attempt dropped them and loaded nothing yet.
-			jr.logf("info", "Database %s tidak ada lagi di replika; tidak ada yang dibuang.", strings.Join(jr.st.AddDrop, ", "))
+			// An earlier attempt dropped them and loaded nothing yet (or
+			// there was never anything to drop).
+			if len(jr.st.AddDrop) > 0 {
+				jr.logf("info", "Database %s tidak ada lagi di replika; tidak ada yang dibuang.", strings.Join(jr.st.AddDrop, ", "))
+			}
 			return outcome{}, true, nil
 		case slices.Equal(list, jr.st.AddDrop):
 		case approved && jr.st.WaitReason == WaitAddExisting && h == jr.st.AddExistingHash:

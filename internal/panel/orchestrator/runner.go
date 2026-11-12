@@ -225,17 +225,39 @@ func (r *Runner) Connect(ctx context.Context, serverID int64, p proto.ConnectPar
 // RefreshInventory re-reads the server's MySQL inventory with the account
 // its agent keeps and stores it.
 func (r *Runner) RefreshInventory(ctx context.Context, serverID int64) (proto.ConnectResult, error) {
-	return r.inventoryCall(ctx, serverID, "mysql.inventory", nil)
+	res, _, err := r.refreshInventory(ctx, serverID)
+	return res, err
+}
+
+// refreshInventory is RefreshInventory that also says whether the list was
+// cut at maxInventoryDBs: a caller that decides what to drop from it must
+// refuse a cut list (FR-6).
+func (r *Runner) refreshInventory(ctx context.Context, serverID int64) (proto.ConnectResult, bool, error) {
+	return r.inventoryCallCut(ctx, serverID, "mysql.inventory", nil)
+}
+
+// errInventoryCut refuses a decision about dropping that a cut inventory
+// cannot support.
+func errInventoryCut(what string) error {
+	return fmt.Errorf("daftar database %s lebih dari %d; panel tidak bisa memeriksa semuanya, pekerjaan ditolak agar tidak ada "+
+		"database yang dibuang atau ditimpa tanpa dicek", what, maxInventoryDBs)
 }
 
 func (r *Runner) inventoryCall(ctx context.Context, serverID int64, cmd string, params any) (proto.ConnectResult, error) {
+	res, _, err := r.inventoryCallCut(ctx, serverID, cmd, params)
+	return res, err
+}
+
+// inventoryCallCut is inventoryCall, also saying whether the list was cut.
+func (r *Runner) inventoryCallCut(ctx context.Context, serverID int64, cmd string, params any) (proto.ConnectResult, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	var res proto.ConnectResult
 	if err := r.d.Hub.Call(ctx, serverID, cmd, params, &res); err != nil {
-		return res, err
+		return res, false, err
 	}
-	if len(res.Databases) > maxInventoryDBs {
+	cut := len(res.Databases) > maxInventoryDBs
+	if cut {
 		r.log.Warn("inventory truncated", "server_id", serverID, "databases", len(res.Databases), "kept", maxInventoryDBs)
 		res.Databases = res.Databases[:maxInventoryDBs]
 	}
@@ -245,10 +267,10 @@ func (r *Runner) inventoryCall(ctx context.Context, serverID int64, cmd string, 
 		inv.Databases, inv.MissingGrants = res.Databases, res.MissingGrants
 	})
 	if err != nil {
-		return res, err
+		return res, cut, err
 	}
 	r.d.Publish("mysql_inventory", map[string]any{"id": serverID})
-	return res, nil
+	return res, cut, nil
 }
 
 // updateInventory applies change to the server's inventory (a new one when

@@ -1073,16 +1073,19 @@ func (jr *jobRun) stopReplicaAfter(ctx context.Context) {
 // enforceWipeOnly refuses a job that would drop a database that exists only
 // on the replica unless the user acknowledged exactly that (spec 5.6, R-035).
 // It reads the master's databases from the master's agent now, never from the
-// stored inventory, which may be stale, and fails closed: an unreadable master
-// refuses the job. A name of WipeList that the master lacks and WipeOnly does
+// stored inventory, which may be stale, and fails closed: an unreadable master,
+// or one whose list was cut (refreshInventory), refuses the job. A name of WipeList that the master lacks and WipeOnly does
 // not hold is refused; a WipeOnly name the master does have is harmless.
 // Names are compared exactly (case-sensitive), as the wipe list is validated
 // everywhere. On success PeerDatabases is what the master has right now.
 func (jr *jobRun) enforceWipeOnly(ctx context.Context) error {
-	res, err := jr.r.RefreshInventory(ctx, jr.master())
+	res, cut, err := jr.r.refreshInventory(ctx, jr.master())
 	if err != nil {
 		jr.logf("error", "Inventaris master tidak bisa dibaca: %v", err)
 		return errors.New("inventaris master tidak bisa dibaca; pekerjaan ditolak agar tidak ada database yang dibuang tanpa dicek")
+	}
+	if cut {
+		return errInventoryCut("master")
 	}
 	names := make([]string, 0, len(res.Databases))
 	for _, d := range res.Databases {

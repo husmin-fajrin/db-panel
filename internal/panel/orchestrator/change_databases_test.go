@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -719,4 +720,110 @@ func TestAddExistingRetryRechecks(t *testing.T) {
 	wantCmds(t, "replica", r.cmds(mark), []string{"mysql.inventory", "mysql.inventory", "mysql.inventory",
 		"mysql.dropDatabases", "mysql.dumpFrom", "mysql.startUntil", "mysql.setReplicationFilter", "mysql.startReplica",
 		"mysql.waitSynced"})
+}
+
+// TestAddRetryAtDumpWaitsForDatabaseCreatedMeanwhile (FR-5): a job whose
+// first run found nothing to drop fails at the dump; meanwhile a database
+// of that name appears on the replica. The Retry from the dump step reads
+// the replica again and waits for the typed approval: nothing is dumped
+// over it.
+func TestAddRetryAtDumpWaitsForDatabaseCreatedMeanwhile(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	e.masterHas(m.id, "rekap")
+	r := e.followingReplica(topo, "a")
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		return nil, errors.New("koneksi ke master terputus")
+	})
+	id, err := e.r.StartAddDatabases(context.Background(), r.id, []string{"rekap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if j.CurrentStep != stepAddDump {
+		t.Fatalf("job = %+v", j)
+	}
+	e.waitIdle(id)
+	replicaHas(r, "a", "rekap")
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		return proto.SnapshotResult{Method: "dump", Bytes: 200, GTIDExecuted: dumpGTID}, nil
+	})
+	mark := r.mark()
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	j, steps := e.waitJob(id, store.JobWaiting)
+	if j.CurrentStep != stepAddDump || steps[stepAddDump].Message != existingText("rekap") {
+		t.Fatalf("job = %+v, step = %+v", j, steps[stepAddDump])
+	}
+	wantNoDrop(t, r, mark)
+}
+
+// manyDatabases is n database infos db0000, db0001, ...
+func manyDatabases(n int, also ...string) []proto.DatabaseInfo {
+	var out []proto.DatabaseInfo
+	for i := range n {
+		out = append(out, proto.DatabaseInfo{Name: fmt.Sprintf("db%04d", i)})
+	}
+	for _, d := range also {
+		out = append(out, proto.DatabaseInfo{Name: d})
+	}
+	return out
+}
+
+// TestAddExistingRefusesTruncatedInventory (FR-6): a replica inventory
+// longer than the panel keeps is cut; the add job then cannot know whether
+// a database it adds exists, and fails instead of loading over it.
+func TestAddExistingRefusesTruncatedInventory(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	e.masterHas(m.id, "zzz")
+	r := e.followingReplica(topo, "a")
+	r.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"},
+		Databases: manyDatabases(maxInventoryDBs, "a", "zzz")})
+	mark := r.mark()
+	id, err := e.r.StartAddDatabases(context.Background(), r.id, []string{"zzz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if !strings.Contains(j.Error, "lebih dari") {
+		t.Fatalf("job error = %q", j.Error)
+	}
+	wantNoDrop(t, r, mark)
+}
+
+// TestEnforceWipeOnlyRefusesTruncatedInventory (FR-6): a master inventory
+// cut at the panel's limit refuses a job with a wipe list.
+func TestEnforceWipeOnlyRefusesTruncatedInventory(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}}, "a")
+	m.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"},
+		Databases: manyDatabases(maxInventoryDBs, "a")})
+	got := failedResync(t, e, r, []string{"a"}, nil)
+	if !strings.Contains(got, "lebih dari") {
+		t.Fatalf("job error = %q", got)
+	}
+}
+
+// TestAddExistingRefusesFollowedNameIgnoringCase (ledger Task 13 m3):
+// adding Rekap to a replica that follows rekap would drop rekap where
+// names compare without case: the job fails and drops nothing.
+func TestAddExistingRefusesFollowedNameIgnoringCase(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	e.masterHas(m.id, "rekap", "Rekap")
+	r := e.followingReplica(topo, "rekap")
+	replicaHas(r, "rekap")
+	mark := r.mark()
+	id, err := e.r.StartAddDatabases(context.Background(), r.id, []string{"Rekap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	if !strings.Contains(j.Error, "rekap") || !strings.Contains(j.Error, "sudah diikuti") {
+		t.Fatalf("job error = %q", j.Error)
+	}
+	wantNoDrop(t, r, mark)
 }
