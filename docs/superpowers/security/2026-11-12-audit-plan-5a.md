@@ -16,7 +16,7 @@
 
 ## 1. Ringkasan eksekutif
 
-Rencana 5a menutup jalur dua master dan kehilangan data yang dicatat inventaris risiko (R-029..R-036, R-043, R-058) dan, menurut tabel spesifikasi §5.9, delapan dari sembilan jalur tambahannya (yang kesembilan, replika sebagian yang tidak terbaca penjaga, tetap terbuka sebagai R-108). Yang ditambahkan: kunci start lewat `init_file` sehingga master lama yang dikarantina menyala baca-saja walau agent mati; loop penjaga tetap 5 detik; catatan replika (host × port) yang dibaca sebelum kunci promosi dibuka; kunci promosi yang dipertahankan bila replika tercatat tidak terbaca; daftar koneksi yang jujur; token baru untuk Ulangi dan Setujui job pembuang; dan "Jangan ganggu" yang tidak membungkam jenis berbahaya.
+Rencana 5a menutup jalur dua master dan kehilangan data yang dicatat inventaris risiko (R-029..R-036, R-043, R-058) dan, menurut tabel spesifikasi §5.9, delapan dari sembilan jalur tambahannya (yang kesembilan, replika sebagian yang tidak terbaca penjaga, tetap terbuka sebagai R-108). Yang ditambahkan: kunci start lewat `init_file` sehingga master lama yang dikarantina menyala baca-saja walau agent mati; loop penjaga tetap 5 detik; daftar replika (host × port) yang dibaca sebelum kunci promosi dibuka; kunci promosi yang dipertahankan bila replika di daftar replika tidak terbaca; daftar koneksi yang jujur; token baru untuk Ulangi dan Setujui job pembuang; dan "Jangan ganggu" yang tidak membungkam jenis berbahaya.
 
 Hasil keseluruhan: tidak ada temuan Kritis. Tidak ada jalur ke `mysql.dropDatabases` tanpa konfirmasi yang sah. Kunci start dibangun sesuai urutan yang dituntut spesifikasi (berkas sebelum baris, baris sebelum berkas). Tiga celah pada pengiriman peringatan, yang justru menjadi andalan operator saat failover, ditemukan review dan sudah diperbaiki.
 
@@ -43,7 +43,7 @@ Gelombang perbaikan diuji dengan `make test` (exit 0, 36m27s), `make test-e2e` (
 
 1. **SEC-85 (SA-1), Tinggi, kelas B.** Panel yang dibobol bisa membuka kembali master lama yang dikarantina. Caranya: `mysql.releaseRole` (diizinkan pada peran `quarantined`) membuat peran `unassigned`; penjaga lalu melepas kunci start, dan `mysql.setReadOnly{on:false}` membuka tulis secara PERSIST. **Kasus terburuk:** dua master yang sama-sama bisa ditulis, bertahan melewati restart, dan semua aplikasi yang masih menunjuk alamat lama menulis ke master lama. Penutupnya ("mode ketat": agent menolak pelepasan server yang dikarantina tanpa persetujuan root lokal) mengubah cara "Hapus server" bekerja, jadi dijadwalkan Rencana 5b. Sementara itu tidak ada yang menutupnya selain menjaga host panel.
 2. **SEC-86 (SA-2), Tinggi, kelas B.** Panel yang memegang sandi replikasi (panel memang menyimpannya) bisa membuat master **sehat** mengarantina dirinya sendiri di bawah server milik penyerang, lalu membuang datanya lewat `mysql.dropDatabases` atau menimpanya dengan `mysql.cloneFrom` dari server itu. **Kasus terburuk:** produksi berhenti menulis sampai root turun tangan, lalu data master produksi hilang atau diganti salinan penyerang. Bila tidak ada replika yang sinkron, tidak ada salinan yang tersisa. Dijadwalkan Rencana 5b (persetujuan root lokal sebelum bangun ulang yang menyusul karantina). Sementara itu, sama dengan SEC-85, satu-satunya pertahanan adalah menjaga host panel.
-3. **SEC-87 (SA-3), Tinggi (dinaikkan dari Sedang, lihat §4).** Pada setiap promote terencana, agent master mengirim sandi akun replikasi, tanpa verifikasi sertifikat, ke setiap host yang tercatat sebagai replika dalam setahun terakhir di setiap port yang tercatat. Rencana 5a melebarkan ini dari satu port ke semua port tercatat. **Kasus terburuk:** perangkat yang mengambil alamat bekas replika menerima sandi `dbpanel_repl` (REPLICATION SLAVE, BACKUP_ADMIN), lalu menyalin atau meng-CLONE seluruh basis data pasien dari master. Penyerang tidak perlu posisi on-path. Penutup tuntasnya adalah akun baca per replika di Rencana 5c (R-038, R-108). Sementara itu: jalankan "Perketat" (verifikasi sertifikat) di topologi, dan jalankan `sudo dbpanel agent forget-replica <host>` di master setiap kali replika dipensiunkan.
+3. **SEC-87 (SA-3), Tinggi (dinaikkan dari Sedang, lihat §4).** Pada setiap promote terencana, agent master mengirim sandi akun replikasi, tanpa verifikasi sertifikat, ke setiap host di daftar replika dalam setahun terakhir di setiap port di daftar port replika. Rencana 5a melebarkan ini dari satu port ke semua port di daftar port replika. **Kasus terburuk:** perangkat yang mengambil alamat bekas replika menerima sandi `dbpanel_repl` (REPLICATION SLAVE, BACKUP_ADMIN), lalu menyalin atau meng-CLONE seluruh basis data pasien dari master. Penyerang tidak perlu posisi on-path. Penutup tuntasnya adalah akun baca per replika di Rencana 5c (R-038, R-108). Sementara itu: jalankan "Perketat" (verifikasi sertifikat) di topologi, dan jalankan `sudo dbpanel agent forget-replica <host>` di master setiap kali replika dipensiunkan.
 
 Butir terbuka lain, semuanya dengan baris inventaris dan rencana penyerapnya, ada di §7. Ringkasnya:
 - Rencana 5b: SA-9 (kunci terlihat terpasang padahal berkas opsi milik pengguna `mysql` mengalahkannya), laporan start yang hilang bila agent restart sebelum terkirim, dan `set-role master` yang butuh kunci rahasia agent. Juga R-117: urutan kirim-laporan sebelum penegakan baca-saja ditemukan pemeriksaan ulang dan sudah diperbaiki di dalam satu putaran setelah audit (`bb54853`, `ef453b6`); yang tersisa, pengiriman yang memblok memperpanjang jeda sebelum putaran berikutnya, tetap di Rencana 5b.
@@ -94,7 +94,7 @@ Model ancaman Rencana 1–4 tetap berlaku (audit Rencana 4a §3 butir 18–24). 
 
 - **Aset baru:**
   - berkas kunci start (`init_file`) dan barisnya di konfigurasi MySQL terkelola, ditulis root di direktori include atau direktori berkas konfigurasi utama;
-  - catatan replika `/var/lib/dbpanel/replicas-seen` (host, setahun) dan `/var/lib/dbpanel/replica-ports-seen` (port, kini paling banyak 8 dengan tanda `penuh`);
+  - daftar replika `/var/lib/dbpanel/replicas-seen` (host, setahun) dan `/var/lib/dbpanel/replica-ports-seen` (port, kini paling banyak 8 dengan tanda `penuh`);
   - daftar `Readable` di berkas kunci promosi;
   - antrean laporan start di memori agent (paling banyak 16);
   - kolom `snooze_from` (migrasi 0011) dan field job-state baru (`WipeOnly`, `AddDrop`, `ConfirmedAt`, `WaitList`).
@@ -102,15 +102,15 @@ Model ancaman Rencana 1–4 tetap berlaku (audit Rencana 4a §3 butir 18–24). 
   - Kunci start membuat master lama menyala baca-saja **tanpa** agent. Pertahanan ini ditujukan pada restart tanpa agent, **bukan** pada root atau pengguna OS `mysql`: keduanya bisa menyalakan mysqld sendiri di direktori data. Jawabannya tetap penjaga 5 detik.
   - Kunci itu hanya sekuat apa yang dibaca `mysqld --print-defaults` di lingkungan agent (SEC-98) dan tata letak direktori yang tidak diperiksa pemiliknya (SEC-96).
   - Loop penjaga 5 detik yang terpisah dari interval pemeriksaan. Ia menjalankan kunci start, penjaga karantina, penjaga kunci promosi, pemutus FTWRL, dan pencatatan replika dalam satu loop, sehingga satu operasi yang macet di dalamnya mematikan semuanya (SEC-90).
-  - Catatan replika host × port berasal dari koneksi yang dilihat master sendiri, tidak pernah dari panel. Namun port dipilih replika (`report_port`), dan host bisa diisi siapa pun yang login dengan hak REPLICATION SLAVE (SEC-86, SEC-88).
-  - Kunci promosi dipertahankan selama replika tercatat tidak terbaca. Arah gagal ini aman bagi data tetapi bisa menahan tulis (R-098).
-  - Pembacaan replika tercatat memakai akun replikasi kandidat, tanpa verifikasi sertifikat kecuali topologi sudah "Perketat" (SEC-87).
+  - Daftar replika dan daftar port replika (host × port) berasal dari koneksi yang dilihat master sendiri, tidak pernah dari panel. Namun port dipilih replika (`report_port`), dan host bisa diisi siapa pun yang login dengan hak REPLICATION SLAVE (SEC-86, SEC-88).
+  - Kunci promosi dipertahankan selama replika di daftar replika tidak terbaca. Arah gagal ini aman bagi data tetapi bisa menahan tulis (R-098).
+  - Pembacaan replika di daftar replika memakai akun replikasi kandidat, tanpa verifikasi sertifikat kecuali topologi sudah "Perketat" (SEC-87).
   - Daftar koneksi mencakup semua thread klien. Yang disembunyikan hanya akun replikasi dan dump buatan agent serta sesi agent dari server itu sendiri yang bertanda `program_name=dbpanel-agent`. Daftar ini menjadi syarat bangun ulang master lama, juga saat Setujui (SEC-91).
   - Ulangi dan Setujui job pembuang memakai token baru yang terikat pada job, dengan batas 24 jam. Setujui terikat pada hash daftar yang ditampilkan (SEC-102, SEC-103).
   - Jenis peringatan yang tidak pernah dibungkam "Jangan ganggu" ditentukan daftar izin (SEC-122), dengan ringkasan saat senyap berakhir.
 - **Butir baru model ancaman:**
   - 25. **Panel yang dibobol vs master lama yang dikarantina:** `mysql.releaseRole`, `claimRole`, pelepasan kunci start pada peran `master` (SEC-85).
-  - 26. **Panel yang dibobol, atau pemegang sandi replikasi, vs master sehat:** gerbang "pernah tercatat sebagai replika" yang bisa diisi server milik penyerang (SEC-86); port tercatat tanpa batas (SEC-88).
+  - 26. **Panel yang dibobol, atau pemegang sandi replikasi, vs master sehat:** gerbang "pernah tercatat sebagai replika" yang bisa diisi server milik penyerang (SEC-86); port di daftar port replika tanpa batas (SEC-88).
   - 27. **Perangkat di alamat bekas replika:** menerima sandi replikasi pada promote terencana (SEC-87) dan bisa menjawab sebesar apa pun (SEC-99).
   - 28. **Pengguna OS `mysql` di master lama:** log error (SEC-90), berkas opsi di home akun layanan (SEC-98), dan direktori berkas kunci (SEC-96).
   - 29. **Agent yang dibobol vs monitor panel:** banjir kejadian (SEC-93), kejadian yang tidak sesuai peran pengirimnya (SEC-107), dan teks tanpa batas (SEC-108).
@@ -126,8 +126,8 @@ Kolom "Asal" menyebut nomor asli: SA = audit keamanan sisi agent, SP = audit kea
 |---|---|---|---|---|---|
 | SEC-85 | SA-1 | **Tinggi** | Panel yang dibobol membuka master lama yang dikarantina lewat `releaseRole`; kunci start ikut lepas | **Terbuka** | R-109 (Rencana 5b) |
 | SEC-86 | SA-2 | **Tinggi** | Panel pemegang sandi replikasi mengarantina master sehat di bawah server miliknya, lalu membuang datanya | **Terbuka** | R-110 (Rencana 5b) |
-| SEC-87 | SA-3 | **Tinggi** (dinaikkan; pemeriksa: Sedang) | Sandi replikasi ditawarkan tanpa verifikasi ke setiap host × port tercatat setahun | **Terbuka** | R-111 (Rencana 5c); R-039 |
-| SEC-88 | SA-4 | Sedang | Port tercatat dari replika tanpa batas; pembacaan saat kunci 10 menit, kunci terlambat, kunci yang tidak terbaca | Diperbaiki | 8d9be83, ee3ab70; sisa R-118, R-119 |
+| SEC-87 | SA-3 | **Tinggi** (dinaikkan; pemeriksa: Sedang) | Sandi replikasi ditawarkan tanpa verifikasi ke setiap host di daftar replika × port di daftar port replika setahun | **Terbuka** | R-111 (Rencana 5c); R-039 |
+| SEC-88 | SA-4 | Sedang | Port dari replika masuk daftar port replika tanpa batas; pembacaan saat kunci 10 menit, kunci terlambat, kunci yang tidak terbaca | Diperbaiki | 8d9be83, ee3ab70; sisa R-118, R-119 |
 | SEC-89 | SA-5 = FR-1 | Sedang / Penting | Laporan start sekali kirim hilang bila sesi panel belum tersambung | Diperbaiki | a9545a2; sisa R-116, R-117 (R-117: urutan dalam putaran diperbaiki setelah audit di bb54853; jeda antarputaran tetap terbuka) |
 | SEC-90 | SA-6 | Sedang | Penjaga membuka log error MySQL sebagai root dengan `open` biasa (FIFO menggantung loop penjaga) | Diperbaiki | b7dd3db; sisa R-122 |
 | SEC-91 | SP-1 | Sedang | Setujui bangun ulang master lama tidak membaca ulang koneksinya | Diperbaiki | daa12b9 |
@@ -192,7 +192,7 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 - **Tingkat:** Tinggi (alasan bukan Kritis sama dengan SEC-85).
 - **Penyerang:** pengendali proses panel. Panel menyimpan sandi replikasi, jadi penyerang juga memegangnya. Ia butuh satu host yang menjangkau port MySQL master; host panel sendiri sudah cukup.
 - **Lokasi:**
-  - `quarantine.go:107-121`: pada master yang tidak dikunci untuk kandidat itu, `mysql.quarantine` hanya meminta host itu ada di catatan replika (`seenAddr`). Catatan itu diisi setiap host yang punya sesi `Binlog Dump`, dari akun apa pun yang ber-REPLICATION SLAVE.
+  - `quarantine.go:107-121`: pada master yang tidak dikunci untuk kandidat itu, `mysql.quarantine` hanya meminta host itu ada di daftar replika (`seenAddr`). Daftar itu diisi setiap host yang punya sesi `Binlog Dump`, dari akun apa pun yang ber-REPLICATION SLAVE.
   - `quarantine.go:149` (`selfQuarantine`).
   - `pins.go:693` (`Allow`): server `quarantined` dengan pin sumber menerima `mysql.dropDatabases`, serta `mysql.dumpFrom`/`mysql.cloneFrom` dari sumber yang dipin.
 - **Skenario:**
@@ -204,11 +204,11 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 - **Yang dikerjakan gelombang perbaikan:** hanya komentar `pins.go` (c2133b3).
 - **Status: Terbuka.** Masuk Rencana 5b (persetujuan root lokal sebelum bangun ulang yang menyusul karantina, yaitu "mode ketat" untuk satu kelompok perintah). Baris inventaris R-110 (kelas B, Tinggi). **Saran sementara:** lindungi host panel.
 
-### SEC-87 — Sandi replikasi ditawarkan tanpa verifikasi ke setiap host × port tercatat (SA-3)
+### SEC-87 — Sandi replikasi ditawarkan tanpa verifikasi ke setiap host di daftar replika × port di daftar port replika (SA-3)
 - **Tingkat:** Tinggi, satu-satunya tingkat yang dinaikkan dalam dokumen ini. Pemeriksa memberi Sedang. Keputusan pengendali menaikkannya ke Tinggi karena kredensial bocor (definisi Tinggi di inventaris), dan pemeriksa sendiri menyebut Tinggi untuk baris inventarisnya.
-- **Penyerang:** (a) perangkat yang mengambil IP bekas replika (dalam setahun terakhir), atau (b) pengguna lokal tanpa hak di host yang tercatat, pada port tercatat yang tidak dipakai. Tidak perlu akun MySQL atau posisi on-path.
+- **Penyerang:** (a) perangkat yang mengambil IP bekas replika (dalam setahun terakhir), atau (b) pengguna lokal tanpa hak di host di daftar replika, pada port di daftar port replika yang tidak dipakai. Tidak perlu akun MySQL atau posisi on-path.
 - **Lokasi:**
-  - `promote_lock.go:225`, `:335-353` (`lockReadTargets`: setiap host tercatat × setiap port tercatat ditambah port kandidat, dengan akun kandidat);
+  - `promote_lock.go:225`, `:335-353` (`lockReadTargets`: setiap host di daftar replika × setiap port di daftar port replika ditambah port kandidat, dengan akun kandidat);
   - `promote_files.go:368` (`seenCutoff`: setahun);
   - `peer.go:89-90` (tanpa `Verify`: TLS `skip-verify`).
   - Perilaku driver yang menjadi dasarnya dicek pemeriksa di `go-sql-driver/mysql@v1.9.3/auth.go:400-406`: pada "perform full authentication" `caching_sha2_password` di atas TLS (terverifikasi atau tidak), sandi dikirim polos di dalam sesi TLS itu.
@@ -218,7 +218,7 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 - **Yang dikerjakan gelombang perbaikan:** catatan README (2fc63a4): jalankan `forget-replica` saat replika dipensiunkan, dan "Perketat" menutup paparan ini. Pemeriksaan ulang menilai catatan itu sesuai kode.
 - **Status: Terbuka.** Masuk Rencana 5c (akun baca per replika berhak rendah; R-038, R-108). Baris inventaris R-111 (kelas C, Tinggi); R-039 ditulis ulang karena SEC-87 memperburuknya (tidak perlu posisi on-path). **Saran sementara:** jalankan "Perketat" di topologi, dan `sudo dbpanel agent forget-replica <host>` di master saat replika dipensiunkan. Usul jangka pendek pemeriksa (sematkan kunci publik TLS per host saat dicatat) belum dikerjakan.
 
-### SEC-88 — Port tercatat dari replika, tanpa batas (SA-4)
+### SEC-88 — Port dari replika masuk daftar port replika tanpa batas (SA-4)
 - **Tingkat:** Sedang.
 - **Penyerang:** siapa pun yang memegang akun ber-REPLICATION SLAVE di master: host replika yang dibobol, atau bekas replika yang masih tahu sandi bersama (R-038). Bukan panel.
 - **Masalah di `343898c`:**
@@ -236,7 +236,7 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 - **Putusan pemeriksaan ulang:** ADDRESSED. Keempat jalur bahaya tertutup. RED-nya berupa kegagalan build, tetapi pemeriksa ulang memastikan setiap test akan gagal pada kode lama.
 - **Status: Diperbaiki.**
 - **Sisa yang dicatat:**
-  - Tanda `penuh` yang gagal-tertutup menurunkan ambang pemblokiran: sembilan registrasi replika dengan `report_port` berbeda sudah cukup memblokir setiap promote terencana. Penyerang bisa mengisinya lagi setelah root membersihkannya. Tidak ada field kesehatan yang menunjukkannya sebelum promote dicoba. Di atas 1 MiB, host tertua dibuang dari catatan, dan host itu tidak lagi diterima sebagai sumber karantina. → R-118 (Rencana 5c/5e).
+  - Tanda `penuh` yang gagal-tertutup menurunkan ambang pemblokiran: sembilan registrasi replika dengan `report_port` berbeda sudah cukup memblokir setiap promote terencana. Penyerang bisa mengisinya lagi setelah root membersihkannya. Tidak ada field kesehatan yang menunjukkannya sebelum promote dicoba. Di atas 1 MiB, host tertua dibuang dari daftar replika, dan host itu tidak lagi diterima sebagai sumber karantina. → R-118 (Rencana 5c/5e).
   - `forget-replica-port semua` ikut melupakan port replika yang tidak tersambung saat itu. Replika yang terjangkau tetapi replikasinya berhenti, di port lain, tidak dibaca pada kunci berikutnya. → R-119 (Rencana 5e); satu kalimat README ditambahkan. Ditemukan pemeriksaan ulang; setelah audit, `bb54853` dan `ef453b6` membuat `semua` menyebut path berkas, setiap port yang dihapusnya, dan peringatan bahwa port replika yang tidak tersambung sekarang tidak masuk daftar lagi dengan sendirinya (bila yang ada hanya tanda penuh, ia mengatakannya tanpa peringatan port); teks bantuan dan pesan hapus satu port menyebut hal yang sama (dipin `TestForgetReplicaPortCLI`). Perilakunya tidak berubah, jadi R-119 tetap terbuka: operator kini diperingatkan.
   - Terbuka (kecil), Rencana 5e: batas ukuran `writeJSON` kini juga berlaku untuk `WritePromoted`. `gtid_executed` di atas ~64 KiB akan menggagalkan `mysql.promote` setelah pin master. Hampir tidak terjangkau dalam praktik.
 
@@ -493,8 +493,8 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 - **(a) Diperbaiki (8d9be83):** perintah kini menerima `host:port` dari peringatan dan membuang port-nya (`internal/agent/cli.go` `mainForgetReplica`). Test pin: `TestForgetReplicaCLI`. Putusan pemeriksaan ulang: ADDRESSED.
 - **(b) Terbuka:** melupakan replika yang masih tersambung. Dari kode di `e138d86`:
   - `mainForgetReplica` (`internal/agent/cli.go:461-495`) tidak memeriksa apakah host itu sedang punya thread `Binlog Dump`.
-  - Agent hanya menulis ulang catatan bila himpunan replika yang tersambung berubah, atau setelah `seenRefresh` = 24 jam (`promote_files.go:70`, `:653`). Review menyebut "sejam"; kode menyebut 24 jam.
-  - Akibatnya replika yang dilupakan tetapi masih tersambung tidak ada di catatan sampai salah satu itu terjadi (atau agent restart). Selama itu master lama menolak karantina di bawah host tersebut ("tidak pernah tercatat sebagai replika").
+  - Agent hanya menulis ulang daftar replika bila himpunan replika yang tersambung berubah, atau setelah `seenRefresh` = 24 jam (`promote_files.go:70`, `:653`). Review menyebut "sejam"; kode menyebut 24 jam.
+  - Akibatnya replika yang dilupakan tetapi masih tersambung tidak ada di daftar replika sampai salah satu itu terjadi (atau agent restart). Selama itu master lama menolak karantina di bawah host tersebut ("tidak pernah tercatat sebagai replika").
   - Bila master mati dan replika itu dipromote darurat, karantina ditolak dan promote menjadi `partial`, seperti R-094.
 - **Status: Diperbaiki sebagian.** (b) di R-120 (Rencana 5e). Usul: CLI menolak atau memperingatkan bila host itu sedang punya thread `Binlog Dump`.
 
@@ -596,7 +596,7 @@ Semua butir di bawah dinilai dengan membaca kode. Butir yang dipin test menyebut
   - Penulis konfigurasi terkelola hanya `configure`, `writeStartLock`, dan `releaseStartLock`, semuanya di bawah `lockManagedConfig`.
   - Urutan berkas lalu baris saat menulis, baris lalu berkas saat melepas (`TestStartLockFileBeforeLine`, `TestStartLockReleaseInterruptedNeverLeavesLineWithoutFile`).
   - Berkas flock dibuka `O_NOFOLLOW`, 0600, close-on-exec (`startlock.go:100`).
-  - Pin, kunci promosi, dan catatan replika dibaca lewat `readTrustedFile` dan ditulis lewat `writePin` (temp, fsync, rename, sync direktori). `/var/lib/dbpanel` milik root 0711.
+  - Pin, kunci promosi, dan daftar replika dibaca lewat `readTrustedFile` dan ditulis lewat `writePin` (temp, fsync, rename, sync direktori). `/var/lib/dbpanel` milik root 0711.
 - **Gagal terbuka (A04):**
   - Pelepasan kunci start butuh MySQL menjawab. `set-role replica` saat MySQL mati mempertahankan kunci (`TestSetRoleReplicaWhileDownKeepsStartLock`), dan bukti dibuang begitu salah satu bendera mati (`TestReleaseProofLostOnceWritesOpen`).
   - Pin yang tidak tepercaya: penjaga kunci start tidak mengubah apa pun.
@@ -678,7 +678,7 @@ Semuanya membawa set penuh dengan `no-store`. 404 statis kehilangan `Cache-Contr
 | **R-030** (penjaga mengikuti interval) | **Dikonfirmasi tertutup** | Loop tetap 5 detik, putaran tidak tumpang tindih. Satu FIFO bisa mematikan loop itu (SEC-90); diperbaiki b7dd3db. **Sisa:** R-117. Urutan kirim laporan sebelum baca-saja diperbaiki di dalam satu putaran setelah audit (`bb54853`, `ef453b6`); pengiriman yang memblok masih memperpanjang jeda sebelum putaran berikutnya (Rencana 5b). |
 | **R-031** (master lama yang dikarantina saat mati baru dikunci pada tik pertama) | **Dikonfirmasi tertutup untuk restart tanpa agent, dengan sisa** | Urutan berkas/baris dan pelepasan yang butuh bukti dikonfirmasi audit agent dan review. Laporan start yang hilang (SEC-89) dan start gagal yang tidak dilaporkan (SEC-110) diperbaiki. **Sisa:** R-096, R-097, R-112 (SEC-97), R-113 (SEC-98), R-114 (`loose-`/`skip-`, belum dibuktikan), R-115 (SEC-96), R-116; dan SEC-85 (panel yang dibobol bisa melepas kunci itu, R-109). |
 | **R-032** (master mati di interval pertama tidak bisa dikarantina) | **Dikonfirmasi tertutup, dengan sisa** | Pencatatan 5 detik dan `mysql.recordReplicas` dikonfirmasi. **Sisa:** R-094; gerbang "pernah tercatat" bisa diisi server milik panel (SEC-86, R-110); `forget-replica` pada replika yang masih tersambung (SEC-114 b, R-120); host tertua dibuang di atas 1 MiB (R-118). |
-| **R-033** bagian port (penjaga hanya membaca port kandidat) | **Dikonfirmasi tertutup untuk bagian port** | Semua host × port tercatat dibaca saat kunci dan sebelum dibuka. Fan-out kini dibatasi (SEC-88). `unlockPromote` juga membaca daftar itu (SEC-119). **Sisa:** R-108 (akun lain; ditambah kasus nama host processlist di bawah verifikasi sertifikat), R-098, R-102, R-103. **Diperlebar:** sandi replikasi kini dikirim ke semua port tercatat (SEC-87, R-111, R-039). |
+| **R-033** bagian port (penjaga hanya membaca port kandidat) | **Dikonfirmasi tertutup untuk bagian port** | Semua host di daftar replika × port di daftar port replika dibaca saat kunci dan sebelum dibuka. Fan-out kini dibatasi (SEC-88). `unlockPromote` juga membaca daftar itu (SEC-119). **Sisa:** R-108 (akun lain; ditambah kasus nama host processlist di bawah verifikasi sertifikat), R-098, R-102, R-103. **Diperlebar:** sandi replikasi kini dikirim ke semua port di daftar port replika (SEC-87, R-111, R-039). |
 | **R-035** (Resync membuang database "hanya di replika" dengan satu ketik-nama) | **Dikonfirmasi tertutup** | `enforceWipeOnly` atas bacaan segar master, gagal tertutup; kini juga menolak inventaris terpotong (SEC-112). |
 | **R-036** (Ulangi resync tanpa konfirmasi) | **Dikonfirmasi tertutup, dengan sisa** | Token per job, batas 24 jam, preflight ulang; diperluas ke semua create_replica sebelum salinan (SEC-104, b9ec203). **Sisa:** SEC-103 (R-124). Review seluruh cabang menyebut (tanpa menilai) bahwa restart panel melanjutkan job pembuang tanpa token; kode di `e138d86` membantahnya: `Runner.Resume` (`orchestrator/runner.go:1010-1048`) menggagalkan job yang berjalan atau mengantre di langkahnya, job yang menunggu tetap menunggu, dan lanjutan apa pun butuh Ulangi atau Setujui bertoken. |
 | **R-043** ("Jangan ganggu" membungkam bahaya) | **Dikonfirmasi tertutup, dengan sisa** | Himpunan yang tidak pernah dibungkam = dua belas jenis spesifikasi; ringkasan berutang di store. Pembukuan ringkasan diperbaiki (SEC-113). **Sisa:** R-106, R-107, SEC-122 (R-129). |
@@ -697,17 +697,17 @@ Semuanya membawa set penuh dengan `no-store`. 404 statis kehilangan `Cache-Contr
 | A04 Insecure Design | Kunci start, kunci promosi, persetujuan, peringatan | SEC-86, SEC-88, SEC-89, SEC-91, SEC-92, SEC-93, SEC-97, SEC-101, SEC-102, SEC-103, SEC-104, SEC-106, SEC-107, SEC-122 | **sebagian** | Yang diperbaiki dipin test; SEC-97, SEC-103, SEC-107, SEC-122 terbuka |
 | A05 Security Misconfiguration | Lingkungan `--print-defaults`, batas port, header | SEC-88, SEC-98, SEC-124 | **sebagian** | SEC-98 terbuka |
 | A06 Vulnerable and Outdated Components | — | — | **tidak diperiksa di audit ini** | govulncheck tidak dijalankan (Lampiran 8.2) |
-| A07 Identification and Authentication Failures | Akun replikasi bersama dikirim ke alamat tercatat | SEC-87 | **rentan** | Dibaca |
+| A07 Identification and Authentication Failures | Akun replikasi bersama dikirim ke alamat di daftar replika | SEC-87 | **rentan** | Dibaca |
 | A08 Software and Data Integrity Failures | Tidak ada perubahan distribusi | — | **tidak berubah** | — |
 | A09 Security Logging and Monitoring Failures | Laporan start, kejadian tak terbaca, audit pengakuan | SEC-89, SEC-94, SEC-95, SEC-105, SEC-106, SEC-110 | **sebagian** (SEC-105 terbuka) | Yang diperbaiki dipin test |
-| A10 SSRF | Pembacaan peer ke alamat tercatat, bukan dari input pengguna | SEC-99 | **aman setelah perbaikan** | `limitedConn` (batas 256 KiB tidak dipin test) |
+| A10 SSRF | Pembacaan peer ke alamat di daftar replika, bukan dari input pengguna | SEC-99 | **aman setelah perbaikan** | `limitedConn` (batas 256 KiB tidak dipin test) |
 
 ### 6.2 OWASP ASVS 4.0.3 Level 2 (bab yang relevan dengan delta)
 
 | Bab | Gagal / tak terverifikasi | Temuan | Lulus (contoh) |
 |---|---|---|---|
 | V1 Architecture | 1.4.x kontrol akses ditegakkan di sisi tepercaya: agent mempercayai panel untuk pelepasan dan karantina | SEC-85, SEC-86 | Penegakan `dropsData` di orkestrator, bukan di web |
-| V2 Authentication | 2.10.x kredensial layanan: satu akun replikasi bersama dikirim ke alamat tercatat | SEC-87 | Sandi tidak di argv atau log |
+| V2 Authentication | 2.10.x kredensial layanan: satu akun replikasi bersama dikirim ke alamat di daftar replika | SEC-87 | Sandi tidak di argv atau log |
 | V4 Access Control | 4.3.1 aksi administratif dengan konfirmasi: persetujuan yang mengantre | SEC-103 | Token per job dan per aksi; batas 24 jam |
 | V7 Error Handling and Logging | 7.1.x apa yang diakui tidak diaudit; 7.2.x peringatan tidak terikat peran | SEC-105, SEC-107 | Batas laju kejadian; kejadian tak terbaca tetap membuka peringatan |
 | V9 Communications | 9.2.1 verifikasi sertifikat ke server lain bersifat opsional | SEC-87 | Dengan "Perketat", rantai dan nama diperiksa sebelum autentikasi |
