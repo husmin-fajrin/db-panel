@@ -77,6 +77,18 @@ type fakePeer struct {
 	state mysql.PeerState
 	reads int
 	creds []proto.PeerCred
+	// at answers for one host:port instead of state.
+	at map[string]mysql.PeerState
+}
+
+// setAt makes the peer at key (host:port) answer st.
+func (f *fakePeer) setAt(key string, st mysql.PeerState) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.at == nil {
+		f.at = map[string]mysql.PeerState{}
+	}
+	f.at[key] = st
 }
 
 func (f *fakePeer) set(st mysql.PeerState) {
@@ -96,6 +108,9 @@ func (f *fakePeer) read(_ context.Context, c proto.PeerCred, _ time.Duration) my
 	defer f.mu.Unlock()
 	f.reads++
 	f.creds = append(f.creds, c)
+	if st, ok := f.at[net.JoinHostPort(c.Host, strconv.Itoa(c.Port))]; ok {
+		return st
+	}
 	return f.state
 }
 
@@ -978,6 +993,52 @@ func TestLockKeptWhileListedReplicaDownThenOpens(t *testing.T) {
 	if ev := r.ev.lockEvent(t, 1); ev.Action != "unlocked" {
 		t.Errorf("second lockExpired = %+v, want unlocked", ev)
 	}
+}
+
+// TestKeptHostsReportedAtOnceAfterAnotherKeepReason (FR-3): the lock was
+// kept first because the candidate did not answer; a minute later the
+// candidate reads read-only but a listed replica does not: the kept
+// event that names that replica is sent at once, not an hour after the
+// first. A change of the unreadable set is reported at once too
+// (TestKeptHostsChangeReported); an unchanged set waits for the hour.
+func TestKeptHostsReportedAtOnceAfterAnotherKeepReason(t *testing.T) {
+	r := newLockRig(t, guardCandidateKey)
+	const a, b = "10.9.9.7:3306", "10.9.9.8:3306"
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: guardCandidateKey, Deadline: r.deadline, Readable: []string{a, b}}); err != nil {
+		t.Fatal(err)
+	}
+	r.d.ArmGuard(guardCandidate)
+	r.peer.set(mysql.PeerState{Err: "dial tcp 10.9.9.9:3306: i/o timeout"})
+	r.tick(0)
+	r.wantEvents(proto.EventLockExpired)
+	if ev := r.ev.lockEvent(t, 0); ev.Action != "kept" || len(ev.Hosts) != 0 {
+		t.Fatalf("first lockExpired = %+v, want kept without hosts", ev)
+	}
+
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true})
+	r.peer.setAt(a, mysql.PeerState{Err: "dial tcp 10.9.9.7:3306: i/o timeout"})
+	r.tick(time.Minute)
+	r.tick(time.Minute + lockGrace)
+	r.wantLocked("listed replica unreadable")
+	r.wantEvents(proto.EventLockExpired, proto.EventLockExpired)
+	if ev := r.ev.lockEvent(t, 1); ev.Action != "kept" || strings.Join(ev.Hosts, ",") != a {
+		t.Fatalf("second lockExpired = %+v, want kept with hosts [%s]", ev, a)
+	}
+
+	t.Run("TestKeptHostsChangeReported", func(t *testing.T) {
+		// The same set a recheck later: nothing new within the hour.
+		r.tick(2*time.Minute + lockGrace)
+		r.tick(3*time.Minute + lockGrace)
+		r.wantEvents(proto.EventLockExpired, proto.EventLockExpired)
+		// A second replica stops answering: reported at once.
+		r.peer.setAt(b, mysql.PeerState{Err: "dial tcp 10.9.9.8:3306: i/o timeout"})
+		r.tick(4*time.Minute + lockGrace)
+		r.tick(5*time.Minute + lockGrace)
+		r.wantEvents(proto.EventLockExpired, proto.EventLockExpired, proto.EventLockExpired)
+		if ev := r.ev.lockEvent(t, 2); strings.Join(ev.Hosts, ",") != a+","+b {
+			t.Errorf("third lockExpired = %+v, want kept with hosts [%s %s]", ev, a, b)
+		}
+	})
 }
 
 // lockGrace is the guard's grace between two read-only reads.

@@ -75,7 +75,9 @@ type promoteGuard struct {
 	// nextRead is when the candidate is read next.
 	nextRead time.Time
 	// keptAt is when a kept lock was last reported; zero when never.
-	keptAt time.Time
+	// keptHosts are the unreadable hosts that report carried (sorted).
+	keptAt    time.Time
+	keptHosts []string
 	// up is whether MySQL answered the guard's last tick.
 	up bool
 }
@@ -622,17 +624,24 @@ func serverUUID(ctx context.Context, db *sql.DB) (string, error) {
 }
 
 // keepLock records that the lock stays past its deadline, reporting it
-// the first time and then at most every keptEvery; hosts are the listed
-// replicas (host:port) that could not be read, when that is why. The
-// caller holds promoteMu.
+// the first time, at once whenever the set of unreadable hosts differs
+// from the last one reported (another keep reason came first, or the set
+// changed: the hosts are what the operator acts on), and otherwise at
+// most every keptEvery; hosts are the listed replicas (host:port) that
+// could not be read, when that is why. A report the panel did not get is
+// tried again at the next recheck. The caller holds promoteMu.
 func (d *Driver) keepLock(now time.Time, key, reason string, hosts ...string) {
 	g := &d.guard
-	if !g.keptAt.IsZero() && now.Sub(g.keptAt) < keptEvery {
+	hosts = slices.Clone(hosts)
+	slices.Sort(hosts)
+	if !g.keptAt.IsZero() && now.Sub(g.keptAt) < keptEvery && slices.Equal(hosts, g.keptHosts) {
 		return
 	}
-	g.keptAt = now
 	d.warn("promote lock expired but kept", "candidate", key, "reason", reason)
-	d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "kept", Candidate: key, Reason: reason, Hosts: hosts})
+	if d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "kept", Candidate: key, Reason: reason, Hosts: hosts}) != nil {
+		return
+	}
+	g.keptAt, g.keptHosts = now, hosts
 }
 
 // selfQuarantine makes this server read-only for good (PERSIST, both
