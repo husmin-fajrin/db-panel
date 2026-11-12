@@ -714,7 +714,11 @@ ini). Perintah ini menyebut yang dilewatinya: penjaga tidak lagi menunggu
 host itu, jadi bila replika itu ternyata sudah menjadi master, master ini
 bisa terbuka dan ada dua master. `forget-replica-port semua` hanya mengosongkan
 catatan port; port replika yang sedang tersambung dicatat lagi dalam
-beberapa detik.
+beberapa detik. Periksa dulu isi `/var/lib/dbpanel/replica-ports-seen`
+sebelum menjalankan `forget-replica-port semua`: port replika yang tidak
+tersambung saat itu (misalnya replikasinya sedang dihentikan) ikut terlupa,
+sehingga replika itu tidak dibaca pada kunci promosi berikutnya dan penjaga
+tidak menunggunya.
 
 **Saat replika dipensiunkan, jalankan `forget-replica` untuk host itu di
 server master.** Catatan replika disimpan setahun, dan pada setiap promote
@@ -1329,7 +1333,10 @@ Yang perlu diketahui:
   hanya bila berkas biasa, bukan symlink atau FIFO) dan panel membuka
   peringatan Kritis "MySQL master lama gagal menyala karena berkas kunci
   tidak terbaca" dengan langkah perbaikannya. Arah gagal ini
-  aman bagi data. Bila barisnya dihapus saat agent berjalan, agent
+  aman bagi data. Bila berkas log error MySQL itu sendiri berupa symlink,
+  penjaga tidak membacanya, jadi MySQL yang gagal menyala karena berkas kunci
+  tidak dilaporkan ke panel; agent hanya menulis peringatan di journal-nya
+  sekali semenit. Bila barisnya dihapus saat agent berjalan, agent
   menulisnya lagi; bila dihapus saat agent mati, MySQL menyala tanpa kunci
   start: ia tetap baca-saja hanya bila `read_only` dan `super_read_only`
   ON sempat tersimpan (`SET PERSIST`) sebelumnya, dan agent melaporkan
