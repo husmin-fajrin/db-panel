@@ -20,8 +20,8 @@ const (
 // at last closes master_unpinned at once), lag crossing lagThreshold (an unknown
 // lag is a state of its own), the binlog dump threads, disk use crossing
 // diskWarn or diskCrit percent, connections crossing connPct percent of
-// max_connections, and a restart (uptime went down). An empty prev is
-// always a change.
+// max_connections, a restart (uptime went down), and the start lock's
+// state (startLockChanged). An empty prev is always a change.
 func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWarn, diskCrit, connPct int) bool {
 	if prev == (proto.HealthSnapshot{}) {
 		return true
@@ -36,10 +36,23 @@ func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWar
 		(prev.PinError == "") != (cur.PinError == ""),
 		diskLevel(prev, diskWarn, diskCrit) != diskLevel(cur, diskWarn, diskCrit),
 		connHigh(prev, connPct) != connHigh(cur, connPct),
-		prev.MySQLOK && cur.MySQLOK && cur.UptimeSec < prev.UptimeSec:
+		prev.MySQLOK && cur.MySQLOK && cur.UptimeSec < prev.UptimeSec,
+		startLockChanged(prev.StartLock, cur.StartLock):
 		return true
 	}
 	return replicaChanged(prev.Replica, cur.Replica, lagThreshold)
+}
+
+// startLockChanged: the start lock appeared or went, or its Present,
+// Locked or Reason changed; master_start_unguarded follows it.
+func startLockChanged(prev, cur *proto.StartLockState) bool {
+	if (prev == nil) != (cur == nil) {
+		return true
+	}
+	if prev == nil {
+		return false
+	}
+	return prev.Present != cur.Present || prev.Locked != cur.Locked || prev.Reason != cur.Reason
 }
 
 // replicaChanged compares the replication fields that are reported at once.

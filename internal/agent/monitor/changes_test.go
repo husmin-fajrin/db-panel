@@ -113,3 +113,36 @@ func TestChangedFromEmptyPrev(t *testing.T) {
 		t.Fatal("an empty prev is always a change")
 	}
 }
+
+// TestChangedOnStartLock: a change of the start lock's state (gone or
+// back, Present, Locked, Reason) is reported at once, not with the next
+// summary (FR-2).
+func TestChangedOnStartLock(t *testing.T) {
+	locked := proto.StartLockState{File: "/etc/mysql/dbpanel-start-lock.sql", Present: true, Locked: true}
+	notLocked := locked
+	notLocked.Locked, notLocked.Reason = false, "init_file lain dibaca sesudahnya"
+	other := notLocked
+	other.Reason = "berkas kunci tidak ada"
+	notPresent := notLocked
+	notPresent.Present = false
+	for _, c := range []struct {
+		name      string
+		prev, cur *proto.StartLockState
+		want      bool
+	}{
+		{"both nil", nil, nil, false},
+		{"same", &locked, &locked, false},
+		{"appears", nil, &locked, true},
+		{"goes", &locked, nil, true},
+		{"locked flips", &locked, &notLocked, true},
+		{"unlocked back", &notLocked, &locked, true},
+		{"reason changes", &notLocked, &other, true},
+		{"present flips", &notLocked, &notPresent, true},
+	} {
+		prev, cur := base(), base()
+		prev.StartLock, cur.StartLock = c.prev, c.cur
+		if got := changed(prev, cur, 30*time.Second, 85, 95, 80); got != c.want {
+			t.Errorf("%s: changed = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

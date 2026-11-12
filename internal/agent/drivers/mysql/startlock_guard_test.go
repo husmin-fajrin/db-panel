@@ -447,6 +447,22 @@ func TestQuarantineStartReportRetriedUntilDelivered(t *testing.T) {
 	})
 }
 
+// TestFirstSnapshotOfQuarantinedServerCarriesCheckedStartLock: a health
+// snapshot taken before the guard's first round on a quarantined server
+// (every agent start) checks the start lock itself instead of saying "not
+// checked yet", which the panel reads as unguarded (FR-2).
+func TestFirstSnapshotOfQuarantinedServerCarriesCheckedStartLock(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	if err := mysql.WriteStartLock(context.Background(), inst.Host()); err != nil {
+		t.Fatal(err)
+	}
+	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+	s := r.d.Snapshot(context.Background())
+	if s.StartLock == nil || !s.StartLock.Locked || !s.StartLock.Present || s.StartLock.File != r.lock {
+		t.Fatalf("StartLock of the first snapshot = %+v, want locked at %s", s.StartLock, r.lock)
+	}
+}
+
 func TestScanBootstrapFailure(t *testing.T) {
 	const file = "/etc/mysql/dbpanel-start-lock.sql"
 	since := time.Date(2026, 11, 11, 3, 0, 0, 0, time.UTC)

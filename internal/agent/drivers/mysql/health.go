@@ -38,7 +38,7 @@ const (
 // The pins are reported whatever MySQL answers (Pins.Report), and so is
 // the start lock while the role is quarantined or its line is still there
 // (StartLock; before the guard first checked it on a quarantined server,
-// a state saying so).
+// checked here for the report).
 func (d *Driver) Snapshot(ctx context.Context) proto.HealthSnapshot {
 	h, err := d.host()
 	var s proto.HealthSnapshot
@@ -50,7 +50,16 @@ func (d *Driver) Snapshot(ctx context.Context) proto.HealthSnapshot {
 	s.AgentVersion = version.Version
 	s.RolePin, s.SourcePin, s.PinError = d.pins.Report()
 	if s.StartLock = d.StartLock(); s.StartLock == nil && d.pins.RoleIs(roleQuarantined) {
-		s.StartLock = &proto.StartLockState{Reason: "kunci start belum diperiksa agent"}
+		// Before the guard's first check (every agent start): check it
+		// here (it only reads files and runs --print-defaults) rather
+		// than report "not checked", which the panel reads as unguarded.
+		// Not stored: the guard's own check stays the one it acts on.
+		if h != nil {
+			st := startLockStatus(ctx, h)
+			s.StartLock = &st
+		} else {
+			s.StartLock = &proto.StartLockState{Reason: "kunci start belum diperiksa agent"}
+		}
 	}
 	if d.Sys != nil {
 		datadir := ""
