@@ -695,8 +695,8 @@ tersambung di luar alur panel tidak mencatat replika itu, jadi promote
 darurat ke replika itu tidak bisa mengkarantina master lama (agent master
 lama menolak karantina di bawah host yang tidak pernah tercatat).
 
-Replika yang sudah tidak dipakai dihapus dari daftar replika itu, dan dari daftar
-replika kunci promosi yang sedang berdiri, di server master:
+Replika yang sudah tidak dipakai dihapus dari daftar replika itu, dan dari kunci
+promosi yang sedang berdiri, di server master:
 
 ```sh
 sudo dbpanel agent forget-replica 10.0.0.7        # semua port host itu; nama dibandingkan tanpa beda huruf besar-kecil
@@ -721,9 +721,9 @@ sehingga replika itu tidak dibaca pada kunci promosi berikutnya dan penjaga
 tidak menunggunya.
 
 **Saat replika dipensiunkan, jalankan `forget-replica` untuk host itu di
-server master.** Catatan replika disimpan setahun, dan pada setiap promote
-terencana agent master membaca setiap host yang tercatat di setiap port yang
-tercatat dengan akun replikasi. Pada topologi tanpa verifikasi sertifikat
+server master.** Daftar replika disimpan setahun, dan pada setiap promote
+terencana agent master membaca setiap host di daftar replika pada setiap port
+di daftar port replika dengan akun replikasi. Pada topologi tanpa verifikasi sertifikat
 ("Perketat" belum dijalankan) sandi akun itu dikirim ke siapa pun yang
 menjawab di alamat dan port itu, termasuk perangkat yang kemudian memakai
 alamat replika lama. "Perketat" menutup ini: tanpa sertifikat yang cocok
@@ -1756,7 +1756,7 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   wajib; tanpa verifikasi sertifikat ("Perketat" belum dijalankan)
   sertifikatnya tidak diperiksa, tetapi koneksi tanpa TLS ditolak.
 - Penjaga kunci promosi membaca replika di berkas replika yang pernah
-  tersambung, pada port kandidat dan setiap port replika yang tercatat.
+  tersambung, pada port kandidat dan setiap port di daftar port replika.
   Replika yang tidak terbaca saat kunci dipasang (misalnya menolak akun
   replikasi kandidat) dilewati dan tidak menahan kunci; replika yang
   terbaca saat itu menahan kunci selama tidak terbaca lagi (lihat "Peran

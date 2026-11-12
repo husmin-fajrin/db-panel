@@ -899,7 +899,7 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 		t.Errorf("forget-replica-port bukan = %d, %q", code, errOut)
 	}
 	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "semua port dihapus") {
+	if code != 0 || !strings.Contains(out, "semua port dihapus dari daftar port replika") {
 		t.Errorf("forget-replica-port semua = %d, %q, %q", code, out, errOut)
 	}
 	// semua names what it removed: each port (the cap kept 20000-20007,
