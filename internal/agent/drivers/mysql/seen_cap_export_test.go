@@ -22,3 +22,6 @@ func SetLockReadBudget(d time.Duration) (restore func()) {
 	lockReadBudget = d
 	return func() { lockReadBudget = old }
 }
+
+// ReadTail is how the guard reads the end of MySQL's error log (SA-6).
+var ReadTail = readTail

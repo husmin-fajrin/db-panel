@@ -131,6 +131,8 @@ type Driver struct {
 	bootFailAt         time.Time
 	bootLog            string
 	bootLogAt          time.Time
+	// bootLogWarnAt: when an unreadable error log was last logged.
+	bootLogWarnAt time.Time
 
 	salvageMu sync.Mutex // a salvage rename, a delete or the sweep; never held across mysqlbinlog
 	// salvageRun is held by the one mysql.salvage that may run; another

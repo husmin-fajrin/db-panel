@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -299,6 +300,10 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 	}
 	tail, err := readTail(d.bootLog, bootLogTail)
 	if err != nil {
+		if now.Sub(d.bootLogWarnAt) >= startLockRetry || now.Before(d.bootLogWarnAt) {
+			d.bootLogWarnAt = now
+			d.warn("MySQL error log not read; a failed start is not reported", "file", d.bootLog, "err", err)
+		}
 		return
 	}
 	at, ok := scanBootstrapFailure(tail, path, fi.ModTime())
@@ -368,9 +373,14 @@ func (d *Driver) flushStartEvents() {
 	d.pendingStart = nil
 }
 
-// readTail is the last n bytes of the file at path.
+// readTail is the last n bytes of the regular file at path. The error log
+// lives in a directory the mysql user owns and the guard runs as root: it
+// is opened without following a symlink and without blocking (a FIFO
+// planted there would otherwise hang the guard loop for good, with
+// promoteMu held), and read only when what was opened is a regular file
+// (SA-6).
 func readTail(path string, n int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -378,6 +388,9 @@ func readTail(path string, n int64) ([]byte, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s bukan berkas biasa", path)
 	}
 	if off := fi.Size() - n; off > 0 {
 		if _, err := f.Seek(off, io.SeekStart); err != nil {

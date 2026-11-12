@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -460,6 +462,45 @@ func TestFirstSnapshotOfQuarantinedServerCarriesCheckedStartLock(t *testing.T) {
 	s := r.d.Snapshot(context.Background())
 	if s.StartLock == nil || !s.StartLock.Locked || !s.StartLock.Present || s.StartLock.File != r.lock {
 		t.Fatalf("StartLock of the first snapshot = %+v, want locked at %s", s.StartLock, r.lock)
+	}
+}
+
+// TestReadTailOnlyRegularFiles (SA-6): the error log is read only when it
+// is a regular file, opened without following a symlink and without
+// blocking: a FIFO there (planted by the mysql user) fails at once
+// instead of hanging the guard loop; a symlink is not followed.
+func TestReadTailOnlyRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "error.log")
+	if err := os.WriteFile(regular, []byte("baris satu\nbaris dua\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := mysql.ReadTail(regular, 9); err != nil || string(b) != "aris dua\n" {
+		t.Fatalf("ReadTail(regular) = %q, %v", b, err)
+	}
+	fifo := filepath.Join(dir, "fifo.log")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := mysql.ReadTail(fifo, 1024)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("ReadTail(fifo) read a FIFO")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadTail(fifo) blocked")
+	}
+	link := filepath.Join(dir, "link.log")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := mysql.ReadTail(link, 1024); err == nil {
+		t.Errorf("ReadTail(symlink) followed the link: %q", b)
 	}
 }
 
