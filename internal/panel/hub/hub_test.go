@@ -631,3 +631,58 @@ func TestHubDecodesBacklogOutsideLock(t *testing.T) {
 		t.Fatalf("decoded %d times (want 5, once the 10 tokens are gone), %d under rateMu (want 0)", calls, held)
 	}
 }
+
+// TestHubLimitsAgentEvents (SP-3): the start lock and promote lock events
+// of one server pass at most a burst and then one per refill; drops are
+// counted. The first occurrence of each kind of such event in a window
+// passes even over the limit, so a flood of one kind never hides the first
+// report of another (a late start after a flood of "ok"). Job events are
+// not limited.
+func TestHubLimitsAgentEvents(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)}
+	l := &fakeListener{}
+	h := New(l, WithNow(clk.Now))
+	h.Attach(1, newFakeConn(0))
+	start := func(result string, bypassed bool) proto.Event {
+		b, _ := json.Marshal(proto.QuarantineStartEvent{Result: result, Bypassed: bypassed})
+		return proto.Event{Type: proto.EventQuarantineStart, Payload: b}
+	}
+	for range 1000 {
+		h.OnEvent(1, start(proto.QuarantineStartBypassed, true))
+		h.OnEvent(1, start(proto.QuarantineStartOK, false))
+	}
+	if n := l.eventCount(1, proto.EventQuarantineStart); n > eventBurst+2 || n < 2 {
+		t.Fatalf("start events passed = %d, want at most %d", n, eventBurst+2)
+	}
+	if h.Dropped(1) == 0 {
+		t.Fatal("dropped events not counted")
+	}
+	before := l.eventCount(1, proto.EventQuarantineStart)
+	h.OnEvent(1, start(proto.QuarantineStartLate, false))
+	if n := l.eventCount(1, proto.EventQuarantineStart); n != before+1 {
+		t.Fatal("the first late start after a flood was dropped")
+	}
+	b, _ := json.Marshal(proto.QuarantineStartFailedEvent{File: "/x"})
+	h.OnEvent(1, proto.Event{Type: proto.EventQuarantineStartFailed, Payload: b})
+	if n := l.eventCount(1, proto.EventQuarantineStartFailed); n != 1 {
+		t.Fatal("the first failed start after a flood was dropped")
+	}
+	// A repeat of a kind already let through is dropped.
+	h.OnEvent(1, start(proto.QuarantineStartLate, false))
+	if n := l.eventCount(1, proto.EventQuarantineStart); n != before+1 {
+		t.Fatal("a repeated late start passed over the limit")
+	}
+	// Job events are not limited.
+	for range 50 {
+		h.OnEvent(1, proto.Event{Type: proto.EventJobLog})
+	}
+	if n := l.eventCount(1, proto.EventJobLog); n != 50 {
+		t.Fatalf("job.log events passed = %d, want 50", n)
+	}
+	// A refill lets one more through.
+	clk.Add(eventRefill)
+	h.OnEvent(1, start(proto.QuarantineStartLate, false))
+	if n := l.eventCount(1, proto.EventQuarantineStart); n != before+2 {
+		t.Fatal("no event passed after a refill")
+	}
+}

@@ -69,6 +69,14 @@ const (
 	// monitor's own limit (internal/panel/monitor maxPayload): a larger
 	// one is dropped before it is decoded.
 	maxHealthPayload = 64 << 10
+	// eventBurst and eventRefill limit one server's start lock and
+	// promote lock events (limitedEvent, SP-3): an honest agent sends one
+	// per MySQL start, per lock decision, and at most one a minute while
+	// a lock is kept. firstEvery: the first event of each kind
+	// (eventKind) in that time passes even over the limit.
+	eventBurst  = 10
+	eventRefill = 5 * time.Second
+	firstEvery  = 10 * time.Minute
 )
 
 // Hub maps server IDs to their active connection.
@@ -99,6 +107,11 @@ type reportBucket struct {
 	// grantedAt.
 	backlogLeft int
 	grantedAt   time.Time
+	// The event limit (allowEvent): its tokens, when they were last
+	// refilled, and when each kind of event last passed over the limit.
+	evTokens float64
+	evLast   time.Time
+	firstAt  map[string]time.Time
 }
 
 type dropMinute struct {
@@ -165,7 +178,7 @@ func (h *Hub) grantBacklog(serverID int64) {
 func (h *Hub) bucket(serverID int64, now time.Time) *reportBucket {
 	b, ok := h.buckets[serverID]
 	if !ok {
-		b = &reportBucket{tokens: reportBurst, last: now}
+		b = &reportBucket{tokens: reportBurst, last: now, evTokens: eventBurst, evLast: now}
 		h.buckets[serverID] = b
 	}
 	return b
@@ -225,13 +238,88 @@ func (h *Hub) Call(ctx context.Context, serverID int64, cmd string, params any, 
 
 // OnEvent is the single entry for events sent by agents, remote or embedded:
 // it passes ev to the listener, except a health report over the server's
-// rate limit, which is dropped and counted (Dropped). It runs on the
+// rate limit, or a start lock or promote lock event over its own
+// (allowEvent), which is dropped and counted (Dropped). It runs on the
 // sending connection's goroutine, so the listener's OnEvent must not block.
 func (h *Hub) OnEvent(serverID int64, ev proto.Event) {
 	if ev.Type == proto.EventHealth && !h.allowReport(serverID, ev.Payload) {
 		return
 	}
+	if limitedEvent(ev.Type) && !h.allowEvent(serverID, ev) {
+		return
+	}
 	h.l.OnEvent(serverID, ev)
+}
+
+// limitedEvent: the events that open and close alerts at the agent's word
+// (spec 5.2, 5.4), which a faulty or compromised agent could send in a
+// loop (SP-3).
+func limitedEvent(typ string) bool {
+	switch typ {
+	case proto.EventQuarantineStart, proto.EventQuarantineStartFailed, proto.EventLockExpired, proto.EventQuarantined:
+		return true
+	}
+	return false
+}
+
+// eventKind is what makes two limited events the same kind: the type, and
+// the result (start) or action (lock). A payload that cannot be read is a
+// kind of its own.
+func eventKind(ev proto.Event) string {
+	var p struct {
+		Result   string `json:"result"`
+		Bypassed bool   `json:"bypassed"`
+		Action   string `json:"action"`
+	}
+	if len(ev.Payload) > maxEventKindPayload || json.Unmarshal(ev.Payload, &p) != nil {
+		return ev.Type + " ?"
+	}
+	// Only known words make kinds: an agent cannot mint new ones.
+	known := func(v string, words ...string) string {
+		if slices.Contains(words, v) {
+			return v
+		}
+		return "?"
+	}
+	return fmt.Sprintf("%s %s %v %s", ev.Type, known(p.Result, proto.QuarantineStartOK, proto.QuarantineStartLate,
+		proto.QuarantineStartBypassed), p.Bypassed, known(p.Action, "kept", "unlocked"))
+}
+
+// maxEventKindPayload: a larger payload is not decoded for its kind (the
+// monitor ignores those anyway).
+const maxEventKindPayload = 4 << 10
+
+// allowEvent takes a token from serverID's event bucket; without one the
+// event still passes when no event of its kind passed over the limit in
+// the last firstEvery, so a flood of one kind never hides the first
+// report of another (a Critical alert's first event is never dropped for
+// another's flood). Otherwise it is dropped and counted.
+func (h *Hub) allowEvent(serverID int64, ev proto.Event) bool {
+	kind := eventKind(ev) // outside rateMu
+	now := h.now()
+	h.rateMu.Lock()
+	b := h.bucket(serverID, now)
+	if elapsed := now.Sub(b.evLast); elapsed > 0 {
+		b.evTokens = min(eventBurst, b.evTokens+float64(elapsed)/float64(eventRefill))
+		b.evLast = now
+	}
+	if b.evTokens >= 1 {
+		b.evTokens--
+		h.rateMu.Unlock()
+		return true
+	}
+	if at, ok := b.firstAt[kind]; !ok || now.Sub(at) >= firstEvery {
+		if b.firstAt == nil {
+			b.firstAt = map[string]time.Time{}
+		}
+		maps.DeleteFunc(b.firstAt, func(_ string, at time.Time) bool { return now.Sub(at) >= firstEvery })
+		b.firstAt[kind] = now
+		h.rateMu.Unlock()
+		return true
+	}
+	h.rateMu.Unlock()
+	h.drop(serverID, "agent event over the rate limit")
+	return false
 }
 
 // allowReport drops a payload over maxHealthPayload unread; otherwise it
