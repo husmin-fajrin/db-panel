@@ -16,7 +16,7 @@
 
 ## 1. Ringkasan eksekutif
 
-Rencana 5a menutup jalur dua master dan kehilangan data yang dicatat inventaris risiko (R-029..R-036, R-043, R-058) dan, menurut tabel spesifikasi §5.9, delapan dari sembilan jalur tambahannya (yang kesembilan, replika sebagian yang tidak terbaca penjaga, tetap terbuka sebagai R-108). Yang ditambahkan: kunci start lewat `init_file` sehingga master lama yang dikarantina menyala baca-saja walau agent mati; loop penjaga tetap 5 detik; daftar replika (host × port) yang dibaca sebelum kunci promosi dibuka; kunci promosi yang dipertahankan bila replika di daftar replika tidak terbaca; daftar koneksi yang jujur; token baru untuk Ulangi dan Setujui job pembuang; dan "Jangan ganggu" yang tidak membungkam jenis berbahaya.
+Rencana 5a menutup jalur dua master dan kehilangan data yang dicatat inventaris risiko (R-029..R-036, R-043, R-058) dan, menurut tabel spesifikasi §5.9, delapan dari sembilan jalur tambahannya (yang kesembilan, replika sebagian yang tidak terbaca penjaga, tetap terbuka sebagai R-108). Yang ditambahkan: kunci start lewat `init_file` sehingga master lama yang dikarantina menyala baca-saja walau agent mati; loop penjaga tetap 5 detik; daftar replika dan daftar port replika (host × port) yang dibaca sebelum kunci promosi dibuka; kunci promosi yang dipertahankan bila replika di daftar replika tidak terbaca; daftar koneksi yang jujur; token baru untuk Ulangi dan Setujui job pembuang; dan "Jangan ganggu" yang tidak membungkam jenis berbahaya.
 
 Hasil keseluruhan: tidak ada temuan Kritis. Tidak ada jalur ke `mysql.dropDatabases` tanpa konfirmasi yang sah. Kunci start dibangun sesuai urutan yang dituntut spesifikasi (berkas sebelum baris, baris sebelum berkas). Tiga celah pada pengiriman peringatan, yang justru menjadi andalan operator saat failover, ditemukan review dan sudah diperbaiki.
 
@@ -94,7 +94,7 @@ Model ancaman Rencana 1–4 tetap berlaku (audit Rencana 4a §3 butir 18–24). 
 
 - **Aset baru:**
   - berkas kunci start (`init_file`) dan barisnya di konfigurasi MySQL terkelola, ditulis root di direktori include atau direktori berkas konfigurasi utama;
-  - daftar replika `/var/lib/dbpanel/replicas-seen` (host, setahun) dan `/var/lib/dbpanel/replica-ports-seen` (port, kini paling banyak 8 dengan tanda `penuh`);
+  - daftar replika `/var/lib/dbpanel/replicas-seen` (host, setahun) dan daftar port replika `/var/lib/dbpanel/replica-ports-seen` (port, kini paling banyak 8 dengan tanda `penuh`);
   - daftar `Readable` di berkas kunci promosi;
   - antrean laporan start di memori agent (paling banyak 16);
   - kolom `snooze_from` (migrasi 0011) dan field job-state baru (`WipeOnly`, `AddDrop`, `ConfirmedAt`, `WaitList`).
@@ -206,7 +206,7 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
 
 ### SEC-87 — Sandi replikasi ditawarkan tanpa verifikasi ke setiap host di daftar replika × port di daftar port replika (SA-3)
 - **Tingkat:** Tinggi, satu-satunya tingkat yang dinaikkan dalam dokumen ini. Pemeriksa memberi Sedang. Keputusan pengendali menaikkannya ke Tinggi karena kredensial bocor (definisi Tinggi di inventaris), dan pemeriksa sendiri menyebut Tinggi untuk baris inventarisnya.
-- **Penyerang:** (a) perangkat yang mengambil IP bekas replika (dalam setahun terakhir), atau (b) pengguna lokal tanpa hak di host di daftar replika, pada port di daftar port replika yang tidak dipakai. Tidak perlu akun MySQL atau posisi on-path.
+- **Penyerang:** (a) perangkat yang mengambil IP bekas replika (dalam setahun terakhir), atau (b) pengguna lokal tanpa hak di salah satu host dalam daftar replika, pada port dalam daftar port replika yang tidak dipakai. Tidak perlu akun MySQL atau posisi on-path.
 - **Lokasi:**
   - `promote_lock.go:225`, `:335-353` (`lockReadTargets`: setiap host di daftar replika × setiap port di daftar port replika ditambah port kandidat, dengan akun kandidat);
   - `promote_files.go:368` (`seenCutoff`: setahun);
