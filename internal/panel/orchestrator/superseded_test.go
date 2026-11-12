@@ -9,9 +9,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // failedJob stores a failed job of kind on serverID at step with params.
@@ -292,4 +294,42 @@ func TestCancelBetweenReopenAndLaunchIsCanceled(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRetryRefusedAfterMasterSwapped (SP-4): a job made before a
+// promotion keeps the old master's id; once the topology's master has
+// changed, its Retry would check wipe_only against the old master and
+// copy from the new one: it is superseded instead.
+func TestRetryRefusedAfterMasterSwapped(t *testing.T) {
+	e := newEnv(t)
+	_, topo := e.readyMaster("db-master")
+	r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}}, "a")
+	if err := e.st.SetReplicaState(r.id, store.ReplicaFailed, "gagal"); err != nil {
+		t.Fatal(err)
+	}
+	const id = "ffffffffffffffffffffffffffffff01"
+	b, _ := json.Marshal(jobState{MasterServerID: topo.MasterServerID, Databases: []string{"a"}, ConfirmWipe: true,
+		Resync: true, WipeList: []string{"a"}, ConfirmedAt: time.Now()})
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: KindResyncReplica, ServerID: r.id, TopologyID: topo.ID,
+		ParamsJSON: string(b), CreatedAt: time.Now()}, resyncSteps()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobFailed, 0, "gagal", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.r.Superseded(id); got != "" {
+		t.Fatalf("Superseded before the swap = %q", got)
+	}
+	other := e.replicaAgent("db-baru", "dump")
+	if err := e.st.SwapMaster(topo.ID, topo.MasterServerID, other.id, "10.0.0.9", 3306); err != nil {
+		t.Fatal(err)
+	}
+	mark := r.mark()
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err == nil {
+		t.Fatal("Retry after the master changed was accepted")
+	}
+	if got := e.r.Superseded(id); !strings.Contains(got, "master") {
+		t.Fatalf("Superseded after the swap = %q", got)
+	}
+	wantCmds(t, "replica", r.cmds(mark), nil)
 }

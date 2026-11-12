@@ -927,6 +927,20 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 		if srv.Role != store.RoleReplica {
 			return "peran server ini sudah berubah", nil
 		}
+		// A job keeps the master it was made for: after a promotion it
+		// would check against the old master and copy from the new one
+		// (SP-4).
+		var st jobState
+		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+			return "", err
+		}
+		topo, err := r.d.Store.GetTopology(rep.TopologyID)
+		if err != nil {
+			return "", err
+		}
+		if topo.MasterServerID != st.MasterServerID {
+			return "master topologi ini sudah berganti sejak pekerjaan ini dibuat", nil
+		}
 		if seedsReplica(j.Kind) {
 			running := store.ReplicaCreating
 			if j.Kind == KindResyncReplica {
@@ -936,10 +950,6 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 				return "replika di server ini sudah " + replicaStateText(rep.State), nil
 			}
 			break
-		}
-		var st jobState
-		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
-			return "", err
 		}
 		if !slices.Equal(rep.Databases, st.Databases) {
 			return "database yang diikuti replika sudah berubah sejak pekerjaan ini dibuat", nil
