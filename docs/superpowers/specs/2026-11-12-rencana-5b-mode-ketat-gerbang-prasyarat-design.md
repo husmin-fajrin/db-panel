@@ -1,6 +1,7 @@
 # Rencana 5b: Mode Ketat, Gerbang Prasyarat, dan Panduan Langkah
 
-Status: draf untuk persetujuan pemilik produk (2026-11-12)
+Status: draf untuk persetujuan pemilik produk (2026-11-12), sudah melewati
+builder check; keputusan penulis sesudahnya ada di bagian 9
 Sumber: `docs/superpowers/security/2026-11-10-inventaris-risiko.md`
 (R-001, R-019, R-046, R-109, R-110, R-113, R-114, R-116, R-117, R-121, dan
 tabel "Prasyarat yang sebaiknya dipaksa panel"), audit
@@ -200,14 +201,36 @@ Pekerjaan dibagi menjadi dua rencana pelaksanaan, dikerjakan berurutan:
   bila server itu akan menjadi master lagi). Ini berlaku apa pun versi
   agentnya.
 - Untuk peran `replica` dan `unassigned`, `releaseRole` tidak berubah.
+- `set-role master` dan `set-role unassigned` yang dijalankan pada server
+  berperan `quarantined` menampilkan dulu apa yang dilepas: server ini
+  dikarantina di bawah sumber mana; setelah perintah ini kunci start
+  dilepas; dengan `master` server bisa dibuka untuk ditulis, dengan
+  `unassigned` panel boleh menyiapkannya ulang termasuk membuang datanya.
+  Lalu meminta ketik `ya`. Pilihan `--ya` melewati pertanyaan itu untuk
+  skrip. Pada peran lain `set-role` tidak bertanya (seperti sekarang).
 
 ### 5.2 Persetujuan root untuk bangun ulang server yang dikarantina (R-110, R-019)
 
-Yang dilindungi: pada server berperan `quarantined`, agent menolak
-`mysql.dropDatabases`, `mysql.dumpFrom`, dan `mysql.cloneFrom` kecuali ada
-persetujuan yang berlaku. Pelaksana memeriksa daftar perintah agent dan
-menambahkan perintah lain yang bisa membuang atau mengganti data tabel pada
-server yang dikarantina.
+Yang dilindungi: pada server berperan `quarantined` tanpa persetujuan yang
+berlaku, agent hanya menerima perintah dari **daftar izin**: perintah yang
+membaca (kesehatan, inventaris, koneksi, preflight), perintah penyelamatan
+(periksa data tertinggal, amankan, unduh dan hapus berkas salvage),
+`mysql.quarantine` untuk sumber yang sama, `mysql.recordReplicas`,
+`monitor.*`, dan `mysql.rebuildApproval`. Semua perintah lain ditolak.
+
+Yang dengan sendirinya ikut tertolak tanpa persetujuan:
+- `mysql.dropDatabases`, `mysql.dumpFrom`, `mysql.cloneFrom`;
+- **perintah replikasi** (`mysql.configureReplication`, `startReplica`,
+  `startUntil`, `setReplicationFilter`, `resetReplica`). Tanpa ini, sumber
+  yang dipin bisa mengalirkan `DROP` atau `DELETE` ke data server yang
+  dikarantina lewat replikasi, karena baca-saja tidak menahan applier;
+- pemasangan atau restart MySQL dan perubahan konfigurasi.
+
+Pelaksana menuliskan daftar izin itu dari daftar perintah agent yang ada,
+dan menambah uji yang gagal bila sebuah perintah terdaftar tanpa diputuskan
+masuk daftar izin atau tidak. Dengan persetujuan yang berlaku, aturan pin
+yang ada hari ini tetap berlaku seperti semula (sumber harus sama dengan
+pin, dan seterusnya).
 
 Berkas (di `/etc/dbpanel`, aturan kepercayaan sama dengan berkas pin: milik
 root, tidak bisa ditulis grup/lain, ditulis atomik):
@@ -216,11 +239,15 @@ root, tidak bisa ditulis grup/lain, ditulis atomik):
   angka dari `crypto/rand`. Berlaku 30 menit. Dibuat agent, tidak pernah
   dari isi yang dikirim panel: `sumber` adalah pin sumber server itu saat
   permintaan dibuat.
-- **Persetujuan** `rebuild-approval`: `{sumber, disetujui, berlaku_sampai}`.
-  Berlaku 24 jam. Hanya ditulis CLI.
+- **Persetujuan** `rebuild-approval`:
+  `{sumber, alamat, disetujui, berlaku_sampai}`. Berlaku 24 jam. Hanya
+  ditulis CLI. `alamat` adalah alamat IP yang ditampilkan kepada operator:
+  isi `source-addr` bila ada, kalau tidak hasil resolusi nama sumber saat
+  `approve` dijalankan.
 
-Persetujuan berlaku bila ketiganya benar: peran `quarantined`; `sumber`
-sama dengan pin sumber saat perintah datang; waktu sekarang belum melewati
+Persetujuan berlaku bila semuanya benar: peran `quarantined`; `sumber`
+sama dengan pin sumber saat perintah datang; nama sumber saat itu masih
+teresolusi ke `alamat` yang disetujui; waktu sekarang belum melewati
 `berlaku_sampai` dan `disetujui` tidak lebih dari 5 menit di masa depan.
 Persetujuan dihapus saat `settleRebuilt` berhasil dan oleh setiap
 `set-role`.
@@ -239,9 +266,10 @@ CLI baru:
 - `sudo dbpanel agent approve <kode>`
   - Menolak bila tidak ada permintaan yang berlaku atau kodenya salah.
   - Menampilkan, sebelum bertanya: nama host server ini; sumber
-    (`host:port`) yang datanya akan disalin; kalimat bahwa **semua data
+    (`host:port`) yang datanya akan disalin dan alamat IP-nya; kalimat
+    bahwa **semua data
     MySQL di server ini dibuang** dan diganti salinan dari sumber itu;
-    permintaan untuk memastikan sumber itu memang master baru; dan
+    permintaan untuk memastikan nama dan alamat itu memang master baru; dan
     pengingat menjalankan "Periksa data tertinggal" dulu bila promote tadi
     darurat.
   - Meminta ketik `ya`. Jawaban lain membatalkan.
@@ -335,8 +363,14 @@ penjelasan, dan cara memperbaiki. Fungsi yang sama dipakai untuk tampilan
 dan untuk keputusan.
 
 Di mana ditegakkan:
-- Semua `Start*` di bawah menolak bila ada baris merah, sebelum ada yang
-  diubah dan sebelum token konfirmasi dipakai.
+- `Start*` yang digerbang (tabel "Tindakan dan barisnya" di bawah) menolak
+  bila ada baris merah, sebelum ada yang diubah dan sebelum token
+  konfirmasi dipakai.
+- **Tidak digerbang sama sekali:** promote darurat (5.9), "Periksa data
+  tertinggal" dan "Amankan data tertinggal" (penyelamatan tidak boleh
+  tertahan), "Perketat" dan pemasangan sertifikat (keduanya adalah cara
+  memperbaiki baris merah), hentikan/jalankan/kunci ulang replika, arahkan
+  ulang, lepas replika, buka kunci master, batalkan job, dan hapus server.
 - `Retry` dan `Approve` menilai ulang hanya bila langkah yang tersisa masih
   membuang data. Promote yang sudah melewati titik tidak-bisa-batal tidak
   pernah ditahan.
@@ -350,17 +384,37 @@ Di mana ditampilkan:
 
 Baris merah:
 
-| Kunci | Merah bila | Berlaku untuk | Sumber data |
-|---|---|---|---|
-| Versi agent | versi agent server yang terlibat berbeda dari panel | semua `Start*` | sudah ada |
-| Pin master | master topologi tidak melaporkan pin `master` | promote terencana, buat replika, Resync, tambah database | sudah ada |
-| Jam | selisih jam server dengan panel lebih dari 30 detik | promote terencana | field baru: jam agent saat laporan diambil |
-| Perketat | ada replika topologi yang belum terverifikasi, atau master tanpa sertifikat | promote terencana, bangun ulang | sudah ada |
-| Ruang disk | disk server tujuan atau master di atas ambang kritis Pengaturan | buat replika, bangun ulang, Resync, tambah database | sudah ada |
-| Akun panel | akun MySQL agent bernama `root` | semua `Start*` | panel menyimpan `ConnectResult.Account` |
-| `performance_schema` | mati di master | buat replika, bangun ulang, Resync, tambah database | field baru |
-| Cadangan | folder diisi, dan berkas terbaru lebih tua dari batas, kosong, atau folder tidak terbaca | promote terencana, bangun ulang | 5.8 |
-| Persetujuan di server | belum disetujui | bangun ulang | 5.2 |
+| Kunci | Merah bila | Sumber data |
+|---|---|---|
+| Versi agent | versi agent sebuah server yang dinilai berbeda dari panel, atau tidak diketahui | sudah ada |
+| Pin master | master topologi tidak melaporkan pin `master` | sudah ada |
+| Jam | selisih jam sebuah server yang dinilai dengan panel lebih dari 30 detik | field baru: jam agent saat laporan diambil |
+| Perketat | master topologi tanpa sertifikat; untuk promote terencana juga: ada replika berstatus siap atau perlu perhatian yang belum terverifikasi | sudah ada |
+| Ruang disk | disk sebuah server yang dinilai di atas ambang kritis Pengaturan | sudah ada |
+| Akun panel | akun MySQL agent pada sebuah server yang dinilai bernama `root` | panel menyimpan `ConnectResult.Account` |
+| `performance_schema` | mati di master topologi | field baru |
+| Cadangan | folder master topologi diisi, dan berkas terbaru lebih tua dari batas, kosong, atau folder tidak terbaca | 5.8 |
+| Persetujuan di server | belum disetujui | 5.2 |
+
+Tindakan dan barisnya. "Server yang dinilai" adalah server yang dikirimi
+perintah oleh job itu dan harus online untuk memulainya; replika lain di
+topologi tidak dinilai, sehingga satu replika offline tidak menahan apa
+pun (promote terencana tetap boleh melewati replika tak terjangkau seperti
+sekarang).
+
+| Tindakan | Server yang dinilai | Baris |
+|---|---|---|
+| Promote terencana | master, kandidat | Versi agent, Pin master, Jam, Perketat, Akun panel, Cadangan |
+| Buat replika | master, server tujuan | Versi agent, Pin master, Ruang disk, Akun panel, `performance_schema` |
+| Bangun ulang master lama | master baru, master lama | Versi agent, Perketat (hanya sertifikat master), Ruang disk, Akun panel, `performance_schema`, Cadangan, Persetujuan di server |
+| Resync, tambah database | master, replika itu | Versi agent, Pin master, Ruang disk, Akun panel, `performance_schema` |
+| Lepas database dengan hapus data | replika itu | Versi agent, Akun panel |
+| Siapkan master | server itu | Versi agent, Akun panel |
+
+Status replika yang dihitung untuk "Perketat" sama dengan yang dihitung
+halaman master hari ini (siap atau perlu perhatian). Replika berstatus
+lain (perlu diarahkan ulang, gagal, sedang dibangun) tidak dihitung, jadi
+bangun ulang setelah promote darurat tidak tertahan oleh mereka.
 
 Baris kuning (tidak menolak):
 - Cadangan belum diatur: meminta centang "saya sudah memastikan ada
@@ -392,9 +446,14 @@ dinilai; baris "Versi agent" sudah merah untuk agent itu.
 - Folder harus path absolut. Folder di bawah `/home`, `/root`, atau
   `/run/user` tidak terlihat oleh agent; panel menolaknya saat disimpan
   dan menyebut sebabnya.
-- Baris "Cadangan" menilai master topologi saat itu. Setelah promote,
-  master baru belum punya folder, sehingga barisnya kuning sampai diisi;
-  layar pengalihan dan Panduan menyebut "pindahkan jadwal cadangan".
+- Baris "Cadangan" menilai master topologi saat itu, juga untuk bangun
+  ulang: yang dinilai master baru, bukan master lama. Alasannya, bangun
+  ulang menghapus satu salinan penuh data, jadi yang perlu punya cadangan
+  adalah server yang sesudahnya menjadi satu-satunya sumber. Berkas
+  cadangan lama di disk master lama tidak disentuh bangun ulang.
+- Setelah promote, master baru belum punya folder, sehingga barisnya
+  kuning sampai diisi; layar pengalihan dan Panduan menyebut "pindahkan
+  jadwal cadangan".
 - Peringatan baru `backup_stale` untuk master yang foldernya diisi dan
   berkas terbarunya melewati batas, lewat mesin peringatan yang ada
   (termasuk Telegram).
@@ -498,7 +557,9 @@ Keputusan penulis yang perlu dilihat pemilik:
 - **7.1** "Hapus server" pada server yang dikarantina tidak memakai kode
   persetujuan. Server dibiarkan terkunci, dan memakainya lagi butuh
   `set-role` di server itu. Ini satu perintah, sama seperti yang
-  disepakati, tetapi bentuknya berbeda dari `approve <kode>`.
+  disepakati, tetapi bentuknya berbeda dari `approve <kode>`. Pada server
+  yang dikarantina, `set-role` kini menampilkan apa yang dilepas dan
+  meminta ketik `ya` (perilaku baru untuk perintah yang sudah ada).
 - **7.2** Bangun ulang butuh persetujuan **juga setelah promote
   terencana**, berbeda dari yang penulis katakan dalam percakapan.
   Alasannya di bagian 4: agent tidak bisa membedakan promote terencana
@@ -533,3 +594,35 @@ Keputusan penulis yang perlu dilihat pemilik:
 - **Akar R-110 belum tertutup:** akun replikasi bersama (Rencana 5c).
 - **Opsi mysqld di baris perintah layanan** tetap tidak terbaca agent
   (R-097).
+- **Alamat sumber diperiksa, bukan dipaksa.** Agent memeriksa bahwa nama
+  sumber masih teresolusi ke alamat yang disetujui, lalu perintah muat
+  menyambung memakai nama. Penyerang yang menguasai DNS dan panel
+  sekaligus masih punya jeda sangat singkat di antaranya.
+
+## 9. Keputusan penulis setelah builder check
+
+Builder check mengajukan enam pertanyaan. Tidak ada yang hanya bisa dijawab
+pemilik produk; semuanya diputuskan penulis dan sudah dimasukkan ke bagian
+5. Dicatat di sini supaya bisa diperiksa.
+
+1. **Replikasi ke server yang dikarantina.** Daftar larangan diganti
+   daftar izin (5.2). Tanpa persetujuan, perintah replikasi juga ditolak;
+   kalau tidak, sumber yang dipin bisa menghapus data lewat replikasi.
+   Bukti "sudah dimuat" tetap di memori seperti sekarang: bila agent
+   restart di antara muat dan sambung, job mengulang muat selama
+   persetujuan masih berlaku. Pelaksana boleh menyimpannya di berkas bila
+   murah.
+2. **`Start*` yang digerbang.** Daftar tindakan dan barisnya ditulis
+   lengkap (5.7). Penyelamatan data dan "Perketat" tidak digerbang.
+3. **Server yang dinilai.** Hanya server yang dikirimi perintah dan harus
+   online. Replika offline tidak menahan promote terencana. "Perketat"
+   memakai status replika yang sama dengan halaman master.
+4. **Cadangan pada bangun ulang** menilai master baru (5.8).
+5. **Persetujuan mengikat alamat.** CLI menampilkan nama dan alamat IP,
+   persetujuan mencatatnya, dan agent menolak bila nama itu tidak lagi
+   teresolusi ke alamat tersebut (5.2). Yang tersisa: perintah muat
+   memakai nama, jadi ada jeda sangat singkat antara pemeriksaan dan
+   sambungan; dicatat di bagian 8.
+6. **`set-role` pada server yang dikarantina** menampilkan apa yang dilepas
+   dan meminta `ya` (5.1).
+
