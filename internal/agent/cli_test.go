@@ -785,4 +785,57 @@ func TestForgetReplicaCLI(t *testing.T) {
 	if _, out, _ := run("help"); !strings.Contains(out, "dbpanel agent forget-replica <host> [--dir DIR]") {
 		t.Errorf("usage lacks forget-replica: %s", out)
 	}
+
+	// host:port as the master_lock_kept alert names it (FR-9 a).
+	code, out, errOut = run("forget-replica", "10.0.0.4:3306", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "replika 10.0.0.4 dihapus dari catatan (1 entri kunci promosi ikut dihapus)") {
+		t.Errorf("forget-replica host:port = %d, %q, %q", code, out, errOut)
+	}
+	if ok, err := mysql.ReplicaSeen(seen, "10.0.0.4"); ok || err != nil {
+		t.Errorf("10.0.0.4 still seen: %v, %v", ok, err)
+	}
+}
+
+// TestForgetReplicaPortCLI (SA-4): "agent forget-replica-port PORT" removes
+// one port from the replica-ports file; "semua" empties it and clears its
+// full mark. It never needs MySQL.
+func TestForgetReplicaPortCLI(t *testing.T) {
+	dir := t.TempDir()
+	ports := filepath.Join(t.TempDir(), "replica-ports-seen")
+	oldPorts, oldHost := cliSeenPortsPath, cliMySQLHost
+	cliSeenPortsPath = ports
+	cliMySQLHost = func(string) (mysql.Host, error) { t.Error("forget-replica-port opened MySQL"); return nil, errors.New("no") }
+	t.Cleanup(func() { cliSeenPortsPath, cliMySQLHost = oldPorts, oldHost })
+	run := func(args ...string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		code := Main(args, &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+	var many []int
+	for p := 20000; p < 20020; p++ {
+		many = append(many, p)
+	}
+	if err := mysql.RecordReplicaPortsSeen(ports, many, time.Now()); err == nil {
+		t.Fatal("20 ports recorded without the full mark")
+	}
+	code, out, errOut := run("forget-replica-port", "20000", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "port 20000 dihapus") {
+		t.Errorf("forget-replica-port 20000 = %d, %q, %q", code, out, errOut)
+	}
+	if code, _, errOut := run("forget-replica-port", "20000", "--dir", dir); code != 1 || !strings.Contains(errOut, "port 20000 tidak ada di catatan") {
+		t.Errorf("forget-replica-port again = %d, %q", code, errOut)
+	}
+	if code, _, errOut := run("forget-replica-port", "bukan", "--dir", dir); code != 2 || !strings.Contains(errOut, "bukan port") {
+		t.Errorf("forget-replica-port bukan = %d, %q", code, errOut)
+	}
+	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "semua port replika dihapus") {
+		t.Errorf("forget-replica-port semua = %d, %q, %q", code, out, errOut)
+	}
+	if b, err := os.ReadFile(ports); err != nil || strings.TrimSpace(string(b)) != "" {
+		t.Errorf("replica-ports-seen after semua = %q, %v; want empty", b, err)
+	}
+	if _, out, _ := run("help"); !strings.Contains(out, "dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]") {
+		t.Errorf("usage lacks forget-replica-port: %s", out)
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -45,7 +46,11 @@ const usage = `Penggunaan:
                                                          setelah restart) tanpa kandidat promosi
   dbpanel agent unlock-master [--dir DIR]                buka kunci master dan hapus kunci promosi
   dbpanel agent forget-replica <host> [--dir DIR]        hapus replika dari catatan dan dari kunci
-                                                         promosi yang sedang berdiri
+                                                         promosi yang sedang berdiri (host:port juga
+                                                         diterima; portnya diabaikan)
+  dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]
+                                                         hapus port replika dari catatan; semua juga
+                                                         menghapus tanda catatan port penuh
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -64,9 +69,12 @@ const (
 	credFile       = "mysql.cred"
 )
 
-// cliSeenPath is the replicas-seen file forget-replica edits; tests
-// replace it.
-var cliSeenPath = mysql.SeenFile
+// cliSeenPath and cliSeenPortsPath are the replicas-seen and replica-ports
+// files forget-replica and forget-replica-port edit; tests replace them.
+var (
+	cliSeenPath      = mysql.SeenFile
+	cliSeenPortsPath = mysql.SeenPortsFile
+)
 
 // getenv and stdin are replaced by tests.
 var (
@@ -91,6 +99,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			return mainUnlockMaster(args[1:], stdout, stderr)
 		case "forget-replica":
 			return mainForgetReplica(args[1:], stdout, stderr)
+		case "forget-replica-port":
+			return mainForgetReplicaPort(args[1:], stdout, stderr)
 		case "version":
 			fmt.Fprintf(stdout, "dbpanel agent %s\n", version.Version)
 			return 0
@@ -438,6 +448,10 @@ func mainForgetReplica(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return 2
 	}
+	// host:port as an alert names it: the host is what is recorded.
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		host = h
+	}
 	p, _ := mysql.LoadPins(dir) // the lock does not depend on the role or source pins
 	n, err := p.ForgetLockHost(host)
 	if err != nil {
@@ -454,6 +468,45 @@ func mainForgetReplica(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "replika %s dihapus dari catatan (%d entri kunci promosi ikut dihapus)\n", host, n)
+	return 0
+}
+
+// mainForgetReplicaPort is "agent forget-replica-port {PORT|semua}": the
+// port leaves the replica-ports file; "semua" empties it and removes its
+// full mark (SA-4), which lets planned promotions lock again. The ports of
+// the replicas connected now are recorded again by the agent within
+// seconds. It is local only: the panel has no command for it.
+func mainForgetReplicaPort(args []string, stdout, stderr io.Writer) int {
+	_, arg, ok := parsePinArgs("agent forget-replica-port", args, stderr)
+	if !ok {
+		return 2
+	}
+	port := 0
+	if arg != "semua" {
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 1 || n > 65535 {
+			fmt.Fprintf(stderr, "%q bukan port (1-65535) atau semua\n", arg)
+			return 2
+		}
+		port = n
+	}
+	changed, err := mysql.ForgetReplicaPort(cliSeenPortsPath, port)
+	if err != nil {
+		fmt.Fprintf(stderr, "catatan port replika tidak bisa diubah: %v\n", err)
+		return 1
+	}
+	switch {
+	case !changed && port == 0:
+		fmt.Fprintln(stderr, "catatan port replika sudah kosong")
+		return 1
+	case !changed:
+		fmt.Fprintf(stderr, "port %d tidak ada di catatan\n", port)
+		return 1
+	case port == 0:
+		fmt.Fprintln(stdout, "semua port replika dihapus dari catatan; port replika yang tersambung dicatat lagi oleh agent dalam beberapa detik")
+	default:
+		fmt.Fprintf(stdout, "port %d dihapus dari catatan port replika\n", port)
+	}
 	return 0
 }
 

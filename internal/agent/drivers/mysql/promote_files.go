@@ -68,6 +68,23 @@ const (
 	// same replicas stay connected, so their times (and the one-year
 	// pruning) stay current.
 	seenRefresh = 24 * time.Hour
+	// maxSeenPorts is how many distinct replica ports the replica-ports
+	// file holds at most (SA-4: a replica chooses its report_port). A port
+	// past it is not recorded; the file is marked full (seenPortsFullTag)
+	// and lockForPromote refuses until root clears it
+	// ("dbpanel agent forget-replica-port semua").
+	maxSeenPorts = 8
+	// seenPortsFullTag starts the line of the replica-ports file that
+	// marks it full, "penuh <RFC3339>" (an older agent skips the line).
+	seenPortsFullTag = "penuh"
+)
+
+// errSeenPortsFull: a port was not recorded, the set is full. errSeenTrimmed:
+// the oldest hosts left the replicas-seen file so that it stays readable.
+// Either write did happen.
+var (
+	errSeenPortsFull = fmt.Errorf("port replika tidak dicatat: sudah ada %d port tercatat", maxSeenPorts)
+	errSeenTrimmed   = errors.New("host replika tertua dibuang dari catatan agar berkasnya tetap terbaca")
 )
 
 // PromoteLock is the promote lock: the server stays read-only for the
@@ -303,6 +320,10 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
+	// Never a record readJSON refuses to read back (SA-4).
+	if len(b) > maxRecordSize {
+		return fmt.Errorf("%s tidak ditulis: %d byte, lebih dari %d yang bisa dibaca kembali", path, len(b), maxRecordSize)
+	}
 	return writePin(path, string(b))
 }
 
@@ -343,18 +364,50 @@ func RecordReplicasSeen(path string, hosts []string, now time.Time) error {
 	return writeSeen(path, seen)
 }
 
+// seenLine is a host's line of the replicas-seen file, without its newline.
+func seenLine(h string, t time.Time) string { return h + " " + t.UTC().Format(time.RFC3339) }
+
 // writeSeen writes seen to the replicas-seen file at path, one
 // "<host> <RFC3339>" line per host, sorted, creating its directory when
-// missing.
+// missing. A file readSeen would refuse (over maxSeenSize) is never
+// written: the oldest hosts are dropped first, and errSeenTrimmed says so
+// once the smaller file is written.
 func writeSeen(path string, seen map[string]time.Time) error {
+	size := 0
+	for h, t := range seen {
+		size += len(seenLine(h, t)) + 1
+	}
+	trimmed := 0
+	if size > maxSeenSize {
+		byAge := slices.SortedFunc(maps.Keys(seen), func(a, b string) int {
+			if c := seen[a].Compare(seen[b]); c != 0 {
+				return c
+			}
+			return strings.Compare(a, b)
+		})
+		for _, h := range byAge {
+			if size <= maxSeenSize {
+				break
+			}
+			size -= len(seenLine(h, seen[h])) + 1
+			delete(seen, h)
+			trimmed++
+		}
+	}
 	var lines []string
 	for _, h := range slices.Sorted(maps.Keys(seen)) {
-		lines = append(lines, h+" "+seen[h].UTC().Format(time.RFC3339))
+		lines = append(lines, seenLine(h, seen[h]))
 	}
 	if err := os.MkdirAll(filepath.Dir(path), seenDirMode); err != nil {
 		return fmt.Errorf("buat %s: %w", filepath.Dir(path), err)
 	}
-	return writePin(path, strings.Join(lines, "\n"))
+	if err := writePin(path, strings.Join(lines, "\n")); err != nil {
+		return err
+	}
+	if trimmed > 0 {
+		return fmt.Errorf("%s: %w (%d host)", path, errSeenTrimmed, trimmed)
+	}
+	return nil
 }
 
 // ForgetReplica removes host (names compare case-insensitively) from the
@@ -424,27 +477,57 @@ func (d *Driver) seenPath() string {
 // RecordReplicaPortsSeen merges ports (1..65535; others are ignored), seen
 // at now, into the replica-ports file at path: one line per port,
 // "<port> <RFC3339>", sorted, with each port's newest time. Entries older
-// than a year are dropped. The file's directory is created when missing.
+// than a year are dropped. At most maxSeenPorts ports are kept: a new port
+// past them is not recorded, the file is marked full (a "penuh <RFC3339>"
+// line, kept until ForgetReplicaPort clears it or it is a year old) and
+// the error wraps errSeenPortsFull, after the write. The file's directory
+// is created when missing.
 func RecordReplicaPortsSeen(path string, ports []int, now time.Time) error {
-	seen, err := readSeenPorts(path)
+	seen, fullAt, err := readSeenPortsFull(path)
 	if err != nil {
 		return err
 	}
+	cutoff := seenCutoff(now)
+	maps.DeleteFunc(seen, func(_ int, t time.Time) bool { return t.Before(cutoff) })
+	if fullAt.Before(cutoff) {
+		fullAt = time.Time{}
+	}
+	dropped := false
 	for _, p := range ports {
 		if !validSeenPort(p) {
 			continue
 		}
-		if t, ok := seen[p]; !ok || now.After(t) {
+		t, ok := seen[p]
+		switch {
+		case ok && now.After(t):
+			seen[p] = now
+		case !ok && len(seen) >= maxSeenPorts:
+			dropped = true
+		case !ok:
 			seen[p] = now
 		}
 	}
-	cutoff := seenCutoff(now)
+	if dropped && now.After(fullAt) {
+		fullAt = now
+	}
+	if err := writeSeenPorts(path, seen, fullAt); err != nil {
+		return err
+	}
+	if dropped {
+		return fmt.Errorf("%s: %w", path, errSeenPortsFull)
+	}
+	return nil
+}
+
+// writeSeenPorts writes the replica-ports file at path: seen, sorted, and
+// the full mark when fullAt is set, creating its directory when missing.
+func writeSeenPorts(path string, seen map[int]time.Time, fullAt time.Time) error {
 	var lines []string
 	for _, p := range slices.Sorted(maps.Keys(seen)) {
-		if seen[p].Before(cutoff) {
-			continue
-		}
 		lines = append(lines, strconv.Itoa(p)+" "+seen[p].UTC().Format(time.RFC3339))
+	}
+	if !fullAt.IsZero() {
+		lines = append(lines, seenPortsFullTag+" "+fullAt.UTC().Format(time.RFC3339))
 	}
 	if err := os.MkdirAll(filepath.Dir(path), seenDirMode); err != nil {
 		return fmt.Errorf("buat %s: %w", filepath.Dir(path), err)
@@ -452,18 +535,55 @@ func RecordReplicaPortsSeen(path string, ports []int, now time.Time) error {
 	return writePin(path, strings.Join(lines, "\n"))
 }
 
+// ForgetReplicaPort removes port from the replica-ports file at path and
+// reports whether it was there; port 0 removes every port and the full
+// mark (true when there was anything). Without a change nothing is
+// written. The ports of the replicas connected now are recorded again by
+// the agent's next round.
+func ForgetReplicaPort(path string, port int) (bool, error) {
+	seen, fullAt, err := readSeenPortsFull(path)
+	if err != nil {
+		return false, err
+	}
+	if port == 0 {
+		if len(seen) == 0 && fullAt.IsZero() {
+			return false, nil
+		}
+		return true, writeSeenPorts(path, nil, time.Time{})
+	}
+	if _, ok := seen[port]; !ok {
+		return false, nil
+	}
+	delete(seen, port)
+	return true, writeSeenPorts(path, seen, fullAt)
+}
+
 // readSeenPorts parses the replica-ports file; lines it cannot parse (and
 // ports outside 1..65535) are skipped, a missing file is empty.
 func readSeenPorts(path string) (map[int]time.Time, error) {
+	seen, _, err := readSeenPortsFull(path)
+	return seen, err
+}
+
+// readSeenPortsFull is readSeenPorts with the time the file was marked
+// full (zero: not full).
+func readSeenPortsFull(path string) (map[int]time.Time, time.Time, error) {
 	seen := map[int]time.Time{}
+	var fullAt time.Time
 	content, ok, err := readTrustedFile(path, maxSeenSize)
 	if err != nil || !ok {
-		return seen, err
+		return seen, fullAt, err
 	}
 	sc := bufio.NewScanner(strings.NewReader(content))
 	for sc.Scan() {
 		field, ts, ok := strings.Cut(strings.TrimSpace(sc.Text()), " ")
 		if !ok {
+			continue
+		}
+		if field == seenPortsFullTag {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(ts)); err == nil && t.After(fullAt) {
+				fullAt = t
+			}
 			continue
 		}
 		port, err := strconv.Atoi(field)
@@ -478,7 +598,7 @@ func readSeenPorts(path string) (map[int]time.Time, error) {
 			seen[port] = t
 		}
 	}
-	return seen, nil
+	return seen, fullAt, nil
 }
 
 func validSeenPort(p int) bool { return p >= 1 && p <= 65535 }
@@ -506,16 +626,21 @@ func (d *Driver) recordSeen(hosts []string, ports []int, now time.Time) error {
 	defer d.seenMu.Unlock()
 	var errs []error
 	if len(hosts) > 0 && (!slices.Equal(hosts, d.seenHosts) || now.Sub(d.seenAt) >= seenRefresh) {
-		if err := RecordReplicasSeen(d.seenPath(), hosts, now); err != nil {
+		err := RecordReplicasSeen(d.seenPath(), hosts, now)
+		if err != nil {
 			errs = append(errs, err)
-		} else {
+		}
+		// Trimmed is written too: not rewritten every round.
+		if err == nil || errors.Is(err, errSeenTrimmed) {
 			d.seenHosts, d.seenAt = hosts, now
 		}
 	}
 	if len(ports) > 0 && (!slices.Equal(ports, d.seenPorts) || now.Sub(d.seenPortsAt) >= seenRefresh) {
-		if err := RecordReplicaPortsSeen(d.seenPortsPath(), ports, now); err != nil {
+		err := RecordReplicaPortsSeen(d.seenPortsPath(), ports, now)
+		if err != nil {
 			errs = append(errs, err)
-		} else {
+		}
+		if err == nil || errors.Is(err, errSeenPortsFull) {
 			d.seenPorts, d.seenPortsAt = ports, now
 		}
 	}

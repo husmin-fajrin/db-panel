@@ -56,6 +56,10 @@ const (
 	unlockTimeout = 10 * time.Second
 	// maxPeerReads is how many replicas are read at once (readPeers).
 	maxPeerReads = 16
+	// maxLockReads is how many host:port reads lockForPromote makes at
+	// most (recorded hosts × recorded ports); past it the lock is
+	// refused at once (SA-4).
+	maxLockReads = 64
 )
 
 // Emitter sends an event to the panel (the agent's connection).
@@ -209,11 +213,36 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 			"kandidat %s tidak bisa dibaca dengan akun replikasi (%s); periksa akun %s dan sandinya di kandidat. Master tidak dikunci",
 			key, st.Err, p.Candidate.User)}
 	}
-	readable := readableAtLock(ctx, p.Candidate, addr, p.Candidate.Port, d.recordedHosts(seenHosts), d.recordedPorts(seenPorts))
+	ports, fullAt := d.recordedPorts(seenPorts)
+	if !fullAt.IsZero() {
+		// A replica's port was not recorded: the reads below would miss
+		// it, and the guard would open writes past it.
+		return res, &commands.ParamError{Msg: fmt.Sprintf("catatan port replika %s penuh (%d port; port lain tidak dicatat sejak %s), "+
+			"jadi tidak semua replika bisa dibaca; master tidak dikunci. Periksa berkas itu, lalu jalankan di server ini: "+
+			"sudo dbpanel agent forget-replica-port semua (port replika yang tersambung dicatat lagi dalam beberapa detik)",
+			d.seenPortsPath(), maxSeenPorts, fullAt.Local().Format(time.RFC3339))}
+	}
+	targets := lockReadTargets(p.Candidate, addr, p.Candidate.Port, d.recordedHosts(seenHosts), ports)
+	if len(targets) > maxLockReads {
+		return res, &commands.ParamError{Msg: fmt.Sprintf("terlalu banyak replika tercatat untuk dibaca sebelum master dikunci "+
+			"(%d pembacaan host:port, paling banyak %d); master tidak dikunci. Hapus replika yang sudah tidak dipakai dengan: "+
+			"sudo dbpanel agent forget-replica <host> (catatan %s) dan port yang tidak dipakai dengan: "+
+			"sudo dbpanel agent forget-replica-port <port> (catatan %s)",
+			len(targets), maxLockReads, d.seenPath(), d.seenPortsPath())}
+	}
+	rctx, cancel := context.WithTimeout(ctx, lockReadBudget)
+	readable := readReachable(rctx, targets)
+	rerr := rctx.Err()
+	cancel()
 	if err := ctx.Err(); err != nil {
 		// The reads did not all finish: a list cut short would let the
 		// guard open writes past a replica it never tried.
 		return res, fmt.Errorf("replika lain belum selesai dibaca (%w); master tidak dikunci", err)
+	}
+	if rerr != nil {
+		return res, &commands.ParamError{Msg: fmt.Sprintf("replika lain belum selesai dibaca dalam %s; master tidak dikunci. "+
+			"Replika yang tercatat ada di %s dan %s; hapus yang sudah tidak dipakai dengan: sudo dbpanel agent forget-replica <host>",
+			lockReadBudget, d.seenPath(), d.seenPortsPath())}
 	}
 	// The lock file first: a failure or a crash after it leaves a lock
 	// the guard turns into super_read_only on its next tick, never a
@@ -243,6 +272,12 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 // writeLock is Pins.WriteLock; tests replace it.
 var writeLock = (*Pins).WriteLock
 
+// lockReadBudget bounds lockForPromote's reads of the other replicas,
+// well under the panel's two-minute call timeout, so a lock is never set
+// after the panel gave up on it (SA-4); past it the lock is refused.
+// Tests shorten it.
+var lockReadBudget = 60 * time.Second
+
 // beforeLockRecord runs in lockForPromote between matching the candidate's
 // Binlog Dump thread and recording the replicas; tests replace it.
 var beforeLockRecord = func() {}
@@ -260,25 +295,44 @@ func (d *Driver) recordedHosts(also []string) []string {
 }
 
 // recordedPorts is every port of the replica-ports file, with also (just
-// observed) added: a file that cannot be read is logged and only also is
-// used.
-func (d *Driver) recordedPorts(also []int) []int {
-	seen, err := readSeenPorts(d.seenPortsPath())
+// observed) added, and when the file was marked full (zero: not full): a
+// file that cannot be read is logged and only also is used.
+func (d *Driver) recordedPorts(also []int) ([]int, time.Time) {
+	seen, fullAt, err := readSeenPortsFull(d.seenPortsPath())
 	if err != nil {
 		d.warn("replica ports seen not read at promote lock; reading the connected replicas' ports only", "err", err)
 	}
 	ports := slices.Collect(maps.Keys(seen))
-	return append(ports, also...)
+	return append(ports, also...), fullAt
 }
 
-// readableAtLock reads, with the candidate's account cred, every host of
-// hosts at the candidate's port candPort and at every port of ports
-// (readPeers), except the candidate itself (candAddr at candPort, just
-// read), and returns those that answered, as sorted host:port. With
-// certificate verification the host as recorded is the name verified. A
-// replica that cannot be read now (no account for cred, or long gone) is
-// left out: the guard never waits for it (spec 5.4).
+// readableAtLock is readReachable of lockReadTargets.
 func readableAtLock(ctx context.Context, cred proto.PeerCred, candAddr string, candPort int, hosts []string, ports []int) []string {
+	return readReachable(ctx, lockReadTargets(cred, candAddr, candPort, hosts, ports))
+}
+
+// readReachable reads every cred (readPeers) and returns those that
+// answered, as sorted host:port.
+func readReachable(ctx context.Context, creds []proto.PeerCred) []string {
+	var list []string
+	for i, st := range readPeers(ctx, creds) {
+		if st.Reachable {
+			list = append(list, peerKey(creds[i]))
+		}
+	}
+	slices.Sort(list)
+	return slices.Compact(list)
+}
+
+// lockReadTargets is what lockForPromote reads with the candidate's
+// account cred: every host of hosts at the candidate's port candPort and
+// at every port of ports, except the candidate itself (candAddr at
+// candPort, just read). Those that answer are the lock's Readable, as
+// sorted host:port. With certificate verification the host as recorded is
+// the name verified. A replica that cannot be read now (no account for
+// cred, or long gone) is left out: the guard never waits for it (spec
+// 5.4).
+func lockReadTargets(cred proto.PeerCred, candAddr string, candPort int, hosts []string, ports []int) []proto.PeerCred {
 	portSet := slices.Compact(slices.Sorted(slices.Values(append([]int{candPort}, ports...))))
 	hostSet := slices.Compact(slices.Sorted(slices.Values(hosts)))
 	var creds []proto.PeerCred
@@ -295,14 +349,7 @@ func readableAtLock(ctx context.Context, cred proto.PeerCred, candAddr string, c
 			creds = append(creds, c)
 		}
 	}
-	var list []string
-	for i, st := range readPeers(ctx, creds) {
-		if st.Reachable {
-			list = append(list, peerKey(creds[i]))
-		}
-	}
-	slices.Sort(list)
-	return slices.Compact(list)
+	return creds
 }
 
 // readListed reads every entry (host:port) of list with the candidate's
