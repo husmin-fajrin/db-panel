@@ -651,8 +651,8 @@ jalankan `forget-replica` (di bawah) di server master; untuk membuka kunci
 saat itu juga, `unlock-master` (pastikan dulu replika itu tidak sedang
 menjadi master di sisi jaringan lain). Jadi master bisa tertahan baca-saja
 selama replika yang terbaca saat kunci dipasang tidak terbaca: aplikasi
-tidak bisa menulis, tetapi tidak ada data yang hilang. Bila semua terbaca
-baca-saja, kunci dibuka. Selain itu (kandidat tidak terjangkau, atau
+tidak bisa menulis sampai itu selesai (pilihan ini menukar ketersediaan
+dengan menutup jalan dua master). Selain itu (kandidat tidak terjangkau, atau
 agent dimulai ulang sehingga akunnya hilang) kunci tetap dan dicoba lagi
 tiap menit, dilaporkan ke panel paling sering sejam sekali, sampai
 `unlock-master`. `mysql.unlockPromote` membatalkan kunci sebelum tenggat
@@ -1245,8 +1245,9 @@ MySQL-nya hidup maupun mati. Kunci itu dua bagian:
   pun bisa masuk.
 
 Berkas ditulis lebih dulu, baru barisnya; saat dilepas, baris dihapus
-lebih dulu, baru berkasnya, jadi konfigurasi tidak pernah menyebut berkas
-yang tidak ada. `init_file` milik operator yang dibaca sebelum baris agent
+lebih dulu, baru berkasnya, jadi agent tidak pernah meninggalkan
+konfigurasi yang menyebut berkas yang tidak ada (mysqld menolak menyala
+dengan konfigurasi seperti itu). `init_file` milik operator yang dibaca sebelum baris agent
 tidak dijalankan selama karantina; halaman master lama menyebutnya. Selama
 peran `quarantined`, loop penjaga agent (tiap 5 detik) menulis lagi berkas
 atau baris yang hilang atau berubah (bila gagal, dicoba lagi paling sering
