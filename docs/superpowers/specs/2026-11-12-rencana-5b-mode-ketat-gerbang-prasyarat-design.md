@@ -1,7 +1,7 @@
 # Rencana 5b: Mode Ketat, Gerbang Prasyarat, dan Panduan Langkah
 
-Status: draf untuk persetujuan pemilik produk (2026-11-12), sudah melewati
-builder check; keputusan penulis sesudahnya ada di bagian 9
+Status: disetujui pemilik produk (2026-11-12), setelah builder check;
+keputusan penulis sesudahnya ada di bagian 9
 Sumber: `docs/superpowers/security/2026-11-10-inventaris-risiko.md`
 (R-001, R-019, R-046, R-109, R-110, R-113, R-114, R-116, R-117, R-121, dan
 tabel "Prasyarat yang sebaiknya dipaksa panel"), audit
