@@ -581,12 +581,11 @@ func ForgetReplicaPort(path string, port int) (bool, error) {
 	return true, writeSeenPorts(path, seen, fullAt)
 }
 
-// ForgottenPorts is what ForgetAllReplicaPorts removed: Ports, sorted, at
-// most maxSeenPorts of them; More, how many ports past those; Full,
+// ForgottenPorts is what ForgetAllReplicaPorts removed: Ports, every one,
+// sorted (the file is bounded by maxSeenSize, so the list is too); Full,
 // whether the full mark was removed.
 type ForgottenPorts struct {
 	Ports []int
-	More  int
 	Full  bool
 }
 
@@ -607,13 +606,7 @@ func ForgetAllReplicaPorts(path string) (ForgottenPorts, error) {
 // forgetAllSeenPorts empties the replica-ports file at path, which held
 // seen and fullAt; without anything to remove nothing is written.
 func forgetAllSeenPorts(path string, seen map[int]time.Time, fullAt time.Time) (ForgottenPorts, error) {
-	ports := slices.Sorted(maps.Keys(seen))
-	f := ForgottenPorts{Full: !fullAt.IsZero()}
-	if len(ports) > maxSeenPorts {
-		f.More = len(ports) - maxSeenPorts
-		ports = ports[:maxSeenPorts]
-	}
-	f.Ports = ports
+	f := ForgottenPorts{Ports: slices.Sorted(maps.Keys(seen)), Full: !fullAt.IsZero()}
 	if !f.Changed() {
 		return f, nil
 	}

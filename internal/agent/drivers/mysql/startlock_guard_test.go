@@ -573,10 +573,13 @@ func TestGuardEnforcesReadOnlyBeforeStartLockHousekeeping(t *testing.T) {
 // stateAtSend is an eventLog that records, at each delivered Emit, whether
 // MySQL's super_read_only was on and whether the start lock file existed:
 // what the guard round had done by the time it talked to the panel.
+// When cfg is set it also records whether that option file named the
+// start lock (its init_file line).
 type stateAtSend struct {
 	eventLog
 	db   *sql.DB
 	lock string
+	cfg  string
 	mu   sync.Mutex
 	seen []sendState
 }
@@ -585,17 +588,23 @@ type sendState struct {
 	typ        string
 	readOnly   bool
 	lockExists bool
+	lineExists bool
 }
 
 func (e *stateAtSend) Emit(ev proto.Event) error {
 	var sro bool
 	err := e.db.QueryRow("SELECT @@global.super_read_only").Scan(&sro)
 	_, serr := os.Lstat(e.lock)
+	line := false
+	if e.cfg != "" {
+		b, cerr := os.ReadFile(e.cfg)
+		line = cerr == nil && strings.Contains(string(b), "init_file="+e.lock+"\n")
+	}
 	if eerr := e.eventLog.Emit(ev); eerr != nil {
 		return eerr
 	}
 	e.mu.Lock()
-	e.seen = append(e.seen, sendState{typ: ev.Type, readOnly: err == nil && sro, lockExists: serr == nil})
+	e.seen = append(e.seen, sendState{typ: ev.Type, readOnly: err == nil && sro, lockExists: serr == nil, lineExists: line})
 	e.mu.Unlock()
 	return nil
 }
@@ -652,6 +661,39 @@ func TestGuardSendsReportsAfterReadOnlyAndHousekeeping(t *testing.T) {
 	}
 	if got := startEvents(t, &ev.eventLog); len(got) != 2 || got[0].Result != proto.QuarantineStartLate || got[1].Result != proto.QuarantineStartLate {
 		t.Errorf("start events = %+v, want two late", got)
+	}
+}
+
+// TestSelfQuarantineWritesStartLockBeforeNotice: a server that quarantines
+// itself (here through mysql.quarantine; the lock guard and unlockPromote
+// call the same selfQuarantine) has its start lock on disk and named in the
+// managed config before it tells the panel: a send that blocks on a panel
+// socket that does not drain must not delay the start lock.
+func TestSelfQuarantineWritesStartLockBeforeNotice(t *testing.T) {
+	r := newQuarantineRig(t)
+	r.seenHosts("10.9.9.9")
+	r.promoted()
+	lock, err := mysql.StartLockPath(r.inst.Layout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := &stateAtSend{db: r.db, lock: lock, cfg: r.inst.ConfigFile}
+	r.d.Events = ev
+	decode[proto.QuarantineResult](t, r.quarantine(quarantineParams))
+	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
+	var notices int
+	for _, s := range ev.sends() {
+		if s.typ != proto.EventQuarantined {
+			continue
+		}
+		notices++
+		if !s.readOnly || !s.lockExists || !s.lineExists {
+			t.Errorf("%s sent with super_read_only=%v, start lock file present=%v, init_file line present=%v; want all three before the send",
+				s.typ, s.readOnly, s.lockExists, s.lineExists)
+		}
+	}
+	if notices != 1 {
+		t.Errorf("quarantine notices = %d (%+v), want 1", notices, ev.sends())
 	}
 }
 

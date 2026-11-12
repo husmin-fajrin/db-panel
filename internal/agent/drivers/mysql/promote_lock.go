@@ -535,8 +535,15 @@ func candidateConnected(ctx context.Context, db *sql.DB, host string) (string, b
 // first makes sure super_read_only is on (again after a MySQL restart,
 // before anything else). At or past the deadline of a lock with a
 // candidate it reads the candidate (see the package comment above); it
-// never acts on a lock-master lock. Reports for the panel are sent last
-// (sendRoundEvents), on every path of a round that ran.
+// never acts on a lock-master lock. The start reports and
+// guardQuarantined's quarantine notice are sent at the end of the round
+// (sendRoundEvents), on every path of a round that ran. Three sends stay
+// inline, each the last action of its path, followed only by
+// sendRoundEvents: keepLock's and the unlock's EventLockExpired
+// (guardExpired), and selfQuarantine's EventQuarantined, sent after its
+// start lock is written. Ordering within a round does not shorten the
+// pause after it: the guard loop waits GuardEvery once the round, sends
+// included, has finished.
 func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	if d.pins == nil {
 		return nil
@@ -730,7 +737,8 @@ func (d *Driver) keepLock(now time.Time, key, reason string, hosts ...string) {
 // panel names its new master, which rebuild commands match), recording
 // addr, the address that host was verified at, for the agent's own reads
 // of it (Pins.SourceDial); it removes the promote lock. Last it writes
-// the start lock (startlock.go) and returns its state; a start lock that
+// the start lock (startlock.go), then reports the quarantine to the panel,
+// and returns the start lock's state; a start lock that
 // cannot be written leaves the quarantine in place. Once the pin is
 // written the start lock is written even when removing the promote lock
 // fails. The caller holds promoteMu.
@@ -762,8 +770,11 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) (pr
 	}
 	d.guard.reset(nil)
 	d.warn("server quarantined under its new master", "new_source", newSource, "verified_addr", addr)
+	// The start lock first, then the panel: a send can block on a panel
+	// connection that does not drain.
+	lock = d.lockStart(ctx, h)
 	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: newSource})
-	return d.lockStart(ctx, h), nil
+	return lock, nil
 }
 
 // emit sends an event to the panel when the driver has an Emitter; one

@@ -548,18 +548,15 @@ func forgetAllReplicaPorts(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "catatan port replika: %s\n", cliSeenPortsPath)
 	if len(f.Ports) == 0 {
-		fmt.Fprintln(stdout, "port yang dihapus: tidak ada")
-	} else {
-		list := make([]string, len(f.Ports))
-		for i, p := range f.Ports {
-			list[i] = strconv.Itoa(p)
-		}
-		more := ""
-		if f.More > 0 {
-			more = fmt.Sprintf(", dan %d port lain", f.More)
-		}
-		fmt.Fprintf(stdout, "port yang dihapus: %s%s\n", strings.Join(list, ", "), more)
+		// Only the full mark: no port was lost.
+		fmt.Fprintln(stdout, "tidak ada port di catatan; hanya tanda catatan port penuh yang dihapus")
+		return 0
 	}
+	list := make([]string, len(f.Ports))
+	for i, p := range f.Ports {
+		list[i] = strconv.Itoa(p)
+	}
+	fmt.Fprintf(stdout, "port yang dihapus: %s\n", strings.Join(list, ", "))
 	if f.Full {
 		fmt.Fprintln(stdout, "tanda catatan port penuh ikut dihapus")
 	}

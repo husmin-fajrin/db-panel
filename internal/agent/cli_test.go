@@ -923,19 +923,34 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 		!strings.Contains(errOut, ports) {
 		t.Errorf("forget-replica-port semua on an empty record = %d, %q, %q", code, out, errOut)
 	}
-	// A file holding more ports than the cap (written by hand or by an
-	// older agent): the list printed is bounded, the rest counted.
+	// A file holding more ports than the agent's cap (written by hand or
+	// by an older agent): every removed port is named, so the caution can
+	// be acted on for each.
 	var lines []string
-	for p := 30001; p <= 30010; p++ {
+	for p := 30001; p <= 30012; p++ {
 		lines = append(lines, fmt.Sprintf("%d %s", p, time.Now().UTC().Format(time.RFC3339)))
 	}
 	if err := os.WriteFile(ports, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "30001") || !strings.Contains(out, "30008") || strings.Contains(out, "30009") ||
-		strings.Contains(out, "30010") || !strings.Contains(out, "2 port lain") || !strings.Contains(out, caution) {
-		t.Errorf("forget-replica-port semua of 10 ports = %d, %q, %q", code, out, errOut)
+	if code != 0 || !strings.Contains(out, caution) || strings.Contains(out, "port lain") {
+		t.Errorf("forget-replica-port semua of 12 ports = %d, %q, %q", code, out, errOut)
+	}
+	for p := 30001; p <= 30012; p++ {
+		if !strings.Contains(out, fmt.Sprint(p)) {
+			t.Errorf("forget-replica-port semua of 12 ports does not name %d: %q", p, out)
+		}
+	}
+	// Only the full mark, no port: said plainly, with no caution about
+	// ports "listed above" when none is listed.
+	if err := os.WriteFile(ports, []byte("penuh "+time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut = run("forget-replica-port", "semua", "--dir", dir)
+	if code != 0 || !strings.Contains(out, "tidak ada port di catatan; hanya tanda catatan port penuh yang dihapus") ||
+		strings.Contains(out, "di atas") || strings.Contains(out, caution) || !strings.Contains(out, ports) {
+		t.Errorf("forget-replica-port semua with only the full mark = %d, %q, %q", code, out, errOut)
 	}
 	_, out, _ = run("help")
 	if !strings.Contains(out, "dbpanel agent forget-replica-port {<port>|semua} [--dir DIR]") {
