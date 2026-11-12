@@ -249,3 +249,4 @@ Follow-up: fix round 1/5 (5 addressed, 0 open — I1 R-117 back in the open tabl
 Follow-up: minor (deferred): audit §7 lines (:722, :728) cite only bb54853 for the in-round ordering, not ef453b6 — not wrong, less complete.
 Follow-up: complete (commits 639f619..faefde5, review clean). Gates on ef453b6 (last code commit): make test exit 0 (37m45s), make test-e2e exit 0 (8m53s); faefde5 is docs-only.
 Final state: Plan 5a + fix wave + audit docs + owner-approved follow-up complete at faefde5. Open for the owner: merge to main; SA-1/SA-2 → 5b, SA-3 → 5c; R-117 residual (guard sends on the critical path) → 5b with R-116.
+Owner (2026-11-12): "Merge ke main. Terkait risiko. Setuju saranmu" → merge approved; SA-1 and SA-2 go to Plan 5b, SA-3 to Plan 5c (interim: "Perketat" + forget-replica when a replica is retired); R-117 residual stays with 5b. Rulings 1–32 were delivered to the owner in the final messages.
