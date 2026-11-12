@@ -362,10 +362,10 @@ type oldMasterBox struct {
 	Status            statusView
 	// Leftover is the latest check (nil: never run); LeftoverSummary its
 	// sentence.
-	Leftover        *orchestrator.LeftoverCheck
+	Leftover *orchestrator.LeftoverCheck
 	// StartLate: master_start_late is open (startLateOpen); Leftover
 	// says nothing about the writes since.
-	StartLate bool
+	StartLate       bool
 	LeftoverSummary string
 	Online, Busy    bool
 }
