@@ -590,6 +590,14 @@ sudo dbpanel agent set-role master       # atau replica, quarantined, atau unass
 sudo dbpanel agent set-source 10.0.0.5:3306
 ```
 
+`set-role master` melepas dulu kunci start master lama (lihat "Master
+lama" di "Promote"); bila pelepasannya gagal, peran tidak diubah dan
+perintah menyebut sebabnya. `set-role replica` atau `unassigned` tidak
+melepasnya: agent yang berjalan melepasnya sendiri setelah MySQL hidup dan
+`read_only` serta `super_read_only` tersimpan ON, jadi server itu tetap
+menyala baca-saja. `set-role quarantined` membuat agent yang berjalan
+menulis kunci start dalam 5 detik.
+
 Master bisa dikunci dan dibuka langsung di servernya:
 
 ```sh
@@ -616,18 +624,35 @@ atau proxy (alamat thread `Binlog Dump` bukan alamat kandidat) tidak bisa
 dipakai untuk mengunci. Kunci itu `/etc/dbpanel/promote-lock` berisi
 `host:port` kandidat dan tenggat (60 sampai 3600 detik), ditulis lebih
 dulu, lalu `SET PERSIST super_read_only=ON` (bila MySQL menolaknya, berkas
-kunci dihapus lagi). Selama berkas itu ada di master, agent
-memasang lagi `super_read_only` pada tiap pemeriksaan kesehatan bila
-mati (misalnya sesudah MySQL restart). Pada tenggat agent membaca kandidat
+kunci dihapus lagi). Sebelum menulis kunci, agent harus bisa membaca
+kandidat dengan akun replikasi yang dikirim panel (bila tidak, master tidak
+dikunci dan promote gagal di awal), lalu membaca semua replika yang pernah
+tersambung ke master ini (host dari berkas replika di bawah, pada port
+kandidat dan setiap port yang tercatat; paralel, 5 detik per bacaan) dan
+menyimpan yang terbaca bersama kunci. Replika yang sudah tidak terbaca saat
+itu (replika sebagian tanpa akun replikasi, replika yang lama mati)
+dilewati dan tidak menahan kunci. Selama berkas kunci ada di master, agent
+memasang lagi `super_read_only` tiap 5 detik bila mati (misalnya sesudah
+MySQL restart). Pada tenggat agent membaca kandidat
 dengan akun replikasi yang dikirim panel (hanya disimpan di memori): bila
 kandidat bisa ditulis dan `gtid_executed`-nya memuat UUID server ini,
 master mengkarantina dirinya (`quarantined`, sumber = kandidat); bila
 kandidat masih read-only, agent menunggu 60 detik dan membaca lagi; bila masih
-read-only, agent membaca juga setiap replika di berkas replika yang pernah
-tersambung (di port kandidat, dengan akun yang sama): bila salah satunya
-bisa ditulis dan `gtid_executed`-nya memuat UUID server ini (replika lain
-yang dipromosikan darurat selama kunci berdiri), master mengkarantina
-dirinya di bawah replika itu; bila tidak ada, kunci dibuka. Selain itu (kandidat tidak terjangkau, atau
+read-only, agent membaca lagi setiap replika yang tersimpan bersama kunci
+(dengan akun yang sama): bila salah satunya bisa ditulis dan
+`gtid_executed`-nya memuat UUID server ini (replika lain yang dipromosikan
+darurat selama kunci berdiri), master mengkarantina dirinya di bawah
+replika itu. Bila salah satunya **tidak bisa dibaca**, kunci
+**dipertahankan**: master tetap baca-saja, agent membaca lagi tiap menit,
+dan panel membuka peringatan Kritis **Kunci promote master dipertahankan**
+yang menyebut replika itu. Kunci terbuka sendiri begitu semua replika itu
+terbaca dan masih baca-saja. Bila replika itu memang sudah tidak dipakai,
+jalankan `forget-replica` (di bawah) di server master; untuk membuka kunci
+saat itu juga, `unlock-master` (pastikan dulu replika itu tidak sedang
+menjadi master di sisi jaringan lain). Jadi master bisa tertahan baca-saja
+selama replika yang terbaca saat kunci dipasang tidak terbaca: aplikasi
+tidak bisa menulis, tetapi tidak ada data yang hilang. Bila semua terbaca
+baca-saja, kunci dibuka. Selain itu (kandidat tidak terjangkau, atau
 agent dimulai ulang sehingga akunnya hilang) kunci tetap dan dicoba lagi
 tiap menit, dilaporkan ke panel paling sering sejam sekali, sampai
 `unlock-master`. `mysql.unlockPromote` membatalkan kunci sebelum tenggat
@@ -636,11 +661,35 @@ pernah disentuh keduanya. Bila pemeriksaan agent jatuh tepat di antara
 langkah `unlock-master` (MySQL dibuka, lalu berkas kunci dihapus), MySQL
 bisa terkunci lagi; jalankan `unlock-master` sekali lagi.
 
-Agent juga mencatat replika yang membaca binlog server ini pada tiap
-pemeriksaan kesehatan di `/var/lib/dbpanel/replicas-seen`: satu baris per
+Agent juga mencatat replika yang membaca binlog server ini tiap 5 detik
+(loop penjaga, lihat "Kecepatan" di "Pemantauan") di
+`/var/lib/dbpanel/replicas-seen`: satu baris per
 host, `<host> <waktu RFC3339>`, dengan waktu terbaru; host yang tidak
 terlihat lebih dari setahun dibuang. Host diambil dari kolom `HOST` daftar
 proses MySQL tanpa port, jadi berupa nama bila `skip_name_resolve` mati.
+Port replika (dari `SHOW REPLICAS`) dicatat dengan cara yang sama di
+`/var/lib/dbpanel/replica-ports-seen`. `mysql.lockForPromote` mencatat
+kandidat begitu melihat thread `Binlog Dump`-nya, dan panel meminta master
+mencatat replikanya (`mysql.recordReplicas`, tanpa data: agent hanya
+melihat koneksinya sendiri dan tidak pernah menerima host replika dari
+panel) setelah replika terverifikasi tersambung di akhir **Buat replika**,
+**Resync ulang**, **Tambah database**, dan pengarahan ulang. Yang belum
+tertutup: master yang mati kurang dari 5 detik setelah replika pertama
+tersambung di luar alur panel tidak mencatat replika itu, jadi promote
+darurat ke replika itu tidak bisa mengkarantina master lama (agent master
+lama menolak karantina di bawah host yang tidak pernah tercatat).
+
+Replika yang sudah tidak dipakai dihapus dari catatan itu, dan dari daftar
+replika kunci promosi yang sedang berdiri, di server master:
+
+```sh
+sudo dbpanel agent forget-replica 10.0.0.7   # semua port host itu; nama dibandingkan tanpa beda huruf besar-kecil
+```
+
+Panel tidak punya padanannya. Perintah ini tidak membuka kunci sendiri:
+penjaga kunci membaca lagi pada pemeriksaan berikutnya (tiap menit) dan
+membuka master bila kandidat dan replika lain yang tersimpan bersama kunci
+terbaca baca-saja.
 
 Agent membacanya ulang pada perintah berikutnya, tanpa restart. Bila alamat
 master untuk replika diubah di halaman master, halaman itu menampilkan
@@ -824,9 +873,22 @@ itu, jadi laporan lama tidak memicu peringatan palsu.
 **Kecepatan.** Replika yang berhenti terlihat di panel dan dikirim ke
 Telegram dalam waktu kurang dari 30 detik; master yang tumbang dalam
 sekitar 1 menit. Interval, ambang, dan batas waktu itu bisa diubah di
-**Pengaturan > Ambang dan interval** (interval pemeriksaan 10 sampai 3600
-detik). Tombol **Periksa sekarang** di halaman server meminta laporan baru
+**Pengaturan > Ambang dan interval** (interval pemeriksaan 10 sampai 300
+detik, di panel dan di agent; nilai lebih besar yang tersimpan dari versi
+lama dibaca 300, karena panel baru tahu master mati pada pemeriksaan
+berikutnya; interval ringkasan dan ambang lag tetap 10 sampai 3600 detik).
+Tombol **Periksa sekarang** di halaman server meminta laporan baru
 saat itu juga (paling sering sekali per 10 detik).
+
+**Loop penjaga.** Di samping pemeriksaan itu, agent menjalankan loop
+penjaga dengan jeda tetap 5 detik setelah tiap putaran selesai (bukan
+jadwal tetap, jadi putaran tidak bertumpuk), apa pun interval
+pemeriksaannya; panel tidak bisa mengubahnya. Tiap putaran: memutus sesi
+akun dump yang memegang kunci baca global terlalu lama (lihat "Keamanan"),
+menjaga kunci promosi dan karantina beserta kunci start master lama (lihat
+"Promote"), dan mencatat replika yang membaca binlog (lihat "Peran dan
+sumber yang dipin"). Galat yang sama dari penjaga kunci promosi atau dari
+pencatatan replika ditulis ke log paling sering sekali per menit.
 
 **Batas dari agent.** Panel menerima paling banyak 10 laporan beruntun
 dari satu server, lalu satu tiap 2 detik; laporan yang lebih sering dari
@@ -927,10 +989,21 @@ bisa dibaca siapa pun.
 **Jangan ganggu.** Saat perawatan terjadwal, pilih lama **Jangan ganggu**
 (1, 2, 8, atau 24 jam) di halaman server, master, replika, atau
 **Peringatan**; klik **Batalkan** (tampil selama Jangan ganggu aktif) untuk
-mengakhirinya lebih awal. Selama
+mengakhirinya lebih awal. Tombol itu membuka dialog konfirmasi (tanpa kata
+sandi) yang menyebut jenis peringatan yang tetap dikirim. Selama
 itu peringatan server tersebut tetap dicatat dan tampil di panel, tetapi
-tidak dikirim ke Telegram. Saat Jangan ganggu berakhir, peringatan yang
-masih terbuka dikirim satu kali.
+tidak dikirim ke Telegram, kecuali jenis yang tidak pernah dibungkam
+karena bisa berarti kehilangan data atau dua master: master diduga
+tumbang, disk kritis, kunci replika terlepas, promote selesai sebagian,
+batas waktu kunci promote, master lama dikarantina, master tidak dipin,
+kunci promote master dipertahankan, dan empat peringatan kunci start master
+lama. Jenis itu tetap mengirim pesan pertama dan pesan pulihnya; hanya
+pengulangannya yang ditunda. Saat Jangan ganggu berakhir, peringatan yang
+masih terbuka dikirim satu kali, dan panel mengirim satu ringkasan: rentang
+waktunya, jumlah peringatan yang terbuka selama senyap, dan daftarnya
+(termasuk yang sudah pulih; paling banyak 30 baris). Awal senyap disimpan di
+`panel.db`, jadi ringkasan tetap dikirim bila panel dimulai ulang; ringkasan
+yang gagal terkirim dicoba lagi.
 
 **Ringkasan mingguan.** Bawaannya setiap Senin 07:00 (waktu panel), satu
 pesan: untuk tiap replika persentase waktu Sinkron atau Ketinggalan selama
@@ -974,7 +1047,9 @@ ditolak.
   menyambungkan replikasinya lagi, dengan database yang sama seperti
   tercatat. Panel membaca ulang daftar database replika saat dialog dibuka
   dan menyebut persis database yang akan **dibuang**; ketik nama server
-  untuk melanjutkan. Pekerjaan berjalan tanpa berhenti, kecuali bila di
+  untuk melanjutkan. Database yang hanya ada di replika dicentang satu per
+  satu, dan **Ulangi** resync meminta kata sandi lagi (lihat "Pembuangan
+  data dengan konfirmasi segar" di "Keamanan"). Pekerjaan berjalan tanpa berhenti, kecuali bila di
   replika ditemukan database di luar daftar itu: pekerjaan lalu menunggu
   persetujuan Anda. CLONE dipakai bila replika mengikuti semua database;
   centang **Paksa dump** untuk memakai mysqldump (juga bila CLONE terus
@@ -1106,15 +1181,34 @@ dan mengirim ringkasan ke Telegram dengan alamat master baru. Layar itu
 menampilkan alamat master baru (dengan tombol salin) dan alamat lama,
 lalu dua tabel yang diperbarui tiap 15 detik: koneksi yang masih ke master
 lama dan koneksi yang sudah ke master baru (per host asal, akun, dan
-database). Yang tidak ditampilkan: akun `dbpanel_*`, replika yang membaca
-binlog, thread MySQL sendiri, koneksi agent sendiri, dan sesi akun admin
-MySQL yang dipakai agent bila tersambung dari server itu sendiri (socket,
-`localhost`, `127.0.0.1`, `::1`). Sesi akun admin itu dari host lain
-ditampilkan dengan tanda "akun admin panel" dan ikut dihitung di
-konfirmasi bangun ulang. Tabel koneksi hanya dibaca untuk master, master
-lama, dan replika topologi yang pernah dipromosikan. Karena itu pakai akun admin khusus untuk panel
+database). Agent membaca semua thread klien dari `performance_schema`
+(atau dari `information_schema.PROCESSLIST` bila `performance_schema`
+mati), termasuk sesi yang sedang login. Yang tidak ditampilkan hanya:
+akun layanan buatan agent (`dbpanel_repl` dan akun dump
+`dbpanel_dump_<8 heksa>`), replika yang membaca binlog, thread MySQL
+sendiri (`system user`, `event_scheduler`, thread replikasi), dan sesi
+agent sendiri: sesi akun admin MySQL agent dari server itu sendiri (socket,
+`localhost`, `127.0.0.1`, `::1`) yang membawa atribut koneksi
+`program_name=dbpanel-agent`, yang dipasang agent di setiap koneksinya.
+Sesi akun admin agent dari server itu tanpa atribut itu (orang yang
+login dengan akun yang sama di server itu) dihitung dengan tanda "sesi
+akun admin dari server ini". Tanpa `performance_schema` atribut tidak
+terbaca, jadi semua sesi lokal akun itu, termasuk milik agent, dihitung
+dengan catatan "tidak bisa dibedakan dari agent". Sesi akun admin agent
+dari host lain, dan sesi `dbpanel_admin` dari mana pun, ditandai "akun
+admin panel". Koneksi X Protocol ditandai "X Protocol" dan thread yang
+jenisnya tidak dikenal agent "jenis koneksi tidak dikenal"; keduanya ikut
+dihitung. Bila daftar tidak bisa dibaca, atau tidak lengkap (misalnya
+`Performance_schema_thread_instances_lost` lebih dari nol, atau agent
+versi lama), tabel menulis "tidak bisa dipastikan" beserta alasannya.
+Layar menulis "Tidak ada koneksi aplikasi tersisa" hanya bila daftar
+master lama lengkap dan kosong. Atribut koneksi bisa dipalsukan klien,
+tetapi hanya sesi yang memakai akun admin agent dari server itu sendiri
+yang bisa disembunyikan dengan cara itu. Tabel koneksi hanya dibaca untuk master, master
+lama, dan replika topologi yang pernah dipromosikan. Pakai akun admin khusus untuk panel
 (lihat "Hubungkan MySQL"), bukan `root` atau akun yang juga dipakai orang
-atau aplikasi di server itu.
+atau aplikasi di server itu: sesi orang lain dengan akun itu ditandai,
+bukan dipisahkan.
 Arahkan semua aplikasi yang menulis ke database ke alamat baru, restart
 aplikasinya, lalu tekan **Sudah saya alihkan**. Selama belum ditekan,
 Telegram mengingatkan dengan jarak pengulangan peringatan (bawaan 6 jam),
@@ -1133,8 +1227,84 @@ masuk di jendela itu ditemukan oleh **Periksa data tertinggal**.
 Master lama dikarantina: agent-nya memasang `super_read_only` dengan
 `SET PERSIST`, pin perannya menjadi `quarantined`, dan sumbernya master
 baru. Saat agent itu start atau MySQL-nya hidup lagi, agent memasang
-`super_read_only` lebih dulu sebelum hal lain. Halaman server master lama
-memuat kotak **Master lama** dengan:
+`super_read_only` lebih dulu sebelum hal lain.
+
+**Kunci start.** Supaya MySQL master lama juga menyala baca-saja ketika
+agent-nya tidak ada (agent mati, atau MySQL-nya mati saat dikarantina dan
+dinyalakan orang sebelum agent jalan), karantina menulis kunci start, baik
+MySQL-nya hidup maupun mati. Kunci itu dua bagian:
+
+- berkas `dbpanel-start-lock.sql` (milik root, mode 0644) di direktori
+  include konfigurasi MySQL bila ada, selain itu di direktori berkas
+  konfigurasi utama (setelah symlink diikuti); tidak pernah di dalam
+  datadir (CLONE mengganti isinya). Isinya tepat tiga baris:
+  `SET GLOBAL super_read_only=ON;`, `SET PERSIST read_only=ON;`,
+  `SET PERSIST super_read_only=ON;`;
+- satu baris `init_file=<path berkas itu>` di blok konfigurasi yang dikelola
+  dbpanel. mysqld menjalankan berkas itu saat menyala, sebelum klien mana
+  pun bisa masuk.
+
+Berkas ditulis lebih dulu, baru barisnya; saat dilepas, baris dihapus
+lebih dulu, baru berkasnya, jadi konfigurasi tidak pernah menyebut berkas
+yang tidak ada. `init_file` milik operator yang dibaca sebelum baris agent
+tidak dijalankan selama karantina; halaman master lama menyebutnya. Selama
+peran `quarantined`, loop penjaga agent (tiap 5 detik) menulis lagi berkas
+atau baris yang hilang atau berubah (bila gagal, dicoba lagi paling sering
+semenit sekali) dan memeriksa dengan `mysqld --print-defaults` bahwa
+`init_file` terakhir yang dibaca mysqld memang berkas agent dan berkas itu
+bisa dibaca pengguna MySQL. Halaman server master lama menampilkan baris
+**Kunci start**: "Terkunci", atau "belum terjamin" beserta alasannya; yang
+kedua membuka peringatan Kritis "master lama belum terjamin terkunci saat
+MySQL menyala; jangan nyalakan MySQL-nya sebelum agent tersambung".
+
+Saat MySQL master lama menyala, putaran penjaga pertama memasang
+`read_only` dan `super_read_only` dengan `SET PERSIST` lalu melaporkan
+caranya menyala. Bila salah satu bendera sempat mati (seseorang membukanya,
+atau kunci tidak berlaku), panel membuka peringatan Kritis "master lama
+sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal";
+peringatan itu tertutup setelah **Periksa data tertinggal** dijalankan
+sesudahnya, atau server itu tidak lagi master lama. Bila `@@init_file`
+bukan berkas agent padahal berkas itu sudah ada sebelum mysqld menyala
+(misalnya `--init-file` di baris perintah layanan, yang mengalahkan baris
+agent dan tidak terlihat oleh agent selama MySQL mati), peringatannya
+"kunci start tidak dipakai MySQL; periksa opsi layanan".
+
+Yang perlu diketahui:
+
+- **Jangan menghapus berkas atau baris itu.** Bila berkas dihapus saat agent
+  berjalan, agent menulisnya lagi dalam beberapa detik. Bila berkas
+  dihapus (atau tidak bisa dibaca mysqld) saat agent mati, MySQL menolak
+  menyala ("Failed to open the bootstrap file") sampai agent hidup dan
+  menulisnya lagi; selama MySQL mati, penjaga membaca log error MySQL dan
+  panel membuka peringatan Kritis "MySQL master lama gagal menyala karena
+  berkas kunci tidak terbaca" dengan langkah perbaikannya. Arah gagal ini
+  aman bagi data. Bila barisnya dihapus saat agent berjalan, agent
+  menulisnya lagi; bila dihapus saat agent mati, MySQL menyala tanpa kunci
+  start: ia tetap baca-saja hanya bila `read_only` dan `super_read_only`
+  ON sempat tersimpan (`SET PERSIST`) sebelumnya, dan agent melaporkan
+  "sempat bisa ditulis" begitu tersambung bila tidak.
+- **AppArmor dan SELinux.** Kunci start baru diuji pada MySQL 8.0 (8.0.46)
+  tanpa AppArmor atau SELinux yang ditegakkan. Bila mysqld dibatasi
+  AppArmor, agent hanya menganggap kunci terjamin bila berkasnya di bawah
+  `/etc/mysql/` (yang dibaca profil bawaan paket); di bawah SELinux hanya
+  bila label berkasnya `mysqld_etc_t`. Selain itu baris **Kunci start**
+  menulis "belum terjamin" dengan alasan "mungkin ditolak profil
+  AppArmor/SELinux mysqld". Bila profil memang menolak berkasnya, MySQL
+  master lama tidak menyala dan panel memperingatkan: data aman, tetapi
+  **Periksa data tertinggal** tertunda sampai diperbaiki.
+- **Melepas kunci.** Kunci dilepas oleh loop penjaga, bukan sekali jalan:
+  begitu peran bukan lagi `quarantined` (misalnya setelah **Bangun ulang
+  sebagai replika**) dan MySQL yang hidup terbukti menyimpan kedua bendera
+  ON. Sebelum itu kunci tetap, apa pun perannya; jadi `set-role replica`
+  saat MySQL mati tidak membuat MySQL menyala bisa ditulis. `set-role
+  master` melepasnya saat itu juga (lihat "Peran dan sumber yang dipin").
+  Replika yang kunci start-nya masih ada tidak bisa dipilih sebagai
+  kandidat promote.
+- **Hapus server** saat MySQL master lama mati tidak melepas karantina dan
+  kunci start-nya; MySQL-nya tetap menyala baca-saja sampai seseorang
+  mengubah perannya di server itu. Dialog hapus mengatakannya.
+
+Halaman server master lama memuat kotak **Master lama** dengan:
 
 - **Periksa data tertinggal:** membandingkan GTID master lama dengan master
   baru dan merangkum transaksi yang tidak sampai ke master baru dari binlog
@@ -1162,7 +1332,15 @@ memuat kotak **Master lama** dengan:
   baru dengan master lama sebagai tujuan. Semua data MySQL di master lama
   diganti salinan dari master baru; konfirmasi menyebut koneksi aplikasi
   yang masih ada dan data tertinggal yang belum diperiksa atau belum
-  diamankan, lalu meminta kata sandi dan nama server. Berkas yang sudah
+  diamankan, lalu meminta kata sandi dan nama server. Bila daftar koneksi
+  master lama tidak lengkap dan kosong (masih ada koneksi, atau daftarnya
+  tidak bisa dipastikan), formulir juga meminta centang "Saya paham N
+  koneksi masih ada dan tulisannya hilang" (atau pernyataan bahwa
+  koneksinya tidak bisa dipastikan); tanpa centang itu bangun ulang
+  ditolak dan tidak ada yang dimulai. Panel membaca ulang daftar koneksi
+  saat pekerjaan dimulai dan saat **Ulangi**, dan menolak tanpa centang
+  bila koneksi muncul lagi. Setelah bangun ulang, agent melepas kunci
+  start (di atas) begitu MySQL-nya terbukti menyimpan baca-saja. Berkas yang sudah
   diamankan tidak ikut dihapus: setelah bangun ulang daftarnya tetap
   tampil di halaman server itu, dengan **Unduh** dan **Hapus**, sampai
   berkasnya habis masa simpan 7 hari. Selama seluruh pemuatan salinan
@@ -1176,7 +1354,8 @@ memuat kotak **Master lama** dengan:
   peran agent baru menjadi `replica` bila salinan dari master baru
   berhasil di agent yang sama.
 - **Hapus server:** melepas pin `quarantined` (agent tidak lagi menjaga
-  baca-saja saat start). Seperti bangun ulang, baru tersedia setelah
+  baca-saja saat start), hanya bila MySQL-nya hidup (lihat "Kunci start"
+  di atas). Seperti bangun ulang, baru tersedia setelah
   **Sudah saya alihkan**.
 
 ### Replika lain
@@ -1469,7 +1648,7 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   membuat akun dump dan memakainya untuk itu. Pagarnya ada di agent:
   akun dump dibatasi 2 sesi (`MAX_USER_CONNECTIONS 2`) dan sandinya
   kedaluwarsa 1 hari setelah dibuat (`PASSWORD EXPIRE INTERVAL 1 DAY`);
-  pemantau agent, setiap pemeriksaan (15 detik), memutus sesi akun
+  loop penjaga agent, tiap 5 detik, memutus sesi akun
   `dbpanel_dump_<8 hex>` yang memegang kunci global itu 1 menit atau
   lebih (`mysqldump` hanya memegangnya sesaat; dibaca dari
   `performance_schema.metadata_locks`, jadi tanpa `performance_schema`
@@ -1496,7 +1675,12 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   dialihkan; semuanya tercatat di audit dan Telegram. Bila kandidat lalu
   dibuat tidak terjangkau, kunci bertahan sampai `sudo dbpanel agent
   unlock-master` dijalankan di server master (membuka otomatis berisiko
-  dua master).
+  dua master). Begitu pula bila replika yang terbaca saat kunci dipasang
+  dibuat tidak terbaca (misalnya MySQL-nya dimatikan): master tetap
+  baca-saja sampai replika itu terbaca lagi, `forget-replica`, atau
+  `unlock-master`, walau panelnya sudah dicabut. Akibatnya henti tulis,
+  bukan kehilangan data; membuka kunci setelah batas waktu akan membuka
+  lagi jalan dua master.
 - Pin `replica` menerima `createReplUser` ketat, jadi panel yang disusupi
   bisa membuat akun replikasi di replika (juga replika sebagian); replika
   lengkap sudah memilikinya sejak dump. Akun itu bisa membaca binlog
@@ -1514,9 +1698,51 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   wajib; tanpa verifikasi sertifikat ("Perketat" belum dijalankan)
   sertifikatnya tidak diperiksa, tetapi koneksi tanpa TLS ditolak.
 - Penjaga kunci promosi membaca replika di berkas replika yang pernah
-  tersambung pada port kandidat. Replika di port lain, atau yang menolak
-  akun replikasi kandidat, dilewati; master tetap dibuka bila tidak ada
-  replika terbaca yang bisa ditulis dan memuat transaksi master itu.
+  tersambung, pada port kandidat dan setiap port replika yang tercatat.
+  Replika yang tidak terbaca saat kunci dipasang (misalnya menolak akun
+  replikasi kandidat) dilewati dan tidak menahan kunci; replika yang
+  terbaca saat itu menahan kunci selama tidak terbaca lagi (lihat "Peran
+  dan sumber yang dipin"). Master dibuka bila semua replika itu terbaca dan
+  tidak ada yang bisa ditulis dengan transaksi master itu.
+- **Kunci start master lama.** Master lama menyala baca-saja lewat
+  `init_file` walau agent-nya tidak ada (lihat "Master lama" di
+  "Promote"). Batasnya: baru diuji pada MySQL 8.0 tanpa AppArmor/SELinux
+  yang ditegakkan; `--init-file` di baris perintah layanan mengalahkannya
+  (dilaporkan begitu MySQL menyala); menghapus barisnya saat agent mati
+  membuat MySQL menyala tanpa kunci itu; menghapus berkasnya saat agent mati
+  membuat MySQL tidak mau menyala sampai agent menulisnya lagi. Pada promote
+  darurat ketika agent master lama tidak terjangkau, karantina dan kunci
+  start baru dipasang saat agent itu tersambung lagi.
+- **Daftar koneksi.** Hanya akun layanan buatan agent (`dbpanel_repl`,
+  `dbpanel_dump_<8 heksa>`) dan sesi agent sendiri dari server itu (akun
+  admin agent dengan `program_name=dbpanel-agent`) yang tidak ditampilkan.
+  Atribut itu bisa dipalsukan klien, tetapi hanya oleh sesi yang sudah
+  memakai akun admin agent dari server itu sendiri. Lihat "Pengalihan
+  aplikasi".
+- **Pembuangan data dengan konfirmasi segar.** **Ulangi** dan **Setujui**
+  pada pekerjaan yang membuang data (Resync ulang; Buat replika dengan
+  database yang dibuang, dengan CLONE yang belum menyalin, atau Bangun
+  ulang master lama; Lepas database dengan hapus data; Tambah database
+  yang sudah ada di replika) meminta kata sandi panel lagi untuk pekerjaan
+  itu saja. Pekerjaan seperti itu yang konfirmasi terakhirnya lebih dari 24
+  jam lalu tidak bisa diulang ("mulai tindakan baru dari halaman
+  servernya"), dan **Ulangi** selalu menjalankan pemeriksaan awal lagi
+  sebelum membuang apa pun. Dialog **Resync ulang** (dan **Ulangi**-nya)
+  mengelompokkan database replika menjadi "ada di master, disalin ulang"
+  dan "hanya di replika, isinya hilang permanen"; tiap database kelompok
+  kedua harus dicentang sendiri, dan panel mencocokkannya lagi dengan
+  daftar database master yang dibaca langsung tepat sebelum pemeriksaan
+  awal (pekerjaan ditolak bila daftar itu tidak bisa dibaca). **Lepas
+  database** dengan hapus data juga meminta nama replika diketik.
+  **Tambah database** yang sudah ada di replika menunggu dengan teks
+  "Database X sudah ada di replika ini. Panel tidak bisa memastikan isinya
+  sama dengan master. Isinya di replika akan dibuang permanen, lalu diganti
+  salinan dari master."; **Setujui** meminta kata sandi dan nama setiap
+  database itu diketik, lalu agent membuangnya tanpa binary log
+  (`sql_log_bin=0`, riwayat GTID replika tidak berubah) dan memuat salinan
+  master. Pertahanan ini melindungi dari salah klik dan konfirmasi basi,
+  bukan dari panel yang disusupi: panel seperti itu tetap bisa
+  memerintahkan pembuangan.
 - Topologi tanpa verifikasi sertifikat ("Perketat" belum dijalankan) tetap
   rentan terhadap pemalsuan DNS nama sumber yang dipin bila panel disusupi:
   pin sumber menyimpan nama, dan pembangunan ulang menyambung ke nama itu.
@@ -1658,20 +1884,29 @@ agent dan `mysqld` sungguhan, lalu lewat UI:
 - `TestE2EPromotePlanned`: tiga `mysqld` (master dan dua replika), promote
   terencana lewat layar pertimbangan dengan token konfirmasi; master baru
   bisa ditulis, replika lain mengikutinya, master lama `quarantined` dan
-  `super_read_only=ON`; layar pengalihan menampilkan koneksi aplikasi uji
-  ke master lama; **Sudah saya alihkan**; **Periksa data tertinggal**
-  kosong; **Bangun ulang sebagai replika**; pesan Telegram memuat alamat
-  master baru;
+  `super_read_only=ON`, halaman master lama menampilkan "Kunci start:
+  Terkunci"; layar pengalihan menampilkan koneksi aplikasi uji ke master
+  lama dan baru menulis "Tidak ada koneksi aplikasi tersisa" setelah
+  koneksi itu ditutup; **Sudah saya alihkan**; **Periksa data tertinggal**
+  kosong; dengan koneksi aplikasi dibuka lagi, **Bangun ulang sebagai
+  replika** tanpa centang `accept_connections` ditolak dan tidak memulai
+  apa pun, dengan centang berhasil, dan kunci start dilepas; pesan
+  Telegram memuat alamat master baru;
 - `TestE2EPromoteEmergency`: dua transaksi tertahan di relay log replika A,
   `mysqld` master dimatikan paksa (agent-nya tetap hidup): layar
   pertimbangan membaca binlog di disk master (angka pasti) dan antrean
   terapan A; promote darurat (token dan nama master) menerapkan relay log
-  dulu; replika B diarahkan ke A. Master lama dihidupkan dengan satu baris
-  yang masuk sebelum agent-nya mengunci; agent mengkarantinanya saat
-  start, **Periksa data tertinggal** menemukan 1 transaksi di `a.t`,
-  **Amankan** menulis berkas yang diunduh lewat HTTPS dengan token dan
-  memuat `INSERT`-nya, berkas dihapus dengan token, lalu master lama
-  dibangun ulang sebagai replika.
+  dulu; replika B diarahkan ke A; karantina menulis kunci start (berkas dan
+  baris `init_file`). Agent master lama dihentikan dan `mysqld`-nya
+  dinyalakan: ia menyala baca-saja karena kunci start; orang membukanya
+  dengan `SET GLOBAL super_read_only = OFF` dan menulis satu baris, lalu
+  agent dinyalakan: ia memasang baca-saja lagi dan panel membuka peringatan
+  `master_start_late`. **Periksa data tertinggal** menemukan 1 transaksi di
+  `a.t` dan menutup peringatan itu, **Amankan** menulis berkas yang
+  diunduh lewat HTTPS dengan token dan memuat `INSERT`-nya, master lama
+  dibangun ulang sebagai replika (konfigurasinya tidak lagi memuat
+  `init_file` dan berkas kuncinya hilang), lalu berkas salvage, yang
+  bertahan setelah bangun ulang, dihapus dengan token.
 
 Test ini dilewati dengan `-short`.
 
