@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -362,6 +363,9 @@ type oldMasterBox struct {
 	// Leftover is the latest check (nil: never run); LeftoverSummary its
 	// sentence.
 	Leftover        *orchestrator.LeftoverCheck
+	// StartLate: master_start_late is open (startLateOpen); Leftover
+	// says nothing about the writes since.
+	StartLate bool
 	LeftoverSummary string
 	Online, Busy    bool
 }
@@ -439,6 +443,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		box.Leftover = &c
 		box.LeftoverSummary = orchestrator.LeftoverSummary(c.LeftoverResult)
 	}
+	box.StartLate = a.startLateOpen(srv.ID)
 	p.OldMaster = box
 	p.DeleteWarnings = deleteWarnings(srv, box, p.Salvage)
 	switch {
@@ -460,6 +465,9 @@ func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []str
 	var out []string
 	if box != nil {
 		switch {
+		case box.StartLate:
+			out = append(out, startLateWarning(srv)+": setelah server ini dihapus dari panel, tulisan itu tidak bisa "+
+				"diperiksa atau diamankan lagi lewat panel.")
 		case box.Leftover == nil:
 			out = append(out, fmt.Sprintf("Data tertinggal di %s belum diperiksa: setelah server ini dihapus dari panel, "+
 				"transaksi yang tidak sampai ke master baru tidak bisa diperiksa atau diamankan lagi lewat panel.", srv.Name))
@@ -678,6 +686,24 @@ type rebuildInfo struct {
 	Form string
 }
 
+// startLateOpen reports whether master_start_late is open for the server:
+// it started writable after the last "Periksa data tertinggal" (the alert
+// closes once a check after it is stored), so a stored result says
+// nothing about those writes (SP-2). A store error counts as open.
+func (a *app) startLateOpen(serverID int64) bool {
+	_, err := a.Store.GetOpenAlert(monitor.KindMasterStartLate, serverID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		a.Logger.Warn("read start late alert", "server", serverID, "err", err)
+		return true
+	}
+	return err == nil
+}
+
+// startLateWarning opens the warning of a late start on srv.
+func startLateWarning(srv store.Server) string {
+	return fmt.Sprintf("MySQL %s sempat bisa ditulis saat menyala setelah Periksa data tertinggal terakhir; tulisan itu belum diperiksa", srv.Name)
+}
+
 // rebuildTarget checks that id is the quarantined old master of master's
 // topology and words what rebuilding it loses.
 func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) (*rebuildInfo, error) {
@@ -726,6 +752,9 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) 
 	}
 	check, checked := orchestrator.LeftoverOf(prom)
 	switch {
+	case a.startLateOpen(srv.ID):
+		info.Warnings = append(info.Warnings, startLateWarning(srv)+": transaksi yang tidak sampai ke master baru akan "+
+			"hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu.")
 	case !checked:
 		info.Warnings = append(info.Warnings, "Data tertinggal belum diperiksa: transaksi yang tidak sampai ke master baru "+
 			"akan hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu bila ragu.")

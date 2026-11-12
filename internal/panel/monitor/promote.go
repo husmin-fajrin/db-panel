@@ -621,7 +621,8 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 }
 
 // closeStartAlerts closes the event alerts of the start lock (late,
-// bypassed, blocked) that are over: the server is no longer quarantined,
+// bypassed, blocked) that are over: the server is no longer quarantined
+// (for late: not while it is a replica whose rebuild has not copied yet),
 // or, for late, "Periksa data tertinggal" stored a result after the alert
 // opened. The caller holds mu.
 func (m *Monitor) closeStartAlerts(now time.Time) []alertUpdate {
@@ -641,6 +642,10 @@ func (m *Monitor) closeStartAlerts(now time.Time) []alertUpdate {
 		}
 		reason := ""
 		switch {
+		case a.Kind == KindMasterStartLate && s.role == store.RoleReplica && !judgedState(s.repState):
+			// A rebuild that has not copied yet (creating, failed): the
+			// writes the alert speaks of are still on the server, and a
+			// cancel makes it an old master again (SP-2).
 		case s.role != store.RoleQuarantined:
 			reason = notQuarantinedReason
 		case a.Kind == KindMasterStartLate && m.leftoverCheckedAfter(a):

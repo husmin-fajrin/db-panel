@@ -1787,6 +1787,48 @@ func TestStartLateClosesAfterLeftoverCheck(t *testing.T) {
 	}
 }
 
+// TestStartLateSurvivesRebuildUntilCopied (SP-2): the rebuild of the old
+// master makes it a replica in state creating at once; that does not
+// close master_start_late (its data is still there), nor does a cancel
+// that makes it an old master again. Once the rebuild finished (a replica
+// whose copy is made) the alert closes: the data it speaks of is gone.
+func TestStartLateSurvivesRebuildUntilCopied(t *testing.T) {
+	r := newRig(t)
+	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	topo, err := r.st.GetTopologyByOldMaster(mID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.st.AddReplica(topo.ID, mID, nil); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatal("master_start_late closed when a rebuild made the server a replica in state creating")
+	}
+	// The rebuild is cancelled: the old master is quarantined again.
+	if err := r.st.RemoveReplica(mID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.SetServerRole(mID, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	if !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatal("master_start_late closed after a cancelled rebuild")
+	}
+	// A rebuild that finished: the copy replaced the data.
+	if _, err := r.st.AddReplica(topo.ID, mID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.SetReplicaState(mID, store.ReplicaReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+}
+
 func TestStartBlockedOpensAndStartCloses(t *testing.T) {
 	r := newRig(t)
 	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))

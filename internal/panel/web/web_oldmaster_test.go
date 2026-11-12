@@ -511,6 +511,31 @@ func TestDeleteOldMasterWarnsOnLeftover(t *testing.T) {
 	wantBody(t, rec, "Daftar berkas data tertinggal di db-master tidak bisa dibaca sekarang")
 }
 
+// TestLateStartDistrustsOlderLeftoverCheck (SP-2): "Periksa data
+// tertinggal" found nothing, then the old master started writable (an
+// open master_start_late): the rebuild form and the delete dialog do not
+// trust that older result and say the writes since are not checked.
+func TestLateStartDistrustsOlderLeftoverCheck(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	f.setConnections(1)
+	setLeftover(t, e, topo, proto.LeftoverResult{})
+	rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantNoBody(t, rec, "sempat bisa ditulis")
+	if _, err := e.st.OpenAlert(store.Alert{Kind: monitor.KindMasterStartLate, ServerID: 1, OpenedAt: time.Now().Add(time.Minute),
+		Message: "master lama sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal"}); err != nil {
+		t.Fatal(err)
+	}
+	const warn = "MySQL db-master sempat bisa ditulis saat menyala setelah Periksa data tertinggal terakhir"
+	rec = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantBody(t, rec, warn)
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, "<li>"+warn, `data-confirm-text="Hapus server db-master dari panel. `+warn)
+}
+
 // A salvage token is issued for one file: it does not open another one,
 // and /confirm issues none for an invalid name or without a name.
 func TestSalvageTokenBoundToFile(t *testing.T) {
