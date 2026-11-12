@@ -376,14 +376,16 @@ func TestFailsWhenAgentDropsDuringSnapshot(t *testing.T) {
 	})
 	r.attach()
 	mark := r.mark()
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	_, steps = e.waitJob(id, store.JobSucceeded)
 	if got := stepStatuses(steps); !slices.Equal(got, allDone(store.StepSkipped)) {
 		t.Fatalf("steps = %v", got)
 	}
-	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.dumpFrom", "mysql.tlsRequest", "mysql.tlsInstall",
+	// The copy is not made yet: the retry runs the preflight again before
+	// the dump (FR-15).
+	wantCmds(t, "replica after retry", r.cmds(mark), []string{"mysql.preflight", "mysql.dumpFrom", "mysql.tlsRequest", "mysql.tlsInstall",
 		"mysql.status", "mysql.configureReplication", "mysql.startReplica", "mysql.startReplica", "mysql.waitSynced"})
 	// The same dump, each attempt with its own temporary account; the
 	// failed attempt's account was dropped when it failed.
@@ -910,7 +912,7 @@ func TestJobFailedReachesAlerts(t *testing.T) {
 		t.Fatalf("JobEnded on a failure: %v", ended)
 	}
 	r.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckOK, Method: "dump"})
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)

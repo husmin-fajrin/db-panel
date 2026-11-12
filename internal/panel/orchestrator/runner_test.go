@@ -116,16 +116,17 @@ func TestDropsData(t *testing.T) {
 		{"create, rebuild", KindCreateReplica, jobState{RebuildOldMaster: true}, true},
 		{"create, leftover wait", KindCreateReplica, jobState{WaitReason: WaitWipe}, true},
 		{"create, clone wait", KindCreateReplica, jobState{WaitReason: WaitClone}, true},
-		{"create, foreign source wait", KindCreateReplica, jobState{WaitReason: WaitForeignSource}, false},
-		{"create, reconnect wait", KindCreateReplica, jobState{WaitReason: WaitReconnect}, false},
-		{"create, plain", KindCreateReplica, jobState{}, false},
-		// Ruling 16: a create that can still run mysql.cloneFrom (method
-		// clone, copy not done) drops data; a dump onto an empty target
-		// with no wipe list, or a clone already copied, does not.
+		// FR-15: before its copy every create drops data (it may still
+		// run mysql.cloneFrom, ruling 16, or load a dump over the target).
+		{"create, foreign source wait", KindCreateReplica, jobState{WaitReason: WaitForeignSource}, true},
+		{"create, reconnect wait", KindCreateReplica, jobState{WaitReason: WaitReconnect}, true},
+		{"create, reconnect wait after the copy", KindCreateReplica, jobState{WaitReason: WaitReconnect, AdminReplaced: true}, false},
+		{"create, plain", KindCreateReplica, jobState{}, true},
 		{"create, clone not copied", KindCreateReplica, jobState{Method: "clone", ConfirmWipe: true}, true},
 		{"create, clone copied", KindCreateReplica, jobState{Method: "clone", SnapshotGTID: "uuid:1-5"}, false},
 		{"create, clone copied, reconnect wait", KindCreateReplica, jobState{Method: "clone", AdminReplaced: true}, false},
-		{"create, dump onto empty target", KindCreateReplica, jobState{Method: "dump", ConfirmWipe: true}, false},
+		{"create, dump onto empty target", KindCreateReplica, jobState{Method: "dump", ConfirmWipe: true}, true},
+		{"create, dump copied", KindCreateReplica, jobState{Method: "dump", SnapshotGTID: "uuid:1-5"}, false},
 		{"remove, drop", KindRemoveDatabases, jobState{DropData: true}, true},
 		{"remove, keep", KindRemoveDatabases, jobState{}, false},
 		{"add", KindAddDatabases, jobState{WipeList: []string{"a"}}, false},
@@ -473,6 +474,74 @@ func failedCloneCreate(t *testing.T, e *env) (r *fakeAgent, id string) {
 	}
 	e.waitIdle(id)
 	return r, id
+}
+
+// TestRetryDumpCreateFailedAtCopyNeedsToken (FR-15, SP-7): a dump-based
+// create that failed while copying loads over whatever the target holds
+// on its retry: the retry needs a token and runs the preflight again
+// before mysql.dumpFrom.
+func TestRetryDumpCreateFailedAtCopyNeedsToken(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	var dumps atomic.Int32
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		if dumps.Add(1) == 1 {
+			return nil, errors.New("koneksi ke master terputus")
+		}
+		return proto.SnapshotResult{Method: "dump", Bytes: 300, GTIDExecuted: masterGTID}, nil
+	})
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, ConfirmWipe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps := e.waitJob(id, store.JobFailed)
+	if steps[j.CurrentStep].Name != "Salin data" {
+		t.Fatalf("job failed at %q, want Salin data", steps[j.CurrentStep].Name)
+	}
+	e.waitIdle(id)
+	mark := r.mark()
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Retry without confirmation = %v, want ErrJobNeedsConfirm", err)
+	}
+	wantCmds(t, "replica", r.cmds(mark), nil)
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	cmds := r.cmds(mark)
+	pre, dump := slices.Index(cmds, "mysql.preflight"), slices.Index(cmds, "mysql.dumpFrom")
+	if pre < 0 || dump < 0 || pre > dump {
+		t.Fatalf("replica commands after the retry = %v, want mysql.preflight before mysql.dumpFrom", cmds)
+	}
+}
+
+// TestCreateReplicaDropsUntilCopied (FR-15): a create_replica drops data
+// (its Approve and Retry need a token) for as long as its copy is not made
+// (no SnapshotGTID and no AdminReplaced), whatever its method, wipe list
+// or wait; once copied, only a wipe list, a rebuild, or a wait to drop
+// leftovers or for CLONE does.
+func TestCreateReplicaDropsUntilCopied(t *testing.T) {
+	for _, method := range []string{"", "dump", "clone"} {
+		for _, gtid := range []string{"", "uuid:1-5"} {
+			for _, replaced := range []bool{false, true} {
+				for _, wipe := range [][]string{nil, {"a"}} {
+					for _, wait := range []string{"", WaitWipe, WaitClone, WaitForeignSource, WaitReconnect, WaitRestart} {
+						for _, rebuild := range []bool{false, true} {
+							st := jobState{Method: method, SnapshotGTID: gtid, AdminReplaced: replaced, WipeList: wipe,
+								WaitReason: wait, RebuildOldMaster: rebuild}
+							copied := gtid != "" || replaced
+							want := !copied || len(wipe) > 0 || rebuild || wait == WaitWipe || wait == WaitClone
+							if got := dropsData(KindCreateReplica, st); got != want {
+								t.Errorf("%+v: dropsData = %v, want %v", st, got, want)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 // TestRetryCloneCreateFailedAtCopyNeedsToken (ruling 16): mysql.cloneFrom

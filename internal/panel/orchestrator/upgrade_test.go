@@ -67,7 +67,7 @@ func TestOldCreateReplicaJobResumesAndRetries(t *testing.T) {
 	if j, _ := e.waitJob("old-create", store.JobFailed); j.CurrentStep != 5 {
 		t.Fatalf("after Resume: %+v", j)
 	}
-	if err := e.r.Retry("old-create", JobAck{}); err != nil {
+	if err := e.r.Retry("old-create", JobAck{Confirmed: true}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	_, steps := e.waitJob("old-create", store.JobSucceeded)

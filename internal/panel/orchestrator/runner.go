@@ -595,9 +595,9 @@ var (
 // dropsData reports whether a job of kind with st drops data on a server
 // when it runs on (spec 5.6): a resync; a create_replica with leftovers to
 // drop, of a quarantined old master, that waited to drop leftovers or for
-// CLONE, or that can still run mysql.cloneFrom (method clone and no copy
-// made yet: CLONE replaces everything on the target, and the agent does
-// not check for user databases again, ruling 16); a remove_databases that
+// CLONE, or whose copy is not made yet, whatever its method (FR-15: CLONE
+// replaces everything on the target, ruling 16, and a dump load replaces
+// every table it carries; the run that copies may choose either); a remove_databases that
 // drops the data; an add_databases that waited for, or has, the drop of
 // added databases that already exist on the replica (AddDrop). Its
 // Approve and Retry need a fresh confirmation (JobAck.Confirmed).
@@ -608,8 +608,8 @@ func dropsData(kind string, st jobState) bool {
 	case KindCreateReplica:
 		// The copy is made once SnapshotGTID is known or the copy is
 		// waiting for the reconnect (AdminReplaced).
-		cloneLeft := st.Method == "clone" && st.SnapshotGTID == "" && !st.AdminReplaced
-		return len(st.WipeList) > 0 || st.RebuildOldMaster || st.WaitReason == WaitWipe || st.WaitReason == WaitClone || cloneLeft
+		copyLeft := st.SnapshotGTID == "" && !st.AdminReplaced
+		return len(st.WipeList) > 0 || st.RebuildOldMaster || st.WaitReason == WaitWipe || st.WaitReason == WaitClone || copyLeft
 	case KindRemoveDatabases:
 		return st.DropData
 	case KindAddDatabases:

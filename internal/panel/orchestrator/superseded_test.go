@@ -180,7 +180,7 @@ func TestRetryReopensBeforeNewJobs(t *testing.T) {
 	// Real scheduling: a Start right after Retry returns is refused.
 	e.waitFor("job goroutine gone", gone)
 	hold.Store(true)
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	wantRefusedNew()
@@ -196,7 +196,7 @@ func TestRetryReopensBeforeNewJobs(t *testing.T) {
 	e.r.mu.Lock()
 	e.r.live[id] = held
 	e.r.mu.Unlock()
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	wantRefusedNew()
@@ -259,7 +259,7 @@ func TestCancelBetweenReopenAndLaunchIsCanceled(t *testing.T) {
 
 			var cancelErr error
 			e.r.afterReopen = func(string) { cancelErr = e.r.Cancel(id) }
-			retryErr := e.r.Retry(id, JobAck{})
+			retryErr := e.r.Retry(id, JobAck{Confirmed: true})
 			e.r.afterReopen = nil
 			if cancelErr != nil {
 				t.Fatalf("Cancel = %v", cancelErr)

@@ -355,7 +355,7 @@ func TestForeignSourceNamedBeforeReset(t *testing.T) {
 	if r.count("mysql.resetReplica") != 0 {
 		t.Fatal("reset before the approval")
 	}
-	if err := e.r.Approve(id, JobAck{}); err != nil {
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
@@ -418,7 +418,7 @@ func TestOfflineMasterLogWording(t *testing.T) {
 		defer e.r.mu.Unlock()
 		return e.r.live[id] == nil
 	})
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if j, _ := e.waitJob(id, store.JobFailed); !strings.Contains(j.Error, "master db-master tidak terhubung") ||
@@ -432,7 +432,7 @@ func TestOfflineMasterLogWording(t *testing.T) {
 		defer e.r.mu.Unlock()
 		return e.r.live[id] == nil
 	})
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
