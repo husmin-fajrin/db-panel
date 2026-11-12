@@ -804,7 +804,10 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 	ports := filepath.Join(t.TempDir(), "replica-ports-seen")
 	oldPorts, oldHost := cliSeenPortsPath, cliMySQLHost
 	cliSeenPortsPath = ports
-	cliMySQLHost = func(string) (mysql.Host, error) { t.Error("forget-replica-port opened MySQL"); return nil, errors.New("no") }
+	cliMySQLHost = func(string) (mysql.Host, error) {
+		t.Error("forget-replica-port opened MySQL")
+		return nil, errors.New("no")
+	}
 	t.Cleanup(func() { cliSeenPortsPath, cliMySQLHost = oldPorts, oldHost })
 	run := func(args ...string) (int, string, string) {
 		var stdout, stderr bytes.Buffer
