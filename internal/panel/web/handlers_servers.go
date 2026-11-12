@@ -666,7 +666,15 @@ func newStartLockFacts(snap *proto.HealthSnapshot) *startLockFacts {
 		return nil
 	}
 	sl := snap.StartLock
-	return &startLockFacts{Locked: sl.Locked, Reason: sl.Reason, OperatorInitFiles: sl.OperatorInitFiles}
+	f := &startLockFacts{Locked: sl.Locked, Reason: monitor.AgentText(sl.Reason, maxAgentWords)}
+	for i, file := range sl.OperatorInitFiles {
+		if i == maxAgentFiles {
+			f.OperatorInitFiles = append(f.OperatorInitFiles, fmt.Sprintf("… dan %d lagi", len(sl.OperatorInitFiles)-maxAgentFiles))
+			break
+		}
+		f.OperatorInitFiles = append(f.OperatorInitFiles, monitor.AgentText(file, maxAgentWords))
+	}
+	return f
 }
 
 // renderServer renders the server page with v's status and messages.

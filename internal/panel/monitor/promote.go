@@ -283,8 +283,8 @@ func (m *Monitor) partialMessage(topo store.Topology, p store.Promotion) string 
 // the new master's host:port.
 func quarantinedMessage(newSource string) string {
 	msg := "Master lama dikarantina: MySQL-nya kini hanya-baca, aplikasi tidak bisa menulis ke sana."
-	if newSource != "" {
-		msg += " Master baru: " + newSource + "."
+	if src := agentText(newSource, maxAgentHost); src != "" {
+		msg += " Master baru: " + src + "."
 	}
 	return msg
 }
@@ -388,8 +388,8 @@ func (m *Monitor) handlePromoteEvent(serverID int64, ev proto.Event) bool {
 // out (it may carry MySQL's own error text).
 func lockExpiredMessage(le proto.LockExpiredEvent) string {
 	cand := "kandidat"
-	if le.Candidate != "" {
-		cand = "kandidat " + le.Candidate
+	if c := agentText(le.Candidate, maxAgentHost); c != "" {
+		cand = "kandidat " + c
 	}
 	if le.Action == lockExpiredUnlocked {
 		return "Batas waktu kunci promote di master habis dan " + cand + " masih replika: promote tidak terjadi, " +

@@ -1948,6 +1948,16 @@ func TestStartAndKeptMessagesBoundAgentText(t *testing.T) {
 		!strings.Contains(k.Message, "sudo dbpanel agent unlock-master") {
 		t.Fatalf("kept message not bounded: %d bytes %q", len(k.Message), k.Message)
 	}
+
+	// SP-11: the candidate of a lock-expired notice and the new source of
+	// a quarantine notice are the agent's words too.
+	long := "x\ny" + strings.Repeat("c", 5000)
+	if msg := lockExpiredMessage(proto.LockExpiredEvent{Action: lockExpiredKept, Candidate: long}); strings.Contains(msg, "\n") || len(msg) > 1200 {
+		t.Fatalf("lock expired message not bounded: %d bytes", len(msg))
+	}
+	if msg := quarantinedMessage(long); strings.Contains(msg, "\n") || len(msg) > 1200 {
+		t.Fatalf("quarantined message not bounded: %d bytes", len(msg))
+	}
 }
 
 func TestLockKeptWithHostsIsCritical(t *testing.T) {

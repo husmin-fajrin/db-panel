@@ -396,6 +396,9 @@ const (
 	maxKeptHosts   = 10  // hosts named in master_lock_kept; the rest are counted
 )
 
+// AgentText is agentText for the web pages' agent strings (SP-11).
+func AgentText(s string, limit int) string { return agentText(s, limit) }
+
 // agentText is text from an agent as data for a message: invalid UTF-8,
 // control and format characters (newlines, bidi overrides) become single
 // spaces, and it is cut at limit characters. The words are otherwise

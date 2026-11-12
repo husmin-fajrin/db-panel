@@ -166,14 +166,14 @@ func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsVi
 			v.LocalAdminTotal += row.Count
 		}
 	}
-	// The agent's own words, shown as given and never matched on.
+	// The agent's own words, shown bounded (SP-11) and never matched on.
 	switch {
 	case res.Unreadable != "":
-		v.Unreadable = res.Unreadable
+		v.Unreadable = monitor.AgentText(res.Unreadable, maxAgentWords)
 	case !res.Typed:
 		v.Uncertain = msgConnsOldAgent
 	case res.Incomplete != "":
-		v.Uncertain = res.Incomplete
+		v.Uncertain = monitor.AgentText(res.Incomplete, maxAgentWords)
 	}
 	return v
 }
@@ -685,6 +685,13 @@ type rebuildInfo struct {
 	// Form: see retryView.Form; always "" here.
 	Form string
 }
+
+// maxAgentWords bounds an agent's sentence shown on a page (SP-11); a
+// list of its file names is cut at maxAgentFiles.
+const (
+	maxAgentWords = 300
+	maxAgentFiles = 10
+)
 
 // startLateOpen reports whether master_start_late is open for the server:
 // it started writable after the last "Periksa data tertinggal" (the alert

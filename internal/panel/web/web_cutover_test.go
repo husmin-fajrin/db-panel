@@ -202,3 +202,27 @@ func TestCutoverEscapesAgentText(t *testing.T) {
 	}
 	wantBody(t, e.do("GET", "/servers/1/connections-fragment", nil, c), "&lt;script&gt;alert(1)&lt;/script&gt;", "&lt;b&gt;h&lt;/b&gt;")
 }
+
+// TestConnectionsBoundAgentText (SP-11): the agent's words about a
+// connection list it could not read (or not whole) are shown bounded,
+// without control or format characters.
+func TestConnectionsBoundAgentText(t *testing.T) {
+	e, f, _ := promotedEnv(t)
+	c := e.cookie()
+	long := "tidak\nterbaca‮" + strings.Repeat("u", 10000)
+	f.mu.Lock()
+	if f.connections == nil {
+		f.connections = map[int64]proto.ConnectionsResult{}
+	}
+	f.connections[1] = proto.ConnectionsResult{Typed: true, TakenAt: time.Now(), Unreadable: long}
+	f.mu.Unlock()
+	rec := e.do("GET", "/servers/1/connections-fragment", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "tidak terbaca")
+	wantNoBody(t, rec, "‮", strings.Repeat("u", 400))
+	f.mu.Lock()
+	f.connections[1] = proto.ConnectionsResult{Typed: true, TakenAt: time.Now(), Incomplete: long}
+	f.mu.Unlock()
+	rec = e.do("GET", "/servers/1/connections-fragment", nil, c)
+	wantNoBody(t, rec, "‮", strings.Repeat("u", 400))
+}
