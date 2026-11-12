@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -306,7 +307,65 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 	}
 	d.bootFailAt = at
 	d.warn("MySQL of the quarantined server failed to start: it could not open the start lock file", "file", path, "at", at)
-	d.emit(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at})
+	d.emitStart(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at})
+}
+
+// maxPendingStart is how many start reports wait for the panel at most.
+const maxPendingStart = 16
+
+// emitStart sends a start report (EventQuarantineStart,
+// EventQuarantineStartFailed) after the ones still waiting, in order. A
+// report the panel does not get (not connected: at agent start the first
+// guard round runs before the session is up, or the server is cut off)
+// is kept and sent again each guard round (flushStartEvents) until one is
+// delivered: these reports are the only carrier of "the old master was
+// writable for a while". Past maxPendingStart the oldest ok result goes
+// first (it only closes alerts), else the oldest report. The caller holds
+// promoteMu.
+func (d *Driver) emitStart(typ string, payload any) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		d.warn("start report not encoded", "type", typ, "err", err)
+		return
+	}
+	d.pendingStart = append(d.pendingStart, proto.Event{Type: typ, Payload: b})
+	if len(d.pendingStart) > maxPendingStart {
+		drop := 0
+		for i, ev := range d.pendingStart {
+			var qe proto.QuarantineStartEvent
+			if ev.Type == proto.EventQuarantineStart && json.Unmarshal(ev.Payload, &qe) == nil &&
+				qe.Result == proto.QuarantineStartOK && !qe.Bypassed {
+				drop = i
+				break
+			}
+		}
+		d.warn("start report dropped: too many waiting for the panel", "type", d.pendingStart[drop].Type)
+		d.pendingStart = slices.Delete(d.pendingStart, drop, drop+1)
+	}
+	d.flushStartEvents()
+}
+
+// flushStartEvents sends the start reports still waiting, oldest first,
+// and stops at the first the panel does not get. The caller holds
+// promoteMu.
+func (d *Driver) flushStartEvents() {
+	if d.Events == nil {
+		d.pendingStart = nil
+		return
+	}
+	for len(d.pendingStart) > 0 {
+		ev := d.pendingStart[0]
+		if err := d.Events.Emit(ev); err != nil {
+			if !d.startSendWarned {
+				d.startSendWarned = true
+				d.warn("start report not sent; kept and sent again each guard round", "type", ev.Type, "err", err)
+			}
+			return
+		}
+		d.startSendWarned = false
+		d.pendingStart = d.pendingStart[1:]
+	}
+	d.pendingStart = nil
 }
 
 // readTail is the last n bytes of the file at path.
@@ -382,7 +441,7 @@ func (d *Driver) reportQuarantineStart(h Host, now time.Time, flagsOff bool, ini
 	if ev.Result != proto.QuarantineStartOK {
 		d.warn("quarantined server started without the start lock holding", "result", ev.Result, "init_file", initFile)
 	}
-	d.emit(proto.EventQuarantineStart, ev)
+	d.emitStart(proto.EventQuarantineStart, ev)
 }
 
 // releaseForPromote releases the start lock a replica still carries

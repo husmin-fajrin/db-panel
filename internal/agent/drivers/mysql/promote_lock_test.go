@@ -26,17 +26,29 @@ var (
 	_ mysql.Emitter        = (*eventLog)(nil)
 )
 
-// eventLog records the events a driver emits.
+// eventLog records the events a driver emits. While offline an Emit is
+// refused (the panel not connected).
 type eventLog struct {
-	mu  sync.Mutex
-	evs []proto.Event
+	mu      sync.Mutex
+	evs     []proto.Event
+	offline bool
 }
 
 func (e *eventLog) Emit(ev proto.Event) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.offline {
+		return proto.ErrOffline
+	}
 	e.evs = append(e.evs, ev)
 	return nil
+}
+
+// setOffline refuses every Emit while on.
+func (e *eventLog) setOffline(on bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.offline = on
 }
 
 func (e *eventLog) all() []proto.Event {

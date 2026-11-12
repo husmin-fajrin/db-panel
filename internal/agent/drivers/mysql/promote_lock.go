@@ -481,6 +481,7 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	defer d.promoteMu.Unlock()
+	d.flushStartEvents()
 	d.guardStartLock(ctx, h, now)
 	// A quarantined server is read-only before anything else, lock or
 	// not.
@@ -676,11 +677,12 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) (pr
 }
 
 // emit sends an event to the panel when the driver has an Emitter; one
-// the panel does not get is only logged (the health reports carry the
-// state too).
-func (d *Driver) emit(typ string, payload any) {
+// the panel does not get is logged and its error returned (the health
+// reports carry the state too, except for the start reports, which the
+// caller keeps: emitStart).
+func (d *Driver) emit(typ string, payload any) error {
 	if d.Events == nil {
-		return
+		return nil
 	}
 	b, err := json.Marshal(payload)
 	if err == nil {
@@ -689,6 +691,7 @@ func (d *Driver) emit(typ string, payload any) {
 	if err != nil {
 		d.warn("event not sent", "type", typ, "err", err)
 	}
+	return err
 }
 
 func (d *Driver) warn(msg string, args ...any) {

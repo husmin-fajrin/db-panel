@@ -104,6 +104,11 @@ type Driver struct {
 	// qStartPending: a start of MySQL it has not reported yet.
 	qUp           bool
 	qStartPending bool
+	// pendingStart: start reports the panel has not got yet, oldest
+	// first (emitStart); startSendWarned: their failed send was logged.
+	// The caller holds promoteMu.
+	pendingStart    []proto.Event
+	startSendWarned bool
 
 	// startLockState is the start lock (startlock.go) as last checked,
 	// reported while startLockSet; startLockMu guards both.

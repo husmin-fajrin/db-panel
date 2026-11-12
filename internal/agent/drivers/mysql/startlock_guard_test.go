@@ -383,6 +383,70 @@ func TestBootstrapFailureEventFromErrorLog(t *testing.T) {
 	}
 }
 
+// TestQuarantineStartReportRetriedUntilDelivered: a start report (late)
+// and a failed start computed while the panel is not connected are kept
+// and sent again each guard round until one is delivered: exactly one of
+// each reaches the panel, none lost, none twice (FR-1, SA-5).
+func TestQuarantineStartReportRetriedUntilDelivered(t *testing.T) {
+	t.Run("late", func(t *testing.T) {
+		inst := testmysql.Start(t, testmysql.Options{})
+		// A writable MySQL on a server pinned quarantined: the first
+		// round finds the flags off, a late start.
+		r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+		r.ev.setOffline(true)
+		now := time.Now()
+		r.tickAt(now)
+		r.tickAt(now.Add(5 * time.Second))
+		if got := startEvents(t, r.ev); len(got) != 0 {
+			t.Fatalf("delivered while offline: %+v", got)
+		}
+		r.ev.setOffline(false)
+		r.tickAt(now.Add(10 * time.Second))
+		if got := startEvents(t, r.ev); len(got) != 1 || got[0].Result != proto.QuarantineStartLate {
+			t.Fatalf("start events once connected = %+v, want one late", got)
+		}
+		r.tickAt(now.Add(15 * time.Second))
+		if got := startEvents(t, r.ev); len(got) != 1 {
+			t.Errorf("start events after another round = %+v, want still one", got)
+		}
+	})
+
+	t.Run("start failed", func(t *testing.T) {
+		inst := testmysql.Start(t, testmysql.Options{})
+		if err := mysql.WriteStartLock(context.Background(), inst.Host()); err != nil {
+			t.Fatal(err)
+		}
+		r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
+		inst.Stop(t)
+		written := time.Date(2026, 11, 11, 3, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(r.lock, written, written); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.OpenFile(inst.ErrorLog, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteString("2026-11-11T03:18:19.026539Z 0 [ERROR] [MY-010455] [Server] Failed to open the bootstrap file " + r.lock + "\n")
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.ev.setOffline(true)
+		now := time.Now()
+		r.tickAt(now)
+		if n := len(r.ev.all()); n != 0 {
+			t.Fatalf("delivered while offline: %d events", n)
+		}
+		r.ev.setOffline(false)
+		r.tickAt(now.Add(5 * time.Second))
+		r.tickAt(now.Add(10 * time.Second))
+		evs := r.ev.all()
+		if len(evs) != 1 || evs[0].Type != proto.EventQuarantineStartFailed {
+			t.Fatalf("events once connected = %+v, want one %s", evs, proto.EventQuarantineStartFailed)
+		}
+	})
+}
+
 func TestScanBootstrapFailure(t *testing.T) {
 	const file = "/etc/mysql/dbpanel-start-lock.sql"
 	since := time.Date(2026, 11, 11, 3, 0, 0, 0, time.UTC)
