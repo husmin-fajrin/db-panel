@@ -222,14 +222,17 @@ func (s *Store) TouchSeen(id int64, seen time.Time) error {
 
 // SetSnooze mutes alerts for the server until until; now is the caller's
 // clock. A snooze that is still running (snooze_until after now) when it
-// is extended or shortened keeps its snooze_from; one that is not running
-// starts at now. A nil until, or one that is not after now, ends a running
-// snooze at now: snooze_from stays, so the digest of the snooze is still
-// sent (EndedSnoozes); with no snooze running nothing changes.
+// is extended or shortened keeps its snooze_from; so does a new snooze
+// while the digest of the last one is still owed (snooze_from set, FR-8
+// a): that digest then covers both. Otherwise it starts at now. A nil
+// until, or one that is not after now, ends a running snooze at now:
+// snooze_from stays, so the digest of the snooze is still sent
+// (EndedSnoozes); with no snooze running nothing changes.
 func (s *Store) SetSnooze(id int64, until *time.Time, now time.Time) error {
 	if until != nil && until.After(now) {
 		return s.execOne(`UPDATE servers SET
-			snooze_from = CASE WHEN snooze_until IS NOT NULL AND snooze_until > ? THEN snooze_from ELSE ? END,
+			snooze_from = CASE WHEN snooze_from IS NOT NULL THEN snooze_from
+				WHEN snooze_until IS NOT NULL AND snooze_until > ? THEN snooze_from ELSE ? END,
 			snooze_until = ? WHERE id = ?`, formatTime(now), formatTime(now), formatTime(*until), id)
 	}
 	res, err := s.db.Exec(`UPDATE servers SET snooze_until = ? WHERE id = ? AND snooze_until IS NOT NULL AND snooze_until > ?`,
@@ -286,10 +289,26 @@ func (s *Store) EndedSnoozes(now time.Time) ([]SnoozeSpan, error) {
 	return out, rows.Err()
 }
 
-// ClearSnoozeFrom records that the digest of the server's last snooze was
-// sent.
-func (s *Store) ClearSnoozeFrom(id int64) error {
-	return s.execOne(`UPDATE servers SET snooze_from = NULL WHERE id = ?`, id)
+// ClearSnoozeFrom records that the digest of sp, the server's snooze, was
+// sent: only while the server's snooze is still exactly sp (FR-8 b); a
+// snooze started or changed since keeps its start, and the digest it owes
+// is sent when it ends. ErrNotFound for a server that does not exist.
+func (s *Store) ClearSnoozeFrom(sp SnoozeSpan) error {
+	res, err := s.db.Exec(`UPDATE servers SET snooze_from = NULL WHERE id = ? AND snooze_from = ? AND snooze_until = ?`,
+		sp.ServerID, formatTime(sp.From), formatTime(sp.Until))
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return err
+	}
+	var one int
+	if err := s.db.QueryRow(`SELECT 1 FROM servers WHERE id = ?`, sp.ServerID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("get server: %w", err)
+	}
+	return nil
 }
 
 // DeleteServer removes a server (and, by cascade, its pair tokens,

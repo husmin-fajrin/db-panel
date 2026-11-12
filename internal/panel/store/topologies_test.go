@@ -316,7 +316,11 @@ func TestSetSnoozeKeepsFromWhenExtended(t *testing.T) {
 		t.Fatalf("after extend: from %v until %v; want from %v until %v", got.SnoozeFrom, got.SnoozeUntil, snoozeT0, extended)
 	}
 
-	// Once it ended, a new one starts at its own now.
+	// Once it ended and its digest went out, a new one starts at its own
+	// now.
+	if err := s.ClearSnoozeFrom(SnoozeSpan{ServerID: srv.ID, From: snoozeT0, Until: extended}); err != nil {
+		t.Fatal(err)
+	}
 	later := snoozeT0.Add(12 * time.Hour)
 	next := later.Add(time.Hour)
 	if err := s.SetSnooze(srv.ID, &next, later); err != nil {
@@ -388,14 +392,62 @@ func TestEndedSnoozesAndClear(t *testing.T) {
 	if err != nil || len(spans) != 1 || spans[0].ServerID != a.ID || !spans[0].Until.Equal(ua) {
 		t.Fatalf("at the end of a: %+v, %v", spans, err)
 	}
-	if err := s.ClearSnoozeFrom(a.ID); err != nil {
+	if err := s.ClearSnoozeFrom(spans[0]); err != nil {
 		t.Fatal(err)
 	}
 	if spans, err := s.EndedSnoozes(snoozeT0.Add(2 * time.Hour)); err != nil || len(spans) != 0 {
 		t.Fatalf("after clearing: %+v, %v", spans, err)
 	}
-	if err := s.ClearSnoozeFrom(999); !errors.Is(err, ErrNotFound) {
+	if err := s.ClearSnoozeFrom(SnoozeSpan{ServerID: 999, From: snoozeT0, Until: ua}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ClearSnoozeFrom missing: %v", err)
+	}
+}
+
+// TestResnoozeBeforeDigestKeepsFrom (FR-8 a): a snooze started after the
+// previous one ended but before its digest went out keeps the owed start:
+// the digest, sent when the new one ends, still covers the first.
+func TestResnoozeBeforeDigestKeepsFrom(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db")
+	first := snoozeT0.Add(time.Hour)
+	if err := s.SetSnooze(srv.ID, &first, snoozeT0); err != nil {
+		t.Fatal(err)
+	}
+	later := snoozeT0.Add(2 * time.Hour)
+	next := later.Add(time.Hour)
+	if err := s.SetSnooze(srv.ID, &next, later); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetServer(srv.ID)
+	if got.SnoozeFrom == nil || !got.SnoozeFrom.Equal(snoozeT0) || !got.SnoozeUntil.Equal(next) {
+		t.Fatalf("after a snooze before the digest: from %v until %v; want from %v until %v", got.SnoozeFrom, got.SnoozeUntil, snoozeT0, next)
+	}
+}
+
+// TestClearSnoozeFromOnlyForTheSpanSent (FR-8 b): the digest's clear
+// applies only to the span it covered: a snooze changed between the send
+// and the clear keeps its start.
+func TestClearSnoozeFromOnlyForTheSpanSent(t *testing.T) {
+	s := openTemp(t)
+	srv := mustServer(t, s, "db")
+	until := snoozeT0.Add(time.Hour)
+	if err := s.SetSnooze(srv.ID, &until, snoozeT0); err != nil {
+		t.Fatal(err)
+	}
+	spans, err := s.EndedSnoozes(until)
+	if err != nil || len(spans) != 1 {
+		t.Fatalf("EndedSnoozes = %+v, %v", spans, err)
+	}
+	// Between the send and the clear, a new snooze starts.
+	next := until.Add(2 * time.Hour)
+	if err := s.SetSnooze(srv.ID, &next, until.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearSnoozeFrom(spans[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetServer(srv.ID); got.SnoozeFrom == nil {
+		t.Fatal("the clear of the sent span removed the start of the snooze begun since")
 	}
 }
 

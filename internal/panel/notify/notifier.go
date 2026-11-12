@@ -517,7 +517,7 @@ func (n *Notifier) sendDigests(ctx context.Context, cfg Config) {
 			continue
 		}
 		n.log.Info("notify: snooze digest sent", "server_id", sp.ServerID, "alerts", len(alerts))
-		if err := n.st.ClearSnoozeFrom(sp.ServerID); err != nil {
+		if err := n.st.ClearSnoozeFrom(sp); err != nil {
 			n.log.Warn("notify: clear snooze start", "server_id", sp.ServerID, "err", err)
 		}
 	}
