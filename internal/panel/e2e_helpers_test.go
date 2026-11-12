@@ -673,7 +673,7 @@ func startE2EPromoteTopology(t *testing.T) *e2ePromoteTopology {
 		t.Fatalf("prepare_master ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, e.p, prepareID))
 	}
 	for _, n := range []*e2eNode{e.ra, e.rb} {
-		e.createReplica(t, e.master, n, false)
+		e.createReplica(t, e.master, n, false, false)
 	}
 	for _, n := range []*e2eNode{e.ra, e.rb} {
 		waitRow(t, n.db, "a", 1, "awal")
@@ -701,11 +701,47 @@ var replicaFormDBs = regexp.MustCompile(`name="databases" value="([^"]*)"`)
 
 // createReplica runs "Buat replika" of every database the form of master
 // offers onto target over the UI; with rebuild, it is "Bangun ulang sebagai
-// replika" of the quarantined old master target (token and typed name). A
-// job that waits for the admin account to be reconnected (CLONE replaced
-// it) gets root reconnected and approved; any other wait is approved. The
-// job must succeed.
-func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode, rebuild bool) string {
+// replika" of the quarantined old master target (token and typed name)
+// whose form must ask for the acknowledgement of the connections that
+// remain on it exactly when accept is true (spec 5.5), and which ticks it
+// then. A job that waits for the admin account to be reconnected (CLONE
+// replaced it) gets root reconnected and approved; any other wait is
+// approved. The job must succeed.
+func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode, rebuild, accept bool) string {
+	t.Helper()
+	form, vals := e.replicaForm(t, master, target, rebuild)
+	if rebuild {
+		if asks := strings.Contains(form, `name="accept_connections"`); asks != accept {
+			t.Fatalf("rebuild form of %s asks for accept_connections = %v, want %v:\n%s", target.name, asks, accept, textOf(form))
+		}
+		if accept {
+			vals.Set("accept_connections", "1")
+		}
+	}
+	id := e.ui.postJob(fmt.Sprintf("/masters/%d/replicas", master.srv()), vals)
+	job := waitJob(t, e.p, id, e2eCreateTimeout, func(j store.Job) bool {
+		if strings.Contains(j.ParamsJSON, `"wait_reason":"reconnect"`) {
+			e.connectRoot(t, target)
+		}
+		e.ui.approveJob(j)
+		return true
+	})
+	if job.Status != store.JobSucceeded {
+		t.Fatalf("create_replica of %s (rebuild %v) ended %s: %s\n%s", target.name, rebuild, job.Status, job.Error,
+			jobLogText(t, e.p, id))
+	}
+	if rep, err := e.p.Store.GetReplicaByServer(target.srv()); err != nil || rep.State != store.ReplicaReady {
+		t.Fatalf("replica %s after create = %+v, %v; want ready", target.name, rep, err)
+	}
+	t.Logf("create_replica of %s (rebuild %v) succeeded", target.name, rebuild)
+	return id
+}
+
+// replicaForm opens the "Buat replika" form of master (with rebuild, the
+// "Bangun ulang sebagai replika" form of target) and returns it with the
+// values a user posts from it: target, every database it offers, the wipe
+// confirmation and, with rebuild, the typed name and a fresh token.
+func (e *e2ePromoteTopology) replicaForm(t *testing.T, master, target *e2eNode, rebuild bool) (string, url.Values) {
 	t.Helper()
 	formPath := fmt.Sprintf("/masters/%d/replicas/new", master.srv())
 	if rebuild {
@@ -725,23 +761,29 @@ func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode
 		vals.Set("confirm_name", target.name)
 		vals.Set("confirm_token", e.ui.confirmToken(web.ActRebuildOldMaster, "server", target.srv()))
 	}
-	id := e.ui.postJob(fmt.Sprintf("/masters/%d/replicas", master.srv()), vals)
-	job := waitJob(t, e.p, id, e2eCreateTimeout, func(j store.Job) bool {
-		if strings.Contains(j.ParamsJSON, `"wait_reason":"reconnect"`) {
-			e.connectRoot(t, target)
-		}
-		e.ui.approveJob(j)
-		return true
-	})
-	if job.Status != store.JobSucceeded {
-		t.Fatalf("create_replica of %s (rebuild %v) ended %s: %s\n%s", target.name, rebuild, job.Status, job.Error,
-			jobLogText(t, e.p, id))
+	return form, vals
+}
+
+// startLockOnDisk reports whether n's managed config (the dbpanel block
+// in the instance's my.cnf) holds the agent's init_file line and whether
+// the start lock file exists, failing on a line without its file.
+func startLockOnDisk(t *testing.T, n *e2eNode) (line, file bool) {
+	t.Helper()
+	lock, err := mysql.StartLockPath(n.inst.Layout())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if rep, err := e.p.Store.GetReplicaByServer(target.srv()); err != nil || rep.State != store.ReplicaReady {
-		t.Fatalf("replica %s after create = %+v, %v; want ready", target.name, rep, err)
+	b, err := os.ReadFile(n.inst.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("create_replica of %s (rebuild %v) succeeded", target.name, rebuild)
-	return id
+	line = strings.Contains(string(b), "\ninit_file="+lock+"\n")
+	_, err = os.Stat(lock)
+	file = err == nil
+	if line && !file {
+		t.Fatalf("%s: init_file line names %s, which does not exist", n.name, lock)
+	}
+	return line, file
 }
 
 const globalVarQuery = "SELECT VARIABLE_VALUE FROM performance_schema.global_variables WHERE VARIABLE_NAME = ?"
@@ -827,7 +869,9 @@ func (e *e2ePromoteTopology) confirmCutover(t *testing.T, newMaster *e2eNode) {
 // master's inventory, so the form offers its databases. old then follows
 // the new master as a replica. The load runs with read-only lifted (the
 // quarantine guard defers to it) and old is read-only again afterwards.
-func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eNode, row int) {
+// accept: connections remain on old, the form asks for their
+// acknowledgement and the user ticks it.
+func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eNode, row int, accept bool) {
 	t.Helper()
 	// The old master refuses to become a replica while replicas read its
 	// binlog. After a planned promote the old replicas' dump threads on it
@@ -843,7 +887,7 @@ func (e *e2ePromoteTopology) rebuildOldMaster(t *testing.T, newMaster, old *e2eN
 	if d := time.Since(start); d > time.Second {
 		t.Logf("waited %s for the old replicas' dump threads on %s to end", d.Round(time.Second), old.name)
 	}
-	e.createReplica(t, newMaster, old, true)
+	e.createReplica(t, newMaster, old, true, accept)
 	if srv, err := e.p.Store.GetServer(old.srv()); err != nil || srv.Role != store.RoleReplica {
 		t.Fatalf("old master after the rebuild = %+v, %v; want a replica", srv, err)
 	}

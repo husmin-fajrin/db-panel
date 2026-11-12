@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -896,15 +897,27 @@ func wantVerifiedReplication(t *testing.T, db *sql.DB) {
 	}
 }
 
+// noConns is the old master's connection list when it is complete and
+// empty (spec 5.5), the only case the cutover screen shows it green.
+const noConns = "Tidak ada koneksi aplikasi tersisa"
+
+// acceptRe is the label of the rebuild form's acknowledgement of the
+// connections that remain on the old master (spec 5.5).
+var acceptRe = regexp.MustCompile(`Saya paham \d+ koneksi masih ada dan tulisannya hilang`)
+
 // TestE2EPromotePlanned drives a planned promotion (spec 5.1–5.6) with
 // three real mysqld instances, a real panel and three agents, over the
 // UI: master-e2e with replika-a and replika-b; replika-a is promoted with
 // a confirmation token while an application holds a connection to the
 // master; the new master is writable, replika-b follows it, the old
-// master is quarantined and read-only; the cutover screen shows the
-// application's connection to the old master; "Sudah saya alihkan";
-// "Periksa data tertinggal" finds nothing; the old master is rebuilt as a
-// replica of the new one; Telegram carries the new address.
+// master is quarantined and read-only, its start lock written and shown
+// as "Kunci start: Terkunci"; the cutover screen shows the application's
+// connection to the old master and is green only once the list is
+// complete and empty; "Sudah saya alihkan"; "Periksa data tertinggal"
+// finds nothing; with the application connected again, the rebuild is
+// refused without the acknowledgement of the connection and starts nothing;
+// with it, the old master is rebuilt as a replica of the new one and its
+// guard releases the start lock; Telegram carries the new address.
 func TestE2EPromotePlanned(t *testing.T) {
 	skipWithoutE2E(t)
 	e := startE2EPromoteTopology(t)
@@ -954,14 +967,29 @@ func TestE2EPromotePlanned(t *testing.T) {
 	if prom, err := p.Store.PromotionByOldMaster(m.srv()); err != nil || prom.Mode != proto.PromotePlanned || prom.LockAt == nil {
 		t.Fatalf("promotion record = %+v, %v; want planned with its lock time", prom, err)
 	}
+	// The quarantined old master's guard writes the start lock; its page
+	// says so once the agent reports it.
+	const locked = "Kunci start: Terkunci"
+	var oldPage string
+	waitForWithin(t, e2eWait, "the old master's page to show "+locked, func() bool {
+		oldPage = ui.get(serverPath(m.srv()))
+		return strings.Contains(textOf(oldPage), locked)
+	})
+	if line, file := startLockOnDisk(t, m); !line || !file {
+		t.Fatalf("start lock on the quarantined old master: init_file line %v, file %v; want both", line, file)
+	}
 
 	// The cutover screen: the new address, the old one, and the
-	// application still connected to the old master.
+	// application still connected to the old master; not green while it
+	// is there.
 	cut := ui.get(fmt.Sprintf("/masters/%d/cutover", ra.srv()))
 	for _, want := range []string{ra.addr(), m.addr(), "Koneksi yang masih ke master lama", "app_e2e", "Sudah saya alihkan"} {
 		if !strings.Contains(cut, want) {
 			t.Fatalf("cutover screen lacks %q:\n%s", want, cut)
 		}
+	}
+	if strings.Contains(cut, noConns) {
+		t.Fatalf("cutover screen says %q while app_e2e is connected to the old master:\n%s", noConns, textOf(cut))
 	}
 	e.wantPromoteMessage(t, tgMark, ra)
 	// The application moves: its connection to the old master ends
@@ -975,8 +1003,13 @@ func TestE2EPromotePlanned(t *testing.T) {
 	})
 	// The agent's own sessions (the panel's account, root here) are not
 	// application connections (O1).
-	if !strings.Contains(oldConns, "Tidak ada koneksi aplikasi tersisa") {
+	// The list is complete and empty: green, on the fragment and the
+	// screen.
+	if !strings.Contains(oldConns, noConns) {
 		t.Fatalf("old master's connections once the application left: %s; want none", textOf(oldConns))
+	}
+	if cut := ui.get(fmt.Sprintf("/masters/%d/cutover", ra.srv())); !strings.Contains(cut, noConns) {
+		t.Fatalf("cutover screen lacks %q once the application left:\n%s", noConns, textOf(cut))
 	}
 	e.confirmCutover(t, ra)
 
@@ -986,9 +1019,47 @@ func TestE2EPromotePlanned(t *testing.T) {
 		t.Fatalf("leftover after a planned promote = %+v; page:\n%s", c, srvPage)
 	}
 
-	// Bangun ulang sebagai replika.
-	e.rebuildOldMaster(t, ra, m, 4)
+	// The application connects to the old master again before the
+	// rebuild: the rebuild form asks for the acknowledgement, and a post
+	// without it is refused and starts nothing.
+	appDB2, err := sql.Open("mysql", fmt.Sprintf("app_e2e:App-e2e-pw1@tcp(%s)/a?tls=preferred", m.addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { appDB2.Close() })
+	appConn2, err := appDB2.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("application connection to the old master: %v", err)
+	}
+	defer appConn2.Close()
+	if err := appConn2.PingContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForWithin(t, e2eWait, "the old master's connections table with the application again", func() bool {
+		return strings.Contains(ui.get(fmt.Sprintf("/servers/%d/connections-fragment", m.srv())), "app_e2e")
+	})
+	form, vals := e.replicaForm(t, ra, m, true)
+	if !acceptRe.MatchString(form) || !strings.Contains(form, `name="accept_connections"`) {
+		t.Fatalf("rebuild form with app_e2e connected lacks the acknowledgement:\n%s", textOf(form))
+	}
+	status, body := ui.post(fmt.Sprintf("/masters/%d/replicas", ra.srv()), vals)
+	if status != http.StatusBadRequest || !strings.Contains(textOf(body), "Centang pernyataan bahwa Anda paham koneksi ke master lama") {
+		t.Fatalf("rebuild without accept_connections = %d:\n%s", status, textOf(body))
+	}
+	if j, busy, err := p.Store.ActiveJobForServer(m.srv()); err != nil || busy {
+		t.Fatalf("a refused rebuild started job %+v (%v)", j, err)
+	}
+	if srv, err := p.Store.GetServer(m.srv()); err != nil || srv.Role != store.RoleQuarantined {
+		t.Fatalf("old master after the refused rebuild = %+v, %v; want quarantined", srv, err)
+	}
+
+	// Bangun ulang sebagai replika, the acknowledgement ticked.
+	e.rebuildOldMaster(t, ra, m, 4, true)
 	waitRow(t, rb.db, "a", 4, "setelah-bangun-ulang")
+	waitForWithin(t, e2eWait, "the start lock released on the rebuilt old master", func() bool {
+		line, file := startLockOnDisk(t, m)
+		return !line && !file
+	})
 	t.Logf("planned promote flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }
 
@@ -999,13 +1070,16 @@ func TestE2EPromotePlanned(t *testing.T) {
 // online. The consideration screen reads the master's binlog on disk
 // (exact numbers) and shows the relay backlog; the promotion (token and
 // the old master's typed name) applies the backlog on replika-a before
-// opening writes; replika-b follows the new master. The old master comes
-// back with a write that slipped in before its agent locked it (agent
-// stopped, mysqld restarted, row written, agent started); the agent
-// quarantines it on start; "Periksa data tertinggal" finds that one
-// transaction on a.t; "Amankan" writes a file that downloads over HTTPS
-// with a token and holds the INSERT; the file is deleted with a token; the
-// old master is rebuilt as a replica of the new one.
+// opening writes; replika-b follows the new master. The quarantine finds
+// the old master's MySQL down and writes the start lock, so mysqld
+// restarted without its agent comes up read-only; someone lifts it by
+// hand and writes a row, then the agent starts, puts read-only back and
+// raises master_start_late; "Periksa data tertinggal" finds that one
+// transaction on a.t and closes the alert; "Amankan" writes a file that
+// downloads over HTTPS with a token and holds the INSERT; the old master
+// is rebuilt as a replica of the new one and its guard releases the start
+// lock (no init_file left in the managed config, no lock file); the
+// salvage file survives and is deleted with a token.
 func TestE2EPromoteEmergency(t *testing.T) {
 	skipWithoutE2E(t)
 	e := startE2EPromoteTopology(t)
@@ -1117,22 +1191,41 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	}
 	e.wantPromoteMessage(t, tgMark, ra)
 
+	// The quarantine found MySQL down and wrote the start lock: the file,
+	// then the init_file line in the managed config.
+	if line, file := startLockOnDisk(t, m); !line || !file {
+		t.Fatalf("start lock on the old master after the quarantine: init_file line %v, file %v; want both", line, file)
+	}
+
 	// The old master returns with a write that slipped in before its agent
-	// locked it: agent stopped, mysqld restarted (read-only: the quarantine
-	// found it down and wrote the start lock), opened by hand, a row
-	// written, then the agent starts and locks.
+	// locked it: agent stopped, mysqld restarted without it (read-only:
+	// mysqld ran the start lock file itself), opened by hand as someone
+	// would, a row written, then the agent starts, puts read-only back and
+	// reports the start as late.
 	m.agent.stop(t)
 	restartMySQL(t, m.inst)
-	if v := globalVar(t, m.db, "super_read_only"); v != "ON" {
-		t.Fatalf("super_read_only on the old master restarted without its agent = %s, want ON (start lock)", v)
+	for _, v := range []string{"super_read_only", "read_only"} {
+		if got := globalVar(t, m.db, v); got != "ON" {
+			t.Fatalf("%s on the old master restarted without its agent = %s, want ON (start lock)", v, got)
+		}
 	}
 	execSQL(t, m.db, "SET GLOBAL super_read_only = OFF")
 	const secret = "isi-baris-tertinggal"
 	execSQL(t, m.db, "INSERT INTO a.t VALUES (100, '"+secret+"')")
+	lateFrom := time.Now()
 	m.agent.start(t)
 	e.wantQuarantined(t, m)
 	if n := 0; ra.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id = 100").Scan(&n) != nil || n != 0 {
 		t.Fatal("the old master's late row reached the new master")
+	}
+	var late store.Alert
+	waitForWithin(t, e2eWait, "the master_start_late alert on the old master", func() bool {
+		var ok bool
+		late, ok = openAlert(t, p, healthmon.KindMasterStartLate, m.srv())
+		return ok
+	})
+	if late.OpenedAt.Before(lateFrom.Add(-time.Second)) {
+		t.Fatalf("master_start_late opened at %s, before the agent started (%s)", late.OpenedAt, lateFrom)
 	}
 
 	cut := ui.get(fmt.Sprintf("/masters/%d/cutover", ra.srv()))
@@ -1153,6 +1246,17 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	}
 	if strings.Contains(srvPage, secret) {
 		t.Fatal("the old master's page shows the leftover row's content")
+	}
+	// The check's result, taken after the alert opened, closes it.
+	waitForWithin(t, e2eWait, "master_start_late closed by Periksa data tertinggal", func() bool {
+		_, open := openAlert(t, p, healthmon.KindMasterStartLate, m.srv())
+		return !open
+	})
+	if alerts, err := p.Store.ListAlerts(late.OpenedAt, 100); err != nil ||
+		!slices.ContainsFunc(alerts, func(a store.Alert) bool {
+			return a.ID == late.ID && a.CloseReason == "Periksa data tertinggal sudah dijalankan"
+		}) {
+		t.Fatalf("master_start_late %d after the check: %+v, %v; want closed by Periksa data tertinggal", late.ID, alerts, err)
 	}
 
 	// Amankan data tertinggal: a salvage file, listed on the page.
@@ -1175,11 +1279,20 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	}
 
 	// Bangun ulang sebagai replika: the late row is gone, A's rows are there.
-	e.rebuildOldMaster(t, ra, m, 5)
+	e.rebuildOldMaster(t, ra, m, 5, false)
 	waitRow(t, rb.db, "a", 5, "setelah-bangun-ulang")
 	waitRow(t, m.db, "a", 3, "relay-2")
 	if n := 0; m.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id = 100").Scan(&n) != nil || n != 0 {
 		t.Fatal("the late row survived the rebuild of the old master")
+	}
+	// A replica now: its guard released the start lock, the init_file
+	// line first, then the file.
+	waitForWithin(t, e2eWait, "the start lock released on the rebuilt old master", func() bool {
+		line, file := startLockOnDisk(t, m)
+		return !line && !file
+	})
+	if b, err := os.ReadFile(m.inst.ConfigFile); err != nil || strings.Contains(string(b), "init_file") {
+		t.Fatalf("managed config of the rebuilt old master still names an init_file (%v):\n%s", err, b)
 	}
 
 	// The salvage file survives the rebuild: still listed on the rebuilt
