@@ -629,7 +629,11 @@ kandidat dengan akun replikasi yang dikirim panel (bila tidak, master tidak
 dikunci dan promote gagal di awal), lalu membaca semua replika yang pernah
 tersambung ke master ini (host dari berkas replika di bawah, pada port
 kandidat dan setiap port yang tercatat; paralel, 5 detik per bacaan) dan
-menyimpan yang terbaca bersama kunci. Replika yang sudah tidak terbaca saat
+menyimpan yang terbaca bersama kunci. Pembacaan itu dibatasi: paling banyak
+64 pasangan host × port, selesai dalam 60 detik (jauh di bawah batas tunggu
+panel); lebih dari itu, atau catatan port yang ditandai penuh (lihat di
+bawah), kunci ditolak dengan pesan yang menyebut berkas catatan dan perintah
+untuk merapikannya. Replika yang sudah tidak terbaca saat
 itu (replika sebagian tanpa akun replikasi, replika yang lama mati)
 dilewati dan tidak menahan kunci. Selama berkas kunci ada di master, agent
 memasang lagi `super_read_only` tiap 5 detik bila mati (misalnya sesudah
@@ -646,7 +650,7 @@ replika itu. Bila salah satunya **tidak bisa dibaca**, kunci
 **dipertahankan**: master tetap baca-saja, agent membaca lagi tiap menit,
 dan panel membuka peringatan Kritis **Kunci promote master dipertahankan**
 yang menyebut replika itu. Kunci terbuka sendiri begitu semua replika itu
-terbaca dan masih baca-saja. Bila replika itu memang sudah tidak dipakai,
+terbaca dan baca-saja (atau bisa ditulis tetapi tanpa transaksi server ini). Bila replika itu memang sudah tidak dipakai,
 jalankan `forget-replica` (di bawah) di server master; untuk membuka kunci
 saat itu juga, `unlock-master` (pastikan dulu replika itu tidak sedang
 menjadi master di sisi jaringan lain). Jadi master bisa tertahan baca-saja
@@ -654,9 +658,15 @@ selama replika yang terbaca saat kunci dipasang tidak terbaca: aplikasi
 tidak bisa menulis sampai itu selesai (pilihan ini menukar ketersediaan
 dengan menutup jalan dua master). Selain itu (kandidat tidak terjangkau, atau
 agent dimulai ulang sehingga akunnya hilang) kunci tetap dan dicoba lagi
-tiap menit, dilaporkan ke panel paling sering sejam sekali, sampai
-`unlock-master`. `mysql.unlockPromote` membatalkan kunci sebelum tenggat
-hanya bila kandidat terbaca masih read-only. Kunci `lock-master` tidak
+tiap menit, sampai `unlock-master`. Kunci yang dipertahankan dilaporkan ke
+panel saat pertama kali, langsung lagi setiap kali daftar replika yang tidak
+terbaca berubah, dan selain itu paling sering sejam sekali; laporan yang
+tidak sampai ke panel dicoba lagi tiap menit. `mysql.unlockPromote`
+membatalkan kunci sebelum tenggat hanya bila kandidat terbaca masih
+read-only dan setiap replika yang tersimpan bersama kunci terbaca: replika
+yang tidak terbaca menahan kunci, dan replika yang sudah menjadi master
+yang bisa ditulis dengan transaksi server ini membuat master mengkarantina
+dirinya, seperti penjaga. Kunci `lock-master` tidak
 pernah disentuh keduanya. Bila pemeriksaan agent jatuh tepat di antara
 langkah `unlock-master` (MySQL dibuka, lalu berkas kunci dihapus), MySQL
 bisa terkunci lagi; jalankan `unlock-master` sekali lagi.
@@ -668,7 +678,13 @@ host, `<host> <waktu RFC3339>`, dengan waktu terbaru; host yang tidak
 terlihat lebih dari setahun dibuang. Host diambil dari kolom `HOST` daftar
 proses MySQL tanpa port, jadi berupa nama bila `skip_name_resolve` mati.
 Port replika (dari `SHOW REPLICAS`) dicatat dengan cara yang sama di
-`/var/lib/dbpanel/replica-ports-seen`. `mysql.lockForPromote` mencatat
+`/var/lib/dbpanel/replica-ports-seen`, paling banyak 8 port (port dipilih
+replika sendiri lewat `report_port`): port berikutnya tidak dicatat, berkas
+ditandai penuh (baris `penuh <waktu>`), agent menulis peringatan di log, dan
+promote terencana ditolak sampai root merapikannya dengan `forget-replica-port`
+(di bawah). Berkas catatan host tidak pernah ditulis lebih besar dari yang
+dibaca agent (1 MiB): host tertua dibuang lebih dulu dan dicatat di log.
+`mysql.lockForPromote` mencatat
 kandidat begitu melihat thread `Binlog Dump`-nya, dan panel meminta master
 mencatat replikanya (`mysql.recordReplicas`, tanpa data: agent hanya
 melihat koneksinya sendiri dan tidak pernah menerima host replika dari
@@ -683,13 +699,31 @@ Replika yang sudah tidak dipakai dihapus dari catatan itu, dan dari daftar
 replika kunci promosi yang sedang berdiri, di server master:
 
 ```sh
-sudo dbpanel agent forget-replica 10.0.0.7   # semua port host itu; nama dibandingkan tanpa beda huruf besar-kecil
+sudo dbpanel agent forget-replica 10.0.0.7        # semua port host itu; nama dibandingkan tanpa beda huruf besar-kecil
+sudo dbpanel agent forget-replica 10.0.0.7:3306   # sama; port dari peringatan diabaikan
+sudo dbpanel agent forget-replica-port 3307       # hapus satu port dari catatan port
+sudo dbpanel agent forget-replica-port semua      # kosongkan catatan port dan tanda penuhnya
 ```
 
-Panel tidak punya padanannya. Perintah ini tidak membuka kunci sendiri:
-penjaga kunci membaca lagi pada pemeriksaan berikutnya (tiap menit) dan
-membuka master bila kandidat dan replika lain yang tersimpan bersama kunci
-terbaca baca-saja.
+Panel tidak punya padanannya. `forget-replica` tidak membuka kunci sendiri:
+penjaga kunci membaca kandidat lagi pada pemeriksaan berikutnya (paling lama
+semenit), lalu sekali lagi 60 detik kemudian, dan membuka master setelah
+pembacaan kedua bila kandidat masih baca-saja dan replika lain yang tersimpan
+bersama kunci terbaca baca-saja (atau bisa ditulis tanpa transaksi server
+ini). Perintah ini menyebut yang dilewatinya: penjaga tidak lagi menunggu
+host itu, jadi bila replika itu ternyata sudah menjadi master, master ini
+bisa terbuka dan ada dua master. `forget-replica-port semua` hanya mengosongkan
+catatan port; port replika yang sedang tersambung dicatat lagi dalam
+beberapa detik.
+
+**Saat replika dipensiunkan, jalankan `forget-replica` untuk host itu di
+server master.** Catatan replika disimpan setahun, dan pada setiap promote
+terencana agent master membaca setiap host yang tercatat di setiap port yang
+tercatat dengan akun replikasi. Pada topologi tanpa verifikasi sertifikat
+("Perketat" belum dijalankan) sandi akun itu dikirim ke siapa pun yang
+menjawab di alamat dan port itu, termasuk perangkat yang kemudian memakai
+alamat replika lama. "Perketat" menutup ini: tanpa sertifikat yang cocok
+sandi tidak dikirim.
 
 Agent membacanya ulang pada perintah berikutnya, tanpa restart. Bila alamat
 master untuk replika diubah di halaman master, halaman itu menampilkan
@@ -1251,20 +1285,34 @@ dengan konfigurasi seperti itu). `init_file` milik operator yang dibaca sebelum 
 tidak dijalankan selama karantina; halaman master lama menyebutnya. Selama
 peran `quarantined`, loop penjaga agent (tiap 5 detik) menulis lagi berkas
 atau baris yang hilang atau berubah (bila gagal, dicoba lagi paling sering
-semenit sekali) dan memeriksa dengan `mysqld --print-defaults` bahwa
-`init_file` terakhir yang dibaca mysqld memang berkas agent dan berkas itu
-bisa dibaca pengguna MySQL. Halaman server master lama menampilkan baris
+semenit sekali), dan semenit sekali (serta segera setelah menulisnya)
+memeriksa dengan `mysqld --print-defaults` bahwa `init_file` terakhir yang
+dibaca mysqld memang berkas agent dan berkas itu bisa dibaca pengguna MySQL.
+Perubahan keadaan kunci start dilaporkan ke panel saat itu juga, dan laporan
+pertama setelah agent menyala sudah memeriksa kunci itu. Direktori yang
+namanya memuat `#`, tanda kutip, garis miring terbalik atau karakter kendali
+tidak dipakai untuk kunci start (baris opsi MySQL akan terpotong di sana);
+baris **Kunci start** lalu menulis alasannya. Halaman server master lama menampilkan baris
 **Kunci start**: "Terkunci", atau "belum terjamin" beserta alasannya; yang
 kedua membuka peringatan Kritis "master lama belum terjamin terkunci saat
 MySQL menyala; jangan nyalakan MySQL-nya sebelum agent tersambung".
 
 Saat MySQL master lama menyala, putaran penjaga pertama memasang
 `read_only` dan `super_read_only` dengan `SET PERSIST` lalu melaporkan
-caranya menyala. Bila salah satu bendera sempat mati (seseorang membukanya,
+caranya menyala. Laporan itu disimpan agent dan dikirim lagi tiap putaran
+penjaga sampai panel menerimanya, jadi tidak hilang bila panel belum
+tersambung saat itu (agent yang dimulai ulang sebelum laporan sampai
+kehilangannya). Bila salah satu bendera sempat mati (seseorang membukanya,
 atau kunci tidak berlaku), panel membuka peringatan Kritis "master lama
 sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal";
 peringatan itu tertutup setelah **Periksa data tertinggal** dijalankan
-sesudahnya, atau server itu tidak lagi master lama. Bila `@@init_file`
+sesudahnya, atau server itu tidak lagi master lama. **Bangun ulang sebagai
+replika** yang belum selesai menyalin (atau dibatalkan) tidak menutupnya, dan
+selama peringatan itu terbuka formulir **Bangun ulang** dan dialog **Hapus**
+tidak memercayai hasil **Periksa data tertinggal** yang lebih lama: keduanya
+memperingatkan bahwa tulisan sejak itu belum diperiksa. Laporan menyala yang
+tidak bisa dibaca panel diperlakukan sebagai yang terburuk (sempat bisa
+ditulis, atau gagal menyala). Bila `@@init_file`
 bukan berkas agent padahal berkas itu sudah ada sebelum mysqld menyala
 (misalnya `--init-file` di baris perintah layanan, yang mengalahkan baris
 agent dan tidak terlihat oleh agent selama MySQL mati), peringatannya
@@ -1276,9 +1324,11 @@ Yang perlu diketahui:
   berjalan, agent menulisnya lagi dalam beberapa detik. Bila berkas
   dihapus (atau tidak bisa dibaca mysqld) saat agent mati, MySQL menolak
   menyala ("Failed to open the bootstrap file") sampai agent hidup dan
-  menulisnya lagi; selama MySQL mati, penjaga membaca log error MySQL dan
-  panel membuka peringatan Kritis "MySQL master lama gagal menyala karena
-  berkas kunci tidak terbaca" dengan langkah perbaikannya. Arah gagal ini
+  menulisnya lagi; selama MySQL mati, penjaga membaca log error MySQL (juga
+  baris yang lebih tua dari berkas yang baru ditulisnya lagi; log dibaca
+  hanya bila berkas biasa, bukan symlink atau FIFO) dan panel membuka
+  peringatan Kritis "MySQL master lama gagal menyala karena berkas kunci
+  tidak terbaca" dengan langkah perbaikannya. Arah gagal ini
   aman bagi data. Bila barisnya dihapus saat agent berjalan, agent
   menulisnya lagi; bila dihapus saat agent mati, MySQL menyala tanpa kunci
   start: ia tetap baca-saja hanya bila `read_only` dan `super_read_only`
@@ -1721,11 +1771,16 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   memakai akun admin agent dari server itu sendiri. Lihat "Pengalihan
   aplikasi".
 - **Pembuangan data dengan konfirmasi segar.** **Ulangi** dan **Setujui**
-  pada pekerjaan yang membuang data (Resync ulang; Buat replika dengan
-  database yang dibuang, dengan CLONE yang belum menyalin, atau Bangun
-  ulang master lama; Lepas database dengan hapus data; Tambah database
-  yang sudah ada di replika) meminta kata sandi panel lagi untuk pekerjaan
-  itu saja. Pekerjaan seperti itu yang konfirmasi terakhirnya lebih dari 24
+  pada pekerjaan yang membuang data (Resync ulang; Buat replika yang
+  salinannya belum dibuat, dengan CLONE maupun dump, atau dengan database
+  yang dibuang; Bangun ulang master lama; Lepas database dengan hapus data;
+  Tambah database yang sudah ada di replika) meminta kata sandi panel lagi
+  untuk pekerjaan itu saja. **Setujui** dan **Ulangi** Bangun ulang master
+  lama membaca lagi koneksinya dan meminta centang `accept_connections`
+  bila masih ada koneksi (atau daftarnya tidak bisa dipastikan). Dialog
+  **Setujui** untuk database sisa percobaan sebelumnya menyebut setiap
+  database yang dihapus. Pekerjaan yang dibuat sebelum promote tidak bisa
+  diulang setelah master topologinya berganti. Pekerjaan seperti itu yang konfirmasi terakhirnya lebih dari 24
   jam lalu tidak bisa diulang ("mulai tindakan baru dari halaman
   servernya"), dan **Ulangi** selalu menjalankan pemeriksaan awal lagi
   sebelum membuang apa pun. Dialog **Resync ulang** (dan **Ulangi**-nya)
@@ -1750,7 +1805,10 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   Dengan verifikasi, sertifikat master yang menjaga identitasnya.
 - **Laporan agent dibatasi.** Agent yang mengirim laporan terlalu sering
   hanya kehilangan laporannya (sambungan tidak diputus), dan jumlahnya
-  tampil di **Detail teknis**; satu pesan paling besar 1 MiB. Lihat "Batas
+  tampil di **Detail teknis**; satu pesan paling besar 1 MiB. Kejadian
+  kunci start dan kunci promote juga dibatasi (10 beruntun, lalu satu tiap
+  5 detik per server); kejadian pertama tiap jenis dalam 10 menit tetap
+  diterima, jadi banjir satu jenis tidak menyembunyikan jenis lain. Lihat "Batas
   dari agent" di "Pemantauan".
 - **Sensor kutipan data.** Nilai berkutip di pesan error MySQL (isi baris,
   mis. nama atau NIK pasien) disensor panel sebelum disimpan di
