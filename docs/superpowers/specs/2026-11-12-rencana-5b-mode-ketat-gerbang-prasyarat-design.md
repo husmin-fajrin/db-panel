@@ -494,7 +494,21 @@ Panduan yang ditulis:
 9. Replika yang tersambung di luar alur panel sesaat sebelum master mati
    (catatan spek 5a 5.3).
 
-### 5.11 Perubahan protokol dan kompatibilitas
+### 5.11 Nama dan istilah
+
+- Tombol dan tindakan "Perketat sambungan replikasi" diganti namanya
+  menjadi **"Wajibkan pemeriksaan sertifikat TLS"** di semua teks untuk
+  operator: tombol, modal, pesan job, peringatan, README, Panduan, dan
+  dua dokumen keamanan yang hidup (inventaris risiko dan audit Rencana
+  5a). Nama di kode (`tighten_tls`) dan di ledger tidak berubah. Dokumen
+  ini tetap menulis "Perketat" sebagai nama yang berlaku sekarang.
+- Teks baru di Rencana 5b memakai istilah IT yang lazim dalam bahasa
+  Inggris bila ada (misalnya backup, read-only, restart, replica, master,
+  port, TLS), di dalam kalimat bahasa Indonesia. Teks lama tidak diubah
+  di rencana ini selain penggantian nama di atas (lihat keputusan 7.7).
+- Dikerjakan di 5b-2.
+
+### 5.12 Perubahan protokol dan kompatibilitas
 
 - `HealthSnapshot`: jam agent saat laporan diambil; status
   `performance_schema`; keadaan cadangan; hasil start terburuk. Semua
@@ -508,7 +522,7 @@ Panduan yang ditulis:
 - Migrasi panel: kolom folder dan batas umur cadangan per server, akun
   MySQL di inventaris, penanda `panel.key`, dan penanda penerusan log.
 
-### 5.12 Verifikasi
+### 5.13 Verifikasi
 
 - Uji agent dengan mysqld sungguhan untuk 5.4, dan untuk 5.2: perintah
   terlindung ditolak tanpa persetujuan, diterima dengan persetujuan,
@@ -551,6 +565,9 @@ Panduan yang ditulis:
    Maka centang adalah bawaan, dan folder cadangan adalah pilihan.
 5. Tidak ada keadaan darurat lain yang diminta punya panduan.
 6. Pendekatan diserahkan kepada penulis (A dipilih).
+7. "Perketat" diganti namanya menjadi "Wajibkan pemeriksaan sertifikat
+   TLS". Pemilik menyatakan bahwa untuk urusan server dan IT ia tidak
+   akrab dengan istilah bahasa Indonesia.
 
 Keputusan penulis yang perlu dilihat pemilik:
 
@@ -570,6 +587,9 @@ Keputusan penulis yang perlu dilihat pemilik:
 - **7.4** Selisih jam diukur langsung; status NTP tidak diperiksa.
 - **7.5** Peringatan `backup_stale` ditambahkan walau tidak dibahas.
 - **7.6** Penerusan log audit boleh ditandai manual oleh operator.
+- **7.7** Tafsiran penulis atas pernyataan pemilik soal istilah: teks
+  baru memakai istilah IT bahasa Inggris yang lazim; teks lama belum
+  diubah. Apakah teks lama ikut diubah menunggu jawaban pemilik.
 
 ## 8. Risiko yang tersisa setelah 5b
 
