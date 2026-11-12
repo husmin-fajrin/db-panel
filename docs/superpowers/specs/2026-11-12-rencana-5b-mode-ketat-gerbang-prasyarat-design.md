@@ -55,6 +55,7 @@ Bukan-tujuan (masuk rencana lain atau sengaja dibiarkan):
   tetap keamanan host panel dan "Perketat". Dicatat di bagian 8.
 - Akun replikasi per replika dan "Perketat" wajib untuk semua tindakan
   (5c), checksum data (5d), sisa butir Sedang/Rendah (5e).
+- Panel dua bahasa (Indonesia dan Inggris): pengembangan selanjutnya.
 - Memeriksa isi cadangan atau menjalankan cadangan. Panel hanya melihat
   umur dan ukuran berkas.
 - Opsi mysqld yang diberikan lewat baris perintah layanan (`ExecStart`,
@@ -502,10 +503,14 @@ Panduan yang ditulis:
   dua dokumen keamanan yang hidup (inventaris risiko dan audit Rencana
   5a). Nama di kode (`tighten_tls`) dan di ledger tidak berubah. Dokumen
   ini tetap menulis "Perketat" sebagai nama yang berlaku sekarang.
-- Teks baru di Rencana 5b memakai istilah IT yang lazim dalam bahasa
-  Inggris bila ada (misalnya backup, read-only, restart, replica, master,
-  port, TLS), di dalam kalimat bahasa Indonesia. Teks lama tidak diubah
-  di rencana ini selain penggantian nama di atas (lihat keputusan 7.7).
+- Teks baru di Rencana 5b memakai nama yang sudah dipakai panel untuk hal
+  yang sudah ada (misalnya "baca-saja", "karantina"), supaya satu hal tidak
+  punya dua nama di layar. Pada penyebutan pertama di sebuah layar atau
+  panduan, istilah bahasa Inggrisnya ditulis di dalam kurung, misalnya
+  "baca-saja (read-only)". Untuk hal baru, istilah IT bahasa Inggris yang
+  lazim dipakai langsung (misalnya backup).
+- Panel dua bahasa (Indonesia dan Inggris) adalah pengembangan
+  selanjutnya, di luar Rencana 5 (keputusan 7.7).
 - Dikerjakan di 5b-2.
 
 ### 5.12 Perubahan protokol dan kompatibilitas
@@ -587,9 +592,11 @@ Keputusan penulis yang perlu dilihat pemilik:
 - **7.4** Selisih jam diukur langsung; status NTP tidak diperiksa.
 - **7.5** Peringatan `backup_stale` ditambahkan walau tidak dibahas.
 - **7.6** Penerusan log audit boleh ditandai manual oleh operator.
-- **7.7** Tafsiran penulis atas pernyataan pemilik soal istilah: teks
-  baru memakai istilah IT bahasa Inggris yang lazim; teks lama belum
-  diubah. Apakah teks lama ikut diubah menunggu jawaban pemilik.
+- **7.7** Pemilik meminta panel bisa berbahasa Inggris dan Indonesia, dan
+  menempatkannya sebagai pengembangan selanjutnya. Maka teks lama tidak
+  diubah di Rencana 5b. Tafsiran penulis untuk teks baru ada di 5.11:
+  nama yang sudah dipakai panel tetap, dengan istilah Inggris di dalam
+  kurung pada penyebutan pertama.
 
 ## 8. Risiko yang tersisa setelah 5b
 
