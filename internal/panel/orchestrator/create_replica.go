@@ -1093,9 +1093,15 @@ func (jr *jobRun) enforceWipeOnly(ctx context.Context) error {
 		names = append(names, d.Name)
 	}
 	slices.Sort(names)
+	advice := "mulai Resync ulang lagi dari halaman replika"
+	if jr.job.Kind != KindResyncReplica {
+		// Ledger Task 11: a create or an old master's rebuild is
+		// acknowledged again in the dialog of its own "Ulangi".
+		advice = "ulangi pekerjaan ini dari halamannya dan akui database itu di dialog Ulangi"
+	}
 	for _, d := range jr.st.WipeList {
 		if !slices.Contains(names, d) && !slices.Contains(jr.st.WipeOnly, d) {
-			return fmt.Errorf("database %s hanya ada di replika dan belum diakui akan dibuang; mulai Resync ulang lagi dari halaman replika", d)
+			return fmt.Errorf("database %s hanya ada di replika dan belum diakui akan dibuang; %s", d, advice)
 		}
 	}
 	jr.st.PeerDatabases = names

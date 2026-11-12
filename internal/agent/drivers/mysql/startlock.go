@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -162,6 +163,13 @@ func StartLockPath(l Layout) (string, error) {
 		return "", fmt.Errorf("direktori konfigurasi MySQL %s bukan path absolut; kunci start tidak bisa ditempatkan", dir)
 	}
 	dir = filepath.Clean(dir)
+	// The path goes into an option file unquoted (init_file=<path>):
+	// characters that syntax gives a meaning to would cut it there and
+	// in the agent's own parser (SA-12).
+	if strings.ContainsAny(dir, "#'\"\\") || strings.ContainsFunc(dir, unicode.IsControl) {
+		return "", fmt.Errorf("direktori konfigurasi MySQL %q memuat tanda yang punya arti di berkas opsi MySQL (#, kutip, garis miring "+
+			"terbalik atau karakter kendali); kunci start tidak ditempatkan di sana", dir)
+	}
 	if l.DataDir != "" && insideDir(dir, l.DataDir) {
 		return "", fmt.Errorf("direktori konfigurasi MySQL %s ada di dalam datadir %s; kunci start tidak ditempatkan di sana", dir, l.DataDir)
 	}

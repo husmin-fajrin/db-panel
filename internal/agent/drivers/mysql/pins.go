@@ -21,10 +21,18 @@ import (
 
 // Pinned role and source (spec 5.5, SEC-28 items 1 and 3). Two files in
 // the agent's directory say what this server is, and only the agent's
-// own first configuration or root on the host (dbpanel agent set-role,
-// set-source) writes them: a compromised panel can therefore never turn a
-// production master into a replica, drop or replace its data, or point a
-// replica at a source of its choosing.
+// own first configuration, its own guarded commands (a quarantine, a
+// promotion, a rebuild settling, a release), or root on the host
+// (dbpanel agent set-role, set-source) write them. A compromised panel
+// therefore cannot simply pin a production master as a replica, or point
+// a replica at a source of its choosing. It is not a complete defence
+// against such a panel: the agent cannot tell a host the panel attached
+// itself from a real replica, so a panel holding the replication password
+// can get a healthy master quarantined under a server of its own and then
+// have its data dropped or replaced from that source; and mysql.releaseRole
+// on a quarantined old master, followed by mysql.configure or
+// mysql.setReadOnly, opens it for writes again (security audit 5a, SA-1
+// and SA-2; owner decisions for later plans).
 const (
 	// RoleFile holds master, replica, quarantined or unassigned; no file
 	// is unassigned.

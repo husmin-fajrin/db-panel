@@ -81,6 +81,13 @@ func TestStartLockPathRule(t *testing.T) {
 	if got, err := mysql.StartLockPath(mysql.Layout{}); err == nil {
 		t.Errorf("no config file: %q, want an error", got)
 	}
+	// SA-12: never a directory whose name the option-file syntax would
+	// cut (comment, quotes, backslash, control characters).
+	for _, d := range []string{"/etc/my#sql", "/etc/my'sql", `/etc/my"sql`, `/etc/my\sql`, "/etc/my\nsql"} {
+		if got, err := mysql.StartLockPath(mysql.Layout{IncludeDir: d}); err == nil {
+			t.Errorf("IncludeDir %q: %q, want an error", d, got)
+		}
+	}
 	if strings.HasSuffix(mysql.StartLockFile, ".cnf") {
 		t.Errorf("lock file %s would be read as an option file", mysql.StartLockFile)
 	}

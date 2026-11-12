@@ -1970,7 +1970,8 @@ func TestLockKeptWithHostsIsCritical(t *testing.T) {
 	want := "Batas waktu kunci promote di master habis, tetapi master tetap dikunci karena replika berikut tidak terbaca: " +
 		"10.0.0.5:3306, 10.0.0.6:3307. Kunci terbuka sendiri setelah semua replika itu terbaca dan masih hanya-baca. " +
 		"Bila replika itu sudah tidak dipakai, jalankan di server master: sudo dbpanel agent forget-replica <host>. " +
-		"Untuk membuka kunci sekarang: sudo dbpanel agent unlock-master"
+		"Untuk membuka kunci sekarang (pastikan dulu replika itu tidak sedang menjadi master di sisi jaringan lain: " +
+		"unlock-master membuka master tanpa memeriksanya): sudo dbpanel agent unlock-master"
 	a := r.openAlert(mID, KindMasterLockKept)
 	if a.Message != want || a.TopologyID != topo.ID {
 		t.Fatalf("kept alert = %+v\nwant message %q", a, want)

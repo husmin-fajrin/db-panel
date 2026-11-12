@@ -791,3 +791,34 @@ func TestResyncStoresOnlyListedWipeOnly(t *testing.T) {
 	}
 	e.waitJob(id, store.JobSucceeded)
 }
+
+// TestWipeOnlyRefusalAdviceFitsJobKind (ledger Task 11): a create (or an
+// old master's rebuild) whose wipe list holds a database the master no
+// longer has is told to acknowledge it in its own Ulangi dialog, not to
+// start a Resync.
+func TestWipeOnlyRefusalAdviceFitsJobKind(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master") // the master has a and b
+	r := e.replicaAgent("replica1", "dump")
+	if _, err := e.st.AddReplica(topo.ID, r.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	const id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeee01"
+	b, _ := json.Marshal(jobState{MasterServerID: m.id, ConfirmWipe: true, MasterUUID: masterUUID, Method: "dump",
+		WipeList: []string{"laporan"}, ConfirmedAt: time.Now()})
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: KindCreateReplica, ServerID: r.id, TopologyID: topo.ID,
+		ParamsJSON: string(b), CreatedAt: time.Now()}, createReplicaStepNames()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobFailed, 1, "gagal", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	j, _ := e.waitJob(id, store.JobFailed)
+	want := "database laporan hanya ada di replika dan belum diakui akan dibuang; ulangi pekerjaan ini dari halamannya dan akui database itu di dialog Ulangi"
+	if !strings.HasSuffix(j.Error, want) {
+		t.Fatalf("job error = %q, want %q", j.Error, want)
+	}
+}

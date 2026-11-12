@@ -473,7 +473,8 @@ func lockKeptMessage(hosts []string) string {
 	return lockKeptPrefix + "replika berikut tidak terbaca: " + list + ". " +
 		"Kunci terbuka sendiri setelah semua replika itu terbaca dan masih hanya-baca. " +
 		"Bila replika itu sudah tidak dipakai, jalankan di server master: sudo dbpanel agent forget-replica <host>. " +
-		"Untuk membuka kunci sekarang: sudo dbpanel agent unlock-master"
+		"Untuk membuka kunci sekarang (pastikan dulu replika itu tidak sedang menjadi master di sisi jaringan lain: " +
+		"unlock-master membuka master tanpa memeriksanya): sudo dbpanel agent unlock-master"
 }
 
 func diskMessage(pct int) string { return fmt.Sprintf("Disk data terpakai %d%%.", pct) }

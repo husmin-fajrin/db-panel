@@ -435,6 +435,16 @@ func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
+	// Say what this bypasses (SA-11): the guard's reads of the candidate
+	// and of the replicas the lock lists.
+	if lerr == nil && locked && l.Candidate != mysql.CLILockCandidate {
+		fmt.Fprintf(stderr, "Perhatian: kunci promosi untuk kandidat %s (tenggat %s) dibuka tanpa memeriksa kandidat itu", l.Candidate,
+			l.Deadline.Local().Format(time.RFC3339))
+		if len(l.Readable) > 0 {
+			fmt.Fprintf(stderr, " atau replika %s", strings.Join(l.Readable, ", "))
+		}
+		fmt.Fprintln(stderr, "; bila salah satunya sudah menjadi master, kini ada dua master yang bisa ditulis.")
+	}
 	if err := cliExec(dir, "RESET PERSIST IF EXISTS super_read_only",
 		"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF"); err != nil {
 		fmt.Fprintf(stderr, "gagal membuka kunci MySQL: %v\n", err)
@@ -477,6 +487,9 @@ func mainForgetReplica(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "replika %s dihapus dari catatan (%d entri kunci promosi ikut dihapus)\n", host, n)
+	// What it bypasses (SA-11).
+	fmt.Fprintf(stdout, "Penjaga kunci promosi tidak lagi menunggu %s terbaca: bila replika itu sudah menjadi master, "+
+		"master ini bisa terbuka dalam beberapa menit dan ada dua master yang bisa ditulis.\n", host)
 	return 0
 }
 

@@ -257,7 +257,9 @@ func (p *Pins) ReadLock() (PromoteLock, bool, error) {
 	}
 	d, err := time.Parse(time.RFC3339, v.Deadline)
 	if err != nil || v.Candidate == "" || (v.Addr != "" && net.ParseIP(v.Addr) == nil) {
-		return PromoteLock{}, false, fmt.Errorf("%s tidak valid; hapus dengan: sudo dbpanel agent unlock-master", p.path(LockFile))
+		return PromoteLock{}, false, fmt.Errorf("%s tidak valid; master tetap dikunci. Periksa berkas itu: "+
+			"sudo dbpanel agent unlock-master menghapusnya dan membuka MySQL tanpa memeriksa kandidat atau replika mana pun, "+
+			"jadi pastikan dulu tidak ada replika yang sudah menjadi master", p.path(LockFile))
 	}
 	return PromoteLock{Candidate: v.Candidate, Addr: v.Addr, Deadline: d, Readable: v.Readable}, true, nil
 }

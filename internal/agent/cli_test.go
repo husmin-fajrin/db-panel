@@ -467,6 +467,37 @@ func TestLockMasterKeepsLockWrittenMeanwhile(t *testing.T) {
 	}
 }
 
+// TestUnlockMasterSaysWhatItBypasses (SA-11): unlock-master of a promote
+// lock with a candidate says that it opens without reading the candidate
+// or the replicas the lock lists.
+func TestUnlockMasterSaysWhatItBypasses(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	dir := t.TempDir()
+	old := cliMySQLHost
+	cliMySQLHost = func(string) (mysql.Host, error) { return inst.Host(), nil }
+	t.Cleanup(func() { cliMySQLHost = old })
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetRole("master"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.WriteLock(mysql.PromoteLock{Candidate: "10.0.0.2:3306", Addr: "10.0.0.2", Deadline: time.Now().Add(time.Hour),
+		Readable: []string{"10.0.0.3:3306"}}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"unlock-master", "--dir", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("unlock-master = %d, %q", code, stderr.String())
+	}
+	for _, want := range []string{"10.0.0.2:3306", "tanpa memeriksa", "10.0.0.3:3306", "dua master"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("unlock-master said %q, want it to name %q", stderr.String(), want)
+		}
+	}
+}
+
 // TestCLILockUnlockMaster: lock-master makes MySQL super_read_only, also
 // across a restart (SET PERSIST), and writes the promote lock with no
 // candidate ("cli") for 24 hours; a second lock-master is refused;
@@ -792,7 +823,8 @@ func TestForgetReplicaCLI(t *testing.T) {
 	}
 
 	code, out, errOut := run("forget-replica", "10.0.0.3", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "replika 10.0.0.3 dihapus dari catatan (2 entri kunci promosi ikut dihapus)") {
+	if code != 0 || !strings.Contains(out, "replika 10.0.0.3 dihapus dari catatan (2 entri kunci promosi ikut dihapus)") ||
+		!strings.Contains(out, "Penjaga kunci promosi tidak lagi menunggu 10.0.0.3") {
 		t.Errorf("forget-replica = %d, %q, %q", code, out, errOut)
 	}
 	if ok, err := mysql.ReplicaSeen(seen, "10.0.0.3"); ok || err != nil {
