@@ -1257,3 +1257,37 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// TestUnlockPromoteReadsListedReplicas (final review, Recommendation 4):
+// the panel's rollback of a planned promote reads the replicas the lock
+// lists, as the guard does: one that cannot be read keeps the lock; one
+// that is a writable master holding this server's transactions (another
+// replica promoted meanwhile) quarantines this server instead of opening
+// it.
+func TestUnlockPromoteReadsListedReplicas(t *testing.T) {
+	r := newLockRig(t, guardCandidateKey)
+	const a = "10.9.9.7:3306"
+	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: guardCandidateKey, Deadline: r.deadline, Readable: []string{a}}); err != nil {
+		t.Fatal(err)
+	}
+	unlock := func() proto.Response {
+		return r.dispatch("mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: guardCandidate})
+	}
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true})
+	r.peer.setAt(a, mysql.PeerState{Err: "dial tcp 10.9.9.7:3306: i/o timeout"})
+	if resp := unlock(); resp.OK || !strings.Contains(resp.Error.Message, a) {
+		t.Fatalf("unlock with a listed replica unreadable = %+v", resp)
+	}
+	r.wantLocked("listed replica unreadable")
+
+	r.peer.setAt(a, mysql.PeerState{Reachable: true, GTIDExecuted: r.uuid + ":1-9"})
+	if resp := unlock(); resp.OK || !strings.Contains(resp.Error.Message, a) {
+		t.Fatalf("unlock with a listed replica promoted = %+v", resp)
+	}
+	if got := pinFile(t, r.dir, mysql.RoleFile); got != "quarantined" {
+		t.Fatalf("role after the unlock found another master = %q, want quarantined", got)
+	}
+	if sro, ro := readOnly(t, r.db); !sro || !ro {
+		t.Errorf("quarantined: super_read_only=%v read_only=%v", sro, ro)
+	}
+}

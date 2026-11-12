@@ -431,7 +431,10 @@ func (d *Driver) now() time.Time {
 }
 
 // unlockPromote cancels the lock while its candidate c is reachable and
-// still read-only. The caller holds promoteMu.
+// still read-only, and every replica the lock lists (Readable) is read
+// with c's account: one that cannot be read keeps the lock; one that is a
+// writable master holding this server's transactions quarantines this
+// server, as the guard does. The caller holds promoteMu.
 func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) error {
 	key := peerKey(c)
 	l, locked, err := d.pins.ReadLock()
@@ -463,6 +466,27 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 		return err
 	}
 	defer db.Close()
+	// Another replica may have been promoted meanwhile (an emergency
+	// promote with this server out of reach): every replica readable when
+	// the lock was set is read first, as the guard does (spec 5.4).
+	uuid, err := serverUUID(ctx, db)
+	if err != nil {
+		return err
+	}
+	unreadable, writable := readListed(ctx, c, l.Readable, uuid)
+	switch {
+	case writable != "":
+		d.warn("unlock refused: another replica is a writable master with this server's transactions; quarantining",
+			"candidate", key, "new_source", writable)
+		if _, err := d.selfQuarantine(ctx, writable, ""); err != nil {
+			return fmt.Errorf("replika %s sudah menjadi master yang bisa ditulis dengan transaksi server ini; karantina gagal: %w", writable, err)
+		}
+		return &commands.ParamError{Msg: fmt.Sprintf("replika %s sudah menjadi master yang bisa ditulis dengan transaksi server ini; "+
+			"server ini dikarantina, kunci tidak dibuka", writable)}
+	case len(unreadable) > 0:
+		return &commands.ParamError{Msg: fmt.Sprintf("replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang (%s); "+
+			"kunci tidak dibuka", strings.Join(unreadable, ", "))}
+	}
 	if err := unlockMaster(ctx, db); err != nil {
 		return err
 	}
