@@ -150,6 +150,9 @@ type jobPage struct {
 	// WaitAddExisting drops once approved; the approve dialog asks for
 	// each name typed (confirm_db[]), which the orchestrator compares.
 	TypeDatabases []string
+	// WipeNames: the databases a WaitWipe approval drops, whole (the step
+	// message is cut at 4 KiB; SP-5).
+	WipeNames []string
 	// ApproveConns: the approval of the old master's rebuild reads its
 	// connections again (SP-1); the acknowledgement it needs, tied to the
 	// approve form.
@@ -179,6 +182,7 @@ type jobParams struct {
 	WipeList         []string `json:"wipe_list"`
 	RebuildOldMaster bool     `json:"rebuild_old_master"`
 	AddExisting      []string `json:"add_existing"`
+	WaitList         []string `json:"wait_list"`
 }
 
 // paramsOf reads job's params; unreadable params read as none.
@@ -301,6 +305,9 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 		p.Approval = approvalFor(params.WaitReason, srv)
 		if params.WaitReason == orchestrator.WaitAddExisting {
 			p.TypeDatabases = params.AddExisting
+		}
+		if params.WaitReason == orchestrator.WaitWipe {
+			p.WipeNames = params.WaitList
 		}
 	case store.JobFailed, store.JobPartial:
 		p.CanRetry = true

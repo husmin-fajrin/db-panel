@@ -457,13 +457,14 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 			if !approved || h != jr.st.WipeHash {
 				jr.st.WipeHash = h
 				var msg []string
+				jr.st.WaitList = nil
 				switch {
 				case len(list) > 0 && jr.st.Resync:
-					jr.st.WaitReason = WaitWipe
+					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
 					msg = append(msg, "database berikut tidak ada di daftar yang disetujui saat Resync ulang dimulai dan "+
 						"akan ikut dihapus lalu disalin ulang dari master: "+strings.Join(list, ", "))
 				case len(list) > 0:
-					jr.st.WaitReason = WaitWipe
+					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
 					msg = append(msg, "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: "+
 						strings.Join(list, ", "))
 				default:

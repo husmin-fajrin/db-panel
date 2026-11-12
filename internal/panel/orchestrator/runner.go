@@ -794,10 +794,36 @@ func (r *Runner) Approve(jobID string, ack JobAck) error {
 	if err := r.refuseSuperseded(j); err != nil {
 		return err
 	}
+	if err := r.refuseCutWipeList(j); err != nil {
+		return err
+	}
 	if err := r.confirmDrop(j, ack, false, connsClear); err != nil {
 		return err
 	}
 	return r.launch(jobID, action{kind: actApprove, step: j.CurrentStep})
+}
+
+// errWipeListCut refuses the approval of a leftover list nobody could see
+// whole.
+var errWipeListCut = errors.New("daftar database yang akan dihapus terlalu panjang dan dipotong di halaman ini; " +
+	"batalkan pekerjaan ini lalu mulai lagi agar daftar lengkapnya ditampilkan")
+
+// refuseCutWipeList refuses the approval of a WaitWipe wait stored without
+// its whole list (WaitList, an older panel) whose step message was cut:
+// the list shown is not the list dropped (SP-5).
+func (r *Runner) refuseCutWipeList(j store.Job) error {
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil || st.WaitReason != WaitWipe || len(st.WaitList) > 0 {
+		return nil
+	}
+	_, steps, err := r.d.Store.GetJob(j.ID)
+	if err != nil {
+		return err
+	}
+	if j.CurrentStep < len(steps) && strings.HasSuffix(steps[j.CurrentStep].Message, "(dipotong)") {
+		return errWipeListCut
+	}
+	return nil
 }
 
 // Retry runs a failed job again from the step that failed, with the same
@@ -1199,14 +1225,18 @@ type jobState struct {
 	ConfirmedAt time.Time `json:"confirmed_at,omitempty"`
 
 	// create_replica, learned.
-	MasterUUID      string   `json:"master_uuid,omitempty"`
-	MasterMySQLID   uint32   `json:"master_mysql_server_id,omitempty"`
-	MasterVersion   string   `json:"master_version,omitempty"`
-	MasterSeries    string   `json:"master_series,omitempty"`
-	PeerDatabases   []string `json:"peer_databases,omitempty"`
-	DataBytes       uint64   `json:"data_bytes,omitempty"`
-	NeedsInstall    bool     `json:"needs_install,omitempty"`
-	WipeHash        string   `json:"wipe_hash,omitempty"` // sha256 of the leftover list last shown
+	MasterUUID    string   `json:"master_uuid,omitempty"`
+	MasterMySQLID uint32   `json:"master_mysql_server_id,omitempty"`
+	MasterVersion string   `json:"master_version,omitempty"`
+	MasterSeries  string   `json:"master_series,omitempty"`
+	PeerDatabases []string `json:"peer_databases,omitempty"`
+	DataBytes     uint64   `json:"data_bytes,omitempty"`
+	NeedsInstall  bool     `json:"needs_install,omitempty"`
+	WipeHash      string   `json:"wipe_hash,omitempty"` // sha256 of the leftover list last shown
+	// WaitList is the leftover list a WaitWipe wait shows, whole (the
+	// step message is cut at maxStepMessage): the approve dialog lists
+	// it (SP-5).
+	WaitList        []string `json:"wait_list,omitempty"`
 	WipeList        []string `json:"wipe_list,omitempty"` // leftovers the user approved; dropped before a dump
 	Method          string   `json:"method,omitempty"`    // clone | dump
 	CloneApproved   bool     `json:"clone_approved,omitempty"`

@@ -1060,3 +1060,45 @@ func TestStartRebuildRechecksConnections(t *testing.T) {
 	}
 	e.waitJob(rebuildID, store.JobSucceeded)
 }
+
+// manyNames is n database names long enough that their list passes the
+// step message's 4 KiB.
+func manyNames(n int) []string {
+	var out []string
+	for i := range n {
+		out = append(out, fmt.Sprintf("database_rumah_sakit_%04d", i))
+	}
+	return out
+}
+
+// TestWipeWaitKeepsFullList (SP-5): the leftovers a WaitWipe approval
+// drops are kept whole in the job's state (the step message is cut at 4
+// KiB), so the approve dialog can show every name; a wait from before
+// that, whose message was cut, is not approved.
+func TestWipeWaitKeepsFullList(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	names := manyNames(300)
+	e.masterHas(m.id, names...)
+	r := e.replicaAgent("replica1", "dump")
+	scriptLeftovers(r, "dump", names...)
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{MasterServerID: m.id, TargetServerID: r.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, steps := e.waitJob(id, store.JobWaiting)
+	e.waitIdle(id)
+	if msg := steps[1].Message; !strings.HasSuffix(msg, "(dipotong)") {
+		t.Fatalf("step message was not cut (%d bytes); the test needs a longer list", len(msg))
+	}
+	if st := e.storedState(id); !slices.Equal(st.WaitList, names) {
+		t.Fatalf("WaitList holds %d names, want %d", len(st.WaitList), len(names))
+	}
+	// A wait stored without the list (an older panel), its message cut.
+	e.setState(id, func(st *jobState) { st.WaitList = nil })
+	mark := r.mark()
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err == nil || !strings.Contains(err.Error(), "dipotong") {
+		t.Fatalf("Approve of a cut list without the full one = %v, want refused", err)
+	}
+	wantCmds(t, "replica", r.cmds(mark), nil)
+}

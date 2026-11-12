@@ -363,6 +363,28 @@ func TestApproveRebuildRechecksConnections(t *testing.T) {
 	}
 }
 
+// TestWipeApprovalListsEveryName (SP-5): the approve dialog of a WaitWipe
+// wait lists every database it drops from the job's state, also when the
+// step message was cut.
+func TestWipeApprovalListsEveryName(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	const id = "3333333333333333333333333333333c"
+	var names []string
+	for i := range 300 {
+		names = append(names, fmt.Sprintf("database_rumah_sakit_%04d", i))
+	}
+	b, _ := json.Marshal(map[string]any{"master_server_id": 2, "wait_reason": "wipe", "wait_list": names})
+	storeJob(t, e.st, id, orchestrator.KindCreateReplica, 1, string(b), store.JobWaiting, "Periksa master", "Periksa server tujuan")
+	f.drops = map[string]bool{id: true}
+	rec := e.do("GET", "/jobs/"+id, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	for _, n := range []string{names[0], names[150], names[299]} {
+		wantBody(t, rec, ">"+n+"<")
+	}
+	wantBody(t, rec, "Semua 300 database yang dihapus")
+}
+
 // TestPromoteRetryStillTokenless and TestTightenTLSRetryTokenless: jobs
 // that drop nothing keep their plain buttons and need no token.
 func TestPromoteRetryStillTokenless(t *testing.T) {
