@@ -628,11 +628,11 @@ kunci dihapus lagi). Sebelum menulis kunci, agent harus bisa membaca
 kandidat dengan akun replikasi yang dikirim panel (bila tidak, master tidak
 dikunci dan promote gagal di awal), lalu membaca semua replika yang pernah
 tersambung ke master ini (host dari berkas replika di bawah, pada port
-kandidat dan setiap port yang tercatat; paralel, 5 detik per bacaan) dan
+kandidat dan setiap port di daftar port replika; paralel, 5 detik per bacaan) dan
 menyimpan yang terbaca bersama kunci. Pembacaan itu dibatasi: paling banyak
 64 pasangan host × port, selesai dalam 60 detik (jauh di bawah batas tunggu
-panel); lebih dari itu, atau catatan port yang ditandai penuh (lihat di
-bawah), kunci ditolak dengan pesan yang menyebut berkas catatan dan perintah
+panel); lebih dari itu, atau daftar port replika yang ditandai penuh (lihat di
+bawah), kunci ditolak dengan pesan yang menyebut berkas daftar dan perintah
 untuk merapikannya. Replika yang sudah tidak terbaca saat
 itu (replika sebagian tanpa akun replikasi, replika yang lama mati)
 dilewati dan tidak menahan kunci. Selama berkas kunci ada di master, agent
@@ -677,12 +677,12 @@ Agent juga mencatat replika yang membaca binlog server ini tiap 5 detik
 host, `<host> <waktu RFC3339>`, dengan waktu terbaru; host yang tidak
 terlihat lebih dari setahun dibuang. Host diambil dari kolom `HOST` daftar
 proses MySQL tanpa port, jadi berupa nama bila `skip_name_resolve` mati.
-Port replika (dari `SHOW REPLICAS`) dicatat dengan cara yang sama di
+Port replika (dari `SHOW REPLICAS`) dimasukkan dengan cara yang sama ke daftar port replika di
 `/var/lib/dbpanel/replica-ports-seen`, paling banyak 8 port (port dipilih
-replika sendiri lewat `report_port`): port berikutnya tidak dicatat, berkas
+replika sendiri lewat `report_port`): port berikutnya tidak masuk daftar, berkas
 ditandai penuh (baris `penuh <waktu>`), agent menulis peringatan di log, dan
 promote terencana ditolak sampai root merapikannya dengan `forget-replica-port`
-(di bawah). Berkas catatan host tidak pernah ditulis lebih besar dari yang
+(di bawah). Berkas daftar replika tidak pernah ditulis lebih besar dari yang
 dibaca agent (1 MiB): host tertua dibuang lebih dulu dan dicatat di log.
 `mysql.lockForPromote` mencatat
 kandidat begitu melihat thread `Binlog Dump`-nya, dan panel meminta master
@@ -695,14 +695,14 @@ tersambung di luar alur panel tidak mencatat replika itu, jadi promote
 darurat ke replika itu tidak bisa mengkarantina master lama (agent master
 lama menolak karantina di bawah host yang tidak pernah tercatat).
 
-Replika yang sudah tidak dipakai dihapus dari catatan itu, dan dari daftar
+Replika yang sudah tidak dipakai dihapus dari daftar replika itu, dan dari daftar
 replika kunci promosi yang sedang berdiri, di server master:
 
 ```sh
 sudo dbpanel agent forget-replica 10.0.0.7        # semua port host itu; nama dibandingkan tanpa beda huruf besar-kecil
 sudo dbpanel agent forget-replica 10.0.0.7:3306   # sama; port dari peringatan diabaikan
-sudo dbpanel agent forget-replica-port 3307       # hapus satu port dari catatan port
-sudo dbpanel agent forget-replica-port semua      # kosongkan catatan port dan tanda penuhnya
+sudo dbpanel agent forget-replica-port 3307       # hapus satu port dari daftar port replika
+sudo dbpanel agent forget-replica-port semua      # kosongkan daftar port replika dan tanda penuhnya
 ```
 
 Panel tidak punya padanannya. `forget-replica` tidak membuka kunci sendiri:
@@ -713,7 +713,7 @@ bersama kunci terbaca baca-saja (atau bisa ditulis tanpa transaksi server
 ini). Perintah ini menyebut yang dilewatinya: penjaga tidak lagi menunggu
 host itu, jadi bila replika itu ternyata sudah menjadi master, master ini
 bisa terbuka dan ada dua master. `forget-replica-port semua` hanya mengosongkan
-catatan port; port replika yang sedang tersambung dicatat lagi dalam
+daftar port replika; port replika yang sedang tersambung masuk daftar lagi dalam
 beberapa detik. Periksa dulu isi `/var/lib/dbpanel/replica-ports-seen`
 sebelum menjalankan `forget-replica-port semua`: port replika yang tidak
 tersambung saat itu (misalnya replikasinya sedang dihentikan) ikut terlupa,
