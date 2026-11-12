@@ -89,10 +89,11 @@ func TestRecordReplicasCalledAfterVerify(t *testing.T) {
 			t.Fatal(err)
 		}
 		g.e.waitJob(id, store.JobSucceeded)
-		// b and d were both repointed; each connection is recorded on the NEW
-		// master (the candidate), never on the old one.
-		if n := g.c.count("mysql.recordReplicas"); n != 2 {
-			t.Fatalf("new master got %d recordReplicas, want 2 (one per repointed replica)", n)
+		// b and d were both repointed; their connections are recorded on
+		// the NEW master (the candidate), never on the old one, once after
+		// the repoints (FR-12: outside repointMu).
+		if n := g.c.count("mysql.recordReplicas"); n != 1 {
+			t.Fatalf("new master got %d recordReplicas, want 1 (once after the repoints)", n)
 		}
 		if n := g.m.count("mysql.recordReplicas"); n != 0 {
 			t.Fatalf("old master got %d recordReplicas", n)

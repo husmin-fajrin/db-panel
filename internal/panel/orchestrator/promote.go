@@ -784,6 +784,14 @@ func (jr *jobRun) promoteRepoint(ctx context.Context, _ bool) (outcome, error) {
 		return outcome{}, err
 	}
 	var ok, waiting, rebuild, failed int
+	record := false
+	// The new master records the replicas now connected to it once, after
+	// the repoints and outside repointMu (FR-12).
+	defer func() {
+		if record {
+			jr.r.recordReplicas(ctx, topo.MasterServerID)
+		}
+	}()
 	for _, rep := range reps {
 		if rep.ServerID == jr.candidate() || slices.Contains(jr.st.Repointed, rep.ServerID) {
 			continue
@@ -799,6 +807,7 @@ func (jr *jobRun) promoteRepoint(ctx context.Context, _ bool) (outcome, error) {
 		jr.r.repointMu.Lock()
 		out := jr.r.repointReplica(ctx, topo, rep, jr.st.PromotionID)
 		jr.r.repointMu.Unlock()
+		record = record || out.record
 		if ctx.Err() != nil {
 			return outcome{}, ctx.Err()
 		}
@@ -1156,6 +1165,10 @@ type repointOutcome struct {
 	errant  string // NeedsRebuild: what it holds that the new master lacks
 	ioErr   string // repointed, but its receiver has not connected yet
 	err     error  // it answered and refused or failed: needs_repoint
+	// record: its receiver is connected to the new master, which the
+	// caller has record its replicas (Runner.recordReplicas) once it no
+	// longer holds repointMu (FR-12).
+	record bool
 }
 
 // repointReplica points rep at topo's (new) master and records its state
@@ -1229,11 +1242,9 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 		}
 	}
 	out := set(o, "")
-	if res.IORunning {
-		// The receiver is connected to the new master: have it record the
-		// connection now.
-		r.recordReplicas(ctx, topo.MasterServerID)
-	}
+	// The receiver is connected to the new master: the caller has it
+	// record the connection, outside repointMu.
+	out.record = res.IORunning
 	return out
 }
 
@@ -1244,7 +1255,7 @@ var ErrNeedsRebuild = errors.New("replika punya transaksi yang tidak ada di mast
 // RepointNow points a needs_repoint replica at its topology's new master
 // now ("Arahkan sekarang"), instead of waiting for its agent to reconnect.
 func (r *Runner) RepointNow(ctx context.Context, replicaServerID int64) error {
-	topo, rep, err := func() (store.Topology, store.Replica, error) {
+	topo, _, err := func() (store.Topology, store.Replica, error) {
 		r.startMu.Lock()
 		defer r.startMu.Unlock()
 		rep, err := r.d.Store.GetReplicaByServer(replicaServerID)
@@ -1269,16 +1280,25 @@ func (r *Runner) RepointNow(ctx context.Context, replicaServerID int64) error {
 	if !r.d.Hub.IsOnline(replicaServerID) {
 		return errors.New("agent replika offline; replika diarahkan otomatis saat agent tersambung lagi")
 	}
-	r.repointMu.Lock()
-	defer r.repointMu.Unlock()
-	// Re-read under repointMu: OnOnline may have repointed it meanwhile.
-	if rep, err = r.d.Store.GetReplicaByServer(replicaServerID); err != nil {
+	out, err := func() (repointOutcome, error) {
+		r.repointMu.Lock()
+		defer r.repointMu.Unlock()
+		// Re-read under repointMu: OnOnline may have repointed it meanwhile.
+		rep, err := r.d.Store.GetReplicaByServer(replicaServerID)
+		if err != nil {
+			return repointOutcome{}, err
+		}
+		if rep.State != store.ReplicaNeedsRepoint {
+			return repointOutcome{state: rep.State}, nil
+		}
+		return r.repointReplica(ctx, topo, rep, 0), nil
+	}()
+	if err != nil {
 		return err
 	}
-	if rep.State != store.ReplicaNeedsRepoint {
-		return nil
+	if out.record {
+		r.recordReplicas(ctx, topo.MasterServerID)
 	}
-	out := r.repointReplica(ctx, topo, rep, 0)
 	switch {
 	case out.offline:
 		return errors.New("agent replika terputus; replika diarahkan otomatis saat agent tersambung lagi")
@@ -1316,6 +1336,14 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 	if err != nil {
 		return
 	}
+	// A repointed replica's new master records it once repointMu is
+	// released (FR-12).
+	var recordOn int64
+	defer func() {
+		if recordOn != 0 {
+			r.recordReplicas(ctx, recordOn)
+		}
+	}()
 	r.repointMu.Lock()
 	defer r.repointMu.Unlock()
 	switch srv.Role {
@@ -1356,6 +1384,9 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 			return
 		}
 		out := r.repointReplica(ctx, topo, rep, 0)
+		if out.record {
+			recordOn = topo.MasterServerID
+		}
 		r.log.Info("replica repointed on reconnect", "server_id", serverID, "state", out.state, "err", logErr(out.err))
 	}
 }
