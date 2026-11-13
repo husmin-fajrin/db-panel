@@ -18,6 +18,9 @@ const (
 	CodeInternal       = "internal"
 	CodeOffline        = "offline"
 	CodeTimeout        = "timeout"
+	// CodeNeedsLocalApproval: the agent refuses until root acts on the server
+	// itself; the message says what to run there.
+	CodeNeedsLocalApproval = "needs_local_approval"
 )
 
 // Request asks the peer to run a command.

@@ -182,3 +182,17 @@ func TestRedactParams(t *testing.T) {
 		t.Errorf("long params logged in full (%d bytes)", len(got))
 	}
 }
+
+func TestLocalActionErrorCode(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register("x", func(context.Context, json.RawMessage) (any, error) {
+		return nil, fmt.Errorf("wrapped: %w", &LocalActionError{Msg: "jalankan di server ini: sudo dbpanel agent approve 123456"})
+	})
+	resp := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "x"})
+	if resp.OK || resp.Error == nil || resp.Error.Code != proto.CodeNeedsLocalApproval {
+		t.Fatalf("resp = %+v, want needs_local_approval", resp)
+	}
+	if want := "jalankan di server ini: sudo dbpanel agent approve 123456"; resp.Error.Message != want {
+		t.Errorf("message = %q, want %q", resp.Error.Message, want)
+	}
+}

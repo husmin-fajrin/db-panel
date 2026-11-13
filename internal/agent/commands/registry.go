@@ -29,6 +29,13 @@ type ParamError struct{ Msg string }
 
 func (e *ParamError) Error() string { return e.Msg }
 
+// LocalActionError refuses a command until root acts on the server itself;
+// Dispatch answers it with proto.CodeNeedsLocalApproval and Msg. Checked
+// before ParamError.
+type LocalActionError struct{ Msg string }
+
+func (e *LocalActionError) Error() string { return e.Msg }
+
 // ErrDenied is the answer to a command the local policy disables.
 const ErrDenied = "perintah dinonaktifkan oleh kebijakan lokal server ini"
 
@@ -116,6 +123,10 @@ func (r *Registry) Dispatch(ctx context.Context, req proto.Request) (resp proto.
 
 	result, err := h(ctx, req.Params)
 	if err != nil {
+		var lae *LocalActionError
+		if errors.As(err, &lae) {
+			return proto.ErrorResponse(req.ID, proto.CodeNeedsLocalApproval, lae.Msg)
+		}
 		var pe *ParamError
 		if errors.As(err, &pe) {
 			return proto.ErrorResponse(req.ID, proto.CodeBadParams, pe.Msg)

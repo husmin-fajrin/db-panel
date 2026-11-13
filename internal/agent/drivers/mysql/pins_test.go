@@ -99,6 +99,20 @@ func wantRefused(t *testing.T, what string, r proto.Response, parts ...string) {
 	}
 }
 
+// wantLocalRefusal is wantRefused for code needs_local_approval.
+func wantLocalRefusal(t *testing.T, what string, r proto.Response, parts ...string) {
+	t.Helper()
+	if r.OK || r.Error == nil || r.Error.Code != proto.CodeNeedsLocalApproval {
+		t.Errorf("%s = %+v, want a needs_local_approval refusal", what, r)
+		return
+	}
+	for _, p := range parts {
+		if !strings.Contains(r.Error.Message, p) {
+			t.Errorf("%s message %q does not contain %q", what, r.Error.Message, p)
+		}
+	}
+}
+
 // wantPastPins fails unless r is the answer of a driver without MySQL: the
 // command got past the pins.
 func wantPastPins(t *testing.T, what string, r proto.Response) {
@@ -742,7 +756,7 @@ func TestAllowFailsClosedOnUnexpectedParams(t *testing.T) {
 
 // promoteCommands are the commands of a promotion (Plan 4b) a quarantined
 // server refuses whatever their parameters.
-var promoteCommands = []string{"mysql.lockForPromote", "mysql.promote", "mysql.repoint"}
+var promoteCommands = []string{"mysql.lockForPromote", "mysql.promote", "mysql.repoint", "mysql.unlockPromote"}
 
 // TestQuarantinedRefusalTable: a quarantined server (the old master after
 // a promotion) refuses what a replica refuses plus the promotion commands;
@@ -818,12 +832,63 @@ func TestQuarantinedRefusalTable(t *testing.T) {
 		t.Errorf("role pin after claims = %q, want quarantined", got)
 	}
 
-	// Released like a replica: unassigned, source kept.
-	if err := p.Release(); err != nil {
-		t.Fatalf("Release on quarantined = %v", err)
+	// Not released like a replica: only root or a finished rebuild ends it.
+	if err := p.Release(); !errors.Is(err, mysql.ErrRolePinned) {
+		t.Errorf("Release on quarantined = %v, want ErrRolePinned", err)
 	}
-	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "unassigned" || s != src {
-		t.Errorf("pins after release = %q, %q; want unassigned, %q", role, s, src)
+	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "quarantined" || s != src {
+		t.Errorf("pins after refused release = %q, %q; want quarantined, %q", role, s, src)
+	}
+}
+
+// TestReleaseRoleRefusedOnQuarantined: mysql.releaseRole on a quarantined
+// server needs root on the server, and changes no pin.
+func TestReleaseRoleRefusedOnQuarantined(t *testing.T) {
+	dir := pinDir(t, "quarantined", "10.0.0.1:3306")
+	r := newPinRig(t, nil, dir)
+	wantLocalRefusal(t, "releaseRole", r.dispatch("mysql.releaseRole", nil),
+		"server ini dikarantina (quarantined)", "perintah mysql.releaseRole ditolak",
+		"sudo dbpanel agent set-role unassigned", "sudo dbpanel agent set-role master")
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = p.Release()
+	var lae *commands.LocalActionError
+	if !errors.Is(err, mysql.ErrRolePinned) || !errors.As(err, &lae) {
+		t.Errorf("Release on quarantined = %v, want ErrRolePinned and a LocalActionError", err)
+	}
+	if role, s := pinFile(t, dir, mysql.RoleFile), pinFile(t, dir, mysql.SourceFile); role != "quarantined" || s != "10.0.0.1:3306" {
+		t.Errorf("pins after refused releases = %q, %q", role, s)
+	}
+	wantRefused(t, "unlockPromote", r.dispatch("mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: guardCandidate}),
+		"server ini dipin sebagai quarantined")
+}
+
+// R-109 (spec 5.13): no panel path from quarantined to writable.
+func TestNoPanelPathFromQuarantinedToWritable(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	if _, err := db.Exec("SET PERSIST read_only=ON, super_read_only=ON"); err != nil {
+		t.Fatal(err)
+	}
+	dir := pinDir(t, "quarantined", "10.0.0.1:3306")
+	r := newPinRig(t, inst.Host(), dir)
+	wantLocalRefusal(t, "releaseRole", r.dispatch("mysql.releaseRole", nil), "quarantined")
+	for what, resp := range map[string]proto.Response{
+		"setReadOnly off":  r.dispatch("mysql.setReadOnly", proto.ReadOnlyParams{On: false}),
+		"configure master": r.dispatch("mysql.configure", proto.ConfigureParams{Role: "master"}),
+	} {
+		if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "quarantined") {
+			t.Errorf("%s = %+v, want refused naming quarantined", what, resp)
+		}
+	}
+	var sro int
+	if err := db.QueryRow("SELECT @@global.super_read_only").Scan(&sro); err != nil || sro != 1 {
+		t.Errorf("super_read_only = %d, %v; want 1", sro, err)
+	}
+	if got := pinFile(t, dir, mysql.RoleFile); got != "quarantined" {
+		t.Errorf("role pin = %q, want quarantined", got)
 	}
 }
 

@@ -29,10 +29,12 @@ import (
 // against such a panel: the agent cannot tell a host the panel attached
 // itself from a real replica, so a panel holding the replication password
 // can get a healthy master quarantined under a server of its own and then
-// have its data dropped or replaced from that source; and mysql.releaseRole
-// on a quarantined old master, followed by mysql.configure or
-// mysql.setReadOnly, opens it for writes again (security audit 5a, SA-1
-// and SA-2; owner decisions for later plans).
+// have its data dropped or replaced from that source (security audit 5a,
+// SA-2; closed by a later task of the same plan). The other gap, SA-1
+// (mysql.releaseRole on a quarantined old master, then mysql.configure or
+// mysql.setReadOnly, opening it for writes again), is closed: a quarantined
+// server refuses mysql.releaseRole, and leaves quarantine only through a
+// finished rebuild or root on the host.
 const (
 	// RoleFile holds master, replica, quarantined or unassigned; no file
 	// is unassigned.
@@ -114,6 +116,9 @@ var roleRefuses = map[string]map[string]bool{
 		"mysql.lockForPromote": true,
 		"mysql.promote":        true,
 		"mysql.repoint":        true,
+		// Only a finished rebuild or root on the host ends a quarantine.
+		"mysql.releaseRole":   true,
+		"mysql.unlockPromote": true,
 	},
 }
 
@@ -137,6 +142,24 @@ type pinError struct {
 
 func (e *pinError) Error() string   { return e.pe.Msg }
 func (e *pinError) Unwrap() []error { return []error{e.pe, e.kind} }
+
+// localPinError is a refusal by the pins that needs root on the server: it
+// matches *commands.LocalActionError and kind (ErrRolePinned or
+// ErrSourcePinned).
+type localPinError struct {
+	lae  *commands.LocalActionError
+	kind error
+}
+
+func (e *localPinError) Error() string   { return e.lae.Msg }
+func (e *localPinError) Unwrap() []error { return []error{e.lae, e.kind} }
+
+// quarantineReleaseRefusal is mysql.releaseRole on a quarantined server.
+func quarantineReleaseRefusal() error {
+	return &localPinError{kind: ErrRolePinned, lae: &commands.LocalActionError{Msg: "server ini dikarantina (quarantined); perintah mysql.releaseRole ditolak. Karantina hanya lepas lewat bangun ulang " +
+		"yang selesai, atau dengan perintah di server ini: sudo dbpanel agent set-role unassigned (atau sudo dbpanel agent " +
+		"set-role master bila server ini akan menjadi master lagi)"}}
+}
 
 func roleRefusal(role, cmd string) error {
 	return &pinError{kind: ErrRolePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
@@ -518,8 +541,9 @@ func removeFile(path string) error {
 // Release turns a replica, a quarantined or an unassigned server into an
 // unassigned one by writing role=unassigned. The source pin stays (spec
 // 5.10): a released server still follows only its pinned source until
-// root runs set-source. A master is refused: only the local CLI changes
-// it. mysql.releaseRole checks the replication state first.
+// root runs set-source. A master or a quarantined server is refused: only
+// the local CLI (or a finished rebuild) changes it. mysql.releaseRole checks
+// the replication state first.
 func (p *Pins) Release() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -528,6 +552,9 @@ func (p *Pins) Release() error {
 	}
 	if p.role == roleMaster {
 		return roleRefusal(roleMaster, "mysql.releaseRole")
+	}
+	if p.role == roleQuarantined {
+		return quarantineReleaseRefusal()
 	}
 	defer p.forget()
 	p.settled = true
@@ -625,8 +652,8 @@ func (p *Pins) claimRole(role string) error {
 // quarantined whose source pin is host:port (matched like Allow matches
 // the rebuild commands, by name), it rewrites the role pin to replica and
 // reports true. It changes nothing on any other role (a master included),
-// without a source pin, or toward any other source. Beside releaseRole it
-// is the only way out of quarantined a panel command takes. The source
+// without a source pin, or toward any other source. It is the
+// only way out of quarantined a panel command takes. The source
 // pin and its verified address (SourceAddrFile) stay: the replica follows
 // the same new master and the agent's own reads of it (repoint, promote)
 // keep dialing that address.
@@ -695,6 +722,9 @@ func (p *Pins) Allow(cmd string, params any) error {
 	defer p.mu.Unlock()
 	if err := p.reload(); err != nil {
 		return &commands.ParamError{Msg: fmt.Sprintf("pin peran/sumber agent tidak bisa dipakai, perintah %s ditolak: %v", cmd, err)}
+	}
+	if p.role == roleQuarantined && cmd == "mysql.releaseRole" {
+		return quarantineReleaseRefusal()
 	}
 	refused, err := refusedByRole(p.role, cmd, params)
 	if err != nil {
