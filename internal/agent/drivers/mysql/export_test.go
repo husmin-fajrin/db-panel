@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"os/user"
 	"strings"
@@ -335,6 +334,7 @@ var (
 	ReadManagedContent   = readManagedContent
 	MACAllows            = macAllows
 	OptionName           = optionName
+	ReplaceEnv           = replaceEnv
 )
 
 // StartLockContent is what the start lock file holds.
@@ -356,12 +356,12 @@ func SetLookupUser(f func(name string) (*user.User, error)) (restore func()) {
 	return func() { lookupUser = old }
 }
 
-// SetStatHome replaces the stat of the service account's home; it returns
-// the function that restores it.
-func SetStatHome(f func(path string) (os.FileInfo, error)) (restore func()) {
-	old := statHome
-	statHome = f
-	return func() { statHome = old }
+// SetListHome replaces the listing of the service account's home; it
+// returns the function that restores it.
+func SetListHome(f func(path string) ([]string, error)) (restore func()) {
+	old := listHome
+	listHome = f
+	return func() { listHome = old }
 }
 
 // SetReadXattr replaces the extended attribute reader; it returns the

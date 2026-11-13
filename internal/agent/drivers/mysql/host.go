@@ -27,6 +27,7 @@ type Host interface {
 	DiskFree(path string) (free, total uint64, err error)
 	Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error
 	// ExecEnv is Exec with env (KEY=VALUE) replacing those variables of the agent's environment.
+	// A host that wraps another and overrides Exec must route ExecEnv too, or --print-defaults bypasses it.
 	ExecEnv(ctx context.Context, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error
 	TCPReachable(ctx context.Context, host string, port int, timeout time.Duration) error
 	OSFamily() string // "debian" | "rhel" | "unknown"

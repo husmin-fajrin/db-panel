@@ -159,6 +159,7 @@ type printDefaultsHost struct {
 	outByHome map[string]string
 	runs      [][]string
 	envs      [][]string
+	failHome  string // a HOME whose run fails
 }
 
 func (h *printDefaultsHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
@@ -170,14 +171,19 @@ func (h *printDefaultsHost) ExecEnv(_ context.Context, env []string, _ io.Reader
 	h.runs = append(h.runs, append([]string{name}, args...))
 	h.envs = append(h.envs, append([]string(nil), env...))
 	out := h.out
+	fail := false
 	for _, e := range env {
 		if home, ok := strings.CutPrefix(e, "HOME="); ok {
 			if o, ok := h.outByHome[home]; ok {
 				out = o
 			}
+			fail = h.failHome != "" && home == h.failHome
 		}
 	}
 	h.mu.Unlock()
+	if fail {
+		return errors.New("mysqld gagal (test)")
+	}
 	_, err := io.WriteString(stdout, "/usr/sbin/mysqld would have been started with the following arguments:\n"+out+" \n")
 	return err
 }
@@ -326,13 +332,21 @@ func TestPrintDefaultsRunsWithServiceHome(t *testing.T) {
 		return &printDefaultsHost{Host: mysql.NewHost(l, nil, nil, probe.RealSystem(), nil), out: out}
 	}
 	ctx := context.Background()
-	serviceAccounts(t, map[string]string{"mysql": "/var/lib/mysql", "app": "/home/app"})
-	hidden := true
-	t.Cleanup(mysql.SetStatHome(func(path string) (os.FileInfo, error) {
-		if path == "/home/app" && hidden {
-			return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+	serviceAccounts(t, map[string]string{"mysql": "/var/lib/mysql", "app": "/home/app", "root": "/root", "nohome": ""})
+	// listing is what listHome answers per home; listed records the calls.
+	type answer struct {
+		names []string
+		err   error
+	}
+	listing := map[string]answer{}
+	var listed []string
+	t.Cleanup(mysql.SetListHome(func(path string) ([]string, error) {
+		listed = append(listed, path)
+		a, ok := listing[path]
+		if !ok {
+			return nil, &os.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
 		}
-		return os.Stat("/")
+		return a.names, a.err
 	}))
 
 	h := newHost("--user=mysql --init_file=" + lock)
@@ -342,27 +356,58 @@ func TestPrintDefaultsRunsWithServiceHome(t *testing.T) {
 	if len(h.envs) != 2 || homeEnv(h.envs[0]) != "/nonexistent" || homeEnv(h.envs[1]) != "/var/lib/mysql" {
 		t.Errorf("--user=mysql: envs %q, want HOME=/nonexistent then HOME=/var/lib/mysql", h.envs)
 	}
+	if len(listed) != 0 {
+		t.Errorf("--user=mysql: listed %q; a home outside the protected prefixes is never listed", listed)
+	}
 	for _, run := range h.runs {
 		if want := append([]string{"/nonexistent/mysqld"}, mysql.PrintDefaultsArgs(l)...); !reflect.DeepEqual(run, want) {
 			t.Errorf("ran %q, want %q", run, want)
 		}
 	}
 
-	h = newHost("--user=app --init_file=" + lock)
-	if st := mysql.StartLockStatus(ctx, h); st.Locked || !strings.Contains(st.Reason, "/home/app") || !strings.Contains(st.Reason, "ProtectHome") {
-		t.Errorf("--user=app, home hidden: %+v", st)
-	}
-	if len(h.envs) != 1 {
-		t.Errorf("--user=app, home hidden: ran %d times, want once", len(h.envs))
+	// Hidden: the listing fails, or finds an empty directory (ProtectHome's
+	// mount point, which still stats).
+	for _, c := range []struct {
+		account, home string
+		answer        answer
+	}{
+		{"app", "/home/app", answer{err: &os.PathError{Op: "open", Path: "/home/app", Err: syscall.ENOENT}}},
+		{"app", "/home/app", answer{}},
+		{"root", "/root", answer{}},
+	} {
+		listing[c.home] = c.answer
+		h = newHost("--user=" + c.account + " --init_file=" + lock)
+		st := mysql.StartLockStatus(ctx, h)
+		if st.Locked || !strings.Contains(st.Reason, "("+c.home+")") || !strings.Contains(st.Reason, "ProtectHome") {
+			t.Errorf("%s, listing %+v: %+v", c.home, c.answer, st)
+		}
+		if len(h.envs) != 1 {
+			t.Errorf("%s, listing %+v: ran %d times, want once", c.home, c.answer, len(h.envs))
+		}
 	}
 
-	hidden = false
-	h = newHost("--user=app --init_file=" + lock)
-	if st := mysql.StartLockStatus(ctx, h); !st.Locked {
-		t.Errorf("--user=app, home visible: %+v", st)
+	// Visible: the listing has an entry.
+	for _, c := range []struct{ account, home string }{{"app", "/home/app"}, {"root", "/root"}} {
+		listing[c.home] = answer{names: []string{".profile"}}
+		h = newHost("--user=" + c.account + " --init_file=" + lock)
+		if st := mysql.StartLockStatus(ctx, h); !st.Locked {
+			t.Errorf("%s visible: %+v", c.home, st)
+		}
+		if n := len(h.envs); n != 2 || homeEnv(h.envs[n-1]) != c.home {
+			t.Errorf("%s visible: envs %q", c.home, h.envs)
+		}
 	}
-	if n := len(h.envs); n != 2 || homeEnv(h.envs[n-1]) != "/home/app" {
-		t.Errorf("--user=app, home visible: envs %q", h.envs)
+
+	h = newHost("--user=nohome --init_file=" + lock)
+	if st := mysql.StartLockStatus(ctx, h); st.Locked || !strings.Contains(st.Reason, "konfigurasi efektif MySQL tidak bisa dibaca: akun layanan MySQL nohome tidak punya direktori home; ~/.my.cnf tidak bisa diperiksa") {
+		t.Errorf("account without a home: %+v", st)
+	}
+
+	// The second run fails.
+	h = newHost("--user=mysql --init_file=" + lock)
+	h.failHome = "/var/lib/mysql"
+	if st := mysql.StartLockStatus(ctx, h); st.Locked || !strings.Contains(st.Reason, "mysqld gagal (test)") {
+		t.Errorf("second run fails: %+v", st)
 	}
 
 	h = newHost("--user=ghost --init_file=" + lock)
@@ -394,8 +439,9 @@ func TestDefaultsFileIgnoresServiceHome(t *testing.T) {
 		t.Fatalf("fake layout runs %q, want --defaults-file", args)
 	}
 	serviceAccounts(t, map[string]string{"app": "/home/app"})
-	t.Cleanup(mysql.SetStatHome(func(path string) (os.FileInfo, error) {
-		return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+	t.Cleanup(mysql.SetListHome(func(path string) ([]string, error) {
+		t.Errorf("listed %s with --defaults-file", path)
+		return nil, &os.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
 	}))
 	h.out = "--user=app --init_file=" + lock
 	if st := mysql.StartLockStatus(context.Background(), h); !st.Locked {
@@ -484,6 +530,27 @@ func TestServiceAccountMyCnfBreaksStartLock(t *testing.T) {
 	}
 	if st := mysql.StartLockStatus(ctx, inst.Host()); !st.Locked {
 		t.Errorf("--defaults-file with a .my.cnf in the service home: %+v", st)
+	}
+}
+
+func TestReplaceEnv(t *testing.T) {
+	base := []string{"PATH=/usr/bin", "HOME=/root", "LANG=C"}
+	got := mysql.ReplaceEnv(base, []string{"HOME=/var/lib/mysql", "NEW=1"})
+	want := []string{"PATH=/usr/bin", "LANG=C", "HOME=/var/lib/mysql", "NEW=1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ReplaceEnv = %q, want %q", got, want)
+	}
+	homes := 0
+	for _, e := range got {
+		if strings.HasPrefix(e, "HOME=") {
+			homes++
+		}
+	}
+	if homes != 1 {
+		t.Errorf("HOME appears %d times in %q", homes, got)
+	}
+	if !reflect.DeepEqual(base, []string{"PATH=/usr/bin", "HOME=/root", "LANG=C"}) {
+		t.Errorf("base changed: %q", base)
 	}
 }
 

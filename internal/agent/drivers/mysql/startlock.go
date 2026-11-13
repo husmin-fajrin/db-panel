@@ -497,31 +497,51 @@ func optionName(arg string) (name, prefix string) {
 var protectedHomePrefixes = []string{"/home", "/root", "/run/user"}
 
 var lookupUser = user.Lookup // tests replace (SetLookupUser)
-var statHome = os.Stat       // tests replace (SetStatHome)
+
+// listHome lists at most one entry of the directory path; tests replace
+// it (SetListHome).
+var listHome = func(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
+		return nil, nil
+	}
+	return names, err
+}
 
 // serviceHome is the home of the MySQL service account; hidden is true
-// when it lies under a protectedHomePrefixes entry and the agent cannot
-// stat it (ProtectHome=yes makes those directories empty and unreadable).
+// when it lies at or under a protectedHomePrefixes entry and the agent
+// cannot list it or finds it empty: ProtectHome=yes mounts an empty,
+// unreadable directory over each of them, so the mount point itself
+// still stats and only what lies below it is gone.
 func serviceHome(account string) (home string, hidden bool, err error) {
 	u, err := lookupUser(account)
 	if err != nil {
 		return "", false, err
 	}
 	if u.HomeDir == "" {
-		return "", false, errors.New("direktori home kosong")
+		return "", false, errNoHome
 	}
 	home = filepath.Clean(u.HomeDir)
 	for _, p := range protectedHomePrefixes {
 		if home == p || strings.HasPrefix(home, p+"/") {
-			_, err := statHome(home)
-			return home, err != nil, nil
+			names, err := listHome(home)
+			return home, err != nil || len(names) == 0, nil
 		}
 	}
 	return home, false, nil
 }
 
-// errNoServiceAccount and errHomeHidden are readEffectiveOptions'
-// refusals to vouch for options it cannot see.
+// errNoHome is serviceHome's answer for an account with no home in its
+// passwd entry.
+var errNoHome = errors.New("no home directory")
+
+// errNoServiceAccount, errHomeHidden and errAccountWithoutHome are
+// readEffectiveOptions' refusals to vouch for options it cannot see.
 type errNoServiceAccount struct {
 	account string
 	err     error
@@ -534,6 +554,12 @@ func (e errNoServiceAccount) Error() string {
 func (e errNoServiceAccount) Unwrap() error { return e.err }
 
 type errHomeHidden struct{ account, home string }
+
+type errAccountWithoutHome struct{ account string }
+
+func (e errAccountWithoutHome) Error() string {
+	return fmt.Sprintf("akun layanan MySQL %s tidak punya direktori home; ~/.my.cnf tidak bisa diperiksa", e.account)
+}
 
 func (e errHomeHidden) Error() string {
 	return fmt.Sprintf("direktori home akun layanan MySQL %s (%s) tidak terlihat oleh agent (ProtectHome); ~/.my.cnf di sana tidak bisa diperiksa", e.account, e.home)
@@ -580,6 +606,9 @@ func readEffectiveOptions(ctx context.Context, h Host) (effectiveOpts, error) {
 		return o, nil
 	}
 	home, hidden, err := serviceHome(o.User)
+	if errors.Is(err, errNoHome) {
+		return effectiveOpts{}, errAccountWithoutHome{o.User}
+	}
 	if err != nil {
 		return effectiveOpts{}, errNoServiceAccount{o.User, err}
 	}
