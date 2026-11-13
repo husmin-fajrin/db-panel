@@ -496,8 +496,19 @@ func CheckApproval(a RebuildApproval, role, source string, ips []net.IP, now tim
 // StartResultRecord is the content of the start-result file.
 type StartResultRecord = startResult
 
-// RecordStartResult is recordStartResult.
-func (d *Driver) RecordStartResult(r StartResultRecord) error { return d.recordStartResult(r) }
+// StartKindRecord is one kind of the start-result file.
+type StartKindRecord = startKindRecord
+
+// RecordStartResult is recordStartResult for a start bypassed only when
+// its result says so.
+func (d *Driver) RecordStartResult(r StartResultRecord) error {
+	return d.recordStartResult(r, r.Result == proto.QuarantineStartBypassed)
+}
+
+// RecordJudgedStart is recordStartResult.
+func (d *Driver) RecordJudgedStart(r StartResultRecord, bypassed bool) error {
+	return d.recordStartResult(r, bypassed)
+}
 
 // SetEmitStartHook sets what runs as a start report is queued; the returned
 // func restores the previous hook.

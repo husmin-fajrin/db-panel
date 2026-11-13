@@ -597,6 +597,21 @@ type StartResultState struct {
 	// UTC, time.RFC3339Nano. Opaque to the panel, which compares it for
 	// equality only; empty from an older agent.
 	StartID string `json:"start_id,omitempty"`
+	// Kinds is the last start of each bad kind in this quarantine, at most
+	// one per kind, in the order late, failed, bypassed. The panel
+	// reconciles its start alerts to it; nil from an older agent.
+	Kinds []StartKindState `json:"kinds,omitempty"`
+}
+
+// StartKindState is the last start of one bad kind (StartResultState.Kinds).
+type StartKindState struct {
+	Kind     string `json:"kind"`                // late | failed | bypassed
+	StartID  string `json:"start_id"`            // the decided time, UTC, time.RFC3339Nano; opaque to the panel
+	AgeSec   int64  `json:"age_sec"`             // since the agent decided it, by the agent's clock, >= 0
+	InitFile string `json:"init_file,omitempty"` // failed: the lock file; at most 4096 bytes
+	// Over: a later start ended it (MySQL came up after a failed start; a
+	// start used the lock after a bypassed one). Never set for late.
+	Over bool `json:"over,omitempty"`
 }
 
 // QuarantineStartEvent is the payload of EventQuarantineStart. Bypassed:

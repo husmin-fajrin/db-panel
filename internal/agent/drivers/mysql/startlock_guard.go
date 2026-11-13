@@ -341,7 +341,7 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 	}
 	d.bootFailAt = at
 	d.warn("MySQL of the quarantined server failed to start: it could not open the start lock file", "file", path, "at", at)
-	d.recordStart(startResult{Result: proto.QuarantineStartFailed, Decided: now, InitFile: path})
+	d.recordStart(startResult{Result: proto.QuarantineStartFailed, Decided: now, InitFile: path}, false)
 	d.enqueue(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at, StartID: startID(now)})
 }
 
@@ -437,14 +437,14 @@ func (d *Driver) reportQuarantineStart(h Host, now time.Time, flagsOff bool, ini
 	if ev.Result != proto.QuarantineStartOK {
 		d.warn("quarantined server started without the start lock holding", "result", ev.Result, "init_file", initFile)
 	}
-	d.recordStart(startResult{Result: ev.Result, Decided: now, InitFile: initFile})
+	d.recordStart(startResult{Result: ev.Result, Decided: now, InitFile: initFile}, ev.Bypassed)
 	d.enqueue(proto.EventQuarantineStart, ev)
 }
 
-// recordStart keeps the worst start on disk before it is reported; a
-// failed write is warned and the report is still queued.
-func (d *Driver) recordStart(r startResult) {
-	if err := d.recordStartResult(r); err != nil {
+// recordStart keeps the judged start on disk (recordStartResult) before it
+// is reported; a failed write is warned and the report is still queued.
+func (d *Driver) recordStart(r startResult, bypassed bool) {
+	if err := d.recordStartResult(r, bypassed); err != nil {
 		d.warn("start result not kept on disk; the report is still sent", "result", r.Result, "err", err)
 	}
 }

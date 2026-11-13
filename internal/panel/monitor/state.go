@@ -235,6 +235,9 @@ func unpinnedCount(n int, role string, snap *proto.HealthSnapshot) int {
 // pinMaster is the role pin of a master (proto.HealthSnapshot.RolePin).
 const pinMaster = "master"
 
+// pinQuarantined is the role pin of an old master.
+const pinQuarantined = "quarantined"
+
 func firstTime(cur, at time.Time) time.Time {
 	if cur.IsZero() {
 		return at

@@ -477,6 +477,7 @@ func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	at := now.Add(-m.reportAge(serverID, he.TakenAgoMS))
 	ups := m.ingest(serverID, he, at)
 	alerts := m.startResultFromSnapshot(serverID, &he.Snapshot, at)
+	alerts = append(alerts, m.closeStartAlertsLeftQuarantine(serverID, &he.Snapshot)...)
 	if !he.Backlog {
 		alerts = append(alerts, m.evaluate(now)...)
 	}
