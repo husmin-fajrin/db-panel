@@ -126,6 +126,9 @@ func (d *Driver) guardStartLock(ctx context.Context, h Host, now time.Time) {
 	if role == "" {
 		return // the pins cannot be trusted: nothing changes
 	}
+	if role != roleQuarantined {
+		d.clearStartResult()
+	}
 	l := h.Layout()
 	if role == roleQuarantined {
 		d.keepStartLock(ctx, h, now)
@@ -336,6 +339,7 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 	}
 	d.bootFailAt = at
 	d.warn("MySQL of the quarantined server failed to start: it could not open the start lock file", "file", path, "at", at)
+	d.recordStart(startResult{Result: proto.QuarantineStartFailed, Decided: now, InitFile: path})
 	d.emitStart(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at})
 }
 
@@ -490,7 +494,16 @@ func (d *Driver) reportQuarantineStart(h Host, now time.Time, flagsOff bool, ini
 	if ev.Result != proto.QuarantineStartOK {
 		d.warn("quarantined server started without the start lock holding", "result", ev.Result, "init_file", initFile)
 	}
+	d.recordStart(startResult{Result: ev.Result, Decided: now, InitFile: initFile})
 	d.emitStart(proto.EventQuarantineStart, ev)
+}
+
+// recordStart keeps the worst start on disk before it is reported; a
+// failed write is warned and the report is still sent.
+func (d *Driver) recordStart(r startResult) {
+	if err := d.recordStartResult(r); err != nil {
+		d.warn("start result not kept on disk; the report is still sent", "result", r.Result, "err", err)
+	}
 }
 
 // releaseForPromote releases the start lock a replica still carries

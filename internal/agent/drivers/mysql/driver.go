@@ -43,6 +43,10 @@ type Driver struct {
 	// replica-ports-seen beside SeenPath, or SeenPortsFile when that is
 	// empty too.
 	SeenPortsPath string
+	// StartResultPath is the start-result file (start_result.go); empty
+	// means start-result beside SeenPath, or StartResultFile when that is
+	// empty too.
+	StartResultPath string
 	// Events, when set, sends the promote lock guard's events to the
 	// panel (the agent's connection).
 	Events Emitter

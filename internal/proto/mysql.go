@@ -584,6 +584,17 @@ const (
 	QuarantineStartOK = "ok"
 )
 
+// QuarantineStartFailed is StartResultState.Result when MySQL failed to
+// start on the lock file.
+const QuarantineStartFailed = "failed"
+
+// StartResultState is the worst start of MySQL since the quarantine (spec 5.5).
+type StartResultState struct {
+	Result   string `json:"result"`              // late | failed | bypassed | ok
+	AgeSec   int64  `json:"age_sec"`             // since the agent decided it, by the agent's clock
+	InitFile string `json:"init_file,omitempty"` // @@init_file at that start; the lock file for failed
+}
+
 // QuarantineStartEvent is the payload of EventQuarantineStart. Bypassed:
 // @@init_file is not the agent's file although that file is older than
 // the running mysqld. InitFile is @@init_file as read.

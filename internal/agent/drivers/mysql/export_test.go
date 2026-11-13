@@ -492,3 +492,9 @@ func ConnectionsPSQuery() string { return connectionsPSQuery }
 func CheckApproval(a RebuildApproval, role, source string, ips []net.IP, now time.Time) error {
 	return checkApproval(a, role, source, ips, now)
 }
+
+// StartResultRecord is the content of the start-result file.
+type StartResultRecord = startResult
+
+// RecordStartResult is recordStartResult.
+func (d *Driver) RecordStartResult(r StartResultRecord) error { return d.recordStartResult(r) }

@@ -456,6 +456,7 @@ func (d *Driver) settleRebuilt(host string, port int) error {
 	}
 	d.quarantinePending = false
 	d.log("quarantine ended: rebuilt as a replica of its pinned source", "source", net.JoinHostPort(host, fmt.Sprint(port)))
+	d.clearStartResult()
 	// The approval was for this rebuild; the quarantine ends whether or
 	// not its files go (a replica never asks for them).
 	if err := d.pins.ClearRebuild(); err != nil && d.Logger != nil {

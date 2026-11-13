@@ -50,6 +50,9 @@ type HealthSnapshot struct {
 	// the role pin is quarantined or the agent's init_file line is still
 	// in the MySQL config; nil otherwise, and from an older agent.
 	StartLock *StartLockState `json:"start_lock,omitempty"`
+
+	// StartResult is set while the role pin is quarantined and a start was judged; nil otherwise and from an older agent.
+	StartResult *StartResultState `json:"start_result,omitempty"`
 }
 
 // EventHealth is the event an agent's monitor sends with a HealthEvent

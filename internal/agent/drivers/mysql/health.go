@@ -61,6 +61,7 @@ func (d *Driver) Snapshot(ctx context.Context) proto.HealthSnapshot {
 			s.StartLock = &proto.StartLockState{Reason: "kunci start belum diperiksa agent"}
 		}
 	}
+	s.StartResult = d.StartResult(d.now())
 	if d.Sys != nil {
 		datadir := ""
 		if h != nil {
