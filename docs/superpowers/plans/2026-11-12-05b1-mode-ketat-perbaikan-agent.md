@@ -549,7 +549,8 @@ fmt.Sprintf("server ini dikarantina (quarantined); perintah %s butuh persetujuan
 | `mysql.configureReplication`, `mysql.setReplicationFilter`, `mysql.startReplica`, `mysql.startUntil`, `mysql.resetReplica` | protected | spek (replikasi) |
 | `mysql.configure`, `mysql.restart`, `mysql.install` | protected | spek (konfigurasi, restart, pemasangan) |
 | `mysql.createReplUser`, `mysql.createDumpUser`, `mysql.dropUser`, `mysql.sweepDumpUsers` | protected | mengubah akun; bawaan tolak (sweep otomatis agent memanggil driver langsung, bukan lewat registry) |
-| `mysql.tlsRequest`, `mysql.tlsInstall`, `mysql.tlsTrust` | protected | mengubah kunci, sertifikat atau CA MySQL; panel melewati server dikarantina untuk perpanjangan (Task 11) |
+| `mysql.tlsRequest`, `mysql.tlsInstall` | protected | mengubah kunci atau sertifikat MySQL; panel melewati server dikarantina untuk perpanjangan (Task 11) |
+| `mysql.tlsTrust` | allowed | diubah saat pelaksanaan (lihat "Perubahan selama pelaksanaan"): "Periksa data tertinggal" dan penyelamatan memanggilnya di server yang dikarantina untuk memeriksa sertifikat master baru; hanya menyimpan berkas CA |
 | `mysql.lockForPromote`, `mysql.promote`, `mysql.repoint` | role-refused | sudah di `roleRefuses[roleQuarantined]` |
 | `mysql.unlockPromote` | role-refused | hanya untuk master (`requireMaster`); Task 1 menambahkannya ke tabel peran |
 | `mysql.releaseRole` | role-refused | Task 1: `needs_local_approval` dengan perintah `set-role` |
@@ -1404,6 +1405,45 @@ P15 Server ini dikarantina (quarantined); sertifikat MySQL-nya dipasang lagi saa
 31. **Pembagian task mengikuti saran;** perubahan `Pins.SetRole`
     (bersihkan berkas persetujuan) ada di Task 3 bersama aturan yang
     memakainya, pembersihan pin sumber untuk `master` di Task 5.
+
+## Perubahan selama pelaksanaan
+
+Yang berbeda dari teks rencana di atas, diputuskan saat rencana
+dijalankan. Bila bagian ini dan sebuah task berbeda, bagian ini yang
+berlaku.
+
+1. **`mysql.tlsTrust` masuk kelas `allowed`** (Task 3; rencana semula:
+   `protected`). Jalur "Periksa data tertinggal" dan penyelamatan di panel
+   memanggil `mysql.tlsTrust` pada master lama yang dikarantina sebelum
+   `mysql.leftover` setiap kali master baru punya sertifikat dari panel
+   (`peerCred` → `trustCAOn`). Spek 5.2 mewajibkan jalur penyelamatan
+   berjalan tanpa persetujuan, dan layar `approve` menyuruh operator
+   menjalankan pemeriksaan itu lebih dulu. Perintah ini hanya menulis
+   berkas CA; `mysql.tlsRequest` dan `mysql.tlsInstall` tetap `protected`.
+   Jumlah menjadi 25 `allowed`, 17 `protected`, 5 `role-refused`.
+   Risiko tersisa: panel yang dibobol bisa mengganti berkas CA di server
+   yang dikarantina (berkas yang sama dengan `ssl_ca` MySQL setelah
+   sertifikat dipasang), sehingga pemeriksaan TLS di server itu bisa rusak
+   atau melemah. Panel sendiri penerbit CA itu, jadi tidak ada kemampuan
+   baru, dan data tidak bisa dihapus lewat perintah ini.
+2. **Urutan task: 1, 2, 4, 3, 5 … 12.** Task 3 juga mengubah pembantu e2e
+   yang membangun ulang master lama supaya menyetujui lebih dulu (lewat
+   `EnsureRebuildRequest` dan `RunCLI approve`); tanpa itu e2e merah dari
+   Task 3 sampai Task 11.
+3. **Pemeriksaan persetujuan diperketat setelah pemeriksaan Task 2**
+   (commit terpisah di Task 4): pin sumber dibaca sekali; persetujuan
+   dengan `expires` sebelum `approved` ditolak ("berkas persetujuan tidak
+   bisa dipakai: waktu habis lebih awal dari waktu persetujuan"); teks
+   "server ini tidak punya sumber replikasi yang dipin"; galat DNS bertipe
+   `SourceLookupError`.
+4. **`approve` membatalkan persetujuan bila langkah sesudah penulisan
+   gagal** (Task 4). Teks baru B13 "Gagal menghapus permintaan: %v;
+   persetujuan dibatalkan. Jalankan perintah ini lagi." dan B14 "Berkas
+   persetujuan tidak bisa dihapus (%v), jadi persetujuan mungkin tetap
+   berlaku. Batalkan dengan: sudo dbpanel agent approve batal". B7 hanya
+   untuk galat DNS; galat lain dari pencarian alamat memakai B9. Sumber
+   yang ditulis ke persetujuan adalah sumber yang ditampilkan.
+5. **Baris usage `set-role … [--ya]`** masuk bersama Task 5, bukan Task 4.
 
 ## Catatan untuk pelaksana
 
