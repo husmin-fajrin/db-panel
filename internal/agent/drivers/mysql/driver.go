@@ -64,6 +64,13 @@ type Driver struct {
 
 	pins *Pins // nil without PinDir; set by Register
 
+	// approvalMu: one EnsureRebuildRequest at a time in this process
+	// (strict.go); also guards approvalLogged, the approval whose first
+	// use is logged already (Source+"|"+Approved in RFC3339Nano). Never
+	// held across a DNS lookup or a handler.
+	approvalMu     sync.Mutex
+	approvalLogged string
+
 	// KillDumpLocks: when each dump session was first seen holding the
 	// global read lock.
 	lockMu   sync.Mutex
@@ -169,6 +176,10 @@ func (d *Driver) Register(reg *commands.Registry) {
 		p.logger = d.Logger
 		d.pins = p
 	}
+	// Strict mode on a quarantined server (strict.go).
+	if d.pins != nil {
+		reg.SetGate(d.strictGate)
+	}
 	d.registerStatus(reg)
 	d.registerConnect(reg)
 	d.registerPreflight(reg)
@@ -188,6 +199,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerLeftover(reg)
 	d.registerSalvage(reg)
 	d.registerRecordReplicas(reg)
+	d.registerRebuildApproval(reg)
 }
 
 // Pins is the driver's pinned role and source; nil without PinDir. The

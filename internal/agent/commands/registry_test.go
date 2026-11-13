@@ -196,3 +196,59 @@ func TestLocalActionErrorCode(t *testing.T) {
 		t.Errorf("message = %q, want %q", resp.Error.Message, want)
 	}
 }
+
+// TestGateRunsBeforeHandler: the gate is asked after the local policy and
+// before the handler; its error is the command's answer, mapped like a
+// handler's, and a panicking gate is recovered.
+func TestGateRunsBeforeHandler(t *testing.T) {
+	reg := NewRegistry()
+	ran := 0
+	reg.Register("x", func(context.Context, json.RawMessage) (any, error) { ran++; return "ok", nil })
+	reg.Register("y", func(context.Context, json.RawMessage) (any, error) { ran++; return "ok", nil })
+	reg.Deny("y")
+	var asked []string
+	var gateErr error
+	reg.SetGate(func(_ context.Context, cmd string) error {
+		asked = append(asked, cmd)
+		if gateErr == errPanic {
+			panic("gerbang")
+		}
+		return gateErr
+	})
+	dispatch := func() proto.Response { return reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "x"}) }
+
+	if resp := dispatch(); !resp.OK || ran != 1 {
+		t.Fatalf("open gate: resp %+v, ran %d", resp, ran)
+	}
+	for _, c := range []struct {
+		err  error
+		code string
+	}{
+		{&LocalActionError{Msg: "setujui dulu"}, proto.CodeNeedsLocalApproval},
+		{&ParamError{Msg: "salah"}, proto.CodeBadParams},
+		{errors.New("rusak"), proto.CodeInternal},
+		{errPanic, proto.CodeInternal},
+	} {
+		gateErr = c.err
+		if resp := dispatch(); resp.OK || resp.Error == nil || resp.Error.Code != c.code {
+			t.Errorf("gate error %v: resp %+v, want %s", c.err, resp, c.code)
+		}
+	}
+	if ran != 1 {
+		t.Errorf("handler ran %d times, want only with the open gate", ran)
+	}
+	// The local policy answers first; unknown commands never reach the gate.
+	gateErr = nil
+	if resp := reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "y"}); resp.OK || resp.Error.Message != ErrDenied {
+		t.Errorf("denied command: %+v", resp)
+	}
+	reg.Dispatch(context.Background(), proto.Request{ID: "1", Cmd: "z"})
+	for _, cmd := range asked {
+		if cmd != "x" {
+			t.Errorf("gate asked about %s", cmd)
+		}
+	}
+}
+
+// errPanic makes TestGateRunsBeforeHandler's gate panic.
+var errPanic = errors.New("panic")

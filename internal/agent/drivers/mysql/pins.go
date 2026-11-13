@@ -178,9 +178,14 @@ func sourceClaimRefusal(pinned, asked string) error {
 // unsourcedQuarantineRefusal is a rebuild command on a quarantined server
 // without a source pin: it may be rebuilt only from its new master.
 func unsourcedQuarantineRefusal(cmd string) error {
-	return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
-		"server ini dipin sebagai quarantined tanpa sumber yang dipin; perintah %s ditolak. Pin master barunya dulu di server ini: sudo dbpanel agent set-source <host:port>",
-		cmd)}}
+	return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: unsourcedQuarantineText(cmd)}}
+}
+
+// unsourcedQuarantineText is the text of unsourcedQuarantineRefusal; strict
+// mode answers it with needs_local_approval (strictGate).
+func unsourcedQuarantineText(cmd string) string {
+	return fmt.Sprintf("server ini dipin sebagai quarantined tanpa sumber yang dipin; perintah %s ditolak. "+
+		"Pin master barunya dulu di server ini: sudo dbpanel agent set-source <host:port>", cmd)
 }
 
 // lockRefusal is setReadOnly{off} on a master under the promote lock.
@@ -422,7 +427,8 @@ func (p *Pins) Report() (role, source, pinErr string) {
 // and the source pin. It is the local CLI's: panel commands only ever pin
 // an unassigned server (claimRole) or a rebuilt quarantined one
 // (settleRebuilt). It does not need the current files to
-// be valid, so it also repairs them.
+// be valid, so it also repairs them. It removes the rebuild request and
+// approval first, whatever the role (ClearRebuild).
 func (p *Pins) SetRole(role string) error {
 	if !validRole(role) {
 		return fmt.Errorf("peran harus master, replica, quarantined atau unassigned: %q", role)
@@ -430,6 +436,11 @@ func (p *Pins) SetRole(role string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	defer p.forget()
+	// A rebuild approval (and its request) never outlives root's decision
+	// on the role; the role is not written while one is left.
+	if err := p.ClearRebuild(); err != nil {
+		return err
+	}
 	p.settled = true
 	if role == roleUnassigned {
 		return p.removePins()

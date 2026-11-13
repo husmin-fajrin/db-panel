@@ -258,6 +258,7 @@ func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
 	ev := &eventLog{}
 	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir, Events: ev}
 	d.Register(rig.reg)
+	approveRebuild(t, dir, "127.0.0.1:"+strconv.Itoa(master.Port))
 	tick := func() {
 		if err := d.GuardTick(context.Background(), time.Now()); err != nil {
 			t.Errorf("GuardTick: %v", err)
@@ -673,6 +674,7 @@ func TestRebuildConfigureAndCloneKeepReadOnly(t *testing.T) {
 	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir}
 	d.Register(rig.reg)
 	r := &pinRig{t: t, reg: rig.reg, d: d}
+	approveRebuild(t, dir, "127.0.0.1:"+strconv.Itoa(master.Port))
 	locked := func(when string) {
 		t.Helper()
 		if sro, ro := readOnly(t, rootDB(t, target)); !sro || !ro {

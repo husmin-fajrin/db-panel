@@ -736,3 +736,18 @@ type SalvageReadResult struct {
 type SalvageDeleteParams struct {
 	Name string `json:"name"`
 }
+
+// RebuildApprovalResult is the answer to mysql.rebuildApproval (no
+// parameters): whether root's approval on the server is needed for its
+// rebuild, and the approval that holds or the code of the request root
+// approves.
+type RebuildApprovalResult struct {
+	Required     bool   `json:"required"`                // the role pin is quarantined: protected commands need an approval
+	Approved     bool   `json:"approved"`                // an approval holds
+	RemainingSec int64  `json:"remaining_sec,omitempty"` // approved: until Expires; else until the request's code expires
+	AgeSec       int64  `json:"age_sec,omitempty"`       // approved: since Approved
+	Code         string `json:"code,omitempty"`          // not approved: the request's code
+	Source       string `json:"source,omitempty"`        // host:port the approval is or would be for
+	Addr         string `json:"addr,omitempty"`          // approved: the approved address
+	Invalid      string `json:"invalid,omitempty"`       // why an approval on file does not hold
+}

@@ -36,6 +36,10 @@ type LocalActionError struct{ Msg string }
 
 func (e *LocalActionError) Error() string { return e.Msg }
 
+// Gate is asked before the handler of every registered command (after the
+// local policy); a non-nil error is the command's answer.
+type Gate func(ctx context.Context, cmd string) error
+
 // ErrDenied is the answer to a command the local policy disables.
 const ErrDenied = "perintah dinonaktifkan oleh kebijakan lokal server ini"
 
@@ -44,7 +48,17 @@ type Registry struct {
 	mu       sync.RWMutex
 	handlers map[string]Handler
 	denied   map[string]bool // disabled by the host's local policy
+	gate     Gate            // asked before every handler; nil: none
 	logger   *slog.Logger    // one line per command; nil: none
+}
+
+// SetGate makes Dispatch ask g before running a registered command's
+// handler, after the local policy; an error from g is answered like a
+// handler's and the handler does not run.
+func (r *Registry) SetGate(g Gate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gate = g
 }
 
 // Deny disables names: Dispatch answers them with ErrDenied without running
@@ -102,6 +116,7 @@ func (r *Registry) Dispatch(ctx context.Context, req proto.Request) (resp proto.
 	r.mu.RLock()
 	h, ok := r.handlers[req.Cmd]
 	denied := r.denied[req.Cmd]
+	gate := r.gate
 	logger := r.logger
 	r.mu.RUnlock()
 	if logger != nil {
@@ -121,23 +136,35 @@ func (r *Registry) Dispatch(ctx context.Context, req proto.Request) (resp proto.
 		}
 	}()
 
+	if gate != nil {
+		if err := gate(ctx, req.Cmd); err != nil {
+			return errorResponse(req.ID, err)
+		}
+	}
 	result, err := h(ctx, req.Params)
 	if err != nil {
-		var lae *LocalActionError
-		if errors.As(err, &lae) {
-			return proto.ErrorResponse(req.ID, proto.CodeNeedsLocalApproval, lae.Msg)
-		}
-		var pe *ParamError
-		if errors.As(err, &pe) {
-			return proto.ErrorResponse(req.ID, proto.CodeBadParams, pe.Msg)
-		}
-		return proto.ErrorResponse(req.ID, proto.CodeInternal, err.Error())
+		return errorResponse(req.ID, err)
 	}
 	out, err := proto.NewResponse(req.ID, result)
 	if err != nil {
 		return proto.ErrorResponse(req.ID, proto.CodeInternal, err.Error())
 	}
 	return out
+}
+
+// errorResponse answers a handler's or the gate's error: a LocalActionError
+// with needs_local_approval, a ParamError with bad_params, anything else
+// as an internal error.
+func errorResponse(id string, err error) proto.Response {
+	var lae *LocalActionError
+	if errors.As(err, &lae) {
+		return proto.ErrorResponse(id, proto.CodeNeedsLocalApproval, lae.Msg)
+	}
+	var pe *ParamError
+	if errors.As(err, &pe) {
+		return proto.ErrorResponse(id, proto.CodeBadParams, pe.Msg)
+	}
+	return proto.ErrorResponse(id, proto.CodeInternal, err.Error())
 }
 
 // pollCommands are read-only commands the panel polls while it waits;

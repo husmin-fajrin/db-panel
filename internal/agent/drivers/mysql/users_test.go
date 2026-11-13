@@ -713,13 +713,18 @@ func TestDumpAccountCannotHoldGlobalLock(t *testing.T) {
 // TestReplicaCreatesReplUserOnceStrict: a pinned replica or quarantined
 // server (a promotion candidate preparing its own replicas) makes the
 // replication account under the master's rule: only dbpanel_repl@'%',
-// and only while no dbpanel_repl row exists at any host.
+// and only while no dbpanel_repl row exists at any host. The quarantined
+// server has root's rebuild approval (strict mode protects the command).
 func TestReplicaCreatesReplUserOnceStrict(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	db := rootDB(t, inst)
 	for _, role := range []string{"replica", "quarantined"} {
 		execAll(t, db, "DROP USER IF EXISTS 'dbpanel_repl'@'%'", "DROP USER IF EXISTS 'dbpanel_repl'@'10.9.9.9'")
-		r := newPinRig(t, inst.Host(), pinDir(t, role, "10.0.0.1:3306"))
+		dir := pinDir(t, role, "10.0.0.1:3306")
+		r := newPinRig(t, inst.Host(), dir)
+		if role == "quarantined" {
+			approveRebuild(t, dir, "10.0.0.1:3306")
+		}
 		for _, c := range replUserRefused {
 			wantRefused(t, role+" "+c.cmd, r.dispatch(c.cmd, c.params), "dipin sebagai "+role, "perintah mysql.createReplUser ditolak")
 		}

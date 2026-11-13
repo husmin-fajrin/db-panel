@@ -435,7 +435,8 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // dumpFrom or cloneFrom from that source succeeded in this agent run
 // (loadedFrom); without it the pin stays quarantined and the agent logs
 // why, so a configureReplication alone never ends a quarantine with the
-// leftover data unchecked.
+// leftover data unchecked. Once settled, the rebuild request and approval
+// are removed.
 func (d *Driver) settleRebuilt(host string, port int) error {
 	d.promoteMu.Lock()
 	defer d.promoteMu.Unlock()
@@ -455,5 +456,10 @@ func (d *Driver) settleRebuilt(host string, port int) error {
 	}
 	d.quarantinePending = false
 	d.log("quarantine ended: rebuilt as a replica of its pinned source", "source", net.JoinHostPort(host, fmt.Sprint(port)))
+	// The approval was for this rebuild; the quarantine ends whether or
+	// not its files go (a replica never asks for them).
+	if err := d.pins.ClearRebuild(); err != nil && d.Logger != nil {
+		d.Logger.Warn("rebuild approval files not removed after the rebuild", "err", err)
+	}
 	return nil
 }

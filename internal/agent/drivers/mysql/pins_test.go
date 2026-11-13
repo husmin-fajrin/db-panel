@@ -42,6 +42,24 @@ func pinDir(t *testing.T, role, source string) string {
 	return dir
 }
 
+// approveRebuild writes a valid approval for source (an IP host) as
+// "approve" would: the approval for the source and its address, and no
+// request left behind.
+func approveRebuild(t *testing.T, dir, source string) {
+	t.Helper()
+	host, _, err := mysql.ParseSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := mustPins(t, dir)
+	if err := p.WriteRebuildApproval(mysql.NewRebuildApproval(source, host, time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RemoveRebuildRequest(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // pinFile is the content of dir/name without the newline; "" when absent.
 func pinFile(t *testing.T, dir, name string) string {
 	t.Helper()
@@ -761,11 +779,14 @@ var promoteCommands = []string{"mysql.lockForPromote", "mysql.promote", "mysql.r
 // TestQuarantinedRefusalTable: a quarantined server (the old master after
 // a promotion) refuses what a replica refuses plus the promotion commands;
 // its rebuild path is allowed only toward the pinned source, and it can be
-// released like a replica.
+// released like a replica. Root's approval lets strict mode pass every
+// command to the pins (TestQuarantinedStrictModeRefusesProtected covers
+// the refusals without it).
 func TestQuarantinedRefusalTable(t *testing.T) {
 	const src = "10.0.0.1:3306"
 	dir := pinDir(t, "quarantined", src)
 	r := newPinRig(t, nil, dir)
+	approveRebuild(t, dir, src)
 	for _, c := range append(replicaRefused, replUserRefused...) {
 		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params),
 			"server ini dipin sebagai quarantined", "perintah "+c.cmd+" ditolak", "sudo dbpanel agent set-role <peran>")
@@ -875,14 +896,10 @@ func TestNoPanelPathFromQuarantinedToWritable(t *testing.T) {
 	dir := pinDir(t, "quarantined", "10.0.0.1:3306")
 	r := newPinRig(t, inst.Host(), dir)
 	wantLocalRefusal(t, "releaseRole", r.dispatch("mysql.releaseRole", nil), "quarantined")
-	for what, resp := range map[string]proto.Response{
-		"setReadOnly off":  r.dispatch("mysql.setReadOnly", proto.ReadOnlyParams{On: false}),
-		"configure master": r.dispatch("mysql.configure", proto.ConfigureParams{Role: "master"}),
-	} {
-		if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "quarantined") {
-			t.Errorf("%s = %+v, want refused naming quarantined", what, resp)
-		}
-	}
+	wantRefused(t, "setReadOnly off", r.dispatch("mysql.setReadOnly", proto.ReadOnlyParams{On: false}), "quarantined")
+	// configure is protected by strict mode: refused until root approves.
+	wantLocalRefusal(t, "configure master", r.dispatch("mysql.configure", proto.ConfigureParams{Role: "master"}),
+		"dikarantina (quarantined)", "mysql.configure butuh persetujuan root")
 	var sro int
 	if err := db.QueryRow("SELECT @@global.super_read_only").Scan(&sro); err != nil || sro != 1 {
 		t.Errorf("super_read_only = %d, %v; want 1", sro, err)
@@ -1015,8 +1032,9 @@ func TestSetQuarantinedAndPromoteToMaster(t *testing.T) {
 
 // TestQuarantinedWithoutSourceFailsClosed: a quarantined server with no
 // source pin refuses dropDatabases and every command that names a source,
-// whatever host it names; SetQuarantined writes the source before the
-// role, so an interrupted quarantine never leaves this state.
+// whatever host it names, until root pins one (strict mode refuses them
+// first, with needs_local_approval); SetQuarantined writes the source
+// before the role, so an interrupted quarantine never leaves this state.
 func TestQuarantinedWithoutSourceFailsClosed(t *testing.T) {
 	dir := pinDir(t, "quarantined", "")
 	r := newPinRig(t, nil, dir)
@@ -1026,7 +1044,7 @@ func TestQuarantinedWithoutSourceFailsClosed(t *testing.T) {
 		{"mysql.cloneFrom", validSnapshot},
 		{"mysql.configureReplication", validSource},
 	} {
-		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params), "quarantined tanpa sumber yang dipin",
+		wantLocalRefusal(t, c.cmd, r.dispatch(c.cmd, c.params), "quarantined tanpa sumber yang dipin",
 			"perintah "+c.cmd+" ditolak", "sudo dbpanel agent set-source")
 	}
 	if err := r.d.Pins().Allow("mysql.dumpFrom", validSnapshot); !errors.Is(err, mysql.ErrSourcePinned) {
@@ -1034,10 +1052,12 @@ func TestQuarantinedWithoutSourceFailsClosed(t *testing.T) {
 	}
 	// Commands that touch no data and name no source are the table's.
 	wantPastPins(t, "stopReplica", r.dispatch("mysql.stopReplica", nil))
-	// Once root pins the new master, the rebuild toward it is allowed.
+	// Once root pins the new master and approves, the rebuild toward it is
+	// allowed.
 	if err := mustPins(t, dir).SetSource("10.0.0.1", 3306); err != nil {
 		t.Fatal(err)
 	}
+	approveRebuild(t, dir, "10.0.0.1:3306")
 	wantPastPins(t, "dumpFrom the pinned source", r.dispatch("mysql.dumpFrom", validSnapshot))
 	wantPastPins(t, "dropDatabases with a source pin", r.dispatch("mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}))
 
@@ -1160,6 +1180,7 @@ func TestConfigureReplicationEndsQuarantine(t *testing.T) {
 	d := &mysql.Driver{Host: inst.Host(), PinDir: dir, Logger: slog.New(slog.NewTextHandler(&logBuf, nil))}
 	d.Register(reg)
 	r := &pinRig{t: t, reg: reg, d: d}
+	approveRebuild(t, dir, src)
 
 	other := validSource
 	other.Host = "10.0.0.2"
