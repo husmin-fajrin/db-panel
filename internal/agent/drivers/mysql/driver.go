@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
@@ -102,7 +103,11 @@ type Driver struct {
 	// The promote lock (promote_lock.go): lockForPromote, unlockPromote,
 	// quarantine, repoint and the guard run one at a time.
 	promoteMu sync.Mutex
-	guard     promoteGuard
+	// startState is the start-result state of this agent run
+	// (start_result.go): published by writers holding promoteMu, read by
+	// the health snapshot without a lock; nil until first used.
+	startState atomic.Pointer[startState]
+	guard      promoteGuard
 	// quarantinePending: a quarantine was written while MySQL was down;
 	// the guard reports it once MySQL answers (guardQuarantined).
 	quarantinePending bool

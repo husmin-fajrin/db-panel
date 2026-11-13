@@ -34,3 +34,11 @@ func (s *Store) SetStartMark(serverID int64, kind, startID string) error {
 	}
 	return nil
 }
+
+// DeleteStartMark removes the mark of (serverID, kind), if any.
+func (s *Store) DeleteStartMark(serverID int64, kind string) error {
+	if _, err := s.db.Exec(`DELETE FROM start_marks WHERE server_id = ? AND kind = ?`, serverID, kind); err != nil {
+		return fmt.Errorf("delete start mark: %w", err)
+	}
+	return nil
+}

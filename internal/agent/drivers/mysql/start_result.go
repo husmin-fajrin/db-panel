@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
@@ -134,42 +135,113 @@ func (d *Driver) startResultPath() string {
 	return StartResultFile
 }
 
-// recordStartResult keeps the start judged at r.Decided (bypassed: it did
-// not use the lock) in the file: r replaces the worst start when it is as
-// bad as or worse than the stored one (an equal rank replaces it: the
-// newer decision wins) or when the file holds nothing readable, and the
-// kinds of the file take the start (judgeKinds).
-func (d *Driver) recordStartResult(r startResult, bypassed bool) error {
-	path := d.startResultPath()
-	var stored startResult
-	ok, err := readJSON(path, &stored)
-	worst := r
-	switch {
-	case err != nil:
-		d.warn("stored start result unreadable; replaced", "file", path, "err", err)
-		stored = startResult{}
-	case ok && startResultRank(stored.Result) == 0:
-		d.warn("stored start result has an unknown result; replaced", "file", path, "result", stored.Result)
-	case ok && startResultRank(r.Result) < startResultRank(stored.Result):
-		worst = stored
+// startState is the start-result state of the running agent: what the
+// snapshot reports and the file persists. A value is never modified once
+// published (Driver.startState); a writer, under promoteMu, publishes a new
+// one. unsaved: the file does not hold rec yet (a write or a removal
+// failed); every guard round retries it (retryStartResult). warned: a
+// failed retry of this unsaved state was logged.
+type startState struct {
+	rec     startResult // Result "": nothing judged in this quarantine (no file)
+	unsaved bool
+	warned  bool
+}
+
+// currentStartState is the published state, loaded from the file on first
+// use (an agent start). The snapshot calls it without promoteMu: the load
+// is published only if nothing was published before (CompareAndSwap from
+// nil), so it never overwrites a writer's state.
+func (d *Driver) currentStartState() *startState {
+	if st := d.startState.Load(); st != nil {
+		return st
 	}
-	worst.Kinds = judgeKinds(stored.Kinds, r.Result, bypassed, r.Decided, r.InitFile)
+	st := &startState{}
+	path := d.startResultPath()
+	var r startResult
+	switch ok, err := readJSON(path, &r); {
+	case err != nil:
+		d.warn("stored start result unreadable; ignored", "file", path, "err", err)
+	case ok:
+		st.rec = r
+	}
+	if d.startState.CompareAndSwap(nil, st) {
+		return st
+	}
+	return d.startState.Load()
+}
+
+// saveStartResult makes the file hold rec: written, or removed for an
+// empty rec.
+func (d *Driver) saveStartResult(rec startResult) error {
+	path := d.startResultPath()
+	if rec.Result == "" && len(rec.Kinds) == 0 {
+		return removeFile(path)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return writeJSON(path, worst)
+	return writeJSON(path, rec)
 }
 
-// StartResult is the stored worst start for the health snapshot at now: nil
-// unless the role pin is quarantined and the file reads.
+// setStartResult publishes rec, then persists it; a failed write leaves
+// the state unsaved (retried each guard round) and is returned. The caller
+// holds promoteMu.
+func (d *Driver) setStartResult(rec startResult) error {
+	d.startState.Store(&startState{rec: rec, unsaved: true})
+	if err := d.saveStartResult(rec); err != nil {
+		return err
+	}
+	d.startState.Store(&startState{rec: rec})
+	return nil
+}
+
+// recordStartResult keeps the start judged at r.Decided (bypassed: it did
+// not use the lock): r replaces the worst start when it is as bad as or
+// worse than the kept one (an equal rank replaces it: the newer decision
+// wins) or when nothing readable is kept, and the kinds take the start
+// (judgeKinds). The state is published first, then written. The caller
+// holds promoteMu.
+func (d *Driver) recordStartResult(r startResult, bypassed bool) error {
+	stored := d.currentStartState().rec
+	worst := r
+	switch {
+	case stored.Result == "":
+	case startResultRank(stored.Result) == 0:
+		d.warn("stored start result has an unknown result; replaced", "file", d.startResultPath(), "result", stored.Result)
+	case startResultRank(r.Result) < startResultRank(stored.Result):
+		worst = stored
+	}
+	worst.Kinds = judgeKinds(maps.Clone(stored.Kinds), r.Result, bypassed, r.Decided, r.InitFile)
+	return d.setStartResult(worst)
+}
+
+// retryStartResult writes a state whose write failed; a failure is warned
+// once per state, a success logged. The caller holds promoteMu.
+func (d *Driver) retryStartResult() {
+	st := d.startState.Load()
+	if st == nil || !st.unsaved {
+		return
+	}
+	if err := d.saveStartResult(st.rec); err != nil {
+		if !st.warned {
+			d.warn("start result still not kept on disk; retried every guard round", "err", err)
+			d.startState.Store(&startState{rec: st.rec, unsaved: true, warned: true})
+		}
+		return
+	}
+	d.startState.Store(&startState{rec: st.rec})
+	d.log("start result kept on disk after an earlier failure")
+}
+
+// StartResult is the worst start and the state of the starts for the
+// health snapshot at now: nil unless the role pin is quarantined and a
+// start with a known result is kept. It reads the published state (no lock,
+// no file work once loaded).
 func (d *Driver) StartResult(now time.Time) *proto.StartResultState {
 	if !d.pins.RoleIs(roleQuarantined) {
 		return nil
 	}
-	var r startResult
-	if ok, err := readJSON(d.startResultPath(), &r); err != nil || !ok {
-		return nil
-	}
+	r := d.currentStartState().rec
 	if startResultRank(r.Result) == 0 {
 		return nil
 	}
@@ -204,9 +276,19 @@ func cutInitFile(s string) string {
 	return s[:n]
 }
 
-// clearStartResult removes the file; a failure is warned.
+// resetStartResult empties the state and removes the file (nothing to do
+// when the state is empty and saved); a failed removal leaves the state
+// unsaved, retried each guard round. The caller holds promoteMu.
+func (d *Driver) resetStartResult() error {
+	if st := d.startState.Load(); st != nil && !st.unsaved && st.rec.Result == "" && len(st.rec.Kinds) == 0 {
+		return nil
+	}
+	return d.setStartResult(startResult{})
+}
+
+// clearStartResult is resetStartResult with a failure warned.
 func (d *Driver) clearStartResult() {
-	if err := removeFile(d.startResultPath()); err != nil {
+	if err := d.resetStartResult(); err != nil {
 		d.warn("start result file not removed", "err", err)
 	}
 }
@@ -220,7 +302,7 @@ func (d *Driver) clearStartResult() {
 // then).
 func (d *Driver) setQuarantined(newSource, addr string) error {
 	if role, rerr := d.pins.roleErr(); rerr == nil && role != roleQuarantined {
-		if err := removeFile(d.startResultPath()); err != nil && d.Logger != nil {
+		if err := d.resetStartResult(); err != nil && d.Logger != nil {
 			d.Logger.Error("start result of an earlier quarantine not removed", "err", err)
 		}
 	}

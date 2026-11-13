@@ -358,10 +358,13 @@ func TestStartFailedThenOkKeepsFailed(t *testing.T) {
 
 func TestStartResultSnapshotValidatesFile(t *testing.T) {
 	dir := pinDir(t, "quarantined", guardCandidateKey)
-	r := newPinRig(t, nil, dir)
-	path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
+	var r *pinRig
+	// Each file is read by a new agent: a running one reads the file once,
+	// at its start.
 	write := func(rec mysql.StartResultRecord) {
 		t.Helper()
+		r = newPinRig(t, nil, dir)
+		path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
 		b, _ := json.Marshal(rec)
 		if err := os.WriteFile(path, b, 0o644); err != nil {
 			t.Fatal(err)

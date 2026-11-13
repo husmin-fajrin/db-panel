@@ -574,18 +574,27 @@ func (m *Monitor) closeAlert(serverID int64, kind, reason string) {
 // closeAlertLocked is closeAlert with mu held; it appends to ups what it
 // closed.
 func (m *Monitor) closeAlertLocked(serverID int64, kind, reason string, ups []alertUpdate) []alertUpdate {
+	ups, _ = m.closeAlertOKLocked(serverID, kind, reason, ups)
+	return ups
+}
+
+// closeAlertOKLocked is closeAlertLocked that also says whether no alert
+// of kind is open for serverID afterwards (false when reading or closing
+// failed).
+func (m *Monitor) closeAlertOKLocked(serverID int64, kind, reason string, ups []alertUpdate) ([]alertUpdate, bool) {
 	a, err := m.st.GetOpenAlert(kind, serverID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			m.log.Warn("read open alert", "server_id", serverID, "kind", kind, "err", err)
+			return ups, false
 		}
-		return ups
+		return ups, true
 	}
 	if err := m.st.CloseAlertWithReason(a.ID, m.now(), reason); err != nil {
 		m.log.Warn("close alert", "server_id", serverID, "kind", kind, "err", err)
-		return ups
+		return ups, false
 	}
-	return append(ups, alertUpdate{a.ID, kind, serverID, false})
+	return append(ups, alertUpdate{a.ID, kind, serverID, false}), true
 }
 
 // handleStartEvent takes the start lock guard's events of a quarantined
@@ -680,6 +689,8 @@ const (
 	maxStartAge = 10 * 365 * 24 * 3600 // seconds
 	// maxStartIDLen bounds a start id; a longer one counts as none.
 	maxStartIDLen = 64
+	// maxStartKinds bounds the entries of a start state looked at.
+	maxStartKinds = 16
 )
 
 // cleanStartID is id, or "" when it is empty or longer than maxStartIDLen
@@ -761,20 +772,26 @@ func (m *Monitor) markStart(serverID int64, kind, startID string) {
 // kind, from an agent that reports it). It acts only when the server
 // resolves as quarantined. For each entry, ignoring unknown kinds, entries
 // after the first of a kind and entries without a usable id, in order:
-//  1. over (not late): the alert of the kind closes; mark = id;
+//  1. over (not late): nothing when this over entry was dealt with
+//     already (no store query); else the alert of the kind closes and,
+//     once none is open, mark = id;
 //  2. id is the mark of the kind: nothing (no store query);
 //  3. failed in a report that shows MySQL running: nothing, no mark (the
 //     agent has not judged the new start yet);
 //  4. decided before the promotion's start minus startResultSlack (an
 //     earlier quarantine): nothing, no mark;
 //  5. an alert of the kind is open: it now stands for this start (a
-//     blocked one takes this entry's lock file); mark = id;
+//     blocked one takes this entry's lock file); mark = id. A late alert
+//     that "Periksa data tertinggal" already answered (the check is later
+//     than its opening, as closeStartAlerts judges) is closed first and
+//     the entry goes on to 6 and 7: it is a newer start;
 //  6. late, and a "Periksa data tertinggal" result is later than decided:
 //     mark = id, nothing opens;
 //  7. the alert opens; only if it did, mark = id.
 //
-// A failed mark write may show a start twice; a start is never accounted
-// without its alert. The caller holds mu.
+// At most maxStartKinds entries are looked at. A failed mark write may
+// show a start twice; a start is never accounted without its alert. The
+// caller holds mu.
 func (m *Monitor) startResultFromSnapshot(id int64, snap *proto.HealthSnapshot, at time.Time) []alertUpdate {
 	sr := snap.StartResult
 	if sr == nil || len(sr.Kinds) == 0 {
@@ -786,7 +803,7 @@ func (m *Monitor) startResultFromSnapshot(id int64, snap *proto.HealthSnapshot, 
 	}
 	var ups []alertUpdate
 	seen := map[string]bool{}
-	for _, e := range sr.Kinds {
+	for _, e := range sr.Kinds[:min(len(sr.Kinds), maxStartKinds)] {
 		kind, msg, overReason, ok := startKindAlert(e)
 		if !ok || seen[kind] {
 			continue
@@ -806,8 +823,17 @@ func (m *Monitor) startResultFromSnapshot(id int64, snap *proto.HealthSnapshot, 
 func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSnapshot, at time.Time,
 	e proto.StartKindState, kind, msg, overReason, startID string, ups []alertUpdate) []alertUpdate {
 	if e.Over && kind != KindMasterStartLate {
-		ups = m.closeAlertLocked(id, kind, overReason, ups)
-		m.markStart(id, kind, startID)
+		if s.overDone[kind] == startID {
+			return ups
+		}
+		ups, closed := m.closeAlertOKLocked(id, kind, overReason, ups)
+		if closed {
+			m.markStart(id, kind, startID)
+			if s.overDone == nil {
+				s.overDone = map[string]string{}
+			}
+			s.overDone[kind] = startID
+		}
 		return ups
 	}
 	if m.accounted(id, s, kind, startID) {
@@ -828,6 +854,14 @@ func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSna
 	}
 	a, err := m.st.GetOpenAlert(kind, id)
 	switch {
+	case err == nil && kind == KindMasterStartLate && m.leftoverCheckedAfter(a):
+		// The open alert is about a start the check already answered;
+		// this entry is a newer one.
+		if err := m.st.CloseAlertWithReason(a.ID, m.now(), leftoverCheckedReason); err != nil {
+			m.log.Warn("close alert", "server_id", id, "kind", kind, "err", err)
+			return ups
+		}
+		ups = append(ups, alertUpdate{a.ID, kind, id, false})
 	case err == nil:
 		if kind == KindMasterStartBlocked && a.Message != msg {
 			if err := m.st.SetAlertMessage(a.ID, msg); err != nil {
@@ -851,19 +885,25 @@ func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSna
 	return ups
 }
 
-// closeStartAlertsLeftQuarantine closes, for a report of id whose role pin
-// reads and is not quarantined (a finished rebuild, a local set-role), the
-// blocked and bypassed alerts of the starts the panel accounted for from
-// the start state (it has a mark of the kind), with the reasons the start
-// events have always used. Their end may never reach a snapshot: the agent
-// reports no start state outside quarantine. Late is left to
-// closeStartAlerts. The caller holds mu.
+// closeStartAlertsLeftQuarantine acts once per end of quarantine seen on
+// the agent's side (a finished rebuild, a local set-role): when a taken
+// report of id has a readable role pin that is not quarantined and the
+// last readable pin was quarantined (or is not known: a panel restart),
+// it closes the blocked and bypassed alerts of the starts the panel
+// accounted for from the start state (it has a mark of the kind), with
+// the reasons the start events have always used, and deletes those marks
+// once no such alert is open: a new quarantine starts clean. Their end may
+// never reach a snapshot: the agent reports no start state outside
+// quarantine. Late is left to closeStartAlerts. The caller holds mu.
 func (m *Monitor) closeStartAlertsLeftQuarantine(id int64, snap *proto.HealthSnapshot) []alertUpdate {
-	if snap.RolePin == "" || snap.RolePin == pinQuarantined {
+	pin := snap.RolePin
+	s, ok := m.servers[id]
+	if pin == "" || !ok {
 		return nil
 	}
-	s, ok := m.servers[id]
-	if !ok {
+	prev := s.startPin
+	s.startPin = pin
+	if pin == pinQuarantined || (prev != "" && prev != pinQuarantined) {
 		return nil
 	}
 	var ups []alertUpdate
@@ -871,9 +911,19 @@ func (m *Monitor) closeStartAlertsLeftQuarantine(id int64, snap *proto.HealthSna
 		{KindMasterStartBlocked, startBlockedOverReason},
 		{KindMasterStartBypassed, ""},
 	} {
-		if _, marked := m.startMark(id, s, k.kind); marked {
-			ups = m.closeAlertLocked(id, k.kind, k.reason, ups)
+		if _, marked := m.startMark(id, s, k.kind); !marked {
+			continue
 		}
+		var closed bool
+		if ups, closed = m.closeAlertOKLocked(id, k.kind, k.reason, ups); !closed {
+			continue
+		}
+		if err := m.st.DeleteStartMark(id, k.kind); err != nil {
+			m.log.Warn("start marks: delete", "server_id", id, "kind", k.kind, "err", err)
+			continue
+		}
+		delete(s.marks, k.kind)
+		delete(s.overDone, k.kind)
 	}
 	return ups
 }

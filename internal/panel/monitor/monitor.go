@@ -475,9 +475,14 @@ func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	now := m.now()
 	m.mu.Lock()
 	at := now.Add(-m.reportAge(serverID, he.TakenAgoMS))
-	ups := m.ingest(serverID, he, at)
-	alerts := m.startResultFromSnapshot(serverID, &he.Snapshot, at)
-	alerts = append(alerts, m.closeStartAlertsLeftQuarantine(serverID, &he.Snapshot)...)
+	ups, taken := m.ingest(serverID, he, at)
+	var alerts []alertUpdate
+	if taken {
+		// The start state of a report older than one already taken (a
+		// forced-check reply overtaken by the event stream) is stale.
+		alerts = m.startResultFromSnapshot(serverID, &he.Snapshot, at)
+		alerts = append(alerts, m.closeStartAlertsLeftQuarantine(serverID, &he.Snapshot)...)
+	}
 	if !he.Backlog {
 		alerts = append(alerts, m.evaluate(now)...)
 	}

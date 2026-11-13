@@ -54,6 +54,13 @@ type serverState struct {
 	// marks: the start marks of the store (start_marks), loaded on first
 	// use; nil until then.
 	marks map[string]string
+	// overDone: per alert kind, the id of the over entry of the start
+	// state already dealt with (its alert closed or none open); in memory
+	// only, so a panel restart deals with it once more.
+	overDone map[string]string
+	// startPin: the last readable role pin of a report taken ("" not known
+	// yet); the role-pin close of start alerts acts on its change.
+	startPin string
 	// graceUntil: the report was loaded from the store at startup and does
 	// not count as stale before this time (one StaleAfter after startup);
 	// zero once a report arrives.
@@ -160,13 +167,13 @@ func (m *Monitor) load() {
 
 // ingest takes one report placed at at, also as a lag sample; the caller
 // holds mu. Reports older (by Seq) than the last one taken since the
-// agent connected are ignored. A backlog report is not committed: the
-// end of its batch is.
-func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthUpdate {
+// agent connected are ignored; taken is false for them. A backlog report
+// is not committed: the end of its batch is.
+func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) ([]healthUpdate, bool) {
 	s := m.state(id)
 	if he.Seq < s.lastSeq {
 		m.log.Debug("health report older than the last one; ignored", "server_id", id, "seq", he.Seq, "last", s.lastSeq)
-		return nil
+		return nil, false
 	}
 	s.lastSeq = he.Seq
 	snap := redactSnapshot(he.Snapshot)
@@ -200,9 +207,9 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 		m.derive(id, s, at, true)
 	}
 	if he.Backlog {
-		return nil
+		return nil, true
 	}
-	return m.commit(id, s, nil)
+	return m.commit(id, s, nil), true
 }
 
 // redactSnapshot is snap with MySQL's error texts censored (spec 5.12):

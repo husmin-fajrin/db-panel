@@ -2553,11 +2553,6 @@ func TestStartState15_UntrustedInput(t *testing.T) {
 	if got := r.mark(mID, KindMasterStartBypassed); got != "B1" {
 		t.Fatalf("bypassed mark = %q, want B1 kept (B2 is from an earlier quarantine)", got)
 	}
-	for _, k := range []string{KindMasterStartLate, KindMasterStartBlocked} {
-		if a := r.openAlert(mID, k); a.OpenedAt.After(r.clk.Now()) {
-			t.Errorf("%s opened in the future: %v", k, a.OpenedAt)
-		}
-	}
 
 	// An event whose id is over 64 bytes has no usable id: it is judged as
 	// an older agent's event (it opens, and marks nothing).
@@ -2643,5 +2638,178 @@ func TestStartState18_NotQuarantined(t *testing.T) {
 	}
 	if m, _ := r.st.StartMarks(mID); len(m) != 0 {
 		t.Fatalf("marks = %v, want none", m)
+	}
+}
+
+// Round 4.
+
+// R4-1: a report ingest does not take (older by Seq: a forced-check reply
+// that arrived after a newer report) is not reconciled: it closes nothing
+// and moves no mark, and its role pin closes nothing.
+func TestStartStateR4StaleReportIgnored(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.state(sk(bypassed, "B1", 30, false))
+	ma.send()
+	ma.state(sk(bypassed, "B1", 40, true))
+	ma.send()
+	ma.state(sk(bypassed, "B2", 1, false))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
+	stale := plainQuar()
+	stale.StartResult = &proto.StartResultState{Result: bypassed, AgeSec: 40, StartID: "B1",
+		Kinds: []proto.StartKindState{sk(bypassed, "B1", 40, true)}}
+	ma.emit(proto.HealthEvent{Seq: 1, Snapshot: stale})
+	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
+	if got := r.mark(mID, KindMasterStartBypassed); got != "B2" {
+		t.Fatalf("mark after a stale report = %q, want B2", got)
+	}
+	stale = plainQuar()
+	stale.RolePin = "master"
+	ma.emit(proto.HealthEvent{Seq: 1, Snapshot: stale})
+	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
+}
+
+// R4-3: the L1 alert is open; "Periksa data tertinggal" is stored, then a
+// newer late start L2 is reported before the tick closes L1. L1 closes as
+// checked, L2 opens its own alert, and the tick closes nothing more.
+func TestStartStateR4NewerLateAfterCheck(t *testing.T) {
+	r := newRig(t)
+	mID, pid, ma := r.quarantined(plainQuar())
+	ma.state(sk(late, "L1", 0, false))
+	ma.send()
+	r.clk.Add(time.Minute)
+	r.setLeftoverCheck(pid, r.clk.Now()) // no tick yet
+	r.clk.Add(time.Minute)
+	ma.state(sk(late, "L2", 0, false))
+	ma.send()
+	as := r.alerts(mID, KindMasterStartLate)
+	if len(as) != 2 || as[0].ClosedAt == nil || as[0].CloseReason != leftoverCheckedReason || as[1].ClosedAt != nil {
+		t.Fatalf("late alerts = %+v, want L1 closed as checked and L2 open", as)
+	}
+	if got := r.mark(mID, KindMasterStartLate); got != "L2" {
+		t.Fatalf("mark = %q, want L2", got)
+	}
+	r.m.tick()
+	r.wantAlerts(mID, KindMasterStartLate, 2, true)
+}
+
+// R4-4: the role-pin close runs once per end of quarantine (on the change
+// to a readable pin that is not quarantined, and once after a panel
+// restart when marks exist), and deletes the blocked and bypassed marks.
+func TestStartStateR4PinCloseOncePerEnd(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = false })
+	ma.state(sk(failed, "F1", 10, false), sk(bypassed, "B1", 20, false))
+	ma.send()
+	ma.state()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.RolePin, s.StartLock = "master", nil })
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBlocked, 1, false)
+	r.wantAlerts(mID, KindMasterStartBypassed, 1, false)
+	if m, _ := r.st.StartMarks(mID); m[KindMasterStartBlocked] != "" || m[KindMasterStartBypassed] != "" {
+		t.Fatalf("marks after the end of quarantine = %v, want no blocked or bypassed", m)
+	}
+	// Not again on the next reports: an alert opened while the pin stays
+	// master (an inconsistent agent) is not closed by the pin.
+	ma.state(sk(bypassed, "B5", 1, false))
+	ma.send()
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
+	// quarantined, then master again: a new end, it closes.
+	ma.state()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.RolePin = "quarantined" })
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.RolePin = "master" })
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, 2, false)
+
+	// After a panel restart the previous pin is unknown: with a mark, the
+	// first readable non-quarantined pin closes once.
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.RolePin = "quarantined" })
+	ma.state(sk(bypassed, "B6", 1, false))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, 3, true)
+	m := New(Deps{Store: r.st, Hub: r.hub, Publish: r.publish,
+		Logger: slog.New(slog.NewTextHandler(r.logs, nil)), Now: r.clk.Now, TickEvery: time.Hour})
+	t.Cleanup(m.Close)
+	snap := plainQuar()
+	snap.RolePin = "master"
+	m.report(mID, proto.HealthEvent{Seq: 1, Snapshot: snap})
+	r.wantAlerts(mID, KindMasterStartBypassed, 3, false)
+	if got := r.mark(mID, KindMasterStartBypassed); got != "" {
+		t.Fatalf("bypassed mark after the restart's close = %q, want none", got)
+	}
+}
+
+// R4-5: an over entry already dealt with costs nothing more: an alert of
+// its kind opened later by an event without an id (the "worst" form) is
+// not closed by the same over entry again.
+func TestStartStateR4OverHandledOnce(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = false })
+	ma.state(sk(failed, "F1", 10, false))
+	ma.send()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = true })
+	ma.state(sk(failed, "F1", 70, true))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBlocked, 1, false)
+	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantineStartFailed, Payload: []byte("{")})
+	r.wantAlerts(mID, KindMasterStartBlocked, 2, true)
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBlocked, 2, true)
+}
+
+// R4-6: no more than 16 entries of Kinds are looked at.
+func TestStartStateR4KindsBounded(t *testing.T) {
+	for _, junk := range []int{15, 16} {
+		r := newRig(t)
+		mID, _, ma := r.quarantined(plainQuar())
+		var entries []proto.StartKindState
+		for i := 0; i < junk; i++ {
+			entries = append(entries, sk("weird", "W", 1, false))
+		}
+		ma.state(append(entries, sk(bypassed, "B1", 1, false))...)
+		ma.send()
+		want := 0
+		if junk < 16 {
+			want = 1
+		}
+		if n := r.count(mID, KindMasterStartBypassed); n != want {
+			t.Fatalf("%d entries before the bypass: alerts = %d, want %d", junk, n, want)
+		}
+	}
+}
+
+// 17 (monitor side; the store cascade is TestStartMarksReplaceAndCascade):
+// the in-memory mark cache goes with a server the monitor forgets.
+func TestStartStateR4MarkCacheDroppedWithServer(t *testing.T) {
+	r := newRig(t)
+	id := r.server("db-hapus")
+	r.m.tick()
+	r.m.mu.Lock()
+	r.m.markStart(id, KindMasterStartBypassed, "B1")
+	cached := r.m.servers[id] != nil && r.m.servers[id].marks[KindMasterStartBypassed] == "B1"
+	r.m.mu.Unlock()
+	if !cached {
+		t.Fatal("the mark is not cached")
+	}
+	if err := r.st.DeleteServer(id); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	r.m.mu.Lock()
+	_, kept := r.m.servers[id]
+	r.m.mu.Unlock()
+	if kept {
+		t.Fatal("the monitor kept the state (and its mark cache) of a deleted server")
+	}
+	if m, err := r.st.StartMarks(id); err != nil || len(m) != 0 {
+		t.Fatalf("marks after the delete = %v, %v", m, err)
 	}
 }

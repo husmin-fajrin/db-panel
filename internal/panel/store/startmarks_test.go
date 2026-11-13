@@ -24,6 +24,12 @@ func TestStartMarksReplaceAndCascade(t *testing.T) {
 	if err != nil || len(m) != 2 || m["master_start_late"] != "2026-11-02T09:00:00Z" || m["master_start_blocked"] != "x" {
 		t.Fatalf("marks = %v, %v", m, err)
 	}
+	if err := s.DeleteStartMark(srv.ID, "master_start_blocked"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := s.StartMarks(srv.ID); err != nil || len(m) != 1 || m["master_start_blocked"] != "" {
+		t.Fatalf("marks after deleting blocked = %v, %v", m, err)
+	}
 	if err := s.DeleteServer(srv.ID); err != nil {
 		t.Fatal(err)
 	}

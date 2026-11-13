@@ -196,11 +196,13 @@ func TestStartKindsJudged(t *testing.T) {
 // boundary.
 func TestStartKindsSnapshotFromFile(t *testing.T) {
 	dir := pinDir(t, "quarantined", guardCandidateKey)
-	r := newPinRig(t, nil, dir)
-	path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
+	var r *pinRig
 	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	// Each file is read by a new agent (a running one reads it once).
 	write := func(s string) {
 		t.Helper()
+		r = newPinRig(t, nil, dir)
+		path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
 		if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -274,5 +276,74 @@ func TestStartKindsGoWithTheFile(t *testing.T) {
 	}
 	if _, ok := readStartResultFile(t, path); ok {
 		t.Error("start-result (with its kinds) still there after the rebuild settled")
+	}
+}
+
+// Round 4, finding 2: the state of the starts lives in the running agent;
+// a failed write of the file loses nothing while it runs. The snapshot
+// reports the start whose write failed, a later guard round writes it
+// without a new start, and a new agent then reads it from the file.
+func TestStartStateSurvivesFailedWrite(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	base := t.TempDir()
+	stateDir := filepath.Join(base, "state")
+	path := filepath.Join(stateDir, "start-result")
+	dir := pinDir(t, "quarantined", guardCandidateKey)
+	newAgent := func() *guardRig {
+		g := newGuardRig(t, inst, dir)
+		g.d.StartResultPath = path
+		return g
+	}
+	g := newAgent()
+	g.tickAt(time.Now()) // MySQL writable: a late start, L1, written
+	l1, ok := readStartResultFile(t, path)
+	if !ok || l1.Kinds[proto.QuarantineStartLate].Decided.IsZero() {
+		t.Fatalf("file after L1 = %+v (exists %v), want a late kind", l1, ok)
+	}
+	l1ID := l1.Kinds[proto.QuarantineStartLate].Decided.UTC().Format(time.RFC3339Nano)
+
+	// The file cannot be written: its directory is now a regular file.
+	if err := os.RemoveAll(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// MySQL restarts writable, without the lock line: a second late start,
+	// L2 (bypassed too), judged by the same agent.
+	execAll(t, db, "SET PERSIST read_only = OFF", "SET PERSIST super_read_only = OFF")
+	dropLine(t, inst, g.lock)
+	inst.Restart(t)
+	skip := len(g.ev.all())
+	g.tickAt(time.Now())
+	res, l2ID := newStartID(t, g.ev, skip)
+	if res != proto.QuarantineStartLate+"+bypassed" || l2ID == l1ID {
+		t.Fatalf("second start = %s %q, want a new late start (L1 %q)", res, l2ID, l1ID)
+	}
+	sr := g.d.Snapshot(context.Background()).StartResult
+	if sr == nil || sr.Result != proto.QuarantineStartLate || sr.StartID != l2ID || len(sr.Kinds) == 0 ||
+		sr.Kinds[0].Kind != proto.QuarantineStartLate || sr.Kinds[0].StartID != l2ID {
+		t.Fatalf("snapshot after the failed write = %+v, want late L2 %s (worst and kinds)", sr, l2ID)
+	}
+
+	// Writable again: the next guard round writes L2, no new start needed.
+	if err := os.Remove(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	skip = len(g.ev.all())
+	g.tickAt(time.Now().Add(10 * time.Second))
+	for _, e := range g.ev.all()[skip:] {
+		if e.Type == proto.EventQuarantineStart || e.Type == proto.EventQuarantineStartFailed {
+			t.Fatalf("the retry round judged a new start: %s", e.Type)
+		}
+	}
+	rec, ok := readStartResultFile(t, path)
+	if !ok || rec.Kinds[proto.QuarantineStartLate].Decided.UTC().Format(time.RFC3339Nano) != l2ID {
+		t.Fatalf("file after the retry = %+v (exists %v), want late L2 %s", rec, ok, l2ID)
+	}
+	if sr := newAgent().d.Snapshot(context.Background()).StartResult; sr == nil || sr.StartID != l2ID ||
+		len(sr.Kinds) == 0 || sr.Kinds[0].StartID != l2ID {
+		t.Fatalf("a new agent's snapshot = %+v, want L2 %s", sr, l2ID)
 	}
 }

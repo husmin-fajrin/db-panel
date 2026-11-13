@@ -128,6 +128,7 @@ func (d *Driver) guardStartLock(ctx context.Context, h Host, now time.Time) {
 	if role == "" {
 		return // the pins cannot be trusted: nothing changes
 	}
+	d.retryStartResult()
 	if role != roleQuarantined {
 		d.clearStartResult()
 	}
