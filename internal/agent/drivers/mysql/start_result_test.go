@@ -359,18 +359,20 @@ func TestStartResultSnapshotValidatesFile(t *testing.T) {
 	}
 }
 
+// The dispatch path refuses an untrusted pin before it gets here, so the
+// Driver's step is called directly: it must not read "unreadable" as
+// "another role".
 func TestStartResultKeptWhenRolePinUnreadable(t *testing.T) {
-	r := newQuarantineRig(t)
-	r.seenHosts("10.9.9.9")
-	r.promoted()
+	dir := pinDir(t, "quarantined", guardCandidateKey)
+	r := newPinRig(t, nil, dir)
 	path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
 	if err := r.d.RecordStartResult(mysql.StartResultRecord{Result: "late", Decided: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(r.dir, mysql.RoleFile), 0o666); err != nil {
+	if err := os.Chmod(filepath.Join(dir, mysql.RoleFile), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	r.quarantine(quarantineParams) // whatever it returns with the pin untrusted
+	_ = r.d.SetQuarantined(guardCandidateKey, "") // whatever it returns with the pin untrusted
 	if got, ok := readStartResultFile(t, path); !ok || got.Result != "late" {
 		t.Errorf("start-result with an unreadable role pin = %+v (exists %v), want late kept", got, ok)
 	}

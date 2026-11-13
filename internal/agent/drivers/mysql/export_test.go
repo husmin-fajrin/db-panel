@@ -506,3 +506,8 @@ func SetEmitStartHook(f func(d *Driver)) func() {
 	emitStartHook = f
 	return func() { emitStartHook = old }
 }
+
+// SetQuarantined is setQuarantined.
+func (d *Driver) SetQuarantined(newSource, addr string) error {
+	return d.setQuarantined(newSource, addr)
+}
