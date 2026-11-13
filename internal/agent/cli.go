@@ -544,8 +544,9 @@ var cliLayoutHost = func(cfg config.Config) (mysql.Host, error) {
 // cliReleaseStartLock releases the start lock of the MySQL of this server.
 // It needs neither the agent's secrets nor an admin account: only the
 // layout (the agent configuration is read best effort, for a socket
-// override). It prints the outcome and reports whether the role may go on
-// .
+// override). It prints the outcome and returns ok (the role may
+// go on: the lock is released, or there is none to release) and found
+// (a lock existed and was released).
 func cliReleaseStartLock(dir string, stdout, stderr io.Writer) (ok, found bool) {
 	cfg, err := config.Load(dir)
 	if err != nil {

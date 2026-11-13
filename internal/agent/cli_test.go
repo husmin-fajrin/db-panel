@@ -758,6 +758,7 @@ func (failingConfigHost) WriteConfig(string) (string, error) {
 func TestSetRoleReplicaWhileDownKeepsStartLock(t *testing.T) {
 	r := newStartLockRig(t)
 	stubLayoutHost(t, func(config.Config) (mysql.Host, error) {
+		t.Error("set-role replica looked up MySQL")
 		return nil, errors.New("set-role replica must not look up MySQL")
 	})
 	r.inst.Stop(t)
