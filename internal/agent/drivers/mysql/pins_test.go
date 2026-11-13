@@ -1226,3 +1226,28 @@ func TestConfigureReplicationEndsQuarantine(t *testing.T) {
 		t.Errorf("master's role pin = %q", got)
 	}
 }
+
+// TestSetRoleMasterDropsSourcePins: pinning a master removes the source
+// and its verified address; pinning a replica keeps them.
+func TestSetRoleMasterDropsSourcePins(t *testing.T) {
+	dir := pinDir(t, "quarantined", "10.0.0.1:3306")
+	addr := filepath.Join(dir, mysql.SourceAddrFile)
+	if err := os.WriteFile(addr, []byte("10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mustPins(t, dir).SetRole("replica"); err != nil {
+		t.Fatal(err)
+	}
+	if s, a := pinFile(t, dir, mysql.SourceFile), pinFile(t, dir, mysql.SourceAddrFile); s == "" || a == "" {
+		t.Fatalf("SetRole(replica) dropped the source pins: source=%q addr=%q", s, a)
+	}
+	if err := mustPins(t, dir).SetRole("master"); err != nil {
+		t.Fatal(err)
+	}
+	if got := pinFile(t, dir, mysql.RoleFile); got != "master" {
+		t.Errorf("role = %q, want master", got)
+	}
+	if s, a := pinFile(t, dir, mysql.SourceFile), pinFile(t, dir, mysql.SourceAddrFile); s != "" || a != "" {
+		t.Errorf("SetRole(master) kept source pins: source=%q addr=%q", s, a)
+	}
+}

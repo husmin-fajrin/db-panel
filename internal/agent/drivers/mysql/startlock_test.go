@@ -557,7 +557,7 @@ func TestConfigLockExcludesAcrossOpens(t *testing.T) {
 		u()
 		t.Error("a second holder took the lock while the first held it")
 	}
-	if err := mysql.ReleaseStartLock(short, h); err == nil {
+	if _, err := mysql.ReleaseStartLock(short, h); err == nil {
 		t.Error("release succeeded while another holder had the lock")
 	}
 	cancel()
@@ -566,7 +566,7 @@ func TestConfigLockExcludesAcrossOpens(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- mysql.ReleaseStartLock(ctx, h) }()
+	go func() { _, err := mysql.ReleaseStartLock(ctx, h); done <- err }()
 	time.Sleep(300 * time.Millisecond)
 	if line, file := lineAndFile(t, h, lock); !line || !file {
 		t.Errorf("while the release waits for the lock: line=%v file=%v", line, file)

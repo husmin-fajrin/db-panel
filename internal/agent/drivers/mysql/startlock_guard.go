@@ -52,26 +52,28 @@ var (
 // removes the files. A file is removed only once the managed config, read
 // again, no longer names it. All of it is one critical section under
 // lockManagedConfig (the agent's guard and the CLI exclude each other).
-// Idempotent.
-func releaseStartLock(ctx context.Context, h Host) error {
+// found is false when neither an agent init_file line nor a lock file
+// existed (nothing to release). Idempotent.
+func releaseStartLock(ctx context.Context, h Host) (found bool, err error) {
 	l := h.Layout()
 	unlock, err := lockManagedConfig(ctx, l)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer unlock()
 	content, _, err := readManagedContent(l)
 	if err != nil {
-		return err
+		return false, err
 	}
 	paths := agentStartLockPaths(content)
+	found = len(paths) > 0
 	if len(paths) > 0 {
 		rest := content
 		for _, p := range paths {
 			rest = withoutStartLockLine(rest, p)
 		}
 		if _, err := writeValidConfigLocked(ctx, h, rest); err != nil {
-			return fmt.Errorf("baris init_file kunci start tidak bisa dihapus: %w", err)
+			return found, fmt.Errorf("baris init_file kunci start tidak bisa dihapus: %w", err)
 		}
 	}
 	if p, err := StartLockPath(l); err == nil && !slices.Contains(paths, p) {
@@ -81,25 +83,28 @@ func releaseStartLock(ctx context.Context, h Host) error {
 	// older agent while "dbpanel agent set-role" runs) may have written
 	// the line again meanwhile.
 	if content, _, err = readManagedContent(l); err != nil {
-		return err
+		return found, err
 	}
 	if again := agentStartLockPaths(content); len(again) > 0 {
-		return fmt.Errorf("baris init_file kunci start ditulis lagi (%s); berkas kunci tidak dihapus", strings.Join(again, ", "))
+		return found, fmt.Errorf("baris init_file kunci start ditulis lagi (%s); berkas kunci tidak dihapus", strings.Join(again, ", "))
 	}
 	for _, p := range paths {
 		if !filepath.IsAbs(p) {
 			continue
 		}
-		if err := removeStartLockFile(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("berkas kunci start %s tidak bisa dihapus: %w", p, err)
+		err := removeStartLockFile(p)
+		if err == nil {
+			found = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return found, fmt.Errorf("berkas kunci start %s tidak bisa dihapus: %w", p, err)
 		}
 	}
-	return nil
+	return found, nil
 }
 
 // ReleaseStartLock is releaseStartLock, for "dbpanel agent set-role
 // master".
-func ReleaseStartLock(ctx context.Context, h Host) error {
+func ReleaseStartLock(ctx context.Context, h Host) (found bool, err error) {
 	return releaseStartLock(ctx, h)
 }
 
@@ -149,7 +154,7 @@ func (d *Driver) guardStartLock(ctx context.Context, h Host, now time.Time) {
 		if _, err := os.Lstat(path); err != nil || now.Before(d.startLockNextTry) {
 			return
 		}
-		if err := releaseStartLock(ctx, h); err != nil {
+		if _, err := releaseStartLock(ctx, h); err != nil {
 			d.startLockNextTry = now.Add(startLockRetry)
 			d.warn("start lock file left without its line not removed; tried again in a minute", "file", path, "err", err)
 			return
@@ -167,7 +172,7 @@ func (d *Driver) guardStartLock(ctx context.Context, h Host, now time.Time) {
 		d.checkStartLock(ctx, h, now, false)
 		return
 	}
-	if err := releaseStartLock(ctx, h); err != nil {
+	if _, err := releaseStartLock(ctx, h); err != nil {
 		d.startLockNextTry = now.Add(startLockRetry)
 		d.warn("start lock not released; tried again in a minute", "role", role, "err", err)
 		d.checkStartLock(ctx, h, now, true)
@@ -512,7 +517,7 @@ func (d *Driver) releaseForPromote(ctx context.Context, h Host) error {
 		return err
 	}
 	d.startLockProved = true
-	if err := releaseStartLock(ctx, h); err != nil {
+	if _, err := releaseStartLock(ctx, h); err != nil {
 		return err
 	}
 	d.log("start lock released for a promotion")

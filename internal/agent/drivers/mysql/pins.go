@@ -439,7 +439,8 @@ func (p *Pins) Report() (role, source, pinErr string) {
 // an unassigned server (claimRole) or a rebuilt quarantined one
 // (settleRebuilt). It does not need the current files to
 // be valid, so it also repairs them. It removes the rebuild request and
-// approval first, whatever the role (ClearRebuild).
+// approval first, whatever the role (ClearRebuild). A master follows no
+// source: master also removes the source pins.
 func (p *Pins) SetRole(role string) error {
 	if !validRole(role) {
 		return fmt.Errorf("peran harus master, replica, quarantined atau unassigned: %q", role)
@@ -455,6 +456,14 @@ func (p *Pins) SetRole(role string) error {
 	p.settled = true
 	if role == roleUnassigned {
 		return p.removePins()
+	}
+	if role == roleMaster {
+		if err := removeFile(p.path(SourceFile)); err != nil {
+			return err
+		}
+		if err := removeFile(p.path(SourceAddrFile)); err != nil {
+			return err
+		}
 	}
 	return writePin(p.path(RoleFile), role)
 }

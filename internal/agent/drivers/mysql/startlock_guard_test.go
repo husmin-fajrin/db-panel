@@ -208,7 +208,7 @@ func TestStartLockReleaseInterruptedNeverLeavesLineWithoutFile(t *testing.T) {
 	hook := &countingHook{}
 	hook.fail.Store(true)
 	restore := mysql.SetWriteConfigHook(hook.hook)
-	if err := mysql.ReleaseStartLock(ctx, h); err == nil {
+	if _, err := mysql.ReleaseStartLock(ctx, h); err == nil {
 		t.Fatal("release with the config write failing succeeded")
 	}
 	restore()
@@ -218,7 +218,7 @@ func TestStartLockReleaseInterruptedNeverLeavesLineWithoutFile(t *testing.T) {
 
 	// The file cannot be removed.
 	restore = mysql.SetRemoveStartLockFile(func(string) error { return errors.New("hapus gagal (test)") })
-	if err := mysql.ReleaseStartLock(ctx, h); err == nil {
+	if _, err := mysql.ReleaseStartLock(ctx, h); err == nil {
 		t.Fatal("release with the file removal failing succeeded")
 	}
 	restore()
@@ -902,7 +902,7 @@ func TestConfigureKeepsStaleStartLockLine(t *testing.T) {
 		t.Errorf("stale lock file = %q, %v", b, err)
 	}
 
-	if err := mysql.ReleaseStartLock(context.Background(), h); err != nil {
+	if _, err := mysql.ReleaseStartLock(context.Background(), h); err != nil {
 		t.Fatal(err)
 	}
 	content, _, _ = mysql.ReadManagedContent(h.Layout())
@@ -963,7 +963,7 @@ func TestReleaseHelperProcess(t *testing.T) {
 		return os.Remove(path)
 	})
 	h := mysql.NewHost(l, nil, nil, probe.RealSystem(), nil)
-	if err := mysql.ReleaseStartLock(context.Background(), h); err != nil {
+	if _, err := mysql.ReleaseStartLock(context.Background(), h); err != nil {
 		fmt.Println("release-error:", err)
 		return
 	}
