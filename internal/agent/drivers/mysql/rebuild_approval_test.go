@@ -3,6 +3,7 @@ package mysql_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -162,6 +163,9 @@ func TestRebuildApprovalValidity(t *testing.T) {
 		}), "quarantined", "db-b:3306", ips, now, "di masa depan"},
 		{"too long", with(func(a *mysql.RebuildApproval) { a.Expires = a.Approved.Add(24*time.Hour + time.Second) }),
 			"quarantined", "db-b:3306", ips, now, "lebih dari 24 jam"},
+		{"expires before approved", with(func(a *mysql.RebuildApproval) { a.Expires = a.Approved.Add(-time.Second) }),
+			"quarantined", "db-b:3306", ips, now,
+			"berkas persetujuan tidak bisa dipakai: waktu habis lebih awal dari waktu persetujuan"},
 	}
 	for _, c := range cases {
 		err := mysql.CheckApproval(c.a, c.role, c.source, c.ips, c.now)
@@ -262,5 +266,103 @@ func TestRebuildApprovalAddr(t *testing.T) {
 	addr, others, err = p.RebuildApprovalAddr(ctx)
 	if err != nil || addr != "10.0.0.9" || len(others) != 0 {
 		t.Errorf("verified address = %q, %v, %v", addr, others, err)
+	}
+}
+
+func TestRebuildApprovalAddrDNSNamesHostPort(t *testing.T) {
+	p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
+	defer mysql.SetResolver(func(context.Context, string) ([]net.IP, error) {
+		return nil, errors.New("no such host")
+	}, nil)()
+	if _, _, err := p.RebuildApprovalAddr(context.Background()); err == nil || !strings.Contains(err.Error(), "sumber db-b:3306 tidak ditemukan (DNS)") {
+		t.Errorf("DNS error: err = %v, want the source named as host:port", err)
+	}
+	restore := mysql.SetResolver(func(context.Context, string) ([]net.IP, error) { return nil, nil }, nil)
+	defer restore()
+	if _, _, err := p.RebuildApprovalAddr(context.Background()); err == nil || !strings.Contains(err.Error(), "sumber db-b:3306 tidak ditemukan (DNS): tidak ada alamat") {
+		t.Errorf("no address: err = %v, want the source named as host:port", err)
+	}
+}
+
+func TestCheckRebuildApproval(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	approval := mysql.NewRebuildApproval("db-b:3306", "10.0.0.5", now.Add(-time.Hour))
+	resolve := func(ips []net.IP, err error) func() {
+		return mysql.SetResolver(func(context.Context, string) ([]net.IP, error) { return ips, err }, nil)
+	}
+
+	t.Run("no file", func(t *testing.T) {
+		p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
+		defer resolve([]net.IP{net.ParseIP("10.0.0.5")}, nil)()
+		if _, err := p.CheckRebuildApproval(ctx, now); err == nil || !strings.Contains(err.Error(), "berkas persetujuan tidak bisa dipakai") {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("untrusted file", func(t *testing.T) {
+		dir := pinDir(t, "quarantined", "db-b:3306")
+		p := mustPins(t, dir)
+		if err := p.WriteRebuildApproval(approval); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(dir, mysql.RebuildApprovalFile), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		defer resolve([]net.IP{net.ParseIP("10.0.0.5")}, nil)()
+		if _, err := p.CheckRebuildApproval(ctx, now); err == nil || !strings.Contains(err.Error(), "berkas persetujuan tidak bisa dipakai") {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("DNS error", func(t *testing.T) {
+		p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
+		if err := p.WriteRebuildApproval(approval); err != nil {
+			t.Fatal(err)
+		}
+		defer resolve(nil, errors.New("servfail"))()
+		_, err := p.CheckRebuildApproval(ctx, now)
+		if err == nil || !strings.Contains(err.Error(), "tidak ditemukan (DNS)") || !strings.Contains(err.Error(), "db-b:3306") {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("approved address", func(t *testing.T) {
+		p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
+		if err := p.WriteRebuildApproval(approval); err != nil {
+			t.Fatal(err)
+		}
+		defer resolve([]net.IP{net.ParseIP("10.0.0.5")}, nil)()
+		got, err := p.CheckRebuildApproval(ctx, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Source != approval.Source || got.Addr != approval.Addr || !got.Expires.Equal(approval.Expires) {
+			t.Errorf("approval = %+v, want %+v", got, approval)
+		}
+	})
+}
+
+func TestEnsureRebuildRequestUntrustedFile(t *testing.T) {
+	dir := pinDir(t, "quarantined", "db-b:3306")
+	p := mustPins(t, dir)
+	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	if _, err := p.EnsureRebuildRequest(now); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, mysql.RebuildRequestFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.EnsureRebuildRequest(now.Add(time.Minute)); err == nil {
+		t.Error("EnsureRebuildRequest = nil error with an untrusted request file")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("request file changed: %q -> %q", before, after)
 	}
 }

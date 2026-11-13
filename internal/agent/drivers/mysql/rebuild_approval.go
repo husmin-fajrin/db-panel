@@ -104,6 +104,9 @@ func checkApproval(a RebuildApproval, role, source string, ips []net.IP, now tim
 	if a.Approved.After(now.Add(approvalFutureSlack)) {
 		return fmt.Errorf("waktu persetujuan %s lebih dari 5 menit di masa depan; periksa jam server ini", a.Approved.Local().Format(approvalTimeFormat))
 	}
+	if a.Expires.Before(a.Approved) {
+		return errors.New("berkas persetujuan tidak bisa dipakai: waktu habis lebih awal dari waktu persetujuan")
+	}
 	if a.Expires.Sub(a.Approved) > RebuildApprovalTTL {
 		return errors.New("masa berlaku persetujuan lebih dari 24 jam")
 	}
@@ -155,7 +158,7 @@ func (p *Pins) EnsureRebuildRequest(now time.Time) (RebuildRequest, error) {
 	}
 	source, has := p.pinnedSource()
 	if !has {
-		return RebuildRequest{}, errors.New("server ini tidak punya sumber yang dipin")
+		return RebuildRequest{}, errors.New("server ini tidak punya sumber replikasi yang dipin")
 	}
 	r, ok, err := p.ValidRebuildRequest(now)
 	if err != nil {
@@ -224,8 +227,11 @@ func (p *Pins) CheckRebuildApproval(ctx context.Context, now time.Time) (Rebuild
 		return RebuildApproval{}, fmt.Errorf("berkas persetujuan tidak bisa dipakai: %v", errors.New("berkas tidak ada"))
 	}
 	role := p.Role()
-	host, _, hasSrc := p.Source()
-	source, _ := p.pinnedSource()
+	host, port, hasSrc := p.Source()
+	source := ""
+	if hasSrc {
+		source = net.JoinHostPort(host, strconv.Itoa(port))
+	}
 	var ips []net.IP
 	if hasSrc && role == roleQuarantined {
 		if ips, err = sourceIPs(ctx, host); err != nil {
@@ -243,19 +249,20 @@ func (p *Pins) CheckRebuildApproval(ctx context.Context, now time.Time) (Rebuild
 // an IP, else the first address the host resolves to (IPv4 before IPv6,
 // each sorted); others are the remaining resolved addresses.
 func (p *Pins) RebuildApprovalAddr(ctx context.Context) (addr string, others []string, err error) {
-	host, _, dial, ok, err := p.SourceDial()
+	host, port, dial, ok, err := p.SourceDial()
 	if err != nil {
 		return "", nil, err
 	}
 	if !ok {
-		return "", nil, errors.New("server ini tidak punya sumber yang dipin")
+		return "", nil, errors.New("server ini tidak punya sumber replikasi yang dipin")
 	}
 	if net.ParseIP(dial) != nil {
 		return dial, nil, nil
 	}
+	source := net.JoinHostPort(host, strconv.Itoa(port))
 	ips, err := sourceIPs(ctx, host)
 	if err != nil {
-		return "", nil, fmt.Errorf("alamat untuk nama sumber %s tidak ditemukan (DNS): %v", host, err)
+		return "", nil, fmt.Errorf("alamat untuk nama sumber %s tidak ditemukan (DNS): %v", source, err)
 	}
 	sort.Slice(ips, func(i, j int) bool {
 		a4, b4 := ips[i].To4() != nil, ips[j].To4() != nil
@@ -271,7 +278,7 @@ func (p *Pins) RebuildApprovalAddr(ctx context.Context) (addr string, others []s
 		}
 	}
 	if len(all) == 0 {
-		return "", nil, fmt.Errorf("alamat untuk nama sumber %s tidak ditemukan (DNS): tidak ada alamat", host)
+		return "", nil, fmt.Errorf("alamat untuk nama sumber %s tidak ditemukan (DNS): tidak ada alamat", source)
 	}
 	return all[0], all[1:], nil
 }
