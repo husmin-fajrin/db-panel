@@ -382,8 +382,8 @@ func TestStartResultInitFileCutOnRuneBoundary(t *testing.T) {
 	dir := pinDir(t, "quarantined", guardCandidateKey)
 	r := newPinRig(t, nil, dir)
 	path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
-	// "a" + 3-byte characters: byte 4096 falls inside one.
-	b, _ := json.Marshal(mysql.StartResultRecord{Result: "bypassed", Decided: time.Now(), InitFile: "a" + strings.Repeat("\u20ac", 2000)})
+	// "aa" + 3-byte characters: byte 4096 falls inside one ((4096-2)%3 == 2).
+	b, _ := json.Marshal(mysql.StartResultRecord{Result: "bypassed", Decided: time.Now(), InitFile: "aa" + strings.Repeat("\u20ac", 2000)})
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
