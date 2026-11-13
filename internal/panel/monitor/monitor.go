@@ -473,9 +473,9 @@ func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	m.mu.Lock()
 	at := now.Add(-m.reportAge(serverID, he.TakenAgoMS))
 	ups := m.ingest(serverID, he, at)
-	var alerts []alertUpdate
+	alerts := m.startResultFromSnapshot(serverID, &he.Snapshot, at)
 	if !he.Backlog {
-		alerts = m.evaluate(now)
+		alerts = append(alerts, m.evaluate(now)...)
 	}
 	m.mu.Unlock()
 	m.emit(ups)

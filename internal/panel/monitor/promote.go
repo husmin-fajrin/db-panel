@@ -590,10 +590,10 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 	// never rewrites an open alert.
 	worst := func() {
 		if ev.Type == proto.EventQuarantineStartFailed {
-			m.raiseIfNone(serverID, KindMasterStartBlocked, startBlockedMessage(""))
+			m.raiseStartEvent(serverID, KindMasterStartBlocked, startBlockedMessage(""), false)
 			return
 		}
-		m.raiseIfNone(serverID, KindMasterStartLate, startUnreadableText)
+		m.raiseStartEvent(serverID, KindMasterStartLate, startUnreadableText, false)
 	}
 	if len(ev.Payload) > maxPromoteEventPayload {
 		m.log.Warn("start lock event too large", "server_id", serverID, "type", ev.Type, "bytes", len(ev.Payload))
@@ -607,7 +607,7 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 			worst()
 			return true
 		}
-		m.raise(serverID, KindMasterStartBlocked, startBlockedMessage(fe.File))
+		m.raiseStartEvent(serverID, KindMasterStartBlocked, startBlockedMessage(fe.File), true)
 		return true
 	}
 	var qe proto.QuarantineStartEvent
@@ -633,15 +633,110 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 			ups = m.closeAlertLocked(serverID, KindMasterStartBypassed, "", ups)
 		}
 	}
-	if qe.Result == proto.QuarantineStartLate {
+	if qe.Result == proto.QuarantineStartLate && !m.startEventRepeats(serverID, KindMasterStartLate) {
 		ups = m.raiseLocked(serverID, KindMasterStartLate, startLateText, ups)
 	}
-	if bypassed {
+	if bypassed && !m.startEventRepeats(serverID, KindMasterStartBypassed) {
 		ups = m.raiseLocked(serverID, KindMasterStartBypassed, startBypassedText, ups)
 	}
 	m.mu.Unlock()
 	m.emitAlerts(ups)
 	return true
+}
+
+// raiseStartEvent opens the alert of kind for a start event of serverID
+// unless the snapshot's start result opened it a moment ago (see
+// startEventRepeats). With rewrite an open alert takes msg; without, it
+// keeps its message.
+func (m *Monitor) raiseStartEvent(serverID int64, kind, msg string, rewrite bool) {
+	m.mu.Lock()
+	var ups []alertUpdate
+	_, err := m.st.GetOpenAlert(kind, serverID)
+	switch {
+	case err == nil:
+		if rewrite {
+			ups = m.raiseLocked(serverID, kind, msg, ups)
+		}
+	case !errors.Is(err, store.ErrNotFound):
+		m.log.Warn("read open alert", "server_id", serverID, "kind", kind, "err", err)
+	case !m.startEventRepeats(serverID, kind):
+		ups = m.raiseLocked(serverID, kind, msg, ups)
+	}
+	m.mu.Unlock()
+	m.emitAlerts(ups)
+}
+
+// startEventRepeats: no alert of kind is open for serverID and one was
+// opened within startEventRepeatWindow, so the event repeats a start the
+// snapshot already opened (and something already handled). The caller
+// holds mu.
+func (m *Monitor) startEventRepeats(serverID int64, kind string) bool {
+	if _, err := m.st.GetOpenAlert(kind, serverID); err == nil {
+		return false
+	}
+	n, err := m.st.CountAlertsOpenedSince(kind, serverID, m.now().Add(-startEventRepeatWindow))
+	if err != nil {
+		m.log.Warn("start event: count alerts", "server_id", serverID, "kind", kind, "err", err)
+		return false
+	}
+	return n > 0
+}
+
+const (
+	startResultSlack       = time.Minute      // decided time read back from a relative age
+	startEventRepeatWindow = 10 * time.Minute // an event after a snapshot already opened the same alert
+)
+
+// startResultFromSnapshot opens, from a report's StartResult, the alert of
+// a start the panel may not have heard of (its event lost): late ->
+// KindMasterStartLate, failed -> KindMasterStartBlocked, bypassed ->
+// KindMasterStartBypassed; ok and anything unknown open nothing. decided
+// is at minus the age, the age bound by reportAge to [0, the events'
+// retention] (the agent is untrusted), so decided is never in the future
+// nor older than the retention. The alert itself opens at the panel's now. It
+// opens only when the server resolves as quarantined, no alert of that
+// kind is open, none was opened at or after decided-startResultSlack, and,
+// for late, no "Periksa data tertinggal" result is later than decided.
+// The caller holds mu.
+func (m *Monitor) startResultFromSnapshot(id int64, snap *proto.HealthSnapshot, at time.Time) []alertUpdate {
+	sr := snap.StartResult
+	if sr == nil {
+		return nil
+	}
+	var kind, msg string
+	switch sr.Result {
+	case proto.QuarantineStartLate:
+		kind, msg = KindMasterStartLate, startLateText
+	case proto.QuarantineStartFailed:
+		kind, msg = KindMasterStartBlocked, startBlockedMessage(sr.InitFile)
+	case proto.QuarantineStartBypassed:
+		kind, msg = KindMasterStartBypassed, startBypassedText
+	default:
+		return nil
+	}
+	s, ok := m.servers[id]
+	if !ok || !s.resolvedOK || s.role != store.RoleQuarantined {
+		return nil
+	}
+	if _, err := m.st.GetOpenAlert(kind, id); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		m.log.Warn("read open alert", "server_id", id, "kind", kind, "err", err)
+		return nil
+	}
+	decided := at.Add(-m.reportAge(id, sr.AgeSec*1000))
+	n, err := m.st.CountAlertsOpenedSince(kind, id, decided.Add(-startResultSlack))
+	if err != nil {
+		m.log.Warn("start result: count alerts", "server_id", id, "kind", kind, "err", err)
+		return nil
+	}
+	if n > 0 {
+		return nil
+	}
+	if kind == KindMasterStartLate && m.leftoverCheckedAfter(store.Alert{ServerID: id, OpenedAt: decided}) {
+		return nil
+	}
+	return m.raiseLocked(id, kind, msg, nil)
 }
 
 // startUnreadableText words master_start_late opened for a start report
