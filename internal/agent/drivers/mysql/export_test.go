@@ -498,3 +498,11 @@ type StartResultRecord = startResult
 
 // RecordStartResult is recordStartResult.
 func (d *Driver) RecordStartResult(r StartResultRecord) error { return d.recordStartResult(r) }
+
+// SetEmitStartHook sets what runs as a start report is queued; the returned
+// func restores the previous hook.
+func SetEmitStartHook(f func(d *Driver)) func() {
+	old := emitStartHook
+	emitStartHook = f
+	return func() { emitStartHook = old }
+}

@@ -13,6 +13,9 @@ import (
 // and carried in every health snapshot while the role pin is quarantined.
 const StartResultFile = "/var/lib/dbpanel/start-result"
 
+// maxInitFile caps the init_file a snapshot carries.
+const maxInitFile = 4096
+
 // startResult is the content of the start-result file.
 type startResult struct {
 	Result   string    `json:"result"`
@@ -55,7 +58,13 @@ func (d *Driver) startResultPath() string {
 func (d *Driver) recordStartResult(r startResult) error {
 	path := d.startResultPath()
 	var stored startResult
-	if ok, err := readJSON(path, &stored); err == nil && ok && startResultRank(r.Result) < startResultRank(stored.Result) {
+	ok, err := readJSON(path, &stored)
+	switch {
+	case err != nil:
+		d.warn("stored start result unreadable; replaced", "file", path, "err", err)
+	case ok && startResultRank(stored.Result) == 0:
+		d.warn("stored start result has an unknown result; replaced", "file", path, "result", stored.Result)
+	case ok && startResultRank(r.Result) < startResultRank(stored.Result):
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -74,6 +83,12 @@ func (d *Driver) StartResult(now time.Time) *proto.StartResultState {
 	if ok, err := readJSON(d.startResultPath(), &r); err != nil || !ok {
 		return nil
 	}
+	if startResultRank(r.Result) == 0 {
+		return nil
+	}
+	if len(r.InitFile) > maxInitFile {
+		r.InitFile = r.InitFile[:maxInitFile]
+	}
 	age := int64(now.Sub(r.Decided) / time.Second)
 	if age < 0 {
 		age = 0
@@ -86,4 +101,18 @@ func (d *Driver) clearStartResult() {
 	if err := removeFile(d.startResultPath()); err != nil {
 		d.warn("start result file not removed", "err", err)
 	}
+}
+
+// setQuarantined pins the role quarantined (Pins.SetQuarantinedAt). Coming
+// from another role, the start result of an earlier quarantine goes first,
+// before the pins are written; a failure is logged and does not stop the
+// quarantine. A server already quarantined keeps its result: it belongs to
+// this quarantine.
+func (d *Driver) setQuarantined(newSource, addr string) error {
+	if !d.pins.RoleIs(roleQuarantined) {
+		if err := removeFile(d.startResultPath()); err != nil && d.Logger != nil {
+			d.Logger.Error("start result of an earlier quarantine not removed", "err", err)
+		}
+	}
+	return d.pins.SetQuarantinedAt(newSource, addr)
 }

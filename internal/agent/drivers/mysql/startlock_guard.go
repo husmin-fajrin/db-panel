@@ -43,7 +43,10 @@ const (
 // them.
 var (
 	removeStartLockFile = os.Remove
-	clearLock           = (*Pins).ClearLock
+	// emitStartHook runs as a start report is queued; tests see what is on
+	// disk at that moment.
+	emitStartHook func(d *Driver)
+	clearLock     = (*Pins).ClearLock
 )
 
 // releaseStartLock removes the start lock: the agent's init_file lines
@@ -357,6 +360,9 @@ const maxPendingStart = 16
 // first (it only closes alerts), else the oldest report. The caller holds
 // promoteMu.
 func (d *Driver) emitStart(typ string, payload any) {
+	if emitStartHook != nil {
+		emitStartHook(d)
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		d.warn("start report not encoded", "type", typ, "err", err)

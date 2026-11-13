@@ -155,7 +155,7 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	}
 	// MySQL is down: the pins now, then the start lock that makes MySQL
 	// start read-only; guardQuarantined reports once MySQL answers.
-	if err := d.pins.SetQuarantinedAt(key, addr); err != nil {
+	if err := d.setQuarantined(key, addr); err != nil {
 		return res, fmt.Errorf("pin quarantined gagal ditulis: %w", err)
 	}
 	// Read-only is proved again once MySQL answers (guardQuarantined).

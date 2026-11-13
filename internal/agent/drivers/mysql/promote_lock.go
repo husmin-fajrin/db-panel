@@ -759,7 +759,7 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) (pr
 	if err := persistReadOnly(ctx, db); err != nil {
 		return lock, err
 	}
-	if err := d.pins.SetQuarantinedAt(newSource, addr); err != nil {
+	if err := d.setQuarantined(newSource, addr); err != nil {
 		return lock, fmt.Errorf("MySQL sudah read-only, tetapi pin quarantined gagal ditulis: %w", err)
 	}
 	// MySQL is up and was not quarantined: there is no start to report.
