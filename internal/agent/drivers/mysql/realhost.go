@@ -237,14 +237,38 @@ func (h *host) DiskFree(path string) (free, total uint64, err error) {
 const stderrTail = 4096
 
 func (h *host) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
+	return h.ExecEnv(ctx, nil, stdin, stdout, name, args...)
+}
+
+func (h *host) ExecEnv(ctx context.Context, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
 	cmd := command(ctx, name, args...)
 	cmd.Stdin, cmd.Stdout = stdin, stdout
+	if len(env) > 0 {
+		cmd.Env = replaceEnv(os.Environ(), env)
+	}
 	var stderr tailBuffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s gagal: %v: %s", name, err, strings.TrimSpace(string(stderr.b)))
 	}
 	return nil
+}
+
+// replaceEnv is base with every variable env sets (KEY=VALUE) taken from
+// env instead.
+func replaceEnv(base, env []string) []string {
+	set := make(map[string]bool, len(env))
+	for _, e := range env {
+		k, _, _ := strings.Cut(e, "=")
+		set[k] = true
+	}
+	out := make([]string, 0, len(base)+len(env))
+	for _, e := range base {
+		if k, _, _ := strings.Cut(e, "="); !set[k] {
+			out = append(out, e)
+		}
+	}
+	return append(out, env...)
 }
 
 // tailBuffer keeps the last stderrTail bytes written to it.

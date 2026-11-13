@@ -26,6 +26,8 @@ type Host interface {
 	ValidateConfig(ctx context.Context) error
 	DiskFree(path string) (free, total uint64, err error)
 	Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error
+	// ExecEnv is Exec with env (KEY=VALUE) replacing those variables of the agent's environment.
+	ExecEnv(ctx context.Context, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error
 	TCPReachable(ctx context.Context, host string, port int, timeout time.Duration) error
 	OSFamily() string // "debian" | "rhel" | "unknown"
 	TempFile(pattern string, mode os.FileMode) (*os.File, error)

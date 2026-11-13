@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -148,19 +149,34 @@ func TestPrintDefaultsArgsExact(t *testing.T) {
 	}
 }
 
-// printDefaultsHost answers mysqld --print-defaults with out and records
-// every command it is asked to run.
+// printDefaultsHost answers mysqld --print-defaults with out (or
+// outByHome's entry for the HOME it runs with) and records every command
+// it is asked to run and the environment it is given.
 type printDefaultsHost struct {
 	mysql.Host
-	mu   sync.Mutex
-	out  string
-	runs [][]string
+	mu        sync.Mutex
+	out       string
+	outByHome map[string]string
+	runs      [][]string
+	envs      [][]string
 }
 
-func (h *printDefaultsHost) Exec(_ context.Context, _ io.Reader, stdout io.Writer, name string, args ...string) error {
+func (h *printDefaultsHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
+	return h.ExecEnv(ctx, nil, stdin, stdout, name, args...)
+}
+
+func (h *printDefaultsHost) ExecEnv(_ context.Context, env []string, _ io.Reader, stdout io.Writer, name string, args ...string) error {
 	h.mu.Lock()
 	h.runs = append(h.runs, append([]string{name}, args...))
+	h.envs = append(h.envs, append([]string(nil), env...))
 	out := h.out
+	for _, e := range env {
+		if home, ok := strings.CutPrefix(e, "HOME="); ok {
+			if o, ok := h.outByHome[home]; ok {
+				out = o
+			}
+		}
+	}
 	h.mu.Unlock()
 	_, err := io.WriteString(stdout, "/usr/sbin/mysqld would have been started with the following arguments:\n"+out+" \n")
 	return err
@@ -225,6 +241,249 @@ func TestEffectiveInitFileOrder(t *testing.T) {
 	}
 	if st := mysql.StartLockStatus(ctx, h); st.Present || st.Locked || st.Reason != "baris init_file belum ada di konfigurasi MySQL" {
 		t.Errorf("no line: %+v", st)
+	}
+}
+
+func TestOptionNamePrefixes(t *testing.T) {
+	for _, c := range []struct{ arg, name, prefix string }{
+		{"--init-file", "init_file", ""},
+		{"--init_file", "init_file", ""},
+		{"--loose-init-file", "init_file", "loose"},
+		{"--loose_init_file", "init_file", "loose"},
+		{"--skip-init-file", "init_file", "skip"},
+		{"--disable-init-file", "init_file", "disable"},
+		{"--enable-init-file", "init_file", "enable"},
+		{"--maximum-init-file", "init_file", "maximum"},
+		{"--loose-skip-init-file", "init_file", "loose_skip"},
+		{"--loose_user", "user", "loose"},
+		{"--init-file-x", "init_file_x", ""},
+	} {
+		if name, prefix := mysql.OptionName(c.arg); name != c.name || prefix != c.prefix {
+			t.Errorf("OptionName(%q) = (%q, %q), want (%q, %q)", c.arg, name, prefix, c.name, c.prefix)
+		}
+	}
+}
+
+func TestStartLockPrefixedInitFileNotLocked(t *testing.T) {
+	t.Cleanup(mysql.SetMACConfinement(func(mysql.Layout) string { return "" }))
+	h, lock := fakeLockHost(t)
+	ctx := context.Background()
+	for _, c := range []struct {
+		out       string
+		locked    bool
+		reason    string
+		operators []string
+	}{
+		{out: "--init_file=" + lock, locked: true},
+		{out: "--init_file=" + lock + " --skip-init-file", reason: "opsi --skip-init-file dibaca sesudah baris agent; kunci start tidak terjamin"},
+		{out: "--init_file=" + lock + " --loose-init-file=/op/x.sql", reason: "opsi --loose-init-file=/op/x.sql dibaca sesudah baris agent"},
+		{out: "--loose-init-file=" + lock},
+		{out: "--init_file=" + lock + " --maximum-init-file=/op/y.sql", reason: "opsi --maximum-init-file=/op/y.sql membuat MySQL menolak menyala; kunci start tidak terjamin"},
+		{out: "--maximum-init-file=/op/y.sql --init_file=" + lock, reason: "opsi --maximum-init-file=/op/y.sql membuat MySQL menolak menyala; kunci start tidak terjamin"},
+		{out: "--loose-maximum-init-file=/op/y.sql --init_file=" + lock, reason: "opsi --loose-maximum-init-file=/op/y.sql membuat MySQL menolak menyala"},
+		{out: "--loose-init-file=/op/a.sql --init_file=" + lock, locked: true, operators: []string{"/op/a.sql"}},
+	} {
+		h.out = "--user=nobody " + c.out
+		st := mysql.StartLockStatus(ctx, h)
+		if st.Locked != c.locked || !strings.Contains(st.Reason, c.reason) || (!c.locked && st.Reason == "") ||
+			!reflect.DeepEqual(st.OperatorInitFiles, c.operators) {
+			t.Errorf("%s: %+v", c.out, st)
+		}
+	}
+}
+
+// serviceAccounts makes lookupUser answer for the names in homes (each
+// with nobody's ids, so the lock file's mode bits decide readableBy) and
+// fail for every other name.
+func serviceAccounts(t *testing.T, homes map[string]string) {
+	t.Helper()
+	t.Cleanup(mysql.SetLookupUser(func(name string) (*user.User, error) {
+		home, ok := homes[name]
+		if !ok {
+			return nil, user.UnknownUserError(name)
+		}
+		return &user.User{Username: name, Uid: "65534", Gid: "65534", HomeDir: home}, nil
+	}))
+}
+
+// homeEnv is the HOME in env, or "" without one.
+func homeEnv(env []string) string {
+	for _, e := range env {
+		if home, ok := strings.CutPrefix(e, "HOME="); ok {
+			return home
+		}
+	}
+	return ""
+}
+
+func TestPrintDefaultsRunsWithServiceHome(t *testing.T) {
+	t.Cleanup(mysql.SetMACConfinement(func(mysql.Layout) string { return "" }))
+	fake, lock := fakeLockHost(t)
+	// The layout of a real host: no --defaults-file, so ~/.my.cnf counts.
+	l := fake.Layout()
+	l.ConfigFiles = []string{"/etc/my.cnf", "/etc/mysql/my.cnf", "~/.my.cnf"}
+	newHost := func(out string) *printDefaultsHost {
+		return &printDefaultsHost{Host: mysql.NewHost(l, nil, nil, probe.RealSystem(), nil), out: out}
+	}
+	ctx := context.Background()
+	serviceAccounts(t, map[string]string{"mysql": "/var/lib/mysql", "app": "/home/app"})
+	hidden := true
+	t.Cleanup(mysql.SetStatHome(func(path string) (os.FileInfo, error) {
+		if path == "/home/app" && hidden {
+			return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+		}
+		return os.Stat("/")
+	}))
+
+	h := newHost("--user=mysql --init_file=" + lock)
+	if st := mysql.StartLockStatus(ctx, h); !st.Locked {
+		t.Errorf("--user=mysql: %+v", st)
+	}
+	if len(h.envs) != 2 || homeEnv(h.envs[0]) != "/nonexistent" || homeEnv(h.envs[1]) != "/var/lib/mysql" {
+		t.Errorf("--user=mysql: envs %q, want HOME=/nonexistent then HOME=/var/lib/mysql", h.envs)
+	}
+	for _, run := range h.runs {
+		if want := append([]string{"/nonexistent/mysqld"}, mysql.PrintDefaultsArgs(l)...); !reflect.DeepEqual(run, want) {
+			t.Errorf("ran %q, want %q", run, want)
+		}
+	}
+
+	h = newHost("--user=app --init_file=" + lock)
+	if st := mysql.StartLockStatus(ctx, h); st.Locked || !strings.Contains(st.Reason, "/home/app") || !strings.Contains(st.Reason, "ProtectHome") {
+		t.Errorf("--user=app, home hidden: %+v", st)
+	}
+	if len(h.envs) != 1 {
+		t.Errorf("--user=app, home hidden: ran %d times, want once", len(h.envs))
+	}
+
+	hidden = false
+	h = newHost("--user=app --init_file=" + lock)
+	if st := mysql.StartLockStatus(ctx, h); !st.Locked {
+		t.Errorf("--user=app, home visible: %+v", st)
+	}
+	if n := len(h.envs); n != 2 || homeEnv(h.envs[n-1]) != "/home/app" {
+		t.Errorf("--user=app, home visible: envs %q", h.envs)
+	}
+
+	h = newHost("--user=ghost --init_file=" + lock)
+	if st := mysql.StartLockStatus(ctx, h); st.Locked || !strings.Contains(st.Reason, "akun layanan MySQL ghost tidak ditemukan") {
+		t.Errorf("no such account: %+v", st)
+	}
+
+	// ~/.my.cnf names another account than the first run found.
+	h = newHost("--user=mysql --init_file=" + lock)
+	h.outByHome = map[string]string{"/var/lib/mysql": "--user=app --init_file=" + lock}
+	if st := mysql.StartLockStatus(ctx, h); st.Locked || !strings.Contains(st.Reason, "opsi user di ~/.my.cnf akun layanan MySQL berbeda (app, bukan mysql); kunci start tidak bisa dipastikan") {
+		t.Errorf("user changed by ~/.my.cnf: %+v", st)
+	}
+	// What the second run reads is what counts.
+	h = newHost("--user=mysql --init_file=" + lock)
+	h.outByHome = map[string]string{"/var/lib/mysql": "--user=mysql --init_file=" + lock + " --init-file=/op/y.sql"}
+	if st := mysql.StartLockStatus(ctx, h); st.Locked || !strings.Contains(st.Reason, "init_file lain dibaca sesudah baris agent: /op/y.sql") {
+		t.Errorf("~/.my.cnf init-file: %+v", st)
+	}
+}
+
+// TestDefaultsFileIgnoresServiceHome: with --defaults-file mysqld reads
+// that file only (plan 5b-1 evidence), so the service account's home is
+// neither looked up nor used: one run with HOME=/nonexistent.
+func TestDefaultsFileIgnoresServiceHome(t *testing.T) {
+	t.Cleanup(mysql.SetMACConfinement(func(mysql.Layout) string { return "" }))
+	h, lock := fakeLockHost(t)
+	if args := mysql.PrintDefaultsArgs(h.Layout()); !strings.HasPrefix(args[0], "--defaults-file=") {
+		t.Fatalf("fake layout runs %q, want --defaults-file", args)
+	}
+	serviceAccounts(t, map[string]string{"app": "/home/app"})
+	t.Cleanup(mysql.SetStatHome(func(path string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+	}))
+	h.out = "--user=app --init_file=" + lock
+	if st := mysql.StartLockStatus(context.Background(), h); !st.Locked {
+		t.Errorf("--defaults-file, hidden home: %+v", st)
+	}
+	if len(h.envs) != 1 || !reflect.DeepEqual(h.envs[0], []string{"HOME=/nonexistent"}) {
+		t.Errorf("envs %q, want one run with HOME=/nonexistent", h.envs)
+	}
+}
+
+// TestServiceAccountMyCnfBreaksStartLock: a real mysqld reads the service
+// account's ~/.my.cnf when no --defaults-file is given, and an init-file
+// there after the agent's line breaks the start lock.
+func TestServiceAccountMyCnfBreaksStartLock(t *testing.T) {
+	for _, f := range []string{"/etc/my.cnf", "/etc/mysql/my.cnf"} {
+		if _, err := os.Stat(f); err == nil {
+			t.Skipf("%s exists: --print-defaults without --defaults-file would read this machine's MySQL config", f)
+		}
+	}
+	t.Cleanup(mysql.SetMACConfinement(func(mysql.Layout) string { return "" }))
+	inst := testmysql.Start(t, testmysql.Options{})
+	ctx := context.Background()
+	if err := mysql.WriteStartLock(ctx, inst.Host()); err != nil {
+		t.Fatal(err)
+	}
+	// The account the first run (nothing readable) settles on: mysql as
+	// root, else this process's user.
+	account := "mysql"
+	if os.Geteuid() != 0 {
+		u, err := user.Current()
+		if err != nil {
+			t.Fatal(err)
+		}
+		account = u.Username
+	}
+	runAs := account
+	if os.Geteuid() == 0 {
+		runAs = "nobody" // the instance's mysqld user, for readableBy
+	}
+	real, err := user.Lookup(runAs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Cleanup(mysql.SetLookupUser(func(name string) (*user.User, error) {
+		if name != account {
+			return user.Lookup(name)
+		}
+		u := *real
+		u.Username, u.HomeDir = name, home
+		return &u, nil
+	}))
+	myCnf := filepath.Join(home, ".my.cnf")
+	op := filepath.Join(home, "op.sql")
+	// The include brings the instance's user= line; the user line after
+	// it keeps the account the first run found, so only init-file differs.
+	include := "!include " + inst.ConfigFile + "\n[mysqld]\nuser=" + account + "\n"
+
+	l := inst.Layout()
+	l.ConfigFiles = []string{"/etc/my.cnf", "/etc/mysql/my.cnf", "~/.my.cnf"}
+	h := mysql.NewHost(l, inst.Service(), nil, probe.RealSystem(), nil)
+	if err := os.WriteFile(myCnf, []byte(include), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st := mysql.StartLockStatus(ctx, h); !st.Locked {
+		t.Errorf(".my.cnf with the include only: %+v", st)
+	}
+	if err := os.WriteFile(myCnf, []byte(include+"init-file="+op+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st := mysql.StartLockStatus(ctx, h); st.Locked || st.Reason != "init_file lain dibaca sesudah baris agent: "+op {
+		t.Errorf(".my.cnf with init-file: %+v", st)
+	}
+
+	// With --defaults-file (the instance's own layout) mysqld does not read
+	// ~/.my.cnf at all: the same .my.cnf changes nothing.
+	if err := os.WriteFile(myCnf, []byte("[mysqld]\ninit-file="+op+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := inst.Host().ExecEnv(ctx, []string{"HOME=" + home}, nil, &out, inst.Layout().MysqldPath, mysql.PrintDefaultsArgs(inst.Layout())...); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), op) {
+		t.Errorf("mysqld --defaults-file read ~/.my.cnf: %s", out.String())
+	}
+	if st := mysql.StartLockStatus(ctx, inst.Host()); !st.Locked {
+		t.Errorf("--defaults-file with a .my.cnf in the service home: %+v", st)
 	}
 }
 

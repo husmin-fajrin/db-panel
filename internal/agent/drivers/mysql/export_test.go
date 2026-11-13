@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"os/user"
 	"strings"
 	"time"
 
@@ -332,6 +334,7 @@ var (
 	StartLockLinePresent = startLockLinePresent
 	ReadManagedContent   = readManagedContent
 	MACAllows            = macAllows
+	OptionName           = optionName
 )
 
 // StartLockContent is what the start lock file holds.
@@ -343,6 +346,22 @@ func SetMACConfinement(f func(Layout) string) (restore func()) {
 	old := macConfinement
 	macConfinement = f
 	return func() { macConfinement = old }
+}
+
+// SetLookupUser replaces the account lookup of the start lock check; it
+// returns the function that restores it.
+func SetLookupUser(f func(name string) (*user.User, error)) (restore func()) {
+	old := lookupUser
+	lookupUser = f
+	return func() { lookupUser = old }
+}
+
+// SetStatHome replaces the stat of the service account's home; it returns
+// the function that restores it.
+func SetStatHome(f func(path string) (os.FileInfo, error)) (restore func()) {
+	old := statHome
+	statHome = f
+	return func() { statHome = old }
 }
 
 // SetReadXattr replaces the extended attribute reader; it returns the

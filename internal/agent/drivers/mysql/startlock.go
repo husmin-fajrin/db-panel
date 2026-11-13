@@ -451,13 +451,92 @@ func fixStartLockFile(f *os.File, root bool) (done bool, err error) {
 	return true, nil
 }
 
+// initFileArg is one --print-defaults argument naming init_file once its
+// prefixes are stripped.
+type initFileArg struct {
+	Prefix string // "" or the stripped prefixes joined by "_", e.g. "loose", "skip", "loose_skip"
+	Value  string
+	Raw    string // the argument as --print-defaults printed it
+}
+
 // effectiveOpts is what mysqld --print-defaults says mysqld reads: every
 // init_file in order (the last one is used), the user it runs as and its
 // error log.
 type effectiveOpts struct {
-	InitFiles []string
-	User      string
-	LogError  string
+	InitFiles    []string      // plain init_file values, in order (as today)
+	InitFileArgs []initFileArg // every argument named init_file after its prefixes, in order
+	User         string
+	LogError     string
+	Home         string // HOME the final --print-defaults ran with
+}
+
+// optionPrefixes are the prefixes mysqld accepts before an option name.
+var optionPrefixes = []string{"loose_", "skip_", "disable_", "enable_", "maximum_"}
+
+// optionName strips "--", turns "-" into "_", then strips the prefixes
+// mysqld accepts (loose_, skip_, disable_, enable_, maximum_) repeatedly.
+// A value after "=" is not part of the name.
+func optionName(arg string) (name, prefix string) {
+	k, _, _ := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+	name = strings.ReplaceAll(k, "-", "_")
+	var stripped []string
+	for {
+		i := slices.IndexFunc(optionPrefixes, func(p string) bool {
+			return strings.HasPrefix(name, p) && len(name) > len(p)
+		})
+		if i < 0 {
+			return name, strings.Join(stripped, "_")
+		}
+		stripped = append(stripped, strings.TrimSuffix(optionPrefixes[i], "_"))
+		name = name[len(optionPrefixes[i]):]
+	}
+}
+
+// protectedHomePrefixes are the directories ProtectHome=yes hides from
+// the agent.
+var protectedHomePrefixes = []string{"/home", "/root", "/run/user"}
+
+var lookupUser = user.Lookup // tests replace (SetLookupUser)
+var statHome = os.Stat       // tests replace (SetStatHome)
+
+// serviceHome is the home of the MySQL service account; hidden is true
+// when it lies under a protectedHomePrefixes entry and the agent cannot
+// stat it (ProtectHome=yes makes those directories empty and unreadable).
+func serviceHome(account string) (home string, hidden bool, err error) {
+	u, err := lookupUser(account)
+	if err != nil {
+		return "", false, err
+	}
+	if u.HomeDir == "" {
+		return "", false, errors.New("direktori home kosong")
+	}
+	home = filepath.Clean(u.HomeDir)
+	for _, p := range protectedHomePrefixes {
+		if home == p || strings.HasPrefix(home, p+"/") {
+			_, err := statHome(home)
+			return home, err != nil, nil
+		}
+	}
+	return home, false, nil
+}
+
+// errNoServiceAccount and errHomeHidden are readEffectiveOptions'
+// refusals to vouch for options it cannot see.
+type errNoServiceAccount struct {
+	account string
+	err     error
+}
+
+func (e errNoServiceAccount) Error() string {
+	return fmt.Sprintf("akun layanan MySQL %s tidak ditemukan: %v", e.account, e.err)
+}
+
+func (e errNoServiceAccount) Unwrap() error { return e.err }
+
+type errHomeHidden struct{ account, home string }
+
+func (e errHomeHidden) Error() string {
+	return fmt.Sprintf("direktori home akun layanan MySQL %s (%s) tidak terlihat oleh agent (ProtectHome); ~/.my.cnf di sana tidak bisa diperiksa", e.account, e.home)
 }
 
 // printDefaultsArgs are mysqld's arguments for --print-defaults. With any
@@ -471,22 +550,61 @@ func printDefaultsArgs(l Layout) []string {
 }
 
 // readEffectiveOptions runs mysqld --print-defaults (which reads the
-// option files only, never the data directory) and parses its answer.
-// User is the last --user, else mysql when the agent runs as root, else
-// the agent's own user. --print-defaults runs as the agent (root), so it
-// may read option files mysqld's own user could not; that can only add
-// init_file entries after the agent's line, which makes the start lock
-// look broken, never held: the result is conservative.
+// option files only, never the data directory) the way the MySQL service
+// reads them, and parses its answer. mysqld reads ~/.my.cnf from HOME, and
+// the service runs with its account's HOME, not the agent's (root, hidden
+// by ProtectHome): a first run with HOME=/nonexistent finds the account
+// (the last --user, else mysql when the agent runs as root, else the
+// agent's own user), a second runs with that account's home and is the
+// answer. A home the agent cannot see, an unknown account, or a ~/.my.cnf
+// that names another user is an error: the start lock cannot be vouched
+// for. --print-defaults runs as the agent (root), so it may read option
+// files mysqld's own user could not; that can only add init_file entries
+// after the agent's line, which makes the start lock look broken, never
+// held: the result is conservative.
 func readEffectiveOptions(ctx context.Context, h Host) (effectiveOpts, error) {
-	var o effectiveOpts
 	l := h.Layout()
 	if l.MysqldPath == "" {
-		return o, errors.New("mysqld tidak diketahui")
+		return effectiveOpts{}, errors.New("mysqld tidak diketahui")
 	}
+	args := printDefaultsArgs(l)
+	o, err := printDefaults(ctx, h, l.MysqldPath, args, "/nonexistent")
+	if err != nil {
+		return o, err
+	}
+	// With --defaults-file mysqld reads that file only, never ~/.my.cnf
+	// (MySQL's documented rule, and plan 5b-1's evidence: HOME changed
+	// neither --print-defaults nor a real start), so HOME is irrelevant
+	// and the service account's home is not needed.
+	if strings.HasPrefix(args[0], "--defaults-file=") {
+		return o, nil
+	}
+	home, hidden, err := serviceHome(o.User)
+	if err != nil {
+		return effectiveOpts{}, errNoServiceAccount{o.User, err}
+	}
+	if hidden {
+		return effectiveOpts{}, errHomeHidden{o.User, home}
+	}
+	o2, err := printDefaults(ctx, h, l.MysqldPath, args, home)
+	if err != nil {
+		return o2, err
+	}
+	if o2.User != o.User {
+		return effectiveOpts{}, fmt.Errorf("opsi user di ~/.my.cnf akun layanan MySQL berbeda (%s, bukan %s); kunci start tidak bisa dipastikan", o2.User, o.User)
+	}
+	o2.Home = home
+	return o2, nil
+}
+
+// printDefaults runs mysqld with args (printDefaultsArgs) and HOME=home
+// and parses what it prints.
+func printDefaults(ctx context.Context, h Host, mysqld string, args []string, home string) (effectiveOpts, error) {
+	var o effectiveOpts
 	ctx, cancel := context.WithTimeout(ctx, printDefaultsTimeout)
 	defer cancel()
 	var out bytes.Buffer
-	if err := h.Exec(ctx, nil, &out, l.MysqldPath, printDefaultsArgs(l)...); err != nil {
+	if err := h.ExecEnv(ctx, []string{"HOME=" + home}, nil, &out, mysqld, args...); err != nil {
 		return o, err
 	}
 	head, rest, ok := strings.Cut(out.String(), "\n")
@@ -495,19 +613,23 @@ func readEffectiveOptions(ctx context.Context, h Host) (effectiveOpts, error) {
 	}
 	// Values are printed as they are, spaces included: a word that does
 	// not start an option continues the one before.
-	var args []string
+	var words []string
 	for _, w := range strings.Fields(rest) {
-		if strings.HasPrefix(w, "--") || len(args) == 0 {
-			args = append(args, w)
+		if strings.HasPrefix(w, "--") || len(words) == 0 {
+			words = append(words, w)
 		} else {
-			args[len(args)-1] += " " + w
+			words[len(words)-1] += " " + w
 		}
 	}
-	for _, a := range args {
-		k, v, _ := strings.Cut(strings.TrimPrefix(a, "--"), "=")
-		switch strings.ReplaceAll(k, "-", "_") {
+	for _, a := range words {
+		_, v, _ := strings.Cut(a, "=")
+		name, prefix := optionName(a)
+		switch name {
 		case "init_file":
-			o.InitFiles = append(o.InitFiles, v)
+			o.InitFileArgs = append(o.InitFileArgs, initFileArg{Prefix: prefix, Value: v, Raw: a})
+			if prefix == "" {
+				o.InitFiles = append(o.InitFiles, v)
+			}
 		case "user":
 			o.User = v
 		case "log_error":
@@ -593,7 +715,7 @@ func macAllows(kind, path string) bool {
 // the class (owner, group, other) the account falls in. ACLs and MAC are
 // not considered.
 func readableBy(path, name string) (bool, error) {
-	u, err := user.Lookup(name)
+	u, err := lookupUser(name)
 	if err != nil {
 		return false, err
 	}
@@ -652,8 +774,9 @@ func readableBy(path, name string) (bool, error) {
 
 // startLockStatus checks whether the start lock holds for the next start
 // of MySQL: the agent's line in the managed config, its file with exactly
-// startLockContent, that file the last init_file mysqld reads
-// (--print-defaults, run as the agent: see readEffectiveOptions), readable
+// startLockContent, that file the last init_file argument mysqld reads,
+// with no prefix (--print-defaults with the service account's HOME: see
+// readEffectiveOptions) and no maximum- prefix on any of them, readable
 // by mysqld's user and, under AppArmor or SELinux, in a place its profile
 // allows.
 func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
@@ -686,23 +809,35 @@ func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
 		st.Reason = fmt.Sprintf("konfigurasi efektif MySQL tidak bisa dibaca: %v", err)
 		return st
 	}
+	// A maximum- prefix makes mysqld refuse to start wherever it is read
+	// (plan 5b-1 evidence), before or after the agent's line.
+	for _, a := range opts.InitFileArgs {
+		if slices.Contains(strings.Split(a.Prefix, "_"), "maximum") {
+			st.Reason = fmt.Sprintf("opsi %s membuat MySQL menolak menyala; kunci start tidak terjamin", a.Raw)
+			return st
+		}
+	}
+	args := opts.InitFileArgs
 	last := -1
-	for i, f := range opts.InitFiles {
-		if f == path {
+	for i, a := range args {
+		if a.Prefix == "" && a.Value == path {
 			last = i
 		}
 	}
-	for _, f := range opts.InitFiles[:max(last, 0)] {
-		if f != path {
-			st.OperatorInitFiles = append(st.OperatorInitFiles, f)
+	for _, a := range args[:max(last, 0)] {
+		if (a.Prefix == "" || a.Prefix == "loose") && a.Value != path {
+			st.OperatorInitFiles = append(st.OperatorInitFiles, a.Value)
 		}
 	}
 	switch {
 	case last < 0:
 		st.Reason = fmt.Sprintf("baris init_file agent tidak dibaca mysqld (--print-defaults tidak memuat %s)", path)
 		return st
-	case last != len(opts.InitFiles)-1:
-		st.Reason = "init_file lain dibaca sesudah baris agent: " + opts.InitFiles[len(opts.InitFiles)-1]
+	case last != len(args)-1 && args[len(args)-1].Prefix != "":
+		st.Reason = fmt.Sprintf("opsi %s dibaca sesudah baris agent; kunci start tidak terjamin", args[len(args)-1].Raw)
+		return st
+	case last != len(args)-1:
+		st.Reason = "init_file lain dibaca sesudah baris agent: " + args[len(args)-1].Value
 		return st
 	}
 	if ok, err := readableBy(path, opts.User); err != nil || !ok {
