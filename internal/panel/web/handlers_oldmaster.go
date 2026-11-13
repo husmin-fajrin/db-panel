@@ -390,6 +390,11 @@ type salvageRow struct {
 func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDetailPage) error {
 	prom, err := a.Store.PromotionByOldMaster(srv.ID)
 	if errors.Is(err, store.ErrNotFound) {
+		// A quarantined server outside any promotion (a rebuild target
+		// that has not yet finished) stays quarantined at a delete too.
+		if srv.Role == store.RoleQuarantined {
+			p.DeleteWarnings = deleteWarnings(srv, nil, nil)
+		}
 		return nil
 	}
 	if err != nil {
@@ -455,10 +460,12 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	return nil
 }
 
-// deleteWarnings words what deleting srv from the panel loses: the panel can no longer check or salvage the
-// old master's leftover data, and its salvage files can no longer be
-// downloaded (the agent removes them after 7 days). box is nil for a
-// server that is no longer a quarantined old master; sf for one without
+// deleteWarnings words what deleting srv from the panel loses: the panel can
+// no longer check or salvage the old master's leftover data, and its salvage
+// files can no longer be downloaded (the agent removes them after 7 days). A
+// quarantined server also stays quarantined: the panel does not ask its
+// agent to lift anything. box is nil for a server that is no longer a
+// quarantined old master (or has no promotion record); sf for one without
 // salvage files.
 func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []string {
 	var out []string

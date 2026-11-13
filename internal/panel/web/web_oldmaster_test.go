@@ -974,3 +974,19 @@ func TestRebuildAcceptanceByConnectionState(t *testing.T) {
 		})
 	}
 }
+
+// A quarantined server with no promotion record (a rebuild target) says in
+// its delete dialog that it stays quarantined.
+func TestDeleteQuarantinedWithoutPromotionDialogSaysStays(t *testing.T) {
+	e, _, _ := promotedEnv(t)
+	if err := e.st.SetServerRole(2, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.PromotionByOldMaster(2); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("server 2 has a promotion record: %v", err)
+	}
+	rec := e.do("GET", "/servers/2", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "<li>Server ini tetap dikarantina (quarantined) setelah dihapus dari panel",
+		"sudo dbpanel agent set-role unassigned")
+}

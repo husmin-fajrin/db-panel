@@ -183,7 +183,7 @@ func (r *Runner) deleteServer(ctx context.Context, serverID int64, unquarantined
 	if srv.Role != store.RoleQuarantined {
 		rctx, cancel := context.WithTimeout(ctx, cancelTimeout)
 		if err := r.d.Hub.Call(rctx, serverID, "mysql.releaseRole", nil, nil); err != nil {
-			r.log.Info("release role before delete", "server_id", serverID, "err", logErr(err))
+			r.log.Warn("release role before delete", "server_id", serverID, "err", logErr(err))
 		}
 		cancel()
 	}
