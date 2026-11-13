@@ -990,3 +990,148 @@ func TestDeleteQuarantinedWithoutPromotionDialogSaysStays(t *testing.T) {
 	wantBody(t, rec, "<li>Server ini tetap dikarantina (quarantined) setelah dihapus dari panel",
 		"sudo dbpanel agent set-role unassigned")
 }
+
+// rebuildButton is the rebuild form's submit button.
+var rebuildButton = regexp.MustCompile(`<button type="submit" class="btn btn-error"[^>]*data-confirm-action="rebuild_old_master"[^>]*>`)
+
+// TestRebuildFormShowsApprovalBox: the rebuild form says whether root on
+// the old master approved its rebuild, the command and code to run when
+// not, and keeps the button disabled until it is.
+func TestRebuildFormShowsApprovalBox(t *testing.T) {
+	const (
+		box     = "Persetujuan di server"
+		why     = "Bangun ulang membuang semua data MySQL di server ini. Persetujuan di server memastikan orang yang memegang server itu melihat dari mana data penggantinya diambil, sehingga panel saja tidak bisa melakukannya."
+		recheck = `<a class="btn btn-sm" href="/masters/2/replicas/new?bangun-ulang=1">Periksa lagi</a>`
+	)
+	approved := proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+	cases := []struct {
+		name     string
+		approval proto.RebuildApprovalResult
+		err      error
+		want     []string
+		wantNot  []string
+		disabled bool
+	}{
+		{name: "not approved", approval: proto.RebuildApprovalResult{Required: true, Code: "123456", Source: "10.0.0.2:3306", RemainingSec: 1700},
+			want: []string{box, "Belum disetujui. Jalankan perintah ini di db-master sebagai root, lalu klik Periksa lagi:",
+				"<code>sudo dbpanel agent approve 123456</code>", "Kode berlaku 29 menit lagi.", why, recheck},
+			wantNot: []string{"tidak berlaku lagi", "Sudah disetujui"}, disabled: true},
+		{name: "invalid approval and a new code", approval: proto.RebuildApprovalResult{Required: true, Code: "007007",
+			Source: "10.0.0.2:3306", RemainingSec: 30, Invalid: "persetujuan sudah habis pada 2026-11-12 09:00 WIB"},
+			want: []string{"Persetujuan yang ada di db-master tidak berlaku lagi: persetujuan sudah habis pada 2026-11-12 09:00 WIB.",
+				"<code>sudo dbpanel agent approve 007007</code>", "Kode berlaku 1 menit lagi.", why, recheck},
+			disabled: true},
+		{name: "approved", approval: approved,
+			want: []string{box, "Sudah disetujui di db-master untuk sumber 10.0.0.2:3306 (10.0.0.2); berlaku 23 jam 53 menit lagi. " +
+				"Untuk membatalkan, jalankan di server itu: <code>sudo dbpanel agent approve batal</code>"},
+			wantNot: []string{"Belum disetujui", why}},
+		{name: "not required", approval: proto.RebuildApprovalResult{},
+			want:    []string{box, "Agent db-master tidak melaporkan server ini dikarantina, jadi persetujuan di server tidak diperlukan."},
+			wantNot: []string{"Belum disetujui", "sudo dbpanel agent approve"}},
+		{name: "old agent", err: orchestrator.ErrAgentOutdated,
+			want: []string{box, "Agent perlu dimutakhirkan: agent di db-master belum mengenal persetujuan di server. Klik Pasang ulang " +
+				"agent di halaman server itu, jalankan perintahnya, lalu klik Periksa lagi.", recheck},
+			disabled: true},
+		{name: "offline", err: proto.ErrOffline,
+			want: []string{"Persetujuan di server tidak bisa diperiksa: agent db-master offline.", recheck}, disabled: true},
+		{name: "other error", err: errors.New("batas waktu habis"),
+			want:    []string{"Persetujuan di server tidak bisa diperiksa sekarang; klik Periksa lagi.", recheck},
+			wantNot: []string{"batas waktu habis"}, disabled: true},
+		{name: "agent refuses with its own words", err: &proto.Error{Code: proto.CodeBadParams, Message: "server ini dipin sebagai " +
+			"quarantined tanpa sumber yang dipin; perintah mysql.rebuildApproval ditolak. Pin master barunya dulu di server ini: " +
+			"sudo dbpanel agent set-source <host:port>"},
+			want:    []string{"Pin master barunya dulu di server ini: sudo dbpanel agent set-source &lt;host:port&gt;", recheck},
+			wantNot: []string{"sudo dbpanel agent approve"}, disabled: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, f, topo := promotedEnv(t)
+			if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			f.approval, f.approvalErr = tc.approval, tc.err
+			rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, e.cookie())
+			wantCode(t, rec, http.StatusOK)
+			wantBody(t, rec, tc.want...)
+			wantNoBody(t, rec, tc.wantNot...)
+			button := rebuildButton.FindString(rec.Body.String())
+			if button == "" {
+				t.Fatalf("no rebuild button in %s", rec.Body.String())
+			}
+			if got := strings.Contains(button, " disabled"); got != tc.disabled {
+				t.Fatalf("button %s: disabled = %v, want %v", button, got, tc.disabled)
+			}
+		})
+	}
+
+	// Agent offline: not asked, said so.
+	e, f, topo := promotedEnv(t)
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	e.hub.Detach(1, fakeConn{})
+	f.approval = approved
+	rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, e.cookie())
+	wantBody(t, rec, "Persetujuan di server tidak bisa diperiksa: agent db-master offline.")
+	if f.approvalCalls != 0 {
+		t.Fatalf("an offline agent was asked %d times", f.approvalCalls)
+	}
+}
+
+// TestRebuildAuditHasLocalApproval: the audit entry of a rebuild, and of
+// Ulangi and Setujui of one, records the approval root gave on the server
+// and its age, read again by the handler.
+func TestRebuildAuditHasLocalApproval(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+	rec := e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm("accept_connections", "1"),
+		web.ActRebuildOldMaster, "server", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantAuditDetail(t, e, "create_replica", `"local_approval":true`, `"local_approval_age_sec":60`)
+
+	// Ulangi of a rebuild job, then Setujui of one whose approval cannot
+	// be read.
+	const retryID, approveID = "3333333333333333333333333333333d", "3333333333333333333333333333333e"
+	storeJob(t, e.st, retryID, orchestrator.KindCreateReplica, 1, `{"master_server_id":2,"rebuild_old_master":true}`,
+		store.JobFailed, "Periksa master", "Periksa server tujuan")
+	f.drops = map[string]bool{retryID: true, approveID: true}
+	f.approval.AgeSec = 120
+	rec = e.do("POST", "/jobs/"+retryID+"/retry", withToken(t, e, url.Values{}, "job_retry:"+retryID, "job", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantAuditDetail(t, e, "job_retry", `"local_approval":true`, `"local_approval_age_sec":120`)
+
+	storeJob(t, e.st, approveID, orchestrator.KindCreateReplica, 1, `{"master_server_id":2,"rebuild_old_master":true,"wait_reason":"wipe"}`,
+		store.JobWaiting, "Periksa master", "Periksa server tujuan")
+	f.approvalErr = proto.ErrOffline
+	rec = e.do("POST", "/jobs/"+approveID+"/approve", withToken(t, e, url.Values{}, "job_approve:"+approveID, "job", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantAuditDetail(t, e, "job_approve", `"local_approval":false`)
+}
+
+// wantAuditDetail fails unless the newest audit entry of action holds
+// every sub in its detail.
+func wantAuditDetail(t *testing.T, e *env, action string, subs ...string) {
+	t.Helper()
+	entries, err := e.st.ListAudit(0, time.Time{}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range entries {
+		if a.Action != action {
+			continue
+		}
+		for _, s := range subs {
+			if !strings.Contains(a.DetailJSON, s) {
+				t.Fatalf("%s audit detail %s lacks %s", action, a.DetailJSON, s)
+			}
+		}
+		return
+	}
+	t.Fatalf("no %s audit entry", action)
+}

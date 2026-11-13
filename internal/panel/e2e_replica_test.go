@@ -1053,8 +1053,23 @@ func TestE2EPromotePlanned(t *testing.T) {
 	if srv, err := p.Store.GetServer(m.srv()); err != nil || srv.Role != store.RoleQuarantined {
 		t.Fatalf("old master after the refused rebuild = %+v, %v; want quarantined", srv, err)
 	}
+	// Acknowledged but not approved by root on the old master: it stops
+	// at the approval and names the command to run there (spec 5.13).
+	form, vals = e.replicaForm(t, ra, m, true)
+	if !strings.Contains(form, "Persetujuan di server") || !rebuildButtonDisabled.MatchString(form) {
+		t.Fatalf("rebuild form before the approval lacks the box or enables the button:\n%s", textOf(form))
+	}
+	vals.Set("accept_connections", "1")
+	status, body = ui.post(fmt.Sprintf("/masters/%d/replicas", ra.srv()), vals)
+	if status == http.StatusSeeOther || !strings.Contains(body, "sudo dbpanel agent approve ") {
+		t.Fatalf("rebuild without the approval = %d:\n%s", status, textOf(body))
+	}
+	if j, busy, err := p.Store.ActiveJobForServer(m.srv()); err != nil || busy {
+		t.Fatalf("an unapproved rebuild started job %+v (%v)", j, err)
+	}
 
-	// Bangun ulang sebagai replika, the acknowledgement ticked.
+	// Bangun ulang sebagai replika, approved by root and the
+	// acknowledgement ticked.
 	e.rebuildOldMaster(t, ra, m, 4, true)
 	waitRow(t, rb.db, "a", 4, "setelah-bangun-ulang")
 	waitForWithin(t, e2eWait, "the start lock released on the rebuilt old master", func() bool {

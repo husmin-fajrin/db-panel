@@ -693,6 +693,102 @@ type rebuildInfo struct {
 	AcceptLabel string
 	// Form: see retryView.Form; always "" here.
 	Form string
+	// Root's approval of the rebuild on the server (spec 5.2), the box
+	// "Persetujuan di server": Approval is the agent's answer, nil when it
+	// could not be read (ApprovalErr says why, in the panel's words or,
+	// for the agent's own refusal, in its words cut at maxAgentWords).
+	// ApprovalOK (approved, or not required) enables the button.
+	Approval    *proto.RebuildApprovalResult
+	ApprovalErr string
+	ApprovalOK  bool
+}
+
+// ApprovalMinutes is how many minutes the code to approve is still valid,
+// rounded up, at least 1.
+func (i *rebuildInfo) ApprovalMinutes() int64 {
+	if i.Approval == nil {
+		return 0
+	}
+	return max(1, (i.Approval.RemainingSec+59)/60)
+}
+
+// ApprovalHours and ApprovalHourMinutes are how long the approval still
+// holds, in hours and the minutes after them.
+func (i *rebuildInfo) ApprovalHours() int64 {
+	if i.Approval == nil {
+		return 0
+	}
+	return max(0, i.Approval.RemainingSec) / 3600
+}
+
+func (i *rebuildInfo) ApprovalHourMinutes() int64 {
+	if i.Approval == nil {
+		return 0
+	}
+	return max(0, i.Approval.RemainingSec) % 3600 / 60
+}
+
+// rebuildApproval fills info's approval from srv's agent; an offline
+// agent is not asked.
+func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
+	srv := info.Server
+	offline := fmt.Sprintf("Persetujuan di server tidak bisa diperiksa: agent %s offline.", srv.Name)
+	if !srv.Paired || !a.Hub.IsOnline(srv.ID) {
+		info.ApprovalErr = offline
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, pageCallTimeout)
+	defer cancel()
+	res, err := a.Orchestrator.RebuildApproval(ctx, srv.ID)
+	if err != nil {
+		a.Logger.Warn("read rebuild approval", "server", srv.ID, "err", logErr(err))
+	}
+	switch {
+	case err == nil:
+		// The agent's words, shown bounded (SP-11).
+		res.Code = monitor.AgentText(res.Code, maxAgentWords)
+		res.Source = monitor.AgentText(res.Source, maxAgentWords)
+		res.Addr = monitor.AgentText(res.Addr, maxAgentWords)
+		res.Invalid = strings.TrimSuffix(monitor.AgentText(res.Invalid, maxAgentWords), ".")
+		info.Approval = &res
+		info.ApprovalOK = res.Approved || !res.Required
+	case errors.Is(err, proto.ErrOffline):
+		info.ApprovalErr = offline
+	case errors.Is(err, orchestrator.ErrAgentOutdated):
+		info.ApprovalErr = fmt.Sprintf("Agent perlu dimutakhirkan: agent di %s belum mengenal persetujuan di server. Klik Pasang "+
+			"ulang agent di halaman server itu, jalankan perintahnya, lalu klik Periksa lagi.", srv.Name)
+	case errors.Is(err, &proto.Error{Code: proto.CodeBadParams}):
+		// The agent's refusal says what to run on the server (set-source,
+		// or why its pin files cannot be used).
+		info.ApprovalErr = monitor.AgentText(err.Error(), maxAgentWords)
+	default:
+		info.ApprovalErr = "Persetujuan di server tidak bisa diperiksa sekarang; klik Periksa lagi."
+	}
+}
+
+// localApprovalDetail adds to an audit detail the approval root holds on
+// serverID now: "local_approval" (false when it cannot be read) and
+// "local_approval_age_sec".
+func (a *app) localApprovalDetail(ctx context.Context, serverID int64, detail map[string]any) {
+	ctx, cancel := context.WithTimeout(ctx, pageCallTimeout)
+	defer cancel()
+	res, err := a.Orchestrator.RebuildApproval(ctx, serverID)
+	if err != nil {
+		a.Logger.Warn("read rebuild approval for the audit", "server", serverID, "err", logErr(err))
+		detail["local_approval"] = false
+		return
+	}
+	detail["local_approval"] = res.Approved
+	detail["local_approval_age_sec"] = res.AgeSec
+}
+
+// shownError is an orchestrator refusal as a page shows it: an agent's
+// own text (a *proto.Error) bounded (SP-11), the panel's as it is.
+func shownError(err error) string {
+	if _, ok := errors.AsType[*proto.Error](err); ok && !errors.Is(err, proto.ErrOffline) {
+		return monitor.AgentText(err.Error(), maxAgentWords)
+	}
+	return err.Error()
 }
 
 // maxAgentWords bounds an agent's sentence shown on a page (SP-11); a
@@ -778,6 +874,7 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) 
 		info.Warnings = append(info.Warnings, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
 			"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
 	}
+	a.rebuildApproval(ctx, info)
 	info.ConfirmText = fmt.Sprintf("Bangun ulang %s sebagai replika %s: semua data MySQL di %s diganti salinan dari master baru.",
 		srv.Name, master.Name, srv.Name)
 	if len(info.Warnings) > 0 {

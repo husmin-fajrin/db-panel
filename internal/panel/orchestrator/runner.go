@@ -782,6 +782,9 @@ func (r *Runner) launchRefused(id string) error {
 // its AddExisting (ErrAddExistingNames).
 func (r *Runner) Approve(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
+	if err := r.rebuildApprovalForJob(jobID); err != nil {
+		return err
+	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
@@ -836,6 +839,9 @@ func (r *Runner) refuseCutWipeList(j store.Job) error {
 // confirmation is stored before the job runs.
 func (r *Runner) Retry(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
+	if err := r.rebuildApprovalForJob(jobID); err != nil {
+		return err
+	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	j, _, err := r.d.Store.GetJob(jobID)
@@ -1624,12 +1630,19 @@ func (jr *jobRun) call(ctx context.Context, serverID int64, cmd string, params, 
 	return jr.callWithin(ctx, callTimeout, serverID, cmd, params, result)
 }
 
+// callWithin runs cmd on serverID within d. A refusal by strict mode
+// (needs_local_approval) becomes localApprovalErr's words, except for
+// mysql.releaseRole, whose refusal names another local command and is
+// kept as the agent wrote it.
 func (jr *jobRun) callWithin(ctx context.Context, d time.Duration, serverID int64, cmd string, params, result any) error {
-	ctx, cancel := context.WithTimeout(ctx, d)
+	cctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
-	err := jr.r.d.Hub.Call(ctx, serverID, cmd, params, result)
+	err := jr.r.d.Hub.Call(cctx, serverID, cmd, params, result)
 	if errors.Is(err, proto.ErrOffline) {
 		return stepError(fmt.Sprintf("agent %s terputus saat %s", jr.serverName(serverID), jr.steps[jr.idx].title))
+	}
+	if cmd != "mysql.releaseRole" && errors.Is(err, &proto.Error{Code: proto.CodeNeedsLocalApproval}) {
+		return jr.r.localApprovalErr(ctx, serverID, err)
 	}
 	return err
 }

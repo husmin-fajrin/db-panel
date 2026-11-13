@@ -80,6 +80,11 @@ type fakeOrch struct {
 	// server.
 	connCalls map[int64]int
 	listCalls map[int64]int
+	// approval and approvalErr answer RebuildApproval (the zero value: the
+	// agent does not hold the server quarantined); approvalCalls counts it.
+	approval      proto.RebuildApprovalResult
+	approvalErr   error
+	approvalCalls int
 }
 
 func (f *fakeOrch) record(call string) {
@@ -315,6 +320,16 @@ func (f *fakeOrch) StartSalvage(_ context.Context, id int64) (string, error) {
 		return "", f.err
 	}
 	return f.nextID, nil
+}
+
+func (f *fakeOrch) RebuildApproval(context.Context, int64) (proto.RebuildApprovalResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approvalCalls++
+	if f.approvalErr != nil {
+		return proto.RebuildApprovalResult{}, f.approvalErr
+	}
+	return f.approval, nil
 }
 
 func (f *fakeOrch) Connections(_ context.Context, id int64) (proto.ConnectionsResult, error) {

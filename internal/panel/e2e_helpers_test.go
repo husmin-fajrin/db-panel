@@ -720,12 +720,15 @@ var replicaFormDBs = regexp.MustCompile(`name="databases" value="([^"]*)"`)
 // replika" of the quarantined old master target (token and typed name)
 // whose form must ask for the acknowledgement of the connections that
 // remain on it exactly when accept is true (spec 5.5), and which ticks it
-// then; root on target approves the rebuild before it is posted
-// (approveRebuild). A job that waits for the admin account to be
+// then; root on target approves the rebuild, with the code its form
+// shows, before it is posted (approveRebuild). A job that waits for the admin account to be
 // reconnected (CLONE replaced it) gets root reconnected and approved; any
 // other wait is approved. The job must succeed.
 func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode, rebuild, accept bool) string {
 	t.Helper()
+	if rebuild {
+		e.approveRebuild(t, master, target)
+	}
 	form, vals := e.replicaForm(t, master, target, rebuild)
 	if rebuild {
 		if asks := strings.Contains(form, `name="accept_connections"`); asks != accept {
@@ -734,7 +737,6 @@ func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode
 		if accept {
 			vals.Set("accept_connections", "1")
 		}
-		e.approveRebuild(t, target)
 	}
 	id := e.ui.postJob(fmt.Sprintf("/masters/%d/replicas", master.srv()), vals)
 	job := waitJob(t, e.p, id, e2eCreateTimeout, func(j store.Job) bool {
@@ -755,26 +757,35 @@ func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode
 	return id
 }
 
-// approveRebuild makes target's agent ask for root's approval of its
-// rebuild (strict mode on a quarantined server) and approves it as root on
-// target would, with "dbpanel agent approve <kode>" answered "ya". A later
-// task reads the code from the rebuild form instead of the request file.
-func (e *e2ePromoteTopology) approveRebuild(t *testing.T, target *e2eNode) {
+// rebuildButtonDisabled is the rebuild form's button while it may not be
+// pressed.
+var rebuildButtonDisabled = regexp.MustCompile(`<button type="submit" class="btn btn-error" disabled data-confirm-action="rebuild_old_master"`)
+
+// approveCodeRe finds the command the rebuild form's box "Persetujuan di
+// server" tells root to run, and its code.
+var approveCodeRe = regexp.MustCompile(`sudo dbpanel agent approve ([0-9]{6})`)
+
+// approveRebuild is what an operator does with the rebuild form of the
+// quarantined old master old: reads the command and code in its box
+// "Persetujuan di server", runs it as root on old ("dbpanel agent approve
+// <kode>" answered "ya"), and clicks Periksa lagi, which must then say the
+// rebuild is approved.
+func (e *e2ePromoteTopology) approveRebuild(t *testing.T, master, old *e2eNode) {
 	t.Helper()
-	dir := target.agent.dir
-	p, err := mysql.LoadPins(dir)
-	if err != nil {
-		t.Fatalf("pins of %s: %v", target.name, err)
-	}
-	req, err := p.EnsureRebuildRequest(time.Now())
-	if err != nil {
-		t.Fatalf("rebuild request on %s: %v", target.name, err)
+	formPath := fmt.Sprintf("/masters/%d/replicas/new?bangun-ulang=%d", master.srv(), old.srv())
+	form := e.ui.get(formPath)
+	m := approveCodeRe.FindStringSubmatch(form)
+	if m == nil {
+		t.Fatalf("rebuild form of %s shows no approve command:\n%s", old.name, textOf(form))
 	}
 	var out, errOut strings.Builder
-	if code := agent.RunCLI([]string{"approve", req.Code, "--dir", dir}, strings.NewReader("ya\n"), &out, &errOut); code != 0 {
-		t.Fatalf("approve on %s exited %d\nstdout:\n%s\nstderr:\n%s", target.name, code, out.String(), errOut.String())
+	if code := agent.RunCLI([]string{"approve", m[1], "--dir", old.agent.dir}, strings.NewReader("ya\n"), &out, &errOut); code != 0 {
+		t.Fatalf("approve on %s exited %d\nstdout:\n%s\nstderr:\n%s", old.name, code, out.String(), errOut.String())
 	}
-	t.Logf("root on %s approved the rebuild from %s", target.name, req.Source)
+	if form := e.ui.get(formPath); !strings.Contains(form, "Sudah disetujui di ") {
+		t.Fatalf("rebuild form of %s after the approval:\n%s", old.name, textOf(form))
+	}
+	t.Logf("root on %s approved the rebuild with code %s from its form", old.name, m[1])
 }
 
 // replicaForm opens the "Buat replika" form of master (with rebuild, the

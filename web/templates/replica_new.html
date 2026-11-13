@@ -9,6 +9,30 @@
 {{if .CutoverPending}}
 <div role="alert" class="alert alert-error mb-4"><span>Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini. <a class="link" href="/masters/{{$.Master.ID}}/cutover">Buka layar pengalihan</a></span></div>
 {{end}}
+{{$rb := .}}
+<section class="card bg-base-100 shadow mb-4 border-l-4 {{if .ApprovalOK}}border-success{{else}}border-warning{{end}}" aria-labelledby="persetujuan-judul">
+  <div class="card-body gap-3">
+    <h2 id="persetujuan-judul" class="card-title text-lg">Persetujuan di server</h2>
+    {{if .ApprovalErr}}
+    <p>{{.ApprovalErr}}</p>
+    {{else}}{{with .Approval}}
+    {{if not .Required}}
+    <p>Agent {{$rb.Server.Name}} tidak melaporkan server ini dikarantina, jadi persetujuan di server tidak diperlukan.</p>
+    {{else if .Approved}}
+    <p>Sudah disetujui di {{$rb.Server.Name}} untuk sumber {{.Source}} ({{.Addr}}); berlaku {{$rb.ApprovalHours}} jam {{$rb.ApprovalHourMinutes}} menit lagi. Untuk membatalkan, jalankan di server itu: <code>sudo dbpanel agent approve batal</code></p>
+    {{else}}
+    {{with .Invalid}}<p>Persetujuan yang ada di {{$rb.Server.Name}} tidak berlaku lagi: {{.}}.</p>{{end}}
+    <p>Belum disetujui. Jalankan perintah ini di {{$rb.Server.Name}} sebagai root, lalu klik Periksa lagi:</p>
+    <pre class="whitespace-pre-wrap break-all rounded bg-base-200 p-3 text-base"><code>sudo dbpanel agent approve {{.Code}}</code></pre>
+    <p>Kode berlaku {{$rb.ApprovalMinutes}} menit lagi.</p>
+    {{end}}
+    {{end}}{{end}}
+    {{if not .ApprovalOK}}
+    <p class="text-sm">Bangun ulang membuang semua data MySQL di server ini. Persetujuan di server memastikan orang yang memegang server itu melihat dari mana data penggantinya diambil, sehingga panel saja tidak bisa melakukannya.</p>
+    <div><a class="btn btn-sm" href="/masters/{{$.Master.ID}}/replicas/new?bangun-ulang={{.Server.ID}}">Periksa lagi</a></div>
+    {{end}}
+  </div>
+</section>
 {{else}}
 <h1 class="text-2xl font-bold mb-4">Buat replika dari {{.Master.Name}}</h1>
 {{end}}
@@ -81,7 +105,7 @@
     <div class="card-actions justify-between">
       <a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Batal</a>
       {{with .Rebuild}}
-      <button type="submit" class="btn btn-error"{{if or (not $.Targets) .CutoverPending}} disabled{{end}} data-confirm-action="rebuild_old_master" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-danger="1" data-confirm-text="{{.ConfirmText}}">Bangun ulang sebagai replika</button>
+      <button type="submit" class="btn btn-error"{{if or (not $.Targets) .CutoverPending (not .ApprovalOK)}} disabled{{end}} data-confirm-action="rebuild_old_master" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-danger="1" data-confirm-text="{{.ConfirmText}}">Bangun ulang sebagai replika</button>
       {{else}}
       <button type="submit" class="btn btn-primary"{{if or (not .Targets) .RebuildBad}} disabled{{end}}>Buat replika</button>
       {{end}}

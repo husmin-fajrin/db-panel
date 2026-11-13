@@ -71,6 +71,10 @@ type Orchestrator interface {
 	SalvageList(ctx context.Context, serverID int64) ([]proto.SalvageFile, error)
 	SalvageRead(ctx context.Context, serverID int64, name string, offset int64) (proto.SalvageReadResult, error)
 	SalvageDelete(ctx context.Context, serverID int64, name string) error
+	// RebuildApproval asks the server's agent whether root on it approved
+	// its rebuild ("Bangun ulang sebagai replika", spec 5.2), and the code
+	// to approve while not.
+	RebuildApproval(ctx context.Context, serverID int64) (proto.RebuildApprovalResult, error)
 }
 
 const (
@@ -727,9 +731,12 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		Databases: selected, ForceDump: p.ForceDump, ConfirmWipe: true, RebuildOldMaster: rebuild,
 		AcceptConnections: acceptConnections,
 	})
+	if rebuild {
+		a.localApprovalDetail(r.Context(), p.Target, detail)
+	}
 	if err != nil {
 		a.Logger.Warn("create replica refused", "master", master.ID, "target", p.Target, "err", logErr(err))
-		fail(err.Error())
+		fail(shownError(err))
 		return
 	}
 	detail["job_id"] = id

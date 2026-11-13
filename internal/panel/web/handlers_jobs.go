@@ -582,7 +582,11 @@ func (a *app) prepareRetry(w http.ResponseWriter, r *http.Request) {
 // job's server.
 func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, name string, do func(jobID string) error) {
 	err := do(job.ID)
-	a.audit(r, name, auditJob, job.ServerID, map[string]any{"job_id": job.ID, "kind": job.Kind}, outcomeOf(err))
+	detail := map[string]any{"job_id": job.ID, "kind": job.Kind}
+	if (name == ActJobRetry || name == ActJobApprove) && job.Kind == orchestrator.KindCreateReplica && paramsOf(job).RebuildOldMaster {
+		a.localApprovalDetail(r.Context(), job.ServerID, detail)
+	}
+	a.audit(r, name, auditJob, job.ServerID, detail, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", logErr(err))
 		status := http.StatusConflict
@@ -592,7 +596,7 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, n
 		case errors.Is(err, orchestrator.ErrJobNeedsConfirm):
 			status = http.StatusForbidden
 		}
-		a.renderJob(w, r, status, err.Error())
+		a.renderJob(w, r, status, shownError(err))
 		return
 	}
 	a.Logger.Info("job action", "action", name, "job", job.ID, "by", auth.UsernameFrom(r.Context()))

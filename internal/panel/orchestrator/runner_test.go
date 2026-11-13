@@ -326,8 +326,9 @@ func TestRetryRebuildRechecksConnections(t *testing.T) {
 	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
 		t.Fatalf("job after a refused retry = %+v", j)
 	}
+	// Only reads: the connections and root's approval.
 	for _, c := range g.m.cmds(mark) {
-		if c != "mysql.connections" {
+		if c != "mysql.connections" && c != "mysql.rebuildApproval" {
 			t.Fatalf("refused retry sent %s to the old master", c)
 		}
 	}
@@ -407,8 +408,9 @@ func TestApproveRebuildRechecksConnections(t *testing.T) {
 	if j, _, _ := e.st.GetJob(id); j.Status != store.JobWaiting {
 		t.Fatalf("job after a refused approval = %+v", j)
 	}
+	// Only reads: the connections and root's approval.
 	for _, c := range g.m.cmds(mark) {
-		if c != "mysql.connections" {
+		if c != "mysql.connections" && c != "mysql.rebuildApproval" {
 			t.Fatalf("refused approval sent %s to the old master", c)
 		}
 	}

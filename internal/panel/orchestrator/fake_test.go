@@ -52,6 +52,7 @@ var agentCommands = []string{
 	"mysql.lockForPromote", "mysql.unlockPromote", "mysql.promote", "mysql.probeSource", "mysql.binlogTail",
 	"mysql.quarantine", "mysql.repoint", "mysql.recordReplicas",
 	"mysql.leftover", "mysql.salvage", "mysql.connections", "mysql.salvageList", "mysql.salvageRead", "mysql.salvageDelete",
+	"mysql.rebuildApproval",
 }
 
 type call struct {
@@ -215,6 +216,12 @@ func (fa *fakeAgent) reply(cmd string, result any) {
 // fail scripts cmd to fail with msg as the agent's error text.
 func (fa *fakeAgent) fail(cmd, msg string) {
 	fa.on(cmd, func(json.RawMessage) (any, error) { return nil, &commands.ParamError{Msg: msg} })
+}
+
+// failCode scripts cmd to be refused until root acts on the server, as
+// strict mode refuses it: needs_local_approval with msg.
+func (fa *fakeAgent) failCode(cmd, msg string) {
+	fa.on(cmd, func(json.RawMessage) (any, error) { return nil, &commands.LocalActionError{Msg: msg} })
 }
 
 // job scripts cmd as an agent job running fn.
@@ -593,6 +600,9 @@ func (e *env) replicaAgent(name, method string) *fakeAgent {
 // scriptReplicaTarget scripts fa's agent to answer a Buat replika onto it
 // by method (clone or dump).
 func scriptReplicaTarget(fa *fakeAgent, name, method string) {
+	// A quarantined old master's rebuild is approved by root on it.
+	fa.reply("mysql.rebuildApproval", proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000,
+		AgeSec: 60, Source: "10.0.0.1:3306", Addr: "10.0.0.1"})
 	fa.reply("probe", proto.ProbeResult{Hostname: name, MySQL: proto.MySQLInfo{Installed: true, Version: "8.4.3"}})
 	fa.reply("mysql.preflight", proto.PreflightResult{Worst: proto.CheckOK, Method: method,
 		Checks: []proto.Check{{ID: "dedicated", Status: proto.CheckOK, Title: "Server replika khusus"}}})

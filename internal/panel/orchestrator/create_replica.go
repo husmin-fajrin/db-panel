@@ -96,6 +96,13 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 			return "", ErrConnectionsRemain
 		}
 	}
+	// Root's approval on the old master, asked before the start lock (an
+	// agent call): its agent refuses the wipe without one anyway.
+	if p.RebuildOldMaster {
+		if _, err := r.requireRebuildApproval(ctx, p.TargetServerID); err != nil {
+			return "", err
+		}
+	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	if _, err := r.d.Store.GetServer(p.MasterServerID); err != nil {

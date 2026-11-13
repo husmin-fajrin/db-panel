@@ -62,6 +62,9 @@ func (r *Runner) StartMySQLTLS(ctx context.Context, serverID int64) (string, err
 	if err != nil {
 		return "", err
 	}
+	if srv.Role == store.RoleQuarantined {
+		return "", errMySQLTLSQuarantined
+	}
 	if srv.Address == "" {
 		return "", errors.New("server ini belum terhubung ke panel")
 	}
@@ -82,10 +85,15 @@ func (r *Runner) StartMySQLTLS(ctx context.Context, serverID int64) (string, err
 	return r.createJob(KindMySQLTLS, serverID, 0, jobState{}, mysqlTLSStepNames())
 }
 
+// errMySQLTLSQuarantined refuses a new certificate for a quarantined old
+// master: its agent needs root's approval for it, and its rebuild installs
+// one.
+var errMySQLTLSQuarantined = errors.New("Server ini dikarantina (quarantined); sertifikat MySQL-nya dipasang lagi saat dibangun ulang sebagai replika.")
+
 // RenewMySQLTLS is the daily check: it starts mysql_tls for every server
-// whose certificate expires within tlsRenewBefore, whose agent is online
-// and that has no unfinished job, and returns the jobs it started. A
-// server it skips is tried again the next day.
+// whose certificate expires within tlsRenewBefore, whose agent is online,
+// that has no unfinished job and is not quarantined, and returns the jobs
+// it started. A server it skips is tried again the next day.
 func (r *Runner) RenewMySQLTLS(ctx context.Context) []string {
 	recs, err := r.d.Store.ListServerTLSExpiring(r.now().Add(tlsRenewBefore))
 	if err != nil {
@@ -96,6 +104,10 @@ func (r *Runner) RenewMySQLTLS(ctx context.Context) []string {
 	for _, rec := range recs {
 		if ctx.Err() != nil {
 			break
+		}
+		if srv, err := r.d.Store.GetServer(rec.ServerID); err == nil && srv.Role == store.RoleQuarantined {
+			r.log.Info("mysql certificate renewal skipped: quarantined", "server_id", rec.ServerID, "not_after", rec.NotAfter)
+			continue
 		}
 		if !r.d.Hub.IsOnline(rec.ServerID) {
 			r.log.Info("mysql certificate renewal postponed: agent offline", "server_id", rec.ServerID, "not_after", rec.NotAfter)
