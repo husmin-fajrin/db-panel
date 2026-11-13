@@ -293,6 +293,9 @@ const (
 - agent melepas kunci start (start lock) setelah MySQL menyala dengan baca-saja (read-only) tersimpan;
 - server ini dipin sebagai replika: panel boleh membuang datanya dan menyalin ulang dari sumber yang dipin tanpa persetujuan di server ini.
 `
+	setRoleUnreadable     = "Pin server ini tidak bisa dibaca (%v); server ini mungkin dikarantina (quarantined).\n"
+	setRoleChanged        = "Peran server ini berubah selama Anda membaca; jalankan perintah ini lagi."
+	setRoleLockGone       = "Kunci start sudah dilepas, tetapi peran belum diubah. Jalankan perintah ini lagi; sampai itu MySQL tidak dipaksa baca-saja (read-only) saat menyala."
 	setRoleAsk            = "Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: "
 	setRoleCancelled      = "Dibatalkan; peran tidak diubah."
 	setRoleReleased       = "Kunci start dilepas: baris init_file dan berkas kuncinya dihapus dari konfigurasi MySQL."
@@ -337,10 +340,13 @@ func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	p := loadPinsForCLI(dir, stderr)
-	was := p.Role()
-	// Leaving quarantine gives up what it protects: say what, and ask.
-	if was == "quarantined" && role != "quarantined" && !yes {
-		if host, port, has := p.Source(); has {
+	was, readErr := p.RoleErr()
+	// Pins that cannot be read may hide a quarantine: the server counts
+	// as possibly quarantined.
+	if (was == "quarantined" || readErr != nil) && role != "quarantined" && !yes {
+		if readErr != nil {
+			fmt.Fprintf(stdout, setRoleUnreadable, readErr)
+		} else if host, port, has := p.Source(); has {
 			fmt.Fprintf(stdout, setRoleQuarantinedWithSource, net.JoinHostPort(host, strconv.Itoa(port)))
 		} else {
 			fmt.Fprint(stdout, setRoleQuarantinedNoSource)
@@ -359,14 +365,27 @@ func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, setRoleCancelled)
 			return 1
 		}
+		// The role may have changed while root read the screen.
+		if now, err := p.RoleErr(); now != was || (err != nil) != (readErr != nil) {
+			fmt.Fprintln(stderr, setRoleChanged)
+			return 1
+		}
 	}
 	// A master never keeps a quarantine's start lock: it goes first, and
 	// the role stays as it was when it cannot.
-	if role == "master" && !cliReleaseStartLock(dir, stdout, stderr) {
-		return 1
+	var released bool
+	if role == "master" {
+		ok, found := cliReleaseStartLock(dir, stdout, stderr)
+		if !ok {
+			return 1
+		}
+		released = found
 	}
 	if err := p.SetRole(role); err != nil {
 		fmt.Fprintf(stderr, "gagal mengubah peran: %v\n", err)
+		if released {
+			fmt.Fprintln(stderr, setRoleLockGone)
+		}
 		return 1
 	}
 	fmt.Fprintln(stdout, "peran "+pinsUpdated)
@@ -526,8 +545,8 @@ var cliLayoutHost = func(cfg config.Config) (mysql.Host, error) {
 // It needs neither the agent's secrets nor an admin account: only the
 // layout (the agent configuration is read best effort, for a socket
 // override). It prints the outcome and reports whether the role may go on
-// (false: keep the role).
-func cliReleaseStartLock(dir string, stdout, stderr io.Writer) bool {
+// .
+func cliReleaseStartLock(dir string, stdout, stderr io.Writer) (ok, found bool) {
 	cfg, err := config.Load(dir)
 	if err != nil {
 		cfg = config.Config{}
@@ -535,27 +554,27 @@ func cliReleaseStartLock(dir string, stdout, stderr io.Writer) bool {
 	h, err := cliLayoutHost(cfg)
 	if errors.Is(err, mysql.ErrNoMysqld) {
 		fmt.Fprintln(stdout, setRoleNoMysqld)
-		return true
+		return true, false
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, setRoleNoCheck+"\n", err)
-		return false
+		return false, false
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	found, err := mysql.ReleaseStartLock(ctx, h)
+	found, err = mysql.ReleaseStartLock(ctx, h)
 	if err != nil {
 		fmt.Fprintf(stderr, "kunci start tidak bisa dilepas (%v); peran tidak diubah\n", err)
-		return false
+		return false, found
 	}
 	if found {
 		fmt.Fprintln(stdout, setRoleReleased)
 	} else {
 		fmt.Fprintln(stdout, setRoleNoLock)
 	}
-	return true
+	return true, found
 }
 
 // cliMySQLHost is the MySQL of the agent in dir, logged in to with the

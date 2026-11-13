@@ -404,6 +404,10 @@ func (p *Pins) roleErr() (string, error) {
 	return p.role, nil
 }
 
+// RoleErr is roleErr for the local CLI: the pinned role, or why the pin
+// files cannot be read.
+func (p *Pins) RoleErr() (string, error) { return p.roleErr() }
+
 // Source is the pinned source; ok is false when there is none or the files
 // cannot be read.
 func (p *Pins) Source() (host string, port int, ok bool) {

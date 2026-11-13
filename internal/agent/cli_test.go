@@ -706,6 +706,9 @@ func runCLI(args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+// nextMasterText is C11, asserted in full on every successful master path.
+const nextMasterText = "Langkah berikutnya: bila MySQL di server ini masih baca-saja (read-only) dan server ini memang akan dipakai aplikasi sebagai master, pastikan master lain tidak lagi dipakai, lalu buka dengan: sudo dbpanel agent unlock-master"
+
 // stubLayoutHost replaces cliLayoutHost for the test: without it set-role
 // master would look at the MySQL configuration of this machine.
 func stubLayoutHost(t *testing.T, fn func(config.Config) (mysql.Host, error)) {
@@ -796,8 +799,9 @@ func TestSetRoleMasterReleasesFirst(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("set-role master = %d, %q", code, errOut)
 	}
-	if !strings.Contains(out, "Kunci start dilepas: baris init_file dan berkas kuncinya dihapus dari konfigurasi MySQL.") {
-		t.Errorf("set-role master output = %q; want the release outcome", out)
+	if !strings.Contains(out, "Kunci start dilepas: baris init_file dan berkas kuncinya dihapus dari konfigurasi MySQL.") ||
+		!strings.Contains(out, nextMasterText) {
+		t.Errorf("set-role master output = %q; want the release outcome and the next step", out)
 	}
 	if got := role(); got != "master" {
 		t.Errorf("role = %q, want master", got)
@@ -1375,6 +1379,13 @@ func TestSetRoleOnQuarantinedAsks(t *testing.T) {
 	t.Run("master --ya without input", func(t *testing.T) {
 		dir := quarantined()
 		code, out, errOut := runSetRole("", "set-role", "master", "--ya", "--dir", dir)
+		if code != 0 || strings.Contains(out, "Ketik ya") || role(dir) != "master" || !strings.Contains(out, nextMasterText) {
+			t.Errorf("code %d, out %q, err %q, role %q", code, out, errOut, role(dir))
+		}
+	})
+	t.Run("--ya before the role", func(t *testing.T) {
+		dir := quarantined()
+		code, out, errOut := runSetRole("", "set-role", "--ya", "master", "--dir", dir)
 		if code != 0 || strings.Contains(out, "Ketik ya") || role(dir) != "master" {
 			t.Errorf("code %d, out %q, err %q, role %q", code, out, errOut, role(dir))
 		}
@@ -1454,8 +1465,8 @@ func TestSetRoleMasterNeverTouchesSecrets(t *testing.T) {
 			t.Errorf("%s after set-role master: %v", name, err)
 		}
 	}
-	if !strings.Contains(out, "Kunci start tidak ditemukan; tidak ada yang dilepas.") {
-		t.Errorf("stdout = %q; want the not-found outcome", out)
+	if !strings.Contains(out, "Kunci start tidak ditemukan; tidak ada yang dilepas.") || !strings.Contains(out, nextMasterText) {
+		t.Errorf("stdout = %q; want the not-found outcome and the next step", out)
 	}
 
 	if err := config.Save(dir, config.Config{PanelAddr: "127.0.0.1:1", ServerID: 1, MySQLSocket: "/run/x.sock"}); err != nil {
@@ -1469,7 +1480,7 @@ func TestSetRoleMasterNeverTouchesSecrets(t *testing.T) {
 // TestSetRoleMasterOutcomes: no mysqld still pins master; any other error
 // from the layout keeps the role and says how to release by hand.
 func TestSetRoleMasterOutcomes(t *testing.T) {
-	const next = "sudo dbpanel agent unlock-master"
+	const next = nextMasterText
 	role := func(dir string) string {
 		b, _ := os.ReadFile(filepath.Join(dir, mysql.RoleFile))
 		return strings.TrimSpace(string(b))
@@ -1493,5 +1504,83 @@ func TestSetRoleMasterOutcomes(t *testing.T) {
 	if code != 1 || !strings.Contains(errOut, "kunci start tidak bisa diperiksa (") || !strings.Contains(errOut, "boom") ||
 		!strings.Contains(errOut, "Melepas kunci start dengan tangan") || role(dir) != "quarantined" || strings.Contains(out, next) {
 		t.Errorf("other error: code %d, out %q, err %q, role %q", code, out, errOut, role(dir))
+	}
+}
+
+// TestSetRoleUnreadablePinsAsk: pins that cannot be read may hide a
+// quarantine, so leaving them asks like a quarantined server does.
+func TestSetRoleUnreadablePinsAsk(t *testing.T) {
+	called := false
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { called = true; return noMysqldHost(t.TempDir()), nil })
+	setup := func() string {
+		dir := t.TempDir()
+		writePinFiles(t, dir, map[string]string{mysql.RoleFile: "quarantined\n", mysql.SourceFile: "garbage\n"})
+		return dir
+	}
+	roleOf := func(dir string) string {
+		b, _ := os.ReadFile(filepath.Join(dir, mysql.RoleFile))
+		return strings.TrimSpace(string(b))
+	}
+	dir := setup()
+	code, out, _ := runSetRole("tidak\n", "set-role", "master", "--dir", dir)
+	for _, want := range []string{"Pin server ini tidak bisa dibaca (", "); server ini mungkin dikarantina (quarantined).",
+		"dilepas sekarang", "Ketik ya untuk melanjutkan", "Dibatalkan; peran tidak diubah."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q: %q", want, out)
+		}
+	}
+	if code != 1 || roleOf(dir) != "quarantined" || called {
+		t.Errorf("declined: code %d, role %q, stub called %v; want 1, quarantined, false", code, roleOf(dir), called)
+	}
+	if code, out, errOut := runSetRole("ya\n", "set-role", "master", "--dir", dir); code != 0 || roleOf(dir) != "master" {
+		t.Errorf("ya: code %d, out %q, err %q, role %q", code, out, errOut, roleOf(dir))
+	}
+	dir = setup()
+	if code, out, errOut := runSetRole("", "set-role", "master", "--ya", "--dir", dir); code != 0 || strings.Contains(out, "Ketik ya") || roleOf(dir) != "master" {
+		t.Errorf("--ya: code %d, out %q, err %q, role %q", code, out, errOut, roleOf(dir))
+	}
+}
+
+// TestSetRoleRoleChangedWhileAsking: when the pinned role changes while the
+// operator reads the question, nothing is changed.
+func TestSetRoleRoleChangedWhileAsking(t *testing.T) {
+	called := false
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { called = true; return noMysqldHost(t.TempDir()), nil })
+	dir := t.TempDir()
+	writePinFiles(t, dir, map[string]string{mysql.RoleFile: "quarantined\n", mysql.SourceFile: "10.0.0.1:3306\n"})
+	in := &hookReader{r: strings.NewReader("ya\n"), f: func() {
+		if err := os.WriteFile(filepath.Join(dir, mysql.RoleFile), []byte("replica\n"), 0o644); err != nil {
+			t.Error(err)
+		}
+	}}
+	var stdout, stderr bytes.Buffer
+	code := RunCLI([]string{"set-role", "master", "--dir", dir}, in, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "Peran server ini berubah selama Anda membaca; jalankan perintah ini lagi.") || called {
+		t.Errorf("code %d, stderr %q, stub called %v", code, stderr.String(), called)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, mysql.RoleFile)); strings.TrimSpace(string(b)) != "replica" {
+		t.Errorf("role = %q; want the changed role untouched", b)
+	}
+}
+
+// TestSetRoleMasterLockGoneRoleKept: the start lock is released, then the
+// role cannot be written (an approval that cannot be removed): the operator
+// is told the lock is gone and the role is not changed.
+func TestSetRoleMasterLockGoneRoleKept(t *testing.T) {
+	r := newStartLockRig(t)
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { return r.inst.Host(), nil })
+	if err := os.MkdirAll(filepath.Join(r.dir, mysql.RebuildApprovalFile, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := runSetRole("", "set-role", "master", "--ya", "--dir", r.dir)
+	if code != 1 || !strings.Contains(out, "Kunci start dilepas:") || !strings.Contains(errOut, "gagal mengubah peran: ") ||
+		!strings.Contains(errOut, "Kunci start sudah dilepas, tetapi peran belum diubah. Jalankan perintah ini lagi; sampai itu MySQL tidak dipaksa baca-saja (read-only) saat menyala.") {
+		t.Errorf("code %d, out %q, err %q", code, out, errOut)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.dir, mysql.RoleFile)); strings.TrimSpace(string(b)) != "quarantined" {
+		t.Errorf("role = %q, want quarantined", b)
+	}
+	if line, file := r.lineAndFile(); line || file {
+		t.Errorf("start lock: line=%v file=%v; want released", line, file)
 	}
 }

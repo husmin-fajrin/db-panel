@@ -453,7 +453,11 @@ else
 	kill_root "$r"
 	rm -f "$r/etc/dbpanel/local-pair-token" # earlier versions wrote none
 	printf 'binary agent' >"$r/var/lib/dbpanel/bin/dbpanel_linux_amd64"
-	"$live_bin" agent set-role master --dir "$r/etc/dbpanel" >/dev/null
+	# Write the pin the way the agent does (mode 0644, trailing newline)
+	# instead of running "agent set-role master": a test run must never
+	# touch the real MySQL configuration of this machine.
+	printf 'master\n' >"$r/etc/dbpanel/role"
+	chmod 0644 "$r/etc/dbpanel/role"
 	declare -A before
 	for f in var/lib/dbpanel/panel.db etc/dbpanel/ca.key etc/dbpanel/web.key etc/dbpanel/mysql-ca.key \
 		etc/dbpanel/panel.key etc/dbpanel/admin-initial-password var/lib/dbpanel/bin/dbpanel_linux_amd64; do
