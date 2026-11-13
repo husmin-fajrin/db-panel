@@ -51,6 +51,14 @@ type serverState struct {
 	snap         *proto.HealthSnapshot // never modified once stored
 	receivedAt   time.Time
 	snapBacklog  bool // snap came from the agent's backlog
+	// startResult and startDecided: the start result of the newest report
+	// (nil from an older agent or before any report since the Monitor
+	// started) and when it was decided.
+	startResult  *proto.StartResultState
+	startDecided time.Time
+	// marks: the start marks of the store (start_marks), loaded on first
+	// use; nil until then.
+	marks map[string]time.Time
 	// graceUntil: the report was loaded from the store at startup and does
 	// not count as stale before this time (one StaleAfter after startup);
 	// zero once a report arrives.
@@ -169,6 +177,11 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) []healthU
 	snap := redactSnapshot(he.Snapshot)
 	m.reportSample(id, &snap, at)
 	s.snap, s.receivedAt, s.snapBacklog, s.graceUntil = &snap, at, he.Backlog, time.Time{}
+	s.startResult, s.startDecided = nil, time.Time{}
+	if sr := snap.StartResult; sr != nil {
+		c := *sr
+		s.startResult, s.startDecided = &c, startDecidedAt(at, c.AgeSec)
+	}
 	s.needsUpgrade = false // only a current agent reports
 	s.dirty = true
 	if !he.Backlog {

@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"encoding/json"
+	"log/slog"
 	"math"
 	"strings"
 	"sync/atomic"
@@ -1675,9 +1676,7 @@ func TestQuarantineStartLateAndBypassed(t *testing.T) {
 		t.Fatalf("late after ok = %+v, want still open", as)
 	}
 
-	// Late with the lock bypassed too opens both (a later start: beyond
-	// the window in which an event repeats an alert just opened).
-	r.clk.Add(startEventRepeatWindow + time.Minute)
+	// Late with the lock bypassed too opens both.
 	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, true))
 	r.openAlert(mID, KindMasterStartBypassed)
 
@@ -1688,7 +1687,6 @@ func TestQuarantineStartLateAndBypassed(t *testing.T) {
 	}
 
 	// The server leaves quarantine: both close with a reason.
-	r.clk.Add(startEventRepeatWindow + time.Minute) // a later start, outside the repeat window
 	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
 	if err := r.st.SetServerRole(mID, store.RoleUnassigned); err != nil {
 		t.Fatal(err)
@@ -1903,13 +1901,11 @@ func TestStartBlockedOpensAndStartCloses(t *testing.T) {
 	}
 
 	// A bypassed start closes it too; so does leaving quarantine.
-	r.clk.Add(startEventRepeatWindow + time.Minute) // a later start, outside the repeat window
 	r.m.HandleEvent(mID, startFailedEvent(t, "/x"))
 	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
 	if r.isOpen(mID, KindMasterStartBlocked) {
 		t.Fatal("blocked open after a start event")
 	}
-	r.clk.Add(startEventRepeatWindow + time.Minute) // a later start, outside the repeat window
 	r.m.HandleEvent(mID, startFailedEvent(t, "/x"))
 	if err := r.st.SetServerRole(mID, store.RoleUnassigned); err != nil {
 		t.Fatal(err)
@@ -1920,7 +1916,6 @@ func TestStartBlockedOpensAndStartCloses(t *testing.T) {
 	}
 
 	// No file name: the text still reads.
-	r.clk.Add(startEventRepeatWindow + time.Minute) // a later start, outside the repeat window
 	r.m.HandleEvent(mID, proto.Event{Type: proto.EventQuarantineStartFailed, Payload: []byte(`{}`)})
 	if a := r.openAlert(mID, KindMasterStartBlocked); !strings.HasPrefix(a.Message, wantStartBlockedText+". Pastikan") {
 		t.Fatalf("message without a file = %q", a.Message)
@@ -2130,52 +2125,11 @@ func TestStartLateFromSnapshotNotReopenedAfterLeftoverCheck(t *testing.T) {
 	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
 }
 
-func TestStartLateNewerSnapshotReopens(t *testing.T) {
-	r := newRig(t)
-	mID, pid, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
-	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
-	r.clk.Add(time.Minute)
-	r.setLeftoverCheck(pid, r.clk.Now())
-	r.m.tick()
-	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
-	r.clk.Add(5 * time.Minute)
-	ma.setSnap(func(s *proto.HealthSnapshot) {
-		s.StartResult = &proto.StartResultState{Result: proto.QuarantineStartLate, AgeSec: 0}
-	})
-	ma.send()
-	if got := len(r.alerts(mID, KindMasterStartLate)); got != 2 {
-		t.Fatalf("alerts = %d, want 2 (a newer start reopens)", got)
-	}
-	if !r.isOpen(mID, KindMasterStartLate) {
-		t.Fatal("the newer start is not open")
-	}
-}
-
-func TestStartEventAfterSnapshotNoDouble(t *testing.T) {
-	r := newRig(t)
-	mID, pid, _ := r.quarantined(startResultSnap(proto.QuarantineStartLate, 0, ""))
-	if !r.isOpen(mID, KindMasterStartLate) {
-		t.Fatal("the snapshot did not open the alert")
-	}
-	r.clk.Add(time.Minute)
-	r.setLeftoverCheck(pid, r.clk.Now())
-	r.m.tick()
-	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
-	r.clk.Add(5 * time.Minute)
-	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
-	if got := len(r.alerts(mID, KindMasterStartLate)); got != 1 {
-		t.Fatalf("alerts after an event within the window = %d, want 1", got)
-	}
-	r.clk.Add(6 * time.Minute)
-	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
-	if got := len(r.alerts(mID, KindMasterStartLate)); got != 2 {
-		t.Fatalf("alerts after an event beyond the window = %d, want 2", got)
-	}
-}
-
 func TestSnapshotFailedAndBypassedOpen(t *testing.T) {
 	r := newRig(t)
-	mID, _, ma := r.quarantined(startResultSnap(proto.QuarantineStartFailed, 5, "/etc/mysql/x.sql"))
+	down := startResultSnap(proto.QuarantineStartFailed, 5, "/etc/mysql/x.sql")
+	down.MySQLOK = false
+	mID, _, ma := r.quarantined(down)
 	a := r.openAlert(mID, KindMasterStartBlocked)
 	if !strings.Contains(a.Message, "/etc/mysql/x.sql") {
 		t.Fatalf("message = %q, want the init file", a.Message)
@@ -2195,20 +2149,6 @@ func TestSnapshotFailedAndBypassedOpen(t *testing.T) {
 	}
 }
 
-func TestSnapshotStartResultAgeIsBound(t *testing.T) {
-	r := newRig(t)
-	mID, _, _ := r.quarantined(startResultSnap(proto.QuarantineStartLate, math.MinInt64, ""))
-	a := r.openAlert(mID, KindMasterStartLate)
-	if a.OpenedAt.After(r.clk.Now()) {
-		t.Fatalf("alert opened in the future: %v", a.OpenedAt)
-	}
-	r2 := newRig(t)
-	m2, _, _ := r2.quarantined(startResultSnap(proto.QuarantineStartLate, math.MaxInt64, ""))
-	if !r2.isOpen(m2, KindMasterStartLate) {
-		t.Fatal("an absurd age blocked the alert")
-	}
-}
-
 func TestStartResultIgnoredWhenNotQuarantined(t *testing.T) {
 	r := newRig(t)
 	mID, _ := r.master("db-biasa")
@@ -2217,5 +2157,259 @@ func TestStartResultIgnoredWhenNotQuarantined(t *testing.T) {
 	r.agent(mID, true, snap).attach()
 	if got := len(r.alerts(mID, KindMasterStartLate)); got != 0 {
 		t.Fatalf("late alerts on a plain master = %d, want 0", got)
+	}
+}
+
+// --- Fix round 1: the durable start mark (tests A-M of the fix design). ---
+
+// newer sets the start result an agent of this version reports.
+func (a *fakeAgent) newer(result string, ageSec int64) {
+	a.setSnap(func(s *proto.HealthSnapshot) {
+		s.StartResult = &proto.StartResultState{Result: result, AgeSec: ageSec, InitFile: "/etc/mysql/x.sql"}
+	})
+}
+
+// checkLeftover stores a "Periksa data tertinggal" result taken now and
+// lets the tick close what it closes.
+func (r *rig) checkLeftover(pid int64) {
+	r.t.Helper()
+	r.setLeftoverCheck(pid, r.clk.Now())
+	r.m.tick()
+}
+
+func (r *rig) count(id int64, kind string) int { return len(r.alerts(id, kind)) }
+
+func TestStartMarkA_EventThenSnapshotOpensOnce(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	ma.newer(proto.QuarantineStartLate, 5)
+	ma.send()
+	ma.send()
+	if n := r.count(mID, KindMasterStartLate); n != 1 {
+		t.Fatalf("late alerts = %d, want 1", n)
+	}
+}
+
+func TestStartMarkB_SecondLateAfterCheck(t *testing.T) {
+	r := newRig(t)
+	mID, pid, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	ma.newer(proto.QuarantineStartLate, 10)
+	ma.send()
+	r.clk.Add(time.Minute)
+	r.checkLeftover(pid)
+	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+	r.clk.Add(3 * time.Minute)
+	// The second start's event arrives while the latest snapshot still
+	// shows the first: the snapshot path will deal with it.
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	if n := r.count(mID, KindMasterStartLate); n != 1 {
+		t.Fatalf("late alerts after the covered event = %d, want 1", n)
+	}
+	ma.newer(proto.QuarantineStartLate, 0)
+	ma.send()
+	if n := r.count(mID, KindMasterStartLate); n != 2 || !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatalf("late alerts after the newer snapshot = %d (open %v), want 2 with one open", n, r.isOpen(mID, KindMasterStartLate))
+	}
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	if n := r.count(mID, KindMasterStartLate); n != 2 {
+		t.Fatalf("late alerts after a late event = %d, want 2", n)
+	}
+}
+
+func TestStartMarkC_OlderAgentSecondStartOpensAtOnce(t *testing.T) {
+	r := newRig(t)
+	mID, pid, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	r.clk.Add(time.Minute)
+	r.checkLeftover(pid)
+	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+	r.clk.Add(3 * time.Minute)
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	if n := r.count(mID, KindMasterStartLate); n != 2 || !r.isOpen(mID, KindMasterStartLate) {
+		t.Fatalf("late alerts = %d, want 2 with one open", n)
+	}
+
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartOK, false))
+	r.clk.Add(3 * time.Minute)
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	if n := r.count(mID, KindMasterStartBypassed); n != 2 || !r.isOpen(mID, KindMasterStartBypassed) {
+		t.Fatalf("bypassed alerts = %d, want 2 with one open", n)
+	}
+
+	r.m.HandleEvent(mID, startFailedEvent(t, "/x"))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartOK, false))
+	r.clk.Add(3 * time.Minute)
+	r.m.HandleEvent(mID, startFailedEvent(t, "/x"))
+	if n := r.count(mID, KindMasterStartBlocked); n != 2 || !r.isOpen(mID, KindMasterStartBlocked) {
+		t.Fatalf("blocked alerts = %d, want 2 with one open", n)
+	}
+}
+
+func TestStartMarkD_OtherKindOnFileDoesNotCover(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	ma.newer(proto.QuarantineStartLate, 0)
+	ma.send()
+	r.openAlert(mID, KindMasterStartLate)
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartOK, false))
+	r.clk.Add(2 * time.Minute)
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartBypassed, true))
+	if n := r.count(mID, KindMasterStartBypassed); n != 2 || !r.isOpen(mID, KindMasterStartBypassed) {
+		t.Fatalf("bypassed alerts = %d, want 2 with one open", n)
+	}
+}
+
+func TestStartMarkE_LostEventArrivesLate(t *testing.T) {
+	r := newRig(t)
+	mID, pid, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	ma.newer(proto.QuarantineStartLate, 30)
+	ma.send()
+	if n := r.count(mID, KindMasterStartLate); n != 1 {
+		t.Fatalf("late alerts from the snapshot = %d, want 1", n)
+	}
+	r.clk.Add(time.Minute)
+	r.checkLeftover(pid)
+	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+	r.clk.Add(30 * time.Minute)
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartLate, false))
+	if n := r.count(mID, KindMasterStartLate); n != 1 {
+		t.Fatalf("late alerts after the late event = %d, want 1", n)
+	}
+}
+
+func TestStartMarkF_PrunedAlertsDoNotReopen(t *testing.T) {
+	for _, ahead := range []time.Duration{2 * time.Minute, 400 * 24 * time.Hour} {
+		r := newRig(t)
+		mID, pid, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+		ma.newer(proto.QuarantineStartLate, 0)
+		ma.send()
+		r.clk.Add(time.Minute)
+		r.checkLeftover(pid)
+		closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+		r.clk.Add(ahead)
+		if _, err := r.st.PruneAlertsClosedBefore(r.clk.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if n := r.count(mID, KindMasterStartLate); n != 0 {
+			t.Fatalf("ahead %v: alerts after the prune = %d, want 0", ahead, n)
+		}
+		// The agent keeps reporting the same start, its age grown.
+		ma.newer(proto.QuarantineStartLate, int64((ahead+time.Minute)/time.Second))
+		ma.send()
+		ma.send()
+		if n := r.count(mID, KindMasterStartLate); n != 0 {
+			t.Fatalf("ahead %v: late alerts reopened = %d", ahead, n)
+		}
+	}
+}
+
+func TestStartMarkG_FailedWhileMySQLRuns(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	ma.newer(proto.QuarantineStartFailed, 10) // MySQLOK is true
+	ma.send()
+	if n := r.count(mID, KindMasterStartBlocked); n != 0 {
+		t.Fatalf("blocked alerts with MySQL running = %d, want 0", n)
+	}
+	r.clk.Add(time.Minute)
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = false })
+	ma.newer(proto.QuarantineStartFailed, 70) // the same start
+	ma.send()
+	if n := r.count(mID, KindMasterStartBlocked); n != 0 {
+		t.Fatalf("blocked alerts for an accounted start = %d, want 0", n)
+	}
+
+	r2 := newRig(t)
+	m2, _, a2 := r2.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	a2.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = false })
+	a2.newer(proto.QuarantineStartFailed, 10)
+	a2.send()
+	if !r2.isOpen(m2, KindMasterStartBlocked) {
+		t.Fatal("failed with MySQL down opened nothing")
+	}
+}
+
+func TestStartMarkH_OkStartEndsALostBypass(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.clk.Add(2 * time.Minute)
+	r.m.HandleEvent(mID, startEvent(t, proto.QuarantineStartOK, false))
+	ma.newer(proto.QuarantineStartBypassed, 150) // decided before the ok start
+	ma.send()
+	if n := r.count(mID, KindMasterStartBypassed); n != 0 {
+		t.Fatalf("bypassed alerts = %d, want 0", n)
+	}
+}
+
+func TestStartDecidedAtBoundsTheAge(t *testing.T) {
+	at := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		age  int64
+		want time.Time
+	}{
+		{0, at},
+		{-5, at},
+		{math.MinInt64, at},
+		{30, at.Add(-30 * time.Second)},
+		{math.MaxInt64, at.Add(-maxStartAge * time.Second)},
+		{maxStartAge + 1, at.Add(-maxStartAge * time.Second)},
+	} {
+		if got := startDecidedAt(at, c.age); !got.Equal(c.want) {
+			t.Errorf("startDecidedAt(age %d) = %v, want %v", c.age, got, c.want)
+		}
+	}
+}
+
+func TestStartMarkJ_EarlierQuarantineOpensNothing(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	for _, age := range []int64{3600, math.MaxInt64} {
+		ma.newer(proto.QuarantineStartLate, age)
+		ma.send()
+	}
+	if n := r.count(mID, KindMasterStartLate); n != 0 {
+		t.Fatalf("late alerts from an earlier quarantine = %d, want 0", n)
+	}
+	if m, err := r.st.StartMarks(mID); err != nil || len(m) != 0 {
+		t.Fatalf("marks = %v, %v; want none", m, err)
+	}
+}
+
+func TestStartMarkK_LeftoverGuard(t *testing.T) {
+	r := newRig(t)
+	mID, pid, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	r.setLeftoverCheck(pid, r.clk.Now())
+	r.clk.Add(time.Minute)
+	ma.newer(proto.QuarantineStartLate, 120) // decided a minute before the check
+	ma.send()
+	if n := r.count(mID, KindMasterStartLate); n != 0 {
+		t.Fatalf("late alerts for a checked start = %d, want 0", n)
+	}
+	if m, err := r.st.StartMarks(mID); err != nil || m[KindMasterStartLate].IsZero() {
+		t.Fatalf("marks = %v, %v; want one for late", m, err)
+	}
+}
+
+func TestStartMarkL_SurvivesRestart(t *testing.T) {
+	r := newRig(t)
+	mID, pid, ma := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
+	ma.newer(proto.QuarantineStartLate, 0)
+	ma.send()
+	r.clk.Add(time.Minute)
+	r.checkLeftover(pid)
+	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+
+	m2 := New(Deps{Store: r.st, Hub: r.hub, Publish: r.publish,
+		Logger: slog.New(slog.NewTextHandler(r.logs, nil)), Now: r.clk.Now, TickEvery: time.Hour})
+	t.Cleanup(m2.Close)
+	snap := quarSnap(&proto.StartLockState{Present: true, Locked: true})
+	snap.StartResult = &proto.StartResultState{Result: proto.QuarantineStartLate, AgeSec: 60}
+	m2.report(mID, proto.HealthEvent{Seq: 1, Snapshot: snap})
+	if n := r.count(mID, KindMasterStartLate); n != 1 || r.isOpen(mID, KindMasterStartLate) {
+		t.Fatalf("late alerts after a restart = %d (open %v), want the one closed", n, r.isOpen(mID, KindMasterStartLate))
 	}
 }

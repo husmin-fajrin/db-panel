@@ -49,20 +49,20 @@ func TestMigrateSkipsApplied(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 11 {
-		t.Fatalf("schema_migrations rows = %d, want 11", n)
+	if n != 12 {
+		t.Fatalf("schema_migrations rows = %d, want 12", n)
 	}
 }
 
 // TestMigrate0004Applies: the monitoring tables and columns exist (0004
-// to 0011) and the schema is at version 11.
+// to 0012) and the schema is at version 12.
 func TestMigrate0004Applies(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 11 {
-		t.Fatalf("schema version = %d, %v; want 11", v, err)
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 12 {
+		t.Fatalf("schema version = %d, %v; want 12", v, err)
 	}
-	for _, table := range []string{"server_health", "status_events", "alerts", "audit_log", "confirmations", "server_tls", "health_samples"} {
+	for _, table := range []string{"server_health", "status_events", "alerts", "audit_log", "confirmations", "server_tls", "health_samples", "start_marks"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&n); err != nil || n != 1 {
 			t.Errorf("table %s missing (n=%d, err=%v)", table, n, err)
@@ -154,7 +154,7 @@ func TestMigrate0009BackfillsEmptyAndLarge(t *testing.T) {
 			t.Logf("migration 0009 over %d rows: %v", n, time.Since(start))
 			defer s.Close()
 			var v int
-			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 11 {
+			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 12 {
 				t.Fatalf("schema version = %d, %v", v, err)
 			}
 			lastOK, brokenAt, err := s.VerifyAuditChain()
