@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -53,6 +54,9 @@ const usage = `Penggunaan:
                                                          menghapus tanda daftar port penuh; port replika
                                                          yang tidak tersambung tidak masuk daftar lagi
                                                          dengan sendirinya
+  dbpanel agent approve <kode> [--dir DIR]               setujui bangun ulang server yang dikarantina;
+                                                         kode dari form "Bangun ulang sebagai replika"
+  dbpanel agent approve batal [--dir DIR]                hapus persetujuan dan permintaan bangun ulang
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -84,15 +88,30 @@ var (
 	stdin  io.Reader = os.Stdin
 )
 
+// cliHostname and cliNow are what "agent approve" shows and dates the
+// approval by; tests replace them.
+var (
+	cliHostname = os.Hostname
+	cliNow      = time.Now
+)
+
 // Main runs the "dbpanel agent" command; args exclude "agent" itself. It
 // returns the process exit code.
 func Main(args []string, stdout, stderr io.Writer) int {
+	return RunCLI(args, stdin, stdout, stderr)
+}
+
+// RunCLI is Main with the input the prompts read (approve, set-role); Main
+// passes the package's stdin. e2e tests answer prompts through it.
+func RunCLI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "pair":
 			return mainPair(args[1:], stdout, stderr)
 		case "set-role":
-			return mainSetRole(args[1:], stdout, stderr)
+			return mainSetRole(args[1:], in, stdout, stderr)
+		case "approve":
+			return mainApprove(args[1:], in, stdout, stderr)
 		case "set-source":
 			return mainSetSource(args[1:], stdout, stderr)
 		case "lock-master":
@@ -256,7 +275,7 @@ func loadPinsForCLI(dir string, stderr io.Writer) *mysql.Pins {
 	return p
 }
 
-func mainSetRole(args []string, stdout, stderr io.Writer) int {
+func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	dir, role, ok := parsePinArgs("agent set-role", args, stderr)
 	if !ok {
 		return 2
@@ -278,6 +297,100 @@ func mainSetRole(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stdout, "peran "+pinsUpdated)
+	return 0
+}
+
+// mainApprove is "agent approve <kode>|batal": root approves the rebuild
+// the panel asked for, after seeing which source and address it gets the
+// data from, or removes the approval and the request.
+func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
+	dir, arg, ok := parsePinArgs("agent approve", args, stderr)
+	if !ok {
+		return 2
+	}
+	if arg == "batal" {
+		// Clearing does not depend on the pins being readable.
+		p, _ := mysql.LoadPins(dir)
+		if err := p.ClearRebuild(); err != nil {
+			fmt.Fprintf(stderr, "Gagal menghapus: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "Persetujuan dan permintaan bangun ulang di server ini dihapus.")
+		return 0
+	}
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "Pin server ini tidak bisa dibaca (%v); persetujuan tidak ditulis.\n", err)
+		return 1
+	}
+	if role := p.Role(); role != "quarantined" {
+		fmt.Fprintf(stderr, "Server ini tidak dikarantina (peran: %s); persetujuan bangun ulang tidak diperlukan.\n", role)
+		return 1
+	}
+	host, port, has := p.Source()
+	if !has {
+		fmt.Fprintln(stderr, "Server ini dikarantina tanpa sumber yang dipin; pin master barunya dulu: sudo dbpanel agent set-source <host:port>")
+		return 1
+	}
+	source := net.JoinHostPort(host, strconv.Itoa(port))
+	now := cliNow()
+	req, valid, err := p.ValidRebuildRequest(now)
+	if err != nil {
+		fmt.Fprintf(stderr, "Pin server ini tidak bisa dibaca (%v); persetujuan tidak ditulis.\n", err)
+		return 1
+	}
+	if !valid {
+		fmt.Fprintln(stderr, `Tidak ada permintaan persetujuan yang berlaku di server ini. Buka form "Bangun ulang sebagai replika" di panel, klik Periksa lagi, lalu jalankan perintah yang ditampilkan.`)
+		return 1
+	}
+	if subtle.ConstantTimeCompare([]byte(arg), []byte(req.Code)) != 1 {
+		fmt.Fprintln(stderr, `Kode salah. Salin perintah dari form "Bangun ulang sebagai replika" di panel.`)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	addr, others, err := p.RebuildApprovalAddr(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "Alamat untuk nama sumber %s tidak ditemukan (DNS: %v); persetujuan tidak ditulis.\n", source, err)
+		return 1
+	}
+	name, err := cliHostname()
+	if err != nil {
+		name = "(tidak diketahui)"
+	}
+	fmt.Fprintf(stdout, "Persetujuan bangun ulang (rebuild) server ini\n\nServer ini  : %s\nPeran       : dikarantina (quarantined)\nSumber data : %s\nAlamat IP   : %s\n", name, source, addr)
+	if len(others) > 0 {
+		fmt.Fprintf(stdout, "              (nama sumber juga mengarah ke: %s)\n", strings.Join(others, ", "))
+	}
+	fmt.Fprint(stdout, `
+Bila disetujui, SEMUA data MySQL di server ini dibuang dan diganti salinan dari sumber di atas. Data yang dibuang tidak bisa dikembalikan.
+Pastikan nama dan alamat IP di atas memang master baru Anda, yaitu server yang sekarang dipakai aplikasi.
+Bila promote tadi promote darurat, jalankan dulu "Periksa data tertinggal" (dan "Amankan data tertinggal" bila ada) di halaman server ini di panel.
+Persetujuan berlaku 24 jam, hanya untuk sumber di atas.
+
+Ketik ya untuk menyetujui, atau apa saja untuk membatalkan: `)
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	if strings.TrimSpace(line) != "ya" {
+		fmt.Fprintln(stdout, "Dibatalkan; tidak ada yang disetujui.")
+		return 1
+	}
+	// The request may have changed while root read the screen.
+	again, valid, err := p.ValidRebuildRequest(cliNow())
+	if err != nil || !valid || again.Code != req.Code {
+		fmt.Fprintln(stderr, "Permintaan berubah selama Anda membaca; jalankan perintah ini lagi.")
+		return 1
+	}
+	approval := mysql.NewRebuildApproval(req.Source, addr, now)
+	if err := p.WriteRebuildApproval(approval); err != nil {
+		fmt.Fprintf(stderr, "Gagal menulis persetujuan: %v\n", err)
+		return 1
+	}
+	if err := p.RemoveRebuildRequest(); err != nil {
+		fmt.Fprintf(stderr, "Gagal menulis persetujuan: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Disetujui sampai %s. Kembali ke panel dan klik Periksa lagi. Untuk membatalkan: sudo dbpanel agent approve batal\n",
+		approval.Expires.Local().Format("2006-01-02 15:04 MST"))
 	return 0
 }
 

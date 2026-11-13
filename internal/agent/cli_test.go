@@ -960,3 +960,153 @@ func TestForgetReplicaPortCLI(t *testing.T) {
 		t.Errorf("usage of forget-replica-port lacks the caution: %s", out)
 	}
 }
+
+// TestCLIApprove: "agent approve <kode>" shows the source and its address,
+// asks, and writes the local approval only for "ya"; "approve batal" removes
+// the approval and the request.
+func TestCLIApprove(t *testing.T) {
+	oldHost, oldNow := cliHostname, cliNow
+	t.Cleanup(func() { cliHostname, cliNow = oldHost, oldNow })
+	cliHostname = func() (string, error) { return "db-lama", nil }
+
+	setup := func(t *testing.T, role string) (dir string, req mysql.RebuildRequest) {
+		t.Helper()
+		dir = t.TempDir()
+		p, _ := mysql.LoadPins(dir)
+		if err := p.SetRole(role); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.SetSource("127.0.0.1", 3306); err != nil {
+			t.Fatal(err)
+		}
+		if role == "quarantined" {
+			var err error
+			if req, err = p.EnsureRebuildRequest(time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir, req
+	}
+	run := func(in string, args ...string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		code := RunCLI(args, strings.NewReader(in), &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+	exists := func(dir, name string) bool {
+		_, err := os.Stat(filepath.Join(dir, name))
+		return err == nil
+	}
+
+	t.Run("approved", func(t *testing.T) {
+		dir, req := setup(t, "quarantined")
+		code, out, errOut := run("ya\n", "approve", req.Code, "--dir", dir)
+		if code != 0 {
+			t.Fatalf("code = %d, stdout %q, stderr %q", code, out, errOut)
+		}
+		last := -1
+		for _, want := range []string{"Server ini  : db-lama", "Sumber data : 127.0.0.1:3306", "Alamat IP   : 127.0.0.1",
+			"SEMUA data MySQL di server ini dibuang", "Periksa data tertinggal", "Ketik ya"} {
+			i := strings.Index(out, want)
+			if i < 0 || i < last {
+				t.Fatalf("stdout lacks %q in order: %q", want, out)
+			}
+			last = i
+		}
+		if !strings.Contains(out, "Disetujui sampai ") {
+			t.Errorf("stdout = %q, want Disetujui sampai", out)
+		}
+		a, ok, err := mysqlLoad(t, dir).ReadRebuildApproval()
+		if err != nil || !ok {
+			t.Fatalf("approval = %v, %v", ok, err)
+		}
+		if a.Source != "127.0.0.1:3306" || a.Addr != "127.0.0.1" || a.Expires.Sub(a.Approved) != 24*time.Hour {
+			t.Errorf("approval = %+v", a)
+		}
+		if exists(dir, mysql.RebuildRequestFile) {
+			t.Error("request file still there")
+		}
+	})
+	for name, in := range map[string]string{"y": "y\n", "empty input": ""} {
+		t.Run("declined "+name, func(t *testing.T) {
+			dir, req := setup(t, "quarantined")
+			code, out, _ := run(in, "approve", req.Code, "--dir", dir)
+			if code != 1 || !strings.Contains(out, "Dibatalkan; tidak ada yang disetujui.") {
+				t.Errorf("code = %d, stdout %q", code, out)
+			}
+			if exists(dir, mysql.RebuildApprovalFile) || !exists(dir, mysql.RebuildRequestFile) {
+				t.Error("approval written or request removed")
+			}
+		})
+	}
+	t.Run("wrong code", func(t *testing.T) {
+		dir, req := setup(t, "quarantined")
+		wrong := "000000"
+		if req.Code == wrong {
+			wrong = "000001"
+		}
+		code, _, errOut := run("ya\n", "approve", wrong, "--dir", dir)
+		if code != 1 || !strings.Contains(errOut, "Kode salah.") || exists(dir, mysql.RebuildApprovalFile) {
+			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("no request", func(t *testing.T) {
+		dir, req := setup(t, "quarantined")
+		if err := mysqlLoad(t, dir).RemoveRebuildRequest(); err != nil {
+			t.Fatal(err)
+		}
+		code, _, errOut := run("ya\n", "approve", req.Code, "--dir", dir)
+		if code != 1 || !strings.Contains(errOut, "Tidak ada permintaan persetujuan yang berlaku") {
+			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("old request", func(t *testing.T) {
+		dir, _ := setup(t, "quarantined")
+		old := fmt.Sprintf(`{"code":"123456","source":"127.0.0.1:3306","created":%q}`, time.Now().Add(-31*time.Minute).Format(time.RFC3339))
+		path := filepath.Join(dir, mysql.RebuildRequestFile)
+		if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, _, errOut := run("ya\n", "approve", "123456", "--dir", dir)
+		if code != 1 || !strings.Contains(errOut, "Tidak ada permintaan persetujuan yang berlaku") {
+			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("replica", func(t *testing.T) {
+		dir, _ := setup(t, "replica")
+		code, _, errOut := run("ya\n", "approve", "123456", "--dir", dir)
+		if code != 1 || !strings.Contains(errOut, "tidak dikarantina (peran: replica)") {
+			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("batal", func(t *testing.T) {
+		dir, _ := setup(t, "quarantined")
+		p := mysqlLoad(t, dir)
+		if err := p.WriteRebuildApproval(mysql.NewRebuildApproval("127.0.0.1:3306", "127.0.0.1", time.Now())); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errOut := run("", "approve", "batal", "--dir", dir)
+		if code != 0 || !strings.Contains(out, "dihapus") {
+			t.Fatalf("code = %d, stdout %q, stderr %q", code, out, errOut)
+		}
+		if exists(dir, mysql.RebuildRequestFile) || exists(dir, mysql.RebuildApprovalFile) {
+			t.Error("files still there")
+		}
+	})
+	t.Run("no argument", func(t *testing.T) {
+		if code, _, _ := run("", "approve"); code != 2 {
+			t.Errorf("code = %d, want 2", code)
+		}
+	})
+}
+
+func mysqlLoad(t *testing.T, dir string) *mysql.Pins {
+	t.Helper()
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
