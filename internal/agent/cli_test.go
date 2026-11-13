@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -1109,4 +1110,167 @@ func mysqlLoad(t *testing.T, dir string) *mysql.Pins {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// hookReader runs f when it is first read, then reads from r.
+type hookReader struct {
+	r    io.Reader
+	f    func()
+	done bool
+}
+
+func (h *hookReader) Read(p []byte) (int, error) {
+	if !h.done {
+		h.done = true
+		h.f()
+	}
+	return h.r.Read(p)
+}
+
+func approveSetup(t *testing.T, source string) (dir string, req mysql.RebuildRequest) {
+	t.Helper()
+	dir = t.TempDir()
+	p := mysqlLoad(t, dir)
+	host, port, err := mysql.ParseSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetRole("quarantined"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetSource(host, port); err != nil {
+		t.Fatal(err)
+	}
+	if req, err = p.EnsureRebuildRequest(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	return dir, req
+}
+
+func approveRun(in io.Reader, args ...string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := RunCLI(args, in, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func fileExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// TestCLIApproveRecheckAfterYes: a request that changed or went away while
+// root read the screen is refused (B8) and nothing is approved.
+func TestCLIApproveRecheckAfterYes(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, dir string){
+		"new code": func(t *testing.T, dir string) {
+			body := fmt.Sprintf(`{"code":"999999","source":"127.0.0.1:3306","created":%q}`, time.Now().Format(time.RFC3339))
+			path := filepath.Join(dir, mysql.RebuildRequestFile)
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"removed": func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, mysql.RebuildRequestFile)); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, req := approveSetup(t, "127.0.0.1:3306")
+			if name == "new code" && req.Code == "999999" {
+				t.Skip("code collision")
+			}
+			in := &hookReader{r: strings.NewReader("ya\n"), f: func() { change(t, dir) }}
+			code, _, errOut := approveRun(in, "approve", req.Code, "--dir", dir)
+			if code != 1 || !strings.Contains(errOut, "Permintaan berubah selama Anda membaca; jalankan perintah ini lagi.") {
+				t.Errorf("code = %d, stderr %q", code, errOut)
+			}
+			if fileExists(filepath.Join(dir, mysql.RebuildApprovalFile)) {
+				t.Error("approval written")
+			}
+		})
+	}
+}
+
+func TestCLIApproveNoSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := mysqlLoad(t, dir).SetRole("quarantined"); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := approveRun(strings.NewReader("ya\n"), "approve", "123456", "--dir", dir)
+	if code != 1 || !strings.Contains(errOut, "Server ini dikarantina tanpa sumber yang dipin; pin master barunya dulu: sudo dbpanel agent set-source <host:port>") {
+		t.Errorf("code = %d, stderr %q", code, errOut)
+	}
+}
+
+// TestCLIApproveAddressErrors: a failed DNS lookup is B7 with the sentence
+// once; any other failure to find the address is B9.
+func TestCLIApproveAddressErrors(t *testing.T) {
+	t.Run("DNS", func(t *testing.T) {
+		dir, req := approveSetup(t, "nama-tidak-ada.invalid:3306")
+		code, out, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
+		if code != 1 || strings.Count(errOut, "tidak ditemukan") != 1 ||
+			!strings.Contains(errOut, "Alamat untuk nama sumber nama-tidak-ada.invalid:3306 tidak ditemukan (DNS: ") ||
+			!strings.Contains(errOut, "); persetujuan tidak ditulis.") {
+			t.Errorf("code = %d, stdout %q, stderr %q", code, out, errOut)
+		}
+	})
+	t.Run("source address file", func(t *testing.T) {
+		dir, req := approveSetup(t, "nama-tidak-ada.invalid:3306")
+		path := filepath.Join(dir, mysql.SourceAddrFile)
+		if err := os.WriteFile(path, []byte("10.0.0.9\n"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		code, _, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
+		if code != 1 || strings.Contains(errOut, "(DNS") || !strings.Contains(errOut, "Pin server ini tidak bisa dibaca (") {
+			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+	})
+}
+
+// TestCLIApproveRollsBack: when a step after the approval write fails, the
+// approval file is removed before the failure is reported.
+func TestCLIApproveRollsBack(t *testing.T) {
+	t.Run("request not removable", func(t *testing.T) {
+		dir, req := approveSetup(t, "127.0.0.1:3306")
+		path := filepath.Join(dir, mysql.RebuildRequestFile)
+		// An immutable request file cannot be removed, even by root.
+		if out, err := exec.Command("chattr", "+i", path).CombinedOutput(); err != nil {
+			t.Skipf("chattr +i unavailable here: %v %s", err, out)
+		}
+		t.Cleanup(func() { _ = exec.Command("chattr", "-i", path).Run() })
+		code, _, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
+		if code != 1 || !strings.Contains(errOut, "Gagal menghapus permintaan: ") ||
+			!strings.Contains(errOut, "; persetujuan dibatalkan. Jalankan perintah ini lagi.") {
+			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+		if fileExists(filepath.Join(dir, mysql.RebuildApprovalFile)) {
+			t.Error("approval left on disk")
+		}
+		if strings.Contains(errOut, "tidak bisa dihapus") {
+			t.Errorf("rollback reported as failed: %q", errOut)
+		}
+	})
+	t.Run("write fails and rollback fails", func(t *testing.T) {
+		dir, req := approveSetup(t, "127.0.0.1:3306")
+		// A non-empty directory where the approval goes: it cannot be
+		// replaced and cannot be removed.
+		blocker := filepath.Join(dir, mysql.RebuildApprovalFile)
+		if err := os.MkdirAll(filepath.Join(blocker, "x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		code, _, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
+		lines := strings.Split(strings.TrimSpace(errOut), "\n")
+		if code != 1 || len(lines) != 2 || !strings.HasPrefix(lines[0], "Gagal menulis persetujuan: ") ||
+			!strings.HasPrefix(lines[1], "Berkas persetujuan tidak bisa dihapus (") ||
+			!strings.HasSuffix(lines[1], "), jadi persetujuan mungkin tetap berlaku. Batalkan dengan: sudo dbpanel agent approve batal") {
+			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+	})
 }

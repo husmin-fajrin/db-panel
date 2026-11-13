@@ -43,6 +43,19 @@ type RebuildApproval struct {
 	Expires  time.Time `json:"expires"` // Approved + RebuildApprovalTTL
 }
 
+// SourceLookupError is a failed DNS lookup of the source's host; Source is
+// the pinned host:port.
+type SourceLookupError struct {
+	Source string
+	Err    error
+}
+
+func (e *SourceLookupError) Error() string {
+	return fmt.Sprintf("alamat untuk nama sumber %s tidak ditemukan (DNS): %v", e.Source, e.Err)
+}
+
+func (e *SourceLookupError) Unwrap() error { return e.Err }
+
 // NewRebuildApproval is the approval root gives at now.
 func NewRebuildApproval(source, addr string, now time.Time) RebuildApproval {
 	return RebuildApproval{Source: source, Addr: addr, Approved: now, Expires: now.Add(RebuildApprovalTTL)}
@@ -181,6 +194,9 @@ func (p *Pins) EnsureRebuildRequest(now time.Time) (RebuildRequest, error) {
 // RemoveRebuildRequest removes the request file; none is not an error.
 func (p *Pins) RemoveRebuildRequest() error { return removeFile(p.path(RebuildRequestFile)) }
 
+// RemoveRebuildApproval removes the approval file; none is not an error.
+func (p *Pins) RemoveRebuildApproval() error { return removeFile(p.path(RebuildApprovalFile)) }
+
 // ReadRebuildApproval reads the approval file; ok is false when it is absent.
 func (p *Pins) ReadRebuildApproval() (RebuildApproval, bool, error) {
 	var a RebuildApproval
@@ -235,7 +251,7 @@ func (p *Pins) CheckRebuildApproval(ctx context.Context, now time.Time) (Rebuild
 	var ips []net.IP
 	if hasSrc && role == roleQuarantined {
 		if ips, err = sourceIPs(ctx, host); err != nil {
-			return RebuildApproval{}, fmt.Errorf("alamat untuk nama sumber %s tidak ditemukan (DNS): %v", source, err)
+			return RebuildApproval{}, &SourceLookupError{Source: source, Err: err}
 		}
 	}
 	if err := checkApproval(a, role, source, ips, now); err != nil {
@@ -262,7 +278,7 @@ func (p *Pins) RebuildApprovalAddr(ctx context.Context) (addr string, others []s
 	source := net.JoinHostPort(host, strconv.Itoa(port))
 	ips, err := sourceIPs(ctx, host)
 	if err != nil {
-		return "", nil, fmt.Errorf("alamat untuk nama sumber %s tidak ditemukan (DNS): %v", source, err)
+		return "", nil, &SourceLookupError{Source: source, Err: err}
 	}
 	sort.Slice(ips, func(i, j int) bool {
 		a4, b4 := ips[i].To4() != nil, ips[j].To4() != nil
@@ -278,7 +294,7 @@ func (p *Pins) RebuildApprovalAddr(ctx context.Context) (addr string, others []s
 		}
 	}
 	if len(all) == 0 {
-		return "", nil, fmt.Errorf("alamat untuk nama sumber %s tidak ditemukan (DNS): tidak ada alamat", source)
+		return "", nil, &SourceLookupError{Source: source, Err: errors.New("tidak ada alamat")}
 	}
 	return all[0], all[1:], nil
 }

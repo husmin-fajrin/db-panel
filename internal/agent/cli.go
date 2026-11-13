@@ -102,7 +102,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 }
 
 // RunCLI is Main with the input the prompts read (approve, set-role); Main
-// passes the package's stdin. e2e tests answer prompts through it.
+// passes the package's stdin. e2e tests answer prompts through it. "pair
+// --token-stdin" still reads the package's stdin.
 func RunCLI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -339,7 +340,7 @@ func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Pin server ini tidak bisa dibaca (%v); persetujuan tidak ditulis.\n", err)
 		return 1
 	}
-	if !valid {
+	if !valid || !sameSourceText(req.Source, source) {
 		fmt.Fprintln(stderr, `Tidak ada permintaan persetujuan yang berlaku di server ini. Buka form "Bangun ulang sebagai replika" di panel, klik Periksa lagi, lalu jalankan perintah yang ditampilkan.`)
 		return 1
 	}
@@ -350,8 +351,13 @@ func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	addr, others, err := p.RebuildApprovalAddr(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "Alamat untuk nama sumber %s tidak ditemukan (DNS: %v); persetujuan tidak ditulis.\n", source, err)
+	var lookup *mysql.SourceLookupError
+	switch {
+	case errors.As(err, &lookup):
+		fmt.Fprintf(stderr, "Alamat untuk nama sumber %s tidak ditemukan (DNS: %v); persetujuan tidak ditulis.\n", lookup.Source, lookup.Err)
+		return 1
+	case err != nil:
+		fmt.Fprintf(stderr, "Pin server ini tidak bisa dibaca (%v); persetujuan tidak ditulis.\n", err)
 		return 1
 	}
 	name, err := cliHostname()
@@ -376,22 +382,42 @@ Ketik ya untuk menyetujui, atau apa saja untuk membatalkan: `)
 	}
 	// The request may have changed while root read the screen.
 	again, valid, err := p.ValidRebuildRequest(cliNow())
-	if err != nil || !valid || again.Code != req.Code {
+	if err != nil || !valid || again.Code != req.Code || !sameSourceText(again.Source, source) {
 		fmt.Fprintln(stderr, "Permintaan berubah selama Anda membaca; jalankan perintah ini lagi.")
 		return 1
 	}
-	approval := mysql.NewRebuildApproval(req.Source, addr, now)
+	// From here on the approval is rolled back when a step fails: the
+	// operator is told it failed, so it must not stay valid on disk.
+	rollback := func() {
+		if err := p.RemoveRebuildApproval(); err != nil {
+			fmt.Fprintf(stderr, "Berkas persetujuan tidak bisa dihapus (%v), jadi persetujuan mungkin tetap berlaku. Batalkan dengan: sudo dbpanel agent approve batal\n", err)
+		}
+	}
+	approval := mysql.NewRebuildApproval(source, addr, now)
 	if err := p.WriteRebuildApproval(approval); err != nil {
 		fmt.Fprintf(stderr, "Gagal menulis persetujuan: %v\n", err)
+		rollback()
 		return 1
 	}
 	if err := p.RemoveRebuildRequest(); err != nil {
-		fmt.Fprintf(stderr, "Gagal menulis persetujuan: %v\n", err)
+		fmt.Fprintf(stderr, "Gagal menghapus permintaan: %v; persetujuan dibatalkan. Jalankan perintah ini lagi.\n", err)
+		rollback()
 		return 1
 	}
 	fmt.Fprintf(stdout, "Disetujui sampai %s. Kembali ke panel dan klik Periksa lagi. Untuk membatalkan: sudo dbpanel agent approve batal\n",
 		approval.Expires.Local().Format("2006-01-02 15:04 MST"))
 	return 0
+}
+
+// sameSourceText reports whether a and b are the same host:port (host
+// without case).
+func sameSourceText(a, b string) bool {
+	ha, pa, err := mysql.ParseSource(a)
+	if err != nil {
+		return false
+	}
+	hb, pb, err := mysql.ParseSource(b)
+	return err == nil && strings.EqualFold(ha, hb) && pa == pb
 }
 
 func mainSetSource(args []string, stdout, stderr io.Writer) int {
