@@ -1504,6 +1504,75 @@ berlaku.
    untuk galat DNS; galat lain dari pencarian alamat memakai B9. Sumber
    yang ditulis ke persetujuan adalah sumber yang ditampilkan.
 5. **Baris usage `set-role … [--ya]`** masuk bersama Task 5, bukan Task 4.
+6. **Gerbang mode ketat menolak saat pin tidak bisa dibaca** (Task 3;
+   membatalkan Keputusan perencana 4). Anggapan "`Pins.Allow` menolak
+   perintah yang dijaga" salah untuk perintah yang tidak pernah memanggil
+   `d.allow` (`mysql.install`, `mysql.sweepDumpUsers`). Bila berkas pin
+   tidak bisa dibaca, setiap perintah di luar kelas `allowed` ditolak
+   dengan teks "pin peran/sumber agent tidak bisa dipakai, perintah %s
+   ditolak: %v". Server tanpa berkas pin tetap `unassigned`.
+7. **Masuk karantina menghapus berkas persetujuan lama** (Task 3):
+   `SetQuarantinedAt` dari peran lain memanggil `ClearRebuild` lebih dulu
+   dan gagal bila tidak bisa; karantina ulang server yang sudah
+   dikarantina tidak menghapus persetujuan yang baru diberi. Batas yang
+   tetap ada: mencabut persetujuan tidak menghentikan pekerjaan bangun
+   ulang yang sudah berjalan.
+8. **`set-role` juga bertanya bila pin tidak bisa dibaca** (Task 5). Teks
+   baru C13 "Pin server ini tidak bisa dibaca (%v); server ini mungkin
+   dikarantina (quarantined).", C14 "Kunci start sudah dilepas, tetapi
+   peran belum diubah. Jalankan perintah ini lagi; sampai itu MySQL tidak
+   dipaksa baca-saja (read-only) saat menyala.", C15 "Peran server ini
+   berubah selama Anda membaca; jalankan perintah ini lagi.".
+   `scripts/install_test.sh` menulis berkas pin langsung dan tidak lagi
+   menjalankan `set-role master` (perintah itu kini menyentuh tata letak
+   MySQL mesin tempat uji berjalan).
+9. **Kunci start, Task 6, mengikuti hasil ukur.** Dengan
+   `--defaults-file`, mysqld tidak membaca `~/.my.cnf`, jadi di sana
+   pemeriksaan home akun layanan dilewati (satu kali `--print-defaults`).
+   Awalan `maximum` pada `init_file` di mana pun → tidak terkunci, teks
+   "opsi %s membuat MySQL menolak menyala; kunci start tidak terjamin".
+   Home akun layanan di atau di bawah `/home`, `/root`, `/run/user`
+   dianggap tersembunyi kecuali isinya bisa didaftar dan tidak kosong
+   (`listHome` menggantikan `statHome`). Akun tanpa home: "akun layanan
+   MySQL %s tidak punya direktori home; ~/.my.cnf tidak bisa diperiksa".
+   Batas yang tetap ada: `User=` di unit systemd yang berbeda dari opsi
+   `user`, dan `MYSQL_HOME` dari lingkungan layanan, tidak terlihat.
+10. **Hasil start, Task 7.** Karantina baru (lewat agent) menghapus hasil
+    start lama, kecuali pin tidak bisa dibaca; hasil yang tersimpan tetapi
+    tidak terbaca ditimpa dengan peringatan di log. `set-role
+    quarantined` lewat CLI saat agent mati tidak menghapusnya.
+11. **Antrean kejadian, Task 8.** Antrean tidak pernah membuang kejadian
+    yang sedang dikirim (membuang laporan start tertua berikutnya, atau
+    kejadian tepat di belakangnya).
+12. **Peringatan start, Task 9, dibangun ulang** (aturan rencana, jendela
+    10 menit, menelan peringatan yang sungguhan). Agent menyimpan dan
+    melaporkan di setiap laporan kesehatan start terakhir tiap jenis buruk
+    (`late`, `failed`, `bypassed`) dengan tanda pengenal (`start_id`) dan
+    tanda `over`; keadaan itu dipegang di memori dan berkasnya ditulis
+    ulang tiap putaran penjaga bila gagal. Panel menyamakan tiga
+    peringatannya dengan keadaan itu pada setiap laporan yang diterima
+    (tabel baru `start_marks`, migrasi 0012: tanda pengenal start terakhir
+    yang sudah diperhitungkan per server dan jenis; perbandingan hanya
+    sama/tidak sama). Kejadian start yang membawa tanda pengenal tidak
+    lagi membuka atau menutup peringatan; kejadian tanpa tanda pengenal
+    (agent lama) berperilaku seperti sebelum Task 9. Peringatan
+    "blocked"/"bypassed" yang bertanda ditutup saat laporan menunjukkan
+    karantina berakhir. `startEventRepeatWindow` tidak ada.
+13. **"Hapus server", Task 10.** D1 juga tampil untuk server dikarantina
+    tanpa catatan promosi. Bila catatan panel bukan `quarantined` tetapi
+    agent menolak melepas, penolakan hanya masuk log (Warn).
+14. **Persetujuan di panel, Task 11.** Kode dari agent harus tepat enam
+    angka ASCII, sumber `host:port`, alamat IP; selain itu jawaban agent
+    dianggap "tidak bisa diperiksa" dan tidak pernah "disetujui". Teks
+    baru P10b "Bangun ulang {{server}} butuh persetujuan di server itu,
+    tetapi kodenya tidak bisa dibaca dari agent. Buka form Bangun ulang
+    sebagai replika dan klik Periksa lagi." dan P16 "Tombol ini aktif
+    setelah bangun ulang disetujui di server; lihat kotak Persetujuan di
+    server di atas.". "Perketat" melewati server yang dikarantina, dan
+    mengulang pekerjaan sertifikat pada server itu ditolak dengan P15.
+15. **Gerbang.** Task yang menyentuh `internal/agent` juga menjalankan
+    `go test ./internal/agent/... -race -short -timeout 60m` (`make test`
+    tidak memakai `-race`, dan paket driver MySQL butuh ±40 menit).
 
 ## Catatan untuk pelaksana
 
