@@ -490,7 +490,7 @@ func TestDeleteOldMasterWarnsOnLeftover(t *testing.T) {
 	// lock (TestDeleteQuarantinedDialogSaysLockStays) remains.
 	setLeftover(t, e, topo, proto.LeftoverResult{})
 	rec = e.do("GET", "/servers/1", nil, c)
-	wantBody(t, rec, confirm+"Bila MySQL server ini sedang mati")
+	wantBody(t, rec, confirm+"Server ini tetap dikarantina (quarantined)")
 	wantNoBody(t, rec, "belum diperiksa", "yang tidak sampai ke master baru", "berkas data tertinggal di db-master")
 
 	// Three transactions found and two salvage files never downloaded.
@@ -808,8 +808,9 @@ func TestDeleteQuarantinedDialogSaysLockStays(t *testing.T) {
 	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	const sentence = "Bila MySQL server ini sedang mati, karantina dan kunci start-nya tetap ada di server itu setelah dihapus " +
-		"dari panel; MySQL-nya akan menyala hanya-baca sampai seseorang mengubah perannya di server itu."
+	const sentence = "Server ini tetap dikarantina (quarantined) setelah dihapus dari panel: MySQL-nya tetap baca-saja (read-only) " +
+		"dan kunci start (start lock) tetap terpasang. Untuk memakai server ini lagi, jalankan di server itu: " +
+		"sudo dbpanel agent set-role unassigned, atau sudo dbpanel agent set-role master bila server ini akan menjadi master lagi."
 	rec := e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "<li>"+sentence, `data-confirm-text="Hapus server db-master dari panel.`, sentence)
@@ -818,7 +819,7 @@ func TestDeleteQuarantinedDialogSaysLockStays(t *testing.T) {
 	// speak of: not said on its page.
 	rec = e.do("GET", "/servers/2", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantNoBody(t, rec, "kunci start-nya tetap ada")
+	wantNoBody(t, rec, "tetap dikarantina (quarantined)")
 }
 
 func TestOldMasterPageShowsStartLockAndOperatorInitFiles(t *testing.T) {

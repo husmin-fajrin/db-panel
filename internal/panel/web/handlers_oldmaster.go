@@ -455,8 +455,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	return nil
 }
 
-// deleteWarnings words what deleting srv from the panel loses: its agent
-// lifts the read-only guard, the panel can no longer check or salvage the
+// deleteWarnings words what deleting srv from the panel loses: the panel can no longer check or salvage the
 // old master's leftover data, and its salvage files can no longer be
 // downloaded (the agent removes them after 7 days). box is nil for a
 // server that is no longer a quarantined old master; sf for one without
@@ -476,10 +475,13 @@ func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []str
 				"setelah server ini dihapus dari panel, data itu tidak bisa diamankan lagi lewat panel.",
 				box.Leftover.Transactions, srv.Name))
 		}
-		// The agent keeps the quarantine and its start lock when MySQL is
-		// down at the deletion (releaseRole needs a running MySQL).
-		out = append(out, "Bila MySQL server ini sedang mati, karantina dan kunci start-nya tetap ada di server itu "+
-			"setelah dihapus dari panel; MySQL-nya akan menyala hanya-baca sampai seseorang mengubah perannya di server itu.")
+	}
+	// The panel does not ask the agent to release a quarantined server's
+	// role at the delete, so it stays quarantined whatever the agent is.
+	if srv.Role == store.RoleQuarantined {
+		out = append(out, "Server ini tetap dikarantina (quarantined) setelah dihapus dari panel: MySQL-nya tetap baca-saja "+
+			"(read-only) dan kunci start (start lock) tetap terpasang. Untuk memakai server ini lagi, jalankan di server itu: "+
+			"sudo dbpanel agent set-role unassigned, atau sudo dbpanel agent set-role master bila server ini akan menjadi master lagi.")
 	}
 	if sf == nil {
 		return out

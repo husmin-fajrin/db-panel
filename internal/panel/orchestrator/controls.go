@@ -153,9 +153,9 @@ func (r *Runner) detachable(serverID int64) error {
 // DeleteServer removes a server that is not the panel's own, neither the
 // master of a topology with replicas nor a registered replica, nor a
 // quarantined old master whose cutover is pending, and has no unfinished
-// job: its agent releases its
-// pinned role first (best effort; the agent may be offline), then the
-// server is deleted and its connection dropped. It answers
+// job: its agent releases its pinned role first (best effort; the agent may
+// be offline; not asked for a quarantined server, which stays quarantined),
+// then the server is deleted and its connection dropped. It answers
 // store.ErrNotFound for an unknown server.
 func (r *Runner) DeleteServer(ctx context.Context, serverID int64) error {
 	return r.deleteServer(ctx, serverID, false)
@@ -174,11 +174,19 @@ func (r *Runner) deleteServer(ctx context.Context, serverID int64, unquarantined
 	if err := r.deletable(serverID, unquarantined); err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, cancelTimeout)
-	if err := r.d.Hub.Call(rctx, serverID, "mysql.releaseRole", nil, nil); err != nil {
-		r.log.Info("release role before delete", "server_id", serverID, "err", logErr(err))
+	srv, err := r.d.Store.GetServer(serverID)
+	if err != nil {
+		return err
 	}
-	cancel()
+	// A quarantined server stays quarantined: its agent is not asked to
+	// release the pin (it refuses anyway), whatever agent version it runs.
+	if srv.Role != store.RoleQuarantined {
+		rctx, cancel := context.WithTimeout(ctx, cancelTimeout)
+		if err := r.d.Hub.Call(rctx, serverID, "mysql.releaseRole", nil, nil); err != nil {
+			r.log.Info("release role before delete", "server_id", serverID, "err", logErr(err))
+		}
+		cancel()
+	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	if err := r.deletableLocked(serverID, unquarantined); err != nil {
@@ -230,7 +238,7 @@ func (r *Runner) deletableLocked(serverID int64, unquarantined bool) error {
 		return err
 	}
 	// A quarantined old master is deleted like a detached server (its
-	// agent releases the quarantined pin first, in DeleteServer), but not
+	// agent is not asked to release the quarantined pin), but not
 	// while applications may still write to it.
 	if unquarantined && srv.Role != store.RoleQuarantined {
 		return ErrNotQuarantinePending

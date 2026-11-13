@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
@@ -1422,5 +1423,58 @@ func TestE2EAddDatabaseExistingOnReplica(t *testing.T) {
 	if rep, err := e.p.Store.GetReplicaByServer(e.replicaSrv); err != nil || rep.State != store.ReplicaReady ||
 		strings.Join(rep.Databases, ",") != "a,rekap" {
 		t.Fatalf("replica after add = %+v, %v", rep, err)
+	}
+}
+
+// TestE2EDeleteQuarantinedOldMasterStaysLocked: "Hapus server" on a
+// quarantined old master does not release its agent's pin: the role pin,
+// the start lock and the read-only guard stay on that server, until its
+// root sets another role there with the agent's CLI.
+func TestE2EDeleteQuarantinedOldMasterStaysLocked(t *testing.T) {
+	skipWithoutE2E(t)
+	e := startE2EPromoteTopology(t)
+	m, ra, rb := e.master, e.ra, e.rb
+
+	e.waitReplicasSeen(t)
+	id, _ := e.startPromote(t, ra, proto.PromotePlanned, nil)
+	job := waitJob(t, e.p, id, e2ePromoteTimeout, nil)
+	if job.Status != store.JobSucceeded {
+		t.Fatalf("promote job ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, e.p, id))
+	}
+	e.wantPromoted(t, ra, m, rb, 3)
+	e.wantQuarantined(t, m)
+	waitForWithin(t, e2eWait, "the start lock on the quarantined old master", func() bool {
+		line, file := startLockOnDisk(t, m)
+		return line && file
+	})
+	e.confirmCutover(t, ra)
+
+	path := serverPath(m.srv()) + "/delete"
+	loc := e.ui.postRedirect(path, url.Values{"confirm_name": {m.name},
+		"confirm_token": {e.ui.confirmToken(web.ActDeleteServer, "server", m.srv())}})
+	if loc == "" {
+		t.Fatalf("POST %s did not redirect", path)
+	}
+	if _, err := e.p.Store.GetServer(m.srv()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old master after the delete: %v, want not found", err)
+	}
+
+	dir := m.agent.dir
+	if role := readPin(t, dir, mysql.RoleFile); role != "quarantined" {
+		t.Fatalf("role pin after the delete = %q, want quarantined", role)
+	}
+	if line, file := startLockOnDisk(t, m); !line || !file {
+		t.Fatalf("start lock after the delete: init_file line %v, file %v; want both", line, file)
+	}
+	if v := globalVar(t, m.db, "super_read_only"); v != "ON" {
+		t.Fatalf("super_read_only after the delete = %s, want ON", v)
+	}
+
+	var out, errOut strings.Builder
+	if code := agent.RunCLI([]string{"set-role", "unassigned", "--ya", "--dir", dir}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("set-role unassigned exited %d\nstdout:\n%s\nstderr:\n%s", code, out.String(), errOut.String())
+	}
+	if role := readPin(t, dir, mysql.RoleFile); role != "" {
+		t.Fatalf("role pin after set-role unassigned = %q, want none", role)
 	}
 }
