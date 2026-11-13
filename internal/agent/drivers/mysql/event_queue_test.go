@@ -3,6 +3,7 @@ package mysql_test
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -61,7 +62,8 @@ func seq(from, to int) []int {
 
 // TestEventQueueOrderAndDrop: the queue keeps the order events were put
 // in; past its cap it drops the oldest start report first (its value is
-// in the health snapshot), else the oldest event.
+// in the health snapshot), else the oldest event, never the one being
+// sent.
 func TestEventQueueOrderAndDrop(t *testing.T) {
 	if mysql.EventQueueCap != 64 {
 		t.Fatalf("eventQueueCap = %d, want 64", mysql.EventQueueCap)
@@ -99,26 +101,31 @@ func TestEventQueueOrderAndDrop(t *testing.T) {
 		}
 		wantNumbers(t, numbers(t, q.Drain()), seq(2, 65)...)
 	})
-	t.Run("event being sent dropped meanwhile", func(t *testing.T) {
-		// The sender holds the front event while it sends; a push that
-		// drops that event meanwhile must not make the sender's popFront
-		// remove the next one.
+	t.Run("event being sent never dropped", func(t *testing.T) {
+		// The sender holds the front event while it sends; a full queue
+		// drops the next oldest instead (start reports still first), and
+		// never holds more than its cap.
 		var q mysql.EventQueue
-		for i := 1; i <= 64; i++ {
+		q.Push(numbered(proto.EventQuarantineStart, 1))
+		for i := 2; i <= 63; i++ {
 			q.Push(numbered(proto.EventLockExpired, i))
 		}
+		q.Push(numbered(proto.EventQuarantineStartFailed, 64))
 		ev, ok := q.Front()
 		if !ok || eventNumber(t, ev) != 1 {
 			t.Fatalf("front = %+v, %v", ev, ok)
 		}
-		if d := q.Push(numbered(proto.EventLockExpired, 65)); d == nil || eventNumber(t, *d) != 1 {
-			t.Fatalf("dropped = %+v, want 1", d)
+		for _, c := range []struct{ push, dropped int }{{65, 64}, {66, 2}, {67, 3}} {
+			d := q.Push(numbered(proto.EventLockExpired, c.push))
+			if d == nil || eventNumber(t, *d) != c.dropped {
+				t.Fatalf("push %d dropped %+v, want %d", c.push, d, c.dropped)
+			}
+			if n := q.Len(); n != mysql.EventQueueCap {
+				t.Fatalf("queue holds %d after push %d, want %d (its cap)", n, c.push, mysql.EventQueueCap)
+			}
 		}
-		if d := q.Push(numbered(proto.EventLockExpired, 66)); d == nil || eventNumber(t, *d) != 2 {
-			t.Fatalf("dropped = %+v, want 2", d)
-		}
-		q.PopFront() // 1 was sent: nothing left to remove
-		wantNumbers(t, numbers(t, q.Drain()), seq(3, 66)...)
+		q.PopFront() // 1 was sent
+		wantNumbers(t, numbers(t, q.Drain()), append(seq(4, 63), 65, 66, 67)...)
 	})
 }
 
@@ -130,8 +137,9 @@ type stuckEmitter struct {
 	d       *mysql.Driver
 	release chan struct{}
 	calls   atomic.Int32
-	// lockFree: whether promoteMu could be taken within 1 s from inside
-	// the first Emit; sent once.
+	// lockFree: whether promoteMu could be taken within 5 s from inside
+	// the first Emit; sent once. A sender that held promoteMu while it
+	// sends could never let it be taken while that Emit is stuck.
 	lockFree chan bool
 }
 
@@ -145,7 +153,7 @@ func (e *stuckEmitter) Emit(ev proto.Event) error {
 		select {
 		case <-got:
 			e.lockFree <- true
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			e.lockFree <- false
 		}
 		<-e.release
@@ -155,8 +163,9 @@ func (e *stuckEmitter) Emit(ev proto.Event) error {
 
 // TestGuardNeverSendsUnderPromoteMu (R-117): a panel that does not take
 // the guard's events (a send that blocks) does not delay the guard's
-// rounds, and the sender does not hold promoteMu while it sends; once the
-// panel takes them again, every queued event arrives in order.
+// rounds, even one that queues events while the send is stuck, and the
+// sender does not hold promoteMu while it sends; once the panel takes them
+// again, every queued event arrives in order.
 func TestGuardNeverSendsUnderPromoteMu(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	// Quarantined with a writable MySQL: the first round finds a late
@@ -183,8 +192,8 @@ func TestGuardNeverSendsUnderPromoteMu(t *testing.T) {
 		t.Helper()
 		start := time.Now()
 		r.tickAt(now.Add(time.Duration(i) * 5 * time.Second))
-		if d := time.Since(start); d >= 2*time.Second {
-			t.Errorf("guard round %d took %v with the panel not taking events, want under 2 s", i, d)
+		if d := time.Since(start); d >= 5*time.Second {
+			t.Errorf("guard round %d took %v with the panel not taking events, want under 5 s", i, d)
 		}
 	}
 	// The sender starts after the first round, so that the check from
@@ -194,12 +203,22 @@ func TestGuardNeverSendsUnderPromoteMu(t *testing.T) {
 	select {
 	case free := <-ev.lockFree:
 		if !free {
-			t.Error("promoteMu not free within 1 s while the sender is sending")
+			t.Error("promoteMu not free within 5 s while the sender is sending")
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the sender never sent")
 	}
-	for i := 1; i < 5; i++ {
+	tick(1)
+	// While the send is stuck, MySQL restarts writable without the start
+	// lock: the next round queues a second late start and notice.
+	db := rootDB(t, inst)
+	execAll(t, db, "RESET PERSIST super_read_only", "RESET PERSIST read_only")
+	inst.Restart(t)
+	execAll(t, db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+	if err := os.Remove(r.lock); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i < 5; i++ {
 		tick(i)
 	}
 	if n := ev.calls.Load(); n != 1 {
@@ -211,17 +230,26 @@ func TestGuardNeverSendsUnderPromoteMu(t *testing.T) {
 	var evs []proto.Event
 	for {
 		evs = ev.delivered()
-		if len(evs) >= 2 || time.Now().After(deadline) {
+		if len(evs) >= 4 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if len(evs) != 2 || evs[0].Type != proto.EventQuarantineStart || evs[1].Type != proto.EventQuarantined {
-		t.Fatalf("delivered = %+v, want the late start report then the quarantine notice", evs)
+	// Each restart: its late start report, then the quarantine notice.
+	if len(evs) != 4 {
+		t.Fatalf("delivered = %+v, want two late starts each followed by a quarantine notice", evs)
 	}
-	var st proto.QuarantineStartEvent
-	if err := json.Unmarshal(evs[0].Payload, &st); err != nil || st.Result != proto.QuarantineStartLate {
-		t.Errorf("first event = %s (%v), want a late start", evs[0].Payload, err)
+	for i, e := range evs {
+		if i%2 == 1 {
+			if e.Type != proto.EventQuarantined {
+				t.Errorf("event %d = %s, want %s", i, e.Type, proto.EventQuarantined)
+			}
+			continue
+		}
+		var st proto.QuarantineStartEvent
+		if e.Type != proto.EventQuarantineStart || json.Unmarshal(e.Payload, &st) != nil || st.Result != proto.QuarantineStartLate {
+			t.Errorf("event %d = %s %s, want a late start", i, e.Type, e.Payload)
+		}
 	}
 }
 

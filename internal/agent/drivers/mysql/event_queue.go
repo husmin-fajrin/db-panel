@@ -30,8 +30,7 @@ type eventQueue struct {
 	items []proto.Event
 	wake  chan struct{} // cap 1, made on first push (or wait)
 	// sending: the front event is with the sender (front until
-	// popFront). A push that drops that event clears it, and popFront then
-	// removes none.
+	// popFront); push never drops it.
 	sending bool
 }
 
@@ -45,20 +44,25 @@ func isStartReport(typ string) bool {
 
 // push appends ev; when full it first drops the oldest start report
 // (EventQuarantineStart, EventQuarantineStartFailed: their value is in
-// the snapshot), else the oldest event, and returns what it dropped.
+// the snapshot), else the oldest event, and returns what it dropped. The
+// event being sent (front until popFront) is never the one dropped: it
+// would be delivered anyway. The queue never holds more than
+// eventQueueCap events.
 func (q *eventQueue) push(ev proto.Event) (dropped *proto.Event) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if len(q.items) >= eventQueueCap {
-		i := slices.IndexFunc(q.items, func(e proto.Event) bool { return isStartReport(e.Type) })
+		first := 0
+		if q.sending {
+			first = 1
+		}
+		i := slices.IndexFunc(q.items[first:], func(e proto.Event) bool { return isStartReport(e.Type) })
 		if i < 0 {
 			i = 0
 		}
+		i += first
 		old := q.items[i]
 		dropped = &old
-		if i == 0 {
-			q.sending = false
-		}
 		q.items = slices.Delete(q.items, i, i+1)
 	}
 	q.items = append(q.items, ev)
@@ -80,12 +84,11 @@ func (q *eventQueue) front() (proto.Event, bool) {
 	return q.items[0], true
 }
 
-// popFront removes the event front gave, once it was sent; nothing when
-// push dropped it meanwhile.
+// popFront removes the event front gave, once it was sent.
 func (q *eventQueue) popFront() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.sending {
+	if len(q.items) > 0 {
 		q.items[0] = proto.Event{}
 		q.items = q.items[1:]
 	}
@@ -123,7 +126,7 @@ func (d *Driver) enqueue(typ string, payload any) {
 		return
 	}
 	if dropped := d.outbox.push(proto.Event{Type: typ, Payload: b}); dropped != nil {
-		d.warn("event dropped: too many waiting for the panel", "type", dropped.Type)
+		d.warnLimited("event dropped: too many waiting for the panel", "type", dropped.Type)
 	}
 }
 

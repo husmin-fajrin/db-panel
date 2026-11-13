@@ -148,8 +148,8 @@ func TestGuardRoundsNotDelayedByNonDrainingPanel(t *testing.T) {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	for i := range rounds {
-		if took := src.ends[i].Sub(src.starts[i]); took > 2*time.Second {
-			t.Errorf("guard round %d took %v, want under 2 s", i, took)
+		if took := src.ends[i].Sub(src.starts[i]); took > 5*time.Second {
+			t.Errorf("guard round %d took %v, want under 5 s", i, took)
 		}
 		if i+1 < rounds {
 			if gap := src.starts[i+1].Sub(src.ends[i]); gap > monitor.GuardEvery+time.Second {

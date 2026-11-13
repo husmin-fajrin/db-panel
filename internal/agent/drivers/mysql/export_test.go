@@ -527,6 +527,13 @@ func (q *EventQueue) Push(ev proto.Event) (dropped *proto.Event) { return q.q.pu
 func (q *EventQueue) Front() (proto.Event, bool)                 { return q.q.front() }
 func (q *EventQueue) PopFront()                                  { q.q.popFront() }
 
+// Len is how many events are queued.
+func (q *EventQueue) Len() int {
+	q.q.mu.Lock()
+	defer q.q.mu.Unlock()
+	return len(q.q.items)
+}
+
 // Drain takes every queued event, oldest first.
 func (q *EventQueue) Drain() []proto.Event {
 	var out []proto.Event
