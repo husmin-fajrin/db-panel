@@ -48,7 +48,8 @@ type Driver struct {
 	// empty too.
 	StartResultPath string
 	// Events, when set, sends the promote lock guard's events to the
-	// panel (the agent's connection).
+	// panel (the agent's connection). The guard only queues them;
+	// RunEvents sends them.
 	Events Emitter
 	// Now is the driver's clock (the promote lock's time); nil means
 	// time.Now. Tests replace it.
@@ -117,15 +118,16 @@ type Driver struct {
 	// qStartPending: a start of MySQL it has not reported yet.
 	qUp           bool
 	qStartPending bool
-	// pendingStart: start reports the panel has not got yet, oldest
-	// first (emitStart); startSendWarned: their failed send was logged.
-	// The caller holds promoteMu.
-	pendingStart    []proto.Event
-	startSendWarned bool
 	// qNotice: the quarantine took effect in this guard round
-	// (guardQuarantined), sent once the round's work is done
+	// (guardQuarantined), queued once the round's work is done
 	// (sendRoundEvents). The caller holds promoteMu.
 	qNotice *proto.QuarantinedEvent
+	// outbox: the guard's events not sent to the panel yet (enqueue);
+	// RunEvents sends them (event_queue.go). It has its own lock, never
+	// promoteMu. sendWarned: a failed send was logged; owned by the
+	// sender.
+	outbox     eventQueue
+	sendWarned bool
 
 	// startLockState is the start lock (startlock.go) as last checked,
 	// reported while startLockSet; startLockMu guards both.

@@ -66,6 +66,10 @@ type PromoteGuard interface {
 	GuardTick(ctx context.Context, now time.Time) error
 }
 
+// EventSender is a Source that sends its guard's events itself
+// (mysql.Driver.RunEvents); Run runs it beside its loops and waits for it.
+type EventSender interface{ RunEvents(ctx context.Context) }
+
 // Emitter sends an event to the panel; an error (proto.ErrOffline while
 // there is no connection) means the event was not delivered.
 type Emitter interface {
@@ -293,7 +297,8 @@ func (m *Monitor) options() Options {
 // accounts when SweepEvery has passed since the last sweep and the salvage
 // files when SalvageSweepEvery has (the first sweeps at once). The guard
 // loop (guardLoop) runs the safety guards every GuardEvery, whatever
-// CheckEvery is.
+// CheckEvery is. When the Source is an EventSender its sender runs beside
+// them, and Run waits for it too.
 func (m *Monitor) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -301,6 +306,13 @@ func (m *Monitor) Run(ctx context.Context) {
 		defer wg.Done()
 		m.guardLoop(ctx)
 	}()
+	if s, ok := m.src.(EventSender); ok {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.RunEvents(ctx)
+		}()
+	}
 	for {
 		m.tick(ctx)
 		m.sweep(ctx)

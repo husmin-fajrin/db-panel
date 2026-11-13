@@ -44,6 +44,7 @@ func newQuarantineRig(t *testing.T) *quarantineRig {
 		seen: filepath.Join(t.TempDir(), "replicas-seen"), ev: &eventLog{}, peer: &fakePeer{}}
 	r.db = rootDB(t, inst)
 	r.d.Events = r.ev
+	r.ev.flush = r.d.FlushEvents
 	r.d.SeenPath = r.seen
 	t.Cleanup(mysql.SetReadPeer(r.peer.read))
 	if err := r.db.QueryRow("SELECT @@global.server_uuid").Scan(&r.uuid); err != nil {
@@ -257,6 +258,7 @@ func TestQuarantineGuardLeavesRebuildAlone(t *testing.T) {
 	rig := &snapshotRig{reg: commands.NewRegistry(), runner: runner, events: jev}
 	ev := &eventLog{}
 	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir, Events: ev}
+	ev.flush = d.FlushEvents
 	d.Register(rig.reg)
 	approveRebuild(t, dir, "127.0.0.1:"+strconv.Itoa(master.Port))
 	tick := func() {
@@ -556,6 +558,7 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	var logs bytes.Buffer
 	ev := &eventLog{}
 	d := &mysql.Driver{Host: inst.Host(), PinDir: dir, Events: ev, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	ev.flush = d.FlushEvents
 	d.Register(commands.NewRegistry())
 	tick := func() {
 		t.Helper()

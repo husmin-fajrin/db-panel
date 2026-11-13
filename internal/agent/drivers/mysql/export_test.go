@@ -511,3 +511,31 @@ func SetEmitStartHook(f func(d *Driver)) func() {
 func (d *Driver) SetQuarantined(newSource, addr string) error {
 	return d.setQuarantined(newSource, addr)
 }
+
+// FlushEvents sends what the guard has queued, as the sender (RunEvents)
+// does: true when the queue is empty, false when a send failed.
+func (d *Driver) FlushEvents() bool { return d.sendQueued() }
+
+// EventQueueCap is how many events wait for the panel at most.
+const EventQueueCap = eventQueueCap
+
+// EventQueue is the driver's queue of events for the panel, for its own
+// tests.
+type EventQueue struct{ q eventQueue }
+
+func (q *EventQueue) Push(ev proto.Event) (dropped *proto.Event) { return q.q.push(ev) }
+func (q *EventQueue) Front() (proto.Event, bool)                 { return q.q.front() }
+func (q *EventQueue) PopFront()                                  { q.q.popFront() }
+
+// Drain takes every queued event, oldest first.
+func (q *EventQueue) Drain() []proto.Event {
+	var out []proto.Event
+	for {
+		ev, ok := q.q.front()
+		if !ok {
+			return out
+		}
+		out = append(out, ev)
+		q.q.popFront()
+	}
+}

@@ -29,11 +29,14 @@ var (
 )
 
 // eventLog records the events a driver emits. While offline an Emit is
-// refused (the panel not connected).
+// refused (the panel not connected). flush, when set (the driver's
+// FlushEvents), sends what the driver has queued before the log is read:
+// the guard only queues its events, a sender delivers them.
 type eventLog struct {
 	mu      sync.Mutex
 	evs     []proto.Event
 	offline bool
+	flush   func() bool
 }
 
 func (e *eventLog) Emit(ev proto.Event) error {
@@ -53,7 +56,18 @@ func (e *eventLog) setOffline(on bool) {
 	e.offline = on
 }
 
+// all sends what the driver has queued (flush), then is what reached the
+// log.
 func (e *eventLog) all() []proto.Event {
+	if e.flush != nil {
+		e.flush()
+	}
+	return e.delivered()
+}
+
+// delivered is what has reached the log so far, without sending what the
+// driver has queued.
+func (e *eventLog) delivered() []proto.Event {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]proto.Event(nil), e.evs...)
@@ -142,6 +156,7 @@ func newLockRig(t *testing.T, candidate string) *lockRig {
 	r := &lockRig{pinRig: newPinRig(t, inst.Host(), dir), inst: inst, db: rootDB(t, inst), dir: dir,
 		ev: &eventLog{}, peer: &fakePeer{}, deadline: time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)}
 	r.d.Events = r.ev
+	r.ev.flush = r.d.FlushEvents
 	t.Cleanup(mysql.SetReadPeer(r.peer.read))
 	execAll(t, r.db, "SET PERSIST super_read_only = ON")
 	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: candidate, Deadline: r.deadline}); err != nil {
@@ -599,6 +614,7 @@ func TestLockRecordsMatchedAddress(t *testing.T) {
 	r := newPinRig(t, master.Host(), dir)
 	ev := &eventLog{}
 	r.d.Events = ev
+	ev.flush = r.d.FlushEvents
 	r.d.SeenPath = filepath.Join(t.TempDir(), "replicas-seen") // none: the lock is what counts
 	lockedAt := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
 	r.d.Now = func() time.Time { return lockedAt }

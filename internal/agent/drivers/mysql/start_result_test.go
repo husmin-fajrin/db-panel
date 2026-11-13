@@ -119,11 +119,12 @@ func TestStartResultWrittenBeforeSend(t *testing.T) {
 	em := &readAtEmit{eventLog: r.ev, path: filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")}
 	r.d.Events = em
 	r.tickAt(time.Now())
-	if len(em.seen) == 0 {
-		t.Fatal("no event emitted")
-	}
+	// The round only queues the report; reading the log sends it.
 	if got := startEvents(t, r.ev); len(got) != 1 || got[0].Result != "late" {
 		t.Fatalf("start events = %+v, want one late", got)
+	}
+	if len(em.seen) == 0 {
+		t.Fatal("no event emitted")
 	}
 	if em.seen[0].Result != "late" {
 		t.Errorf("start-result at the first Emit = %+v, want late already written", em.seen[0])
@@ -246,7 +247,7 @@ func TestStartResultUnreadableStoredIsReplacedWithWarning(t *testing.T) {
 }
 
 // The start result is on disk by the time the report is queued (before
-// emitStart queues it, hence before any send).
+// enqueue queues it, hence before any send).
 func TestStartResultWrittenBeforeReportQueued(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))

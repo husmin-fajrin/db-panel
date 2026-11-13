@@ -36,6 +36,7 @@ func newGuardRig(t *testing.T, inst *testmysql.Instance, dir string) *guardRig {
 	t.Helper()
 	r := &guardRig{pinRig: newPinRig(t, inst.Host(), dir), inst: inst, dir: dir, ev: &eventLog{}}
 	r.d.Events = r.ev
+	r.ev.flush = r.d.FlushEvents
 	lock, err := mysql.StartLockPath(inst.Layout())
 	if err != nil {
 		t.Fatal(err)
@@ -385,70 +386,6 @@ func TestBootstrapFailureEventFromErrorLog(t *testing.T) {
 	}
 }
 
-// TestQuarantineStartReportRetriedUntilDelivered: a start report (late)
-// and a failed start computed while the panel is not connected are kept
-// and sent again each guard round until one is delivered: exactly one of
-// each reaches the panel, none lost, none twice (FR-1, SA-5).
-func TestQuarantineStartReportRetriedUntilDelivered(t *testing.T) {
-	t.Run("late", func(t *testing.T) {
-		inst := testmysql.Start(t, testmysql.Options{})
-		// A writable MySQL on a server pinned quarantined: the first
-		// round finds the flags off, a late start.
-		r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
-		r.ev.setOffline(true)
-		now := time.Now()
-		r.tickAt(now)
-		r.tickAt(now.Add(5 * time.Second))
-		if got := startEvents(t, r.ev); len(got) != 0 {
-			t.Fatalf("delivered while offline: %+v", got)
-		}
-		r.ev.setOffline(false)
-		r.tickAt(now.Add(10 * time.Second))
-		if got := startEvents(t, r.ev); len(got) != 1 || got[0].Result != proto.QuarantineStartLate {
-			t.Fatalf("start events once connected = %+v, want one late", got)
-		}
-		r.tickAt(now.Add(15 * time.Second))
-		if got := startEvents(t, r.ev); len(got) != 1 {
-			t.Errorf("start events after another round = %+v, want still one", got)
-		}
-	})
-
-	t.Run("start failed", func(t *testing.T) {
-		inst := testmysql.Start(t, testmysql.Options{})
-		if err := mysql.WriteStartLock(context.Background(), inst.Host()); err != nil {
-			t.Fatal(err)
-		}
-		r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
-		inst.Stop(t)
-		written := time.Date(2026, 11, 11, 3, 0, 0, 0, time.UTC)
-		if err := os.Chtimes(r.lock, written, written); err != nil {
-			t.Fatal(err)
-		}
-		f, err := os.OpenFile(inst.ErrorLog, os.O_APPEND|os.O_WRONLY, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = f.WriteString("2026-11-11T03:18:19.026539Z 0 [ERROR] [MY-010455] [Server] Failed to open the bootstrap file " + r.lock + "\n")
-		f.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		r.ev.setOffline(true)
-		now := time.Now()
-		r.tickAt(now)
-		if n := len(r.ev.all()); n != 0 {
-			t.Fatalf("delivered while offline: %d events", n)
-		}
-		r.ev.setOffline(false)
-		r.tickAt(now.Add(5 * time.Second))
-		r.tickAt(now.Add(10 * time.Second))
-		evs := r.ev.all()
-		if len(evs) != 1 || evs[0].Type != proto.EventQuarantineStartFailed {
-			t.Fatalf("events once connected = %+v, want one %s", evs, proto.EventQuarantineStartFailed)
-		}
-	})
-}
-
 // TestFirstSnapshotOfQuarantinedServerCarriesCheckedStartLock: a health
 // snapshot taken before the guard's first round on a quarantined server
 // (every agent start) checks the start lock itself instead of saying "not
@@ -610,22 +547,27 @@ func (e *stateAtSend) Emit(ev proto.Event) error {
 }
 
 func (e *stateAtSend) sends() []sendState {
+	if e.flush != nil {
+		e.flush()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]sendState(nil), e.seen...)
 }
 
-// TestGuardSendsReportsAfterReadOnlyAndHousekeeping (R-117): a start
-// report still waiting for the panel is sent only after the round has made
-// the quarantined server read-only again and done the start lock's
-// housekeeping; a send to a panel whose socket does not drain blocks, and
-// must not delay either.
+// TestGuardSendsReportsAfterReadOnlyAndHousekeeping (R-117): a guard
+// round sends nothing itself; the start reports it queued (one kept from a
+// round while the panel was not connected, one of its own) reach the panel
+// through the sender, in order, once the round has made the quarantined
+// server read-only again and done the start lock's housekeeping: a send to
+// a panel whose socket does not drain blocks, and must not delay either.
 func TestGuardSendsReportsAfterReadOnlyAndHousekeeping(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	r := newGuardRig(t, inst, pinDir(t, "quarantined", guardCandidateKey))
 	db := rootDB(t, inst)
 	ev := &stateAtSend{db: db, lock: r.lock}
 	r.d.Events = ev
+	ev.flush = r.d.FlushEvents
 	// Round 1, panel not connected: MySQL is writable, a late start is
 	// kept for the panel.
 	ev.setOffline(true)
@@ -643,6 +585,9 @@ func TestGuardSendsReportsAfterReadOnlyAndHousekeeping(t *testing.T) {
 	}
 	ev.setOffline(false)
 	r.tickAt(time.Now())
+	if n := len(ev.delivered()); n != 0 {
+		t.Fatalf("the round sent %d events itself, want 0 (the sender sends)", n)
+	}
 	sends := ev.sends()
 	var starts int
 	for _, s := range sends {
@@ -654,10 +599,9 @@ func TestGuardSendsReportsAfterReadOnlyAndHousekeeping(t *testing.T) {
 				s.typ, s.readOnly, s.lockExists)
 		}
 	}
-	// The report kept from round 1 and this round's own go out in this
-	// round, not 5 s later.
+	// The report kept from round 1 and this round's own, both delivered.
 	if starts != 2 {
-		t.Errorf("start reports sent in the round = %d (%+v), want 2", starts, sends)
+		t.Errorf("start reports sent = %d (%+v), want 2", starts, sends)
 	}
 	if got := startEvents(t, &ev.eventLog); len(got) != 2 || got[0].Result != proto.QuarantineStartLate || got[1].Result != proto.QuarantineStartLate {
 		t.Errorf("start events = %+v, want two late", got)
@@ -679,6 +623,7 @@ func TestSelfQuarantineWritesStartLockBeforeNotice(t *testing.T) {
 	}
 	ev := &stateAtSend{db: r.db, lock: lock, cfg: r.inst.ConfigFile}
 	r.d.Events = ev
+	ev.flush = r.d.FlushEvents
 	decode[proto.QuarantineResult](t, r.quarantine(quarantineParams))
 	wantQuarantined(t, r.db, r.dir, guardCandidateKey)
 	var notices int
@@ -698,8 +643,9 @@ func TestSelfQuarantineWritesStartLockBeforeNotice(t *testing.T) {
 }
 
 // TestGuardFlushesStartReportsOnEveryPath (R-117, FR-1): a start report
-// still waiting is sent in every round that runs the guard, whatever path
-// the round leaves by; on a locked master only once super_read_only is on.
+// queued while the panel was not connected reaches it through the sender
+// whatever path the next round leaves by; on a locked master the round has
+// put super_read_only back before anything is sent.
 func TestGuardFlushesStartReportsOnEveryPath(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -719,6 +665,7 @@ func TestGuardFlushesStartReportsOnEveryPath(t *testing.T) {
 			db := rootDB(t, inst)
 			ev := &stateAtSend{db: db, lock: r.lock}
 			r.d.Events = ev
+			ev.flush = r.d.FlushEvents
 			ev.setOffline(true)
 			now := time.Now()
 			r.tickAt(now)

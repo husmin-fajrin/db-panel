@@ -535,15 +535,12 @@ func candidateConnected(ctx context.Context, db *sql.DB, host string) (string, b
 // first makes sure super_read_only is on (again after a MySQL restart,
 // before anything else). At or past the deadline of a lock with a
 // candidate it reads the candidate (see the package comment above); it
-// never acts on a lock-master lock. The start reports and
-// guardQuarantined's quarantine notice are sent at the end of the round
-// (sendRoundEvents), on every path of a round that ran. Three sends stay
-// inline, each the last action of its path, followed only by
-// sendRoundEvents: keepLock's and the unlock's EventLockExpired
-// (guardExpired), and selfQuarantine's EventQuarantined, sent after its
-// start lock is written. Ordering within a round does not shorten the
-// pause after it: the guard loop waits GuardEvery once the round, sends
-// included, has finished.
+// never acts on a lock-master lock. The round never sends to the panel:
+// its events are queued (enqueue) in the order they are decided, and the
+// one sender (RunEvents) sends them outside promoteMu, so a panel
+// connection that does not drain cannot delay a round (R-117).
+// guardQuarantined's quarantine notice is queued at the end of the round
+// (sendRoundEvents), on every path of a round that ran.
 func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	if d.pins == nil {
 		return nil
@@ -562,10 +559,7 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	defer d.promoteMu.Unlock()
-	// What the round has for the panel goes last, on every path: a send
-	// can block on a panel connection that does not drain, and must not
-	// delay read-only, the start lock's housekeeping or the promote lock
-	// (R-117).
+	// The quarantine notice is queued last, on every path.
 	defer d.sendRoundEvents()
 	// A quarantined server is read-only before anything else, lock or
 	// not; the start lock's housekeeping (which may run --print-defaults)
@@ -697,7 +691,7 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		}
 		g.reset(nil)
 		d.warn("promote lock expired with the candidate still a replica; master unlocked", "candidate", key)
-		d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "unlocked", Candidate: key})
+		d.enqueue(proto.EventLockExpired, proto.LockExpiredEvent{Action: "unlocked", Candidate: key})
 	}
 	return nil
 }
@@ -716,8 +710,8 @@ func serverUUID(ctx context.Context, db *sql.DB) (string, error) {
 // from the last one reported (another keep reason came first, or the set
 // changed: the hosts are what the operator acts on), and otherwise at
 // most every keptEvery; hosts are the listed replicas (host:port) that
-// could not be read, when that is why. A report the panel did not get is
-// tried again at the next recheck. The caller holds promoteMu.
+// could not be read, when that is why. A report is queued (enqueue) and
+// stays queued until it is sent. The caller holds promoteMu.
 func (d *Driver) keepLock(now time.Time, key, reason string, hosts ...string) {
 	g := &d.guard
 	hosts = slices.Clone(hosts)
@@ -726,9 +720,7 @@ func (d *Driver) keepLock(now time.Time, key, reason string, hosts ...string) {
 		return
 	}
 	d.warn("promote lock expired but kept", "candidate", key, "reason", reason, "hosts", hosts)
-	if d.emit(proto.EventLockExpired, proto.LockExpiredEvent{Action: "kept", Candidate: key, Reason: reason, Hosts: hosts}) != nil {
-		return
-	}
+	d.enqueue(proto.EventLockExpired, proto.LockExpiredEvent{Action: "kept", Candidate: key, Reason: reason, Hosts: hosts})
 	g.keptAt, g.keptHosts = now, hosts
 }
 
@@ -737,8 +729,8 @@ func (d *Driver) keepLock(now time.Time, key, reason string, hosts ...string) {
 // panel names its new master, which rebuild commands match), recording
 // addr, the address that host was verified at, for the agent's own reads
 // of it (Pins.SourceDial); it removes the promote lock. Last it writes
-// the start lock (startlock.go), then reports the quarantine to the panel,
-// and returns the start lock's state; a start lock that
+// the start lock (startlock.go), then queues the quarantine notice for
+// the panel, and returns the start lock's state; a start lock that
 // cannot be written leaves the quarantine in place. Once the pin is
 // written the start lock is written even when removing the promote lock
 // fails. The caller holds promoteMu.
@@ -770,29 +762,10 @@ func (d *Driver) selfQuarantine(ctx context.Context, newSource, addr string) (pr
 	}
 	d.guard.reset(nil)
 	d.warn("server quarantined under its new master", "new_source", newSource, "verified_addr", addr)
-	// The start lock first, then the panel: a send can block on a panel
-	// connection that does not drain.
+	// The start lock first, then the notice for the panel.
 	lock = d.lockStart(ctx, h)
-	d.emit(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: newSource})
+	d.enqueue(proto.EventQuarantined, proto.QuarantinedEvent{NewSource: newSource})
 	return lock, nil
-}
-
-// emit sends an event to the panel when the driver has an Emitter; one
-// the panel does not get is logged and its error returned (the health
-// reports carry the state too, except for the start reports, which the
-// caller keeps: emitStart).
-func (d *Driver) emit(typ string, payload any) error {
-	if d.Events == nil {
-		return nil
-	}
-	b, err := json.Marshal(payload)
-	if err == nil {
-		err = d.Events.Emit(proto.Event{Type: typ, Payload: b})
-	}
-	if err != nil {
-		d.warn("event not sent", "type", typ, "err", err)
-	}
-	return err
 }
 
 func (d *Driver) warn(msg string, args ...any) {

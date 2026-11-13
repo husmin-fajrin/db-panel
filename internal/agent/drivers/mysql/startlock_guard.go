@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,8 +42,8 @@ const (
 // them.
 var (
 	removeStartLockFile = os.Remove
-	// emitStartHook runs as a start report is queued; tests see what is on
-	// disk at that moment.
+	// emitStartHook runs as a start report is queued (enqueue); tests see
+	// what is on disk at that moment.
 	emitStartHook func(d *Driver)
 	clearLock     = (*Pins).ClearLock
 )
@@ -343,80 +342,18 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 	d.bootFailAt = at
 	d.warn("MySQL of the quarantined server failed to start: it could not open the start lock file", "file", path, "at", at)
 	d.recordStart(startResult{Result: proto.QuarantineStartFailed, Decided: now, InitFile: path})
-	d.emitStart(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at})
+	d.enqueue(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at})
 }
 
-// maxPendingStart is how many start reports wait for the panel at most.
-const maxPendingStart = 16
-
-// emitStart queues a start report (EventQuarantineStart,
-// EventQuarantineStartFailed) after the ones still waiting, in order; the
-// guard round sends them once its own work is done (sendRoundEvents). A
-// report the panel does not get (not connected: at agent start the first
-// guard round runs before the session is up, or the server is cut off)
-// is kept and sent again each guard round (flushStartEvents) until one is
-// delivered: these reports are the only carrier of "the old master was
-// writable for a while". Past maxPendingStart the oldest ok result goes
-// first (it only closes alerts), else the oldest report. The caller holds
+// sendRoundEvents queues what a guard round has for the panel once the
+// round's work is done: the quarantine that took effect in the round
+// (qNotice). It sends nothing (RunEvents does). The caller holds
 // promoteMu.
-func (d *Driver) emitStart(typ string, payload any) {
-	if emitStartHook != nil {
-		emitStartHook(d)
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		d.warn("start report not encoded", "type", typ, "err", err)
-		return
-	}
-	d.pendingStart = append(d.pendingStart, proto.Event{Type: typ, Payload: b})
-	if len(d.pendingStart) > maxPendingStart {
-		drop := 0
-		for i, ev := range d.pendingStart {
-			var qe proto.QuarantineStartEvent
-			if ev.Type == proto.EventQuarantineStart && json.Unmarshal(ev.Payload, &qe) == nil &&
-				qe.Result == proto.QuarantineStartOK && !qe.Bypassed {
-				drop = i
-				break
-			}
-		}
-		d.warn("start report dropped: too many waiting for the panel", "type", d.pendingStart[drop].Type)
-		d.pendingStart = slices.Delete(d.pendingStart, drop, drop+1)
-	}
-}
-
-// sendRoundEvents sends what a guard round has for the panel, after the
-// round's work: the start reports still waiting, then the quarantine that
-// took effect in the round (qNotice), which is not kept when not sent. The
-// caller holds promoteMu.
 func (d *Driver) sendRoundEvents() {
-	d.flushStartEvents()
 	if n := d.qNotice; n != nil {
 		d.qNotice = nil
-		d.emit(proto.EventQuarantined, *n)
+		d.enqueue(proto.EventQuarantined, *n)
 	}
-}
-
-// flushStartEvents sends the start reports still waiting, oldest first,
-// and stops at the first the panel does not get. The caller holds
-// promoteMu.
-func (d *Driver) flushStartEvents() {
-	if d.Events == nil {
-		d.pendingStart = nil
-		return
-	}
-	for len(d.pendingStart) > 0 {
-		ev := d.pendingStart[0]
-		if err := d.Events.Emit(ev); err != nil {
-			if !d.startSendWarned {
-				d.startSendWarned = true
-				d.warn("start report not sent; kept and sent again each guard round", "type", ev.Type, "err", err)
-			}
-			return
-		}
-		d.startSendWarned = false
-		d.pendingStart = d.pendingStart[1:]
-	}
-	d.pendingStart = nil
 }
 
 // readTail is the last n bytes of the regular file at path. The error log
@@ -475,7 +412,7 @@ func scanBootstrapFailure(tail []byte, file string, since time.Time) (time.Time,
 	return last, found
 }
 
-// reportQuarantineStart sends EventQuarantineStart for a start of MySQL
+// reportQuarantineStart queues EventQuarantineStart for a start of MySQL
 // on a quarantined server seen at now: late when a flag was off
 // (flagsOff), bypassed when @@init_file (initFile) is not the agent's file
 // although that file is older than the running mysqld (uptime seconds,
@@ -501,11 +438,11 @@ func (d *Driver) reportQuarantineStart(h Host, now time.Time, flagsOff bool, ini
 		d.warn("quarantined server started without the start lock holding", "result", ev.Result, "init_file", initFile)
 	}
 	d.recordStart(startResult{Result: ev.Result, Decided: now, InitFile: initFile})
-	d.emitStart(proto.EventQuarantineStart, ev)
+	d.enqueue(proto.EventQuarantineStart, ev)
 }
 
 // recordStart keeps the worst start on disk before it is reported; a
-// failed write is warned and the report is still sent.
+// failed write is warned and the report is still queued.
 func (d *Driver) recordStart(r startResult) {
 	if err := d.recordStartResult(r); err != nil {
 		d.warn("start result not kept on disk; the report is still sent", "result", r.Result, "err", err)
