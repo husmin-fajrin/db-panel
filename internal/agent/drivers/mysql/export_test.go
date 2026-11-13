@@ -464,3 +464,8 @@ var (
 
 // ConnectionsPSQuery is the performance_schema thread query.
 func ConnectionsPSQuery() string { return connectionsPSQuery }
+
+// CheckApproval is the validity rule of a rebuild approval.
+func CheckApproval(a RebuildApproval, role, source string, ips []net.IP, now time.Time) error {
+	return checkApproval(a, role, source, ips, now)
+}
