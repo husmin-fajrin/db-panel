@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
@@ -355,5 +356,37 @@ func TestStartResultSnapshotValidatesFile(t *testing.T) {
 	write(mysql.StartResultRecord{Result: "bypassed", Decided: time.Now(), InitFile: strings.Repeat("a", 10000)})
 	if s := r.d.StartResult(time.Now()); s == nil || len(s.InitFile) != 4096 {
 		t.Errorf("StartResult init_file length = %v, want 4096", s)
+	}
+}
+
+func TestStartResultKeptWhenRolePinUnreadable(t *testing.T) {
+	r := newQuarantineRig(t)
+	r.seenHosts("10.9.9.9")
+	r.promoted()
+	path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
+	if err := r.d.RecordStartResult(mysql.StartResultRecord{Result: "late", Decided: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(r.dir, mysql.RoleFile), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	r.quarantine(quarantineParams) // whatever it returns with the pin untrusted
+	if got, ok := readStartResultFile(t, path); !ok || got.Result != "late" {
+		t.Errorf("start-result with an unreadable role pin = %+v (exists %v), want late kept", got, ok)
+	}
+}
+
+func TestStartResultInitFileCutOnRuneBoundary(t *testing.T) {
+	dir := pinDir(t, "quarantined", guardCandidateKey)
+	r := newPinRig(t, nil, dir)
+	path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
+	// "a" + 3-byte characters: byte 4096 falls inside one.
+	b, _ := json.Marshal(mysql.StartResultRecord{Result: "bypassed", Decided: time.Now(), InitFile: "a" + strings.Repeat("\u20ac", 2000)})
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := r.d.StartResult(time.Now())
+	if s == nil || len(s.InitFile) > 4096 || len(s.InitFile) < 4093 || !utf8.ValidString(s.InitFile) {
+		t.Errorf("InitFile = %d bytes, valid UTF-8 %v; want valid and 4093..4096 bytes", len(s.InitFile), s != nil && utf8.ValidString(s.InitFile))
 	}
 }

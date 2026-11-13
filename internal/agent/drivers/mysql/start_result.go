@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -87,7 +88,11 @@ func (d *Driver) StartResult(now time.Time) *proto.StartResultState {
 		return nil
 	}
 	if len(r.InitFile) > maxInitFile {
-		r.InitFile = r.InitFile[:maxInitFile]
+		n := maxInitFile
+		for n > 0 && !utf8.RuneStart(r.InitFile[n]) {
+			n--
+		}
+		r.InitFile = r.InitFile[:n]
 	}
 	age := int64(now.Sub(r.Decided) / time.Second)
 	if age < 0 {
@@ -107,9 +112,11 @@ func (d *Driver) clearStartResult() {
 // from another role, the start result of an earlier quarantine goes first,
 // before the pins are written; a failure is logged and does not stop the
 // quarantine. A server already quarantined keeps its result: it belongs to
-// this quarantine.
+// this quarantine. While the role pin cannot be read nothing is known
+// about the role, so the result is kept (as guardStartLock changes nothing
+// then).
 func (d *Driver) setQuarantined(newSource, addr string) error {
-	if !d.pins.RoleIs(roleQuarantined) {
+	if role, rerr := d.pins.roleErr(); rerr == nil && role != roleQuarantined {
 		if err := removeFile(d.startResultPath()); err != nil && d.Logger != nil {
 			d.Logger.Error("start result of an earlier quarantine not removed", "err", err)
 		}
