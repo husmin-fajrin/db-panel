@@ -113,11 +113,18 @@ func StrictClassNames() map[string]string {
 // strictGate is strict mode (spec 5.2), asked before every command's
 // handler: on a quarantined server a command that is not allowed or left
 // to the role table runs only under root's valid approval. Without one the
-// answer is needs_local_approval with the request's code, made here. A
-// pin that cannot be read is not quarantined here: Allow refuses the
-// guarded commands then.
+// answer is needs_local_approval with the request's code, made here.
+// While the pin files cannot be read only the allowed commands pass (some
+// handlers, mysql.install and mysql.sweepDumpUsers, never ask the pins).
 func (d *Driver) strictGate(ctx context.Context, cmd string) error {
-	if d.pins.Role() != roleQuarantined {
+	role, err := d.pins.roleErr()
+	if err != nil {
+		if strictCommands[cmd] == strictAllowed {
+			return nil
+		}
+		return &commands.ParamError{Msg: fmt.Sprintf("pin peran/sumber agent tidak bisa dipakai, perintah %s ditolak: %v", cmd, err)}
+	}
+	if role != roleQuarantined {
 		return nil
 	}
 	switch strictCommands[cmd] {

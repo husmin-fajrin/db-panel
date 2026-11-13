@@ -459,7 +459,7 @@ func (d *Driver) settleRebuilt(host string, port int) error {
 	// The approval was for this rebuild; the quarantine ends whether or
 	// not its files go (a replica never asks for them).
 	if err := d.pins.ClearRebuild(); err != nil && d.Logger != nil {
-		d.Logger.Warn("rebuild approval files not removed after the rebuild", "err", err)
+		d.Logger.Error("rebuild approval files not removed after the rebuild", "err", err)
 	}
 	return nil
 }

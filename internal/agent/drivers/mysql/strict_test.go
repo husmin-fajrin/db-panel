@@ -3,6 +3,7 @@ package mysql_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
@@ -50,6 +51,16 @@ var protectedCases = []pinCase{
 func TestQuarantinedStrictModeRefusesProtected(t *testing.T) {
 	dir := pinDir(t, "quarantined", strictSource)
 	r := newPinRig(t, nil, dir)
+	// Every command classed protected has a case here.
+	cased := map[string]bool{}
+	for _, c := range protectedCases {
+		cased[c.cmd] = true
+	}
+	for cmd, class := range mysql.StrictClassNames() {
+		if class == "protected" && !cased[cmd] {
+			t.Errorf("%s is protected but has no case in protectedCases", cmd)
+		}
+	}
 	codes := map[string]bool{}
 	codeRe := regexp.MustCompile(`approve ([0-9]{6}) `)
 	for _, c := range protectedCases {
@@ -451,5 +462,91 @@ func TestStrictModeFailsClosed(t *testing.T) {
 		"tetapi permintaan persetujuan tidak bisa dibuat: ")
 	if resp.Error != nil && strings.Contains(resp.Error.Message, "approve ") {
 		t.Errorf("refusal without a request names a code: %q", resp.Error.Message)
+	}
+}
+
+// TestStrictGateProtectsUnclassified: a command strict mode does not know
+// is protected.
+func TestStrictGateProtectsUnclassified(t *testing.T) {
+	r := newPinRig(t, nil, pinDir(t, "quarantined", strictSource))
+	ran := false
+	r.reg.Register("mysql.notClassified", func(context.Context, json.RawMessage) (any, error) { ran = true; return "ok", nil })
+	wantLocalRefusal(t, "unclassified", r.dispatch("mysql.notClassified", nil), "perintah mysql.notClassified butuh persetujuan root")
+	if ran {
+		t.Error("the unclassified command's handler ran")
+	}
+}
+
+// TestStrictGateRefusesWithUnreadablePins: while the pin files cannot be
+// trusted only the allowed commands get past the gate, also those whose
+// handlers never ask the pins; a server without pin files is unassigned,
+// not unreadable.
+func TestStrictGateRefusesWithUnreadablePins(t *testing.T) {
+	dir := pinDir(t, "quarantined", strictSource)
+	r := newPinRig(t, nil, dir)
+	if err := os.Chmod(filepath.Join(dir, mysql.RoleFile), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []pinCase{
+		{"mysql.install", proto.InstallParams{Series: "8.4"}},
+		{"mysql.sweepDumpUsers", proto.SweepDumpUsersParams{OlderThanSec: 3600}},
+		{"mysql.restart", nil},
+		{"mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}},
+	} {
+		wantRefused(t, c.cmd, r.dispatch(c.cmd, c.params), "pin peran/sumber agent tidak bisa dipakai, perintah "+c.cmd+" ditolak: ")
+	}
+	wantPastPins(t, "mysql.status", r.dispatch("mysql.status", nil))
+
+	fresh := newPinRig(t, nil, pinDir(t, "", ""))
+	resp := fresh.dispatch("mysql.install", proto.InstallParams{Series: "8.4"})
+	if resp.OK || resp.Error == nil || resp.Error.Message != "agent tidak bisa memasang MySQL di server ini" {
+		t.Errorf("install without pin files = %+v, want it past the gate to the handler", resp)
+	}
+}
+
+// TestEnteringQuarantineClearsStaleApproval: an approval left on a
+// rebuilt server never holds when it is quarantined again; a quarantine
+// written again on a quarantined server keeps root's approval.
+func TestEnteringQuarantineClearsStaleApproval(t *testing.T) {
+	dir := pinDir(t, "replica", strictSource)
+	p := mustPins(t, dir)
+	if err := p.WriteRebuildApproval(mysql.NewRebuildApproval(strictSource, "10.0.0.1", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, mysql.RebuildRequestFile), []byte(`{"code":"123456","source":"10.0.0.1:3306","created":"2026-11-13T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := newPinRig(t, nil, dir)
+	if err := p.SetQuarantined(strictSource); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{mysql.RebuildRequestFile, mysql.RebuildApprovalFile} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s after entering quarantine: %v, want gone", name, err)
+		}
+	}
+	wantLocalRefusal(t, "drop after entering quarantine", r.dispatch("mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}),
+		"butuh persetujuan root")
+
+	// Already quarantined: root's fresh approval stays valid.
+	approveRebuild(t, dir, strictSource)
+	if err := p.SetQuarantined(strictSource); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CheckRebuildApproval(context.Background(), time.Now()); err != nil {
+		t.Errorf("approval after a repeated quarantine: %v, want valid", err)
+	}
+	wantPastPins(t, "drop after a repeated quarantine", r.dispatch("mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}))
+
+	// Rebuild files that cannot be removed: the role is not written.
+	bdir := pinDir(t, "master", "")
+	if err := os.MkdirAll(filepath.Join(bdir, mysql.RebuildApprovalFile, "blok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := mustPins(t, bdir).SetQuarantined(strictSource); err == nil {
+		t.Fatal("SetQuarantined succeeded with an approval it could not remove")
+	}
+	if role, src := pinFile(t, bdir, mysql.RoleFile), pinFile(t, bdir, mysql.SourceFile); role != "master" || src != "" {
+		t.Errorf("pins after a refused quarantine = %q, %q; want master and no source", role, src)
 	}
 }

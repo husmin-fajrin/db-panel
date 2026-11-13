@@ -393,6 +393,17 @@ func (p *Pins) Role() string {
 	return p.role
 }
 
+// roleErr is the pinned role, or why the files cannot be read: one read,
+// so that unreadable pins are never taken for a role.
+func (p *Pins) roleErr() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.reload(); err != nil {
+		return "", err
+	}
+	return p.role, nil
+}
+
 // Source is the pinned source; ok is false when there is none or the files
 // cannot be read.
 func (p *Pins) Source() (host string, port int, ok bool) {
@@ -471,7 +482,12 @@ func (p *Pins) SetQuarantined(newSource string) error { return p.SetQuarantinedA
 
 // SetQuarantinedAt is SetQuarantined that also records addr, the address
 // the new master's name was verified at, in SourceAddrFile ("" removes
-// it). The address is written before the source and the role.
+// it). The address is written before the source and the role. Entering
+// quarantine from another role (or from unreadable pins) removes the
+// rebuild request and approval first, and writes nothing when they
+// cannot be removed: an approval left from an earlier quarantine never
+// holds again. A server already quarantined keeps them (root may have
+// just approved its rebuild).
 func (p *Pins) SetQuarantinedAt(newSource, addr string) error {
 	host, port, err := ParseSource(newSource)
 	if err != nil {
@@ -483,6 +499,11 @@ func (p *Pins) SetQuarantinedAt(newSource, addr string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	defer p.forget()
+	if err := p.reload(); err != nil || p.role != roleQuarantined {
+		if err := p.ClearRebuild(); err != nil {
+			return err
+		}
+	}
 	p.settled = true
 	if addr == "" || strings.EqualFold(addr, host) {
 		err = removeFile(p.path(SourceAddrFile))
