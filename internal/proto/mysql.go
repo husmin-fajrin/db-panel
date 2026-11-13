@@ -593,6 +593,10 @@ type StartResultState struct {
 	Result   string `json:"result"`              // late | failed | bypassed | ok
 	AgeSec   int64  `json:"age_sec"`             // since the agent decided it, by the agent's clock
 	InitFile string `json:"init_file,omitempty"` // @@init_file at that start; the lock file for failed
+	// StartID identifies the start on file: the time the agent decided it,
+	// UTC, time.RFC3339Nano. Opaque to the panel, which compares it for
+	// equality only; empty from an older agent.
+	StartID string `json:"start_id,omitempty"`
 }
 
 // QuarantineStartEvent is the payload of EventQuarantineStart. Bypassed:
@@ -602,6 +606,9 @@ type QuarantineStartEvent struct {
 	Result   string `json:"result"`
 	Bypassed bool   `json:"bypassed"`
 	InitFile string `json:"init_file"`
+	// StartID is the StartID the start has in StartResultState (also for a
+	// start that is not kept there: ok, or worse one on file).
+	StartID string `json:"start_id,omitempty"`
 }
 
 // EventQuarantineStartFailed: MySQL of a quarantined server failed to
@@ -614,6 +621,8 @@ const EventQuarantineStartFailed = "monitor.quarantineStartFailed"
 type QuarantineStartFailedEvent struct {
 	File string    `json:"file"`
 	At   time.Time `json:"at"`
+	// StartID is the StartID of this start in StartResultState.
+	StartID string `json:"start_id,omitempty"`
 }
 
 // LockExpiredEvent is the payload of EventLockExpired.

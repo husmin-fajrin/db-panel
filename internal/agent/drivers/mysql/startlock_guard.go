@@ -342,7 +342,7 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 	d.bootFailAt = at
 	d.warn("MySQL of the quarantined server failed to start: it could not open the start lock file", "file", path, "at", at)
 	d.recordStart(startResult{Result: proto.QuarantineStartFailed, Decided: now, InitFile: path})
-	d.enqueue(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at})
+	d.enqueue(proto.EventQuarantineStartFailed, proto.QuarantineStartFailedEvent{File: path, At: at, StartID: startID(now)})
 }
 
 // sendRoundEvents queues what a guard round has for the panel once the
@@ -418,7 +418,7 @@ func scanBootstrapFailure(tail []byte, file string, since time.Time) (time.Time,
 // although that file is older than the running mysqld (uptime seconds,
 // give or take mysqlUptimeSlack), else ok.
 func (d *Driver) reportQuarantineStart(h Host, now time.Time, flagsOff bool, initFile string, uptime int64) {
-	ev := proto.QuarantineStartEvent{Result: proto.QuarantineStartOK, InitFile: initFile}
+	ev := proto.QuarantineStartEvent{Result: proto.QuarantineStartOK, InitFile: initFile, StartID: startID(now)}
 	path, err := StartLockPath(h.Layout())
 	if err != nil || initFile != path {
 		started := now.Add(-time.Duration(uptime+mysqlUptimeSlack) * time.Second)

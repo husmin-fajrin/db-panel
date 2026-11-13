@@ -24,6 +24,11 @@ type startResult struct {
 	InitFile string    `json:"init_file,omitempty"`
 }
 
+// startID is the identity of the start decided at t: t in UTC, as
+// time.RFC3339Nano. The event of a start, the file and the snapshot all
+// derive it from the one decided time.
+func startID(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
 // startResultRank orders results from worst to best: late 4, failed 3,
 // bypassed 2, ok 1, anything else 0.
 func startResultRank(result string) int {
@@ -98,7 +103,7 @@ func (d *Driver) StartResult(now time.Time) *proto.StartResultState {
 	if age < 0 {
 		age = 0
 	}
-	return &proto.StartResultState{Result: r.Result, AgeSec: age, InitFile: r.InitFile}
+	return &proto.StartResultState{Result: r.Result, AgeSec: age, InitFile: r.InitFile, StartID: startID(r.Decided)}
 }
 
 // clearStartResult removes the file; a failure is warned.

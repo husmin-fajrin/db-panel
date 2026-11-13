@@ -91,6 +91,17 @@ func startEvents(t *testing.T, ev *eventLog) []proto.QuarantineStartEvent {
 	return out
 }
 
+// withoutStartID is e with its start id (the decided time: it cannot be
+// predicted) cleared, after checking that it has one.
+func withoutStartID(t *testing.T, e proto.QuarantineStartEvent) proto.QuarantineStartEvent {
+	t.Helper()
+	if e.StartID == "" {
+		t.Errorf("start event %+v has no start id", e)
+	}
+	e.StartID = ""
+	return e
+}
+
 // countingHook fails every config write while fail is set, counting the
 // writes it sees.
 type countingHook struct {
@@ -284,7 +295,7 @@ func TestQuarantineStartEvents(t *testing.T) {
 		r.inst.Restart(t)
 		r.tick()
 		lock, _ := mysql.StartLockPath(r.inst.Layout())
-		if got := startEvents(t, r.ev); len(got) != 1 || got[0] != (proto.QuarantineStartEvent{Result: "ok", InitFile: lock}) {
+		if got := startEvents(t, r.ev); len(got) != 1 || withoutStartID(t, got[0]) != (proto.QuarantineStartEvent{Result: "ok", InitFile: lock}) {
 			t.Errorf("start events = %+v, want one ok with init_file %s", got, lock)
 		}
 		r.tick()
@@ -317,7 +328,7 @@ func TestQuarantineStartEvents(t *testing.T) {
 		}
 		r := newGuardRig(t, inst, dir)
 		r.tickAt(time.Now())
-		if got := startEvents(t, r.ev); len(got) != 1 || got[0] != (proto.QuarantineStartEvent{Result: "bypassed", Bypassed: true}) {
+		if got := startEvents(t, r.ev); len(got) != 1 || withoutStartID(t, got[0]) != (proto.QuarantineStartEvent{Result: "bypassed", Bypassed: true}) {
 			t.Errorf("start events = %+v, want one bypassed", got)
 		}
 		if fi, err := os.Stat(lock); err != nil || fi.ModTime().After(hourAgo.Add(time.Second)) {
@@ -331,7 +342,7 @@ func TestQuarantineStartEvents(t *testing.T) {
 		}
 		r = newGuardRig(t, inst, dir)
 		r.tickAt(time.Now())
-		if got := startEvents(t, r.ev); len(got) != 1 || got[0] != (proto.QuarantineStartEvent{Result: "ok"}) {
+		if got := startEvents(t, r.ev); len(got) != 1 || withoutStartID(t, got[0]) != (proto.QuarantineStartEvent{Result: "ok"}) {
 			t.Errorf("start events = %+v, want one ok", got)
 		}
 	})
@@ -379,6 +390,10 @@ func TestBootstrapFailureEventFromErrorLog(t *testing.T) {
 	at := time.Date(2026, 11, 11, 3, 18, 19, 26539000, time.UTC)
 	if len(got) != 1 || got[0].File != r.lock || !got[0].At.Equal(at) {
 		t.Fatalf("start failed events = %+v, want one for %s at %s", got, r.lock, at)
+	}
+	// The event and the snapshot's start result name the start by one id.
+	if sr := r.d.Snapshot(context.Background()).StartResult; got[0].StartID == "" || sr == nil || sr.Result != proto.QuarantineStartFailed || sr.StartID != got[0].StartID {
+		t.Errorf("failed event id = %q, snapshot StartResult = %+v, want the same id", got[0].StartID, sr)
 	}
 	r.tickAt(now.Add(5 * time.Second))
 	if n := len(r.ev.all()); n != 1 {

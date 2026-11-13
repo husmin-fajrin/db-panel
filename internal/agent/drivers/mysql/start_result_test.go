@@ -77,21 +77,38 @@ func TestStartResultSurvivesRestart(t *testing.T) {
 	if err := rootDB(t, inst).QueryRow("SELECT @@global.init_file").Scan(&initFile); err != nil {
 		t.Fatal(err)
 	}
+	// The late start's event and the snapshot after it carry one id: the
+	// decided time on file.
+	r.ev.setOffline(false)
+	lateEvs := startEvents(t, r.ev)
+	if len(lateEvs) != 1 || lateEvs[0].StartID == "" {
+		t.Fatalf("start events of the first round = %+v, want one late with a start id", lateEvs)
+	}
+	lateID := lateEvs[0].StartID
+	if rec, _ := readStartResultFile(t, path); rec.Decided.UTC().Format(time.RFC3339Nano) != lateID {
+		t.Errorf("start id of the event = %q, decided on file = %v", lateID, rec.Decided)
+	}
+	if got := r.d.Snapshot(context.Background()).StartResult; got == nil || got.StartID != lateID {
+		t.Errorf("snapshot StartResult = %+v, want start id %q", got, lateID)
+	}
 
 	g := newGuardRig(t, inst, dir) // "restart": a new driver, the same files
 	g.d.SeenPath = r.d.SeenPath
-	want := proto.StartResultState{Result: "late", InitFile: initFile.String}
+	want := proto.StartResultState{Result: "late", InitFile: initFile.String, StartID: lateID}
 	check := func(when string) {
 		t.Helper()
 		got := g.d.Snapshot(context.Background()).StartResult
-		if got == nil || got.Result != want.Result || got.InitFile != want.InitFile || got.AgeSec < 0 || got.AgeSec > 5 {
+		if got == nil || got.Result != want.Result || got.InitFile != want.InitFile || got.AgeSec < 0 || got.AgeSec > 5 || got.StartID != lateID {
 			t.Errorf("%s: StartResult = %+v, want %+v with age in [0,5]", when, got, want)
 		}
 	}
 	check("before the new agent's first round")
 	g.tickAt(time.Now())
-	if got := startEvents(t, g.ev); len(got) != 1 || got[0].Result != "ok" {
+	got := startEvents(t, g.ev)
+	if len(got) != 1 || got[0].Result != "ok" {
 		t.Errorf("start events of the new agent = %+v, want one ok", got)
+	} else if got[0].StartID == "" || got[0].StartID == lateID {
+		t.Errorf("the ok start's id = %q, want its own (not the late %q on file)", got[0].StartID, lateID)
 	}
 	check("after the new agent's ok")
 }

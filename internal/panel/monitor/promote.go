@@ -521,6 +521,13 @@ func (m *Monitor) raise(serverID int64, kind, msg string) {
 
 // raiseLocked is raise with mu held; it appends to ups what it opened.
 func (m *Monitor) raiseLocked(serverID int64, kind, msg string, ups []alertUpdate) []alertUpdate {
+	ups, _ = m.raiseOpenLocked(serverID, kind, msg, ups)
+	return ups
+}
+
+// raiseOpenLocked is raiseLocked that also says whether an alert of kind
+// is open for serverID afterwards (false when reading or opening failed).
+func (m *Monitor) raiseOpenLocked(serverID int64, kind, msg string, ups []alertUpdate) ([]alertUpdate, bool) {
 	a, err := m.st.GetOpenAlert(kind, serverID)
 	switch {
 	case err == nil:
@@ -529,10 +536,10 @@ func (m *Monitor) raiseLocked(serverID int64, kind, msg string, ups []alertUpdat
 				m.log.Warn("update alert message", "server_id", serverID, "kind", kind, "err", err)
 			}
 		}
-		return ups
+		return ups, true
 	case !errors.Is(err, store.ErrNotFound):
 		m.log.Warn("read open alert", "server_id", serverID, "kind", kind, "err", err)
-		return ups
+		return ups, false
 	}
 	s := m.state(serverID)
 	if !s.resolvedOK {
@@ -540,12 +547,19 @@ func (m *Monitor) raiseLocked(serverID int64, kind, msg string, ups []alertUpdat
 			m.log.Warn("raise: resolve role", "server_id", serverID, "err", err)
 		}
 	}
-	id, err := m.st.OpenAlert(store.Alert{Kind: kind, ServerID: serverID, TopologyID: s.topoID, OpenedAt: m.now(), Message: msg})
+	var id int64
+	err = nil
+	if m.openFault != nil {
+		err = m.openFault()
+	}
+	if err == nil {
+		id, err = m.st.OpenAlert(store.Alert{Kind: kind, ServerID: serverID, TopologyID: s.topoID, OpenedAt: m.now(), Message: msg})
+	}
 	if err != nil {
 		m.log.Warn("open alert", "server_id", serverID, "kind", kind, "err", err)
-		return ups
+		return ups, false
 	}
-	return append(ups, alertUpdate{id, kind, serverID, true})
+	return append(ups, alertUpdate{id, kind, serverID, true}), true
 }
 
 // closeAlert closes the open alert of kind for serverID, if any; reason
@@ -590,10 +604,10 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 	// never rewrites an open alert.
 	worst := func() {
 		if ev.Type == proto.EventQuarantineStartFailed {
-			m.raiseStartEvent(serverID, KindMasterStartBlocked, startBlockedMessage(""), false)
+			m.raiseStartEvent(serverID, KindMasterStartBlocked, startBlockedMessage(""), false, "")
 			return
 		}
-		m.raiseStartEvent(serverID, KindMasterStartLate, startUnreadableText, false)
+		m.raiseStartEvent(serverID, KindMasterStartLate, startUnreadableText, false, "")
 	}
 	if len(ev.Payload) > maxPromoteEventPayload {
 		m.log.Warn("start lock event too large", "server_id", serverID, "type", ev.Type, "bytes", len(ev.Payload))
@@ -607,7 +621,7 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 			worst()
 			return true
 		}
-		m.raiseStartEvent(serverID, KindMasterStartBlocked, startBlockedMessage(fe.File), true)
+		m.raiseStartEvent(serverID, KindMasterStartBlocked, startBlockedMessage(fe.File), true, cleanStartID(fe.StartID))
 		return true
 	}
 	var qe proto.QuarantineStartEvent
@@ -625,24 +639,20 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 	}
 	var ups []alertUpdate
 	m.mu.Lock()
-	now := m.now()
 	if known {
 		// MySQL started: a start that failed on the lock file is over. A
 		// bypass of an earlier start is over when this one used the lock.
-		// Their earlier starts are accounted for, so a snapshot that still
-		// carries one does not open a stale alert.
 		ups = m.closeAlertLocked(serverID, KindMasterStartBlocked, startBlockedOverReason, ups)
-		m.markStart(serverID, KindMasterStartBlocked, now)
 		if !bypassed {
 			ups = m.closeAlertLocked(serverID, KindMasterStartBypassed, "", ups)
-			m.markStart(serverID, KindMasterStartBypassed, now)
 		}
 	}
+	id := cleanStartID(qe.StartID)
 	if qe.Result == proto.QuarantineStartLate {
-		ups = m.raiseStartEventLocked(serverID, KindMasterStartLate, startLateText, true, ups)
+		ups = m.raiseStartEventLocked(serverID, KindMasterStartLate, startLateText, true, id, ups)
 	}
 	if bypassed {
-		ups = m.raiseStartEventLocked(serverID, KindMasterStartBypassed, startBypassedText, true, ups)
+		ups = m.raiseStartEventLocked(serverID, KindMasterStartBypassed, startBypassedText, true, id, ups)
 	}
 	m.mu.Unlock()
 	m.emitAlerts(ups)
@@ -651,60 +661,66 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 
 // raiseStartEvent is raiseStartEventLocked for a caller that does not hold
 // mu.
-func (m *Monitor) raiseStartEvent(serverID int64, kind, msg string, rewrite bool) {
+func (m *Monitor) raiseStartEvent(serverID int64, kind, msg string, rewrite bool, startID string) {
 	m.mu.Lock()
-	ups := m.raiseStartEventLocked(serverID, kind, msg, rewrite, nil)
+	ups := m.raiseStartEventLocked(serverID, kind, msg, rewrite, startID, nil)
 	m.mu.Unlock()
 	m.emitAlerts(ups)
 }
 
 // raiseStartEventLocked opens the alert of kind for a start event of
 // serverID, as the panel did before it read the snapshot's start result:
-// an open alert takes msg (rewrite) or keeps its own. The exception is an
-// event the snapshot path has already dealt with (eventCovered), which
-// opens nothing. An event that opens marks the kind at the panel's now.
+// an open alert takes msg (rewrite) or keeps its own. startID is the id the
+// event gives its start ("" for none: an older agent, or an event read in
+// its worst form); an event whose start is accounted for opens nothing
+// new. When an alert of kind is open afterwards the mark takes startID.
 // The caller holds mu.
-func (m *Monitor) raiseStartEventLocked(serverID int64, kind, msg string, rewrite bool, ups []alertUpdate) []alertUpdate {
-	_, err := m.st.GetOpenAlert(kind, serverID)
-	switch {
+func (m *Monitor) raiseStartEventLocked(serverID int64, kind, msg string, rewrite bool, startID string, ups []alertUpdate) []alertUpdate {
+	open := false
+	switch _, err := m.st.GetOpenAlert(kind, serverID); {
 	case err == nil:
-		if rewrite {
-			ups = m.raiseLocked(serverID, kind, msg, ups)
-		}
-		return ups
+		open = true
 	case !errors.Is(err, store.ErrNotFound):
 		m.log.Warn("read open alert", "server_id", serverID, "kind", kind, "err", err)
 		return ups
 	}
-	if m.eventCovered(serverID, kind) {
+	switch {
+	case open && !rewrite:
+	case open:
+		ups = m.raiseLocked(serverID, kind, msg, ups)
+	case startID != "" && m.accounted(serverID, m.state(serverID), kind, startID):
 		return ups
+	default:
+		ups, open = m.raiseOpenLocked(serverID, kind, msg, ups)
 	}
-	m.markStart(serverID, kind, m.now())
-	return m.raiseLocked(serverID, kind, msg, ups)
-}
-
-// eventCovered: the newest snapshot the monitor holds carries a start
-// result of kind that is accounted for, so the snapshot path has dealt
-// with the newest start of this kind the agent knows of and an event
-// about it opens nothing. The caller holds mu.
-func (m *Monitor) eventCovered(serverID int64, kind string) bool {
-	s, ok := m.servers[serverID]
-	if !ok || s.startResult == nil {
-		return false
+	if open && startID != "" {
+		m.markStart(serverID, kind, startID)
 	}
-	k, _, ok := startKind(s.startResult)
-	return ok && k == kind && m.accounted(serverID, s, kind, s.startDecided)
+	return ups
 }
 
 const (
 	startResultSlack = time.Minute // decided time read back from a relative age
 	// maxStartAge bounds the age an agent gives a start result.
 	maxStartAge = 10 * 365 * 24 * 3600 // seconds
+	// maxStartIDLen bounds a start id; a longer one counts as none.
+	maxStartIDLen = 64
 )
 
-// startDecidedAt is when a start result was decided: the report's time
-// minus its age in seconds, the age clamped to [0, maxStartAge] before it
-// is multiplied (the agent is untrusted).
+// cleanStartID is id, or "" when it is empty or longer than maxStartIDLen
+// (an id comes from an agent: untrusted data).
+func cleanStartID(id string) string {
+	if len(id) > maxStartIDLen {
+		return ""
+	}
+	return id
+}
+
+// startDecidedAt is when a start result was decided by the panel's clock:
+// the report's time minus its age in seconds, the age clamped to
+// [0, maxStartAge] before it is multiplied (the agent is untrusted). It is
+// compared only with times of the panel's clock (the promotion's start, the
+// leftover check), never used to tell one start from another.
 func startDecidedAt(at time.Time, ageSec int64) time.Time {
 	return at.Add(-time.Duration(min(max(ageSec, 0), maxStartAge)) * time.Second)
 }
@@ -725,70 +741,77 @@ func startKind(sr *proto.StartResultState) (kind, msg string, ok bool) {
 
 // startMark is the mark of kind on s (loaded from the store on first use,
 // then kept); the caller holds mu.
-func (m *Monitor) startMark(id int64, s *serverState, kind string) (time.Time, bool) {
+func (m *Monitor) startMark(id int64, s *serverState, kind string) (string, bool) {
 	if s.marks == nil {
 		marks, err := m.st.StartMarks(id)
 		if err != nil {
 			m.log.Warn("start marks: read", "server_id", id, "err", err)
-			return time.Time{}, false
+			return "", false
 		}
 		s.marks = marks
 	}
-	t, ok := s.marks[kind]
-	return t, ok
+	v, ok := s.marks[kind]
+	return v, ok
 }
 
-// accounted: the panel has accounted for every start of kind decided at or
-// before d (within startResultSlack). The caller holds mu.
-func (m *Monitor) accounted(id int64, s *serverState, kind string, d time.Time) bool {
-	t, ok := m.startMark(id, s, kind)
-	return ok && !t.Before(d.Add(-startResultSlack))
+// accounted: the last start of kind the panel accounted for is startID.
+// The caller holds mu.
+func (m *Monitor) accounted(id int64, s *serverState, kind, startID string) bool {
+	v, ok := m.startMark(id, s, kind)
+	return ok && v == startID
 }
 
-// markStart moves the mark of kind on serverID forward to t, in the store
-// and in memory. The caller holds mu.
-func (m *Monitor) markStart(serverID int64, kind string, t time.Time) {
+// markStart sets the mark of kind on serverID to startID, in the store and
+// in memory. It is called only once an alert of the kind is open, never
+// before. The caller holds mu.
+func (m *Monitor) markStart(serverID int64, kind, startID string) {
 	s := m.state(serverID)
-	if cur, ok := m.startMark(serverID, s, kind); ok && !t.After(cur) {
+	if cur, ok := m.startMark(serverID, s, kind); ok && cur == startID {
 		return
 	}
-	if err := m.st.RaiseStartMark(serverID, kind, t); err != nil {
+	if err := m.st.SetStartMark(serverID, kind, startID); err != nil {
 		m.log.Warn("start marks: write", "server_id", serverID, "kind", kind, "err", err)
+		return
 	}
 	if s.marks != nil {
-		s.marks[kind] = t // else the read failed: the next use reads the store again
+		s.marks[kind] = startID // else the read failed: the next use reads the store again
 	}
 }
 
 // startResultFromSnapshot opens, from a report's StartResult, the alert of
 // a start the panel may not have heard of (its event lost): late ->
 // KindMasterStartLate, failed -> KindMasterStartBlocked, bypassed ->
-// KindMasterStartBypassed; ok and anything unknown open nothing. It acts
-// only when the server resolves as quarantined and the start is not
-// accounted for (a durable mark per kind: the decided time, at minus the
-// age, of the newest start dealt with). Then: a start before the
-// promotion's start belongs to an earlier quarantine (nothing); an open
-// alert of the kind covers it; a late start already followed by a
-// "Periksa data tertinggal" result, or a failed one in a snapshot that
-// shows MySQL running, is stale on purpose; otherwise the alert opens. In
-// each of the last three the mark moves to decided. The caller holds mu.
+// KindMasterStartBypassed; ok, anything unknown and a result without a
+// usable start id open nothing. It acts only when the server resolves as
+// quarantined and the start (its id) is not the last one accounted for
+// (the durable mark of the kind). Then: a start before the promotion's
+// start belongs to an earlier quarantine (nothing); an open alert covers
+// it (mark); a late start already followed by a "Periksa data
+// tertinggal" result needs no alert (mark); a failed start in a snapshot
+// that shows MySQL running opens nothing and leaves no mark (the next
+// report is judged again); otherwise the alert opens and, only if it did,
+// the mark takes the id. The caller holds mu.
 func (m *Monitor) startResultFromSnapshot(id int64, snap *proto.HealthSnapshot, at time.Time) []alertUpdate {
 	sr := snap.StartResult
 	if sr == nil {
 		return nil
 	}
 	kind, msg, ok := startKind(sr)
-	if !ok {
+	startID := cleanStartID(sr.StartID)
+	if !ok || startID == "" {
 		return nil
 	}
 	s, ok := m.servers[id]
 	if !ok || !s.resolvedOK || s.role != store.RoleQuarantined {
 		return nil
 	}
-	decided := startDecidedAt(at, sr.AgeSec)
-	if m.accounted(id, s, kind, decided) {
+	if kind == KindMasterStartBlocked && snap.MySQLOK {
 		return nil
 	}
+	if m.accounted(id, s, kind, startID) {
+		return nil
+	}
+	decided := startDecidedAt(at, sr.AgeSec)
 	p, err := m.st.PromotionByOldMaster(id)
 	switch {
 	case err == nil:
@@ -799,19 +822,21 @@ func (m *Monitor) startResultFromSnapshot(id int64, snap *proto.HealthSnapshot, 
 		m.log.Warn("start result: promotion", "server_id", id, "err", err)
 	}
 	if _, err := m.st.GetOpenAlert(kind, id); err == nil {
-		m.markStart(id, kind, decided)
+		m.markStart(id, kind, startID)
 		return nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		m.log.Warn("read open alert", "server_id", id, "kind", kind, "err", err)
 		return nil
 	}
-	if (kind == KindMasterStartLate && m.leftoverCheckedAfter(store.Alert{ServerID: id, OpenedAt: decided})) ||
-		(kind == KindMasterStartBlocked && snap.MySQLOK) {
-		m.markStart(id, kind, decided)
+	if kind == KindMasterStartLate && m.leftoverCheckedAfter(store.Alert{ServerID: id, OpenedAt: decided}) {
+		m.markStart(id, kind, startID)
 		return nil
 	}
-	m.markStart(id, kind, decided)
-	return m.raiseLocked(id, kind, msg, nil)
+	ups, open := m.raiseOpenLocked(id, kind, msg, nil)
+	if open {
+		m.markStart(id, kind, startID)
+	}
+	return ups
 }
 
 // startUnreadableText words master_start_late opened for a start report

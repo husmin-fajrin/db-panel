@@ -83,6 +83,9 @@ func (v View) AgentAway() bool {
 // share the per-server state under one mutex, which is never held across
 // a Hub.Call.
 type Monitor struct {
+	// openFault, when set, is asked before an alert is inserted and makes
+	// the insert fail with its error (tests only).
+	openFault func() error
 	st        *store.Store
 	hub       *hub.Hub
 	publish   func(event string, data any)
