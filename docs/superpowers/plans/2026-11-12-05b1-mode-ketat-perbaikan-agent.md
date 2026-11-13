@@ -155,18 +155,78 @@ untuk teks baru), 5.12 (protokol) dan 5.13 (verifikasi) sejauh menyangkut
 
 **Diisi pelaksana di Task 6 Step 1 (mysqld sungguhan yang dijalankan):**
 
+Versi: `/usr/sbin/mysqld  Ver 8.0.46-0ubuntu0.24.04.4 for Linux on x86_64 ((Ubuntu))`,
+dijalankan sebagai root dengan `user=nobody`. Datadir sementara dibuat
+dengan `mysqld --no-defaults --initialize-insecure --datadir=D/data
+--user=nobody`. Tiap bentuk: `my.cnf` berisi `[mysqld]` `user=nobody`
+`datadir=D/data` `socket=D/s.sock` `pid-file=D/m.pid`
+`log-error=D/err.log` `port=0` `mysqlx=OFF` `secure-file-priv=D/files`
+(tanpa `secure-file-priv` mysqld berhenti karena `/var/lib/mysql-files`
+tidak ada) lalu baris yang diuji. `<agent>` berisi isi kunci start (tiga
+baris `SET …`); `/op/x.sql`, `/op/y.sql`, `/op/a.sql` berisi
+`SET GLOBAL max_connections=771` / `772` / `773` supaya terlihat mana yang
+dijalankan. Perintah: `mysqld --defaults-file=my.cnf --print-defaults`;
+`mysqld --defaults-file=my.cnf &`; tunggu soket;
+`mysql -S D/s.sock -uroot -e "SELECT @@global.init_file, @@global.super_read_only, @@global.max_connections"`;
+`mysqladmin -S D/s.sock -uroot shutdown`; `D/data/mysqld-auto.cnf`
+dihapus di antara bentuk (SET PERSIST terbawa ke start berikutnya).
+Kolom kedua hanya menunjukkan argumen init_file; argumen dasar dicetak
+sebelumnya dalam urutan berkas.
+
 | Bentuk di berkas opsi | `--print-defaults` mencetak | `@@global.init_file` setelah start | Isi init file dijalankan? | Diperlakukan agent |
 |---|---|---|---|---|
-| `init_file=<agent>` terakhir | | | | terkunci |
-| `init_file=<agent>` lalu `loose-init-file=/op/x.sql` | | | | tidak terkunci |
-| `init_file=<agent>` lalu `skip-init-file` | | | | tidak terkunci |
-| `skip-init-file` lalu `init_file=<agent>` | | | | (catat) |
-| `init_file=<agent>` lalu `disable-init-file` / `maximum-init-file=…` | | | | tidak terkunci |
-| `~/.my.cnf` akun layanan berisi `init-file=/op/y.sql` | | | | tidak terkunci |
+| `init_file=<agent>` terakhir | `--init_file=<agent>` | `<agent>` | ya (`super_read_only=1`) | terkunci |
+| `init_file=<agent>` lalu `loose-init-file=/op/x.sql` | `--init_file=<agent> --loose-init-file=/op/x.sql` | `/op/x.sql` | hanya `/op/x.sql` (`super_read_only=0`, `max_connections=771`) | tidak terkunci |
+| `init_file=<agent>` lalu `loose_init_file=/op/x.sql` | `--init_file=<agent> --loose_init_file=/op/x.sql` | `/op/x.sql` | hanya `/op/x.sql` | tidak terkunci |
+| `init_file=<agent>` lalu `skip-init-file` | `--init_file=<agent> --skip-init-file` | — | MySQL tidak menyala: `Failed to open the bootstrap file 0` | tidak terkunci |
+| `init_file=<agent>` lalu `loose_skip_init_file` | `--init_file=<agent> --loose_skip_init_file` | — | MySQL tidak menyala (sama) | tidak terkunci |
+| `skip-init-file` lalu `init_file=<agent>` | `--skip-init-file --init_file=<agent>` | `<agent>` | ya (`skip-` tidak berpengaruh) | terkunci |
+| `init_file=<agent>` lalu `disable-init-file` | `--init_file=<agent> --disable-init-file` | — | MySQL tidak menyala: `Failed to open the bootstrap file 0` | tidak terkunci |
+| `disable-init-file` lalu `init_file=<agent>` | `--disable-init-file --init_file=<agent>` | `<agent>` | ya | terkunci |
+| `init_file=<agent>` lalu `enable-init-file` | `--init_file=<agent> --enable-init-file` | `<agent>` | ya (`enable-` tidak berpengaruh) | tidak terkunci (gagal-tertutup) |
+| `init_file=<agent>` lalu `loose-enable-init-file` | `--init_file=<agent> --loose-enable-init-file` | `<agent>` | ya | tidak terkunci (gagal-tertutup) |
+| `init_file=<agent>` lalu `maximum-init-file=/op/y.sql` | `--init_file=<agent> --maximum-init-file=/op/y.sql` | — | MySQL tidak menyala: `Maximum value of 'init_file' cannot be set.` | tidak terkunci |
+| `maximum-init-file=/op/y.sql` lalu `init_file=<agent>` | `--maximum-init-file=/op/y.sql --init_file=<agent>` | — | MySQL tidak menyala (sama) | tidak terkunci (aturan "di mana pun") |
+| `loose-maximum-init-file=/op/y.sql` lalu `init_file=<agent>` | `--loose-maximum-init-file=/op/y.sql --init_file=<agent>` | — | MySQL tidak menyala (sama) | tidak terkunci (aturan "di mana pun") |
+| `loose-init-file=<agent>` saja | `--loose-init-file=<agent>` | `<agent>` | ya | tidak terkunci (gagal-tertutup) |
+| `loose-init-file=/op/a.sql` lalu `init_file=<agent>` | `--loose-init-file=/op/a.sql --init_file=<agent>` | `<agent>` | hanya `<agent>` (`max_connections=151`) | terkunci, `/op/a.sql` di OperatorInitFiles |
+| `~/.my.cnf` akun layanan berisi `init-file=/op/y.sql`, tanpa `--defaults-file` | `HOME=<dir> mysqld --print-defaults`: `… --init-file=/op/y.sql`; dengan `HOME=/nonexistent`: kosong | `HOME=<dir> mysqld &`: `/op/y.sql` | hanya `/op/y.sql` (`super_read_only=0`, `max_connections=772`) | tidak terkunci |
+| `~/.my.cnf` yang sama, dengan `--defaults-file=my.cnf` (berisi baris agent) | `HOME=<dir> mysqld --defaults-file=my.cnf --print-defaults`: hanya isi `my.cnf`, `~/.my.cnf` tidak dibaca | `<agent>` | ya (`super_read_only=1`) | terkunci (`HOME` tidak berpengaruh) |
+| `~/.my.cnf` = `!include my.cnf` lalu `[mysqld]` `init-file=/op/y.sql`, tanpa `--defaults-file` | `--init_file=<agent> --init-file=/op/y.sql` | (tidak dijalankan) | — | tidak terkunci |
 
-Catat juga: versi mysqld, perintah persis yang dijalankan, dan untuk tiap
-bentuk yang terbukti tidak berpengaruh, satu kalimat "tetap dianggap tidak
-terkunci karena …" (spek 5.4: gagal-tertutup).
+Gagal-tertutup:
+
+- `enable-init-file` / `loose-enable-init-file` sesudah baris agent tetap
+  dianggap tidak terkunci karena bentuk berawalan sebagai argumen terakhir
+  tidak pernah dibuktikan aman untuk setiap versi mysqld; di 8.0.46 ia
+  tidak berpengaruh.
+- `loose-init-file=<agent>` sebagai argumen terakhir tetap dianggap tidak
+  terkunci karena aturan spek 5.4 meminta argumen terakhir tanpa awalan;
+  di 8.0.46 ia bekerja seperti `init_file`. Baris agent selalu ditulis
+  tanpa awalan, jadi bentuk ini hanya muncul bila orang lain menulisnya.
+- `skip-`/`disable-`/`maximum-` sesudah baris agent membuat MySQL tidak
+  menyala sama sekali; kunci start tetap dianggap tidak terkunci karena
+  server yang tidak menyala tidak "menyala baca-saja".
+
+Keputusan pengendali (Task 6):
+
+1. `maximum-` mengubah hasil walau terbaca sebelum baris agent (MySQL
+   menolak menyala). Aturan tambahan: argumen init_file mana pun yang
+   awalannya memuat `maximum` → tidak terkunci, dengan teks
+   `opsi %s membuat MySQL menolak menyala; kunci start tidak terjamin`;
+   aturan ini diperiksa sebelum aturan argumen terakhir.
+2. Bila `printDefaultsArgs` memuat `--defaults-file`, `HOME` tidak
+   berpengaruh (baris di atas, dan aturan MySQL: hanya berkas itu yang
+   dibaca). `readEffectiveOptions` lalu menjalankan `--print-defaults`
+   sekali dengan `HOME=/nonexistent`, tanpa `serviceHome` dan tanpa
+   penolakan ProtectHome/akun layanan. Tanpa `--defaults-file`: dua
+   putaran seperti brief.
+3. Test mysqld sungguhan `~/.my.cnf` memakai tata letak tanpa
+   `--defaults-file` (`ConfigFiles = /etc/my.cnf /etc/mysql/my.cnf
+   ~/.my.cnf`) dengan `.my.cnf` akun layanan yang diawali
+   `!include <my.cnf instance>`, dan dilewati bila `/etc/my.cnf` atau
+   `/etc/mysql/my.cnf` ada. Satu pemeriksaan tambahan memastikan bahwa
+   dengan `--defaults-file` `.my.cnf` itu tidak mengubah hasil.
 
 ---
 
