@@ -555,11 +555,73 @@ selain `dbpanel_repl@'%'` (dan akun itu pun hanya bila belum ada baris
 
 Peran **quarantined** dipakai untuk master lama sesudah promosi replika:
 servernya menolak semua yang ditolak replika, ditambah perintah promosi
-(`mysql.lockForPromote`, `mysql.promote`, `mysql.repoint`). Ia hanya bisa
-dibangun ulang (hapus database, dump atau CLONE, dikonfigurasi sebagai
-replika, replikasi) dari sumber yang dipin, yaitu master barunya, atau
-dilepas seperti replika. Agent tidak pernah menurunkan pin `quarantined`
-(atau pin lain) berdasarkan keadaan MySQL.
+(`mysql.lockForPromote`, `mysql.promote`, `mysql.repoint`,
+`mysql.unlockPromote`) dan pelepasan peran (`mysql.releaseRole`). Ia hanya
+bisa dibangun ulang (hapus database, dump atau CLONE, dikonfigurasi sebagai
+replika, replikasi) dari sumber yang dipin, yaitu master barunya. Bangun
+ulang itu juga butuh persetujuan root di server itu (lihat "Mode ketat" di
+bawah). Panel tidak bisa melepas server ini seperti replika. Karantina
+hanya berakhir lewat bangun ulang yang selesai, atau dengan `set-role` di
+server itu sendiri. Bila panel mencoba melepasnya, agent menjawab "server
+ini dikarantina (quarantined); perintah mysql.releaseRole ditolak.
+Karantina hanya lepas lewat bangun ulang yang selesai, atau dengan perintah
+di server ini: sudo dbpanel agent set-role unassigned (atau sudo dbpanel
+agent set-role master bila server ini akan menjadi master lagi)". Agent
+tidak pernah menurunkan pin `quarantined` (atau pin lain) berdasarkan
+keadaan MySQL.
+
+**Mode ketat.** Di server yang dikarantina (quarantined), agent hanya
+menjalankan perintah panel yang tidak membuang data. Tanpa persetujuan,
+yang tetap jalan:
+
+- membaca keadaan: pemantauan, status MySQL, daftar database, koneksi,
+  pemeriksaan awal, binlog, dan status serta log pekerjaan agent;
+- penyelamatan: **Periksa data tertinggal** (`mysql.leftover`),
+  **Amankan data tertinggal** (`mysql.salvage`), serta daftar, **Unduh**
+  dan **Hapus** berkas salvage;
+- menyimpan berkas CA panel (`mysql.tlsTrust`). **Periksa data
+  tertinggal** dan **Amankan data tertinggal** memakainya untuk memeriksa
+  sertifikat master baru, dan penyelamatan harus bisa jalan tanpa
+  persetujuan. Perintah ini hanya menulis berkas CA dan tidak menyentuh
+  data;
+- yang hanya mengencangkan: membuat MySQL baca-saja (read-only)
+  (`mysql.setReadOnly`; membukanya tetap ditolak), menghentikan replikasi
+  (`mysql.stopReplica`), dan membatalkan pekerjaan agent (`job.cancel`);
+- **Hubungkan MySQL** (`mysql.connect`): hanya menyimpan akun yang terbukti
+  bisa masuk ke MySQL di server itu. **Periksa data tertinggal** butuh akun
+  yang berfungsi;
+- karantina ulang di bawah sumber yang sama (`mysql.quarantine`),
+  pencatatan replika (`mysql.recordReplicas`), pembacaan sumber yang dipin
+  (`mysql.probeSource`, `mysql.waitSynced`), dan pertanyaan form bangun
+  ulang tentang persetujuan (`mysql.rebuildApproval`).
+
+Yang butuh persetujuan root di server itu: semua langkah bangun ulang (hapus
+database, dump, CLONE, konfigurasi dan filter replikasi, start dan reset
+replikasi, pengaturan, restart dan pemasangan MySQL), membuat dan menghapus
+akun MySQL, serta kunci dan sertifikat MySQL (`mysql.tlsRequest`,
+`mysql.tlsInstall`). Tanpa persetujuan yang berlaku, agent menolak dengan
+kode `needs_local_approval` dan teks "server ini dikarantina (quarantined)
+mengikuti sumber <host:port>; perintah <perintah> butuh persetujuan root di
+server ini. Jalankan di server ini: sudo dbpanel agent approve <kode> (kode
+berlaku <N> menit lagi)". Cara menyetujui ada di "Persetujuan di server
+untuk bangun ulang" (bagian "Master lama" di "Promote"). Perintah promosi
+dan pelepasan peran tidak pernah diberi kode: tabel peran menolaknya, apa
+pun persetujuannya. Server yang dikarantina tanpa pin sumber menolak
+perintah yang butuh persetujuan dengan "server ini dipin sebagai
+quarantined tanpa sumber yang dipin; perintah <perintah> ditolak. Pin master
+barunya dulu di server ini: sudo dbpanel agent set-source <host:port>".
+
+Bila berkas pin tidak bisa dibaca, di server mana pun, hanya perintah dari
+daftar "tetap jalan" di atas yang dijalankan. Perintah lain ditolak dengan
+"pin peran/sumber agent tidak bisa dipakai, perintah <perintah> ditolak:
+<sebab>".
+
+Karena memasang sertifikat butuh persetujuan, panel tidak memasang
+sertifikat MySQL baru di server yang dikarantina. Perpanjangan sertifikat
+harian dan **Perketat** melewatinya. Memasang sertifikat MySQL di sana, atau
+mengulang pekerjaan sertifikatnya, ditolak dengan "Server ini dikarantina
+(quarantined); sertifikat MySQL-nya dipasang lagi saat dibangun ulang
+sebagai replika." Sertifikat baru dipasang saat server itu dibangun ulang.
 
 Hanya di server `quarantined`, panel bisa melihat transaksi master lama
 yang tidak dimiliki master barunya (`mysql.leftover`: jumlah transaksi,
@@ -590,13 +652,73 @@ sudo dbpanel agent set-role master       # atau replica, quarantined, atau unass
 sudo dbpanel agent set-source 10.0.0.5:3306
 ```
 
-`set-role master` melepas dulu kunci start master lama (lihat "Master
-lama" di "Promote"); bila pelepasannya gagal, peran tidak diubah dan
-perintah menyebut sebabnya. `set-role replica` atau `unassigned` tidak
-melepasnya: agent yang berjalan melepasnya sendiri setelah MySQL hidup dan
-`read_only` serta `super_read_only` tersimpan ON, jadi server itu tetap
-menyala baca-saja. `set-role quarantined` membuat agent yang berjalan
-menulis kunci start dalam 5 detik.
+Baris bantuan untuk `set-role` dan `approve` (`dbpanel agent help`):
+
+```text
+  dbpanel agent set-role {master|replica|quarantined|unassigned} [--ya] [--dir DIR]
+                                                         ubah peran yang dipin; --ya: tanpa pertanyaan
+                                                         pada server yang dikarantina (quarantined)
+  dbpanel agent approve <kode> [--dir DIR]               setujui bangun ulang server yang dikarantina;
+                                                         kode dari form "Bangun ulang sebagai replika"
+  dbpanel agent approve batal [--dir DIR]                hapus persetujuan dan permintaan bangun ulang
+```
+
+**`set-role` di server yang dikarantina bertanya dulu.** Ini berlaku untuk
+`set-role master`, `replica` dan `unassigned` di server yang dipin
+`quarantined`, dan di server yang berkas pinnya tidak bisa dibaca (server
+itu mungkin dikarantina). Perintah menampilkan keadaan server itu (sumber
+yang diikutinya, atau sebab pinnya tidak bisa dibaca) dan apa yang berubah
+setelahnya, lalu menulis "Ketik ya untuk melanjutkan, atau apa saja untuk
+membatalkan:". Ketik `ya` lalu Enter untuk melanjutkan. Jawaban lain, atau
+input kosong, membatalkan: perintah menulis "Dibatalkan; peran tidak
+diubah." dan keluar dengan kode 1. Tambahkan `--ya` untuk melewati
+pertanyaan itu, misalnya di skrip:
+
+```sh
+sudo dbpanel agent set-role unassigned --ya
+```
+
+Bila peran berubah selagi pertanyaan ditampilkan, perintah berhenti dengan
+"Peran server ini berubah selama Anda membaca; jalankan perintah ini
+lagi.". `set-role quarantined` tidak bertanya.
+
+Setiap `set-role` lebih dulu menghapus permintaan dan persetujuan bangun
+ulang (`/etc/dbpanel/rebuild-request` dan `/etc/dbpanel/rebuild-approval`).
+`set-role master` juga menghapus pin sumber (`/etc/dbpanel/source` dan
+`/etc/dbpanel/source-addr`): master tidak mengikuti server lain.
+
+`set-role master` berjalan dalam dua langkah. Langkah pertama melepas kunci
+start (start lock) master lama (lihat "Master lama" di "Promote"). Langkah
+kedua baru mengubah peran. Untuk langkah pertama perintah hanya mencari
+mysqld dan berkas konfigurasinya; ia tidak memakai kunci rahasia agent
+(`secrets.key`) atau akun MySQL yang disimpan agent (`mysql.cred`). Hasil
+langkah pertama salah satu dari tiga ini, dan ketiganya lanjut mengubah
+peran:
+
+- "Kunci start dilepas: baris init_file dan berkas kuncinya dihapus dari
+  konfigurasi MySQL."
+- "Kunci start tidak ditemukan; tidak ada yang dilepas."
+- "MySQL tidak ditemukan di server ini; tidak ada kunci start yang perlu
+  dilepas."
+
+Bila mysqld ada tetapi konfigurasinya tidak bisa dibaca, perintah berhenti
+dan peran tidak diubah: "kunci start tidak bisa diperiksa (<sebab>); peran
+tidak diubah. Bila agent tidak bisa dijalankan, lepas dengan tangan: lihat
+README, bagian "Melepas kunci start dengan tangan"." Bila kunci ada tetapi
+gagal dilepas, perintah juga berhenti: "kunci start tidak bisa dilepas
+(<sebab>); peran tidak diubah". Bila kunci sudah dilepas tetapi peran gagal
+ditulis, perintah menulis "Kunci start sudah dilepas, tetapi peran belum
+diubah. Jalankan perintah ini lagi; sampai itu MySQL tidak dipaksa
+baca-saja (read-only) saat menyala." Artinya server itu masih dipin
+`quarantined`, tetapi MySQL-nya bisa menyala tanpa kunci start. Agent yang
+berjalan menulis kunci itu lagi selama perannya `quarantined`. Jalankan
+`set-role master` sekali lagi.
+
+`set-role replica` atau `unassigned` tidak melepas kunci start: agent yang
+berjalan melepasnya sendiri setelah MySQL hidup dan `read_only` serta
+`super_read_only` tersimpan ON, jadi server itu tetap menyala baca-saja.
+`set-role quarantined` membuat agent yang berjalan menulis kunci start
+dalam 5 detik.
 
 Master bisa dikunci dan dibuka langsung di servernya:
 
@@ -1292,6 +1414,23 @@ atau baris yang hilang atau berubah (bila gagal, dicoba lagi paling sering
 semenit sekali), dan semenit sekali (serta segera setelah menulisnya)
 memeriksa dengan `mysqld --print-defaults` bahwa `init_file` terakhir yang
 dibaca mysqld memang berkas agent dan berkas itu bisa dibaca pengguna MySQL.
+mysqld juga membaca `~/.my.cnf` milik akun layanannya (akun dari opsi
+`user`; bila tidak ada, `mysql`, karena agent berjalan sebagai root), jadi
+pemeriksaan itu dijalankan dengan `HOME` akun tersebut. Bila mysqld hanya
+membaca satu berkas opsi, agent memeriksanya dengan `--defaults-file`; di
+sana `~/.my.cnf` tidak dibaca dan langkah `HOME` ini dilewati. Nama opsi
+dibaca dengan semua awalan yang diterima mysqld (`loose-`, `skip-`,
+`disable-`, `enable-`, `maximum-`). `init_file` berawalan yang dibaca
+sesudah baris agent membuat kunci "belum terjamin". Awalan `maximum-` pada
+`init_file` di mana pun juga membuat kunci "belum terjamin": mysqld menolak
+menyala dengan opsi itu. Home akun layanan di atau di bawah `/home`, `/root`
+atau `/run/user` yang tidak bisa didaftar agent, atau kosong, membuat kunci
+"belum terjamin" juga: `ProtectHome` di unit systemd agent menyembunyikan
+direktori itu, jadi `~/.my.cnf` di sana tidak bisa diperiksa. Akun layanan
+yang tidak ditemukan, akun tanpa direktori home, atau `~/.my.cnf` yang
+menyebut user lain juga membuat kunci "belum terjamin". Yang tetap tidak
+terlihat oleh agent: `User=` di unit systemd MySQL yang berbeda dari opsi
+`user`, dan `MYSQL_HOME` di lingkungan layanan MySQL.
 Perubahan keadaan kunci start dilaporkan ke panel saat itu juga, dan laporan
 pertama setelah agent menyala sudah memeriksa kunci itu. Direktori yang
 namanya memuat `#`, tanda kutip, garis miring terbalik atau karakter kendali
@@ -1302,25 +1441,39 @@ kedua membuka peringatan Kritis "master lama belum terjamin terkunci saat
 MySQL menyala; jangan nyalakan MySQL-nya sebelum agent tersambung".
 
 Saat MySQL master lama menyala, putaran penjaga pertama memasang
-`read_only` dan `super_read_only` dengan `SET PERSIST` lalu melaporkan
-caranya menyala. Laporan itu disimpan agent dan dikirim lagi tiap putaran
-penjaga sampai panel menerimanya, jadi tidak hilang bila panel belum
-tersambung saat itu (agent yang dimulai ulang sebelum laporan sampai
-kehilangannya). Bila salah satu bendera sempat mati (seseorang membukanya,
-atau kunci tidak berlaku), panel membuka peringatan Kritis "master lama
-sempat bisa ditulis saat menyala; jalankan Periksa data tertinggal";
-peringatan itu tertutup setelah **Periksa data tertinggal** dijalankan
-sesudahnya, atau server itu tidak lagi master lama. **Bangun ulang sebagai
-replika** yang belum selesai menyalin (atau dibatalkan) tidak menutupnya, dan
-selama peringatan itu terbuka formulir **Bangun ulang** dan dialog **Hapus**
-tidak memercayai hasil **Periksa data tertinggal** yang lebih lama: keduanya
-memperingatkan bahwa tulisan sejak itu belum diperiksa. Laporan menyala yang
-tidak bisa dibaca panel diperlakukan sebagai yang terburuk (sempat bisa
-ditulis, atau gagal menyala). Bila `@@init_file`
-bukan berkas agent padahal berkas itu sudah ada sebelum mysqld menyala
-(misalnya `--init-file` di baris perintah layanan, yang mengalahkan baris
-agent dan tidak terlihat oleh agent selama MySQL mati), peringatannya
-"kunci start tidak dipakai MySQL; periksa opsi layanan".
+`read_only` dan `super_read_only` dengan `SET PERSIST` lalu menilai caranya
+menyala. Agent menyimpan hasilnya di `/var/lib/dbpanel/start-result`: hasil
+terburuk sejak karantina dan start terakhir tiap jenis yang buruk. Urutannya
+dari yang terburuk: sempat bisa ditulis (`late`), gagal menyala (`failed`),
+menyala tanpa kunci start (`bypassed`), normal (`ok`). Setiap laporan
+pemantauan dari server yang dikarantina membawa hasil itu. Jadi hasilnya
+tidak hilang bila panel belum tersambung, bila kiriman kejadian dari agent
+hilang, atau bila agent dimulai ulang. Bila berkas itu gagal ditulis, agent
+mencobanya lagi tiap putaran penjaga. Karantina baru lewat agent menghapus
+hasil lama, kecuali pin tidak bisa dibaca. `set-role quarantined` saat agent
+mati tidak menghapusnya. Hasil yang tersimpan tetapi tidak terbaca ditimpa
+hasil berikutnya, dengan peringatan di log agent.
+
+Panel membuka dan menutup peringatan menyala menurut hasil itu, setiap kali
+menerima laporan pemantauan. Hasil menyala yang berubah tidak membuat agent
+mengirim laporan lebih awal: peringatannya bisa baru terbuka atau tertutup
+pada laporan ringkasan berikutnya. **Periksa sekarang** di halaman server
+meminta laporan saat itu juga. Bila salah satu bendera sempat mati
+(seseorang membukanya, atau kunci tidak berlaku), panel membuka peringatan
+Kritis "master lama sempat bisa ditulis saat menyala; jalankan Periksa data
+tertinggal"; peringatan itu tertutup setelah **Periksa data tertinggal**
+dijalankan sesudahnya, atau server itu tidak lagi master lama. Start
+berikutnya yang sempat bisa ditulis membuka peringatan baru. **Bangun ulang
+sebagai replika** yang belum selesai menyalin (atau dibatalkan) tidak
+menutupnya, dan selama peringatan itu terbuka formulir **Bangun ulang** dan
+dialog **Hapus** tidak memercayai hasil **Periksa data tertinggal** yang
+lebih lama: keduanya memperingatkan bahwa tulisan sejak itu belum diperiksa.
+Laporan menyala yang tidak bisa dibaca panel diperlakukan sebagai yang
+terburuk (sempat bisa ditulis, atau gagal menyala). Bila `@@init_file` bukan
+berkas agent padahal berkas itu sudah ada sebelum mysqld menyala (misalnya
+`--init-file` di baris perintah layanan, yang mengalahkan baris agent dan
+tidak terlihat oleh agent selama MySQL mati), peringatannya "kunci start
+tidak dipakai MySQL; periksa opsi layanan".
 
 Yang perlu diketahui:
 
@@ -1340,7 +1493,9 @@ Yang perlu diketahui:
   menulisnya lagi; bila dihapus saat agent mati, MySQL menyala tanpa kunci
   start: ia tetap baca-saja hanya bila `read_only` dan `super_read_only`
   ON sempat tersimpan (`SET PERSIST`) sebelumnya, dan agent melaporkan
-  "sempat bisa ditulis" begitu tersambung bila tidak.
+  "sempat bisa ditulis" begitu tersambung bila tidak. Untuk melepas kunci
+  start saat agent tidak bisa dijalankan, ikuti "Melepas kunci start dengan
+  tangan" di bawah.
 - **AppArmor dan SELinux.** Kunci start baru diuji pada MySQL 8.0 (8.0.46)
   tanpa AppArmor atau SELinux yang ditegakkan. Bila mysqld dibatasi
   AppArmor, agent hanya menganggap kunci terjamin bila berkasnya di bawah
@@ -1358,9 +1513,11 @@ Yang perlu diketahui:
   master` melepasnya saat itu juga (lihat "Peran dan sumber yang dipin").
   Replika yang kunci start-nya masih ada tidak bisa dipilih sebagai
   kandidat promote.
-- **Hapus server** saat MySQL master lama mati tidak melepas karantina dan
-  kunci start-nya; MySQL-nya tetap menyala baca-saja sampai seseorang
-  mengubah perannya di server itu. Dialog hapus mengatakannya.
+- **Hapus server** tidak melepas karantina dan kunci start master lama,
+  baik MySQL-nya hidup maupun mati: MySQL-nya tetap menyala baca-saja
+  sampai seseorang mengubah perannya di server itu. Dialog hapus
+  mengatakannya (lihat "Memakai lagi server yang dihapus saat masih
+  dikarantina" di bawah).
 
 Halaman server master lama memuat kotak **Master lama** dengan:
 
@@ -1390,8 +1547,10 @@ Halaman server master lama memuat kotak **Master lama** dengan:
   baru dengan master lama sebagai tujuan. Semua data MySQL di master lama
   diganti salinan dari master baru; konfirmasi menyebut koneksi aplikasi
   yang masih ada dan data tertinggal yang belum diperiksa atau belum
-  diamankan, lalu meminta kata sandi dan nama server. Bila daftar koneksi
-  master lama tidak lengkap dan kosong (masih ada koneksi, atau daftarnya
+  diamankan, lalu meminta kata sandi dan nama server. Bangun ulang juga
+  butuh persetujuan root di master lama (lihat "Persetujuan di server untuk
+  bangun ulang" di bawah); tombolnya baru aktif setelah disetujui. Bila
+  daftar koneksi master lama tidak lengkap dan kosong (masih ada koneksi, atau daftarnya
   tidak bisa dipastikan), formulir juga meminta centang "Saya paham N
   koneksi masih ada dan tulisannya hilang" (atau pernyataan bahwa
   koneksinya tidak bisa dipastikan); tanpa centang itu bangun ulang
@@ -1411,10 +1570,173 @@ Halaman server master lama memuat kotak **Master lama** dengan:
   Sesudahnya ia kembali baca-saja dan menjadi replika master baru. Pin
   peran agent baru menjadi `replica` bila salinan dari master baru
   berhasil di agent yang sama.
-- **Hapus server:** melepas pin `quarantined` (agent tidak lagi menjaga
-  baca-saja saat start), hanya bila MySQL-nya hidup (lihat "Kunci start"
-  di atas). Seperti bangun ulang, baru tersedia setelah
-  **Sudah saya alihkan**.
+- **Hapus server:** menghapus server dari panel. Panel tidak meminta agent
+  melepas pin `quarantined`, jadi server itu tetap dikarantina: MySQL-nya
+  tetap baca-saja dan kunci start tetap terpasang (lihat "Memakai lagi
+  server yang dihapus saat masih dikarantina" di bawah). Seperti bangun
+  ulang, baru tersedia setelah **Sudah saya alihkan**.
+
+#### Persetujuan di server untuk bangun ulang
+
+Master lama yang dikarantina (quarantined) hanya bisa dibangun ulang setelah
+root di server itu menyetujuinya. Bangun ulang membuang semua data MySQL
+master lama. Karena itu panel saja tidak bisa memulainya. Root di master
+lama harus melihat dari mana data penggantinya diambil, lalu menyetujuinya
+di server itu.
+
+1. Di halaman master lama, buka form **Bangun ulang sebagai replika**.
+   Kotak **Persetujuan di server** menulis "Belum disetujui. Jalankan
+   perintah ini di <server> sebagai root, lalu klik Periksa lagi:", lalu
+   perintahnya, misalnya `sudo dbpanel agent approve 042917`, dan "Kode
+   berlaku <N> menit lagi.". Tombol **Bangun ulang sebagai replika** belum
+   bisa diklik.
+2. Bila promote tadi promote darurat, jalankan dulu **Periksa data
+   tertinggal** (dan **Amankan data tertinggal** bila ada) di halaman
+   master lama.
+3. Masuk ke master lama dan jalankan perintah dari form itu. Layar
+   menampilkan nama server ini, perannya, sumber data (master baru,
+   `host:port`) dan alamat IP sumber itu. Bila nama sumber mengarah ke
+   beberapa alamat, alamat lainnya ditampilkan di bawahnya. Pastikan nama
+   dan alamat itu memang master baru yang sekarang dipakai aplikasi.
+4. Ketik `ya` lalu Enter. Jawaban lain, atau input kosong, membatalkan:
+   "Dibatalkan; tidak ada yang disetujui."
+5. Perintah menulis "Disetujui sampai <waktu>. Kembali ke panel dan klik
+   Periksa lagi. Untuk membatalkan: sudo dbpanel agent approve batal".
+6. Di form, klik **Periksa lagi**. Kotak itu kini menulis "Sudah disetujui
+   di <server> untuk sumber <host:port> (<alamat>); berlaku <H> jam <M>
+   menit lagi. Untuk membatalkan, jalankan di server itu: sudo dbpanel
+   agent approve batal", dan tombol bangun ulang aktif.
+
+Batas waktunya:
+
+- Kode terdiri dari enam angka dan berlaku 30 menit. Selama berlaku dan
+  sumber yang dipin tidak berubah, kodenya tetap sama. Setelah habis, form
+  menampilkan kode baru.
+- Persetujuan berlaku 24 jam, hanya untuk sumber dan alamat yang
+  ditampilkan saat disetujui.
+- Persetujuan yang waktunya lebih dari 5 menit di masa depan tidak
+  berlaku. Periksa jam server itu.
+
+Berkasnya ada di direktori pin, dalam format JSON, dan dibaca dengan aturan
+yang sama dengan berkas pin:
+
+- `/etc/dbpanel/rebuild-request`: permintaan yang ditulis agent, dengan
+  `code` (kode), `source` (sumber yang dipin) dan `created` (waktu dibuat).
+- `/etc/dbpanel/rebuild-approval`: persetujuan yang ditulis `approve`,
+  dengan `source`, `addr` (alamat IP yang ditampilkan), `approved` (waktu
+  disetujui) dan `expires` (waktu habis).
+
+Alamat yang disetujui adalah alamat sumber yang sudah diverifikasi saat
+karantina bila ada, alamat itu sendiri bila sumbernya alamat IP, atau
+alamat pertama hasil pencarian DNS nama sumber (IPv4 lebih dulu).
+
+Untuk membatalkan persetujuan, jalankan di master lama:
+
+```sh
+sudo dbpanel agent approve batal
+```
+
+Perintah itu menghapus kedua berkas dan menulis "Persetujuan dan
+permintaan bangun ulang di server ini dihapus.". Setiap `set-role` juga
+menghapusnya, begitu pula karantina baru dari peran lain dan bangun ulang
+yang selesai. Mencabut persetujuan tidak menghentikan pekerjaan bangun
+ulang yang sudah berjalan. Untuk menghentikannya, batalkan pekerjaannya di
+panel.
+
+Persetujuan yang ada tidak berlaku lagi bila sumber yang dipin berubah, bila
+nama sumber tidak lagi mengarah ke alamat yang disetujui (atau DNS-nya
+gagal), bila waktunya habis, bila waktunya tidak masuk akal (lebih dari 5
+menit di masa depan, atau masa berlaku lebih dari 24 jam), atau bila
+berkasnya tidak bisa dipakai. Form lalu menulis "Persetujuan yang ada di
+<server> tidak berlaku lagi: <alasan>." dan menampilkan kode baru.
+
+Panel memeriksa persetujuan saat bangun ulang dimulai, dan saat pekerjaan
+bangun ulang yang gagal atau menunggu dijalankan lagi. Tanpa persetujuan
+panel menolak dengan "Bangun ulang <server> butuh persetujuan di server
+itu. Jalankan di server itu sebagai root: sudo dbpanel agent approve
+<kode>, lalu coba lagi." Bila persetujuan habis di tengah pekerjaan,
+langkah berikutnya gagal dengan "Server <server> dikarantina (quarantined):
+langkah ini butuh persetujuan di server itu. Jalankan di server itu sebagai
+root: sudo dbpanel agent approve <kode>, lalu klik Ulangi." Setujui lagi,
+lalu tekan **Ulangi dari tahap ini**.
+
+Agent versi lama belum mengenal persetujuan di server. Panel menolak
+membangun ulangnya dengan "Agent perlu dimutakhirkan: agent di <server>
+belum mengenal persetujuan di server, jadi bangun ulang ditolak. Klik
+Pasang ulang agent di halaman server itu, jalankan perintahnya, lalu coba
+lagi." Panel versi lama dengan agent baru menampilkan penolakan agent
+sebagai teks; teks itu memuat perintah `sudo dbpanel agent approve <kode>`
+lengkap.
+
+#### Memakai lagi server yang dihapus saat masih dikarantina
+
+**Hapus server** pada master lama yang dikarantina tidak mengubah apa pun
+di server itu. Dialog hapus menulis: "Server ini tetap dikarantina
+(quarantined) setelah dihapus dari panel: MySQL-nya tetap baca-saja
+(read-only) dan kunci start (start lock) tetap terpasang. Untuk memakai
+server ini lagi, jalankan di server itu: sudo dbpanel agent set-role
+unassigned, atau sudo dbpanel agent set-role master bila server ini akan
+menjadi master lagi."
+
+Untuk memakainya lagi, pilih salah satu di server itu:
+
+- **Disiapkan ulang lewat panel:** `sudo dbpanel agent set-role
+  unassigned`, lalu ketik `ya`. Peran dan pin sumbernya dihapus. Agent
+  yang berjalan melepas kunci start setelah MySQL menyala dengan baca-saja
+  tersimpan. Perintah menulis langkah berikutnya: "Langkah berikutnya: bila
+  server ini sudah dihapus dari panel, tambahkan lagi lewat Tambah server,
+  lalu jalankan Siapkan master atau Buat replika. Sampai itu MySQL-nya
+  tetap baca-saja (read-only)."
+- **Menjadi master lagi:** `sudo dbpanel agent set-role master`, lalu ketik
+  `ya`. Kunci start dilepas saat itu juga dan server dipin sebagai master.
+  Perintah menulis: "Langkah berikutnya: bila MySQL di server ini masih
+  baca-saja (read-only) dan server ini memang akan dipakai aplikasi sebagai
+  master, pastikan master lain tidak lagi dipakai, lalu buka dengan: sudo
+  dbpanel agent unlock-master". `unlock-master` tidak menghapus `read_only`
+  yang disimpan karantina dengan `SET PERSIST`, jadi setelah MySQL restart
+  `read_only` menyala lagi. Matikan dengan `SET PERSIST read_only=OFF;`
+  sebagai root MySQL.
+
+#### Melepas kunci start dengan tangan
+
+Cara ini melepas kunci start (start lock) master lama tanpa agent. Pakai
+hanya bila `set-role master` menulis "kunci start tidak bisa diperiksa",
+atau agent tidak bisa dijalankan sama sekali. Kerjakan sebagai root
+(misalnya setelah `sudo -i`), berurutan:
+
+1. Hentikan agent: `systemctl stop dbpanel-agent`. Selama perannya
+   `quarantined`, agent yang berjalan menulis kunci itu lagi dalam beberapa
+   detik.
+2. Di berkas konfigurasi MySQL yang dikelola dbpanel, hapus baris
+   `init_file=<…>/dbpanel-start-lock.sql`. Berkas itu
+   `<direktori include>/zz-dbpanel.cnf` bila konfigurasi MySQL punya
+   direktori include; selain itu blok antara `# BEGIN dbpanel` dan
+   `# END dbpanel` di berkas konfigurasi utama.
+3. Baru sesudah itu hapus berkas `dbpanel-start-lock.sql` yang disebut
+   baris tadi. Urutan ini wajib: mysqld menolak menyala bila konfigurasinya
+   menyebut berkas yang tidak ada.
+4. Ubah peran dan hapus pin sumber serta berkas persetujuan (ganti
+   `master` dengan `unassigned` bila server ini akan disiapkan ulang lewat
+   panel):
+
+   ```sh
+   echo master > /etc/dbpanel/role
+   rm -f /etc/dbpanel/source /etc/dbpanel/source-addr /etc/dbpanel/rebuild-request /etc/dbpanel/rebuild-approval
+   ```
+
+   Berkas peran harus tetap milik root dan tidak bisa ditulis grup atau
+   pengguna lain.
+5. MySQL tetap baca-saja (read-only), karena `read_only` dan
+   `super_read_only` tersimpan ON. Bila server ini memang akan menjadi
+   master yang dipakai aplikasi, buka sebagai root MySQL:
+
+   ```sql
+   SET PERSIST super_read_only=OFF;
+   SET PERSIST read_only=OFF;
+   ```
+
+Sesudahnya agent boleh dijalankan lagi: `systemctl start dbpanel-agent`.
+Dengan peran `master` atau `unassigned`, agent tidak menulis kunci start.
 
 ### Replika lain
 
@@ -1743,11 +2065,18 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   bisa membuat akun replikasi di replika (juga replika sebagian); replika
   lengkap sudah memilikinya sejak dump. Akun itu bisa membaca binlog
   replika dan menjadi donor CLONE, bukan menulis ke master.
-- Panel yang disusupi bisa menghapus data tertinggal di master lama yang
-  dikarantina: lewat bangun ulang sebagai replika (seluruh data MySQL
-  diganti salinan master baru) atau `dropDatabases`. Amankan data
-  tertinggal (dan unduh berkasnya) sebelum menyetujui bangun ulang;
-  berkas salvage yang sudah ditulis tidak ikut terhapus.
+- Panel yang disusupi tidak bisa membuang data master lama yang
+  dikarantina tanpa persetujuan root di server itu (mode ketat, lihat
+  "Peran dan sumber yang dipin"). Selama persetujuan berlaku (24 jam,
+  untuk satu sumber), panel itu bisa membangun ulangnya dari sumber
+  tersebut, jadi seluruh data MySQL-nya diganti salinan master baru.
+  Amankan data tertinggal (dan unduh berkasnya) sebelum menyetujui bangun
+  ulang; berkas salvage yang sudah ditulis tidak ikut terhapus oleh bangun
+  ulang. Tanpa persetujuan pun, panel yang disusupi masih bisa menghapus
+  berkas salvage di server itu, dan mengganti berkas CA panel di sana
+  (`mysql.tlsTrust`), sehingga pemeriksaan sertifikat dari server itu bisa
+  rusak atau melemah. Panel sendiri penerbit CA itu, dan data MySQL tidak
+  bisa dihapus lewat perintah itu.
 - Salvage di master lama hanya mengambil transaksi yang ditemukan
   pemeriksaan data tertinggal terakhir, satu run sekaligus, dengan batas
   8 GiB untuk direktorinya, jadi panel yang disusupi tidak bisa mengambil
@@ -1966,11 +2295,14 @@ agent dan `mysqld` sungguhan, lalu lewat UI:
   baris `init_file`). Agent master lama dihentikan dan `mysqld`-nya
   dinyalakan: ia menyala baca-saja karena kunci start; orang membukanya
   dengan `SET GLOBAL super_read_only = OFF` dan menulis satu baris, lalu
-  agent dinyalakan: ia memasang baca-saja lagi dan panel membuka peringatan
-  `master_start_late`. **Periksa data tertinggal** menemukan 1 transaksi di
-  `a.t` dan menutup peringatan itu, **Amankan** menulis berkas yang
-  diunduh lewat HTTPS dengan token dan memuat `INSERT`-nya, master lama
-  dibangun ulang sebagai replika (konfigurasinya tidak lagi memuat
+  agent dinyalakan dengan laporan menyalanya dibuang sebelum sampai ke
+  panel: ia memasang baca-saja lagi dan panel membuka tepat satu peringatan
+  `master_start_late` dari hasil menyala di laporan pemantauan. **Periksa
+  data tertinggal** menemukan 1 transaksi di `a.t` dan menutup peringatan
+  itu, yang tidak terbuka lagi pada dua laporan berikutnya; **Amankan**
+  menulis berkas yang diunduh lewat HTTPS dengan token dan memuat
+  `INSERT`-nya, master lama dibangun ulang sebagai replika setelah root
+  menyetujuinya dengan `approve` (konfigurasinya tidak lagi memuat
   `init_file` dan berkas kuncinya hilang), lalu berkas salvage, yang
   bertahan setelah bangun ulang, dihapus dengan token.
 

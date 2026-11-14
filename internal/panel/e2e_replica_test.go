@@ -1229,7 +1229,11 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	const secret = "isi-baris-tertinggal"
 	execSQL(t, m.db, "INSERT INTO a.t VALUES (100, '"+secret+"')")
 	lateFrom := time.Now()
+	// The start lock's report of this start never reaches the panel (spec
+	// 5.13): the alert must come from the start state the reports carry.
+	m.agent.dropStartEvents = true
 	m.agent.start(t)
+	m.agent.dropStartEvents = false
 	e.wantQuarantined(t, m)
 	if n := 0; ra.db.QueryRow("SELECT COUNT(*) FROM a.t WHERE id = 100").Scan(&n) != nil || n != 0 {
 		t.Fatal("the old master's late row reached the new master")
@@ -1242,6 +1246,10 @@ func TestE2EPromoteEmergency(t *testing.T) {
 	})
 	if late.OpenedAt.Before(lateFrom.Add(-time.Second)) {
 		t.Fatalf("master_start_late opened at %s, before the agent started (%s)", late.OpenedAt, lateFrom)
+	}
+	takeHealthReports(t, p, m.srv(), 1)
+	if n := countAlerts(t, p, healthmon.KindMasterStartLate, m.srv(), start); n != 1 {
+		t.Fatalf("master_start_late alerts on the old master = %d, want exactly 1", n)
 	}
 
 	cut := ui.get(fmt.Sprintf("/masters/%d/cutover", ra.srv()))
@@ -1273,6 +1281,15 @@ func TestE2EPromoteEmergency(t *testing.T) {
 			return a.ID == late.ID && a.CloseReason == "Periksa data tertinggal sudah dijalankan"
 		}) {
 		t.Fatalf("master_start_late %d after the check: %+v, %v; want closed by Periksa data tertinggal", late.ID, alerts, err)
+	}
+	// The reports still carry the late start; it is accounted for and does
+	// not open the alert again.
+	takeHealthReports(t, p, m.srv(), 2)
+	if _, open := openAlert(t, p, healthmon.KindMasterStartLate, m.srv()); open {
+		t.Fatal("master_start_late opened again after Periksa data tertinggal")
+	}
+	if n := countAlerts(t, p, healthmon.KindMasterStartLate, m.srv(), start); n != 1 {
+		t.Fatalf("master_start_late alerts on the old master after the check = %d, want 1", n)
 	}
 
 	// Amankan data tertinggal: a salvage file, listed on the page.

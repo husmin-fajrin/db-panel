@@ -35,6 +35,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
 	"github.com/husmin-fajrin/db-panel/internal/version"
 )
@@ -308,6 +309,43 @@ func openAlert(t *testing.T, p *Panel, kind string, serverID int64) (store.Alert
 	return a, true
 }
 
+// countAlerts counts the alerts of kind on the server opened at or after
+// since, open or closed.
+func countAlerts(t *testing.T, p *Panel, kind string, serverID int64, since time.Time) int {
+	t.Helper()
+	alerts, err := p.Store.ListAlerts(since, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, a := range alerts {
+		if a.Kind == kind && a.ServerID == serverID {
+			n++
+		}
+	}
+	return n
+}
+
+// takeHealthReports has the panel take n fresh health reports of the
+// server, one after another, through the path of its "check now" (a
+// monitor.snapshot answer taken as a report, at most one per 10 s): the
+// test does not wait for the agent's summary interval.
+func takeHealthReports(t *testing.T, p *Panel, serverID int64, n int) {
+	t.Helper()
+	for i := range n {
+		waitForWithin(t, e2eWait, fmt.Sprintf("health report %d of %d of server %d", i+1, n, serverID), func() bool {
+			err := p.Monitor.CheckNow(context.Background(), serverID)
+			if errors.Is(err, healthmon.ErrCheckTooSoon) {
+				return false
+			}
+			if err != nil {
+				t.Fatalf("check now of server %d: %v", serverID, err)
+			}
+			return true
+		})
+	}
+}
+
 // openKinds lists the kinds of the alerts open on the server.
 func openKinds(t *testing.T, p *Panel, serverID int64) []string {
 	t.Helper()
@@ -425,7 +463,24 @@ type e2eAgent struct {
 	dir  string
 	cfg  config.Config
 
+	// dropStartEvents: the next start's driver loses its start lock
+	// reports (proto.EventQuarantineStart, EventQuarantineStartFailed) as
+	// if they never reached the panel; the snapshot's start state is all
+	// the panel gets.
+	dropStartEvents bool
+
 	stopFn func() // nil while stopped
+}
+
+// dropStartEmitter passes every event to the agent except the start lock
+// reports, which it drops as sent.
+type dropStartEmitter struct{ a mysql.Emitter }
+
+func (e dropStartEmitter) Emit(ev proto.Event) error {
+	if ev.Type == proto.EventQuarantineStart || ev.Type == proto.EventQuarantineStartFailed {
+		return nil
+	}
+	return e.a.Emit(ev)
 }
 
 // pairE2EAgent creates a server called name on p and pairs an agent
@@ -458,8 +513,9 @@ func pairE2EAgent(t *testing.T, p *Panel, name string, inst *testmysql.Instance,
 // start runs the agent and its health monitor, wired as "dbpanel agent"
 // wires them (the promote guard's events go to the panel), with the
 // replicas-seen file and the salvage directory in the agent's own
-// directory so the test's agents do not share them, and waits until the
-// panel sees it online with its probe.
+// directory so the test's agents do not share them (dropStartEvents: its
+// start lock reports are dropped), and waits until the panel sees it
+// online with its probe.
 func (ag *e2eAgent) start(t *testing.T) {
 	t.Helper()
 	if ag.stopFn != nil {
@@ -479,9 +535,13 @@ func (ag *e2eAgent) start(t *testing.T) {
 	a := agent.New(ag.cfg, reg, logger)
 	runner := jobs.NewRunner(a, logger)
 	runner.Register(reg)
+	var events mysql.Emitter = a
+	if ag.dropStartEvents {
+		events = dropStartEmitter{a}
+	}
 	d := &mysql.Driver{Host: ag.inst.HostWith(creds), Creds: creds, Jobs: runner, Logger: logger, Sys: sys, Cfg: ag.cfg,
 		PinDir: ag.dir, SeenPath: filepath.Join(ag.dir, "replicas-seen"), SalvageDir: filepath.Join(ag.dir, "salvage"),
-		Events: a}
+		Events: events}
 	d.Register(reg)
 	// The health monitor, as "dbpanel agent" runs it; the panel sends its
 	// intervals with monitor.configure once the agent is online.
