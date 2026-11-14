@@ -28,9 +28,12 @@ import (
 // a replica at a source of its choosing. It is not a complete defence
 // against such a panel: the agent cannot tell a host the panel attached
 // itself from a real replica, so a panel holding the replication password
-// can get a healthy master quarantined under a server of its own and then
-// have its data dropped or replaced from that source (security audit 5a,
-// SA-2; closed by a later task of the same plan). The other gap, SA-1
+// can get a healthy master quarantined under a server of its own (security
+// audit 5a, SA-2). Strict mode limits what follows: on a quarantined
+// server every command that drops or replaces data runs only under root's
+// approval given on this server (dbpanel agent approve; strict.go), so
+// such a panel alone cannot have its data dropped or replaced from that
+// source. The other gap, SA-1
 // (mysql.releaseRole on a quarantined old master, then mysql.configure or
 // mysql.setReadOnly, opening it for writes again), is closed: a quarantined
 // server refuses mysql.releaseRole, and leaves quarantine only through a
