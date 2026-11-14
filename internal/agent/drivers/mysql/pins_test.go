@@ -1261,3 +1261,29 @@ func TestSetRoleMasterDropsSourcePins(t *testing.T) {
 		t.Errorf("SetRole(master) kept source pins: source=%q addr=%q", s, a)
 	}
 }
+
+// TestUnsourcedQuarantineRefusesLeftoverAndSalvage (E-5): on a quarantined
+// server without a source pin the panel would name the "new master"
+// mysql.leftover compares with, and so the set mysql.salvage may extract:
+// both are refused with the unsourced-quarantine text until root pins the
+// source, and then work again.
+func TestUnsourcedQuarantineRefusesLeftoverAndSalvage(t *testing.T) {
+	dir := pinDir(t, "quarantined", "")
+	r := newPinRig(t, nil, dir)
+	r.d.SalvageDir = t.TempDir()
+	leftover := proto.LeftoverParams{NewMaster: proto.PeerCred{Host: "10.0.0.1", Port: 3306, User: "dbpanel_repl", Password: "rahasia"}}
+	salvage := proto.SalvageParams{GTIDSet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"}
+	for _, c := range []pinCase{{"mysql.leftover", leftover}, {"mysql.salvage", salvage}} {
+		resp := r.dispatch(c.cmd, c.params)
+		want := "server ini dipin sebagai quarantined tanpa sumber yang dipin; perintah " + c.cmd + " ditolak. " +
+			"Pin master barunya dulu di server ini: sudo dbpanel agent set-source <host:port>"
+		if resp.OK || resp.Error == nil || resp.Error.Message != want {
+			t.Errorf("%s without a source pin = %+v, want %q", c.cmd, resp, want)
+		}
+	}
+	if err := mustPins(t, dir).SetSource("10.0.0.1", 3306); err != nil {
+		t.Fatal(err)
+	}
+	wantPastPins(t, "leftover with a source pin", r.dispatch("mysql.leftover", leftover))
+	wantPastPins(t, "salvage with a source pin", r.dispatch("mysql.salvage", salvage))
+}

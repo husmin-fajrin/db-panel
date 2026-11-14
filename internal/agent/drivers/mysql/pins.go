@@ -801,7 +801,11 @@ func (p *Pins) Allow(cmd string, params any) error {
 	// A quarantined server without a source pin (an interrupted
 	// quarantine, or set-role without set-source) is never wiped or
 	// pointed anywhere: there is no pinned new master to rebuild from.
-	if p.role == roleQuarantined && !p.hasSrc && (names || cmd == "mysql.dropDatabases") {
+	// Nor does it compare itself with a "new master" the panel names
+	// (mysql.leftover), which would make the set mysql.salvage may extract
+	// the panel's choice: the whole binary log.
+	if p.role == roleQuarantined && !p.hasSrc && (names || cmd == "mysql.dropDatabases" ||
+		cmd == "mysql.leftover" || cmd == "mysql.salvage") {
 		return unsourcedQuarantineRefusal(cmd)
 	}
 	// A replica is promoted, or pointed at the promoted replica of its
