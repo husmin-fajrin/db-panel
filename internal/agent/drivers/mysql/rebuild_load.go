@@ -189,13 +189,21 @@ func (c loadCopy) notCopied(present []string) []string {
 // errListIncomplete refuses to rely on a database listing that cannot be
 // proved complete: information_schema shows an account only the databases
 // it holds some privilege on. account is 'user'@'host' (quoteAccount);
-// cause, for the log, is why the proof failed.
+// unsupported means the account's name itself is outside what the proof
+// handles (proofAccount), and the text then names no account; cause, for
+// the log, is why the proof failed.
 type errListIncomplete struct {
-	account string
-	cause   error
+	account     string
+	unsupported bool
+	cause       error
 }
 
 func (e *errListIncomplete) Error() string {
+	if e.unsupported {
+		return "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat " +
+			"karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya " +
+			"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin), lalu ulangi bangun ulang dari panel."
+	}
 	return fmt.Sprintf("daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent "+
 		"tidak punya hak SHOW DATABASES. Jalankan sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO %s; "+
 		"lalu ulangi bangun ulang dari panel.", e.account, e.account)
@@ -216,21 +224,46 @@ func completeUserDatabases(ctx context.Context, db *sql.DB) ([]string, error) {
 	if err := conn.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&account); err != nil {
 		return nil, fmt.Errorf("baca akun MySQL: %w", err)
 	}
-	if err := listingComplete(ctx, conn, account); err != nil {
+	user, host, ok := proofAccount(account)
+	if !ok {
+		return nil, &errListIncomplete{unsupported: true, cause: fmt.Errorf("account name %q not supported by the proof", account)}
+	}
+	if err := listingComplete(ctx, conn, user, host); err != nil {
 		return nil, &errListIncomplete{account: quoteAccount(account), cause: err}
 	}
 	return userDatabases(ctx, conn)
 }
 
-// listingComplete proves that account's listing of databases on conn is
+// Characters an account's user and host may hold for the proof: none
+// needs escaping in a quoted string or identifier under any sql_mode
+// (NO_BACKSLASH_ESCAPES, ANSI_QUOTES), and none can make a SHOW GRANTS row
+// look like another one.
+var (
+	proofUserRe = regexp.MustCompile(`^[A-Za-z0-9_.$-]+$`)
+	proofHostRe = regexp.MustCompile(`^[A-Za-z0-9_.%:/-]+$`)
+)
+
+// proofAccount splits CURRENT_USER()'s user@host for the proof; ok is
+// false for a name the proof does not handle safely.
+func proofAccount(account string) (user, host string, ok bool) {
+	i := strings.LastIndex(account, "@")
+	if i < 0 {
+		return "", "", false
+	}
+	user, host = account[:i], account[i+1:]
+	return user, host, proofUserRe.MatchString(user) && proofHostRe.MatchString(host)
+}
+
+// listingComplete proves that user@host's listing of databases on conn is
 // complete (plan evidence "Bukti daftar database yang lengkap"): the
 // account holds SHOW DATABASES directly on *.*, not partially revoked; or
 // it holds SELECT directly on *.* and partial revokes are off, so none can
 // hide a database from it. The grants are read for the account by name:
 // SHOW GRANTS FOR CURRENT_USER() would show an active role's privileges as
 // the account's own. Anything else, a query error included, is no proof.
-func listingComplete(ctx context.Context, conn *sql.Conn, account string) error {
-	rows, err := conn.QueryContext(ctx, "SHOW GRANTS FOR "+quoteAccount(account))
+// user and host passed proofAccount.
+func listingComplete(ctx context.Context, conn *sql.Conn, user, host string) error {
+	rows, err := conn.QueryContext(ctx, "SHOW GRANTS FOR "+quoteString(user)+"@"+quoteString(host))
 	if err != nil {
 		return fmt.Errorf("SHOW GRANTS: %w", err)
 	}
@@ -247,7 +280,7 @@ func listingComplete(ctx context.Context, conn *sql.Conn, account string) error 
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("SHOW GRANTS: %w", err)
 	}
-	show, sel := listingProof(grants)
+	show, sel := listingProof(grants, user, host)
 	if show {
 		return nil
 	}
@@ -264,29 +297,41 @@ func listingComplete(ctx context.Context, conn *sql.Conn, account string) error 
 	return nil
 }
 
-// revokeRow matches a partial revoke row of SHOW GRANTS, e.g.
-// "REVOKE SELECT, SHOW DATABASES ON `old`.* FROM `u`@`h`".
-var revokeRow = regexp.MustCompile("(?s)^REVOKE (.+?) ON .+ FROM ")
+// revokeRow is a partial revoke row of SHOW GRANTS, e.g.
+// "REVOKE SELECT, SHOW DATABASES ON `old`.* FROM `u`@`h`": privilege
+// tokens only (grantPrivileges), then the account last.
+var revokeRow = regexp.MustCompile(`^REVOKE ` + grantPrivileges + ` ON .+ FROM (\S+)$`)
 
-// listingProof reads SHOW GRANTS rows of one account: show is SHOW
+// listingProof reads the SHOW GRANTS rows of user@host: show is SHOW
 // DATABASES (or ALL) granted on *.* with no revoke row naming it; sel is
-// SELECT (or ALL) granted on *.*. Role grants are no global grant.
-func listingProof(grants []string) (show, sel bool) {
+// SELECT (or ALL) granted on *.*. A row counts only when it parses with
+// privilege tokens alone (globalGrant, revokeRow) and names user@host,
+// quoted with backticks or (ANSI_QUOTES) double quotes. Other GRANT rows
+// (role, column and database grants, other accounts) are ignored; a REVOKE
+// row that does not parse or names another account proves nothing at all.
+func listingProof(grants []string, user, host string) (show, sel bool) {
+	self := func(a string) bool {
+		return a == "`"+user+"`@`"+host+"`" || a == `"`+user+`"@"`+host+`"`
+	}
 	held, revoked := map[string]bool{}, false
 	for _, g := range grants {
 		g = strings.TrimSpace(g)
-		if m := globalGrant.FindStringSubmatch(g); m != nil {
-			for _, p := range strings.Split(m[1], ",") {
-				held[strings.ToUpper(strings.TrimSpace(p))] = true
+		if strings.HasPrefix(g, "REVOKE ") {
+			m := revokeRow.FindStringSubmatch(g)
+			if m == nil || !self(m[2]) {
+				return false, false
 			}
-			continue
-		}
-		if m := revokeRow.FindStringSubmatch(g); m != nil {
 			for _, p := range strings.Split(m[1], ",") {
-				switch strings.ToUpper(strings.TrimSpace(p)) {
+				switch strings.TrimSpace(p) {
 				case "SHOW DATABASES", "ALL", "ALL PRIVILEGES":
 					revoked = true
 				}
+			}
+			continue
+		}
+		if m := globalGrant.FindStringSubmatch(g); m != nil && self(m[2]) {
+			for _, p := range strings.Split(m[1], ",") {
+				held[strings.TrimSpace(p)] = true
 			}
 		}
 	}

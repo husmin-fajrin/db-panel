@@ -390,10 +390,17 @@ func showGrants(ctx context.Context, db *sql.DB) ([]string, error) {
 	return out, nil
 }
 
+// grantPrivileges is the privilege list of a SHOW GRANTS row: privilege
+// tokens only (upper case, digits, _, spaces, commas), as MySQL prints
+// them. It holds no quote, backtick or parenthesis, so it can never run
+// into an account, role or column name that contains " ON *.* TO ".
+const grantPrivileges = `([A-Z0-9_ ,]+)`
+
 // globalGrant matches a GRANT statement on all databases, e.g.
-// "GRANT SELECT, RELOAD ON *.* TO `u`@`h` WITH GRANT OPTION". Role grants and
-// grants on one database or table do not match.
-var globalGrant = regexp.MustCompile("(?s)^GRANT (.+?) ON \\*\\.\\* TO .*?( WITH GRANT OPTION)?$")
+// "GRANT SELECT, RELOAD ON *.* TO `u`@`h` WITH GRANT OPTION": the
+// privileges (1), the account (2) and WITH GRANT OPTION (3). Role grants
+// and grants on one database, table or column do not match.
+var globalGrant = regexp.MustCompile(`^GRANT ` + grantPrivileges + ` ON \*\.\* TO (.+?)( WITH GRANT OPTION)?$`)
 
 // isDynamic reports whether a privilege is a dynamic one (SYSTEM_VARIABLES_ADMIN);
 // static privileges have no underscore (SELECT, LOCK TABLES, SUPER, USAGE).
@@ -412,7 +419,7 @@ func missingGrants(grants []string, account string, req grantSet) []string {
 		if m == nil {
 			continue
 		}
-		withGO := m[2] != ""
+		withGO := m[3] != ""
 		for _, priv := range strings.Split(m[1], ",") {
 			priv = strings.ToUpper(strings.TrimSpace(priv))
 			if priv == "ALL" || priv == "ALL PRIVILEGES" {

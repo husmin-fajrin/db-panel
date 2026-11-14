@@ -73,11 +73,83 @@ func TestListingProof(t *testing.T) {
 		{"partial revoke of everything on one database", []string{
 			"GRANT ALL PRIVILEGES ON *.*" + to, "REVOKE SELECT, INSERT, DROP ON `old2`.* FROM `u`@`localhost`"}, true, true},
 		{"nothing", nil, false, false},
+		// Crafted names (plan evidence, part E): the privilege list is
+		// privilege tokens only, so a name holding " ON *.* TO " proves
+		// nothing.
+		{"crafted user name", []string{
+			"GRANT RELOAD ON *.* TO `p, SHOW DATABASES ON *.* TO x`@`localhost`",
+			"GRANT ALL PRIVILEGES ON `x`.* TO `p, SHOW DATABASES ON *.* TO x`@`localhost`"}, false, false},
+		{"crafted column name", []string{"GRANT USAGE ON *.*" + to,
+			"GRANT SELECT (`q, SHOW DATABASES ON *.* TO z`) ON `x`.`t`" + to}, false, false},
+		{"crafted role name", []string{"GRANT USAGE ON *.*" + to,
+			"GRANT `a``,SHOW DATABASES ON *.* TO b`@`%`" + to}, false, false},
+		{"crafted role name, ANSI_QUOTES", []string{"GRANT USAGE ON *.* TO \"u\"@\"localhost\"",
+			"GRANT \"a`,SHOW DATABASES ON *.* TO b\"@\"%\" TO \"u\"@\"localhost\""}, false, false},
+		{"REVOKE row with a crafted identifier", []string{"GRANT SHOW DATABASES ON *.*" + to,
+			"REVOKE SELECT (`c`) ON `x`.`t` FROM `u`@`localhost`"}, false, false},
+		{"REVOKE row of another account", []string{"GRANT SHOW DATABASES ON *.*" + to,
+			"REVOKE SELECT ON `old1`.* FROM `v`@`localhost`"}, false, false},
+		{"GRANT row of another account is ignored", []string{"GRANT SHOW DATABASES, SELECT ON *.* TO `v`@`localhost`"},
+			false, false},
+		{"another account, then the account's own row", []string{"GRANT SHOW DATABASES ON *.* TO `v`@`localhost`",
+			"GRANT SELECT ON *.*" + to}, false, true},
+		{"ANSI_QUOTES rows", []string{"GRANT SELECT, SHOW DATABASES ON *.* TO \"u\"@\"localhost\""}, true, true},
 	}
 	for _, c := range cases {
-		show, sel := listingProof(c.grants)
+		show, sel := listingProof(c.grants, "u", "localhost")
 		if show != c.show || sel != c.select_ {
 			t.Errorf("%s: listingProof = (show %v, select %v), want (%v, %v)", c.name, show, sel, c.show, c.select_)
+		}
+	}
+}
+
+// TestProofAccount: CURRENT_USER() is used for the proof only when its
+// user and host need no quoting care.
+func TestProofAccount(t *testing.T) {
+	for _, a := range []string{"dbpanel_admin@localhost", "root@localhost", "admin@127.0.0.1", "app-user@%",
+		"u@192.168.1.%", "u@::1", "panel_admin@localhost", "a$b.c@db.lokal"} {
+		if _, _, ok := proofAccount(a); !ok {
+			t.Errorf("%q refused, want accepted", a)
+		}
+	}
+	for _, a := range []string{"@localhost", `a\b@localhost`, "a'b@localhost", "a b@localhost", "a,b@localhost",
+		"a`b@localhost", "p, SHOW DATABASES ON *.* TO x@localhost", "ü@localhost", "u@", "u", "u@local host", `u@"h"`} {
+		if _, _, ok := proofAccount(a); ok {
+			t.Errorf("%q accepted, want refused", a)
+		}
+	}
+	if u, h, _ := proofAccount("app-user@192.168.1.%"); u != "app-user" || h != "192.168.1.%" {
+		t.Errorf("split = %q, %q", u, h)
+	}
+}
+
+// TestListUnsupportedAccountText: the E-1 refusal, character for
+// character.
+func TestListUnsupportedAccountText(t *testing.T) {
+	got := (&errListIncomplete{unsupported: true}).Error()
+	want := "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat " +
+		"karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya " +
+		"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin), lalu ulangi bangun ulang dari panel."
+	if got != want {
+		t.Errorf("text = %q\nwant   %q", got, want)
+	}
+}
+
+// TestMissingGrantsCraftedRow: a name holding " ON *.* TO " no longer
+// fakes a global privilege for the grant check.
+func TestMissingGrantsCraftedRow(t *testing.T) {
+	req := grantSet{static: []string{"SELECT", "RELOAD"}}
+	for name, rows := range map[string][]string{
+		"user name": {"GRANT USAGE ON *.* TO `p, SELECT, RELOAD ON *.* TO x`@`localhost` WITH GRANT OPTION",
+			"GRANT ALL PRIVILEGES ON `x`.* TO `p, SELECT, RELOAD ON *.* TO x`@`localhost`"},
+		"role name": {"GRANT USAGE ON *.* TO `u`@`localhost` WITH GRANT OPTION",
+			"GRANT `a``,SELECT, RELOAD ON *.* TO b`@`%` TO `u`@`localhost`"},
+		"column name": {"GRANT USAGE ON *.* TO `u`@`localhost` WITH GRANT OPTION",
+			"GRANT SELECT (`q, SELECT, RELOAD ON *.* TO z`) ON `x`.`t` TO `u`@`localhost`"},
+	} {
+		got := missingGrants(rows, "u@localhost", req)
+		if len(got) == 0 || !strings.Contains(got[0], "SELECT, RELOAD") {
+			t.Errorf("%s: missingGrants = %q, want SELECT and RELOAD missing", name, got)
 		}
 	}
 }

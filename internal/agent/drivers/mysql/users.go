@@ -552,7 +552,7 @@ func dumpGrantsHere(ctx context.Context, h Host) (grants, warning string, err er
 func grantable(grants []string, priv string) bool {
 	for _, g := range grants {
 		m := globalGrant.FindStringSubmatch(strings.TrimSpace(g))
-		if m == nil || m[2] == "" {
+		if m == nil || m[3] == "" {
 			continue
 		}
 		for _, p := range strings.Split(m[1], ",") {

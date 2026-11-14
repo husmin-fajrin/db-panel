@@ -135,3 +135,61 @@ func TestRebuildRoleOnlyAccountAtSettle(t *testing.T) {
 		t.Errorf("role pin after the advised GRANT = %q, want replica", role)
 	}
 }
+
+// listUnsupported is the E-1 refusal for an account name the proof does not
+// handle.
+const listUnsupported = "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai " +
+	"agent memuat karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang " +
+	"namanya hanya huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin), lalu ulangi bangun " +
+	"ulang dari panel."
+
+// TestRebuildCraftedAccountNameCannotSettle: the re-review's forgery. The
+// database-scoped account of TestRebuildScopedAccountCannotSettle is named
+// so that its own SHOW GRANTS rows hold " SHOW DATABASES ON *.* TO ": the
+// dump is refused with the unsupported-name text, nothing is loaded, and
+// the server stays quarantined.
+func TestRebuildCraftedAccountNameCannotSettle(t *testing.T) {
+	r := newSettleRig(t, "rs_lama")
+	const acct = "'p, SHOW DATABASES ON *.* TO x'@localhost"
+	r.onTarget(t, "CREATE USER "+acct,
+		"GRANT RELOAD, SUPER, PROCESS, REPLICATION CLIENT ON *.* TO "+acct,
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN ON *.* TO "+acct,
+		"GRANT ALL ON kecil.* TO "+acct, "GRANT SELECT ON performance_schema.* TO "+acct)
+	r.useAccount("p, SHOW DATABASES ON *.* TO x")
+
+	d := r.snap.run(t, "mysql.dumpFrom", dumpParams(r.master, "kecil"))
+	if d.OK || d.Error != listUnsupported {
+		t.Fatalf("dumpFrom{kecil} with a crafted account name = %+v\nwant the error %q", d, listUnsupported)
+	}
+	if r.targetHas(t, "kecil") {
+		t.Error("the refused dump loaded kecil")
+	}
+	r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil"))
+	r.assertStillQuarantined(t)
+}
+
+// TestRebuildCraftedRoleNameCannotSettle: an ordinary database-scoped
+// account that holds a role whose name holds " SHOW DATABASES ON *.* TO ":
+// the role row proves nothing, and the dump is refused with the listing
+// text.
+func TestRebuildCraftedRoleNameCannotSettle(t *testing.T) {
+	r := newSettleRig(t, "rs_lama")
+	const role = "'a`,SHOW DATABASES ON *.* TO b'"
+	r.onTarget(t, "CREATE USER rs_scoped@localhost",
+		"GRANT RELOAD, SUPER, PROCESS, REPLICATION CLIENT ON *.* TO rs_scoped@localhost",
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN ON *.* TO rs_scoped@localhost",
+		"GRANT ALL ON kecil.* TO rs_scoped@localhost", "GRANT SELECT ON performance_schema.* TO rs_scoped@localhost",
+		"CREATE ROLE "+role, "GRANT "+role+" TO rs_scoped@localhost")
+	r.useAccount("rs_scoped")
+
+	want := listIncomplete("'rs_scoped'@'localhost'")
+	d := r.snap.run(t, "mysql.dumpFrom", dumpParams(r.master, "kecil"))
+	if d.OK || d.Error != want {
+		t.Fatalf("dumpFrom{kecil} with a crafted role = %+v\nwant the error %q", d, want)
+	}
+	if r.targetHas(t, "kecil") {
+		t.Error("the refused dump loaded kecil")
+	}
+	r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil"))
+	r.assertStillQuarantined(t)
+}
