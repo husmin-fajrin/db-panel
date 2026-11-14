@@ -363,3 +363,76 @@ func TestListingRefusalReachesJobUnchanged(t *testing.T) {
 		t.Fatalf("replica last error = %q, %v", rep.LastError, err)
 	}
 }
+
+// TestSettleSaveFails (H-2, N-G2 a): when the flag cannot be saved, the
+// connect step fails before the old-master marker is cleared, so a cancel
+// never puts a settled agent's server back to quarantined without its
+// record; a Retry sets both.
+func TestSettleSaveFails(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	e.r.settleSave = func(*jobRun) error { return errors.New("disk penuh") }
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	if jobStateOf(t, e, id).QuarantineEnded {
+		t.Fatal("flag stored although its save failed")
+	}
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); err != nil {
+		t.Fatalf("marker cleared although the flag was not saved: %v", err)
+	}
+	e.r.settleSave = nil
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	e.waitIdle(id)
+	if !jobStateOf(t, e, id).QuarantineEnded {
+		t.Fatal("flag not set by the retry")
+	}
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("marker after the retry: %v", err)
+	}
+}
+
+// TestSettleClearFails (H-2, N-G2 b): when the marker cannot be cleared
+// after the flag was saved, the job fails, "Batalkan percobaan bangun
+// ulang" is refused (the agent ended its quarantine), and a Retry clears
+// the marker although the flag is already set.
+func TestSettleClearFails(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	e.r.settleClear = func(int64) error { return errors.New("store sibuk") }
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	if !jobStateOf(t, e, id).QuarantineEnded {
+		t.Fatal("flag not stored")
+	}
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); err != nil {
+		t.Fatalf("marker gone although its clear failed: %v", err)
+	}
+	const refusal = "server ini bukan master lama dengan percobaan bangun ulang yang gagal"
+	if err := e.r.CancelRebuildAttempt(context.Background(), g.m.id); err == nil || err.Error() != refusal {
+		t.Fatalf("CancelRebuildAttempt = %v, want %q", err, refusal)
+	}
+	if srv := mustServer(t, e, g.m.id); srv.Role != store.RoleReplica {
+		t.Fatalf("role after the refused cancel = %s", srv.Role)
+	}
+	e.r.settleClear = nil
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	e.waitIdle(id)
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("marker after the retry: %v", err)
+	}
+}

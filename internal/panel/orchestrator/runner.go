@@ -169,6 +169,11 @@ type Runner struct {
 	// afterReopen, when set (tests), runs in Retry between ReopenJob and
 	// launch.
 	afterReopen func(jobID string)
+	// settleSave and settleClear, when set (tests), replace the save of
+	// QuarantineEnded and the clear of the old-master marker in the
+	// connect step of a rebuild.
+	settleSave  func(*jobRun) error
+	settleClear func(serverID int64) error
 
 	base context.Context // parent of every job context; ended by Close
 	stop context.CancelFunc
@@ -1666,13 +1671,20 @@ func (jr *jobRun) logLine(level, msg string) {
 
 // save stores the job's state in its ParamsJSON.
 func (jr *jobRun) save() {
-	b, err := json.Marshal(jr.st)
-	if err == nil {
-		err = jr.r.d.Store.SetJobParams(jr.job.ID, string(b))
-	}
-	if err != nil {
+	if err := jr.saveErr(); err != nil {
 		jr.r.log.Warn("save job params", "job", jr.job.ID, "err", err)
 	}
+}
+
+// saveErr is save that returns the store's error instead of logging it,
+// for the one place that must not go on without the state stored (the
+// settle of a rebuild, H-2).
+func (jr *jobRun) saveErr() error {
+	b, err := json.Marshal(jr.st)
+	if err != nil {
+		return err
+	}
+	return jr.r.d.Store.SetJobParams(jr.job.ID, string(b))
 }
 
 // call runs an ordinary agent command for the current step.

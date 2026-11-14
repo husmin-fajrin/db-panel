@@ -972,13 +972,32 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	// The old master's agent ends its quarantine in this command (G-1):
 	// from its OK answer on, the server is no longer the topology's old
 	// master, whatever the next steps do.
-	if jr.st.RebuildOldMaster && !jr.st.QuarantineEnded {
-		jr.st.QuarantineEnded = true
-		jr.save()
-		if err := jr.r.d.Store.ClearOldMaster(jr.target()); err != nil {
+	// The flag is stored before the marker is cleared, so a cancel never
+	// reads "not ended" with the marker gone; the marker is cleared on
+	// every pass (a Retry after a failed clear clears it, H-2).
+	if jr.st.RebuildOldMaster {
+		first := !jr.st.QuarantineEnded
+		if first {
+			jr.st.QuarantineEnded = true
+			save := (*jobRun).saveErr
+			if jr.r.settleSave != nil {
+				save = jr.r.settleSave
+			}
+			if err := save(jr); err != nil {
+				jr.st.QuarantineEnded = false
+				return outcome{}, fmt.Errorf("simpan keadaan pekerjaan: %w", err)
+			}
+		}
+		clear := jr.r.d.Store.ClearOldMaster
+		if jr.r.settleClear != nil {
+			clear = jr.r.settleClear
+		}
+		if err := clear(jr.target()); err != nil {
 			return outcome{}, err
 		}
-		jr.logf("info", "Karantina master lama berakhir: agent kini menyimpan peran replika.")
+		if first {
+			jr.logf("info", "Karantina master lama berakhir: agent kini menyimpan peran replika.")
+		}
 	}
 	if !jr.st.TLSVerify {
 		jr.logf("warn", "%s. Jalankan Perketat sambungan replikasi di halaman master.", msgUnverified)

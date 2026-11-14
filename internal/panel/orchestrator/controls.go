@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -159,6 +160,13 @@ func (r *Runner) CancelRebuildAttempt(ctx context.Context, serverID int64) error
 	if err := r.refuseBusy(serverID, "server ini"); err != nil {
 		return err
 	}
+	// Its agent ended the quarantine in the latest rebuild (the marker
+	// may be left when its clear failed, H-2): not an old master any more.
+	if ended, err := r.latestRebuildEnded(serverID); err != nil {
+		return err
+	} else if ended {
+		return errNotFailedRebuild
+	}
 	if err := r.d.Store.ReturnToQuarantine(serverID); errors.Is(err, store.ErrNotFailedRebuild) {
 		return errNotFailedRebuild
 	} else if err != nil {
@@ -169,6 +177,27 @@ func (r *Runner) CancelRebuildAttempt(ctx context.Context, serverID int64) error
 	// The failed rebuild job leaves no open job_failed behind.
 	r.jobEnded(serverID, "")
 	return nil
+}
+
+// latestRebuildEnded reports whether the newest create_replica job of
+// serverID rebuilt an old master whose agent ended the quarantine
+// (QuarantineEnded). A job whose params cannot be read counts as not ended.
+func (r *Runner) latestRebuildEnded(serverID int64) (bool, error) {
+	jobs, err := r.d.Store.ListJobsForServer(serverID, 0)
+	if err != nil {
+		return false, err
+	}
+	for _, j := range jobs {
+		if j.Kind != KindCreateReplica {
+			continue
+		}
+		var st jobState
+		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+			return false, nil
+		}
+		return st.RebuildOldMaster && st.QuarantineEnded, nil
+	}
+	return false, nil
 }
 
 func (r *Runner) detachable(serverID int64) error {
