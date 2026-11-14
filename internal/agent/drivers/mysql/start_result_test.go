@@ -442,6 +442,55 @@ func TestStartResultJudgedWhileUnreadableTriesTheLoad(t *testing.T) {
 	}
 }
 
+// TestStartJudgedAfterFailedLoadPicksUpFile (T12-7): a load of the stored
+// start result failed (an untrusted file); once the file is readable, the
+// next judged start loads it and builds on it: the worse stored start
+// stays the worst and keeps its kind beside the new one.
+func TestStartJudgedAfterFailedLoadPicksUpFile(t *testing.T) {
+	dir := pinDir(t, "quarantined", guardCandidateKey)
+	r := newPinRig(t, nil, dir)
+	var buf bytes.Buffer
+	r.d.Logger = logDriver(&buf)
+	path := filepath.Join(t.TempDir(), "start-result")
+	r.d.StartResultPath = path
+	late := time.Now().Add(-time.Hour).UTC()
+	b, _ := json.Marshal(mysql.StartResultRecord{Result: "late", Decided: late,
+		Kinds: map[string]mysql.StartKindRecord{"late": {Decided: late}}})
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil { // group/other-writable: not trusted
+		t.Fatal(err)
+	}
+	if s := r.d.StartResult(time.Now()); s != nil {
+		t.Fatalf("StartResult with an untrusted file = %+v, want nil", s)
+	}
+	if !strings.Contains(buf.String(), "stored start result cannot be read") {
+		t.Fatalf("the failed load was not warned:\n%s", buf.String())
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bypassed := time.Now().UTC()
+	if err := r.d.RecordStartResult(mysql.StartResultRecord{Result: "bypassed", Decided: bypassed}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := readStartResultFile(t, path)
+	if !ok || got.Result != "late" || !got.Decided.Equal(late) {
+		t.Errorf("file = %+v (exists %v), want the stored late start kept as the worst", got, ok)
+	}
+	if _, ok := got.Kinds["late"]; !ok {
+		t.Errorf("kinds = %+v, want the stored late kind kept", got.Kinds)
+	}
+	if k, ok := got.Kinds["bypassed"]; !ok || !k.Decided.Equal(bypassed) {
+		t.Errorf("kinds = %+v, want the judged bypassed start", got.Kinds)
+	}
+	s := r.d.StartResult(time.Now())
+	if s == nil || s.Result != "late" || len(s.Kinds) != 2 {
+		t.Errorf("StartResult = %+v, want late with two kinds", s)
+	}
+}
+
 // The dispatch path refuses an untrusted pin before it gets here, so the
 // Driver's step is called directly: it must not read "unreadable" as
 // "another role".
