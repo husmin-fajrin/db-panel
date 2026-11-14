@@ -1812,12 +1812,14 @@ dari sumber <host:port> (<nama database, paling banyak 10>); karantina tidak
 diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu
 menolak karena database itu tidak ada di master baru, lihat README, bagian
 "Database yang tidak ada di master baru"." Pin tetap `quarantined` dan persetujuan
-tidak dihapus oleh langkah itu. Bangun ulang biasa dari panel tidak
-berakhir begini: pekerjaan itu menghapus semua database yang tertinggal di
-server (setelah daftarnya Anda setujui) sebelum memuat dump. Bila teks itu
-muncul, jalankan lagi **Bangun ulang sebagai replika** dari panel; database
-yang disebut ikut dihapus setelah daftarnya Anda setujui, jadi salin dulu
-isinya sendiri bila masih diperlukan. Bila daftar database
+tidak dihapus oleh langkah itu. Teks itu muncul bila di server ini ada
+database yang tidak berasal dari salinan, misalnya dibuat aplikasi yang
+belum dialihkan selama pemuatan. Database yang juga ada di master baru ikut
+dihapus bila Anda memulai lagi **Bangun ulang sebagai replika** (setelah
+daftarnya Anda setujui; lihat langkah memulai bangun ulang baru di bawah).
+Database yang tidak ada di master baru tidak bisa dihapus lewat panel:
+bangun ulang berikutnya berhenti di pemeriksaan awal. Ikuti "Database yang
+tidak ada di master baru" di bawah. Bila daftar database
 server itu tidak bisa dibaca saat itu, langkahnya gagal dengan "sumber
 replikasi sudah diatur, tetapi daftar database di server ini tidak bisa
 dibaca; karantina tidak diakhiri: <sebab>"; tekan **Ulangi dari tahap
@@ -1868,6 +1870,78 @@ Pasang ulang agent di halaman server itu, jalankan perintahnya, lalu coba
 lagi." Panel versi lama dengan agent baru menampilkan penolakan agent
 sebagai teks; teks itu memuat perintah `sudo dbpanel agent approve <kode>`
 lengkap.
+
+#### Database yang tidak ada di master baru
+
+Bagian ini untuk master lama yang bangun ulangnya berhenti karena database
+yang tidak ada di master baru. Itu terjadi bila:
+
+- langkah pengaturan replikasi gagal dengan "server ini masih punya
+  database yang tidak disalin dari sumber …" (lihat di atas), atau
+- bangun ulang yang dimulai lagi gagal di pemeriksaan awal dengan "server
+  ini masih berisi database lain (<nama database>); versi ini hanya
+  mendukung server replika khusus".
+
+Penyebabnya salah satu dari dua hal: database itu ada di master lama tetapi
+tidak pernah sampai ke master baru, atau database itu dibuat di master
+lama selama pemuatan salinan (aplikasi yang belum dialihkan bisa menulis
+selama itu). Bangun ulang menghapus hanya database yang juga ada di master
+baru, jadi database ini tidak ikut dihapus dan tidak ikut disalin. Isinya
+tidak ada di tempat lain: tidak di master baru, tidak di replika lain.
+Simpan dulu, baru hapus.
+
+Kerjakan di master lama itu, sebagai root (misalnya setelah `sudo -i`), satu
+database sekaligus. Ganti `<nama>` dengan nama database dari teks tadi.
+
+1. Cadangkan database itu ke berkas di `/root` dengan `mysqldump`:
+
+   ```sh
+   sudo mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF --databases <nama> > /root/<nama>-cadangan.sql
+   ls -l /root/<nama>-cadangan.sql
+   grep -c 'CREATE DATABASE' /root/<nama>-cadangan.sql
+   ```
+
+   Pastikan ukuran berkas di `ls -l` bukan 0 dan `grep` menulis `1`. Bila
+   root MySQL memakai kata sandi, tambahkan `-u root -p` setelah
+   `mysqldump` (juga setelah `mysql` di langkah berikut). Simpan berkas itu
+   di tempat yang aman sebelum lanjut.
+2. Baru sesudah itu hapus database itu sebagai root MySQL, dengan satu
+   perintah:
+
+   ```sh
+   sudo mysql -e 'SET GLOBAL super_read_only=OFF; SET SESSION sql_log_bin=OFF; DROP DATABASE `<nama>`; SET GLOBAL super_read_only=ON;'
+   sudo mysql -e 'SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;'
+   ```
+
+   Perintah pertama mematikan `super_read_only` sebentar, menghapus
+   database itu tanpa mencatatnya di binlog (`sql_log_bin=OFF`, supaya
+   replika ini tidak membawa transaksi yang tidak ada di master baru), lalu
+   menyalakan `super_read_only` lagi. Selama itu `read_only` tetap ON, jadi
+   akun aplikasi biasa tetap tidak bisa menulis; hanya root MySQL dan akun
+   yang punya hak `SUPER` atau `CONNECTION_ADMIN` yang bisa. Perintah kedua
+   harus menjawab `1 1`. Agent tidak memasang lagi `super_read_only` selama
+   MySQL tetap menyala, jadi bila perintah pertama berhenti dengan galat
+   (misalnya "Can't drop database", nama salah), bagian terakhirnya tidak
+   dijalankan: jalankan sendiri
+
+   ```sh
+   sudo mysql -e 'SET GLOBAL super_read_only=ON;'
+   ```
+
+   lalu periksa lagi dengan perintah kedua. Perintah-perintah ini memakai
+   `SET GLOBAL`, bukan `SET PERSIST`: baca-saja yang tersimpan untuk
+   menyala ulang (`read_only` dan `super_read_only` ON) tidak berubah.
+   Jangan memakai `SET PERSIST` di sini.
+3. Lanjutkan bangun ulangnya di panel:
+   - Bila tadi langkah pengaturan replikasi yang gagal, tekan **Ulangi dari
+     tahap ini** pada pekerjaan itu. Itu cukup selama agent tidak dimulai
+     ulang sejak salinan data dimuat. Bila yang muncul teks "… agent tidak
+     punya catatan salinan data dari bangun ulang ini …", mulai lagi
+     **Bangun ulang sebagai replika** (lihat langkah memulai bangun ulang
+     baru di "Persetujuan di server untuk bangun ulang").
+   - Bila tadi bangun ulang baru yang berhenti di pemeriksaan awal, tekan
+     **Ulangi dari tahap ini** pada pekerjaan itu, atau mulai lagi **Bangun
+     ulang sebagai replika** dari halaman server itu.
 
 #### Memakai lagi server yang dihapus saat masih dikarantina
 
