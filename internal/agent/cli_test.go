@@ -814,6 +814,37 @@ func TestSetRoleMasterReleasesFirst(t *testing.T) {
 	}
 }
 
+// TestSetRoleMasterHalfDoneRelease: when the init_file line was removed
+// but the lock file could not be, set-role says exactly that (C16), the
+// role stays, and running it again finishes the release.
+func TestSetRoleMasterHalfDoneRelease(t *testing.T) {
+	r := newStartLockRig(t)
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { return r.inst.Host(), nil })
+	// A lock "file" that cannot be removed: a directory with an entry.
+	if err := os.Remove(r.lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(r.lock, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := runCLI("set-role", "master", "--ya", "--dir", r.dir)
+	prefix := "Baris init_file sudah dihapus dari konfigurasi MySQL, tetapi berkas kunci start tidak bisa dihapus ("
+	suffix := "); peran tidak diubah. Jalankan perintah ini lagi.\n"
+	if code != 1 || !strings.HasPrefix(errOut, prefix) || !strings.HasSuffix(errOut, suffix) || strings.Count(errOut, "\n") != 1 ||
+		!strings.Contains(errOut, r.lock) {
+		t.Errorf("set-role master, file not removable = %d, stdout %q, stderr %q; want C16", code, out, errOut)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.dir, mysql.RoleFile)); strings.TrimSpace(string(b)) != "quarantined" {
+		t.Errorf("role after the half-done release = %q", b)
+	}
+	if err := os.RemoveAll(r.lock); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := runCLI("set-role", "master", "--ya", "--dir", r.dir); code != 0 {
+		t.Errorf("set-role master again = %d, %q", code, errOut)
+	}
+}
+
 // TestSetRoleMasterRefusedWhileConfigLocked: while another process holds
 // the managed config's lock (the agent mid-write), set-role master does
 // not release around it: it waits, then refuses and leaves the role and

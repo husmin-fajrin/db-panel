@@ -98,14 +98,29 @@ func releaseStartLock(ctx context.Context, h Host) (found bool, err error) {
 		if err == nil {
 			found = true
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return found, fmt.Errorf("berkas kunci start %s tidak bisa dihapus: %w", p, err)
+			return found, &StartLockFileError{Path: p, Err: err}
 		}
 	}
 	return found, nil
 }
 
+// StartLockFileError is a release that got as far as the managed config
+// (no agent init_file line is left in it) but could not remove the lock
+// file at Path: half done.
+type StartLockFileError struct {
+	Path string
+	Err  error
+}
+
+func (e *StartLockFileError) Error() string {
+	return fmt.Sprintf("berkas kunci start %s tidak bisa dihapus: %v", e.Path, e.Err)
+}
+
+func (e *StartLockFileError) Unwrap() error { return e.Err }
+
 // ReleaseStartLock is releaseStartLock, for "dbpanel agent set-role
-// master".
+// master". A *StartLockFileError means the line is gone but the file is
+// not.
 func ReleaseStartLock(ctx context.Context, h Host) (found bool, err error) {
 	return releaseStartLock(ctx, h)
 }

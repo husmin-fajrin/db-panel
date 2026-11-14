@@ -617,6 +617,11 @@ func cliReleaseStartLock(dir string, stdout, stderr io.Writer) (ok, found bool) 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	found, err = mysql.ReleaseStartLock(ctx, h)
+	if fe := (*mysql.StartLockFileError)(nil); errors.As(err, &fe) {
+		fmt.Fprintf(stderr, "Baris init_file sudah dihapus dari konfigurasi MySQL, tetapi berkas kunci start tidak bisa dihapus (%v); "+
+			"peran tidak diubah. Jalankan perintah ini lagi.\n", fe.Err)
+		return false, found
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "kunci start tidak bisa dilepas (%v); peran tidak diubah\n", err)
 		return false, found
