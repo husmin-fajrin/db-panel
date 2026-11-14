@@ -2033,10 +2033,14 @@ dengan nama database dari teks tadi.
 4. Cadangkan database itu ke berkas di `/root`:
 
    ```sh
-   mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF --databases "<nama>" > "/root/<nama>-cadangan.sql"
-   ls -l "/root/<nama>-cadangan.sql"
-   grep -c 'CREATE DATABASE' "/root/<nama>-cadangan.sql"
+   mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF --databases '<nama>' > '/root/<nama>-cadangan.sql'
+   ls -l '/root/<nama>-cadangan.sql'
+   grep -c 'CREATE DATABASE' '/root/<nama>-cadangan.sql'
    ```
+
+   Nama database ditulis di dalam tanda kutip tunggal, di sini dan di
+   langkah 5: nama boleh memuat `$`, dan di dalam tanda kutip ganda shell
+   mengubahnya.
 
    Lanjut hanya bila berkas itu ada, ukurannya di `ls -l` bukan 0, dan
    `grep` menulis `1`. Bila tidak (misalnya `mysqldump` menulis "Unknown
