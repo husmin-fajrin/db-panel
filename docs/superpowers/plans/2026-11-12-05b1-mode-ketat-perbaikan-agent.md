@@ -370,6 +370,27 @@ Kesimpulan tambahan untuk aturan:
 - `skip-show-database` tidak mengubah daftar `information_schema.schemata`
   untuk akun `SELECT` global: aturan tetap.
 
+**Memberi hak `SHOW DATABASES` di server yang dikarantina (bagian E,
+temuan E-6):** instans sementara dengan binary log dan GTID menyala,
+`SET PERSIST read_only = ON`, `SET PERSIST super_read_only = ON`, akun
+`gu2@localhost` dengan `SELECT ON x.*`. Keadaan dibaca sebagai root:
+`@@read_only`, `@@super_read_only`, `@@gtid_executed`, dan
+`performance_schema.persisted_variables` untuk kedua variabel.
+
+| Percobaan | Hasil |
+|---|---|
+| sebelum | `1 1`, gtid `…:1-2`, persisted `read_only ON`, `super_read_only ON` |
+| (i) root: `GRANT SHOW DATABASES ON *.* TO 'gu'@'localhost'` | `ERROR 1290 (HY000) at line 1: The MySQL server is running with the --super-read-only option so it cannot execute this statement`, keluar 1 |
+| (ii) satu `mysql -S <soket> -uroot` dengan heredoc `SET GLOBAL super_read_only=OFF; SET SESSION sql_log_bin=OFF; GRANT SHOW DATABASES ON *.* TO 'gu2'@'localhost'; SET GLOBAL super_read_only=ON;` | keluar 0; di tengah (sesudah `super_read_only=OFF`) `@@read_only`=1, `@@super_read_only`=0; sesudahnya `1 1`, gtid tetap `…:1-2`, persisted tetap `ON`/`ON` |
+| sambungan baru `gu2` sesudah (ii) | `SHOW GRANTS` memuat `GRANT SHOW DATABASES ON *.*`; daftar 6 database (semua) |
+| sambungan `gu` yang sudah terbuka sebelum GRANT yang sama | tetap 3 database sesudah GRANT: hak global berlaku untuk sambungan baru saja |
+| (iii) heredoc yang sama dengan akun yang tidak ada (`'nobody_here'@'localhost'`) | `ERROR 1410 (42000) at line 1: You are not allowed to create a user with GRANT`, keluar 1; klien berhenti di galat itu, jadi `SET GLOBAL super_read_only=ON` tidak dijalankan: `@@read_only`=1, `@@super_read_only`=0, gtid tetap, persisted tetap `ON`/`ON` (berlaku lagi saat MySQL restart). Penjaga karantina tidak memasangnya kembali tanpa restart MySQL; operator harus menjalankan `SET GLOBAL super_read_only=ON` sendiri |
+
+Akibat untuk agent: pemeriksaan daftar database membuka pool baru di
+setiap perintah (`openAdmin` → `Host.Open` → `OpenDB`), jadi
+"Ulangi dari tahap ini" sesudah GRANT memakai sambungan baru yang sudah
+melihat hak itu, tanpa restart agent.
+
 ### Bukti baca-saja saat MySQL dinyalakan tanpa agent (temuan tinjauan ulang C-1)
 
 **Diukur pada gelombang perbaikan akhir, bagian D:** mysqld
