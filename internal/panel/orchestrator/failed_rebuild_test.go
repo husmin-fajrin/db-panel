@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -297,4 +298,37 @@ func TestLeftoverAfterCopyStarted(t *testing.T) {
 		e.waitJob(id, store.JobSucceeded)
 		e.waitIdle(id)
 	})
+}
+
+// TestTLSSkipsFailedRebuild (G-5): an old master left by a failed rebuild
+// (its agent still quarantined) is treated like a quarantined one by the
+// certificate jobs: no renewal, StartMySQLTLS and a retry of a certificate
+// job refused, Perketat leaves it out. No certificate job supersedes the
+// failed rebuild.
+func TestTLSSkipsFailedRebuild(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	ctx := context.Background()
+	rebuildID := failedRebuild(t, g, "mysql.configureReplication")
+	if err := e.st.SetServerTLS(store.ServerTLS{ServerID: g.m.id, CertSerial: "01", NotAfter: time.Now().Add(10 * 24 * time.Hour),
+		InstalledAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	mark := g.m.mark()
+	if ids := e.r.RenewMySQLTLS(ctx); len(ids) != 0 {
+		t.Fatalf("renewal started %v for a failed rebuild's old master", ids)
+	}
+	const want = "Server ini dikarantina (quarantined); sertifikat MySQL-nya dipasang lagi saat dibangun ulang sebagai replika."
+	if _, err := e.r.StartMySQLTLS(ctx, g.m.id); err == nil || err.Error() != want {
+		t.Fatalf("StartMySQLTLS = %v, want %q", err, want)
+	}
+	if err := e.r.refuseQuarantinedTLS(store.Job{Kind: KindMySQLTLS, ServerID: g.m.id}); err == nil || err.Error() != want {
+		t.Fatalf("refuseQuarantinedTLS = %v, want %q", err, want)
+	}
+	if cmds := g.m.cmds(mark); len(cmds) != 0 {
+		t.Fatalf("sent %v to the old master", cmds)
+	}
+	if reason := e.r.Superseded(rebuildID); reason != "" {
+		t.Fatalf("the failed rebuild is superseded: %s", reason)
+	}
 }

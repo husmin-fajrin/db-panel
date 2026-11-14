@@ -62,7 +62,7 @@ func (r *Runner) StartMySQLTLS(ctx context.Context, serverID int64) (string, err
 	if err != nil {
 		return "", err
 	}
-	if srv.Role == store.RoleQuarantined {
+	if r.quarantinedForTLS(srv) {
 		return "", errMySQLTLSQuarantined
 	}
 	if srv.Address == "" {
@@ -105,7 +105,7 @@ func (r *Runner) RenewMySQLTLS(ctx context.Context) []string {
 		if ctx.Err() != nil {
 			break
 		}
-		if srv, err := r.d.Store.GetServer(rec.ServerID); err == nil && srv.Role == store.RoleQuarantined {
+		if srv, err := r.d.Store.GetServer(rec.ServerID); err == nil && r.quarantinedForTLS(srv) {
 			r.log.Info("mysql certificate renewal skipped: quarantined", "server_id", rec.ServerID, "not_after", rec.NotAfter)
 			continue
 		}
@@ -526,7 +526,7 @@ func (r *Runner) StartTightenTLS(ctx context.Context, masterServerID int64) (str
 		}
 		// A quarantined old master (its rebuild failed) gets no
 		// certificate: its agent needs root's approval for it.
-		if rs.Role == store.RoleQuarantined {
+		if r.quarantinedForTLS(rs) {
 			r.log.Info("tighten tls: quarantined server left out", "server_id", rs.ID)
 			continue
 		}
@@ -794,8 +794,21 @@ func (r *Runner) refuseQuarantinedTLS(j store.Job) error {
 	if err != nil {
 		return err
 	}
-	if srv.Role == store.RoleQuarantined {
+	if r.quarantinedForTLS(srv) {
 		return errMySQLTLSQuarantined
 	}
 	return nil
+}
+
+// quarantinedForTLS reports whether srv's agent is quarantined for the
+// certificate jobs: a quarantined old master, or one left by a failed
+// rebuild (AwaitingRebuild, G-5). A store error counts as quarantined:
+// no certificate job is started on a guess.
+func (r *Runner) quarantinedForTLS(srv store.Server) bool {
+	awaiting, err := AwaitingRebuild(r.d.Store, srv)
+	if err != nil {
+		r.log.Warn("old master check for a certificate job", "server_id", srv.ID, "err", err)
+		return true
+	}
+	return awaiting
 }
