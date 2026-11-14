@@ -71,6 +71,64 @@ type ApprovalSeen struct {
 	Result proto.RebuildApprovalResult
 }
 
+// AwaitingRebuild reports whether srv is an old master waiting for its
+// rebuild: quarantined, or left by a failed rebuild (role replica, its
+// replica row failed, still the old master of a topology), which
+// StartCreateReplica takes for a new rebuild as it takes a quarantined
+// one. An ordinary failed replica, and an old master whose rebuild runs or
+// succeeded, are not (D-9). The web layer offers the rebuild by it; the
+// orchestrator refuses Resync ulang and Lepas replika by it (D-10).
+func AwaitingRebuild(st *store.Store, srv store.Server) (bool, error) {
+	switch srv.Role {
+	case store.RoleQuarantined:
+		return true, nil
+	case store.RoleReplica:
+	default:
+		return false, nil
+	}
+	rep, err := st.GetReplicaByServer(srv.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil || rep.State != store.ReplicaFailed {
+		return false, err
+	}
+	if _, err := st.GetTopologyByOldMaster(srv.ID); errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ErrAwaitingRebuild refuses Resync ulang and Lepas replika of a replica
+// that is an old master left by a failed rebuild (AwaitingRebuild): only a
+// new rebuild ends its quarantine, with the rebuild's checks.
+var ErrAwaitingRebuild = errors.New("server ini master lama yang masih dikarantina; pakai Bangun ulang sebagai replika")
+
+// refuseAwaitingRebuild is ErrAwaitingRebuild for a replica serverID left
+// by a failed rebuild of an old master; nil otherwise.
+func (r *Runner) refuseAwaitingRebuild(serverID int64) error {
+	srv, err := r.d.Store.GetServer(serverID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if srv.Role != store.RoleReplica {
+		return nil
+	}
+	awaiting, err := AwaitingRebuild(r.d.Store, srv)
+	if err != nil {
+		return err
+	}
+	if awaiting {
+		return ErrAwaitingRebuild
+	}
+	return nil
+}
+
 // requireRebuildApproval is nil only when serverID's agent needs no
 // approval or holds one; without one it is a rebuildApprovalError naming
 // the command to run there with the agent's code. The answer it decided

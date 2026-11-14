@@ -380,33 +380,10 @@ type oldMasterBox struct {
 	RebuildFailed bool
 }
 
-// oldMasterAwaitingRebuild reports whether srv is an old master waiting
-// for its rebuild: quarantined, or left by a failed rebuild (role
-// replica, its replica row failed, still the old master of a topology),
-// which StartCreateReplica takes for a new rebuild as it takes a
-// quarantined one. An ordinary failed replica, and an old master whose
-// rebuild runs or succeeded, are not (D-9).
+// oldMasterAwaitingRebuild is orchestrator.AwaitingRebuild on the panel's
+// store: the one definition of an old master waiting for its rebuild.
 func (a *app) oldMasterAwaitingRebuild(srv store.Server) (bool, error) {
-	switch srv.Role {
-	case store.RoleQuarantined:
-		return true, nil
-	case store.RoleReplica:
-	default:
-		return false, nil
-	}
-	rep, err := a.Store.GetReplicaByServer(srv.ID)
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil || rep.State != store.ReplicaFailed {
-		return false, err
-	}
-	if _, err := a.Store.GetTopologyByOldMaster(srv.ID); errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
-	return true, nil
+	return orchestrator.AwaitingRebuild(a.Store, srv)
 }
 
 // rebuildURL is the rebuild form of srv, an old master awaiting its

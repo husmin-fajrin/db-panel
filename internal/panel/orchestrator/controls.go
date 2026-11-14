@@ -107,7 +107,8 @@ func (r *Runner) directCall(ctx context.Context, serverID int64, cmd string, par
 // replica registered), then its agent releases the pinned replica role
 // (best effort). Nothing is sent to the master, which may be offline; the
 // replication account there stays (it is shared by the topology's
-// replicas). super_read_only stays on.
+// replicas). super_read_only stays on. An old master left by a failed
+// rebuild is refused (ErrAwaitingRebuild) before anything is sent.
 func (r *Runner) DetachReplica(ctx context.Context, serverID int64, stop bool) error {
 	if err := r.detachable(serverID); err != nil {
 		return err
@@ -125,6 +126,9 @@ func (r *Runner) DetachReplica(ctx context.Context, serverID int64, stop bool) e
 	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
+	if err := r.refuseAwaitingRebuild(serverID); err != nil {
+		return err
+	}
 	if err := r.refuseBusy(serverID, "server ini"); err != nil {
 		return err
 	}
@@ -145,6 +149,12 @@ func (r *Runner) detachable(serverID int64) error {
 	if _, err := r.d.Store.GetReplicaByServer(serverID); errors.Is(err, store.ErrNotFound) {
 		return errors.New("server ini bukan replika")
 	} else if err != nil {
+		return err
+	}
+	// An old master left by a failed rebuild stays quarantined at its
+	// agent: detaching it would make the panel treat it as unassigned
+	// (D-10).
+	if err := r.refuseAwaitingRebuild(serverID); err != nil {
 		return err
 	}
 	return r.refuseBusy(serverID, "server ini")

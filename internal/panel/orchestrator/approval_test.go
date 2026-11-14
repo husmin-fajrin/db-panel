@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -216,6 +217,90 @@ func TestRebuildAgainAfterFailedRebuild(t *testing.T) {
 	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("still the old master after the second rebuild: %v", err)
 	}
+}
+
+// TestFailedRebuildRefusesResyncAndDetach (D-10): a server left by a
+// failed rebuild of an old master (role replica, failed row, still the
+// old master) is refused Resync ulang and Lepas replika (both modes) with
+// one sentence, before any agent command or store change; an ordinary
+// failed replica is not.
+func TestFailedRebuildRefusesResyncAndDetach(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	ctx := context.Background()
+	g.m.fail("mysql.configureReplication", "sumber replikasi sudah diatur, tetapi server ini tetap dikarantina")
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	if ok, err := AwaitingRebuild(e.st, mustServer(t, e, g.m.id)); err != nil || !ok {
+		t.Fatalf("AwaitingRebuild = %v, %v; want true", ok, err)
+	}
+
+	const refusal = "server ini master lama yang masih dikarantina; pakai Bangun ulang sebagai replika"
+	unchanged := func(what string) {
+		t.Helper()
+		if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
+			t.Fatalf("%s: replica row = %+v, %v; want failed", what, rep, err)
+		}
+		if srv := mustServer(t, e, g.m.id); srv.Role != store.RoleReplica {
+			t.Fatalf("%s: role = %s, want replica", what, srv.Role)
+		}
+		if j, busy, err := e.st.ActiveJobForServer(g.m.id); err != nil || busy {
+			t.Fatalf("%s: left a job %+v, %v", what, j, err)
+		}
+	}
+	mark := g.m.mark()
+	if _, err := e.r.StartResync(ctx, ResyncParams{ServerID: g.m.id}); err == nil || err.Error() != refusal {
+		t.Fatalf("StartResync = %v, want %q", err, refusal)
+	}
+	unchanged("resync")
+	for _, stop := range []bool{false, true} {
+		if err := e.r.DetachReplica(ctx, g.m.id, stop); err == nil || err.Error() != refusal {
+			t.Fatalf("DetachReplica(stop=%v) = %v, want %q", stop, err, refusal)
+		}
+		unchanged(fmt.Sprintf("detach stop=%v", stop))
+	}
+	// Buat replika (not a rebuild) with it as target: refused the same
+	// way, before its failed row is removed or its role changed.
+	if _, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+		ConfirmWipe: true}); err == nil || err.Error() != refusal {
+		t.Fatalf("StartCreateReplica (not a rebuild) = %v, want %q", err, refusal)
+	}
+	unchanged("create replica")
+	if cmds := g.m.cmds(mark); len(cmds) != 0 {
+		t.Fatalf("refusals sent %v to the old master", cmds)
+	}
+
+	// An ordinary failed replica: detached, and resynced.
+	for _, fa := range []*fakeAgent{g.b, g.d} {
+		if err := e.st.SetReplicaState(fa.id, store.ReplicaFailed, "gagal"); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := AwaitingRebuild(e.st, mustServer(t, e, fa.id)); err != nil || ok {
+			t.Fatalf("AwaitingRebuild(ordinary failed replica) = %v, %v; want false", ok, err)
+		}
+	}
+	if err := e.r.DetachReplica(ctx, g.b.id, false); err != nil {
+		t.Fatalf("DetachReplica(ordinary failed replica): %v", err)
+	}
+	scriptReplicaTarget(g.d, "rep-d", "clone")
+	rid, err := e.r.StartResync(ctx, ResyncParams{ServerID: g.d.id})
+	if err != nil {
+		t.Fatalf("StartResync(ordinary failed replica): %v", err)
+	}
+	e.waitIdle(rid)
+}
+
+func mustServer(t *testing.T, e *env, id int64) store.Server {
+	t.Helper()
+	srv, err := e.st.GetServer(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv
 }
 
 // TestRebuildDecisionHandedBack: Start, Retry and Approve of a rebuild

@@ -143,6 +143,13 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	if err := r.refuseBusy(target.ID, "server tujuan"); err != nil {
 		return "", err
 	}
+	// An old master left by a failed rebuild takes only a new rebuild:
+	// refused before its failed row goes or its role changes (D-10).
+	if !p.RebuildOldMaster {
+		if err := r.refuseAwaitingRebuild(target.ID); err != nil {
+			return "", err
+		}
+	}
 	// A target whose earlier attempt failed is free for a new one.
 	if rep, err := r.d.Store.GetReplicaByServer(target.ID); err == nil && rep.State == store.ReplicaFailed {
 		if err := r.d.Store.RemoveReplica(target.ID); err != nil {

@@ -3,6 +3,7 @@ package web_test
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -167,4 +168,25 @@ func TestFailedRebuildJobPage(t *testing.T) {
 	rec = e.do("GET", "/jobs/"+otherID, nil, c)
 	wantBody(t, rec, "Ulangi dari tahap ini")
 	wantNoBody(t, rec, "tidak menolong")
+}
+
+// TestFailedRebuildResyncDetachRefused (D-10): a direct POST of Resync
+// ulang or Lepas replika for such a server is refused by the orchestrator
+// and shown as any of its refusals: the replica page, 400, the sentence.
+func TestFailedRebuildResyncDetachRefused(t *testing.T) {
+	e, f, _ := failedRebuildEnv(t)
+	c := e.cookie()
+	f.err = orchestrator.ErrAwaitingRebuild
+	const refusal = "server ini master lama yang masih dikarantina; pakai Bangun ulang sebagai replika"
+	rec := e.do("POST", "/replicas/1/resync", withToken(t, e, url.Values{"confirm_name": {"db-master"}},
+		web.ActResync, "replica", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, refusal)
+	wantAuditDetail(t, e, "replica_resync", `"force_dump":false`)
+	for _, mode := range []string{"keep", "stop"} {
+		rec = e.do("POST", "/replicas/1/detach", withToken(t, e, url.Values{"confirm_name": {"db-master"}, "mode": {mode}},
+			web.ActDetach, "replica", 1), c)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, refusal)
+	}
 }
