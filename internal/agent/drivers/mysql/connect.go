@@ -200,11 +200,23 @@ func (e *errNotLocal) Error() string {
 		"sendiri); %s bukan alamat server ini.", e.host)
 }
 
+// errLookupLocal refuses a MySQL host name that cannot be resolved (or
+// resolves to no address): it may be local, but that cannot be checked.
+type errLookupLocal struct {
+	host string
+	err  error
+}
+
+func (e *errLookupLocal) Error() string {
+	return fmt.Sprintf("alamat MySQL %s tidak bisa dicari (DNS): %v. MySQL yang disambungkan harus berada di server ini "+
+		"(soket, 127.0.0.1, atau alamat server ini sendiri).", e.host, e.err)
+}
+
 // localMySQL accepts host only for a MySQL on this machine: no host or
 // localhost (the socket, or 127.0.0.1 with a port: DSN), a loopback
 // address, an address of one of this machine's interfaces, or a name every
-// address of which is one of those. Anything else, and a name that does not
-// resolve, is errNotLocal.
+// address of which is one of those. Anything else is errNotLocal; a name
+// that does not resolve, or resolves to no address, is errLookupLocal.
 func localMySQL(ctx context.Context, host string) error {
 	if host == "" || strings.EqualFold(host, "localhost") {
 		return nil
@@ -212,11 +224,15 @@ func localMySQL(ctx context.Context, host string) error {
 	ips := []net.IP{net.ParseIP(host)}
 	if ips[0] == nil {
 		lctx, cancel := context.WithTimeout(ctx, localLookupTimeout)
-		ips, _ = lookupIP(lctx, host)
+		var err error
+		ips, err = lookupIP(lctx, host)
 		cancel()
-	}
-	if len(ips) == 0 {
-		return &errNotLocal{host: host}
+		if err != nil {
+			return &errLookupLocal{host: host, err: err}
+		}
+		if len(ips) == 0 {
+			return &errLookupLocal{host: host, err: errors.New("tidak ada alamat")}
+		}
 	}
 	addrs, err := interfaceAddrs()
 	if err != nil {

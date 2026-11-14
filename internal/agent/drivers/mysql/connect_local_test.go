@@ -105,7 +105,7 @@ func TestLocalMySQL(t *testing.T) {
 	for host, local := range map[string]bool{
 		"": true, "localhost": true, "LOCALHOST": true, "127.0.0.1": true, "127.0.0.53": true, "::1": true,
 		"192.168.5.10": true, "db.lokal": true, "db.lokal6": true,
-		"192.168.5.99": false, "10.20.0.5": false, "db.campur": false, "db.lain": false, "db.tidakada": false,
+		"192.168.5.99": false, "10.20.0.5": false, "db.campur": false, "db.lain": false,
 	} {
 		err := mysql.LocalMySQL(context.Background(), host)
 		if local && err != nil {
@@ -118,6 +118,55 @@ func TestLocalMySQL(t *testing.T) {
 				t.Errorf("%q: %v, want %q", host, err, want)
 			}
 		}
+	}
+}
+
+// dnsRefusal is the C-3 text for host and the lookup error text.
+func dnsRefusal(host, lookupErr string) string {
+	return "alamat MySQL " + host + " tidak bisa dicari (DNS): " + lookupErr + ". MySQL yang disambungkan harus berada " +
+		"di server ini (soket, 127.0.0.1, atau alamat server ini sendiri)."
+}
+
+// TestLocalMySQLLookupFailure: a name that does not resolve, or resolves
+// to no address at all, is still refused, with a text that names DNS as
+// the cause rather than the address.
+func TestLocalMySQLLookupFailure(t *testing.T) {
+	t.Cleanup(mysql.SetResolver(func(_ context.Context, host string) ([]net.IP, error) {
+		if host == "db.kosong" {
+			return nil, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}, nil))
+	for host, want := range map[string]string{
+		"db.tidakada": dnsRefusal("db.tidakada", "lookup db.tidakada: no such host"),
+		"db.kosong":   dnsRefusal("db.kosong", "tidak ada alamat"),
+	} {
+		if err := mysql.LocalMySQL(context.Background(), host); err == nil || err.Error() != want {
+			t.Errorf("%q: %v\nwant %q", host, err, want)
+		}
+	}
+}
+
+// TestConnectRefusesUnresolvedMySQL: mysql.connect to a name that does not
+// resolve is refused with the DNS text before any login, and a stored
+// account with such a name fails closed with the same text.
+func TestConnectRefusesUnresolvedMySQL(t *testing.T) {
+	t.Cleanup(fixedResolver(nil))
+	inst := testmysql.Start(t, testmysql.Options{})
+	creds := &memCreds{p: proto.ConnectParams{User: "root"}}
+	r := newPinRig(t, inst.HostWith(creds), pinDir(t, "", ""))
+	r.d.Creds = creds
+	want := dnsRefusal("db.tidakada", "lookup db.tidakada: no such host")
+	resp := r.dispatch("mysql.connect", proto.ConnectParams{User: "root", Host: "db.tidakada", Port: inst.Port})
+	if resp.OK || resp.Error == nil || resp.Error.Message != want {
+		t.Fatalf("connect db.tidakada = %+v, want %q", resp, want)
+	}
+	if creds.p.Host != "" {
+		t.Errorf("stored account = %+v, want kept", creds.p)
+	}
+	stored := &memCreds{p: proto.ConnectParams{User: "root", Host: "db.tidakada", Port: inst.Port}}
+	if _, err := inst.HostWith(stored).Open(context.Background()); err == nil || err.Error() != want {
+		t.Errorf("Open with a stored unresolved name = %v, want %q", err, want)
 	}
 }
 
