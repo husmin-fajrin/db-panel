@@ -1191,10 +1191,19 @@ func TestConfigureReplicationEndsQuarantine(t *testing.T) {
 	}
 
 	// Without a load from the pinned source in this agent run the pin
-	// stays quarantined, and the agent says why.
-	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", validSource))
+	// stays quarantined, the approval stays, and the command fails saying
+	// why (the panel's job must not look finished).
+	resp := r.dispatch("mysql.configureReplication", validSource)
+	const noLoad = "sumber replikasi sudah diatur, tetapi server ini tetap dikarantina: agent tidak punya catatan salinan " +
+		"data dari bangun ulang ini (misalnya karena agent dimulai ulang di tengah jalan). Ulangi bangun ulang dari panel."
+	if resp.OK || resp.Error == nil || resp.Error.Message != noLoad {
+		t.Fatalf("configureReplication without a load = %+v, want the error %q", resp, noLoad)
+	}
 	if role := pinFile(t, dir, mysql.RoleFile); role != "quarantined" {
 		t.Fatalf("role pin after configureReplication without a load = %q, want quarantined", role)
+	}
+	if got := pinFile(t, dir, mysql.RebuildApprovalFile); got == "" {
+		t.Error("the approval was cleared by configureReplication without a load")
 	}
 	if out := logBuf.String(); !strings.Contains(out, "quarantine kept") || strings.Contains(out, `msg="role pinned"`) {
 		t.Errorf("agent log after configureReplication without a load:\n%s", out)

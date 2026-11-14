@@ -434,9 +434,9 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // stops applying and the replica's rules do; a quarantine report still
 // waiting for MySQL is dropped. The data must have been replaced first: a
 // dumpFrom or cloneFrom from that source succeeded in this agent run
-// (loadedFrom); without it the pin stays quarantined and the agent logs
-// why, so a configureReplication alone never ends a quarantine with the
-// leftover data unchecked. After a dump the agent also lists the
+// (loadedFrom); without it the pin stays quarantined, the agent logs why
+// and the command fails (errNoLoadRecord), so a configureReplication alone
+// never ends a quarantine with the leftover data unchecked. After a dump the agent also lists the
 // databases on the server now: one that was not copied from the source
 // (loadCopy.notCopied) keeps the quarantine and the approval, and the
 // command answers errNotReplaced. Once settled, the rebuild request and
@@ -454,7 +454,7 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 			d.Logger.Warn("quarantine kept: replication points at the pinned source, but no dump or clone from it "+
 				"succeeded in this agent run", "source", source)
 		}
-		return nil
+		return errNoLoadRecord
 	}
 	if !copied.whole {
 		left, err := d.databasesNotCopied(ctx, copied)
@@ -516,6 +516,13 @@ func (d *Driver) databasesNotCopied(ctx context.Context, copied loadCopy) ([]str
 	}
 	return copied.notCopied(present), nil
 }
+
+// errNoLoadRecord fails a configureReplication that could not end the
+// quarantine for want of a copy from the source in this agent run, so the
+// panel's job does not look finished (role and approval are unchanged).
+var errNoLoadRecord = errors.New("sumber replikasi sudah diatur, tetapi server ini tetap dikarantina: agent tidak punya " +
+	"catatan salinan data dari bangun ulang ini (misalnya karena agent dimulai ulang di tengah jalan). Ulangi bangun " +
+	"ulang dari panel.")
 
 // settleListTimeout bounds the database listing settleRebuilt does under
 // promoteMu.
