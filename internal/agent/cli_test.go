@@ -1367,6 +1367,44 @@ func TestCLIApproveSyslog(t *testing.T) {
 	}
 }
 
+// TestRunCLIWithSeams: RunCLIWith runs the CLI on the MySQL layout and
+// with the system-log writer it is given, never the machine's (tests in
+// other packages run it on their own MySQL instance).
+func TestRunCLIWithSeams(t *testing.T) {
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) {
+		t.Error("the machine's MySQL layout was used")
+		return nil, errors.New("not here")
+	})
+	oldLog := cliSyslog
+	t.Cleanup(func() { cliSyslog = oldLog })
+	cliSyslog = func(string) error {
+		t.Error("the machine's system log was written")
+		return nil
+	}
+	var layoutCalls int
+	var lines []string
+	seams := CLISeams{
+		LayoutHost: func(config.Config) (mysql.Host, error) { layoutCalls++; return noMysqldHost(t.TempDir()), nil },
+		Syslog:     func(line string) error { lines = append(lines, line); return nil },
+	}
+
+	dir := t.TempDir()
+	writePinFiles(t, dir, map[string]string{mysql.RoleFile: "quarantined\n", mysql.SourceFile: "10.0.0.1:3306\n"})
+	var stdout, stderr bytes.Buffer
+	if code := RunCLIWith([]string{"set-role", "master", "--ya", "--dir", dir}, strings.NewReader(""), &stdout, &stderr,
+		seams); code != 0 || layoutCalls != 1 {
+		t.Fatalf("set-role master = %d (%q, %q), layout calls %d", code, stdout.String(), stderr.String(), layoutCalls)
+	}
+
+	dir, req := approveSetup(t, "127.0.0.1:3306")
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunCLIWith([]string{"approve", req.Code, "--dir", dir}, strings.NewReader("ya\n"), &stdout, &stderr,
+		seams); code != 0 || len(lines) != 1 || !strings.HasPrefix(lines[0], "rebuild approval written: source=127.0.0.1:3306") {
+		t.Fatalf("approve = %d (%q, %q), log lines %q", code, stdout.String(), stderr.String(), lines)
+	}
+}
+
 // TestCLIApproveNameChecks: approve always looks the source's name up
 // before the prompt; a name with more than one address (B16) or one that
 // no longer points at the address recorded at quarantine (B15) is refused

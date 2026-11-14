@@ -106,17 +106,42 @@ func Main(args []string, stdout, stderr io.Writer) int {
 }
 
 // RunCLI is Main with the input the prompts read (approve, set-role); Main
-// passes the package's stdin. e2e tests answer prompts through it. "pair
-// --token-stdin" still reads the package's stdin.
+// passes the package's stdin. "pair --token-stdin" still reads the
+// package's stdin.
 func RunCLI(args []string, in io.Reader, stdout, stderr io.Writer) int {
+	return RunCLIWith(args, in, stdout, stderr, CLISeams{})
+}
+
+// CLISeams are what a CLI run reaches on this machine beyond its --dir and
+// its input and output: this server's MySQL layout (the start lock that
+// set-role master releases) and the system log (approve). A nil field is
+// the machine's own. Tests in other packages pass their own, so a test run
+// never touches the machine's MySQL configuration or system log; Main and
+// RunCLI always use the machine's.
+type CLISeams struct {
+	// LayoutHost is this server's MySQL as far as the start lock needs it.
+	LayoutHost func(config.Config) (mysql.Host, error)
+	// Syslog writes one line to the system log.
+	Syslog func(line string) error
+}
+
+// RunCLIWith is RunCLI with seams in place of the machine's MySQL layout
+// and system log (see CLISeams); e2e tests run the CLI through it.
+func RunCLIWith(args []string, in io.Reader, stdout, stderr io.Writer, seams CLISeams) int {
+	if seams.LayoutHost == nil {
+		seams.LayoutHost = cliLayoutHost
+	}
+	if seams.Syslog == nil {
+		seams.Syslog = cliSyslog
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "pair":
 			return mainPair(args[1:], stdout, stderr)
 		case "set-role":
-			return mainSetRole(args[1:], in, stdout, stderr)
+			return mainSetRole(args[1:], in, stdout, stderr, seams.LayoutHost)
 		case "approve":
-			return mainApprove(args[1:], in, stdout, stderr)
+			return mainApprove(args[1:], in, stdout, stderr, seams.Syslog)
 		case "set-source":
 			return mainSetSource(args[1:], stdout, stderr)
 		case "lock-master":
@@ -333,7 +358,9 @@ func parseSetRoleArgs(args []string, stderr io.Writer) (dir, role string, yes, o
 	return *d, role, *y, true
 }
 
-func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer) int {
+// mainSetRole is "agent set-role"; layout is this server's MySQL layout
+// (cliReleaseStartLock).
+func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer, layout func(config.Config) (mysql.Host, error)) int {
 	dir, role, yes, ok := parseSetRoleArgs(args, stderr)
 	if !ok {
 		return 2
@@ -378,7 +405,7 @@ func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	// the role stays as it was when it cannot.
 	var released bool
 	if role == "master" {
-		ok, found := cliReleaseStartLock(dir, stdout, stderr)
+		ok, found := cliReleaseStartLock(dir, stdout, stderr, layout)
 		if !ok {
 			return 1
 		}
@@ -405,8 +432,9 @@ func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer) int {
 
 // mainApprove is "agent approve <kode>|batal": root approves the rebuild
 // the panel asked for, after seeing which source and address it gets the
-// data from, or removes the approval and the request.
-func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
+// data from, or removes the approval and the request; each is recorded with
+// writeSyslog (approvalSyslog).
+func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer, writeSyslog func(string) error) int {
 	dir, arg, ok := parsePinArgs("agent approve", args, stderr)
 	if !ok {
 		return 2
@@ -421,7 +449,7 @@ func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintln(stdout, "Persetujuan dan permintaan bangun ulang di server ini dihapus.")
-		approvalSyslog("rebuild approval cancelled", a, r.Created, stderr)
+		approvalSyslog("rebuild approval cancelled", a, r.Created, stderr, writeSyslog)
 		return 0
 	}
 	p, err := mysql.LoadPins(dir)
@@ -516,12 +544,12 @@ Ketik ya untuk menyetujui, atau apa saja untuk membatalkan: `)
 	}
 	fmt.Fprintf(stdout, "Disetujui sampai %s. Kembali ke panel dan klik Periksa lagi. Untuk membatalkan: sudo dbpanel agent approve batal\n",
 		approval.Expires.Local().Format("2006-01-02 15:04 MST"))
-	approvalSyslog("rebuild approval written", approval, req.Created, stderr)
+	approvalSyslog("rebuild approval written", approval, req.Created, stderr, writeSyslog)
 	return 0
 }
 
 // cliSyslog writes line to the system log (facility auth, tag
-// dbpanel-agent); tests replace it.
+// dbpanel-agent); tests in this package replace it, others pass CLISeams.
 var cliSyslog = func(line string) error {
 	w, err := syslog.New(syslog.LOG_AUTH|syslog.LOG_NOTICE, "dbpanel-agent")
 	if err != nil {
@@ -532,10 +560,11 @@ var cliSyslog = func(line string) error {
 }
 
 // approvalSyslog records an approval written or cancelled (action) in the
-// system log: its source, address and expiry, when the request it answered
-// was made, and who ran the command. The code is never logged. A log that
-// cannot be written is a warning on stderr; the outcome stands.
-func approvalSyslog(action string, a mysql.RebuildApproval, requested time.Time, stderr io.Writer) {
+// system log through writeSyslog: its source, address and expiry, when the
+// request it answered was made, and who ran the command. The code is never
+// logged. A log that cannot be written is a warning on stderr; the outcome
+// stands.
+func approvalSyslog(action string, a mysql.RebuildApproval, requested time.Time, stderr io.Writer, writeSyslog func(string) error) {
 	or := func(s string) string {
 		if s == "" {
 			return "-"
@@ -554,7 +583,7 @@ func approvalSyslog(action string, a mysql.RebuildApproval, requested time.Time,
 	}
 	line := fmt.Sprintf("%s: source=%s addr=%s expires=%s request_created=%s %s", action,
 		or(a.Source), or(a.Addr), at(a.Expires), at(requested), who)
-	if err := cliSyslog(line); err != nil {
+	if err := writeSyslog(line); err != nil {
 		fmt.Fprintf(stderr, "Peringatan: catatan ke log sistem gagal ditulis (%v).\n", err)
 	}
 }
@@ -589,23 +618,24 @@ func mainSetSource(args []string, stdout, stderr io.Writer) int {
 }
 
 // cliLayoutHost is the MySQL of this server as far as the start lock needs
-// it: the discovered layout, no admin account. Tests replace it.
+// it: the discovered layout, no admin account. Tests in this package
+// replace it; others pass CLISeams.
 var cliLayoutHost = func(cfg config.Config) (mysql.Host, error) {
 	return mysql.NewRealHost(cfg, nil, probe.RealSystem(), slog.New(slog.DiscardHandler))
 }
 
-// cliReleaseStartLock releases the start lock of the MySQL of this server.
+// cliReleaseStartLock releases the start lock of the MySQL layout gives.
 // It needs neither the agent's secrets nor an admin account: only the
 // layout (the agent configuration is read best effort, for a socket
 // override). It prints the outcome and returns ok (the role may
 // go on: the lock is released, or there is none to release) and found
 // (a lock existed and was released).
-func cliReleaseStartLock(dir string, stdout, stderr io.Writer) (ok, found bool) {
+func cliReleaseStartLock(dir string, stdout, stderr io.Writer, layout func(config.Config) (mysql.Host, error)) (ok, found bool) {
 	cfg, err := config.Load(dir)
 	if err != nil {
 		cfg = config.Config{}
 	}
-	h, err := cliLayoutHost(cfg)
+	h, err := layout(cfg)
 	if errors.Is(err, mysql.ErrNoMysqld) {
 		fmt.Fprintln(stdout, setRoleNoMysqld)
 		return true, false
