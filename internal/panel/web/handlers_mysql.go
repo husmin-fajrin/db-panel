@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -105,16 +104,6 @@ const (
 	inventoryCap = 5000
 )
 
-// hostRe is a MySQL host the panel passes on: an IP address or a host name,
-// as the agent checks it too (SEC-33).
-var hostRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,255}$`)
-
-// validHost reports whether h is an address or name hostRe admits; one
-// with a colon must be an IPv6 address.
-func validHost(h string) bool {
-	return hostRe.MatchString(h) && (!strings.Contains(h, ":") || net.ParseIP(h) != nil)
-}
-
 // notices are the success messages a redirect names in ?pesan=.
 var notices = map[string]string{
 	"terhubung":  "MySQL berhasil dihubungkan.",
@@ -205,7 +194,7 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 	case len(form.User) > maxMySQLUser || len(password) > maxMySQLPassword || len(form.Host) > maxMySQLHost:
 		fail(msgMySQLFieldTooLong)
 		return
-	case form.Host != "" && !validHost(form.Host):
+	case form.Host != "" && !orchestrator.ValidHost(form.Host):
 		fail(msgMySQLHostBad)
 		return
 	}
@@ -419,7 +408,7 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 		SourceHost: host, SourcePort: portText, SourceOpen: true}
 	port, err := strconv.Atoi(portText)
 	switch {
-	case !validHost(host):
+	case !orchestrator.ValidHost(host):
 		p.Flash = msgSourceHostBad
 	case err != nil || port < 1 || port > 65535:
 		p.Flash = msgSourcePortBad

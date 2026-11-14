@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -203,38 +204,35 @@ func validApprovalCode(code string) bool {
 	return true
 }
 
-// validApprovalSource reports whether source is host:port with a host
-// that is an IP address or an RFC 1123 host name (validHostName) and a
-// port 1-65535 (P-3): nothing else of the agent's reaches a page or a
-// job through it.
+// validApprovalSource reports whether source is host:port with a host the
+// panel takes for a master's replication address (ValidHost: an IP
+// address or a host name, which is also what the agent pins as the
+// source, N-1) and a port 1-65535 (P-3): nothing else of the agent's
+// reaches a page or a job through it. Brackets enclose an IPv6 or IPv4
+// address only.
 func validApprovalSource(source string) bool {
 	host, port, err := net.SplitHostPort(source)
-	if err != nil || (net.ParseIP(host) == nil && !validHostName(host)) {
+	if err != nil || !ValidHost(host) {
+		return false
+	}
+	if strings.HasPrefix(source, "[") && net.ParseIP(host) == nil {
 		return false
 	}
 	n, err := strconv.Atoi(port)
 	return err == nil && n >= 1 && n <= 65535
 }
 
-// validHostName reports whether host is an RFC 1123 host name: ASCII
-// letters, digits and hyphens in dot-separated labels of 1-63 characters,
-// at most 253 characters in all.
-func validHostName(host string) bool {
-	if host == "" || len(host) > 253 {
-		return false
-	}
-	for label := range strings.SplitSeq(host, ".") {
-		if label == "" || len(label) > 63 {
-			return false
-		}
-		for i := 0; i < len(label); i++ {
-			c := label[i]
-			if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-') {
-				return false
-			}
-		}
-	}
-	return true
+// hostRe is a MySQL host the panel passes on or takes from an agent: an
+// IP address or a host name, as the agent checks it too (SEC-33,
+// sourceHostRe there).
+var hostRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,255}$`)
+
+// ValidHost reports whether h is an address or name hostRe admits; one
+// with a colon must be an IPv6 address. It is the one rule for a master's
+// replication address set in the panel and for the source host of an
+// agent's rebuild approval.
+func ValidHost(h string) bool {
+	return hostRe.MatchString(h) && (!strings.Contains(h, ":") || net.ParseIP(h) != nil)
 }
 
 // AgentQuote is an agent's own sentence as the panel shows it (P-2): after
