@@ -291,3 +291,27 @@ func TestDumpLocalClientUsesCheckedAddress(t *testing.T) {
 		t.Errorf("a.t rows on the replica = %d, want 1", n)
 	}
 }
+
+// TestDialPrefersIPv4: a name with a local IPv6 and a local IPv4 address
+// is dialled at the IPv4 one, as MySQL often listens on IPv4 only (the
+// test instance binds 127.0.0.1).
+func TestDialPrefersIPv4(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	const name = "db.duatumpuk.test"
+	t.Cleanup(mysql.SetResolver(func(_ context.Context, host string) ([]net.IP, error) {
+		if host == name {
+			return []net.IP{net.ParseIP("::1"), net.ParseIP("127.0.0.1")}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}, nil))
+	creds := &memCreds{p: proto.ConnectParams{User: "root"}}
+	r := newPinRig(t, inst.HostWith(creds), pinDir(t, "", ""))
+	r.d.Creds = creds
+	decode[proto.ConnectResult](t, r.dispatch("mysql.connect", proto.ConnectParams{User: "root", Host: name, Port: inst.Port}))
+	stored := &memCreds{p: proto.ConnectParams{User: "root", Host: name, Port: inst.Port}}
+	db, err := inst.HostWith(stored).Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open with a stored dual-stack name = %v", err)
+	}
+	db.Close()
+}

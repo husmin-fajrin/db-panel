@@ -222,9 +222,10 @@ func (e *errLookupLocal) Error() string {
 // address of which is one of those. Anything else is errNotLocal; a name
 // that does not resolve, or resolves to no address, is errLookupLocal.
 //
-// dial is what to connect to: host itself, except that a name becomes the
-// first address its one lookup answered, so the connection goes where the
-// check looked (a second lookup at dial time could answer otherwise).
+// dial is what to connect to: host itself, except that a name becomes one
+// of the addresses its one lookup answered (the first IPv4 address, else
+// the first), so the connection goes where the check looked (a second
+// lookup at dial time could answer otherwise).
 func localMySQL(ctx context.Context, host string) (dial string, err error) {
 	if host == "" || strings.EqualFold(host, "localhost") {
 		return host, nil
@@ -255,6 +256,13 @@ func localMySQL(ctx context.Context, host string) (dial string, err error) {
 			return ok && n.IP.Equal(ip)
 		}) {
 			return "", &errNotLocal{host: host}
+		}
+	}
+	// MySQL often listens on IPv4 only (bind-address=127.0.0.1): every
+	// address is local, so the first IPv4 one is dialled when there is one.
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return ip.String(), nil
 		}
 	}
 	return ips[0].String(), nil
