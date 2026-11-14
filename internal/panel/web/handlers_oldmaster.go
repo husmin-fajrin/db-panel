@@ -876,10 +876,12 @@ const msgApprovalUnreadable = "Persetujuan di server tidak bisa diperiksa sekara
 
 // localApprovalDetail adds to an audit detail the approval root held on
 // the server when the orchestrator decided (seen): "local_approval"
-// (false when it was not read) and "local_approval_age_sec".
+// and "local_approval_age_sec", neither when it was not read.
 func localApprovalDetail(seen *orchestrator.ApprovalSeen, detail map[string]any) {
 	if !seen.Read {
-		detail["local_approval"] = false
+		// Not read (refused before the agent was asked, or it could not
+		// answer): no field, so "not approved" is never recorded for it
+		// (N-3).
 		return
 	}
 	detail["local_approval"] = seen.Result.Approved

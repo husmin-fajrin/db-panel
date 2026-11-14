@@ -1798,7 +1798,10 @@ klik Ulangi."). Setujui lagi, lalu tekan **Ulangi dari tahap ini**.
 Pekerjaan **Buat replika** (juga bangun ulang) yang parameternya tidak bisa
 dibaca panel tidak bisa diulang atau disetujui. Catatan audit bangun ulang dan **Ulangi**
 atau **Setujui**-nya menyimpan persetujuan yang dipakai keputusan itu
-(`local_approval`, `local_approval_age_sec`).
+(`local_approval`, `local_approval_age_sec`). Bila panel tidak sempat membaca
+persetujuan dari agent (permintaan ditolak lebih dulu, atau agent tidak
+menjawab), kedua kolom itu tidak ada; `local_approval: false` berarti agent
+terbaca dan bangun ulang belum disetujui.
 
 Selama persetujuan berlaku, panel boleh menjalankan langkah bangun ulang
 dan perintah lain yang butuh persetujuan (lihat "Mode ketat" di "Peran dan

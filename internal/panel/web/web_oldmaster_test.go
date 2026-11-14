@@ -1320,13 +1320,63 @@ func TestRebuildAuditHasLocalApproval(t *testing.T) {
 	f.approvalErr = proto.ErrOffline
 	rec = e.do("POST", "/jobs/"+approveID+"/approve", withToken(t, e, url.Values{}, "job_approve:"+approveID, "job", 1), c)
 	wantCode(t, rec, http.StatusSeeOther)
-	wantAuditDetail(t, e, "job_approve", `"local_approval":false`)
+	// The agent was not read: no local_approval at all (N-3).
+	wantAuditDetail(t, e, "job_approve", `"kind":"create_replica"`)
+	wantNoAuditDetail(t, e, "job_approve", `"local_approval"`)
 	// No read of its own after the action.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.approvalCalls != calls {
 		t.Fatalf("the handler read the approval %d more times", f.approvalCalls-calls)
 	}
+}
+
+// TestRebuildAuditTellsNotReadFromNotApproved (N-3): a decision refused
+// before the agent was read records no local_approval; false is recorded
+// only for an agent that was read and answered "not approved".
+func TestRebuildAuditTellsNotReadFromNotApproved(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	// Refused before the agent was asked (connections came back).
+	f.approvalErr = errors.New("not asked")
+	f.err = orchestrator.ErrConnectionsRemain
+	rec := e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm("accept_connections", "1"),
+		web.ActRebuildOldMaster, "server", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantAuditDetail(t, e, "create_replica", `"rebuild_old_master":true`)
+	wantNoAuditDetail(t, e, "create_replica", `"local_approval"`)
+
+	// Read, not approved.
+	f.approvalErr = nil
+	f.approval = proto.RebuildApprovalResult{Required: true, Code: "654321", Source: "10.0.0.2:3306", RemainingSec: 1790}
+	f.err = fmt.Errorf("%w: %s", orchestrator.ErrRebuildNeedsApproval, "Bangun ulang db-master butuh persetujuan di server itu. "+
+		"Jalankan di server itu sebagai root: sudo dbpanel agent approve 654321, lalu coba lagi.")
+	rec = e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm("accept_connections", "1"),
+		web.ActRebuildOldMaster, "server", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantAuditDetail(t, e, "create_replica", `"local_approval":false`)
+}
+
+// wantNoAuditDetail fails when the newest audit entry of action holds sub.
+func wantNoAuditDetail(t *testing.T, e *env, action, sub string) {
+	t.Helper()
+	entries, err := e.st.ListAudit(0, time.Time{}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range entries {
+		if a.Action != action {
+			continue
+		}
+		if strings.Contains(a.DetailJSON, sub) {
+			t.Fatalf("%s audit detail %s holds %s", action, a.DetailJSON, sub)
+		}
+		return
+	}
+	t.Fatalf("no %s audit entry", action)
 }
 
 // wantAuditDetail fails unless the newest audit entry of action holds
