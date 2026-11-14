@@ -1,9 +1,9 @@
 package monitor
 
 import (
-	"fmt"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
