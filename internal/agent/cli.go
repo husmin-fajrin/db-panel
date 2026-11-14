@@ -90,10 +90,12 @@ var (
 )
 
 // cliHostname and cliNow are what "agent approve" shows and dates the
-// approval by; tests replace them.
+// approval by, and cliLookupIP resolves the source's name (nil: the
+// system resolver); tests replace them.
 var (
 	cliHostname = os.Hostname
 	cliNow      = time.Now
+	cliLookupIP func(context.Context, string) ([]net.IP, error)
 )
 
 // Main runs the "dbpanel agent" command; args exclude "agent" itself. It
@@ -447,11 +449,18 @@ func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	addr, others, err := p.RebuildApprovalAddr(ctx)
-	var lookup *mysql.SourceLookupError
+	addr, err := p.RebuildApprovalAddr(ctx, cliLookupIP)
+	var (
+		lookup *mysql.SourceLookupError
+		multi  *mysql.SourceAddrsError
+		moved  *mysql.SourceMovedError
+	)
 	switch {
 	case errors.As(err, &lookup):
 		fmt.Fprintf(stderr, "Alamat untuk nama sumber %s tidak ditemukan (DNS: %v); persetujuan tidak ditulis.\n", lookup.Source, lookup.Err)
+		return 1
+	case errors.As(err, &multi), errors.As(err, &moved):
+		fmt.Fprintln(stderr, err)
 		return 1
 	case err != nil:
 		fmt.Fprintf(stderr, "Pin server ini tidak bisa dibaca (%v); persetujuan tidak ditulis.\n", err)
@@ -462,9 +471,6 @@ func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		name = "(tidak diketahui)"
 	}
 	fmt.Fprintf(stdout, "Persetujuan bangun ulang (rebuild) server ini\n\nServer ini  : %s\nPeran       : dikarantina (quarantined)\nSumber data : %s\nAlamat IP   : %s\n", name, source, addr)
-	if len(others) > 0 {
-		fmt.Fprintf(stdout, "              (nama sumber juga mengarah ke: %s)\n", strings.Join(others, ", "))
-	}
 	fmt.Fprint(stdout, `
 Bila disetujui, SEMUA data MySQL di server ini dibuang dan diganti salinan dari sumber di atas. Data yang dibuang tidak bisa dikembalikan.
 Pastikan nama dan alamat IP di atas memang master baru Anda, yaitu server yang sekarang dipakai aplikasi.

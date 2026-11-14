@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1278,6 +1279,72 @@ func TestCLIApproveAddressErrors(t *testing.T) {
 		code, _, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
 		if code != 1 || strings.Contains(errOut, "(DNS") || !strings.Contains(errOut, "Pin server ini tidak bisa dibaca (") {
 			t.Errorf("code = %d, stderr %q", code, errOut)
+		}
+	})
+}
+
+// TestCLIApproveNameChecks: approve always looks the source's name up
+// before the prompt; a name with more than one address (B16) or one that
+// no longer points at the address recorded at quarantine (B15) is refused
+// with exit 1 and nothing written.
+func TestCLIApproveNameChecks(t *testing.T) {
+	answer := []net.IP{}
+	old := cliLookupIP
+	t.Cleanup(func() { cliLookupIP = old })
+	cliLookupIP = func(context.Context, string) ([]net.IP, error) { return answer, nil }
+	refused := func(t *testing.T, dir, code, want string) {
+		t.Helper()
+		rc, out, errOut := approveRun(strings.NewReader("ya\n"), "approve", code, "--dir", dir)
+		if rc != 1 || errOut != want+"\n" || strings.Contains(out, "Ketik ya") {
+			t.Errorf("code = %d, stdout %q, stderr %q; want B text before any prompt", rc, out, errOut)
+		}
+		if fileExists(filepath.Join(dir, mysql.RebuildApprovalFile)) {
+			t.Error("approval written")
+		}
+	}
+	t.Run("two addresses", func(t *testing.T) {
+		dir, req := approveSetup(t, "db-baru.lan:3306")
+		answer = []net.IP{net.ParseIP("10.0.0.7"), net.ParseIP("10.0.0.6")}
+		refused(t, dir, req.Code, "Nama sumber db-baru.lan:3306 mengarah ke lebih dari satu alamat (10.0.0.6, 10.0.0.7). "+
+			"Persetujuan hanya bisa diberikan bila nama itu mengarah ke satu alamat. Tetapkan satu alamat untuk nama itu di "+
+			"server ini (misalnya di /etc/hosts), lalu jalankan perintah approve ini lagi. Persetujuan tidak ditulis.")
+	})
+	t.Run("name moved, then set-source and approve", func(t *testing.T) {
+		dir, req := approveSetup(t, "db-baru.lan:3306")
+		path := filepath.Join(dir, mysql.SourceAddrFile)
+		if err := os.WriteFile(path, []byte("10.0.0.9\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		answer = []net.IP{net.ParseIP("10.0.0.6")}
+		refused(t, dir, req.Code, "Nama sumber db-baru.lan:3306 sekarang mengarah ke 10.0.0.6, bukan ke alamat yang "+
+			"dicatat saat karantina (10.0.0.9). Bila alamat baru itu memang master baru, jalankan: sudo dbpanel agent "+
+			"set-source db-baru.lan:3306, lalu jalankan perintah approve ini lagi. Persetujuan tidak ditulis.")
+		// The way out the text names works: set-source keeps the request
+		// and clears the recorded address; approve then succeeds.
+		if rc, _, errOut := approveRun(strings.NewReader(""), "set-source", "db-baru.lan:3306", "--dir", dir); rc != 0 {
+			t.Fatalf("set-source = %d, %q", rc, errOut)
+		}
+		rc, out, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
+		if rc != 0 || !strings.Contains(out, "Alamat IP   : 10.0.0.6") {
+			t.Fatalf("approve after set-source = %d, stdout %q, stderr %q", rc, out, errOut)
+		}
+	})
+	t.Run("recorded address resolved", func(t *testing.T) {
+		dir, req := approveSetup(t, "db-baru.lan:3306")
+		path := filepath.Join(dir, mysql.SourceAddrFile)
+		if err := os.WriteFile(path, []byte("10.0.0.9\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		answer = []net.IP{net.ParseIP("10.0.0.9")}
+		if rc, out, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir); rc != 0 ||
+			!strings.Contains(out, "Alamat IP   : 10.0.0.9") {
+			t.Errorf("approve = %d, stdout %q, stderr %q", rc, out, errOut)
 		}
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,15 +104,17 @@ func checkApproval(a RebuildApproval, role, source string, ips []net.IP, now tim
 	if !sameSource(a.Source, source) {
 		return fmt.Errorf("persetujuan untuk sumber %s, bukan sumber yang dipin sekarang (%s)", a.Source, source)
 	}
+	// Every address the name resolves to must be the approved one: the
+	// copy and the replication link connect by name and resolve again.
 	approved := net.ParseIP(a.Addr)
-	found := false
+	same := approved != nil && len(ips) > 0
 	for _, ip := range ips {
-		if approved != nil && approved.Equal(ip) {
-			found = true
+		if !approved.Equal(ip) {
+			same = false
 			break
 		}
 	}
-	if !found {
+	if !same {
 		return fmt.Errorf("nama sumber %s sekarang mengarah ke alamat lain, bukan alamat yang disetujui (%s)", source, a.Addr)
 	}
 	if a.Approved.After(now.Add(approvalFutureSlack)) {
@@ -261,25 +264,49 @@ func (p *Pins) CheckRebuildApproval(ctx context.Context, now time.Time) (Rebuild
 }
 
 // RebuildApprovalAddr is the address "approve" records and shows: the
-// verified address (SourceAddrFile) when there is one, the host when it is
-// an IP, else the first address the host resolves to (IPv4 before IPv6,
-// each sorted); others are the remaining resolved addresses.
-func (p *Pins) RebuildApprovalAddr(ctx context.Context) (addr string, others []string, err error) {
+// host when it is an IP, else the one address its name resolves to now
+// (lookup; nil means the system resolver). The name is looked up even when
+// an address was verified at quarantine (SourceAddrFile): a name with more
+// than one address is SourceAddrsError, and one whose single address is
+// not the verified one is SourceMovedError.
+func (p *Pins) RebuildApprovalAddr(ctx context.Context, lookup func(context.Context, string) ([]net.IP, error)) (string, error) {
 	host, port, dial, ok, err := p.SourceDial()
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	if !ok {
-		return "", nil, errors.New("server ini tidak punya sumber replikasi yang dipin")
+		return "", errors.New("server ini tidak punya sumber replikasi yang dipin")
 	}
-	if net.ParseIP(dial) != nil {
-		return dial, nil, nil
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), nil
+	}
+	if lookup == nil {
+		lookup = lookupIP
 	}
 	source := net.JoinHostPort(host, strconv.Itoa(port))
-	ips, err := sourceIPs(ctx, host)
+	rctx, cancel := context.WithTimeout(ctx, peerTimeout)
+	ips, err := lookup(rctx, host)
+	cancel()
 	if err != nil {
-		return "", nil, &SourceLookupError{Source: source, Err: err}
+		return "", &SourceLookupError{Source: source, Err: err}
 	}
+	all := distinctAddrs(ips)
+	switch {
+	case len(all) == 0:
+		return "", &SourceLookupError{Source: source, Err: errors.New("tidak ada alamat")}
+	case len(all) > 1:
+		return "", &SourceAddrsError{Source: source, Addrs: all}
+	}
+	if recorded := net.ParseIP(dial); recorded != nil && !recorded.Equal(net.ParseIP(all[0])) {
+		return "", &SourceMovedError{Source: source, Addrs: all, Recorded: recorded.String()}
+	}
+	return all[0], nil
+}
+
+// distinctAddrs are ips as text without repeats, IPv4 before IPv6, each
+// sorted.
+func distinctAddrs(ips []net.IP) []string {
+	ips = slices.Clone(ips)
 	sort.Slice(ips, func(i, j int) bool {
 		a4, b4 := ips[i].To4() != nil, ips[j].To4() != nil
 		if a4 != b4 {
@@ -289,12 +316,39 @@ func (p *Pins) RebuildApprovalAddr(ctx context.Context) (addr string, others []s
 	})
 	var all []string
 	for _, ip := range ips {
+		if ip == nil {
+			continue
+		}
 		if s := ip.String(); len(all) == 0 || all[len(all)-1] != s {
 			all = append(all, s)
 		}
 	}
-	if len(all) == 0 {
-		return "", nil, &SourceLookupError{Source: source, Err: errors.New("tidak ada alamat")}
-	}
-	return all[0], all[1:], nil
+	return all
+}
+
+// SourceAddrsError refuses an approval for a source name that resolves to
+// more than one address (B16).
+type SourceAddrsError struct {
+	Source string
+	Addrs  []string
+}
+
+func (e *SourceAddrsError) Error() string {
+	return fmt.Sprintf("Nama sumber %s mengarah ke lebih dari satu alamat (%s). Persetujuan hanya bisa diberikan bila nama "+
+		"itu mengarah ke satu alamat. Tetapkan satu alamat untuk nama itu di server ini (misalnya di /etc/hosts), lalu "+
+		"jalankan perintah approve ini lagi. Persetujuan tidak ditulis.", e.Source, strings.Join(e.Addrs, ", "))
+}
+
+// SourceMovedError refuses an approval for a source name that no longer
+// resolves to the address verified at quarantine (B15).
+type SourceMovedError struct {
+	Source   string
+	Addrs    []string
+	Recorded string
+}
+
+func (e *SourceMovedError) Error() string {
+	return fmt.Sprintf("Nama sumber %s sekarang mengarah ke %s, bukan ke alamat yang dicatat saat karantina (%s). Bila "+
+		"alamat baru itu memang master baru, jalankan: sudo dbpanel agent set-source %s, lalu jalankan perintah approve "+
+		"ini lagi. Persetujuan tidak ditulis.", e.Source, strings.Join(e.Addrs, ", "), e.Recorded, e.Source)
 }

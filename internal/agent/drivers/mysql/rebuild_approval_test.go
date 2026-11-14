@@ -152,6 +152,10 @@ func TestRebuildApprovalValidity(t *testing.T) {
 		{"role", base, "replica", "db-b:3306", ips, now, "tidak dikarantina"},
 		{"other source", base, "quarantined", "db-c:3306", ips, now, "db-c:3306"},
 		{"other address", base, "quarantined", "db-b:3306", []net.IP{net.ParseIP("10.0.0.6")}, now, "10.0.0.5"},
+		{"mixed answer", base, "quarantined", "db-b:3306", []net.IP{net.ParseIP("10.0.0.5"), net.ParseIP("10.0.0.6")}, now,
+			"mengarah ke alamat lain"},
+		{"no address", base, "quarantined", "db-b:3306", nil, now, "mengarah ke alamat lain"},
+		{"same address twice", base, "quarantined", "db-b:3306", []net.IP{net.ParseIP("10.0.0.5"), net.ParseIP("10.0.0.5")}, now, ""},
 		{"expired", base, "quarantined", "db-b:3306", ips, base.Expires, "sudah habis"},
 		{"future edge", with(func(a *mysql.RebuildApproval) {
 			a.Approved = now.Add(5 * time.Minute)
@@ -244,42 +248,65 @@ func TestRebuildFilesTrusted(t *testing.T) {
 func TestRebuildApprovalAddr(t *testing.T) {
 	ctx := context.Background()
 	p := mustPins(t, pinDir(t, "quarantined", "10.0.0.5:3306"))
-	addr, others, err := p.RebuildApprovalAddr(ctx)
-	if err != nil || addr != "10.0.0.5" || len(others) != 0 {
-		t.Errorf("IP source = %q, %v, %v", addr, others, err)
+	looked := false
+	addr, err := p.RebuildApprovalAddr(ctx, func(context.Context, string) ([]net.IP, error) {
+		looked = true
+		return nil, nil
+	})
+	if err != nil || addr != "10.0.0.5" || looked {
+		t.Errorf("IP source = %q, %v, looked up %v", addr, err, looked)
 	}
 
 	dir := pinDir(t, "quarantined", "db-b:3306")
 	p = mustPins(t, dir)
-	restore := mysql.SetResolver(func(context.Context, string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("fd00::5"), net.ParseIP("10.0.0.7"), net.ParseIP("10.0.0.6")}, nil
-	}, nil)
-	defer restore()
-	addr, others, err = p.RebuildApprovalAddr(ctx)
-	if err != nil || addr != "10.0.0.6" || !reflect.DeepEqual(others, []string{"10.0.0.7", "fd00::5"}) {
-		t.Errorf("name source = %q, %v, %v", addr, others, err)
+	answer := []net.IP{net.ParseIP("10.0.0.6")}
+	lookup := func(context.Context, string) ([]net.IP, error) { return answer, nil }
+	if addr, err = p.RebuildApprovalAddr(ctx, lookup); err != nil || addr != "10.0.0.6" {
+		t.Errorf("one address = %q, %v", addr, err)
+	}
+	answer = []net.IP{net.ParseIP("10.0.0.6"), net.ParseIP("10.0.0.6")}
+	if addr, err = p.RebuildApprovalAddr(ctx, lookup); err != nil || addr != "10.0.0.6" {
+		t.Errorf("one address twice = %q, %v", addr, err)
+	}
+	answer = []net.IP{net.ParseIP("fd00::5"), net.ParseIP("10.0.0.7"), net.ParseIP("10.0.0.6")}
+	_, err = p.RebuildApprovalAddr(ctx, lookup)
+	b16 := "Nama sumber db-b:3306 mengarah ke lebih dari satu alamat (10.0.0.6, 10.0.0.7, fd00::5). Persetujuan hanya bisa " +
+		"diberikan bila nama itu mengarah ke satu alamat. Tetapkan satu alamat untuk nama itu di server ini (misalnya di " +
+		"/etc/hosts), lalu jalankan perintah approve ini lagi. Persetujuan tidak ditulis."
+	if err == nil || err.Error() != b16 {
+		t.Errorf("three addresses: %v, want B16", err)
 	}
 
+	// A recorded (verified) address: the name is still looked up.
 	if err := os.WriteFile(filepath.Join(dir, mysql.SourceAddrFile), []byte("10.0.0.9\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	addr, others, err = p.RebuildApprovalAddr(ctx)
-	if err != nil || addr != "10.0.0.9" || len(others) != 0 {
-		t.Errorf("verified address = %q, %v, %v", addr, others, err)
+	answer = []net.IP{net.ParseIP("10.0.0.9")}
+	if addr, err = p.RebuildApprovalAddr(ctx, lookup); err != nil || addr != "10.0.0.9" {
+		t.Errorf("recorded address resolved = %q, %v", addr, err)
+	}
+	answer = []net.IP{net.ParseIP("10.0.0.6")}
+	_, err = p.RebuildApprovalAddr(ctx, lookup)
+	b15 := "Nama sumber db-b:3306 sekarang mengarah ke 10.0.0.6, bukan ke alamat yang dicatat saat karantina (10.0.0.9). " +
+		"Bila alamat baru itu memang master baru, jalankan: sudo dbpanel agent set-source db-b:3306, lalu jalankan perintah " +
+		"approve ini lagi. Persetujuan tidak ditulis."
+	if err == nil || err.Error() != b15 {
+		t.Errorf("name moved: %v, want B15", err)
+	}
+	answer = []net.IP{net.ParseIP("10.0.0.9"), net.ParseIP("10.0.0.6")}
+	if _, err = p.RebuildApprovalAddr(ctx, lookup); err == nil || !strings.HasPrefix(err.Error(), "Nama sumber db-b:3306 mengarah ke lebih dari satu alamat (10.0.0.6, 10.0.0.9).") {
+		t.Errorf("recorded among two: %v, want B16", err)
 	}
 }
 
 func TestRebuildApprovalAddrDNSNamesHostPort(t *testing.T) {
 	p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
-	defer mysql.SetResolver(func(context.Context, string) ([]net.IP, error) {
-		return nil, errors.New("no such host")
-	}, nil)()
-	if _, _, err := p.RebuildApprovalAddr(context.Background()); err == nil || !strings.Contains(err.Error(), "sumber db-b:3306 tidak ditemukan (DNS)") {
+	fail := func(context.Context, string) ([]net.IP, error) { return nil, errors.New("no such host") }
+	if _, err := p.RebuildApprovalAddr(context.Background(), fail); err == nil || !strings.Contains(err.Error(), "sumber db-b:3306 tidak ditemukan (DNS)") {
 		t.Errorf("DNS error: err = %v, want the source named as host:port", err)
 	}
-	restore := mysql.SetResolver(func(context.Context, string) ([]net.IP, error) { return nil, nil }, nil)
-	defer restore()
-	if _, _, err := p.RebuildApprovalAddr(context.Background()); err == nil || !strings.Contains(err.Error(), "sumber db-b:3306 tidak ditemukan (DNS): tidak ada alamat") {
+	none := func(context.Context, string) ([]net.IP, error) { return nil, nil }
+	if _, err := p.RebuildApprovalAddr(context.Background(), none); err == nil || !strings.Contains(err.Error(), "sumber db-b:3306 tidak ditemukan (DNS): tidak ada alamat") {
 		t.Errorf("no address: err = %v, want the source named as host:port", err)
 	}
 }
