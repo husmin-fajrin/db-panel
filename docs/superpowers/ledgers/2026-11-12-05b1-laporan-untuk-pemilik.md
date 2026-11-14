@@ -10,6 +10,8 @@ Dokumen ini ditulis untuk pemilik dbpanel yang harus memutuskan apakah cabang ke
 
 **Risiko yang masih terbuka.** Daftar risiko yang masih terbuka ada di dokumen audit `docs/superpowers/security/2026-11-14-audit-plan-5b1.md`; risikonya tidak disalin ke sini. Mulailah dari Bagian 1 dokumen audit itu ("Ringkasan eksekutif"): di sana ada tabel semua risiko terbuka, siapa yang bisa memicunya, akibat terburuknya, dan usul perbaikannya. Keputusan yang menyangkut risiko terbuka ditandai "Perlu perhatian pemilik:" di Bagian 2.
 
+**Keputusan pemilik (2026-11-14), sesudah membaca laporan ini.** (1) Satu kalimat README yang salah dan delapan ketidaktepatan kecil di README diperbaiki sebelum merge; itu sudah dikerjakan sebagai bagian I putaran perbaikan dan diperiksa ulang. (2) Semua risiko lain yang masih terbuka masuk Rencana 5b-2 sebagai kelompok tugas pertama. (3) Cabang kerja digabung ke `main` sesudah butir 1 selesai.
+
 **Istilah yang sering muncul.**
 
 - **Panel**: aplikasi web tempat operator bekerja. **Agent**: program di tiap server MySQL yang menjalankan perintah panel.

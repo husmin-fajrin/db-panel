@@ -1902,9 +1902,9 @@ berlaku.
 15. **Gerbang.** Task yang menyentuh `internal/agent` juga menjalankan
     `go test ./internal/agent/... -race -short -timeout 60m` (`make test`
     tidak memakai `-race`, dan paket driver MySQL butuh ±40 menit).
-16. **Gelombang perbaikan akhir: delapan bagian.** Sesudah Task 12
+16. **Gelombang perbaikan akhir: sembilan bagian.** Sesudah Task 12
     (`8ade0e0`) audit keamanan dan review seluruh cabang dijalankan, lalu
-    temuannya diperbaiki dalam delapan bagian. Setiap bagian diperiksa ulang
+    temuannya diperbaiki dalam sembilan bagian. Setiap bagian diperiksa ulang
     secara terarah; temuan pemeriksaan ulang menjadi bagian berikutnya.
     Rincian per temuan dan putusan pemeriksaan ulang ada di audit
     `docs/superpowers/security/2026-11-14-audit-plan-5b1.md` (A5b1).
@@ -1918,12 +1918,17 @@ berlaku.
     | E | agent: bukti daftar database yang bisa dipalsukan, dan sisa bagian C | `6799dc3..abb56bc` (8 commit) | bukti daftar lengkap tidak bisa dipalsukan lewat nama, kolom atau peran (SEC-194); saran yang bisa dijalankan di server baca-saja (SEC-196, teks agent); pin sumber untuk data tertinggal dan salvage (SEC-200); `log_error` lewat `O_PATH` (SEC-150); nama dual-stack dan `LOCALHOST` (SEC-215, SEC-216) |
     | G dan F | G: panel, jalan keluar bangun ulang master lama yang gagal dan saran yang disensor halaman job; F: README | `abb56bc..82b9df0` (10 commit) | "Batalkan percobaan bangun ulang", form Buat replika, pekerjaan sertifikat (SEC-195, G-2, G-4, G-5); sanitizer (SEC-202, sebagian); bagian README "Memberi hak SHOW DATABASES di server yang dikarantina" (SEC-196); firewall bukan pengganti menghentikan aplikasi (SEC-197); pemeriksaan peran sebelum DROP (SEC-198, sebagaimana dirumuskan); README m-A..m-I (SEC-199); `--force` dan `1 1` (SEC-203) |
     | H | panel dan README: apa yang ditinggalkan pemeriksaan ulang bagian G dan F | `82b9df0..8b0389d` (7 commit) | pemeriksaan cadangan yang menangkap dump terpotong dan tidak menimpa cadangan lama (SEC-217, SEC-218); sisa `1 0` diperbaiki di tempat (SEC-219); tiga keadaan salinan (SEC-220); bendera settle dan tanda master lama konsisten pada galat store (SEC-221); titik tetap sanitizer (SEC-222); id promosi (SEC-223); README m-1, m-3..m-11 (SEC-224, sebagian) |
+    | I | README saja, atas keputusan pemilik (bukan keputusan pelaksanaan) | `78a8c9f..7e65a81` (3 commit) | kalimat bahwa bangun ulang yang berhenti di "Salin data" tidak mengubah apa pun (SEC-230); delapan ketidaktepatan kecil README bagian H (SEC-231). `scp` dan langkah `systemctl` tidak dijalankan |
 
     Gelombang berakhir di bagian H (keputusan pelaksanaan 48, yang
     melanggar aturan berhenti sekali lagi karena pemeriksaan ulang bagian G
     dan F menemukan jalan kehilangan data dengan perbaikan kecil yang
-    jelas). Temuan pemeriksaan ulang bagian H (SEC-230, SEC-231, SEC-232)
-    tidak diperbaiki dalam rencana ini.
+    jelas). Sesudah laporan akhir, pemilik memutuskan pada 2026-11-14:
+    "1. Perbaiki sekarang" (SEC-230 dan SEC-231 diperbaiki sebelum merge;
+    itu bagian I), "2. Setuju saranmu" (semua butir lain yang terbuka masuk
+    Rencana 5b-2 sebagai kelompok task pertama), "3. Merge ke main setelah
+    1 diselesaikan". SEC-232 dan temuan bagian I (SEC-233, SEC-234) tidak
+    diperbaiki dalam rencana ini.
 17. **Perilaku baru yang tidak ada di task mana pun.**
     - **Bukti daftar database lengkap, tiga lapis** (bagian A, C dan E;
       keputusan pelaksanaan 36, supaya satu cacat pengurai saja tidak
@@ -1977,7 +1982,8 @@ berlaku.
       terakhir menyuruh root melepas `super_read_only` sesaat dengan
       `sql_log_bin` OFF; urutannya diukur di bagian bukti rencana ini
       (A5b1 SEC-196..SEC-199, SEC-217..SEC-219, SEC-224).
-18. **Ditunda ke Rencana 5b-2, kelompok task pertama.**
+18. **Ditunda ke Rencana 5b-2, kelompok task pertama** (keputusan pemilik
+    2026-11-14, "Setuju saranmu"; alasan pelaksana per butir di bawah).
     - Desain B untuk keadaan master lama yang bangun ulangnya gagal,
       termasuk monitor (keputusan pelaksanaan 43, karena butuh perubahan
       peran dan monitor yang lebih besar dari gelombang perbaikan; A5b1
@@ -1996,7 +2002,7 @@ berlaku.
       dengan siklus gerbang dan review sendiri; A5b1 SEC-206, SEC-207).
     - Label untuk teks agent pada kegagalan job biasa (keputusan
       pelaksanaan 30, karena mengubah teks galat setiap job dan puluhan
-      test; A5b1 SEC-167). Pemilik belum memutuskan.
+      test; A5b1 SEC-167). Pemilik memutuskan Rencana 5b-2 pada 2026-11-14.
     - Cap sumber pada `leftover-gtid`, atau penghapusannya (keputusan
       pelaksanaan 46, alasan sama dengan butir agent di atas; A5b1
       SEC-201).
@@ -2005,9 +2011,12 @@ berlaku.
       dan memberi hak (keputusan pelaksanaan 48, karena langkah dengan
       tangan itu tidak pernah tenang di bawah putaran pemeriksaan ulang;
       A5b1 §1.3, SEC-229).
-    - Minor yang terbuka: SEC-211, SEC-228, SEC-231 (README bagian H),
-      SEC-232 (kode bagian H). SEC-230 dan SEC-231 bisa diperbaiki sebelum
-      merge bila pemilik minta.
+    - Minor yang terbuka: SEC-211, SEC-228, SEC-232 (kode bagian H),
+      SEC-233 (empat ketidaktepatan kecil README bagian I, m-I1..m-I4).
+    - Dua teks panel pada bangun ulang master lama: "database dari
+      percobaan sebelumnya" untuk database produksi master lama, dan
+      "data di server ini tidak diubah" pada Batalkan (A5b1 SEC-234; kode,
+      tidak diubah di bagian I yang hanya menyentuh README).
 
 ## Catatan untuk pelaksana
 

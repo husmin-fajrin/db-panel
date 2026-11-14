@@ -699,3 +699,47 @@ Final run on 8b0389d:
 
 Pushed: origin = HEAD = 8b0389d; `git status --short` is empty.
 Additional commit (not in the brief's list): 8b0389d (the flaky test fix above).
+
+## Part I
+
+Status: done. BASE 78a8c9f. Commits: 9d8a422 docs(plan) evidence rows; cf83f05 docs(readme) fixes; 7e65a81 docs(readme) line rewrap (one line exceeded the wrap width after m-H7). `git diff --stat 78a8c9f..HEAD`: README.md and the plan file only (101+/32-). Pushed; `git status --short` empty; HEAD = origin = 7e65a81. Evidence rows: plan file, new subsection "Bukti langkah tangan, tinjauan ulang H (bagian I)". Scratch mysqld 8.0.46 under /tmp/dbpanel-measure.*: stopped and removed, with no mysqld left running.
+
+### Per item (README line numbers at 7e65a81)
+
+- **I-H1:** I verified this in the code at head.
+  - In `replicaSnapshot` (create_replica.go ~753-760), for a dump that is not a reattach, `mysql.dropDatabases(WipeList)` runs before `copySnapshot`.
+  - `WipeList` is the approved list of databases the target also shares with the master (create_replica.go ~494-522). The approval happens in a job wait (WaitWipe, the approve dialog on the job page), not in the form. The README says "daftar yang Anda setujui saat pekerjaan meminta persetujuan penghapusan" and not "di form".
+  - `DropDatabases` (databases.go) works like this: refuseRunningReplica/refuseOnSource, then liftReadOnly, then DROP with `sql_log_bin = 0`, then restore.
+  - README 2013-2022: the bullet now uses the review's corrected text, with only that one wording change.
+
+  Other sentences I found and corrected:
+  - (a) README 1974-1978, after the quoted Batalkan panel text "data di server ini tidak diubah". That text comes from the code and I did not change it. I added: "Artinya tombol itu sendiri tidak mengubah data; percobaan bangun ulang sebelumnya bisa sudah menghapus atau mengganti data di server ini (lihat di bawah)."
+  - (b) README 2318-2321, the bullet "Menjadi master lagi" (set-role master fallback). I added a warning that a failed or cancelled dump rebuild may have dropped the databases the new master also has, and a step to check `SHOW DATABASES` first.
+
+  Sentences I checked and left unchanged:
+  - README ~1384, the promote partial-replica sentence "data itu tetap utuh di master lama". It covers databases NOT on the new master, and those are never in WipeList.
+  - "Hapus server … tidak mengubah apa pun" (2258). It describes the delete action itself.
+- **m-H1:** README 1835-1841 now uses the corrected text. **Segarkan** is verified in web/templates/server_detail.html:263-264: POST /servers/{id}/mysql/refresh, shown when the MySQL account is connected, in the MySQL box. I added a parenthesis that the list may still be the one from before the load.
+- **m-H2:** both sections, README 2072-2079 and 2219-2226, use the corrected text. The service names match the rest of the README (`dbpanel-agent`, `mysql`/`mysqld`). The order "agent first, then MySQL" matches guardQuarantined: it persists read-only when MySQL answers after not answering. These are systemctl steps, so I did not run them here (no systemd service in this container).
+- **m-H3:** README ~2104-2120. I added "hanya nama yang persis sama yang dihitung". The `mv -n … -cadangan-"$(date …)".sql` command plus an `ls -l` check is in a code block. Measured with the exact quoting, on a name containing `$`:
+  - the target is free: exit 0, the file is moved;
+  - the target exists: "mv: not replacing", exit 1, both files are unchanged.
+  
+  Finding: GNU coreutils before 9.2 exits 0 silently in that case, so the README checks with `ls -l` afterwards, not with the exit code. It also tells the operator to wait a second and repeat.
+- **m-H4:** README 2137-2142. I added the scp example and a `sha256sum` comparison on both servers. I ran `sha256sum`: a copy gives the same hash, and a truncated file gives a different one. **scp was not run:** there is no second host here.
+- **m-H5:** README 1991-1993 now uses the corrected wording. Verified in the code:
+  - dump.go:142 runs resetBinaryLogs only when `gtidMode == "ON"`. This comes after liftReadOnly and before listBefore and "dump dimulai" (155).
+  - clone.go:123 reports "CLONE dimulai".
+  - Note: the dump's "data lama mulai diganti" really happens during the load, after the Progress. The wording follows the review.
+- **m-H6:** README 1917-1921. Measured with interactive mysql through `script`:
+  - The account already exists, and the README block is typed as written. The result is ERROR 1396, the session continues, GRANT ALL goes to the existing account, and the state ends `1 1`. The new password fails with 1045, the old one works. This confirms the review.
+  - The added instruction (after 1396, type only `SET GLOBAL super_read_only=ON;` then `exit`) ends `1 1`, with grants unchanged.
+  - Batch mode without --force stops at line 3 with exit 1 and leaves `1 0`. That is evidence only: the README does not use batch mode for this block.
+- **m-H7:** measured. With `SET PERSIST event_scheduler=ON` and the option line `event_scheduler=OFF`, after a restart the value is `ON` (VARIABLE_SOURCE PERSISTED). After RESET PERSIST it is `OFF` (EXPLICIT). I kept the clause and made it precise at README 2408-2409: "pernah disimpan `ON` dengan `SET PERSIST`: nilai tersimpan itu yang dipakai".
+- **m-H8:** README 1981-1983 uses the corrected text. Verified: `latestRebuildEnded` (controls.go ~185-201) checks `QuarantineEnded` on the newest create_replica job; the error text is controls.go:149.
+
+### Not closed / concerns
+- The panel's wait message for WaitWipe on a rebuild calls the old master's own databases "database dari percobaan sebelumnya" (create_replica.go:498). That is misleading on an old master, where they are its production databases. Changing it is a code change, so I left it; this is a follow-up for the code.
+- The Batalkan quoted text "data di server ini tidak diubah" is panel text. The README now qualifies it, but the panel still says it. That would also need a code change.
+- scp and the systemctl steps (m-H2) were not run here.
+- I did not run `graphify update .`: no code changed, and the rebuild would have touched files outside the allowed set.
