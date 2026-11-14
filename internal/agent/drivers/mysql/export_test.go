@@ -267,7 +267,10 @@ func SetInterfaceAddrs(f func() ([]net.Addr, error)) (restore func()) {
 }
 
 // LocalMySQL is the locality check of mysql.connect and the stored account.
-var LocalMySQL = localMySQL
+func LocalMySQL(ctx context.Context, host string) error {
+	_, err := localMySQL(ctx, host)
+	return err
+}
 
 // SetRepointHook makes mysql.repoint call f at its test points.
 func SetRepointHook(f func(stage string)) (restore func()) {

@@ -122,13 +122,17 @@ func (d *Driver) registerConnect(reg *commands.Registry) {
 		}
 
 		// Only a MySQL on this machine: the guard and every later command
-		// act through the stored account.
-		if err := localMySQL(ctx, p.Host); err != nil {
+		// act through the stored account. The login goes to the address
+		// the check accepted; the account is stored as given.
+		dial, err := localMySQL(ctx, p.Host)
+		if err != nil {
 			return nil, &commands.ParamError{Msg: err.Error()}
 		}
 
 		// Try the new account without touching the stored one.
-		db, err := openWith(ctx, h.Layout().Socket, p)
+		dp := p
+		dp.Host = dial
+		db, err := openWith(ctx, h.Layout().Socket, dp)
 		if err != nil {
 			return nil, &commands.ParamError{Msg: loginFailure(err)}
 		}
@@ -217,9 +221,13 @@ func (e *errLookupLocal) Error() string {
 // address, an address of one of this machine's interfaces, or a name every
 // address of which is one of those. Anything else is errNotLocal; a name
 // that does not resolve, or resolves to no address, is errLookupLocal.
-func localMySQL(ctx context.Context, host string) error {
+//
+// dial is what to connect to: host itself, except that a name becomes the
+// first address its one lookup answered, so the connection goes where the
+// check looked (a second lookup at dial time could answer otherwise).
+func localMySQL(ctx context.Context, host string) (dial string, err error) {
 	if host == "" || strings.EqualFold(host, "localhost") {
-		return nil
+		return host, nil
 	}
 	ips := []net.IP{net.ParseIP(host)}
 	if ips[0] == nil {
@@ -228,15 +236,15 @@ func localMySQL(ctx context.Context, host string) error {
 		ips, err = lookupIP(lctx, host)
 		cancel()
 		if err != nil {
-			return &errLookupLocal{host: host, err: err}
+			return "", &errLookupLocal{host: host, err: err}
 		}
 		if len(ips) == 0 {
-			return &errLookupLocal{host: host, err: errors.New("tidak ada alamat")}
+			return "", &errLookupLocal{host: host, err: errors.New("tidak ada alamat")}
 		}
 	}
 	addrs, err := interfaceAddrs()
 	if err != nil {
-		return &errNotLocal{host: host}
+		return "", &errNotLocal{host: host}
 	}
 	for _, ip := range ips {
 		if ip.IsLoopback() {
@@ -246,10 +254,10 @@ func localMySQL(ctx context.Context, host string) error {
 			n, ok := a.(*net.IPNet)
 			return ok && n.IP.Equal(ip)
 		}) {
-			return &errNotLocal{host: host}
+			return "", &errNotLocal{host: host}
 		}
 	}
-	return nil
+	return ips[0].String(), nil
 }
 
 // normalizeParams validates p and fills the default host.

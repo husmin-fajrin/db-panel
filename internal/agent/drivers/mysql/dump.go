@@ -291,7 +291,8 @@ func findClientTool(mysqldPath, name string) (string, error) {
 // account: the local client must log in as the account Host.Open uses.
 var errNotConnected = errors.New("akun MySQL belum terhubung; jalankan Hubungkan MySQL dulu")
 
-// storedAccount is the stored admin account the local mysql logs in with.
+// storedAccount is the stored admin account the local mysql logs in with,
+// its host name (if any) replaced by the address localMySQL checked.
 func storedAccount(creds CredentialStore) (proto.ConnectParams, error) {
 	if creds == nil {
 		return proto.ConnectParams{}, errNotConnected
@@ -303,9 +304,12 @@ func storedAccount(creds CredentialStore) (proto.ConnectParams, error) {
 	if !ok {
 		return p, errNotConnected
 	}
-	if err := localMySQL(context.Background(), p.Host); err != nil {
+	// The local client connects to the address the check accepted.
+	dial, err := localMySQL(context.Background(), p.Host)
+	if err != nil {
 		return p, err
 	}
+	p.Host = dial
 	return p, nil
 }
 

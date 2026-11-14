@@ -72,10 +72,15 @@ func OpenDB(ctx context.Context, creds CredentialStore, socket, rootPassword str
 	}
 	if !stored {
 		p = proto.ConnectParams{User: "root", Password: rootPassword}
-	} else if err := localMySQL(ctx, p.Host); err != nil {
+	} else {
 		// An account stored by an older agent for another machine's
 		// MySQL is never used: reconnecting from the panel replaces it.
-		return nil, err
+		// Every connection of the pool goes to the checked address.
+		dial, err := localMySQL(ctx, p.Host)
+		if err != nil {
+			return nil, err
+		}
+		p.Host = dial
 	}
 	db, err := openWith(ctx, socket, p)
 	if err != nil {

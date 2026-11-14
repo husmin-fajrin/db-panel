@@ -210,3 +210,84 @@ func TestStoredRemoteAccountFailsClosed(t *testing.T) {
 		t.Errorf("snapshot = ok %v, error %q; want the locality text", s.MySQLOK, s.MySQLError)
 	}
 }
+
+// changingResolver answers name with first on the first lookup and with
+// then on every later one; other names are not found. The system resolver
+// does not know name, so a client that dials it by name fails.
+func changingResolver(name, first, then string) (restore func()) {
+	calls := 0
+	return mysql.SetResolver(func(_ context.Context, host string) ([]net.IP, error) {
+		if host != name {
+			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+		}
+		calls++
+		if calls == 1 {
+			return []net.IP{net.ParseIP(first)}, nil
+		}
+		return []net.IP{net.ParseIP(then)}, nil
+	}, nil)
+}
+
+// TestDialGoesToCheckedAddress: the name is resolved once, and the
+// connection goes to the address the locality check accepted, not to
+// whatever the name resolves to when it is dialled.
+func TestDialGoesToCheckedAddress(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	const name = "db.berubah.test"
+
+	t.Run("mysql.connect", func(t *testing.T) {
+		defer changingResolver(name, "127.0.0.1", "10.20.0.5")()
+		creds := &memCreds{p: proto.ConnectParams{User: "root"}}
+		r := newPinRig(t, inst.HostWith(creds), pinDir(t, "", ""))
+		r.d.Creds = creds
+		decode[proto.ConnectResult](t, r.dispatch("mysql.connect", proto.ConnectParams{User: "root", Host: name, Port: inst.Port}))
+		if creds.p.Host != name {
+			t.Errorf("stored host = %q, want the name as given", creds.p.Host)
+		}
+	})
+	t.Run("stored account", func(t *testing.T) {
+		defer changingResolver(name, "127.0.0.1", "10.20.0.5")()
+		creds := &memCreds{p: proto.ConnectParams{User: "root", Host: name, Port: inst.Port}}
+		db, err := inst.HostWith(creds).Open(context.Background())
+		if err != nil {
+			t.Fatalf("Open with a stored name = %v", err)
+		}
+		defer db.Close()
+		// The pool dials again for a second connection: still the checked
+		// address.
+		c1, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c1.Close()
+		c2, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("second connection of the pool: %v", err)
+		}
+		c2.Close()
+	})
+}
+
+// TestDumpLocalClientUsesCheckedAddress: the dump's local mysql client is
+// given the address the check accepted for the stored account's host
+// name, not the name (which only the agent's resolver knows here).
+func TestDumpLocalClientUsesCheckedAddress(t *testing.T) {
+	const name = "db.lokal.test"
+	t.Cleanup(mysql.SetResolver(func(_ context.Context, host string) ([]net.IP, error) {
+		if host == name {
+			return []net.IP{net.ParseIP("127.0.0.1")}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}, nil))
+	master := testmysql.Start(t, testmysql.Options{})
+	replica := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	execAll(t, mdb, "CREATE DATABASE a", "CREATE TABLE a.t (id INT PRIMARY KEY)", "INSERT INTO a.t VALUES (1)")
+	dumpUser(t, mdb)
+	creds := &memCreds{p: proto.ConnectParams{User: "root", Host: name, Port: replica.Port}}
+	rig := newSnapshotRig(replica.HostWith(creds), creds)
+	snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master, "a")))
+	if n := count(t, rootDB(t, replica), "SELECT COUNT(*) FROM a.t"); n != 1 {
+		t.Errorf("a.t rows on the replica = %d, want 1", n)
+	}
+}
