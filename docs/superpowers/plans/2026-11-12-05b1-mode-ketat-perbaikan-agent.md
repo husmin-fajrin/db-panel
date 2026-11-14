@@ -483,6 +483,8 @@ Perintah lain yang dipakai README:
 | `mysqldump … --databases "lama app" > "<dir>/lama app-cadangan.sql"` (nama dengan spasi) | keluar 0; 2134 byte; `grep -c 'CREATE DATABASE'` menulis `1` |
 | `mysqldump … --databases "tidakada" > …` (database tidak ada) | keluar 2, "Got error: 1049: Unknown database 'tidakada'"; berkas tetap ada (798 byte), `grep -c` menulis `0` |
 | `mysql -e 'SET GLOBAL …; DROP DATABASE `lama app`; …'` | keluar 0; database hilang; `1 1` |
+| `mysqldump … --databases 'ab$cd' > '<dir>/ab$cd-cadangan.sql'` (tanda kutip tunggal, nama dengan `$`) | keluar 0; 2116 byte; `grep -c` menulis `1`; dengan tanda kutip ganda shell menulis `abZZ` (`cd=ZZ`) |
+| `mysql -e '…; DROP DATABASE `ab$cd`; …'` | keluar 0; database hilang; `1 1` |
 | `mysql -e 'SHOW DATABASES LIKE "lama app";'` | menulis nama itu bila ada; kosong bila tidak ada |
 | `mysql -e 'SELECT @@read_only, @@super_read_only;'` | `1 1` |
 | `SELECT ID, USER, HOST, DB, COMMAND, TIME FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID();` di master | `event_scheduler` (`Daemon`) dan satu sesi aplikasi `gu` (`Query`) saat aplikasi tersambung; sesudah aplikasi selesai hanya `event_scheduler` |
