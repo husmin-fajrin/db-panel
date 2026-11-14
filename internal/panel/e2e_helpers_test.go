@@ -846,8 +846,16 @@ func (e *e2ePromoteTopology) approveRebuild(t *testing.T, master, old *e2eNode) 
 		t.Fatalf("rebuild form of %s shows no approve command:\n%s", old.name, textOf(form))
 	}
 	var out, errOut strings.Builder
-	if code := agent.RunCLI([]string{"approve", m[1], "--dir", old.agent.dir}, strings.NewReader("ya\n"), &out, &errOut); code != 0 {
+	seams, calls := nodeCLISeams(old)
+	if code := agent.RunCLIWith([]string{"approve", m[1], "--dir", old.agent.dir}, strings.NewReader("ya\n"), &out, &errOut,
+		seams); code != 0 {
 		t.Fatalf("approve on %s exited %d\nstdout:\n%s\nstderr:\n%s", old.name, code, out.String(), errOut.String())
+	}
+	// The line the CLI logs for root's approval, written to the test's
+	// writer instead of this machine's system log.
+	if len(calls.syslog) != 1 || !strings.HasPrefix(calls.syslog[0], "rebuild approval written: source=") ||
+		strings.Contains(calls.syslog[0], m[1]) || calls.layout != 0 {
+		t.Fatalf("approve on %s logged %q (layout used %d times)", old.name, calls.syslog, calls.layout)
 	}
 	if form := e.ui.get(formPath); !strings.Contains(form, "Sudah disetujui di ") {
 		t.Fatalf("rebuild form of %s after the approval:\n%s", old.name, textOf(form))
@@ -880,6 +888,23 @@ func (e *e2ePromoteTopology) replicaForm(t *testing.T, master, target *e2eNode, 
 		vals.Set("confirm_token", e.ui.confirmToken(web.ActRebuildOldMaster, "server", target.srv()))
 	}
 	return form, vals
+}
+
+// cliSeamCalls records what a CLI run reached through nodeCLISeams.
+type cliSeamCalls struct {
+	layout int      // times the MySQL layout was asked for
+	syslog []string // lines written to the system log
+}
+
+// nodeCLISeams makes the agent's CLI run on n's MySQL instance and log to
+// the returned record, never on this machine's MySQL configuration or
+// system log.
+func nodeCLISeams(n *e2eNode) (agent.CLISeams, *cliSeamCalls) {
+	calls := &cliSeamCalls{}
+	return agent.CLISeams{
+		LayoutHost: func(config.Config) (mysql.Host, error) { calls.layout++; return n.inst.Host(), nil },
+		Syslog:     func(line string) error { calls.syslog = append(calls.syslog, line); return nil },
+	}, calls
 }
 
 // startLockOnDisk reports whether n's managed config (the dbpanel block

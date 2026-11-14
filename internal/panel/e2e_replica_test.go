@@ -1502,11 +1502,30 @@ func TestE2EDeleteQuarantinedOldMasterStaysLocked(t *testing.T) {
 		t.Fatalf("super_read_only after the delete = %s, want ON", v)
 	}
 
+	// set-role unassigned only rewrites the role pin: it releases no start
+	// lock (only set-role master does; the agent's guard removes the lock
+	// of an unassigned server once read-only is persisted), so the CLI
+	// leaves the instance's init_file line and lock file as they are. The
+	// agent is stopped first so its guard cannot remove them meanwhile.
+	// The CLI runs on this test's instance (nodeCLISeams), never on this
+	// machine's MySQL configuration or system log.
+	m.agent.stop(t)
 	var out, errOut strings.Builder
-	if code := agent.RunCLI([]string{"set-role", "unassigned", "--ya", "--dir", dir}, strings.NewReader(""), &out, &errOut); code != 0 {
+	seams, calls := nodeCLISeams(m)
+	if code := agent.RunCLIWith([]string{"set-role", "unassigned", "--ya", "--dir", dir}, strings.NewReader(""), &out, &errOut,
+		seams); code != 0 {
 		t.Fatalf("set-role unassigned exited %d\nstdout:\n%s\nstderr:\n%s", code, out.String(), errOut.String())
 	}
 	if role := readPin(t, dir, mysql.RoleFile); role != "" {
 		t.Fatalf("role pin after set-role unassigned = %q, want none", role)
+	}
+	if calls.layout != 0 || len(calls.syslog) != 0 {
+		t.Fatalf("set-role unassigned used the layout %d times, logged %q; want neither", calls.layout, calls.syslog)
+	}
+	if line, file := startLockOnDisk(t, m); !line || !file {
+		t.Fatalf("start lock after set-role unassigned: init_file line %v, file %v; want both left as they were", line, file)
+	}
+	if !strings.Contains(out.String(), "agent tidak lagi menjaga MySQL-nya tetap baca-saja (read-only)") {
+		t.Fatalf("set-role unassigned did not say the read-only guard ends:\n%s", out.String())
 	}
 }
