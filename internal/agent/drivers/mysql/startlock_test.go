@@ -151,7 +151,7 @@ func TestPrintDefaultsArgsExact(t *testing.T) {
 
 // printDefaultsHost answers mysqld --print-defaults with out (or
 // outByHome's entry for the HOME it runs with) and records every command
-// it is asked to run and the environment it is given.
+// it is asked to run, the environment it is given and the ids it runs as.
 type printDefaultsHost struct {
 	mysql.Host
 	mu        sync.Mutex
@@ -159,15 +159,21 @@ type printDefaultsHost struct {
 	outByHome map[string]string
 	runs      [][]string
 	envs      [][]string
-	failHome  string // a HOME whose run fails
+	failHome  string                // a HOME whose run fails
+	creds     []*syscall.Credential // the ids of each run; nil: as the agent
 }
 
 func (h *printDefaultsHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
 	return h.ExecEnv(ctx, nil, stdin, stdout, name, args...)
 }
 
-func (h *printDefaultsHost) ExecEnv(_ context.Context, env []string, _ io.Reader, stdout io.Writer, name string, args ...string) error {
+func (h *printDefaultsHost) ExecEnv(ctx context.Context, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
+	return h.ExecEnvAs(ctx, nil, env, stdin, stdout, name, args...)
+}
+
+func (h *printDefaultsHost) ExecEnvAs(_ context.Context, cred *syscall.Credential, env []string, _ io.Reader, stdout io.Writer, name string, args ...string) error {
 	h.mu.Lock()
+	h.creds = append(h.creds, cred)
 	h.runs = append(h.runs, append([]string{name}, args...))
 	h.envs = append(h.envs, append([]string(nil), env...))
 	out := h.out
@@ -467,9 +473,16 @@ func TestServiceAccountMyCnfBreaksStartLock(t *testing.T) {
 	if err := mysql.WriteStartLock(ctx, inst.Host()); err != nil {
 		t.Fatal(err)
 	}
-	// The account the first run (nothing readable) settles on: mysql as
-	// root, else this process's user.
-	account := "mysql"
+	// The system option files: $MYSQL_HOME/my.cnf (a global file mysqld
+	// searches like /etc/my.cnf, which a test may not write) brings the
+	// instance's config, with the agent's line and its user=, which the
+	// first run (as root) settles on.
+	sys := openDir(t)
+	if err := os.WriteFile(filepath.Join(sys, "my.cnf"), []byte("!include "+inst.ConfigFile+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYSQL_HOME", sys)
+	account := "nobody" // the instance's mysqld user
 	if os.Geteuid() != 0 {
 		u, err := user.Current()
 		if err != nil {
@@ -477,43 +490,51 @@ func TestServiceAccountMyCnfBreaksStartLock(t *testing.T) {
 		}
 		account = u.Username
 	}
-	runAs := account
-	if os.Geteuid() == 0 {
-		runAs = "nobody" // the instance's mysqld user, for readableBy
-	}
-	real, err := user.Lookup(runAs)
+	real, err := user.Lookup(account)
 	if err != nil {
 		t.Fatal(err)
 	}
-	home := t.TempDir()
+	home := openDir(t)
 	t.Cleanup(mysql.SetLookupUser(func(name string) (*user.User, error) {
 		if name != account {
 			return user.Lookup(name)
 		}
 		u := *real
-		u.Username, u.HomeDir = name, home
+		u.HomeDir = home
 		return &u, nil
 	}))
 	myCnf := filepath.Join(home, ".my.cnf")
 	op := filepath.Join(home, "op.sql")
-	// The include brings the instance's user= line; the user line after
-	// it keeps the account the first run found, so only init-file differs.
-	include := "!include " + inst.ConfigFile + "\n[mysqld]\nuser=" + account + "\n"
 
 	l := inst.Layout()
 	l.ConfigFiles = []string{"/etc/my.cnf", "/etc/mysql/my.cnf", "~/.my.cnf"}
 	h := mysql.NewHost(l, inst.Service(), nil, probe.RealSystem(), nil)
-	if err := os.WriteFile(myCnf, []byte(include), 0o644); err != nil {
+	if err := os.WriteFile(myCnf, []byte("[mysqld]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if st := mysql.StartLockStatus(ctx, h); !st.Locked {
-		t.Errorf(".my.cnf with the include only: %+v", st)
+		t.Errorf(".my.cnf without init-file: %+v", st)
 	}
-	if err := os.WriteFile(myCnf, []byte(include+"init-file="+op+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(myCnf, []byte("[mysqld]\ninit-file="+op+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if st := mysql.StartLockStatus(ctx, h); st.Locked || st.Reason != "init_file lain dibaca sesudah baris agent: "+op {
 		t.Errorf(".my.cnf with init-file: %+v", st)
+	}
+	if os.Geteuid() == 0 {
+		// The home's run is the account's own: a file only root can read,
+		// named by the account's .my.cnf, is never opened (mysqld skips
+		// the include), so its init-file does not count.
+		secret := filepath.Join(sys, "root-only.cnf")
+		if err := os.WriteFile(secret, []byte("[mysqld]\ninit-file="+op+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(myCnf, []byte("!include "+secret+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if st := mysql.StartLockStatus(ctx, h); !st.Locked {
+			t.Errorf(".my.cnf including a root-only file: %+v; the run as %s cannot read it", st, account)
+		}
 	}
 
 	// With --defaults-file (the instance's own layout) mysqld does not read

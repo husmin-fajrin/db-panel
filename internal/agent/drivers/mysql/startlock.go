@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -39,8 +40,20 @@ const StartLockFile = "dbpanel-start-lock.sql"
 // startLockContent is the start lock file, statement by statement.
 const startLockContent = "SET GLOBAL super_read_only=ON;\nSET PERSIST read_only=ON;\nSET PERSIST super_read_only=ON;\n"
 
-// printDefaultsTimeout bounds mysqld --print-defaults.
-const printDefaultsTimeout = 30 * time.Second
+// printDefaultsTimeout bounds each mysqld --print-defaults run (an
+// !include of a FIFO blocks it until then).
+const printDefaultsTimeout = 10 * time.Second
+
+// maxPrintDefaultsOutput bounds what the agent reads from one
+// --print-defaults run; more makes the run fail.
+const maxPrintDefaultsOutput = 256 << 10
+
+// maxOperatorInitFiles and maxStartLockReason bound what a start lock
+// state carries into a health snapshot (the panel's frame is 1 MiB).
+const (
+	maxOperatorInitFiles = 20
+	maxStartLockReason   = 300
+)
 
 // managedConfigMu is held by every writer of the managed config in this
 // process (writeStartLock, releaseStartLock, configure), from reading the
@@ -463,7 +476,6 @@ type initFileArg struct {
 // init_file in order (the last one is used), the user it runs as and its
 // error log.
 type effectiveOpts struct {
-	InitFiles    []string      // plain init_file values, in order (as today)
 	InitFileArgs []initFileArg // every argument named init_file after its prefixes, in order
 	User         string
 	LogError     string
@@ -513,27 +525,27 @@ var listHome = func(path string) ([]string, error) {
 	return names, err
 }
 
-// serviceHome is the home of the MySQL service account; hidden is true
+// serviceHome is the MySQL service account and its home; hidden is true
 // when it lies at or under a protectedHomePrefixes entry and the agent
 // cannot list it or finds it empty: ProtectHome=yes mounts an empty,
 // unreadable directory over each of them, so the mount point itself
 // still stats and only what lies below it is gone.
-func serviceHome(account string) (home string, hidden bool, err error) {
-	u, err := lookupUser(account)
+func serviceHome(account string) (u *user.User, home string, hidden bool, err error) {
+	u, err = lookupUser(account)
 	if err != nil {
-		return "", false, err
+		return nil, "", false, err
 	}
 	if u.HomeDir == "" {
-		return "", false, errNoHome
+		return nil, "", false, errNoHome
 	}
 	home = filepath.Clean(u.HomeDir)
 	for _, p := range protectedHomePrefixes {
 		if home == p || strings.HasPrefix(home, p+"/") {
 			names, err := listHome(home)
-			return home, err != nil || len(names) == 0, nil
+			return u, home, err != nil || len(names) == 0, nil
 		}
 	}
-	return home, false, nil
+	return u, home, false, nil
 }
 
 // errNoHome is serviceHome's answer for an account with no home in its
@@ -577,68 +589,138 @@ func printDefaultsArgs(l Layout) []string {
 
 // readEffectiveOptions runs mysqld --print-defaults (which reads the
 // option files only, never the data directory) the way the MySQL service
-// reads them, and parses its answer. mysqld reads ~/.my.cnf from HOME, and
+// reads them, and parses its answers. mysqld reads ~/.my.cnf from HOME, and
 // the service runs with its account's HOME, not the agent's (root, hidden
-// by ProtectHome): a first run with HOME=/nonexistent finds the account
-// (the last --user, else mysql when the agent runs as root, else the
-// agent's own user), a second runs with that account's home and is the
-// answer. A home the agent cannot see, an unknown account, or a ~/.my.cnf
-// that names another user is an error: the start lock cannot be vouched
-// for. --print-defaults runs as the agent (root), so it may read option
-// files mysqld's own user could not; that can only add init_file entries
-// after the agent's line, which makes the start lock look broken, never
-// held: the result is conservative.
-func readEffectiveOptions(ctx context.Context, h Host) (effectiveOpts, error) {
+// by ProtectHome): a first run as root with HOME=/nonexistent reads the
+// system option files and finds the account (the last --user, else mysql
+// when the agent runs as root, else the agent's own user); a second runs
+// with that account's home AS that account (its uid, gid and
+// supplementary groups), so root never opens a path the account names
+// (an !include of a FIFO or a device). mysqld skips, without a word, a
+// system option file the account cannot read (plan 5b-1 evidence), so
+// both runs are returned, root's first: the start lock holds only if each
+// one says so (startLockStatus). A home the agent cannot see, an unknown
+// account, or a ~/.my.cnf that names another user is an error: the start
+// lock cannot be vouched for. With --defaults-file only that file is read
+// and the root run is the only one.
+func readEffectiveOptions(ctx context.Context, h Host) ([]effectiveOpts, error) {
 	l := h.Layout()
 	if l.MysqldPath == "" {
-		return effectiveOpts{}, errors.New("mysqld tidak diketahui")
+		return nil, errors.New("mysqld tidak diketahui")
 	}
 	args := printDefaultsArgs(l)
-	o, err := printDefaults(ctx, h, l.MysqldPath, args, "/nonexistent")
+	o, err := printDefaults(ctx, h, nil, l.MysqldPath, args, "/nonexistent")
 	if err != nil {
-		return o, err
+		return nil, err
 	}
 	// With --defaults-file mysqld reads that file only, never ~/.my.cnf
 	// (MySQL's documented rule, and plan 5b-1's evidence: HOME changed
 	// neither --print-defaults nor a real start), so HOME is irrelevant
 	// and the service account's home is not needed.
 	if strings.HasPrefix(args[0], "--defaults-file=") {
-		return o, nil
+		return []effectiveOpts{o}, nil
 	}
-	home, hidden, err := serviceHome(o.User)
+	u, home, hidden, err := serviceHome(o.User)
 	if errors.Is(err, errNoHome) {
-		return effectiveOpts{}, errAccountWithoutHome{o.User}
+		return nil, errAccountWithoutHome{o.User}
 	}
 	if err != nil {
-		return effectiveOpts{}, errNoServiceAccount{o.User, err}
+		return nil, errNoServiceAccount{o.User, err}
 	}
 	if hidden {
-		return effectiveOpts{}, errHomeHidden{o.User, home}
+		return nil, errHomeHidden{o.User, home}
 	}
-	o2, err := printDefaults(ctx, h, l.MysqldPath, args, home)
+	cred, err := accountCredential(u)
 	if err != nil {
-		return o2, err
+		return nil, fmt.Errorf("id akun layanan MySQL %s tidak bisa dibaca: %v", o.User, err)
+	}
+	o2, err := printDefaults(ctx, h, cred, l.MysqldPath, args, home)
+	if err != nil {
+		return nil, err
 	}
 	if o2.User != o.User {
-		return effectiveOpts{}, fmt.Errorf("opsi user di ~/.my.cnf akun layanan MySQL berbeda (%s, bukan %s); kunci start tidak bisa dipastikan", o2.User, o.User)
+		return nil, fmt.Errorf("opsi user di ~/.my.cnf akun layanan MySQL berbeda (%s, bukan %s); kunci start tidak bisa dipastikan", o2.User, o.User)
 	}
 	o2.Home = home
-	return o2, nil
+	return []effectiveOpts{o, o2}, nil
 }
 
-// printDefaults runs mysqld with args (printDefaultsArgs) and HOME=home
-// and parses what it prints.
-func printDefaults(ctx context.Context, h Host, mysqld string, args []string, home string) (effectiveOpts, error) {
+// accountCredential is the uid, gid and supplementary groups the system
+// gives u.
+func accountCredential(u *user.User) (*syscall.Credential, error) {
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := lookupGroupIDs(u)
+	if err != nil {
+		return nil, err
+	}
+	groups := make([]uint32, 0, len(ids))
+	for _, g := range ids {
+		n, err := strconv.ParseUint(g, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, uint32(n))
+	}
+	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: groups}, nil
+}
+
+// lookupGroupIDs are u's group ids as the system gives them; tests replace
+// it.
+var lookupGroupIDs = func(u *user.User) ([]string, error) { return u.GroupIds() }
+
+// errPrintDefaultsTooLarge fails a run that prints more than
+// maxPrintDefaultsOutput.
+var errPrintDefaultsTooLarge = errors.New("keluaran --print-defaults terlalu besar")
+
+// boundedBuffer keeps at most max bytes; one more ends the run (stop) and
+// marks it over.
+type boundedBuffer struct {
+	buf  bytes.Buffer
+	max  int
+	over bool
+	stop func()
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.over || b.buf.Len()+len(p) > b.max {
+		b.over = true
+		b.stop()
+		return 0, errPrintDefaultsTooLarge
+	}
+	return b.buf.Write(p)
+}
+
+// printDefaults runs mysqld with args (printDefaultsArgs) and HOME=home,
+// as cred when it is not nil, and parses what it prints: at most
+// maxPrintDefaultsOutput bytes within printDefaultsTimeout.
+func printDefaults(ctx context.Context, h Host, cred *syscall.Credential, mysqld string, args []string, home string) (effectiveOpts, error) {
 	var o effectiveOpts
 	ctx, cancel := context.WithTimeout(ctx, printDefaultsTimeout)
 	defer cancel()
-	var out bytes.Buffer
-	if err := h.ExecEnv(ctx, []string{"HOME=" + home}, nil, &out, mysqld, args...); err != nil {
+	out := &boundedBuffer{max: maxPrintDefaultsOutput, stop: cancel}
+	env := []string{"HOME=" + home}
+	var err error
+	if cred == nil {
+		err = h.ExecEnv(ctx, env, nil, out, mysqld, args...)
+	} else {
+		err = h.ExecEnvAs(ctx, cred, env, nil, out, mysqld, args...)
+	}
+	if out.over {
+		return o, errPrintDefaultsTooLarge
+	}
+	if err != nil {
 		return o, err
 	}
-	head, rest, ok := strings.Cut(out.String(), "\n")
+	head, rest, ok := strings.Cut(out.buf.String(), "\n")
 	if !ok || !strings.Contains(head, "would have been started with the following arguments") {
-		return o, fmt.Errorf("keluaran --print-defaults tidak dikenal: %.200q", out.String())
+		return o, fmt.Errorf("keluaran --print-defaults tidak dikenal: %.200q", out.buf.String())
 	}
 	// Values are printed as they are, spaces included: a word that does
 	// not start an option continues the one before.
@@ -656,9 +738,6 @@ func printDefaults(ctx context.Context, h Host, mysqld string, args []string, ho
 		switch name {
 		case "init_file":
 			o.InitFileArgs = append(o.InitFileArgs, initFileArg{Prefix: prefix, Value: v, Raw: a})
-			if prefix == "" {
-				o.InitFiles = append(o.InitFiles, v)
-			}
 		case "user":
 			o.User = v
 		case "log_error":
@@ -804,11 +883,16 @@ func readableBy(path, name string) (bool, error) {
 // startLockStatus checks whether the start lock holds for the next start
 // of MySQL: the agent's line in the managed config, its file with exactly
 // startLockContent, that file the last init_file argument mysqld reads,
-// with no prefix (--print-defaults with the service account's HOME: see
-// readEffectiveOptions) and no maximum- prefix on any of them, readable
-// by mysqld's user and, under AppArmor or SELinux, in a place its profile
-// allows.
+// with no prefix and no maximum- prefix on any of them, readable by
+// mysqld's user (judgeInitFiles; every --print-defaults run of
+// readEffectiveOptions must agree) and, under AppArmor or SELinux, in a
+// place its profile allows. The state is bounded (boundStartLock).
 func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
+	return boundStartLock(checkStartLock(ctx, h))
+}
+
+// checkStartLock is startLockStatus before boundStartLock.
+func checkStartLock(ctx context.Context, h Host) proto.StartLockState {
 	var st proto.StartLockState
 	l := h.Layout()
 	path, err := StartLockPath(l)
@@ -833,48 +917,22 @@ func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
 		st.Reason = fmt.Sprintf("isi berkas kunci %s bukan isi kunci start", path)
 		return st
 	}
-	opts, err := readEffectiveOptions(ctx, h)
+	runs, err := readEffectiveOptions(ctx, h)
 	if err != nil {
 		st.Reason = fmt.Sprintf("konfigurasi efektif MySQL tidak bisa dibaca: %v", err)
 		return st
 	}
-	// A maximum- prefix makes mysqld refuse to start wherever it is read
-	// (plan 5b-1 evidence), before or after the agent's line.
-	for _, a := range opts.InitFileArgs {
-		if slices.Contains(strings.Split(a.Prefix, "_"), "maximum") {
-			st.Reason = fmt.Sprintf("opsi %s membuat MySQL menolak menyala; kunci start tidak terjamin", a.Raw)
+	for _, opts := range runs {
+		operator, reason := judgeInitFiles(opts, path)
+		for _, f := range operator {
+			if len(st.OperatorInitFiles) < maxOperatorInitFiles && !slices.Contains(st.OperatorInitFiles, f) {
+				st.OperatorInitFiles = append(st.OperatorInitFiles, f)
+			}
+		}
+		if reason != "" {
+			st.Reason = reason
 			return st
 		}
-	}
-	args := opts.InitFileArgs
-	last := -1
-	for i, a := range args {
-		if a.Prefix == "" && a.Value == path {
-			last = i
-		}
-	}
-	for _, a := range args[:max(last, 0)] {
-		if (a.Prefix == "" || a.Prefix == "loose") && a.Value != path {
-			st.OperatorInitFiles = append(st.OperatorInitFiles, a.Value)
-		}
-	}
-	switch {
-	case last < 0:
-		st.Reason = fmt.Sprintf("baris init_file agent tidak dibaca mysqld (--print-defaults tidak memuat %s)", path)
-		return st
-	case last != len(args)-1 && args[len(args)-1].Prefix != "":
-		st.Reason = fmt.Sprintf("opsi %s dibaca sesudah baris agent; kunci start tidak terjamin", args[len(args)-1].Raw)
-		return st
-	case last != len(args)-1:
-		st.Reason = "init_file lain dibaca sesudah baris agent: " + args[len(args)-1].Value
-		return st
-	}
-	if ok, err := readableBy(path, opts.User); err != nil || !ok {
-		st.Reason = "berkas kunci tidak bisa dibaca pengguna " + opts.User
-		if err != nil {
-			st.Reason += ": " + err.Error()
-		}
-		return st
 	}
 	mac := macConfinement(l)
 	st.MACConfined = mac != ""
@@ -886,8 +944,82 @@ func startLockStatus(ctx context.Context, h Host) proto.StartLockState {
 	return st
 }
 
+// judgeInitFiles applies the start lock's rules to one --print-defaults
+// run: the agent's file at path must be the last init_file argument, with
+// no prefix, no maximum- prefix on any of them, readable by mysqld's user.
+// operator are the other init_file values read before the agent's line;
+// reason is why the lock does not hold, "" when it does.
+func judgeInitFiles(opts effectiveOpts, path string) (operator []string, reason string) {
+	// A maximum- prefix makes mysqld refuse to start wherever it is read
+	// (plan 5b-1 evidence), before or after the agent's line.
+	for _, a := range opts.InitFileArgs {
+		if slices.Contains(strings.Split(a.Prefix, "_"), "maximum") {
+			return nil, fmt.Sprintf("opsi %s membuat MySQL menolak menyala; kunci start tidak terjamin", a.Raw)
+		}
+	}
+	args := opts.InitFileArgs
+	last := -1
+	for i, a := range args {
+		if a.Prefix == "" && a.Value == path {
+			last = i
+		}
+	}
+	for _, a := range args[:max(last, 0)] {
+		if (a.Prefix == "" || a.Prefix == "loose") && a.Value != path {
+			operator = append(operator, a.Value)
+		}
+	}
+	switch {
+	case last < 0:
+		return operator, fmt.Sprintf("baris init_file agent tidak dibaca mysqld (--print-defaults tidak memuat %s)", path)
+	case last != len(args)-1 && args[len(args)-1].Prefix != "":
+		return operator, fmt.Sprintf("opsi %s dibaca sesudah baris agent; kunci start tidak terjamin", args[len(args)-1].Raw)
+	case last != len(args)-1:
+		return operator, "init_file lain dibaca sesudah baris agent: " + args[len(args)-1].Value
+	}
+	if ok, err := readableBy(path, opts.User); err != nil || !ok {
+		reason = "berkas kunci tidak bisa dibaca pengguna " + opts.User
+		if err != nil {
+			reason += ": " + err.Error()
+		}
+		return operator, reason
+	}
+	return operator, ""
+}
+
+// boundStartLock keeps st within what a health snapshot may carry: the
+// first maxOperatorInitFiles entries, each cut like a start result's
+// init_file, and the reason cut to maxStartLockReason bytes, on rune
+// boundaries.
+func boundStartLock(st proto.StartLockState) proto.StartLockState {
+	if len(st.OperatorInitFiles) > maxOperatorInitFiles {
+		st.OperatorInitFiles = st.OperatorInitFiles[:maxOperatorInitFiles]
+	}
+	if st.OperatorInitFiles != nil {
+		files := make([]string, len(st.OperatorInitFiles))
+		for i, f := range st.OperatorInitFiles {
+			files[i] = cutInitFile(f)
+		}
+		st.OperatorInitFiles = files
+	}
+	st.Reason = cutRunes(st.Reason, maxStartLockReason)
+	return st
+}
+
+// cutRunes is s cut to at most n bytes on a rune boundary.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // setStartLockState records st as the start lock's last known state.
 func (d *Driver) setStartLockState(st proto.StartLockState) {
+	st = boundStartLock(st)
 	d.startLockMu.Lock()
 	d.startLockState, d.startLockSet = st, true
 	d.startLockMu.Unlock()
@@ -934,6 +1066,7 @@ func (d *Driver) lockStart(ctx context.Context, h Host) proto.StartLockState {
 
 // withStartLock is res carrying st.
 func withStartLock(res proto.QuarantineResult, st proto.StartLockState) proto.QuarantineResult {
+	st = boundStartLock(st)
 	res.StartLocked, res.StartLockReason = st.Locked, st.Reason
 	res.MACConfined, res.OperatorInitFiles = st.MACConfined, st.OperatorInitFiles
 	return res

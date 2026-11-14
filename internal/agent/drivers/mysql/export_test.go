@@ -369,6 +369,14 @@ func SetLookupUser(f func(name string) (*user.User, error)) (restore func()) {
 	return func() { lookupUser = old }
 }
 
+// SetLookupGroupIDs replaces the group lookup of the service account's
+// run of --print-defaults.
+func SetLookupGroupIDs(f func(u *user.User) ([]string, error)) (restore func()) {
+	old := lookupGroupIDs
+	lookupGroupIDs = f
+	return func() { lookupGroupIDs = old }
+}
+
 // SetListHome replaces the listing of the service account's home; it
 // returns the function that restores it.
 func SetListHome(f func(path string) ([]string, error)) (restore func()) {

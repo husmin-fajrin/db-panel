@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"io"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -29,6 +30,11 @@ type Host interface {
 	// ExecEnv is Exec with env (KEY=VALUE) replacing those variables of the agent's environment.
 	// A host that wraps another and overrides Exec must route ExecEnv too, or --print-defaults bypasses it.
 	ExecEnv(ctx context.Context, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error
+	// ExecEnvAs is ExecEnv run with the user id, group id and supplementary
+	// groups in cred instead of the agent's, so the command never opens a
+	// path with root's rights. A host that wraps another and overrides
+	// ExecEnv must route it too.
+	ExecEnvAs(ctx context.Context, cred *syscall.Credential, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error
 	TCPReachable(ctx context.Context, host string, port int, timeout time.Duration) error
 	OSFamily() string // "debian" | "rhel" | "unknown"
 	TempFile(pattern string, mode os.FileMode) (*os.File, error)

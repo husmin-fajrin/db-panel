@@ -241,7 +241,17 @@ func (h *host) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name
 }
 
 func (h *host) ExecEnv(ctx context.Context, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
+	return h.ExecEnvAs(ctx, nil, env, stdin, stdout, name, args...)
+}
+
+func (h *host) ExecEnvAs(ctx context.Context, cred *syscall.Credential, env []string, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
 	cmd := command(ctx, name, args...)
+	if cred != nil {
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		cmd.SysProcAttr.Credential = cred
+	}
 	cmd.Stdin, cmd.Stdout = stdin, stdout
 	if len(env) > 0 {
 		cmd.Env = replaceEnv(os.Environ(), env)

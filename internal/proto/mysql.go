@@ -477,8 +477,9 @@ type QuarantineParams struct {
 // the next time MySQL starts; StartLockReason says why not, in words for
 // the UI. MACConfined: mysqld runs under AppArmor or SELinux.
 // OperatorInitFiles are other init_file options read before the agent's
-// line, which MySQL does not run while the lock is in place. An older
-// agent sends none of these.
+// line, which MySQL does not run while the lock is in place; the agent
+// sends at most the first 20, each cut, and cuts StartLockReason to 300
+// bytes, so either may be truncated. An older agent sends none of these.
 type QuarantineResult struct {
 	Applied           bool     `json:"applied"`
 	Already           bool     `json:"already"`
@@ -493,7 +494,9 @@ type QuarantineResult struct {
 // config. Locked: the line, the file, the agent's file being the last
 // init_file mysqld reads, the file readable by mysqld's user and, under
 // AppArmor or SELinux, in a place mysqld's profile allows. Reason says
-// why Locked is false (Indonesian, for the UI).
+// why Locked is false (Indonesian, for the UI), cut to 300 bytes.
+// OperatorInitFiles are other init_file options read before the agent's
+// line: at most the first 20, each cut, so the list may be truncated.
 type StartLockState struct {
 	Present           bool     `json:"present"`
 	Locked            bool     `json:"locked"`

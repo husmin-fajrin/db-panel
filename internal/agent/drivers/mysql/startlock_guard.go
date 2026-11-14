@@ -311,11 +311,13 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 		return
 	}
 	if d.bootLogAt.IsZero() || now.Sub(d.bootLogAt) >= startLockRetry || now.Before(d.bootLogAt) {
-		opts, err := readEffectiveOptions(ctx, h)
+		runs, err := readEffectiveOptions(ctx, h)
 		if err != nil {
 			return
 		}
-		d.bootLog, d.bootLogAt = opts.LogError, now
+		// The service account's run, when there is one, is how mysqld
+		// starts.
+		d.bootLog, d.bootLogAt = runs[len(runs)-1].LogError, now
 		if d.bootLog != "" && !filepath.IsAbs(d.bootLog) {
 			if l.DataDir == "" {
 				d.bootLog = ""
