@@ -524,6 +524,39 @@ memasang `SET PERSIST read_only = ON` dan `SET PERSIST super_read_only =
 ON` pada putaran penjaga pertama setelah agent mulai (`guard.up` masih
 false), tiap `monitor.GuardEvery` (5 detik), selama MySQL menjawab dan tidak
 ada pemuatan bangun ulang yang berjalan.
+
+### Bukti langkah tangan, tinjauan ulang H (bagian I)
+
+**Diukur pada gelombang perbaikan akhir, bagian I:** mysqld
+`8.0.46-0ubuntu0.24.04.4` sementara seperti di atas (`1 1`, tersimpan ON
+ON), root lewat soket; GNU coreutils `mv` 9.4. Perintah berkas dijalankan
+di direktori sementara, bukan di `/root`.
+
+| Langkah | Hasil |
+|---|---|
+| `mv -n '<dir>/db$x-cadangan.sql' '<dir>/db$x-cadangan-'"$(date +%Y%m%d%H%M%S)"'.sql'` (nama memuat `$`), nama tujuan belum ada | keluar 0; berkas pindah ke `db$x-cadangan-20261114150948.sql`; `ls -l` nama lama: "No such file or directory" |
+| `mv -n` ke nama tujuan yang sudah ada (dibuat lebih dulu dengan detik yang sama) | `mv: not replacing '…'`, keluar 1; berkas tujuan tetap berisi yang lama, berkas sumber tetap di nama lama. Catatan: `mv -n` dari coreutils sebelum 9.2 keluar 0 tanpa pesan pada keadaan ini, jadi README memeriksa dengan `ls -l` sesudahnya, bukan dengan kode keluar |
+| `sha256sum` pada berkas 100000 byte dan salinannya, dan pada berkas yang terpotong di 50000 byte | berkas dan salinan menulis hash yang sama (`41d94f…3f37`); berkas terpotong menulis hash lain (`41a3e5…a9f8`). `scp` tidak dijalankan: di sini tidak ada server kedua |
+| `mysql` interaktif (lewat `script`), akun `'panel_admin'@'localhost'` sudah ada dengan sandi lama; blok README diketik satu per satu | `CREATE USER` menulis `ERROR 1396 (HY000): Operation CREATE USER failed for 'panel_admin'@'localhost'`; sesi berlanjut; `GRANT ALL … WITH GRANT OPTION` berhasil pada akun lama; `SET GLOBAL super_read_only=ON` berhasil, `1 1`; masuk dengan sandi baru: `ERROR 1045 … Access denied`, dengan sandi lama berhasil |
+| `mysql` interaktif, akun sudah ada; sesudah `ERROR 1396` diketik `SET GLOBAL super_read_only=ON;` lalu `exit` (tanpa `GRANT`) | `Query OK`, `Bye`; `1 1`; hak akun lama tidak berubah (`GRANT USAGE`) |
+| blok yang sama lewat `mysql` tanpa terminal (batch, tanpa `--force`) | `ERROR 1396 … at line 3`, keluar 1; berhenti di situ: `GRANT` dan `SET GLOBAL super_read_only=ON` tidak dijalankan, sesudahnya **`1 0`** |
+| `SET PERSIST event_scheduler=ON`, lalu baris `event_scheduler=OFF` di `[mysqld]`, MySQL dinyalakan ulang | `@@event_scheduler` = `ON`, `VARIABLE_SOURCE` = `PERSISTED` (nilai tersimpan mengalahkan baris itu); `1 1` |
+| sama sesudah `RESET PERSIST event_scheduler`, MySQL dinyalakan ulang | `@@event_scheduler` = `OFF`, `VARIABLE_SOURCE` = `EXPLICIT` |
+
+Kode (dibaca, bukan diukur): pada bangun ulang dengan dump,
+`replicaSnapshot` (create_replica.go) memanggil `mysql.dropDatabases`
+dengan `WipeList` sebelum `copySnapshot` mencatat bahwa perintah salinan
+dikirim. Pada bangun ulang master lama, `WipeList` memuat database server
+itu yang juga ada di master baru, setelah pengguna menyetujuinya di halaman
+pekerjaan. `DropDatabases` (databases.go) melepas baca-saja sebentar,
+menghapus dengan `sql_log_bin = 0` lalu memasang baca-saja lagi.
+`dumpFrom` (dump.go) mengosongkan binary log hanya bila `gtid_mode` ON,
+lalu melapor "dump dimulai"; `cloneFrom` (clone.go) melapor "CLONE
+dimulai" tepat sebelum `CLONE INSTANCE`. Tombol batal ditolak hanya bila
+pekerjaan bangun ulang terbaru server itu tercatat `QuarantineEnded`
+(`latestRebuildEnded`, controls.go). `guardQuarantined` memasang lagi
+baca-saja saat MySQL menjawab sesudah tidak menjawab, atau pada putaran
+pertama setelah agent mulai; tidak selama pemuatan bangun ulang berjalan.
 ---
 
 ## File Structure
