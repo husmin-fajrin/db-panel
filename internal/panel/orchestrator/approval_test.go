@@ -211,6 +211,42 @@ func TestRebuildDecisionHandedBack(t *testing.T) {
 	}
 }
 
+// TestRetryRefusesUnreadableCreateReplicaParams: a create_replica job
+// whose params cannot be read is refused, not let through without asking
+// the agent (it may be a rebuild).
+func TestRetryRefusesUnreadableCreateReplicaParams(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	g.m.fail("mysql.preflight", "pemeriksaan gagal")
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	if err := e.st.SetJobParams(id, "{rusak"); err != nil {
+		t.Fatal(err)
+	}
+	mark := g.m.mark()
+	for name, do := range map[string]func() error{
+		"retry":   func() error { return e.r.Retry(id, JobAck{Confirmed: true}) },
+		"approve": func() error { return e.r.Approve(id, JobAck{Confirmed: true}) },
+	} {
+		err := do()
+		if err == nil || !strings.Contains(err.Error(), "parameter pekerjaan ini tidak bisa dibaca") {
+			t.Fatalf("%s = %v, want refused", name, err)
+		}
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+		t.Fatalf("job after a refused retry = %+v", j)
+	}
+	for _, c := range g.m.cmds(mark) {
+		if c != "mysql.connections" {
+			t.Fatalf("refused retry sent %s to the old master", c)
+		}
+	}
+}
+
 // TestNeedsLocalApprovalMidJobNamesCommand: a step refused by strict mode
 // on the old master (its approval ran out meanwhile) fails the job with
 // the command to run there and the code, read from the agent.

@@ -96,12 +96,17 @@ func (r *Runner) requireRebuildApproval(ctx context.Context, serverID int64, see
 
 // rebuildApprovalForJob is requireRebuildApproval on the server of a
 // create_replica job that rebuilds an old master and is failed, partial
-// or waiting (what Retry and Approve run again); nil for any other job.
+// or waiting (what Retry and Approve run again); nil for any other job,
+// an error for a job that cannot be read or a create_replica job whose
+// params cannot be read.
 // It asks the agent, so callers run it before startMu; the answer it
 // decided on goes to seen, when set.
 func (r *Runner) rebuildApprovalForJob(jobID string, seen *ApprovalSeen) error {
 	j, _, err := r.d.Store.GetJob(jobID)
-	if err != nil || j.Kind != KindCreateReplica {
+	if err != nil {
+		return err
+	}
+	if j.Kind != KindCreateReplica {
 		return nil
 	}
 	switch j.Status {
@@ -109,8 +114,14 @@ func (r *Runner) rebuildApprovalForJob(jobID string, seen *ApprovalSeen) error {
 	default:
 		return nil
 	}
+	// Params that cannot be read may hide a rebuild: refused, not skipped.
 	var st jobState
-	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil || !st.RebuildOldMaster {
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		r.log.Warn("create replica job params not readable", "job", jobID, "err", err)
+		return errors.New("parameter pekerjaan ini tidak bisa dibaca, jadi persetujuan bangun ulang di server tidak bisa " +
+			"diperiksa; pekerjaan ini tidak bisa diulang atau disetujui")
+	}
+	if !st.RebuildOldMaster {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(r.base, callTimeout)
