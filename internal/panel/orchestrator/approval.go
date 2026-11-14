@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -167,13 +168,38 @@ func validApprovalCode(code string) bool {
 	return true
 }
 
+// validApprovalSource reports whether source is host:port with a host
+// that is an IP address or an RFC 1123 host name (validHostName) and a
+// port 1-65535 (P-3): nothing else of the agent's reaches a page or a
+// job through it.
 func validApprovalSource(source string) bool {
 	host, port, err := net.SplitHostPort(source)
-	if err != nil || host == "" {
+	if err != nil || (net.ParseIP(host) == nil && !validHostName(host)) {
 		return false
 	}
 	n, err := strconv.Atoi(port)
 	return err == nil && n >= 1 && n <= 65535
+}
+
+// validHostName reports whether host is an RFC 1123 host name: ASCII
+// letters, digits and hyphens in dot-separated labels of 1-63 characters,
+// at most 253 characters in all.
+func validHostName(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(host, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // AgentQuote is an agent's own sentence as the panel shows it (P-2): after
