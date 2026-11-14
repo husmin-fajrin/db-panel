@@ -325,6 +325,51 @@ yang sama, tepat sebelum daftar):
   *.*` tanpa `SHOW DATABASES`) lengkap selama `partial_revokes` mati
   (bawaan).
 
+**Diukur pada gelombang perbaikan akhir, bagian E (tinjauan ulang C-1:
+bukti bisa dipalsukan lewat nama):** mysqld yang sama, instans sementara
+baru. Nama akun, peran dan kolom boleh memuat spasi, koma, `*`, `.` dan
+backtick, jadi baris `SHOW GRANTS` bisa memuat ` ON *.* TO ` di dalam
+sebuah nama:
+
+| Yang dibuat | Baris `SHOW GRANTS FOR` (sql_mode bawaan) | Dengan `ANSI_QUOTES` di sesi |
+|---|---|---|
+| akun `'p, SHOW DATABASES ON *.* TO x'@'localhost'`, `ALL ON x.*` | ``GRANT ALL PRIVILEGES ON `x`.* TO `p, SHOW DATABASES ON *.* TO x`@`localhost` `` | ``GRANT ALL PRIVILEGES ON "x".* TO "p, SHOW DATABASES ON *.* TO x"@"localhost"`` |
+| kolom ``x.t.`q, SHOW DATABASES ON *.* TO z` ``, `GRANT SELECT (kolom) ON x.t TO u` | ``GRANT SELECT (`q, SHOW DATABASES ON *.* TO z`) ON `x`.`t` TO `u`@`localhost` `` | sama, dengan `"` |
+| peran ``'a`,SHOW DATABASES ON *.* TO b'`` diberikan ke `u` | ``GRANT `a``,SHOW DATABASES ON *.* TO b`@`%` TO `u`@`localhost` `` (backtick di nama digandakan) | ``GRANT "a`,SHOW DATABASES ON *.* TO b"@"%" TO "u"@"localhost"`` |
+| akun `'q"x'@'localhost'`, `SELECT ON *.*` | ``GRANT SELECT ON *.* TO `q"x`@`localhost` `` | `GRANT SELECT ON *.* TO "q""x"@"localhost"` |
+| akun `sel@localhost`, `SELECT ON *.*` | ``GRANT SELECT ON *.* TO `sel`@`localhost` `` | `GRANT SELECT ON *.* TO "sel"@"localhost"` |
+
+`ANSI_QUOTES` (yang bisa dipasang global oleh akun ber-`SYSTEM_VARIABLES_ADMIN`)
+mengganti backtick dengan tanda kutip ganda di setiap identifier, juga di
+akun sesudah `TO`. Daftar hak sendiri tetap huruf besar, angka, garis
+bawah, spasi dan koma.
+
+| Percobaan | Hasil |
+|---|---|
+| peran `r_show` (`SHOW DATABASES ON *.*`) di `mandatory_roles`, `activate_all_roles_on_login=ON`, akun `m_user` tanpa hak langsung | `CURRENT_ROLE()` = `r_show`; `SHOW GRANTS FOR CURRENT_USER()` menulis `GRANT SHOW DATABASES ON *.*` atas nama akun; `FOR` nama hanya `GRANT USAGE ON *.*` (peran wajib tidak muncul sebagai baris); daftar semua database |
+| sama, `activate_all_roles_on_login=OFF` | `CURRENT_ROLE()` = `NONE`; daftar hanya `information_schema`, `performance_schema` |
+| server dinyalakan dengan `skip-show-database` (`@@skip_show_database`=1), akun `SELECT ON *.*` | `information_schema.schemata` tetap semua database; `SHOW DATABASES` ditolak (1227) |
+| sama, akun `SHOW DATABASES ON *.*` | keduanya semua database |
+| sama, `m_user` (peran wajib tidak aktif) | hanya `information_schema`, `performance_schema` |
+
+Kesimpulan tambahan untuk aturan:
+
+- Daftar hak dibaca hanya bila terdiri dari token hak (`[A-Z0-9_ ,]+`,
+  tanpa backtick, tanda kutip atau kurung) tepat sesudah `GRANT ` dan tepat
+  sebelum ` ON *.* TO `; baris lain diabaikan. Baris `REVOKE` yang tidak
+  terurai dengan aturan yang sama membuat daftar tidak terbukti.
+- Baris dihitung hanya bila akun sesudah `TO`/`FROM` sama dengan akun yang
+  dibuktikan, dalam bentuk backtick atau tanda kutip ganda.
+- Nama akun dari `CURRENT_USER()` hanya diproses bila user terdiri dari
+  `[A-Za-z0-9_.$-]` dan host dari `[A-Za-z0-9_.%:/-]`; selain itu tidak
+  terbukti (dengan begitu kutipan nama tidak bergantung pada
+  `NO_BACKSLASH_ESCAPES` atau `ANSI_QUOTES`).
+- Peran wajib (`mandatory_roles`) memang bisa membuat daftar lengkap, tetapi
+  tidak tampil di `SHOW GRANTS FOR` nama: aturan menyebutnya tidak lengkap
+  (gagal-tertutup, sama dengan hak lewat peran biasa).
+- `skip-show-database` tidak mengubah daftar `information_schema.schemata`
+  untuk akun `SELECT` global: aturan tetap.
+
 ### Bukti baca-saja saat MySQL dinyalakan tanpa agent (temuan tinjauan ulang C-1)
 
 **Diukur pada gelombang perbaikan akhir, bagian D:** mysqld
