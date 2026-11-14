@@ -352,3 +352,17 @@ func TestLeftoverWordingAfterFailedRebuild(t *testing.T) {
 		})
 	}
 }
+
+// TestBuatReplikaLeavesOutFailedRebuild (G-4): the non-rebuild Buat
+// replika form does not offer an old master left by a failed rebuild as a
+// target; an ordinary failed replica is still offered.
+func TestBuatReplikaLeavesOutFailedRebuild(t *testing.T) {
+	e, _, _ := failedRebuildEnv(t)
+	if err := e.st.SetReplicaState(3, store.ReplicaFailed, "gagal"); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("GET", "/masters/2/replicas/new", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `<option value="3"`)
+	wantNoBody(t, rec, `<option value="1"`)
+}

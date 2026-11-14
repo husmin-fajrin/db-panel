@@ -603,7 +603,16 @@ func (a *app) replicaForm(r *http.Request, master store.Server, checked map[stri
 				return p, err
 			}
 			if err == nil && rep.State == store.ReplicaFailed {
-				p.Targets = append(p.Targets, targetChoice{Server: s, Retry: true, NotConnected: notConnected})
+				// An old master left by a failed rebuild takes only a new
+				// rebuild (its own form; the orchestrator refuses it here,
+				// G-4).
+				awaiting, err := a.oldMasterAwaitingRebuild(s)
+				if err != nil {
+					return p, err
+				}
+				if !awaiting {
+					p.Targets = append(p.Targets, targetChoice{Server: s, Retry: true, NotConnected: notConnected})
+				}
 			}
 		}
 	}
