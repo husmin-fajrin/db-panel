@@ -118,12 +118,14 @@ Semua dibaca dari kode pada `8ce7fc5`.
   usang: `CONNECTION_ADMIN` kini hak wajib akun admin, dan akun dengan hak
   itu boleh menulis saat `read_only` menyala. Tidak ada test yang
   mensyaratkan `read_only` mati.
-- F11. Saat muat, agent menyalurkan keluaran `mysqldump` lewat penghitung
-  miliknya sendiri. `mysqldump` menulis satu baris
-  ``CREATE DATABASE … `nama` `` untuk setiap database yang dibawanya, dan
-  isi baris data tidak pernah memulai baris baru dengan teks itu (baris
-  baru di dalam nilai ditulis `\n`). Agent tidak punya sambungan SQL ke
-  master baru selama bangun ulang.
+- F11. Selama bangun ulang agent tidak punya sambungan SQL sendiri ke
+  master baru; ia menjangkaunya hanya lewat program klien (`mysqldump`,
+  dan `mysql` untuk pemeriksaan awal) dengan berkas kredensial sementara
+  dan opsi TLS yang sama. Aliran dump tidak bisa dipakai sebagai daftar
+  database yang tepercaya: isi routine, trigger dan event ditulis apa
+  adanya, dengan baris baru sungguhan, jadi siapa pun yang boleh membuat
+  routine di master baru bisa menaruh baris yang tampak seperti
+  `CREATE DATABASE`.
 - F12. `mysqlbinlog` dijalankan sebagai root di tiga tempat atas berkas di
   direktori binlog. Ekor log galat dibaca root di dalam proses. Mekanisme
   "jalankan sebagai uid akun layanan" (`ExecEnvAs` dengan kredensial)
@@ -145,8 +147,9 @@ hasilnya dicatat di rencana dan bisa mengubah butir yang disebut):
   `DROP DATABASE`, `CREATE USER`/`GRANT`, dan `INSTALL PLUGIN` berhasil
   untuk akun ber-`CONNECTION_ADMIN` tanpa SUPER? Apakah CLONE butuh
   `read_only` mati? (5.3)
-- M2. Bentuk baris `CREATE DATABASE` dari `mysqldump --all-databases` dan
-  `--databases`, termasuk nama dengan backtick, spasi dan huruf besar. (5.3)
+- M2. Apakah akun dump yang dibuat panel melihat **semua** database di
+  master baru lewat `information_schema.schemata`, dan bentuk keluaran
+  klien `mysql` untuk nama yang di-`HEX`. (5.3)
 - M3. Apakah `mysqlbinlog` yang dijalankan sebagai uid akun layanan bisa
   membaca berkas binlog dan indeksnya pada pemasangan Debian dan RHEL
   bawaan. (5.5)
@@ -190,21 +193,26 @@ hasilnya dicatat di rencana dan bisa mengubah butir yang disebut):
 
 - A. Baca bendera tiap putaran, kunci lagi tanpa peduli siapa yang
   membuka. Berebut dengan muat data agent sendiri (anti-tujuan).
-- **B (dipilih). Baca tiap putaran; setiap pembukaan oleh agent sendiri
-  didaftarkan sebelum bendera dimatikan, dan penjaga serta pendaftaran
-  memakai satu kunci** sehingga tidak ada celah di antaranya. Perintah CLI
-  mendaftar lewat berkas penanda berumur pendek.
+- **B (dipilih). Baca tiap putaran; siapa pun yang membuka baca-saja
+  dengan sah memegang satu kunci berkas (`flock`) selama membukanya**:
+  pekerjaan agent sendiri maupun perintah CLI di proses lain. Penjaga
+  hanya mengunci lagi bila kunci berkas itu bebas, jadi tidak ada celah di
+  antara "membaca bendera" dan "mengunci". Kunci berkas dilepas kernel
+  bila prosesnya mati.
 - C. Hanya peringatan panel dari laporan berkala, tanpa mengunci lagi.
   Lebih kecil, tetapi server tetap bisa ditulis sampai orang bertindak.
 
 **Jendela penyalinan**
 
-- A. Sambungan SQL baru ke master baru untuk membaca daftar databasenya.
-  Jalur kredensial dan TLS baru.
-- **B (dipilih). Daftar "dibuat oleh muat" dibaca dari aliran dump itu
-  sendiri (F11), dan `read_only` tetap menyala selama muat (bila M1
-  mengizinkan).** Tepat sama dengan kalimat README: karantina berakhir
-  hanya bila setiap database dibuat oleh muat.
+- A. Membaca nama database dari aliran dump itu sendiri. Tidak butuh
+  apa-apa lagi, tetapi alirannya bisa dipalsukan (F11); ditolak sesudah
+  builder check.
+- **B (dipilih). Daftar database master baru dibaca dengan klien `mysql`
+  memakai kredensial dan TLS yang sama dengan `mysqldump`, sebelum dan
+  sesudah dump; dan `read_only` tetap menyala selama muat (bila M1
+  mengizinkan).** Tidak ada jalur kredensial baru. Database yang ada di
+  server sesudah muat tetapi tidak ada di daftar master baru berarti
+  bukan hasil salinan.
 - C. Cek silang dengan folder di direktori data MySQL. Folder asing di
   direktori data (misalnya `lost+found`) akan menolak bangun ulang yang
   sah; ditolak.
@@ -238,8 +246,11 @@ Empat keadaan, masing-masing satu arti di panel:
   digantikan hanya karena peran `quarantined`, bila keempat syarat ini
   benar: jenis `create_replica` dengan `RebuildOldMaster`; bendera belum
   terpasang; baris server itu gagal; server itu masih master lama
-  topologi job. Pemeriksaan lain (master berganti, ada job lebih baru)
-  tidak berubah.
+  topologi job. Dengan empat syarat yang sama, job Periksa dan Amankan
+  data tertinggal di server itu **tidak** dihitung sebagai "job yang lebih
+  baru": keduanya hanya membaca, dan peringatan panel sendiri menyuruh
+  operator menjalankannya. Pemeriksaan lain (master berganti, job jenis
+  lain yang lebih baru) tidak berubah.
 - **Penolakan.** `refuseAwaitingRebuild` menolak Resync, Lepas, dan Buat
   replika biasa untuk setiap server yang `AwaitingRebuild`, apa pun
   perannya. `AwaitingRebuild` menjadi: peran `quarantined`.
@@ -267,13 +278,18 @@ Empat keadaan, masing-masing satu arti di panel:
   baris gagal tetapi agent melaporkan pin `replica` dengan sumber yang
   sama dengan master topologi, artinya jawaban settle hilang di jalan:
   monitor memasang bendera, menghapus tanda, dan mengembalikan peran ke
-  `replica` (replika gagal biasa). Arah sebaliknya tidak pernah dilakukan
-  dari laporan. Untuk server `quarantined` tanpa baris yang agentnya
+  `replica` (replika gagal biasa). Syaratnya: tiga laporan berturut-turut
+  yang semuanya diterima **sesudah** job bangun ulang itu berakhir, dan
+  job itu memang bangun ulang master lama di topologi yang sama. Arah
+  sebaliknya tidak pernah dilakukan dari laporan. Untuk server `quarantined` tanpa baris yang agentnya
   melaporkan `replica`, kotak menampilkan satu kalimat (5.8 teks T3).
 - **Monitor.** `resolve` membaca peran lebih dulu: peran `quarantined`
-  selalu dinilai sebagai master lama, ada baris atau tidak. Lengan khusus
-  untuk "peran replika yang belum dinilai" tetap, hanya untuk bangun ulang
-  yang sedang berjalan.
+  selalu dinilai sebagai master lama, ada baris atau tidak. Hasil start
+  dan hasil "dikunci lagi" (5.2) dari agent dinilai juga untuk server
+  yang sedang dibangun ulang (peran `replica`, tanda master lama masih
+  ada), bukan hanya untuk peran `quarantined`. Lengan khusus untuk "peran
+  replika yang belum dinilai" tetap, hanya untuk bangun ulang yang sedang
+  berjalan.
 - **Promote kedua.** Promote **terencana** ditolak selama topologi itu
   masih punya master lama yang belum dibangun ulang atau dihapus (teks
   T4). Promote **darurat** tidak pernah ditolak; layarnya menampilkan
@@ -284,31 +300,52 @@ Empat keadaan, masing-masing satu arti di panel:
 
 - Setiap putaran (5 detik), untuk peran `quarantined` dengan MySQL
   menjawab, penjaga membaca `super_read_only` dan `read_only`.
-- **Daftar pembukaan.** Setiap pembukaan baca-saja oleh agent sendiri
-  didaftarkan **sebelum** bendera dimatikan dan dicabut sesudah bendera
-  dipasang lagi. Pendaftaran dan langkah "baca lalu kunci" penjaga memakai
-  satu kunci, jadi penjaga selalu melihat pembukaan yang sedang berjalan
-  atau selesai lebih dulu.
-- **Perintah CLI** (5.4) berjalan di proses lain, jadi mendaftar lewat
-  berkas penanda milik root di direktori data agent, berisi waktu
-  kedaluwarsa (paling lama 15 menit) dan dihapus begitu selesai. Penanda
-  yang kedaluwarsa atau bukan berkas biasa milik root diabaikan.
-- **Tanpa pembukaan terdaftar dan ada bendera mati:** penjaga memasang
-  keduanya lagi (`PERSIST`, seperti sekarang) dan mencatat hasil baru
-  **"dikunci lagi"** dengan mekanisme yang sama dengan hasil start (ditulis
-  ke berkas sebelum dikirim, dibawa laporan berkala, tidak hilang bila
-  agent restart atau panel sedang tidak terjangkau).
-- **Panel:** jenis peringatan baru `master_relocked`, Kritis, tidak bisa
-  ditunda, masuk Telegram (teks T1). Ditutup seperti `master_start_late`:
-  oleh Periksa data tertinggal yang lebih baru, oleh keadaan salinan
-  `CopyStarted` (alasan T2), atau saat server bukan lagi master lama.
-- **`master_start_late` mengikuti keadaan salinan** (SEC-226): teksnya
-  tidak lagi menyuruh Periksa bila salinan sudah mulai, dan peringatannya
-  ditutup dengan alasan T2 pada keadaan itu.
-- **Settle.** Bila sejak muat terakhir selesai penjaga pernah mengunci
-  lagi, `settleRebuilt` menolak (teks agent T7) sampai muat diulang. Ini,
-  bersama F15, membuat serangan pada bukti daftar lengkap (SEC-204) tidak
-  lagi senyap; sisanya ada di bagian 8.
+- **Satu kunci berkas untuk semua pembukaan yang sah.** Sebuah berkas
+  kunci milik root di direktori data agent. Yang membuka baca-saja
+  memegang `flock` eksklusif atas berkas itu dari sebelum bendera
+  dimatikan sampai sesudah bendera dipasang lagi: pekerjaan agent (muat
+  dump, CLONE, pasang plugin, buang database, buat akun) dan perintah CLI
+  (5.4).
+- **Di dalam agent, pembukaan dihitung.** Pembuka pertama mencatat nilai
+  semula dan mematikan bendera; pembuka terakhir memasangnya lagi. Dua
+  pekerjaan yang tumpang-tindih tidak lagi saling memasang bendera di
+  tengah pekerjaan yang lain.
+- **Perintah CLI** mencoba mengambil kunci berkas tanpa menunggu. Bila
+  sedang dipegang (misalnya bangun ulang sedang memuat), perintah menolak
+  dan menyebut sebabnya. Pekerjaan agent yang mendapati kunci dipegang
+  CLI menunggu sebentar lalu gagal dengan teks yang jelas, sebelum
+  mengubah apa pun.
+- **Penjaga** mencoba mengambil kunci berkas tanpa menunggu.
+  - Dapat: tidak ada pembukaan yang sah. Bila ada bendera mati, penjaga
+    memasang keduanya lagi (`PERSIST`, seperti sekarang) dan mencatat
+    kejadian "dikunci lagi".
+  - Tidak dapat: ada pembukaan yang sah. Pembukaan yang sah hanya
+    mematikan `super_read_only` (5.3), jadi penjaga tetap memeriksa
+    `read_only`: bila mati, ia memasangnya lagi dan mencatat kejadian
+    yang sama. Pengecualian: pembukaan di dalam agent yang memang
+    mematikan keduanya (CLONE, bila M1 menunjukkan itu perlu); selama itu
+    penjaga tidak menyentuh apa pun.
+- **Kejadian "dikunci lagi" dicatat sebagai hasil start `late`** dengan
+  satu keterangan tambahan ("selagi berjalan"), lewat mekanisme hasil
+  start yang ada: ditulis ke berkas sebelum dikirim, dibawa laporan
+  berkala, tidak hilang bila agent restart atau panel sedang tidak
+  terjangkau.
+- **Panel:** tidak ada jenis peringatan baru. Peringatan
+  `master_start_late` yang ada dipakai; pesannya mengikuti keterangan itu
+  (teks T1 untuk "selagi berjalan"), dan label jenisnya menjadi "Master
+  lama sempat bisa ditulis". Ditutup seperti sekarang oleh Periksa data
+  tertinggal yang lebih baru atau saat server bukan lagi master lama, dan
+  kini juga oleh keadaan salinan `CopyStarted` (alasan T2).
+- **`master_start_late` mengikuti keadaan salinan** (SEC-226): pesannya
+  tidak lagi menyuruh Periksa bila salinan sudah mulai.
+- **Settle.** Agent mengingat (di memori, seumur catatan muat; dihapus
+  saat muat berikutnya mulai) bila sesudah muat terakhir selesai penjaga
+  mendapati bendera mati tanpa pembukaan yang sah, lewat jalur mana pun:
+  putaran biasa, MySQL yang menyala lagi dengan bendera mati, atau upaya
+  mengunci yang gagal. Bila ya, `settleRebuilt` menolak (teks T7) sampai
+  muat diulang. Pembukaan sah oleh CLI tidak dihitung. Ini, bersama F15,
+  membuat serangan pada bukti daftar lengkap (SEC-204) tidak lagi senyap;
+  sisanya ada di bagian 8.
 
 ### 5.3 Jendela penyalinan
 
@@ -317,15 +354,19 @@ Empat keadaan, masing-masing satu arti di panel:
   M1 memang butuh `read_only` mati (yang diduga: CLONE). Bila M1
   menunjukkan muat dump gagal dengan `read_only` menyala, butir ini batal
   untuk muat dump dan dicatat; butir berikutnya tetap berlaku.
-- **Dibuat oleh muat.** Selama `mysqldump` mengalir, agent mengumpulkan
-  nama database dari baris `CREATE DATABASE` di awal baris. Catatan muat
-  menyimpan daftar itu. Saat settle, database non-sistem yang ada di
-  server tetapi **tidak** ada di daftar itu berarti tidak disalin dari
-  sumber: karantina tidak diakhiri (teks agent yang ada, dengan saran
-  baru T8). Aturan lama ("sudah ada sebelum muat" dan "bukan yang dinamai")
-  tetap. CLONE tetap dihitung mengganti seluruhnya.
-- Nama database di aliran yang memuat karakter kendali membuat daftar
-  tidak bisa dipercaya: muat gagal sebelum settle dengan teks sendiri.
+- **Ada di master baru.** Pada dump penuh, agent membaca daftar database
+  master baru dua kali dengan klien `mysql` (kredensial dan TLS yang sama
+  dengan `mysqldump`, nama di-`HEX` supaya tidak ada yang perlu ditafsir):
+  sekali sebelum perubahan lokal apa pun, sekali sesudah dump selesai.
+  Catatan muat menyimpan gabungan keduanya. Saat settle, database
+  non-sistem yang ada di server tetapi **tidak** ada di gabungan itu
+  berarti tidak disalin dari sumber: karantina tidak diakhiri (teks agent
+  yang ada, dengan saran baru T8). Aturan lama ("sudah ada sebelum muat"
+  dan "bukan yang dinamai") tetap. CLONE tetap dihitung mengganti
+  seluruhnya.
+- Daftar pertama yang tidak terbaca menggagalkan muat sebelum ada yang
+  berubah. Daftar kedua yang tidak terbaca membuat muat tidak dihitung:
+  settle menolak dengan teks "salinan harus diulang" yang sudah ada.
 
 ### 5.4 Tiga perintah menggantikan SQL dengan tangan
 
@@ -336,13 +377,14 @@ terminal (tidak ditampilkan, tidak disimpan, tidak masuk riwayat shell).
 Semua menampilkan apa yang akan dilakukan dan meminta `ya`, seperti
 `approve`. Semua menulis satu baris ke syslog. Semua membuka
 `super_read_only` hanya selama pernyataannya, dengan `sql_log_bin` mati,
-terdaftar pada penjaga (5.2), dan selalu memeriksa `1 1` di akhir; bila
-bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
+sambil memegang kunci berkas penjaga (5.2), dan selalu memeriksa `1 1` di
+akhir; bila bukan, perintah itu sendiri memasangnya lagi dan
+mengatakannya. Bila kunci berkas sedang dipegang (bangun ulang sedang
+memuat), perintah menolak tanpa mengubah apa pun.
 
 - **`sudo dbpanel agent drop-database <nama>`** untuk "database yang tidak
   ada di master baru".
-  1. Menolak skema sistem, nama yang tidak ada, dan bila kunci sedang
-     terbuka (bangun ulang mungkin berjalan).
+  1. Menolak skema sistem dan nama yang tidak ada.
   2. Membuat cadangan dengan `mysqldump` ke berkas baru (tidak pernah
      menimpa) di folder cadangan milik root (bawaan
      `/var/lib/dbpanel/dibuang/`, bisa diganti `--ke <folder>`), sesudah
@@ -352,8 +394,15 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
      jumlah `CREATE TABLE` sama dengan jumlah tabel di database. Gagal
      satu saja: berhenti, tidak ada yang dihapus.
   4. Menampilkan nama database, jumlah tabel, letak, ukuran dan SHA-256
-     cadangan, kalimat bahwa data ini tidak ada di server lain, dan contoh
-     menyalin cadangan ke server lain; lalu meminta `ya`.
+     cadangan, dan contoh menyalin cadangan ke server lain. Lalu meminta
+     konfirmasi. Saat agent menolak mengakhiri karantina karena "database
+     tidak disalin dari sumber", ia menyimpan daftar nama itu di berkas
+     milik root. Bila nama yang diminta ada di daftar itu, perintah
+     berkata "agent mencatat database ini tidak disalin dari master baru;
+     cadangan ini satu-satunya salinannya" dan meminta `ya`. Bila tidak
+     ada di daftar (atau daftarnya tidak ada), perintah berkata bahwa ia
+     tidak bisa memastikan database ini tidak ada di master baru, dan
+     meminta operator **mengetik nama databasenya** sebagai konfirmasi.
   5. Membuang database itu, memeriksa `1 1`, lalu menyebut langkah
      berikutnya di panel.
 - **`sudo dbpanel agent grant-admin`** untuk akun admin yang kurang hak:
@@ -384,11 +433,16 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
 - Ekor log galat dibaca oleh program kecil yang dijalankan sebagai uid
   yang sama, dengan batas ukuran dan batas waktu, bukan oleh root di dalam
   proses.
-- Bila uid akun layanan tidak bisa ditentukan, perintah itu menolak dengan
-  teks yang menyebut sebabnya. Ini berlaku di semua peran.
+- Uid itu diambil dengan pencarian sempit: akun pada opsi `--user`
+  layanan (bawaan `mysql`), dicari di daftar pengguna sistem. Tidak ada
+  syarat tentang direktori home atau `~/.my.cnf`.
+- **Penyelamatan tidak pernah ditolak karena ini.** Bila uid tidak bisa
+  ditentukan, atau menjalankan sebagai uid itu gagal dijalankan, agent
+  berjalan seperti sekarang (sebagai root) dan menulis satu baris
+  peringatan di log pekerjaan. Ini berlaku di semua peran.
 - Bergantung pada M3; bila M3 menunjukkan pemasangan bawaan tidak
-  mengizinkannya, butir `mysqlbinlog` dicatat sebagai tidak dibangun dan
-  dibawa ke pemilik, bukan dipaksa.
+  mengizinkannya, butir ini dicatat sebagai tidak dibangun dan dibawa ke
+  pemilik, bukan dipaksa.
 
 ### 5.6 Label untuk pesan agent
 
@@ -413,6 +467,9 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
 - Sesi bukti daftar lengkap menyetel `sql_quote_show_create` dan
   `sql_mode`-nya sendiri, sesuai M4. (SEC-211)
 - Teks nama akun yang tidak didukung menyebut karakter yang benar. (R-6)
+- `mysql.startReplica` dan `mysql.startUntil` di server yang dikarantina
+  menolak bila sumber kanal replikasi yang akan dijalankan bukan sumber
+  yang dipin. (SEC-210)
 - Lima butir kode SEC-232: penyimpanan `CopySent` yang gagal menghentikan
   langkah sebelum perintah dikirim; `CopySent` dihitung "tidak pasti" apa
   pun nomor promosinya; untuk CLONE bukti adalah progres di atas 0 atau
@@ -424,7 +481,7 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
 
 ### 5.8 Teks baru (untuk dibaca pemilik)
 
-- T1 peringatan `master_relocked`: `MySQL master lama sempat tidak
+- T1 pesan `master_start_late` untuk "selagi berjalan": `MySQL master lama sempat tidak
   terkunci selagi berjalan; agent sudah menguncinya lagi. Tulisan yang
   masuk selama itu tidak ada di master baru: jalankan Periksa data
   tertinggal`
@@ -456,11 +513,14 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
 
 ### 5.9 Kompatibilitas
 
-- Agent baru, panel lama: hasil "dikunci lagi" adalah nilai baru pada
-  laporan start; panel lama memperlakukannya sebagai laporan yang tidak
-  terbaca dan membuka peringatan "anggap sempat bisa ditulis". Itu sisi
-  yang aman.
-- Panel baru, agent lama: tidak ada hasil "dikunci lagi"; perilaku lama.
+- Agent baru, panel lama: kejadian "dikunci lagi" dikirim sebagai hasil
+  start `late`, yang sudah dikenal panel lama; panel lama membuka
+  peringatan `master_start_late` dengan teks lamanya ("sempat bisa ditulis
+  saat menyala; jalankan Periksa data tertinggal"). Tindakannya sama.
+  Keterangan tambahannya adalah field `omitempty` yang diabaikan panel
+  lama.
+- Panel baru, agent lama: tidak ada kejadian "dikunci lagi"; perilaku
+  lama.
 - Catatan muat tetap di memori: agent yang restart di antara muat dan
   settle tetap mengharuskan muat diulang, seperti sekarang.
 - Tidak ada migrasi basis data panel selain penormalan baris lama (5.1).
@@ -476,13 +536,19 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
   selama muat; database yang dibuat di tengah muat membuat settle
   menolak; ketiga perintah CLI pada server `super_read_only`, termasuk
   cadangan terpotong, berkas sudah ada, galat di tengah (akhir selalu
-  `1 1`), dan penjaga tidak mengunci di tengahnya.
+  `1 1`), nama yang tidak ada di daftar agent (harus mengetik nama), dan
+  penjaga tidak mengunci di tengahnya.
 - Test panel: setiap baris tabel 5.1 (peran, baris, tanda, apa yang
   ditawarkan, apa yang diterima); `Resume`; penormalan baris lama;
   pemulihan dari pin agent; promote kedua; label di setiap tempat teks
   agent tampil.
 - Test e2e: bangun ulang gagal sebelum salinan → Periksa data tertinggal
-  bekerja → Ulangi; gagal sesudah settle → replika gagal biasa.
+  bekerja → "Ulangi dari tahap ini" masih tersedia dan menyelesaikan
+  bangun ulang; gagal sesudah settle → replika gagal biasa.
+- Test penjaga dan kunci berkas: perintah CLI dan muat data tidak pernah
+  saling memasang bendera; CLI menolak selama muat; penjaga tidak
+  mencatat "dikunci lagi" untuk pembukaan yang sah; `read_only` yang
+  dimatikan dari luar selama muat dipasang lagi dan dicatat.
 - Audit keamanan menyeluruh dengan model terkuat dilakukan di akhir
   Rencana 5b-2b, mencakup seluruh mode ketat termasuk hasil rencana ini.
   Rencana ini sendiri ditutup dengan tinjauan akhir seluruh cabang
@@ -490,7 +556,7 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
 
 ## 6. Yang diserahkan kepada pelaksana
 
-- Nama fungsi, berkas, field dan kunci JSON; bentuk berkas penanda CLI;
+- Nama fungsi, berkas, field dan kunci JSON; nama dan letak berkas kunci penjaga;
   bentuk hasil "dikunci lagi" di dalam mekanisme hasil start.
 - Cara membaca kata sandi tanpa menampilkannya, tanpa menambah dependensi.
 - Program kecil pembaca ekor log dan batasnya.
@@ -525,6 +591,18 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
    di direktori data MySQL, jadi tidak diambil.
 8. **Rencana 5b-2 dipecah dua:** 5b-2a (ini) lalu 5b-2b (spek 5.7–5.11
    dan audit menyeluruh).
+9. **Periksa dan Amankan data tertinggal tidak menghapus "Ulangi dari
+   tahap ini"** pada bangun ulang yang gagal (5.1). Sekarang job apa pun
+   yang lebih baru menghapusnya, sehingga operator yang mengikuti saran
+   panel (Periksa dulu) terpaksa menyalin ulang dari awal.
+10. **Tidak ada jenis peringatan baru.** Kejadian "dikunci lagi" memakai
+    peringatan `master_start_late` yang ada dengan pesan lain; labelnya
+    berubah menjadi "Master lama sempat bisa ditulis".
+11. **Bila penjaga mengunci lagi di tengah bangun ulang yang sedang
+    berjalan, bangun ulang tidak dihentikan.** Peringatannya terbuka, dan
+    form bangun ulang sudah memperingatkan hal yang sama untuk start yang
+    terlambat. Menghentikannya otomatis bisa menjebak operator di keadaan
+    tanpa jalan (Periksa ditolak sesudah salinan mulai).
 
 ## 8. Risiko yang tersisa setelah 5b-2a
 
@@ -545,6 +623,52 @@ bukan, perintah itu sendiri memasangnya lagi dan mengatakannya.
   mengharuskan muat diulang.
 - **Sesudah promote darurat kedua**, master lama pertama hanya bisa
   dihapus dari panel; data tertinggalnya hanya bisa diambil dengan tangan.
-- **Root di server melewati semuanya**, termasuk berkas penanda penjaga.
+- **Dikunci lagi di tengah bangun ulang sebelum salinan mulai:** tulisan
+  yang masuk di jendela itu terhapus saat salinan menggantikan data,
+  kecuali operator menghentikan bangun ulang dan menjalankan Periksa
+  lebih dulu. Peringatannya terbuka; bangun ulang tidak dihentikan
+  otomatis (keputusan 7.11).
+- **Skema sistem tidak dibandingkan saat karantina diakhiri** (SEC-213)
+  dan **hak lewat peran (role) tidak dihitung bukti daftar lengkap**
+  (SEC-214, gagal tertutup): keduanya menurut rancangan, tidak diubah.
+- **Bila uid akun layanan tidak bisa ditentukan**, `mysqlbinlog` tetap
+  dijalankan root seperti sekarang (5.5).
+- **Root di server melewati semuanya**, termasuk kunci berkas penjaga.
   Batas kepercayaan yang sama dengan agent sendiri.
 - **"Melepas kunci start dengan tangan"** tetap prosedur dengan tangan.
+
+## 9. Keputusan penulis setelah builder check
+
+Builder check menemukan lima pertentangan dan enam pertanyaan. Tidak ada
+yang hanya bisa dijawab pemilik produk; semuanya diputuskan penulis dan
+sudah dimasukkan ke bagian di atas.
+
+1. **Daftar dari aliran dump bisa dipalsukan** lewat isi routine. Diganti
+   daftar yang dibaca klien `mysql` dari master baru (F11, bagian 4, 5.3).
+2. **Klaim kompatibilitas panel lama salah** (panel lama mengabaikan hasil
+   yang tidak dikenal). Kejadian "dikunci lagi" kini dikirim sebagai hasil
+   `late` yang sudah dikenal (5.2, 5.9), dan jenis peringatan baru
+   dibatalkan (7.10).
+3. **"Periksa lalu Ulangi" tidak mungkin** karena job Periksa menggantikan
+   job bangun ulang. Pemeriksaan itu dilonggarkan untuk Periksa dan
+   Amankan saja (5.1, 7.9).
+4. **Menolak bila uid tidak ketemu berarti menolak penyelamatan.** Diganti
+   pencarian sempit dan jalan-seperti-sekarang bila gagal (5.5).
+5. **Berkas penanda saja tidak menutup celah** antara CLI dan penjaga, dan
+   dua pembukaan bisa saling memasang bendera. Diganti satu kunci berkas
+   (`flock`) dan pembukaan yang dihitung (bagian 4, 5.2).
+6. **Apa yang dikecualikan sebuah pembukaan:** hanya `super_read_only`;
+   penjaga tetap menjaga `read_only` selama muat (5.2).
+7. **Dikunci lagi saat bangun ulang berjalan:** peringatan terbuka juga
+   untuk server yang sedang dibangun ulang; bangun ulang tidak dihentikan
+   (5.1, 7.11, bagian 8).
+8. **Apa yang menahan settle:** setiap kali penjaga mendapati bendera mati
+   tanpa pembukaan sah sesudah muat selesai, lewat jalur mana pun (5.2).
+9. **`drop-database` atas database yang ternyata disalin:** konfirmasi
+   lebih berat (mengetik nama) bila nama itu tidak ada di daftar yang
+   dicatat agent, dan kalimatnya tidak lagi mengklaim "tidak ada di server
+   lain" tanpa dasar (5.4).
+10. **Kesegaran laporan pin:** tiga laporan berturut-turut sesudah job
+    berakhir (5.1).
+11. **SEC-210** masuk (5.7); **SEC-213 dan SEC-214** dicatat sebagai
+    menurut rancangan (bagian 8).
