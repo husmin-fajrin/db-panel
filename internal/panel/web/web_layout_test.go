@@ -203,7 +203,8 @@ func TestThemeScriptAndAttribute(t *testing.T) {
 			t.Errorf("%s: theme.js comes after the stylesheet", path)
 		}
 		if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'self'; script-src 'self'; style-src 'self'; "+
-			"img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" {
+			"img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "+
+			"worker-src 'none'; manifest-src 'self'" {
 			t.Errorf("%s: CSP = %q", path, got)
 		}
 		// Login and the certificate page have no sidebar.

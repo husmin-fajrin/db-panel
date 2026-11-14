@@ -725,13 +725,16 @@ func TestRepairPairedServer(t *testing.T) {
 var baseHeaders = map[string]string{
 	"Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; " +
 		"img-src 'self' data:; connect-src 'self'; object-src 'none'; " +
-		"frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-	"X-Content-Type-Options":       "nosniff",
-	"X-Frame-Options":              "DENY",
-	"Referrer-Policy":              "same-origin",
-	"Permissions-Policy":           "camera=(), microphone=(), geolocation=()",
+		"frame-ancestors 'none'; base-uri 'none'; form-action 'self'; worker-src 'none'; manifest-src 'self'",
+	"X-Content-Type-Options": "nosniff",
+	"X-Frame-Options":        "DENY",
+	"Referrer-Policy":        "same-origin",
+	// clipboard-write is not listed: the copy buttons need it.
+	"Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), " +
+		"bluetooth=(), display-capture=(), clipboard-read=(), interest-cohort=()",
 	"Cross-Origin-Opener-Policy":   "same-origin",
 	"Cross-Origin-Resource-Policy": "same-origin",
+	"Cross-Origin-Embedder-Policy": "require-corp",
 }
 
 func wantHeaders(t *testing.T, what string, h http.Header, cacheControl string) {

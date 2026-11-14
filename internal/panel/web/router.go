@@ -260,10 +260,16 @@ func NewRouter(d Deps) http.Handler {
 
 // contentSecurityPolicy allows scripts, styles and connections from the
 // panel itself only: no inline script, no eval (the UI uses the CSP build
-// of Alpine.js), no framing. img-src data: is for daisyUI's inline SVG icons.
+// of Alpine.js), no framing, no workers. img-src data: is for daisyUI's
+// inline SVG icons.
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; " +
 	"img-src 'self' data:; connect-src 'self'; object-src 'none'; " +
-	"frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+	"frame-ancestors 'none'; base-uri 'none'; form-action 'self'; worker-src 'none'; manifest-src 'self'"
+
+// permissionsPolicy turns off browser features the panel never uses.
+// clipboard-write stays allowed: the copy buttons need it.
+const permissionsPolicy = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), " +
+	"bluetooth=(), display-capture=(), clipboard-read=(), interest-cohort=()"
 
 // SecurityHeaders sets the baseline security headers on every UI and
 // agent-bootstrap response. Cache-Control defaults to no-store (pages
@@ -280,9 +286,10 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		// so nobody could log in. same-origin never sends a Referer (with a
 		// pairing token in it) to another site either.
 		h.Set("Referrer-Policy", "same-origin")
-		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		h.Set("Permissions-Policy", permissionsPolicy)
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		h.Set("Cross-Origin-Embedder-Policy", "require-corp")
 		h.Set("Cache-Control", "no-store")
 		h.Del("Server")
 		if r.TLS != nil {
