@@ -2406,8 +2406,8 @@ membuat server ini menerima tulisan.
    tepat di bawah baris `init_file=` yang ditemukan di langkah 3:
    `super_read_only=ON` dan `event_scheduler=OFF` (event terjadwal tidak
    jalan selama baris kedua ada, kecuali `event_scheduler` pernah disimpan
-   `ON` dengan `SET PERSIST`: nilai tersimpan itu yang dipakai). Kedua baris itu bukan jaminan: nilai yang pernah
-   disimpan dengan `SET PERSIST` (misalnya `read_only` atau
+   `ON` dengan `SET PERSIST`: nilai tersimpan itu yang dipakai). Kedua
+   baris itu bukan jaminan: nilai yang pernah disimpan dengan `SET PERSIST` (misalnya `read_only` atau
    `super_read_only` yang disimpan `OFF`) mengalahkannya, dan berkas kunci
    hanya dijalankan bila mysqld memang memakainya. Perlindungan yang pasti
    hanya langkah 2. Lalu nyalakan MySQL (misalnya `systemctl start mysql`,
