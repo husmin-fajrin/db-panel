@@ -590,7 +590,13 @@ func (m *Monitor) closeAlertOKLocked(serverID int64, kind, reason string, ups []
 		}
 		return ups, true
 	}
-	if err := m.st.CloseAlertWithReason(a.ID, m.now(), reason); err != nil {
+	if m.closeFault != nil {
+		err = m.closeFault()
+	}
+	if err == nil {
+		err = m.st.CloseAlertWithReason(a.ID, m.now(), reason)
+	}
+	if err != nil {
 		m.log.Warn("close alert", "server_id", serverID, "kind", kind, "err", err)
 		return ups, false
 	}
@@ -894,7 +900,11 @@ func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSna
 // the reasons the start events have always used, and deletes those marks
 // once no such alert is open: a new quarantine starts clean. Their end may
 // never reach a snapshot: the agent reports no start state outside
-// quarantine. Late is left to closeStartAlerts. The caller holds mu.
+// quarantine. Late is left to closeStartAlerts. The new pin counts as
+// handled only once every marked kind was dealt with (its alert closed or
+// none open, its mark deleted); when reading the marks, the alert or a
+// store write fails, the end stays pending and the next taken report tries
+// again. The caller holds mu.
 func (m *Monitor) closeStartAlertsLeftQuarantine(id int64, snap *proto.HealthSnapshot) []alertUpdate {
 	pin := snap.RolePin
 	s, ok := m.servers[id]
@@ -902,28 +912,39 @@ func (m *Monitor) closeStartAlertsLeftQuarantine(id int64, snap *proto.HealthSna
 		return nil
 	}
 	prev := s.startPin
-	s.startPin = pin
 	if pin == pinQuarantined || (prev != "" && prev != pinQuarantined) {
+		s.startPin = pin
 		return nil
 	}
 	var ups []alertUpdate
+	done := true
 	for _, k := range []struct{ kind, reason string }{
 		{KindMasterStartBlocked, startBlockedOverReason},
 		{KindMasterStartBypassed, ""},
 	} {
-		if _, marked := m.startMark(id, s, k.kind); !marked {
+		_, marked := m.startMark(id, s, k.kind)
+		if s.marks == nil {
+			done = false // the marks did not read: nothing is known
+			continue
+		}
+		if !marked {
 			continue
 		}
 		var closed bool
 		if ups, closed = m.closeAlertOKLocked(id, k.kind, k.reason, ups); !closed {
+			done = false
 			continue
 		}
 		if err := m.st.DeleteStartMark(id, k.kind); err != nil {
 			m.log.Warn("start marks: delete", "server_id", id, "kind", k.kind, "err", err)
+			done = false
 			continue
 		}
 		delete(s.marks, k.kind)
 		delete(s.overDone, k.kind)
+	}
+	if done {
+		s.startPin = pin
 	}
 	return ups
 }

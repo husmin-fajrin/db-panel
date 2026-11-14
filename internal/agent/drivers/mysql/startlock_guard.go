@@ -128,9 +128,12 @@ func (d *Driver) guardStartLock(ctx context.Context, h Host, now time.Time) {
 	if role == "" {
 		return // the pins cannot be trusted: nothing changes
 	}
-	d.retryStartResult()
+	// Outside quarantine the state is cleared (a failed removal is retried
+	// by the clear itself); only a quarantine's state is ever written again.
 	if role != roleQuarantined {
 		d.clearStartResult()
+	} else {
+		d.retryStartResult()
 	}
 	l := h.Layout()
 	if role == roleQuarantined {

@@ -86,13 +86,17 @@ type Monitor struct {
 	// openFault, when set, is asked before an alert is inserted and makes
 	// the insert fail with its error (tests only).
 	openFault func() error
-	st        *store.Store
-	hub       *hub.Hub
-	publish   func(event string, data any)
-	log       *slog.Logger
-	now       func() time.Time
-	tickEvery time.Duration
-	startedAt time.Time
+	// closeFault, when set, is asked before an alert is closed by
+	// closeAlertOKLocked and makes the close fail with its error (tests
+	// only).
+	closeFault func() error
+	st         *store.Store
+	hub        *hub.Hub
+	publish    func(event string, data any)
+	log        *slog.Logger
+	now        func() time.Time
+	tickEvery  time.Duration
+	startedAt  time.Time
 
 	ctx    context.Context // background calls; canceled by Close
 	cancel context.CancelFunc

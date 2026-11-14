@@ -2746,6 +2746,40 @@ func TestStartStateR4PinCloseOncePerEnd(t *testing.T) {
 	}
 }
 
+// R4-4b: the role-pin close fails on the store (the close of the alert):
+// the alert stays open and the end of quarantine stays pending; the next
+// taken report closes it and deletes the marks.
+func TestStartStateR4PinCloseRetriedAfterStoreFailure(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.MySQLOK = false })
+	ma.state(sk(failed, "F1", 10, false), sk(bypassed, "B1", 20, false))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBlocked, 1, true)
+	r.wantAlerts(mID, KindMasterStartBypassed, 1, true)
+	fail := true
+	r.m.closeFault = func() error {
+		if fail {
+			fail = false
+			return errors.New("database is locked")
+		}
+		return nil
+	}
+	ma.state()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.RolePin, s.StartLock = "master", nil })
+	ma.send()
+	if !r.isOpen(mID, KindMasterStartBlocked) || r.mark(mID, KindMasterStartBlocked) != "F1" {
+		t.Fatalf("after a failed close: blocked open %v, mark %q; want open, F1",
+			r.isOpen(mID, KindMasterStartBlocked), r.mark(mID, KindMasterStartBlocked))
+	}
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBlocked, 1, false)
+	r.wantAlerts(mID, KindMasterStartBypassed, 1, false)
+	if m, _ := r.st.StartMarks(mID); m[KindMasterStartBlocked] != "" || m[KindMasterStartBypassed] != "" {
+		t.Fatalf("marks after the retried close = %v, want no blocked or bypassed", m)
+	}
+}
+
 // R4-5: an over entry already dealt with costs nothing more: an alert of
 // its kind opened later by an event without an id (the "worst" form) is
 // not closed by the same over entry again.

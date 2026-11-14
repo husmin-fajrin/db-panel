@@ -139,8 +139,9 @@ func (d *Driver) startResultPath() string {
 // snapshot reports and the file persists. A value is never modified once
 // published (Driver.startState); a writer, under promoteMu, publishes a new
 // one. unsaved: the file does not hold rec yet (a write or a removal
-// failed); every guard round retries it (retryStartResult). warned: a
-// failed retry of this unsaved state was logged.
+// failed); every guard round retries it (retryStartResult while the role
+// pin is quarantined, clearStartResult otherwise). warned: a failed retry
+// of this unsaved state was logged.
 type startState struct {
 	rec     startResult // Result "": nothing judged in this quarantine (no file)
 	unsaved bool
@@ -150,19 +151,30 @@ type startState struct {
 // currentStartState is the published state, loaded from the file on first
 // use (an agent start). The snapshot calls it without promoteMu: the load
 // is published only if nothing was published before (CompareAndSwap from
-// nil), so it never overwrites a writer's state.
+// nil), so it never overwrites a writer's state. Only a file that was read
+// (its content valid or not: an invalid one is ignored, and the next judged
+// start replaces it) or is absent is published; when the file cannot be
+// read (an I/O error, an untrusted file) nothing is published, the failure
+// is warned at most once per warnEvery, and the next call loads again. The
+// empty state returned then is what a judged start proceeds from.
 func (d *Driver) currentStartState() *startState {
 	if st := d.startState.Load(); st != nil {
 		return st
 	}
 	st := &startState{}
 	path := d.startResultPath()
-	var r startResult
-	switch ok, err := readJSON(path, &r); {
-	case err != nil:
-		d.warn("stored start result unreadable; ignored", "file", path, "err", err)
-	case ok:
-		st.rec = r
+	content, ok, err := readTrustedFile(path, maxRecordSize)
+	if err != nil {
+		d.warnLimited("stored start result cannot be read; loaded again on next use", "file", path, "err", err)
+		return st
+	}
+	if ok {
+		var r startResult
+		if err := json.Unmarshal([]byte(content), &r); err != nil {
+			d.warn("stored start result unreadable; ignored", "file", path, "err", err)
+		} else {
+			st.rec = r
+		}
 	}
 	if d.startState.CompareAndSwap(nil, st) {
 		return st

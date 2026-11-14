@@ -1,6 +1,7 @@
 package mysql_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -345,5 +346,37 @@ func TestStartStateSurvivesFailedWrite(t *testing.T) {
 	if sr := newAgent().d.Snapshot(context.Background()).StartResult; sr == nil || sr.StartID != l2ID ||
 		len(sr.Kinds) == 0 || sr.Kinds[0].StartID != l2ID {
 		t.Fatalf("a new agent's snapshot = %+v, want L2 %s", sr, l2ID)
+	}
+}
+
+// A state whose write failed in a quarantine that has ended (the role pin
+// is no longer quarantined) is cleared, never written first: the guard
+// round retries a write only while the pin is quarantined.
+func TestGuardClearsUnsavedStartResultWithoutWritingIt(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	dir := pinDir(t, "master", "")
+	g := newGuardRig(t, inst, dir)
+	var buf bytes.Buffer
+	g.d.Logger = logDriver(&buf)
+	stateDir := filepath.Join(t.TempDir(), "state")
+	g.d.StartResultPath = filepath.Join(stateDir, "start-result")
+	if err := os.WriteFile(stateDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.d.RecordStartResult(mysql.StartResultRecord{Result: "late", Decided: time.Now()}); err == nil {
+		t.Fatal("RecordStartResult under a regular file succeeded")
+	}
+	if err := os.Remove(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	g.tickAt(time.Now())
+	if strings.Contains(buf.String(), "start result kept on disk after an earlier failure") {
+		t.Errorf("the round wrote the old quarantine's state before clearing it:\n%s", buf.String())
+	}
+	if _, ok := readStartResultFile(t, g.d.StartResultPath); ok {
+		t.Error("start-result exists after a round outside quarantine")
+	}
+	if s := g.d.StartResult(time.Now()); s != nil {
+		t.Errorf("StartResult outside quarantine = %+v, want nil", s)
 	}
 }

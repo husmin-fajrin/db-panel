@@ -380,6 +380,68 @@ func TestStartResultSnapshotValidatesFile(t *testing.T) {
 	}
 }
 
+// A start-result file that cannot be read on the first use (here: the path
+// is a directory) publishes nothing: once it reads, the next snapshot
+// carries its state without an agent restart. The failure is warned.
+func TestStartResultLoadRetriedAfterReadError(t *testing.T) {
+	dir := pinDir(t, "quarantined", guardCandidateKey)
+	r := newPinRig(t, nil, dir)
+	var buf bytes.Buffer
+	r.d.Logger = logDriver(&buf)
+	path := filepath.Join(t.TempDir(), "start-result")
+	r.d.StartResultPath = path
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if s := r.d.StartResult(time.Now()); s != nil {
+		t.Fatalf("StartResult while the file does not read = %+v, want nil", s)
+	}
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), path) {
+		t.Errorf("no warning naming %s:\n%s", path, buf.String())
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	decided := time.Now().Add(-time.Minute)
+	b, _ := json.Marshal(mysql.StartResultRecord{Result: "late", Decided: decided,
+		Kinds: map[string]mysql.StartKindRecord{"late": {Decided: decided}}})
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := r.d.StartResult(time.Now())
+	if s == nil || s.Result != "late" || len(s.Kinds) != 1 || s.Kinds[0].Kind != "late" {
+		t.Fatalf("StartResult once the file reads = %+v, want late with its late kind", s)
+	}
+}
+
+// A start judged while the file does not read is kept from an empty
+// state; once the path is usable again the judged start is what is kept.
+func TestStartResultJudgedWhileUnreadableTriesTheLoad(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	d := &mysql.Driver{SeenPath: filepath.Join(dir, "replicas-seen"), Logger: logDriver(&buf)}
+	path := filepath.Join(dir, "start-result")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The write fails too (the path is a directory): the state is unsaved.
+	if err := d.RecordStartResult(mysql.StartResultRecord{Result: "bypassed", Decided: time.Now()}); err == nil {
+		t.Fatal("RecordStartResult over a directory succeeded")
+	}
+	if !strings.Contains(buf.String(), path) {
+		t.Errorf("the failed load was not warned:\n%s", buf.String())
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordStartResult(mysql.StartResultRecord{Result: "ok", Decided: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := readStartResultFile(t, path); !ok || got.Result != "bypassed" {
+		t.Errorf("file = %+v (exists %v), want bypassed kept from the start judged earlier", got, ok)
+	}
+}
+
 // The dispatch path refuses an untrusted pin before it gets here, so the
 // Driver's step is called directly: it must not read "unreadable" as
 // "another role".
