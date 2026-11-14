@@ -573,6 +573,30 @@ func TestTightenTLSLeavesOutQuarantined(t *testing.T) {
 	}
 }
 
+// TestTightenTLSWaitsForQuarantinedReplicaJob: a quarantined server with
+// a job still running (its rebuild) refuses the tighten job as any busy
+// replica does; it is left out only when it has no active job.
+func TestTightenTLSWaitsForQuarantinedReplicaJob(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	e.followingReplica(topo, "a")
+	q := e.agent("db-old", "10.0.0.9")
+	if _, err := e.st.AddReplica(topo.ID, q.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetServerRole(q.id, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.CreateJob(store.Job{ID: "rebuild", Kind: KindCreateReplica, ServerID: q.id, TopologyID: topo.ID,
+		ParamsJSON: `{"rebuild_old_master":true}`, CreatedAt: time.Now()}, []string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.r.StartTightenTLS(context.Background(), m.id)
+	if !errors.Is(err, ErrBusy) || !strings.Contains(err.Error(), "db-old") {
+		t.Fatalf("StartTightenTLS with the quarantined server's rebuild running = %v, want busy", err)
+	}
+}
+
 // TestRetryMySQLTLSRefusedWhenQuarantined: a mysql_tls job that failed
 // before its server was quarantined is not retried (P15).
 func TestRetryMySQLTLSRefusedWhenQuarantined(t *testing.T) {

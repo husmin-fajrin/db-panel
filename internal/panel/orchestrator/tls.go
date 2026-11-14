@@ -519,14 +519,16 @@ func (r *Runner) StartTightenTLS(ctx context.Context, masterServerID int64) (str
 		if err != nil {
 			return "", err
 		}
+		// Busy first: a quarantined old master whose rebuild still runs
+		// is waited for like any replica.
+		if err := r.refuseBusy(rep.ServerID, "replika "+rs.Name); err != nil {
+			return "", err
+		}
 		// A quarantined old master (its rebuild failed) gets no
 		// certificate: its agent needs root's approval for it.
 		if rs.Role == store.RoleQuarantined {
 			r.log.Info("tighten tls: quarantined server left out", "server_id", rs.ID)
 			continue
-		}
-		if err := r.refuseBusy(rep.ServerID, "replika "+rs.Name); err != nil {
-			return "", err
 		}
 		ids = append(ids, rep.ServerID)
 		names = append(names, rs.Name)
