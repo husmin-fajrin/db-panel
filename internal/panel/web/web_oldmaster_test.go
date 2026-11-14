@@ -1129,6 +1129,56 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 	}
 }
 
+// TestRebuildFormAsksAgentOnlySameOrigin: a GET of the rebuild form asks
+// the old master's agent for its approval (which may write a request
+// file there) only for a same-origin request or one without
+// Sec-Fetch-Site; from another site the box only offers Periksa lagi.
+func TestRebuildFormAsksAgentOnlySameOrigin(t *testing.T) {
+	const (
+		notAsked = "Klik Periksa lagi untuk melihat persetujuan di server."
+		recheck  = `<a class="btn btn-sm" href="/masters/2/replicas/new?bangun-ulang=1">Periksa lagi</a>`
+		why      = "Bangun ulang membuang semua data MySQL di server ini."
+	)
+	for site, asks := range map[string]bool{"": true, "same-origin": true, "none": true, "same-site": false, "cross-site": false} {
+		t.Run("site "+site, func(t *testing.T) {
+			e, f, topo := promotedEnv(t)
+			if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+				Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+			req := httptest.NewRequest("GET", "/masters/2/replicas/new?bangun-ulang=1", nil)
+			if site != "" {
+				req.Header.Set("Sec-Fetch-Site", site)
+			}
+			req.AddCookie(e.cookie())
+			rec := httptest.NewRecorder()
+			e.h.ServeHTTP(rec, req)
+			wantCode(t, rec, http.StatusOK)
+			f.mu.Lock()
+			calls := f.approvalCalls
+			f.mu.Unlock()
+			button := rebuildButton.FindString(rec.Body.String())
+			if asks {
+				if calls != 1 {
+					t.Fatalf("agent asked %d times, want once", calls)
+				}
+				wantBody(t, rec, "Sudah disetujui di db-master")
+				wantNoBody(t, rec, notAsked)
+				return
+			}
+			if calls != 0 {
+				t.Fatalf("agent asked %d times for a %s request", calls, site)
+			}
+			wantBody(t, rec, notAsked, recheck)
+			wantNoBody(t, rec, "Sudah disetujui", "Belum disetujui", why)
+			if !strings.Contains(button, " disabled") {
+				t.Fatalf("button %s not disabled", button)
+			}
+		})
+	}
+}
+
 // TestRebuildFormWordsInvalidReason: why an approval on file no longer
 // holds is worded by the panel from the agent's code (P-2); the agent's
 // own sentence is never shown.

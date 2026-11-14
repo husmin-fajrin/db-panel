@@ -564,7 +564,7 @@ func (a *app) replicaForm(r *http.Request, master store.Server, checked map[stri
 		p.Databases = append(p.Databases, databaseChoice{DatabaseInfo: d, Checked: checked == nil || checked[d.Name]})
 	}
 	if rebuild != 0 {
-		if p.Rebuild, err = a.rebuildTarget(r.Context(), master, rebuild); err != nil {
+		if p.Rebuild, err = a.rebuildTarget(r.Context(), master, rebuild, askApproval(r)); err != nil {
 			return p, err
 		}
 		if p.Rebuild == nil {

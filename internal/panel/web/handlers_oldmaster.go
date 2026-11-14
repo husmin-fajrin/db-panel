@@ -707,6 +707,25 @@ type rebuildInfo struct {
 	// ApprovalAgentMsg is the agent's own refusal, quoted as its words
 	// (orchestrator.AgentQuote), shown in a block of its own.
 	ApprovalAgentMsg string
+	// ApprovalNotAsked: the agent was not asked (askApproval); the box
+	// offers only Periksa lagi.
+	ApprovalNotAsked bool
+}
+
+// askApproval reports whether the form's request may make the panel ask
+// the old master's agent for root's approval, which can write a request
+// file there: any POST (same-origin, checked by the router), and a GET
+// whose Sec-Fetch-Site is absent, same-origin or none, so a link from
+// another site does not (P-6).
+func askApproval(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return true
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	}
+	return false
 }
 
 // ApprovalMinutes is how many minutes the code to approve is still valid,
@@ -835,8 +854,9 @@ func startLateWarning(srv store.Server) string {
 }
 
 // rebuildTarget checks that id is the quarantined old master of master's
-// topology and words what rebuilding it loses.
-func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) (*rebuildInfo, error) {
+// topology and words what rebuilding it loses; with ask its agent is asked
+// for root's approval (see askApproval).
+func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64, ask bool) (*rebuildInfo, error) {
 	srv, err := a.Store.GetServer(id)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil
@@ -892,7 +912,11 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64) 
 		info.Warnings = append(info.Warnings, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
 			"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
 	}
-	a.rebuildApproval(ctx, info)
+	if ask {
+		a.rebuildApproval(ctx, info)
+	} else {
+		info.ApprovalNotAsked = true
+	}
 	info.ConfirmText = fmt.Sprintf("Bangun ulang %s sebagai replika %s: semua data MySQL di %s diganti salinan dari master baru.",
 		srv.Name, master.Name, srv.Name)
 	if len(info.Warnings) > 0 {
