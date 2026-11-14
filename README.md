@@ -298,11 +298,14 @@ sendiri: host kosong atau `localhost`, alamat loopback (`127.0.0.1`,
 `::1`), alamat salah satu antarmuka jaringan server itu, atau nama yang
 semua alamatnya termasuk itu. Host lain ditolak dengan "MySQL yang
 disambungkan harus berada di server ini (soket, 127.0.0.1, atau alamat
-server ini sendiri); <host> bukan alamat server ini." Akun tersimpan dari
-versi lama yang menyebut host lain tidak dipakai: setiap akses agent ke
-MySQL gagal dengan teks yang sama, dan laporan pemantauan server itu
-membawanya. Perbaikannya: **Hubungkan MySQL** lagi dari panel dengan
-host kosong atau alamat server itu sendiri.
+server ini sendiri); <host> bukan alamat server ini." Akun tersimpan yang
+host-nya (sekarang) bukan alamat server ini, atau namanya tidak bisa
+dicari, tidak dipakai: setiap akses agent ke MySQL gagal dengan teks itu
+atau teks DNS di bawah. Pada master dan replika yang siap dipantau, panel
+menampilkan teks itu sebagai keterangan status "Tidak terjangkau", juga
+sebagai "Pesan MySQL" di halaman master (di "Detail teknis") atau replika;
+pada master lama yang dikarantina panel tidak menampilkannya. Perbaikannya: **Hubungkan MySQL**
+lagi dari panel dengan host kosong atau alamat server itu sendiri.
 
 Nama host yang tidak bisa dicari tetap ditolak, dengan "alamat MySQL
 <host> tidak bisa dicari (DNS): <sebab>. MySQL yang disambungkan harus
@@ -627,8 +630,10 @@ Tanpa persetujuan, yang tetap jalan:
 
 Yang butuh persetujuan root di server itu: semua langkah bangun ulang (hapus
 database, dump, CLONE, konfigurasi dan filter replikasi, start dan reset
-replikasi, pengaturan dan restart MySQL), membuat akun MySQL, menghapus
-akun dump sementara (`dbpanel_dump_<8 heksa>`), serta kunci dan sertifikat
+replikasi, pengaturan dan restart MySQL), membuat akun replikasi
+`dbpanel_repl@'%'` (hanya bila belum ada baris `dbpanel_repl` di host mana
+pun; akun lain, juga akun dump, ditolak), menghapus akun dump sementara
+(nama berawalan `dbpanel_dump_`), serta kunci dan sertifikat
 MySQL (`mysql.tlsRequest`, `mysql.tlsInstall`). Dua hal tetap ditolak
 walau ada persetujuan: menghapus akun selain akun dump sementara (seperti
 di master; misalnya akun replikasi), dan memasang MySQL (`mysql.install`;
@@ -655,8 +660,8 @@ mungkin dikarantina.
 
 Karena memasang sertifikat butuh persetujuan, panel tidak memasang
 sertifikat MySQL baru di server yang dikarantina. Perpanjangan sertifikat
-harian dan **Perketat** melewatinya; selama server itu masih menjalankan
-pekerjaan (misalnya bangun ulang), **Perketat** ditolak seperti untuk
+harian dan **Perketat** melewatinya; selama bangun ulangnya masih
+berjalan, **Perketat** ditolak seperti untuk
 replika lain yang sibuk ("replika <server> masih punya pekerjaan yang
 belum selesai"). Memasang sertifikat MySQL di sana, atau
 mengulang pekerjaan sertifikatnya, ditolak dengan "Server ini dikarantina
@@ -761,7 +766,7 @@ berjalan menulis kunci itu lagi selama perannya `quarantined`. Jalankan
 `set-role replica` atau `unassigned` tidak melepas kunci start: agent yang
 berjalan melepasnya sendiri setelah MySQL hidup dan `read_only` serta
 `super_read_only` tersimpan ON, jadi server itu tetap menyala baca-saja.
-Sesudah itu agent tidak lagi memasang baca-saja di server `unassigned`:
+Sejak perannya `unassigned`, agent tidak lagi memasang baca-saja:
 siapa pun yang mematikannya (juga panel, lewat perintah yang membuka
 baca-saja) membuat MySQL-nya bisa ditulis.
 `set-role quarantined` membuat agent yang berjalan menulis kunci start
@@ -1642,7 +1647,7 @@ Halaman server master lama memuat kotak **Master lama** dengan:
   server itu (lihat akhir "Persetujuan di server untuk bangun ulang").
 - **Hapus server:** menghapus server dari panel. Panel tidak meminta agent
   melepas pin `quarantined`, jadi server itu tetap dikarantina dan kunci
-  start-nya tetap terpasang; MySQL-nya tetap baca-saja selama kunci itu
+  start-nya (bila terpasang) tetap ada; MySQL-nya tetap baca-saja selama kunci itu
   terjamin (lihat "Memakai lagi server yang dihapus saat masih
   dikarantina" di bawah). Seperti bangun
   ulang, baru tersedia setelah **Sudah saya alihkan**.
@@ -1660,7 +1665,7 @@ di server itu.
    perintah ini di <server> sebagai root, lalu klik Periksa lagi:", lalu
    perintahnya, misalnya `sudo dbpanel agent approve 042917`, dan "Kode
    berlaku <N> menit lagi.". Tombol **Bangun ulang sebagai replika** belum
-   bisa diklik. Form yang dibuka lewat tautan dari situs lain tidak
+   bisa diklik. Form yang dibuka lewat tautan dari situs atau host lain tidak
    bertanya ke agent (pertanyaan itu bisa membuat permintaan baru di
    server); kotaknya hanya menulis "Klik Periksa lagi untuk melihat
    persetujuan di server." dengan tombol **Periksa lagi**.
@@ -2444,7 +2449,8 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   tersebut, jadi seluruh data MySQL-nya diganti salinan master baru;
   persetujuan itu tidak membolehkannya memasang MySQL atau menghapus akun
   selain akun dump sementara di sana, dan karantina baru berakhir bila
-  setiap database di server itu memang hasil salinan dari sumber.
+  setiap database non-sistem di server itu memang hasil salinan dari
+  sumber.
   Amankan data tertinggal (dan unduh berkasnya) sebelum menyetujui bangun
   ulang; berkas salvage yang sudah ditulis tidak ikut terhapus oleh bangun
   ulang. Tanpa persetujuan pun, panel yang disusupi masih bisa menghapus
