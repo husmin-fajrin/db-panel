@@ -1869,6 +1869,112 @@ berlaku.
 15. **Gerbang.** Task yang menyentuh `internal/agent` juga menjalankan
     `go test ./internal/agent/... -race -short -timeout 60m` (`make test`
     tidak memakai `-race`, dan paket driver MySQL butuh ±40 menit).
+16. **Gelombang perbaikan akhir: delapan bagian.** Sesudah Task 12
+    (`8ade0e0`) audit keamanan dan review seluruh cabang dijalankan, lalu
+    temuannya diperbaiki dalam delapan bagian. Setiap bagian diperiksa ulang
+    secara terarah; temuan pemeriksaan ulang menjadi bagian berikutnya.
+    Rincian per temuan dan putusan pemeriksaan ulang ada di audit
+    `docs/superpowers/security/2026-11-14-audit-plan-5b1.md` (A5b1).
+
+    | Bagian | Lingkup | Rentang commit | Yang ditutup (putusan pemeriksaan ulang ADDRESSED) |
+    |---|---|---|---|
+    | A | agent dan protokol | `8ade0e0..7482857` (15 commit) | settle hanya bila setiap database disalin dari sumber (SEC-126, sebagian); `mysql.connect` hanya ke MySQL di mesin ini dan akun penuh di server dikarantina (SEC-128, SEC-129); `~/.my.cnf` dibaca sebagai akun layanan, dengan batas (SEC-130); persetujuan hanya berlaku selama nama sumber menunjuk satu alamat yang disetujui (SEC-131, SEC-152); persetujuan tidak memasang MySQL dan tidak membuang akun lain (SEC-143); persetujuan dicatat (SEC-144); pelepasan setengah jadi disebut (SEC-145); pin tak terbaca (SEC-151); perubahan hasil start dilaporkan (SEC-135); test menjauhi `/var/lib/dbpanel` (SEC-137) |
+    | B | panel, template, README, dua perubahan kecil di `internal/agent/cli.go` | `7482857..472fd35` (20 commit) | kode persetujuan dan kata-kata agent di jalur persetujuan (SEC-132, SEC-133); petunjuk peran monitor (SEC-136); README pelepasan manual (SEC-138, SEC-139); host sumber (SEC-146); audit persetujuan (SEC-147); batas peringatan start (SEC-148); GET form (SEC-149); D1 dan C12 (SEC-153); "Perketat" (SEC-154); job dengan parameter tak terbaca (SEC-162); sisa waktu kode (SEC-163); header (SEC-164); laporan dengan id lama (SEC-165) |
+    | C | agent: sisa pemeriksaan ulang bagian A | `472fd35..0b1c760` (9 commit) | settle hanya pada daftar database yang terbukti lengkap (SEC-127, lapis pertama); alamat yang disambung sama dengan yang dicek (SEC-134); teks A6 (SEC-140); `log_error` hanya berkas biasa (SEC-150, sebagian); `configureReplication` gagal bila karantina tidak berakhir (SEC-155); teks DNS (SEC-156, SEC-157) |
+    | D | README dan panel: sisa pemeriksaan ulang bagian B (tiga putaran) | `0b1c760..6799dc3` (12 commit) | bangun ulang master lama yang gagal bisa dimulai lagi (SEC-195, D-9 dan D-10); aturan host sumber (SEC-141); teks catatan salinan hilang (SEC-142); README pelepasan manual ditulis ulang (SEC-125); jawaban "tidak perlu" dengan data persetujuan (SEC-158); audit (SEC-159); `interest-cohort` (SEC-160); README m-1..m-12 (SEC-161) |
+    | E | agent: bukti daftar database yang bisa dipalsukan, dan sisa bagian C | `6799dc3..abb56bc` (8 commit) | bukti daftar lengkap tidak bisa dipalsukan lewat nama, kolom atau peran (SEC-194); saran yang bisa dijalankan di server baca-saja (SEC-196, teks agent); pin sumber untuk data tertinggal dan salvage (SEC-200); `log_error` lewat `O_PATH` (SEC-150); nama dual-stack dan `LOCALHOST` (SEC-215, SEC-216) |
+    | G dan F | G: panel, jalan keluar bangun ulang master lama yang gagal dan saran yang disensor halaman job; F: README | `abb56bc..82b9df0` (10 commit) | "Batalkan percobaan bangun ulang", form Buat replika, pekerjaan sertifikat (SEC-195, G-2, G-4, G-5); sanitizer (SEC-202, sebagian); bagian README "Memberi hak SHOW DATABASES di server yang dikarantina" (SEC-196); firewall bukan pengganti menghentikan aplikasi (SEC-197); pemeriksaan peran sebelum DROP (SEC-198, sebagaimana dirumuskan); README m-A..m-I (SEC-199); `--force` dan `1 1` (SEC-203) |
+    | H | panel dan README: apa yang ditinggalkan pemeriksaan ulang bagian G dan F | `82b9df0..8b0389d` (7 commit) | pemeriksaan cadangan yang menangkap dump terpotong dan tidak menimpa cadangan lama (SEC-217, SEC-218); sisa `1 0` diperbaiki di tempat (SEC-219); tiga keadaan salinan (SEC-220); bendera settle dan tanda master lama konsisten pada galat store (SEC-221); titik tetap sanitizer (SEC-222); id promosi (SEC-223); README m-1, m-3..m-11 (SEC-224, sebagian) |
+
+    Gelombang berakhir di bagian H (keputusan pelaksanaan 48, yang
+    melanggar aturan berhenti sekali lagi karena pemeriksaan ulang bagian G
+    dan F menemukan jalan kehilangan data dengan perbaikan kecil yang
+    jelas). Temuan pemeriksaan ulang bagian H (SEC-230, SEC-231, SEC-232)
+    tidak diperbaiki dalam rencana ini.
+17. **Perilaku baru yang tidak ada di task mana pun.**
+    - **Bukti daftar database lengkap, tiga lapis** (bagian A, C dan E;
+      keputusan pelaksanaan 36, supaya satu cacat pengurai saja tidak
+      cukup untuk mengakhiri karantina dengan data lama). Karantina hanya
+      berakhir bila setiap database non-sistem di server dibuat oleh muat
+      bangun ulang, dan daftar database itu terbukti lengkap dari
+      `SHOW GRANTS` akun agent: (1) daftar hak hanya dibaca sebagai token
+      hak; (2) baris hanya dihitung untuk akun yang dibuktikan, dan baris
+      REVOKE yang tidak terurai menggagalkan bukti; (3) akun dengan karakter
+      di luar huruf, angka, garis bawah, titik dan tanda hubung tidak
+      dibuktikan dan mendapat teks sendiri. Ketiganya gagal tertutup
+      (A5b1 SEC-126, SEC-127, SEC-194).
+    - **Aturan pin sumber untuk data tertinggal dan salvage** (bagian E;
+      keputusan pelaksanaan 38, karena tanpa pin sumber panel yang dibobol
+      bisa menunjuk "master baru" miliknya dan menarik seluruh binary log).
+      `Pins.Allow` menolak `mysql.leftover` dan `mysql.salvage` pada server
+      yang dikarantina tanpa pin sumber; `mysql.salvageRead` tidak ditolak
+      (A5b1 SEC-200).
+    - **"Batalkan percobaan bangun ulang"** (bagian G; keputusan
+      pelaksanaan 42 dan 43, karena master lama yang bangun ulangnya gagal
+      tidak bisa dihapus atau diperiksa lagi dan alternatif A lebih kecil
+      dari desain B). Rute `POST /servers/{id}/rebuild-attempt/cancel`
+      (login, token konfirmasi sandi) mengembalikan server ke karantina
+      biasa dalam satu transaksi store tanpa panggilan agent; sesudahnya
+      Hapus dan bangun ulang tersedia lagi. Ditolak bila job bangun ulang
+      terbaru membawa bendera settle (A5b1 SEC-195, SEC-221).
+    - **Bendera settle `QuarantineEnded`** (bagian G dan H): disimpan tepat
+      setelah `mysql.configureReplication` berhasil; tanda master lama
+      dihapus saat itu, dan pada galat simpan langkah gagal sebelum tanda
+      dihapus (A5b1 SEC-195 G-1, SEC-221).
+    - **Tiga keadaan salinan** (bagian H; keputusan pelaksanaan 48, karena
+      aturan bagian G menolak penyelamatan walau transaksinya masih di
+      disk): **belum mulai**, **ada bukti** (kejadian progres pertama job
+      salinan, yang agent kirim baru sesudah data lokal mulai berubah, atau
+      hasil job), **tidak pasti** (Periksa dan Amankan tetap ditawarkan
+      dengan peringatan). Hanya "ada bukti" yang menolak Periksa dan
+      Amankan data tertinggal (A5b1 SEC-220, SEC-223).
+    - **Frasa yang dipertahankan sanitizer dan akun yang disarankan**
+      (bagian G dan H; keputusan pelaksanaan 44, karena saran keselamatan
+      di halaman job harus terbaca). `redact.Quotes` mempertahankan daftar
+      tetap frasa panel (`Ulangi dari tahap ini`, `Database yang tidak ada
+      di master baru`, `Memberi hak SHOW DATABASES di server yang
+      dikarantina`, `Paksa dump`, `Sudah saya alihkan`) dan pasangan akun
+      hanya sesudah kalimat agent yang utuh; hasilnya titik tetap
+      (A5b1 SEC-202, SEC-222). Daftar frasa dan teks agent harus berubah
+      bersama (A5b1 SEC-228).
+    - **Tiga bagian README baru atau yang ditulis ulang untuk master lama
+      yang dikarantina:** "Setelah bangun ulang gagal" (di bagian
+      **Master lama**), "Database yang tidak ada di master baru", dan
+      "Memberi hak SHOW DATABASES di server yang dikarantina". Dua yang
+      terakhir menyuruh root melepas `super_read_only` sesaat dengan
+      `sql_log_bin` OFF; urutannya diukur di bagian bukti rencana ini
+      (A5b1 SEC-196..SEC-199, SEC-217..SEC-219, SEC-224).
+18. **Ditunda ke Rencana 5b-2, kelompok task pertama.**
+    - Desain B untuk keadaan master lama yang bangun ulangnya gagal,
+      termasuk monitor (keputusan pelaksanaan 43, karena butuh perubahan
+      peran dan monitor yang lebih besar dari gelombang perbaikan; A5b1
+      SEC-208, SEC-209, SEC-226, SEC-227).
+    - Penjaga yang membaca bendera baca-saja di setiap putaran, ditambah
+      peringatan bila master lama bisa ditulis selagi MySQL hidup
+      (keputusan pelaksanaan 38, karena butuh penjaga terus-menerus yang
+      tidak berebut dengan pelepasan agent sendiri; A5b1 SEC-205, juga
+      SEC-203, SEC-204).
+    - Cek silang daftar database setelah muat dengan daftar milik sumber,
+      dan `read_only` tetap ON selama muat (keputusan pelaksanaan 47,
+      karena aturan berhenti sudah berlaku untuk sisi agent; A5b1
+      SEC-225, SEC-212).
+    - `mysqlbinlog` dan pembacaan `log_error` sebagai uid akun layanan
+      (keputusan pelaksanaan 38 dan 46, karena butuh perubahan agent
+      dengan siklus gerbang dan review sendiri; A5b1 SEC-206, SEC-207).
+    - Label untuk teks agent pada kegagalan job biasa (keputusan
+      pelaksanaan 30, karena mengubah teks galat setiap job dan puluhan
+      test; A5b1 SEC-167). Pemilik belum memutuskan.
+    - Cap sumber pada `leftover-gtid`, atau penghapusannya (keputusan
+      pelaksanaan 46, alasan sama dengan butir agent di atas; A5b1
+      SEC-201).
+    - Tindakan panel/agent sebagai ganti DROP dan GRANT dengan tangan di
+      README: membuang database dengan cadangan yang diverifikasi agent,
+      dan memberi hak (keputusan pelaksanaan 48, karena langkah dengan
+      tangan itu tidak pernah tenang di bawah putaran pemeriksaan ulang;
+      A5b1 §1.3, SEC-229).
+    - Minor yang terbuka: SEC-211, SEC-228, SEC-231 (README bagian H),
+      SEC-232 (kode bagian H). SEC-230 dan SEC-231 bisa diperbaiki sebelum
+      merge bila pemilik minta.
 
 ## Catatan untuk pelaksana
 

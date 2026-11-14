@@ -653,3 +653,62 @@ pemilik produk; semuanya diputuskan penulis dan sudah dimasukkan ke bagian
 6. **`set-role` pada server yang dikarantina** menampilkan apa yang dilepas
    dan meminta `ya` (5.1).
 
+## Catatan pelaksanaan Rencana 5b-1 (2026-11-14)
+
+Bagian-bagian di atas tidak ditulis ulang. Catatan ini menyebut di mana
+perilaku yang dibangun Rencana 5b-1 (sampai `8b0389d`) berbeda dari §5.1–§5.6
+dan §5.12–§5.13, dan apa yang kini tidak lagi tercakup §8. Rincian dan
+putusan pemeriksaan ulang ada di audit Rencana 5b-1
+(`docs/superpowers/security/2026-11-14-audit-plan-5b1.md`, disingkat A5b1).
+§5.11 dikerjakan di 5b-2 dan belum disentuh.
+
+- **§5.2, daftar izin.** `mysql.tlsTrust` masuk daftar izin, karena
+  "Periksa data tertinggal" memanggilnya sebelum `mysql.leftover`; panel yang
+  dibobol bisa mengganti berkas CA MySQL di server yang dikarantina, tetapi
+  tidak bisa membuang data (A5b1 SEC-189; rencana 5b-1, "Perubahan selama
+  pelaksanaan" butir 1).
+- **§5.2, data tertinggal dan salvage.** Pada server yang dikarantina tanpa
+  pin sumber, `mysql.leftover` dan `mysql.salvage` ditolak walau ada di
+  daftar izin (A5b1 SEC-200).
+- **§5.2, apa yang dibuka persetujuan.** Persetujuan tidak membuka
+  `mysql.install`, dan `mysql.dropUser` di server yang dikarantina hanya
+  boleh untuk akun berawalan `dbpanel_dump_` (A5b1 SEC-143).
+- **§5.2, alamat.** `approve` selalu meresolusi nama sumber dan menolak
+  nama yang menunjuk lebih dari satu alamat; persetujuan hanya berlaku bila
+  setiap alamat hasil resolusi sama dengan alamat yang disetujui
+  (A5b1 SEC-131, SEC-152).
+- **§5.2, akhir karantina.** `settleRebuilt` kini hanya mengakhiri
+  karantina bila setiap database non-sistem di server dibuat oleh muat
+  bangun ulang itu dan daftar database terbukti lengkap (tiga lapis bukti),
+  dan `mysql.connect` di server yang dikarantina hanya menyambung ke MySQL
+  di mesin itu dengan akun admin penuh (A5b1 SEC-126, SEC-127, SEC-194,
+  SEC-128, SEC-129). Balapan oleh pemegang SUPER dan database yang ditulis
+  aplikasi selama muat tetap terbuka (A5b1 SEC-204, SEC-225).
+- **§5.3, teks setelah `set-role`.** Untuk `set-role unassigned` dari
+  karantina, CLI menyebut bahwa agent tidak lagi menjaga MySQL baca-saja,
+  bukan "MySQL masih baca-saja" (A5b1 SEC-153). Langkah manual README
+  mewajibkan menghentikan aplikasi dulu (A5b1 SEC-125, SEC-197).
+- **§5.4, `~/.my.cnf`.** `--print-defaults` untuk berkas opsi akun layanan
+  dijalankan sebagai uid akun layanan itu, dengan batas waktu dan ukuran,
+  bukan sebagai root dengan `HOME` akun itu (A5b1 SEC-130).
+- **§5.5, peringatan start.** Agent menyimpan hasil buruk terakhir per jenis
+  (`late`, `failed`, `bypassed`) dengan tanda pengenal, bukan satu hasil
+  terburuk; panel menyamakan peringatannya dengan laporan, dan kejadian
+  start yang bertanda pengenal tidak lagi membuka atau menutup peringatan.
+  Agent mengirim laporan pada pemeriksaan berikutnya setelah keadaan start
+  berubah, supaya peringatan tidak menunggu laporan ringkasan berikutnya (A5b1 SEC-135;
+  rencana 5b-1 butir 12).
+- **§5.12, protokol.** Jawaban `mysql.rebuildApproval` membawa field baru
+  `invalid_code` (alasan tertutup mengapa persetujuan tidak berlaku); panel
+  lama tetap membaca `Invalid` (A5b1 SEC-133).
+- **§9 butir 1.** Agent yang restart di antara muat dan sambung tidak lagi
+  mengulang muat diam-diam: `mysql.configureReplication` gagal dengan teks
+  bahwa catatan salinan tidak ada, dan bangun ulang harus dimulai lagi dari panel
+  (A5b1 SEC-155, SEC-142).
+- **§8, risiko yang belum tercantum.** Sesudah 5b-1 tersisa juga: balapan
+  bukti daftar oleh pemegang SUPER (A5b1 SEC-204); tulisan aplikasi selama
+  muat bangun ulang penuh (SEC-225); master lama yang menjadi bisa ditulis
+  selagi MySQL hidup tidak dikunci lagi (SEC-205); `mysqlbinlog` dan
+  `log_error` dibaca root atas path akun layanan (SEC-206, SEC-207);
+  keadaan bangun ulang master lama yang gagal belum diikuti monitor
+  (SEC-208, SEC-209). Daftar lengkapnya di A5b1 §1.2.
