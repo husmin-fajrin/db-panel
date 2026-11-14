@@ -659,6 +659,12 @@ type startLockFacts struct {
 	OperatorInitFiles []string
 }
 
+// startLockHolds reports whether the page's latest report says the start
+// lock holds (no report, or no start lock in it, counts as not).
+func (p *serverDetailPage) startLockHolds() bool {
+	return p.StartLock != nil && p.StartLock.Locked
+}
+
 // newStartLockFacts reads the start lock of snap; nil without a report or
 // from an agent that reports none.
 func newStartLockFacts(snap *proto.HealthSnapshot) *startLockFacts {

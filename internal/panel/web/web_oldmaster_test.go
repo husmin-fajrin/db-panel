@@ -800,11 +800,13 @@ func TestExplainBannerTone(t *testing.T) {
 	}
 }
 
-// The delete dialog of a quarantined server says that, with MySQL down,
-// the quarantine and its start lock stay on the server after the panel
-// forgets it.
+// The delete dialog of a quarantined server says that the quarantine stays
+// on the server after the panel forgets it; that MySQL stays read-only and
+// the start lock in place only when the latest report says the lock holds
+// (D1), else that it is not guaranteed (D1b).
 func TestDeleteQuarantinedDialogSaysLockStays(t *testing.T) {
-	e, _, topo := promotedEnv(t)
+	mon := &fakeMonitor{}
+	e, _, topo := promotedEnv(t, func(d *web.Deps) { d.Monitor = mon })
 	c := e.cookie()
 	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
 		t.Fatal(err)
@@ -812,13 +814,39 @@ func TestDeleteQuarantinedDialogSaysLockStays(t *testing.T) {
 	const sentence = "Server ini tetap dikarantina (quarantined) setelah dihapus dari panel: MySQL-nya tetap baca-saja (read-only) " +
 		"dan kunci start (start lock) tetap terpasang. Untuk memakai server ini lagi, jalankan di server itu: " +
 		"sudo dbpanel agent set-role unassigned, atau sudo dbpanel agent set-role master bila server ini akan menjadi master lagi."
-	rec := e.do("GET", "/servers/1", nil, c)
-	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "<li>"+sentence, `data-confirm-text="Hapus server db-master dari panel.`, sentence)
+	const notGuaranteed = "Server ini tetap dikarantina (quarantined) setelah dihapus dari panel, tetapi kunci start (start lock)-nya " +
+		"tidak terjamin, jadi MySQL-nya belum tentu baca-saja (read-only) setelah menyala ulang. Untuk memakai server ini lagi, " +
+		"jalankan di server itu: sudo dbpanel agent set-role unassigned, atau sudo dbpanel agent set-role master bila server ini " +
+		"akan menjadi master lagi."
+	view := func(snap *proto.HealthSnapshot) {
+		mon.setView(monitor.View{ServerID: 1, Role: store.RoleQuarantined, ReceivedAt: time.Now(),
+			Status: monitor.DeriveQuarantined(false), Snap: snap})
+	}
+	for name, tc := range map[string]struct {
+		snap *proto.HealthSnapshot
+		want string
+	}{
+		"lock holds":    {&proto.HealthSnapshot{MySQLOK: true, StartLock: &proto.StartLockState{Present: true, Locked: true}}, sentence},
+		"lock not held": {&proto.HealthSnapshot{MySQLOK: true, StartLock: &proto.StartLockState{Present: true}}, notGuaranteed},
+		"no lock state": {&proto.HealthSnapshot{MySQLOK: true}, notGuaranteed},
+		"no report":     {nil, notGuaranteed},
+	} {
+		view(tc.snap)
+		rec := e.do("GET", "/servers/1", nil, c)
+		wantCode(t, rec, http.StatusOK)
+		other := notGuaranteed
+		if tc.want == notGuaranteed {
+			other = sentence
+		}
+		if !strings.Contains(rec.Body.String(), "<li>"+tc.want) || strings.Contains(rec.Body.String(), other) {
+			t.Fatalf("%s: dialog does not say exactly %q", name, tc.want)
+		}
+		wantBody(t, rec, `data-confirm-text="Hapus server db-master dari panel.`)
+	}
 
 	// A server that is no longer a quarantined old master has no lock to
 	// speak of: not said on its page.
-	rec = e.do("GET", "/servers/2", nil, c)
+	rec := e.do("GET", "/servers/2", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantNoBody(t, rec, "tetap dikarantina (quarantined)")
 }

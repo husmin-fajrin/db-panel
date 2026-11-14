@@ -393,7 +393,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		// A quarantined server outside any promotion (a rebuild target
 		// that has not yet finished) stays quarantined at a delete too.
 		if srv.Role == store.RoleQuarantined {
-			p.DeleteWarnings = deleteWarnings(srv, nil, nil)
+			p.DeleteWarnings = deleteWarnings(srv, nil, nil, p.startLockHolds())
 		}
 		return nil
 	}
@@ -428,7 +428,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		if len(p.Salvage.Files) == 0 {
 			p.Salvage = nil
 		}
-		p.DeleteWarnings = deleteWarnings(srv, nil, p.Salvage)
+		p.DeleteWarnings = deleteWarnings(srv, nil, p.Salvage, p.startLockHolds())
 		return nil
 	}
 	box := &oldMasterBox{Promotion: prom, Planned: prom.Mode == proto.PromotePlanned, Online: p.Online,
@@ -450,7 +450,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	}
 	box.StartLate = a.startLateOpen(srv.ID)
 	p.OldMaster = box
-	p.DeleteWarnings = deleteWarnings(srv, box, p.Salvage)
+	p.DeleteWarnings = deleteWarnings(srv, box, p.Salvage, p.startLockHolds())
 	switch {
 	case box.CutoverPending:
 		p.DeleteBlocked = msgDeleteCutover
@@ -466,8 +466,9 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 // quarantined server also stays quarantined: the panel does not ask its
 // agent to lift anything. box is nil for a server that is no longer a
 // quarantined old master (or has no promotion record); sf for one without
-// salvage files.
-func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []string {
+// salvage files. lockHolds: the panel's latest report of srv says its start
+// lock holds; only then is MySQL said to stay read-only.
+func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles, lockHolds bool) []string {
 	var out []string
 	if box != nil {
 		switch {
@@ -485,10 +486,17 @@ func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles) []str
 	}
 	// The panel does not ask the agent to release a quarantined server's
 	// role at the delete, so it stays quarantined whatever the agent is.
-	if srv.Role == store.RoleQuarantined {
+	switch {
+	case srv.Role != store.RoleQuarantined:
+	case lockHolds:
 		out = append(out, "Server ini tetap dikarantina (quarantined) setelah dihapus dari panel: MySQL-nya tetap baca-saja "+
 			"(read-only) dan kunci start (start lock) tetap terpasang. Untuk memakai server ini lagi, jalankan di server itu: "+
 			"sudo dbpanel agent set-role unassigned, atau sudo dbpanel agent set-role master bila server ini akan menjadi master lagi.")
+	default:
+		out = append(out, "Server ini tetap dikarantina (quarantined) setelah dihapus dari panel, tetapi kunci start (start lock)-nya "+
+			"tidak terjamin, jadi MySQL-nya belum tentu baca-saja (read-only) setelah menyala ulang. Untuk memakai server ini lagi, "+
+			"jalankan di server itu: sudo dbpanel agent set-role unassigned, atau sudo dbpanel agent set-role master bila server ini "+
+			"akan menjadi master lagi.")
 	}
 	if sf == nil {
 		return out
