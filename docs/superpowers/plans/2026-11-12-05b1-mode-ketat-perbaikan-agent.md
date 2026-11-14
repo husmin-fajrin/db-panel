@@ -490,6 +490,40 @@ Perintah lain yang dipakai README:
 | `SELECT ID, USER, HOST, DB, COMMAND, TIME FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID();` di master | `event_scheduler` (`Daemon`) dan satu sesi aplikasi `gu` (`Query`) saat aplikasi tersambung; sesudah aplikasi selesai hanya `event_scheduler` |
 | sama, di replika yang mengikuti master itu | `event_scheduler` dan enam baris `USER` `system user` (thread replikasi) |
 
+
+### Bukti cadangan dan langkah tangan, tinjauan ulang F (bagian H)
+
+**Diukur pada gelombang perbaikan akhir, bagian H:** mysqld
+`8.0.46-0ubuntu0.24.04.4` sementara seperti di atas, server di keadaan
+karantina (`1 1`, tersimpan ON ON), root lewat soket.
+
+Cadangan dengan `mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF --databases '<nama>' > '<berkas>'; echo "keluar $?"`, lalu `ls -l`, `grep -c 'CREATE DATABASE'` dan `tail -n 1`:
+
+| Database | Galat `mysqldump` | `keluar` | Ukuran | `grep -c` | Baris terakhir |
+|---|---|---|---|---|---|
+| `baik` (lengkap) | — | 0 | 2114 | 1 | `-- Dump completed on 2026-11-14 13:43:50` |
+| `tidakada` (tidak ada) | `Got error: 1049: Unknown database 'tidakada' when selecting the database` | 2 | 798 | 0 | `/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;` |
+| `rusak2` (view `m` yang merujuk tabel yang sudah dihapus; tabel `z` sesudahnya) | `Couldn't execute 'SHOW FIELDS FROM `m`': View 'rusak2.m' references invalid table(s) … (1356)` | 2 | 1630 | **1** | `DROP TABLE IF EXISTS `m`;` (tabel `z` tidak ada di berkas) |
+| `rusak` (view dengan definer yang sudah dihapus) | — (8.0.46 mencadangkannya tanpa galat) | 0 | 3827 | 1 | `-- Dump completed on …` |
+
+Kesimpulan: ukuran dan `grep -c` saja meloloskan cadangan yang terpotong;
+`keluar 0` dan baris terakhir `-- Dump completed on` menolaknya.
+
+| Langkah | Hasil |
+|---|---|
+| berkas cadangan sudah ada, database masih ada: `ls -l` menunjukkan berkas (2114 byte); `mysql -e 'SHOW DATABASES LIKE "baik";'` menulis `baik`; `mv` ke `…-cadangan-lama.sql` | berkas lama utuh di nama baru (2114 byte, baris terakhir `-- Dump completed on …`) |
+| GRANT dari teks kurang hak persis seperti ditulis agent (tanpa `;` sesudah GRANT terakhir) di blok `mysql <<'EOF'` | `ERROR 1064 (42000) … near 'SET GLOBAL super_read_only=ON'`, keluar 1, sesudahnya **`1 0`**, gtid tidak berubah |
+| sama, setiap perintah diakhiri `;` | keluar 0, `1 1`, hak ada, gtid tidak berubah |
+| `mysql -e 'SELECT EVENT_SCHEMA, EVENT_NAME FROM information_schema.EVENTS WHERE STATUS="ENABLED";'` dengan satu event `baik.e` | menulis `baik  e` |
+| baris `event_scheduler=OFF` di `[mysqld]`, MySQL dinyalakan ulang | `@@event_scheduler` = `OFF`; tidak ada baris `event_scheduler` di PROCESSLIST; dengan baca-saja dibuka 3 detik, event tidak menulis apa pun |
+| blok `mysql -u root -p <<'EOF' … EOF` lewat terminal semu (`script`), root dengan kata sandi | `Enter password:` dibaca dari terminal, keluar 0, `1 1`, hak terpasang |
+| `mysql -u root -p` interaktif (lewat `script`), lalu `SET GLOBAL …; SET SESSION …; CREATE USER … IDENTIFIED BY '…'; GRANT …; SET GLOBAL super_read_only=ON;` diketik satu per satu, `MYSQL_HISTFILE` ke berkas sementara | akun dibuat, `1 1`; riwayat `mysql` memuat keempat baris lain tetapi tidak baris `CREATE USER … IDENTIFIED BY` (kata sandi tidak tersimpan); riwayat shell tidak memuat apa pun dari dalam `mysql` |
+
+Kode agent (dibaca, bukan diukur): `guardQuarantined` (quarantine.go)
+memasang `SET PERSIST read_only = ON` dan `SET PERSIST super_read_only =
+ON` pada putaran penjaga pertama setelah agent mulai (`guard.up` masih
+false), tiap `monitor.GuardEvery` (5 detik), selama MySQL menjawab dan tidak
+ada pemuatan bangun ulang yang berjalan.
 ---
 
 ## File Structure
