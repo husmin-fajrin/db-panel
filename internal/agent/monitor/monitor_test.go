@@ -370,6 +370,28 @@ func TestNoReportWhenUnchanged(t *testing.T) {
 	r.wantReports(2)
 }
 
+// TestReportsOnStartJudged: a start judged between two checks is reported
+// at the next check with nothing else changed; the same state with only
+// its ages advanced is not.
+func TestReportsOnStartJudged(t *testing.T) {
+	r := newRig(t, base())
+	r.src.set(func(s *proto.HealthSnapshot) {
+		s.StartResult = &proto.StartResultState{Result: "late", StartID: "2026-11-14T01:00:00Z",
+			Kinds: []proto.StartKindState{{Kind: "late", StartID: "2026-11-14T01:00:00Z"}}}
+	})
+	r.tick(15 * time.Second)
+	got := r.wantReports(2)
+	if sr := got[1].Snapshot.StartResult; sr == nil || sr.Result != "late" {
+		t.Fatalf("change report = %+v", got[1].Snapshot.StartResult)
+	}
+	r.src.set(func(s *proto.HealthSnapshot) {
+		s.StartResult = &proto.StartResultState{Result: "late", StartID: "2026-11-14T01:00:00Z", AgeSec: 15,
+			Kinds: []proto.StartKindState{{Kind: "late", StartID: "2026-11-14T01:00:00Z", AgeSec: 15}}}
+	})
+	r.tick(15 * time.Second)
+	r.wantReports(2)
+}
+
 func TestReportsOnIOStateChange(t *testing.T) {
 	r := newRig(t, base())
 	r.src.set(func(s *proto.HealthSnapshot) { s.Replica.IORunning = "Connecting" })

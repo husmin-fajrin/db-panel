@@ -20,8 +20,9 @@ const (
 // at last closes master_unpinned at once), lag crossing lagThreshold (an unknown
 // lag is a state of its own), the binlog dump threads, disk use crossing
 // diskWarn or diskCrit percent, connections crossing connPct percent of
-// max_connections, a restart (uptime went down), and the start lock's
-// state (startLockChanged). An empty prev is always a change.
+// max_connections, a restart (uptime went down), the start lock's state
+// (startLockChanged) and the state of the quarantine's starts
+// (startResultChanged). An empty prev is always a change.
 func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWarn, diskCrit, connPct int) bool {
 	if prev == (proto.HealthSnapshot{}) {
 		return true
@@ -37,7 +38,8 @@ func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWar
 		diskLevel(prev, diskWarn, diskCrit) != diskLevel(cur, diskWarn, diskCrit),
 		connHigh(prev, connPct) != connHigh(cur, connPct),
 		prev.MySQLOK && cur.MySQLOK && cur.UptimeSec < prev.UptimeSec,
-		startLockChanged(prev.StartLock, cur.StartLock):
+		startLockChanged(prev.StartLock, cur.StartLock),
+		startResultChanged(prev.StartResult, cur.StartResult):
 		return true
 	}
 	return replicaChanged(prev.Replica, cur.Replica, lagThreshold)
@@ -53,6 +55,28 @@ func startLockChanged(prev, cur *proto.StartLockState) bool {
 		return false
 	}
 	return prev.Present != cur.Present || prev.Locked != cur.Locked || prev.Reason != cur.Reason
+}
+
+// startResultChanged: the start state appeared or went, or its worst
+// result, the worst start's id, or any kind's id or over flag changed;
+// the panel's start alerts follow it. The ages are not compared.
+func startResultChanged(prev, cur *proto.StartResultState) bool {
+	if (prev == nil) != (cur == nil) {
+		return true
+	}
+	if prev == nil {
+		return false
+	}
+	if prev.Result != cur.Result || prev.StartID != cur.StartID || len(prev.Kinds) != len(cur.Kinds) {
+		return true
+	}
+	for i, k := range prev.Kinds {
+		c := cur.Kinds[i]
+		if k.Kind != c.Kind || k.StartID != c.StartID || k.Over != c.Over {
+			return true
+		}
+	}
+	return false
 }
 
 // replicaChanged compares the replication fields that are reported at once.

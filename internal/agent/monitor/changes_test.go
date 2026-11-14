@@ -146,3 +146,43 @@ func TestChangedOnStartLock(t *testing.T) {
 		}
 	}
 }
+
+// TestChangedOnStartResult: a change of the start state (worst result and
+// its id, each kind's id and over flag, or the state appearing or going)
+// is reported at once (F-1); the ages alone are not a change.
+func TestChangedOnStartResult(t *testing.T) {
+	late := proto.StartKindState{Kind: "late", StartID: "2026-11-14T01:00:00Z", AgeSec: 10}
+	failed := proto.StartKindState{Kind: "failed", StartID: "2026-11-14T00:00:00Z", AgeSec: 3600, InitFile: "/x.sql"}
+	st := proto.StartResultState{Result: "late", StartID: late.StartID, AgeSec: 10, Kinds: []proto.StartKindState{late, failed}}
+	with := func(f func(*proto.StartResultState)) *proto.StartResultState {
+		c := st
+		c.Kinds = append([]proto.StartKindState(nil), st.Kinds...)
+		f(&c)
+		return &c
+	}
+	for _, c := range []struct {
+		name      string
+		prev, cur *proto.StartResultState
+		want      bool
+	}{
+		{"both nil", nil, nil, false},
+		{"same", &st, with(func(*proto.StartResultState) {}), false},
+		{"ages advance", &st, with(func(s *proto.StartResultState) { s.AgeSec, s.Kinds[0].AgeSec, s.Kinds[1].AgeSec = 25, 25, 3615 }), false},
+		{"appears", nil, &st, true},
+		{"goes", &st, nil, true},
+		{"worst result", &st, with(func(s *proto.StartResultState) { s.Result = "failed" }), true},
+		{"worst id", &st, with(func(s *proto.StartResultState) { s.StartID = "2026-11-14T02:00:00Z" }), true},
+		{"kind id", &st, with(func(s *proto.StartResultState) { s.Kinds[1].StartID = "2026-11-14T00:30:00Z" }), true},
+		{"kind over", &st, with(func(s *proto.StartResultState) { s.Kinds[1].Over = true }), true},
+		{"kind added", &st, with(func(s *proto.StartResultState) {
+			s.Kinds = append(s.Kinds, proto.StartKindState{Kind: "bypassed", StartID: "2026-11-14T03:00:00Z"})
+		}), true},
+		{"kind gone", &st, with(func(s *proto.StartResultState) { s.Kinds = s.Kinds[:1] }), true},
+	} {
+		prev, cur := base(), base()
+		prev.StartResult, cur.StartResult = c.prev, c.cur
+		if got := changed(prev, cur, 30*time.Second, 85, 95, 80); got != c.want {
+			t.Errorf("%s: changed = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
