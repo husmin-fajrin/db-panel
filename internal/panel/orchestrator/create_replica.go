@@ -941,6 +941,17 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	if err := jr.call(ctx, jr.target(), "mysql.configureReplication", src, &rs); err != nil {
 		return outcome{}, err
 	}
+	// The old master's agent ends its quarantine in this command (G-1):
+	// from its OK answer on, the server is no longer the topology's old
+	// master, whatever the next steps do.
+	if jr.st.RebuildOldMaster && !jr.st.QuarantineEnded {
+		jr.st.QuarantineEnded = true
+		jr.save()
+		if err := jr.r.d.Store.ClearOldMaster(jr.target()); err != nil {
+			return outcome{}, err
+		}
+		jr.logf("info", "Karantina master lama berakhir: agent kini menyimpan peran replika.")
+	}
 	if !jr.st.TLSVerify {
 		jr.logf("warn", "%s. Jalankan Perketat sambungan replikasi di halaman master.", msgUnverified)
 	}

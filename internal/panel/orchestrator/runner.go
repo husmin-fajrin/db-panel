@@ -1170,8 +1170,11 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 			r.log.Warn("remove replica on cancel", "job", j.ID, "err", err)
 		}
 		// A canceled rebuild of an old master leaves it quarantined, pin
-		// included (releaseRole below is skipped for it).
-		r.keepQuarantined(j.ServerID, st.RebuildOldMaster)
+		// included (releaseRole below is skipped for it), unless its
+		// agent already ended the quarantine (G-1): then it is canceled
+		// as any Buat replika.
+		oldMaster := st.RebuildOldMaster && !st.QuarantineEnded
+		r.keepQuarantined(j.ServerID, oldMaster)
 		// The target is unassigned again: it must not keep following the
 		// master, and its agent should not stay pinned as a replica. Once
 		// the connect step ran, replication (stopped above) is reset first,
@@ -1182,7 +1185,7 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 				r.log.Warn("reset replication on cancel", "job", j.ID, "server_id", j.ServerID, "err", logErr(err))
 			}
 		}
-		if st.RebuildOldMaster {
+		if oldMaster {
 			break
 		}
 		if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.releaseRole", nil, nil); err != nil {
@@ -1222,6 +1225,14 @@ type jobState struct {
 	ConfirmWipe    bool     `json:"confirm_wipe,omitempty"` // the form's; pre-approves the CLONE wait only
 	// RebuildOldMaster: create_replica of a quarantined old master.
 	RebuildOldMaster bool `json:"rebuild_old_master,omitempty"`
+	// QuarantineEnded: the old master's agent answered
+	// mysql.configureReplication OK in this rebuild, so it ended its
+	// quarantine (G-1). From then on the server is no longer the
+	// topology's old master: a failure leaves an ordinary failed replica,
+	// and a cancel releases it like any Buat replika. A panel stop between
+	// the answer and the save leaves it unset (the safe side); a Retry of
+	// the connect step sets it.
+	QuarantineEnded bool `json:"quarantine_ended,omitempty"`
 	// AcceptConnections: the user acknowledged the connections to the old
 	// master when starting the rebuild (a record only: a Retry reads the
 	// connections again and needs its own acknowledgement, JobAck).

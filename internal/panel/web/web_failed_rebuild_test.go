@@ -190,3 +190,29 @@ func TestFailedRebuildResyncDetachRefused(t *testing.T) {
 		wantBody(t, rec, refusal)
 	}
 }
+
+// TestRebuildFailedAfterSettleIsOrdinary (G-1): a rebuild that failed after
+// the agent ended the quarantine cleared the old-master marker: the server
+// is an ordinary failed replica, with no Master lama box, no D-9 lines,
+// and Resync ulang and Lepas replika offered.
+func TestRebuildFailedAfterSettleIsOrdinary(t *testing.T) {
+	e, f, _ := failedRebuildEnv(t)
+	c := e.cookie()
+	if err := e.st.ClearOldMaster(1); err != nil {
+		t.Fatal(err)
+	}
+	const id = "4444444444444444444444444444444c"
+	storeJob(t, e.st, id, orchestrator.KindCreateReplica, 1,
+		`{"master_server_id":2,"rebuild_old_master":true,"quarantine_ended":true}`,
+		store.JobFailed, "Periksa master", "Sambungkan replikasi")
+	f.drops = map[string]bool{id: true}
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantNoBody(t, rec, "data-old-master", rebuildLink)
+	rec = e.do("GET", "/replicas/1", nil, c)
+	wantBody(t, rec, "/replicas/1/resync/prepare", `data-open-modal="modal-detach"`)
+	wantNoBody(t, rec, "Server ini master lama yang masih dikarantina.")
+	rec = e.do("GET", "/jobs/"+id, nil, c)
+	wantBody(t, rec, "Ulangi dari tahap ini")
+	wantNoBody(t, rec, "tidak menolong")
+	wantCode(t, e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c), http.StatusBadRequest)
+}
