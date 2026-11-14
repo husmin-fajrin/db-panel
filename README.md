@@ -1898,40 +1898,26 @@ Untuk memakainya lagi, pilih salah satu di server itu:
 Cara ini melepas kunci start (start lock) master lama tanpa agent. Pakai
 hanya bila `set-role master` menulis "kunci start tidak bisa diperiksa",
 atau agent tidak bisa dijalankan sama sekali. Kerjakan sebagai root
-(misalnya setelah `sudo -i`), berurutan:
+(misalnya setelah `sudo -i`), berurutan, dan jangan melompati langkah.
+
+Perhatian sebelum mulai: dalam keadaan ini tidak ada yang tahu pasti apakah
+MySQL memakai kunci start saat menyala. Panel sendiri memperingatkan
+"master lama belum terjamin terkunci saat MySQL menyala; jangan nyalakan
+MySQL-nya sebelum agent tersambung", dan cara ini justru bekerja tanpa
+agent. Jadi MySQL server ini bisa menyala dalam keadaan bisa ditulis. Dua
+master yang sama-sama ditulis aplikasi membuat data keduanya berbeda dan
+sebagian hilang. Karena itu langkah 2 wajib, sebelum apa pun yang bisa
+membuat server ini menerima tulisan.
 
 1. Hentikan agent: `systemctl stop dbpanel-agent`. Selama perannya
    `quarantined`, agent yang berjalan menulis kunci itu lagi dalam beberapa
    detik.
-2. Pastikan MySQL menyala dan baca-saja (read-only) tersimpan, sebelum
-   kunci dilepas. Tanpa itu, MySQL yang menyala setelah kunci dilepas bisa
-   ditulis. Bila MySQL mati, nyalakan dulu (misalnya `systemctl start
-   mysql`, atau `systemctl start mysqld`): selama baris kunci masih ada,
-   mysqld menjalankan berkas kunci saat menyala, yang memasang dan
-   menyimpan baca-saja. Bila MySQL menolak menyala karena berkas kuncinya
-   hilang ("Failed to open the bootstrap file"), tulis lagi berkas itu
-   (path-nya ada di baris `init_file=`, lihat langkah 3) dengan tiga baris
-   isi kunci start (lihat "Master lama"), milik root, mode 0644, lalu
-   nyalakan lagi. Lalu masuk sebagai root MySQL (misalnya
-   `sudo mysql`, atau `mysql -u root -p` bila root MySQL memakai kata
-   sandi) dan jalankan:
-
-   ```sql
-   SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;
-   SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.persisted_variables
-     WHERE VARIABLE_NAME IN ('read_only', 'super_read_only');
-   ```
-
-   Lanjutkan hanya bila yang pertama menjawab `1 1` dan yang kedua
-   menunjukkan `ON` untuk kedua nama: itu juga syarat agent sebelum ia
-   melepas kunci start sendiri. Bila tidak, simpan keduanya, lalu periksa
-   lagi dengan dua perintah di atas:
-
-   ```sql
-   SET PERSIST read_only=ON;
-   SET PERSIST super_read_only=ON;
-   ```
-
+2. Pastikan tidak ada aplikasi yang bisa menulis ke server ini: hentikan
+   aplikasinya, atau tutup port MySQL (biasanya 3306) di firewall server
+   ini untuk semua alamat selain server ini sendiri. Tulisan yang masuk ke
+   server ini tidak pernah sampai ke master baru. Biarkan tetap terputus
+   sampai langkah 9; sambungkan lagi hanya bila server ini dibuka sebagai
+   master di sana.
 3. Cari baris kunci di konfigurasi MySQL. Perintah pertama menampilkan
    berkas opsi yang dibaca mysqld (agent mengelola berkas pertama yang
    ada, atau `zz-dbpanel.cnf` di direktori `!includedir` terakhirnya);
@@ -1942,16 +1928,68 @@ atau agent tidak bisa dijalankan sama sekali. Kerjakan sebagai root
    grep -rn 'dbpanel-start-lock.sql' /etc/my.cnf /etc/my.cnf.d /etc/mysql /usr/etc/my.cnf 2>/dev/null
    ```
 
-   Bila `grep` tidak menemukan apa pun, jalankan lagi dengan berkas dari
+   Bila perintah pertama tidak menampilkan apa pun, ganti `mysqld` dengan
+   path lengkapnya: `/usr/sbin/mysqld`, `/usr/libexec/mysqld`,
+   `/www/server/mysql/bin/mysqld` atau `/usr/local/mysql/bin/mysqld`. Bila
+   `grep` tidak menemukan apa pun, jalankan lagi dengan berkas dari
    perintah pertama dan direktori `!includedir`-nya. Berkas itu
    `<direktori include>/zz-dbpanel.cnf` bila konfigurasi MySQL punya
    direktori include; selain itu blok antara `# BEGIN dbpanel` dan
-   `# END dbpanel` di berkas konfigurasi utama.
-4. Di berkas itu, hapus baris `init_file=<…>/dbpanel-start-lock.sql`.
-5. Baru sesudah itu hapus berkas `dbpanel-start-lock.sql` yang disebut
+   `# END dbpanel` di berkas konfigurasi utama. Barisnya berbentuk
+   `init_file=<…>/dbpanel-start-lock.sql`; path setelah `init_file=` adalah
+   berkas kunci.
+4. Bila MySQL mati, jangan langsung menyalakannya. Tambahkan dulu satu
+   baris `super_read_only=ON` tepat di bawah baris `init_file=` yang
+   ditemukan di langkah 3. Baris itu bukan jaminan: nilai yang pernah
+   disimpan dengan `SET PERSIST` (misalnya `read_only` atau
+   `super_read_only` yang disimpan `OFF`) mengalahkannya, dan berkas kunci
+   hanya dijalankan bila mysqld memang memakainya. Perlindungan yang pasti
+   hanya langkah 2. Lalu nyalakan MySQL (misalnya `systemctl start mysql`,
+   atau `systemctl start mysqld`). Bila MySQL menolak menyala karena
+   berkas kuncinya hilang atau tidak terbaca ("Failed to open the bootstrap
+   file"), tulis lagi berkas itu dengan isi kunci start, milik root, mode
+   0644 (ganti `<berkas kunci>` dengan path dari langkah 3), lalu nyalakan
+   lagi:
+
+   ```sh
+   printf 'SET GLOBAL super_read_only=ON;\nSET PERSIST read_only=ON;\nSET PERSIST super_read_only=ON;\n' > <berkas kunci>
+   chown root:root <berkas kunci>
+   chmod 0644 <berkas kunci>
+   ```
+
+   Bila MySQL tetap tidak mau menyala, berhenti di sini: jangan hapus
+   baris atau berkas kunci; perbaiki dulu sebab yang tertulis di log error
+   MySQL.
+5. Segera setelah MySQL menyala (juga bila MySQL tadi sudah menyala), masuk
+   sebagai root MySQL (misalnya `sudo mysql`, atau `mysql -u root -p` bila
+   root MySQL memakai kata sandi) dan jalankan:
+
+   ```sql
+   SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;
+   SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.persisted_variables
+     WHERE VARIABLE_NAME IN ('read_only', 'super_read_only');
+   ```
+
+   Lanjutkan hanya bila yang pertama menjawab `1 1` dan yang kedua
+   menunjukkan `ON` untuk kedua nama. Bila tidak, simpan keduanya saat itu
+   juga, lalu periksa lagi dengan dua perintah di atas:
+
+   ```sql
+   SET PERSIST read_only=ON;
+   SET PERSIST super_read_only=ON;
+   ```
+
+   Bila salah satu angka pada jawaban pertama `0`, MySQL bisa ditulis sejak
+   menyala sampai saat itu. Tulisan yang masuk selama itu (bila langkah 2
+   tidak memutus semua aplikasi) tidak ada di master baru; tulisan itu hanya
+   ada di server ini. Catat hal itu dan beri tahu penanggung jawab aplikasi
+   sebelum memakai server ini lagi.
+6. Di berkas dari langkah 3, hapus baris `init_file=<…>/dbpanel-start-lock.sql`,
+   dan baris `super_read_only=ON` bila Anda menambahkannya di langkah 4.
+7. Baru sesudah itu hapus berkas `dbpanel-start-lock.sql` yang disebut
    baris tadi. Urutan ini wajib: mysqld menolak menyala bila konfigurasinya
    menyebut berkas yang tidak ada.
-6. Ubah peran dan hapus pin sumber serta berkas persetujuan (ganti
+8. Ubah peran dan hapus pin sumber serta berkas persetujuan (ganti
    `master` dengan `unassigned` bila server ini akan disiapkan ulang lewat
    panel):
 
@@ -1962,18 +2000,23 @@ atau agent tidak bisa dijalankan sama sekali. Kerjakan sebagai root
 
    Berkas peran harus tetap milik root dan tidak bisa ditulis grup atau
    pengguna lain.
-7. Karena langkah 2 menyimpan `read_only` dan `super_read_only` ON, MySQL
-   tetap baca-saja, juga setelah menyala ulang. Seperti kata `set-role
-   master`: "bila MySQL di server ini masih baca-saja (read-only) dan server
-   ini memang akan dipakai aplikasi sebagai master, pastikan master lain
-   tidak lagi dipakai". Dua master yang sama-sama ditulis aplikasi membuat
-   data keduanya berbeda dan sebagian hilang. Baru sesudah itu buka sebagai
-   root MySQL:
+9. Karena langkah 5 memastikan `read_only` dan `super_read_only` tersimpan
+   ON, MySQL tetap baca-saja, juga setelah menyala ulang (agent memakai
+   syarat yang sama, tersimpan ON, sebelum melepas kunci sendiri). Buka
+   hanya bila server ini akan menjadi master yang dipakai aplikasi (bukan
+   bila Anda memilih `unassigned`), dan seperti kata `set-role master`:
+   "bila MySQL di server ini masih baca-saja (read-only) dan server ini
+   memang akan dipakai aplikasi sebagai master, pastikan master lain tidak
+   lagi dipakai". Baru sesudah itu buka sebagai root MySQL, lalu sambungkan
+   lagi aplikasinya:
 
    ```sql
    SET PERSIST super_read_only=OFF;
    SET PERSIST read_only=OFF;
    ```
+
+   Bila Anda memilih `unassigned`, biarkan baca-saja dan jangan arahkan
+   aplikasi ke server ini; siapkan ulang lewat panel.
 
 Sesudahnya agent boleh dijalankan lagi: `systemctl start dbpanel-agent`.
 Dengan peran `master` atau `unassigned`, agent tidak menulis kunci start.
