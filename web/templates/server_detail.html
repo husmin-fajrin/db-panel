@@ -26,7 +26,7 @@
 {{define "content"}}
 {{if eq .Server.Role "master"}}
 <div role="status" class="banner banner-info">{{template "banner-icon" "info"}}<div class="flex-1">Server ini adalah master replikasi.</div></div>
-{{else if eq .Server.Role "replica"}}
+{{else if and (eq .Server.Role "replica") (not .OldMaster)}}
 <div role="status" class="banner banner-info">{{template "banner-icon" "info"}}<div class="flex-1">Server ini adalah replika.</div></div>
 {{end}}
 {{with .ActiveJob}}
@@ -379,6 +379,7 @@
       {{else}}
       <p class="text-muted">Belum diperiksa.</p>
       {{end}}
+      {{if not .RebuildFailed}}
       <div class="flex flex-wrap gap-2">
         <form method="post" action="/servers/{{$s.ID}}/leftover"><button type="submit" class="btn btn-sm"{{if or (not .Online) .Busy}} disabled{{end}}>Periksa data tertinggal</button></form>
         {{with .Leftover}}{{if .Transactions}}
@@ -387,6 +388,7 @@
       </div>
       {{if not .Online}}<p class="help">Agent server ini offline; pemeriksaan bisa dijalankan setelah agent tersambung.</p>{{end}}
       {{with .Leftover}}{{if .Transactions}}<p class="text-sm">Amankan menyimpan transaksi itu sebagai berkas SQL di server ini (bisa dijalankan dengan <code>mysql</code>, berisi komentar yang bisa dibaca untuk tiap baris). Berkas disimpan 7 hari; unduh dari daftar di bawah.</p>{{end}}{{end}}
+      {{end}}
     </div>
 
     <div class="flex flex-col gap-2">
@@ -398,7 +400,7 @@
         {{else if .HasTopology}}
         <a class="btn btn-sm" href="/masters/{{.Topology.MasterServerID}}/replicas/new?bangun-ulang={{$s.ID}}">Bangun ulang sebagai replika</a>
         {{end}}
-        {{if not $p.Local}}{{template "server-delete-button" $p}}{{end}}
+        {{if and (not $p.Local) (not .RebuildFailed)}}{{template "server-delete-button" $p}}{{end}}
       </div>
       {{if .CutoverPending}}<p class="help">Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini.</p>{{end}}
       {{with $p.DeleteBlocked}}{{if not $p.Local}}<p class="help">{{.}}</p>{{end}}{{end}}

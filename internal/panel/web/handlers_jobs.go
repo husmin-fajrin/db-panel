@@ -118,14 +118,18 @@ type jobsPage struct {
 
 type jobPage struct {
 	Page
-	Job       store.Job
-	Server    store.Server
-	Steps     []store.JobStep
-	Waiting   *store.JobStep // the step waiting for the user, if any
-	Log       []store.JobLogLine
-	LastLogID int64
-	LogCut    bool // more than jobLogMaxLines lines
-	LogMax    int  // jobLogMaxLines: app.js replays missed lines up to it
+	// RebuildURL: under Ulangi dari tahap ini of a failed rebuild of an
+	// old master, the form that starts a new one (the retry does not repeat
+	// the copy, D-9); "" otherwise.
+	RebuildURL string
+	Job        store.Job
+	Server     store.Server
+	Steps      []store.JobStep
+	Waiting    *store.JobStep // the step waiting for the user, if any
+	Log        []store.JobLogLine
+	LastLogID  int64
+	LogCut     bool // more than jobLogMaxLines lines
+	LogMax     int  // jobLogMaxLines: app.js replays missed lines up to it
 	// create_replica, add_databases and remove_databases.
 	Master *store.Server
 	// create_replica only.
@@ -331,6 +335,12 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 	}
 	if p.CanApprove && p.DropsData && params.RebuildOldMaster && job.Kind == orchestrator.KindCreateReplica {
 		p.ApproveConns = &retryView{Server: srv, AcceptLabel: acceptLabel(a.connectionsOf(r.Context(), srv)), Form: "form-setujui"}
+	}
+	if p.CanRetry && params.RebuildOldMaster && job.Kind == orchestrator.KindCreateReplica {
+		if p.RebuildURL, err = a.rebuildURL(srv); err != nil {
+			a.internalError(w, "old master check", err)
+			return
+		}
 	}
 	if p.CanRetry && p.DropsData && r.URL.Query().Get("buka") == "ulangi" {
 		p.OpenRetry = true

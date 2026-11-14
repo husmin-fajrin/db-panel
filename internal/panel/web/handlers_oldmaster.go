@@ -135,7 +135,11 @@ func (v connectionsView) NotKnown() bool { return v.Unreadable != "" || v.Uncert
 func (a *app) connectionsOf(ctx context.Context, srv store.Server) connectionsView {
 	v := connectionsView{ServerID: srv.ID, Name: srv.Name, Empty: msgNewNoConns}
 	unreachable := msgNewUnreachable
-	if srv.Role == store.RoleQuarantined {
+	old, err := a.oldMasterAwaitingRebuild(srv)
+	if err != nil {
+		a.Logger.Warn("old master check", "server", srv.ID, "err", err)
+	}
+	if old {
 		v.Empty, unreachable = msgOldNoConns, msgOldUnreachable
 	}
 	if !a.Hub.IsOnline(srv.ID) {
@@ -368,6 +372,58 @@ type oldMasterBox struct {
 	StartLate       bool
 	LeftoverSummary string
 	Online, Busy    bool
+	// RebuildFailed: the server is an old master left by a failed rebuild
+	// (oldMasterAwaitingRebuild, role replica): only Bangun ulang
+	// sebagai replika works on it, not Periksa or Amankan data tertinggal
+	// (they need the quarantined role) nor Hapus server (a registered
+	// replica).
+	RebuildFailed bool
+}
+
+// oldMasterAwaitingRebuild reports whether srv is an old master waiting
+// for its rebuild: quarantined, or left by a failed rebuild (role
+// replica, its replica row failed, still the old master of a topology),
+// which StartCreateReplica takes for a new rebuild as it takes a
+// quarantined one. An ordinary failed replica, and an old master whose
+// rebuild runs or succeeded, are not (D-9).
+func (a *app) oldMasterAwaitingRebuild(srv store.Server) (bool, error) {
+	switch srv.Role {
+	case store.RoleQuarantined:
+		return true, nil
+	case store.RoleReplica:
+	default:
+		return false, nil
+	}
+	rep, err := a.Store.GetReplicaByServer(srv.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil || rep.State != store.ReplicaFailed {
+		return false, err
+	}
+	if _, err := a.Store.GetTopologyByOldMaster(srv.ID); errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// rebuildURL is the rebuild form of srv, an old master awaiting its
+// rebuild; "" when it is none.
+func (a *app) rebuildURL(srv store.Server) (string, error) {
+	awaiting, err := a.oldMasterAwaitingRebuild(srv)
+	if err != nil || !awaiting {
+		return "", err
+	}
+	topo, err := a.Store.GetTopologyByOldMaster(srv.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("/masters/%d/replicas/new?bangun-ulang=%d", topo.MasterServerID, srv.ID), nil
 }
 
 // salvageFiles is the list of salvage files of a server page.
@@ -424,7 +480,11 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	default:
 		p.Salvage = &salvageFiles{ServerID: srv.ID, Unreadable: msgSalvageOffline}
 	}
-	if srv.Role != store.RoleQuarantined {
+	awaiting, err := a.oldMasterAwaitingRebuild(srv)
+	if err != nil {
+		return err
+	}
+	if !awaiting {
 		if len(p.Salvage.Files) == 0 {
 			p.Salvage = nil
 		}
@@ -433,7 +493,7 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	}
 	box := &oldMasterBox{Promotion: prom, Planned: prom.Mode == proto.PromotePlanned, Online: p.Online,
 		QuarantinePending: orchestrator.QuarantinePending(prom), Status: a.statusOf(srv.ID, srv.Role),
-		Busy: p.ActiveJob != nil}
+		Busy: p.ActiveJob != nil, RebuildFailed: srv.Role != store.RoleQuarantined}
 	if box.NewMaster, err = a.Store.GetServer(prom.NewMasterServerID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
@@ -872,8 +932,8 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64, 
 	if err != nil {
 		return nil, err
 	}
-	if srv.Role != store.RoleQuarantined {
-		return nil, nil
+	if awaiting, err := a.oldMasterAwaitingRebuild(srv); err != nil || !awaiting {
+		return nil, err
 	}
 	topo, err := a.Store.GetTopologyByOldMaster(id)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && topo.MasterServerID != master.ID) {

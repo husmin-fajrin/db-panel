@@ -172,6 +172,52 @@ func TestRebuildRetryAndApproveRecheckApproval(t *testing.T) {
 	e.waitJob(id, store.JobSucceeded)
 }
 
+// TestRebuildAgainAfterFailedRebuild (D-9): a rebuild that failed at the
+// configure step leaves the server a failed replica; a new rebuild of it
+// is checked as the first one (an unusable approval refuses it, nothing
+// changes), and with the approval it runs to the end, the server no longer
+// the topology's old master.
+func TestRebuildAgainAfterFailedRebuild(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	g.m.fail("mysql.configureReplication", "sumber replikasi sudah diatur, tetapi server ini tetap dikarantina")
+	first, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(first, store.JobFailed)
+	e.waitIdle(first)
+	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
+		t.Fatalf("replica after the failed rebuild = %+v, %v", rep, err)
+	}
+	if srv, _ := e.st.GetServer(g.m.id); srv.Role != store.RoleReplica {
+		t.Fatalf("role after the failed rebuild = %s", srv.Role)
+	}
+
+	g.m.reply("mysql.rebuildApproval", unusableApprovals["hostile code"])
+	if _, err := g.startRebuild(); !errors.Is(err, ErrRebuildNeedsApproval) {
+		t.Fatalf("second rebuild with an unusable approval = %v, want ErrRebuildNeedsApproval", err)
+	}
+	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
+		t.Fatalf("replica after the refused rebuild = %+v, %v", rep, err)
+	}
+
+	g.m.reply("mysql.rebuildApproval", proto.RebuildApprovalResult{Required: true, Approved: true,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2", RemainingSec: 86000})
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	second, err := g.startRebuild()
+	if err != nil {
+		t.Fatalf("second rebuild: %v", err)
+	}
+	e.waitJob(second, store.JobSucceeded)
+	if srv, _ := e.st.GetServer(g.m.id); srv.Role != store.RoleReplica {
+		t.Fatalf("role after the second rebuild = %s", srv.Role)
+	}
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("still the old master after the second rebuild: %v", err)
+	}
+}
+
 // TestRebuildDecisionHandedBack: Start, Retry and Approve of a rebuild
 // hand back the approval answer they decided on (the audit records it).
 func TestRebuildDecisionHandedBack(t *testing.T) {

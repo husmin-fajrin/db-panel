@@ -86,6 +86,7 @@
         {{else}}
         <form method="post" action="/jobs/{{.Job.ID}}/retry"><button type="submit" class="btn btn-primary">Ulangi dari tahap ini</button></form>
         {{end}}
+        {{with .RebuildURL}}<p class="w-full text-sm">Bila "Ulangi dari tahap ini" tidak menolong, mulai lagi <a class="link" href="{{.}}">Bangun ulang sebagai replika</a>.</p>{{end}}
         {{end}}
         {{if .CanCancel}}
         <form method="post" action="/jobs/{{.Job.ID}}/cancel"><button type="submit" class="btn btn-error btn-outline">Batalkan</button></form>

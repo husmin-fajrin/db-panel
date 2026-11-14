@@ -759,6 +759,10 @@ type replicaPage struct {
 	Busy bool
 	// The controls that make sense now.
 	CanStop, CanStart, CanRelock, CanResync, CanDetach bool
+	// RebuildURL is the rebuild form of an old master left by a failed
+	// rebuild (oldMasterAwaitingRebuild); Resync ulang and Lepas replika
+	// are not offered on it.
+	RebuildURL string
 	// CanRepoint offers "Arahkan sekarang" (needs_repoint, spec 5.6);
 	// RepointInfo is why it just did not repoint (the replica must be
 	// rebuilt), shown as information.
@@ -903,6 +907,18 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 		rep.State == store.ReplicaNeedsRebuild)
 	p.CanRepoint = !p.Busy && rep.State == store.ReplicaNeedsRepoint
 	p.CanDetach = !p.Busy
+	// An old master left by a failed rebuild: its agent stays quarantined.
+	// Resync ulang is no rebuild (no approval check before it starts, no
+	// connections acknowledgement, the server stays the topology's old
+	// master), and Lepas replika would leave the panel treating it as an
+	// unassigned server: only the rebuild is offered.
+	if p.RebuildURL, err = a.rebuildURL(srv); err != nil {
+		a.internalError(w, "old master check", err)
+		return
+	}
+	if p.RebuildURL != "" {
+		p.CanResync, p.CanDetach = false, false
+	}
 	a.render.renderStatus(w, status, "replica_detail", p)
 }
 
