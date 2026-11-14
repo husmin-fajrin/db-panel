@@ -2012,10 +2012,16 @@ dengan nama database dari teks tadi.
    mysql -e 'SELECT @@read_only, @@super_read_only;'
    ```
 
-   Yang pertama harus menulis `quarantined`, yang kedua `1 1`. Bila salah
-   satunya lain, berhenti: ini bukan server yang dimaksud. Di master baru
-   perintah-perintah di bawah akan menghapus data yang sedang dipakai atau
-   mengunci aplikasi dari menulis.
+   Yang pertama harus menulis `quarantined`. Bila tidak, berhenti: ini
+   bukan server yang dimaksud (di master baru perintah-perintah di bawah
+   akan menghapus data yang sedang dipakai atau mengunci aplikasi dari
+   menulis). Yang kedua harus `1 1`. Bila `1 0`, itu sisa percobaan
+   sebelumnya yang berhenti di tengah: jalankan
+   `mysql -e 'SET GLOBAL super_read_only=ON;'` lalu periksa lagi sampai
+   `1 1`. Bila `0 0` atau MySQL tidak menjawab, berhenti, jalankan
+   `systemctl restart dbpanel-agent` (agent yang mulai memasang lagi
+   baca-saja pada putaran penjaga pertamanya, bila MySQL menjawab), tunggu
+   beberapa detik, lalu periksa lagi.
 2. Pastikan database itu memang tidak ada di master baru. Jalankan di
    master baru, juga sebagai root setelah `sudo -i` (perintah ini hanya
    membaca):
@@ -2030,22 +2036,41 @@ dengan nama database dari teks tadi.
 3. Kembali ke master lama. Hentikan dulu aplikasi yang masih memakai
    database itu: `DROP DATABASE` menunggu sampai sambungan yang memakainya
    selesai.
-4. Cadangkan database itu ke berkas di `/root`:
+4. Cadangkan database itu ke berkas di `/root`. Pastikan dulu berkas itu
+   belum ada:
 
    ```sh
-   mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF --databases '<nama>' > '/root/<nama>-cadangan.sql'
+   ls -l '/root/<nama>-cadangan.sql'
+   ```
+
+   Jawabannya harus "No such file or directory". Bila berkas itu sudah ada,
+   jangan jalankan `mysqldump` ke nama itu: berkas lama terhapus begitu
+   perintah dimulai, juga bila `mysqldump` gagal. Periksa dulu apakah
+   database itu masih ada di server ini
+   (`mysql -e 'SHOW DATABASES LIKE "<nama>";'`). Bila sudah tidak ada,
+   database itu sudah dihapus pada percobaan sebelumnya: lewati langkah 4
+   dan 5. Bila masih ada, pindahkan dulu berkas lama ke tempat lain, misalnya
+   `mv '/root/<nama>-cadangan.sql' '/root/<nama>-cadangan-lama.sql'`. Lalu:
+
+   ```sh
+   mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF --databases '<nama>' > '/root/<nama>-cadangan.sql'; echo "keluar $?"
    ls -l '/root/<nama>-cadangan.sql'
    grep -c 'CREATE DATABASE' '/root/<nama>-cadangan.sql'
+   tail -n 1 '/root/<nama>-cadangan.sql'
    ```
 
    Nama database ditulis di dalam tanda kutip tunggal, di sini dan di
    langkah 5: nama boleh memuat `$`, dan di dalam tanda kutip ganda shell
    mengubahnya.
 
-   Lanjut hanya bila berkas itu ada, ukurannya di `ls -l` bukan 0, dan
-   `grep` menulis `1`. Bila tidak (misalnya `mysqldump` menulis "Unknown
-   database" dan `grep` menulis `0`), berhenti dan jangan lanjut ke langkah
-   5. Simpan berkas itu di tempat yang aman sebelum lanjut.
+   Lanjut hanya bila keempatnya benar: baris pertama menulis `keluar 0`,
+   ukuran berkas di `ls -l` bukan 0, `grep` menulis `1`, dan baris terakhir
+   berkas diawali `-- Dump completed on`. Bila `mysqldump` menulis galat apa
+   pun (misalnya "Unknown database" atau "Couldn't execute"), cadangan itu
+   tidak lengkap: berhenti dan jangan lanjut ke langkah 5. Cadangan yang
+   terpotong bisa tetap berukuran lebih dari 0 dan memuat `CREATE DATABASE`.
+   Salin berkas itu ke server lain atau media lain sebelum lanjut; jangan
+   hanya menyimpannya di server ini.
 5. Hapus database itu sebagai root MySQL, dengan satu perintah:
 
    ```sh
@@ -2116,8 +2141,16 @@ tambahkan `-u root -p` setelah `mysql`):
    mysql -e 'SELECT @@read_only, @@super_read_only;'
    ```
 
-   Yang pertama harus menulis `quarantined`, yang kedua `1 1`. Bila salah
-   satunya lain, berhenti: ini bukan server yang dimaksud.
+   Yang pertama harus menulis `quarantined`. Bila tidak, berhenti: ini
+   bukan server yang dimaksud (di master baru perintah-perintah di bawah
+   akan menghapus data yang sedang dipakai atau mengunci aplikasi dari
+   menulis). Yang kedua harus `1 1`. Bila `1 0`, itu sisa percobaan
+   sebelumnya yang berhenti di tengah: jalankan
+   `mysql -e 'SET GLOBAL super_read_only=ON;'` lalu periksa lagi sampai
+   `1 1`. Bila `0 0` atau MySQL tidak menjawab, berhenti, jalankan
+   `systemctl restart dbpanel-agent` (agent yang mulai memasang lagi
+   baca-saja pada putaran penjaga pertamanya, bila MySQL menjawab), tunggu
+   beberapa detik, lalu periksa lagi.
 2. Jalankan perintah ini. Ganti `'<user>'@'<host>'` dengan akun persis
    seperti yang tertulis di teks tadi (di halaman pekerjaan), termasuk
    tanda kutipnya, misalnya `'panel_admin'@'localhost'`:
