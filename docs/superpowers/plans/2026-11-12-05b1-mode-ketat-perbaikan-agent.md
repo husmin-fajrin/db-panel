@@ -325,6 +325,59 @@ yang sama, tepat sebelum daftar):
   *.*` tanpa `SHOW DATABASES`) lengkap selama `partial_revokes` mati
   (bawaan).
 
+### Bukti baca-saja saat MySQL dinyalakan tanpa agent (temuan tinjauan ulang C-1)
+
+**Diukur pada gelombang perbaikan akhir, bagian D:** mysqld
+`8.0.46-0ubuntu0.24.04.4` sementara (datadir baru dari
+`--initialize-insecure` di direktori sementara, dijalankan sebagai root
+dengan `user=nobody`, satu berkas opsi lewat `--defaults-file`,
+`persisted_globals_load` bawaan `1`). Tidak ada agent yang berjalan. Nilai
+dibaca dengan `SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only` dan
+`performance_schema.persisted_variables` sebagai root MySQL lewat soket.
+Server baru tanpa apa pun menyala `0 0`.
+
+| Kasus | Yang tersimpan (`SET PERSIST`) sebelum berhenti | Berkas opsi `[mysqld]` | Sesudah menyala |
+|---|---|---|---|
+| (a) | tidak ada | `super_read_only=ON` | `1 1`; tetap tidak ada yang tersimpan |
+| (b) | `read_only=OFF`, `super_read_only=OFF` | `super_read_only=ON` | **`0 0`** (bisa ditulis) |
+| (b2) | hanya `super_read_only=OFF` | `super_read_only=ON` | `1 0` |
+| (b3) | hanya `read_only=OFF` | `super_read_only=ON` | `0 1` |
+| (b4) | `read_only=OFF`, `super_read_only=OFF` | `super_read_only=ON` dan `init_file=<berkas kunci>` (isi tiga baris kunci start) | `1 1`; tersimpan kembali `ON`, `ON` |
+
+Kesimpulan untuk "Melepas kunci start dengan tangan": nilai yang tersimpan
+dengan `SET PERSIST` mengalahkan baris `super_read_only=ON` di berkas opsi.
+Baris itu hanya menolong bila tidak ada yang tersimpan (misalnya karantina
+ditulis saat MySQL mati dan nilainya belum pernah disimpan); ia bukan
+jaminan. Yang membuat MySQL menyala baca-saja hanyalah berkas kunci yang
+benar-benar dijalankan (b4). Bila kunci itu tidak dipakai mysqld, MySQL bisa
+menyala bisa ditulis; satu-satunya perlindungan adalah memutus aplikasi
+sebelum menyalakannya, lalu langsung memeriksa dan menyimpan baca-saja.
+
+(c) Server dalam keadaan karantina (`1 1`, tersimpan `ON` `ON`), database
+`lain` dan `app`, akun biasa `apl@localhost` dengan `ALL ON app.*` dan
+`ALL ON lain.*` (tanpa `SUPER` atau `CONNECTION_ADMIN`):
+
+| Langkah | Hasil |
+|---|---|
+| `apl`: `INSERT INTO app.t …` saat `1 1` | ditolak, ERROR 1290 (`--read-only`) |
+| root: `mysql -e 'SET GLOBAL super_read_only=OFF; DROP DATABASE lain; SET GLOBAL super_read_only=ON;'` (satu pemanggilan) | keluar 0; `lain` hilang; sesudahnya `1 1`, tersimpan tetap `ON` `ON` |
+| root: `SET GLOBAL super_read_only=OFF` | `read_only` tetap `1`: `1 0` |
+| `apl` saat `1 0`: `INSERT`, `CREATE TABLE`, `DROP DATABASE app` | ketiganya ditolak, ERROR 1290 |
+| root saat `1 0`: `CREATE DATABASE` lalu `DROP DATABASE` | berhasil |
+| root: `SET GLOBAL super_read_only=ON` | `1 1`; tersimpan tetap `ON` `ON` |
+| pemanggilan yang sama dengan `DROP DATABASE` yang gagal (database tidak ada) | keluar 1, ERROR 1008; pernyataan sesudahnya tidak dijalankan: tetap `1 0` sampai `SET GLOBAL super_read_only=ON` dijalankan |
+| restart sesudah itu | `1 1` (dari yang tersimpan) |
+| nama database dengan tanda hubung, `` DROP DATABASE `data-lama` `` di dalam tanda kutip tunggal shell | berhasil, keluar 0 |
+| `mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF --databases data-lama` saat `1 1` | keluar 0; berkas berisi `CREATE DATABASE` dan `INSERT`; dimuat lagi ke server yang bisa ditulis, isinya kembali utuh |
+
+`SET GLOBAL` tidak mengubah nilai yang tersimpan. Penjaga karantina agent
+(`guardQuarantined`) hanya memasang baca-saja lagi saat MySQL kembali
+menyala, saat agent mulai, atau setelah pemuatan bangun ulang selesai;
+selama MySQL tetap menyala ia tidak memasang lagi `super_read_only` yang
+dimatikan dengan `SET GLOBAL`. Karena itu perintah satu pemanggilan di atas
+harus memasang `super_read_only=ON` sendiri, dan bila ia berhenti di tengah,
+operator menjalankan `SET GLOBAL super_read_only=ON` sendiri.
+
 ---
 
 ## File Structure
