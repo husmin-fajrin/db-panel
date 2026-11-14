@@ -630,8 +630,9 @@ Tanpa persetujuan, yang tetap jalan:
   punya semua hak yang dibutuhkan; jalankan perintah GRANT berikut sebagai
   root lalu periksa ulang: <perintah GRANT, dipisah titik koma>". MySQL di
   server itu baca-saja, jadi `GRANT` biasa ditolak; jalankan dengan cara di
-  "Memberi hak SHOW DATABASES di server yang dikarantina" (ganti baris
-  `GRANT` di sana dengan perintah dari teks itu);
+  "Memberi hak SHOW DATABASES di server yang dikarantina" (lihat paragraf
+  "Hubungkan MySQL di server yang dikarantina" di sana: setiap perintah
+  `GRANT` diakhiri titik koma, juga yang terakhir);
 - karantina ulang di bawah sumber yang sama (`mysql.quarantine`),
   pencatatan replika (`mysql.recordReplicas`), pembacaan sumber yang dipin
   (`mysql.probeSource`, `mysql.waitSynced`), dan pertanyaan form bangun
@@ -1831,8 +1832,13 @@ database tertentu), tidak ada database di luar yang disalin. Agent
 membandingkan dengan daftar database yang dibacanya tepat sebelum pemuatan:
 pada bangun ulang penuh (semua database), database yang dibuat aplikasi
 selama pemuatan tidak terdeteksi, dan karantina tetap berakhir bersamanya.
-Karena itu alihkan semua aplikasi sebelum bangun ulang. Database yang sudah
-ada sebelum pemuatan, atau yang tidak termasuk database yang di-dump,
+Karena itu alihkan semua aplikasi sebelum bangun ulang. Sesudah bangun ulang
+selesai, bandingkan daftar database di halaman server ini (kotak **MySQL**)
+dengan daftar di halaman server master baru. Database yang hanya ada di
+server ini dibuat selama pemuatan: datanya tidak ada di master baru. Jangan
+pakai server ini sebagai replika sebelum hal itu diselesaikan (salin
+datanya ke master baru, atau cadangkan lalu hapus database itu). Database
+yang sudah ada sebelum pemuatan, atau yang tidak termasuk database yang di-dump,
 membuat langkah pengaturan replikasi gagal dengan "server ini masih punya database yang tidak disalin
 dari sumber <host:port> (<nama database, paling banyak 10>); karantina tidak
 diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu
@@ -1892,12 +1898,24 @@ titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan
 kotak **MySQL**, buka **Hubungkan ulang** (atau **Hubungkan MySQL** bila
 belum terhubung) dan masukkan akun lain itu. Di server yang dikarantina
 akun itu harus memegang semua hak yang diperiksa panel (lihat "Hubungkan
-MySQL"); akun yang kurang hak ditolak dan akun lama tetap dipakai. Akun
-baru di server yang baca-saja dibuat dengan cara yang sama seperti di
-"Memberi hak SHOW DATABASES di server yang dikarantina", dengan baris
-`GRANT` diganti `CREATE USER 'panel_admin'@'localhost' IDENTIFIED BY
-'<sandi>'; GRANT ALL ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;`.
-Lalu tekan **Ulangi dari tahap ini**.
+MySQL"); akun yang kurang hak ditolak dan akun lama tetap dipakai. Untuk
+membuat akun baru di server yang baca-saja, kerjakan langkah 1 dan 3 dari
+"Memberi hak SHOW DATABASES di server yang dikarantina", tetapi untuk
+langkah 2 masuk ke `mysql` (ketik `mysql`, atau `mysql -u root -p`) dan
+ketik perintah ini satu per satu, supaya kata sandinya tidak tersimpan di
+riwayat shell (riwayat `mysql` sendiri tidak menyimpan baris yang memuat
+`IDENTIFIED BY`):
+
+```sql
+SET GLOBAL super_read_only=OFF;
+SET SESSION sql_log_bin=OFF;
+CREATE USER 'panel_admin'@'localhost' IDENTIFIED BY '<sandi>';
+GRANT ALL ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;
+SET GLOBAL super_read_only=ON;
+```
+
+Ketik `exit`, lalu periksa dengan langkah 3. Lalu hubungkan akun itu dan
+tekan **Ulangi dari tahap ini**.
 
 Bila agent dimulai ulang di antara salinan data dan pengaturan replikasi,
 agent tidak lagi punya catatan salinan itu. Langkah pengaturan replikasi
@@ -1951,8 +1969,11 @@ kembali tercatat sebagai master lama yang dikarantina; data di server ini
 tidak diubah. Sesudah itu Hapus server dan Bangun ulang sebagai replika
 tersedia lagi, dan tombol "Ulangi dari tahap ini" pada pekerjaan yang gagal
 tidak bisa dipakai lagi." Pakai bila bangun ulang tidak segera diulang,
-bila server itu akan dihapus dari panel, atau untuk memeriksa data
-tertinggal.
+bila server itu akan dihapus dari panel, atau, bila bangun ulang belum mulai
+menyalin data (lihat di bawah), untuk memeriksa data tertinggal. Tombol itu
+ditolak dengan "server ini bukan master lama dengan percobaan bangun ulang
+yang gagal" bila agent sudah mengakhiri karantina pada bangun ulang
+terakhir.
 
 Data tertinggal sesudah bangun ulang:
 
@@ -1960,9 +1981,11 @@ Data tertinggal sesudah bangun ulang:
   menulis "Data tertinggal belum bisa diperiksa selama percobaan bangun
   ulang yang gagal masih tercatat. Untuk memeriksa atau mengamankannya,
   tekan dulu "Batalkan percobaan bangun ulang" di halaman server ini."
-- Begitu sebuah bangun ulang sampai di tahap **Salin data**, database lama
-  di server itu bisa sudah dihapus dan, pada dump, binary log-nya sudah
-  dikosongkan. Sejak itu **Periksa data tertinggal** dan **Amankan data
+- Begitu agent mulai menyalin data (dump: sesudah binary log server itu
+  dikosongkan; CLONE: tepat sebelum CLONE dimulai), catatan transaksi lama
+  sudah hilang. Panel mengetahuinya dari laporan kemajuan pekerjaan salinan
+  di agent, dari hasilnya, atau dari pekerjaan yang sudah lewat tahap
+  **Salin data**. Sejak itu **Periksa data tertinggal** dan **Amankan data
   tertinggal** tidak ditawarkan dan ditolak, juga setelah percobaannya
   dibatalkan atau pekerjaannya dibatalkan. Kotak menulis "Bangun ulang
   sebelumnya sudah mulai menyalin data ke server ini, jadi data lamanya
@@ -1970,7 +1993,21 @@ Data tertinggal sesudah bangun ulang:
   diamankan lagi lewat panel." dan form bangun ulang menulis "Bangun ulang
   sebelumnya sudah mulai menyalin data ke server ini; transaksi yang tidak
   sampai ke master baru tidak bisa lagi diperiksa atau diamankan lewat
-  panel." Hasil pemeriksaan yang lebih lama tetap tampil.
+  panel." Saran di kotak status juga menulis kalimat kotak itu. Hasil
+  pemeriksaan yang lebih lama tetap tampil.
+- Bila perintah salinan sudah dikirim ke agent tetapi panel tidak menerima
+  tanda bahwa salinan mulai (misalnya jawabannya hilang, atau pekerjaan
+  salinan berhenti tanpa laporan kemajuan), **Periksa** dan **Amankan**
+  tetap ditawarkan. Di atasnya, dan di form bangun ulang, tertulis "Bangun
+  ulang sebelumnya berhenti di tahap Salin data. Bila penyalinan sempat
+  mulai, catatan transaksi lama di server ini sudah dihapus, dan hasil
+  "tidak ada data tertinggal" dari pemeriksaan ini belum tentu benar."
+- Bangun ulang yang berhenti di tahap **Salin data** sebelum perintah
+  salinan dikirim, atau yang perintah salinannya ditolak agent, tidak
+  mengubah apa pun: **Periksa** dan **Amankan** tetap seperti biasa.
+  Menghapus database sisa percobaan sebelumnya (sebelum dump) tidak dicatat
+  di binary log, jadi transaksi tertinggal tetap bisa diperiksa dan
+  diamankan.
 
 Agent versi lama belum mengenal persetujuan di server. Panel menolak
 membangun ulangnya dengan "Agent perlu dimutakhirkan: agent di <server>
@@ -2003,7 +2040,9 @@ Perintah di bawah ditulis untuk shell root itu, tanpa `sudo` (dari pengguna
 biasa, `sudo perintah > /root/…` gagal karena berkasnya dibuka oleh pengguna
 biasa). Bila root MySQL memakai kata sandi, tambahkan `-u root -p` setelah
 `mysql` dan `mysqldump`. Kerjakan satu database sekaligus; ganti `<nama>`
-dengan nama database dari teks tadi.
+dengan nama database dari teks tadi. Bila nama database memuat tanda kutip
+(`'` atau `"`) atau backtick (`` ` ``), jangan pakai perintah di bawah;
+minta bantuan admin MySQL.
 
 1. Pastikan Anda di master lama:
 
@@ -2030,9 +2069,10 @@ dengan nama database dari teks tadi.
    mysql -e 'SHOW DATABASES LIKE "<nama>";'
    ```
 
-   Jawabannya harus kosong. Bila nama itu tampil, berhenti: database yang
-   ada di master baru dihapus oleh bangun ulang baru, bukan dengan cara
-   ini.
+   Jawabannya harus kosong. Bila tampil nama yang persis sama, berhenti:
+   database yang ada di master baru dihapus oleh bangun ulang baru, bukan
+   dengan cara ini. Bila tampil nama lain yang mirip (tanda `_` dan `%` di
+   perintah itu cocok dengan huruf apa pun), abaikan nama itu.
 3. Kembali ke master lama. Hentikan dulu aplikasi yang masih memakai
    database itu: `DROP DATABASE` menunggu sampai sambungan yang memakainya
    selesai.
@@ -2161,9 +2201,14 @@ tambahkan `-u root -p` setelah `mysql`):
    EOF
    ```
 
-   Tulis perintah ini persis dengan `<<'EOF'` (EOF dalam tanda kutip), bukan
-   `mysql -e "…"`: nama akun boleh memuat `$`, dan di dalam tanda kutip
-   ganda shell mengubahnya, sehingga `GRANT` mengenai akun lain. Selama
+   Ketiga baris itu satu perintah: `mysql` membaca baris di antara
+   `<<'EOF'` dan `EOF` sebagai masukannya. Tulis persis dengan `<<'EOF'`
+   (EOF dalam tanda kutip), bukan `mysql -e "…"`: nama akun boleh memuat
+   `$`, dan di dalam tanda kutip ganda shell mengubahnya, sehingga `GRANT`
+   mengenai akun lain. Baris `EOF` terakhir harus berada di awal baris,
+   tanpa spasi di depannya; bila shell terus menampilkan `>`, tekan Ctrl-C
+   (tidak ada yang dijalankan) dan ketik ulang. Dengan `mysql -u root -p
+   <<'EOF'`, `mysql` tetap menanyakan kata sandi di terminal. Selama
    perintah itu `read_only` tetap ON dan `super_read_only` mati hanya untuk
    `GRANT` itu; tidak ada yang tercatat di binlog (`gtid_executed` tidak
    berubah) dan baca-saja yang tersimpan tidak berubah. Bila `GRANT` gagal
@@ -2198,10 +2243,15 @@ bangun ulang baru di "Persetujuan di server untuk bangun ulang").
 dikarantina (quarantined): akun <akun> belum punya semua hak yang
 dibutuhkan; jalankan perintah GRANT berikut sebagai root lalu periksa ulang:
 <perintah GRANT, dipisah titik koma>", jalankan perintah `GRANT` itu dengan
-cara yang sama: ikuti langkah 1-3 di atas, dengan semua perintah `GRANT`
-dari teks itu di dalam heredoc yang sama, di antara `SET SESSION
-sql_log_bin=OFF;` dan `SET GLOBAL super_read_only=ON;`. Lalu klik
-**Hubungkan MySQL** lagi.
+cara yang sama: ikuti langkah 1-3 di atas, tetapi di langkah 2 ganti
+perintah `GRANT SHOW DATABASES …;` di tengah baris perintah itu dengan semua
+perintah `GRANT` dari teks itu, dan akhiri setiap perintah dengan titik koma
+(`;`), juga yang terakhir (teks agent tidak menulis titik koma di akhir;
+tanpa itu MySQL menolak dengan ERROR 1064 dan `super_read_only` tetap mati).
+Baris itu tetap diawali `SET GLOBAL super_read_only=OFF; SET SESSION
+sql_log_bin=OFF;` dan diakhiri `SET GLOBAL super_read_only=ON;`. Lalu klik
+**Hubungkan MySQL** lagi. Perintah di kotak "Akun admin MySQL ini kurang
+hak" di halaman server yang dikarantina dijalankan dengan cara yang sama.
 
 #### Memakai lagi server yang dihapus saat masih dikarantina
 
@@ -2280,9 +2330,19 @@ membuat server ini menerima tulisan.
    replikasi (USER `system user`), dan akun yang dipakai agent (agent sudah
    dihentikan di langkah 1, jadi biasanya tidak ada lagi). Baris lain
    berarti masih ada aplikasi atau orang yang tersambung: hentikan dulu,
-   lalu periksa lagi. Bila MySQL mati, tidak ada yang bisa diperiksa selain
-   aplikasinya sendiri. Biarkan aplikasi tetap terputus sampai langkah 9;
-   sambungkan lagi hanya bila server ini dibuka sebagai master di sana.
+   lalu periksa lagi. Periksa juga event terjadwal:
+
+   ```sh
+   mysql -e 'SELECT EVENT_SCHEMA, EVENT_NAME FROM information_schema.EVENTS WHERE STATUS="ENABLED";'
+   ```
+
+   Event yang tampil bisa menulis seperti aplikasi begitu MySQL bisa
+   ditulis; langkah 5 membuatnya baca-saja. Bila MySQL mati, tidak ada yang
+   bisa diperiksa selain aplikasinya sendiri; langkah 4 mematikan event
+   terjadwal sebelum MySQL dinyalakan. Biarkan aplikasi tetap terputus
+   sampai langkah 9; sambungkan lagi hanya bila server ini dibuka sebagai
+   master di sana. Bila Anda berhenti di sini, jalankan lagi agent:
+   `systemctl start dbpanel-agent`.
 3. Cari baris kunci di konfigurasi MySQL. Perintah pertama menampilkan
    berkas opsi yang dibaca mysqld (agent mengelola berkas pertama yang
    ada, atau `zz-dbpanel.cnf` di direktori `!includedir` terakhirnya);
@@ -2303,10 +2363,14 @@ membuat server ini menerima tulisan.
    `# END dbpanel` di berkas konfigurasi utama. Barisnya berbentuk
    `init_file=<…>/dbpanel-start-lock.sql`; path setelah `init_file=` adalah
    berkas kunci. Bila baris `init_file=` itu tidak ditemukan, berhenti di sini
-   dan jangan nyalakan MySQL.
-4. Bila MySQL mati, jangan langsung menyalakannya. Tambahkan dulu satu
-   baris `super_read_only=ON` tepat di bawah baris `init_file=` yang
-   ditemukan di langkah 3. Baris itu bukan jaminan: nilai yang pernah
+   dan jangan nyalakan MySQL. Jalankan lagi agent
+   (`systemctl start dbpanel-agent`) bila bisa. Bila MySQL sudah menyala,
+   jalankan juga pemeriksaan langkah 5 sebelum meninggalkan server ini.
+4. Bila MySQL mati, jangan langsung menyalakannya. Tambahkan dulu dua baris
+   tepat di bawah baris `init_file=` yang ditemukan di langkah 3:
+   `super_read_only=ON` dan `event_scheduler=OFF` (event terjadwal tidak
+   jalan selama baris kedua ada, kecuali `event_scheduler` pernah disimpan
+   dengan `SET PERSIST`). Kedua baris itu bukan jaminan: nilai yang pernah
    disimpan dengan `SET PERSIST` (misalnya `read_only` atau
    `super_read_only` yang disimpan `OFF`) mengalahkannya, dan berkas kunci
    hanya dijalankan bila mysqld memang memakainya. Perlindungan yang pasti
@@ -2327,13 +2391,15 @@ membuat server ini menerima tulisan.
    baris `init_file=` atau berkas kunci; perbaiki dulu sebab yang tertulis di
    log error MySQL. Bila Anda menghentikan cara ini di tengah jalan (di
    langkah ini atau sesudahnya, sebelum langkah 6), hapus lagi baris
-   `super_read_only=ON` yang Anda tambahkan, lalu jalankan lagi agent:
+   `super_read_only=ON` dan `event_scheduler=OFF` yang Anda tambahkan, lalu
+   jalankan lagi agent:
    `systemctl start dbpanel-agent`. Bila baris itu tertinggal, MySQL
    menyala baca-saja setiap kali tidak ada nilai lain yang tersimpan dengan
    `SET PERSIST`, juga setelah server ini kelak dibuka sebagai master.
-5. Segera setelah MySQL menyala (juga bila MySQL tadi sudah menyala), masuk
-   sebagai root MySQL (`mysql`, atau `mysql -u root -p` bila root MySQL
-   memakai kata sandi) dan jalankan:
+5. Segera setelah MySQL menyala (juga bila MySQL tadi sudah menyala), ulangi
+   pemeriksaan sambungan dari langkah 2, lalu masuk sebagai root MySQL
+   (`mysql`, atau `mysql -u root -p` bila root MySQL memakai kata sandi) dan
+   jalankan:
 
    ```sql
    SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;
@@ -2356,7 +2422,8 @@ membuat server ini menerima tulisan.
    ada di server ini. Catat hal itu dan beri tahu penanggung jawab aplikasi
    sebelum memakai server ini lagi.
 6. Di berkas dari langkah 3, hapus baris `init_file=<…>/dbpanel-start-lock.sql`,
-   dan baris `super_read_only=ON` bila Anda menambahkannya di langkah 4.
+   dan baris `super_read_only=ON` serta `event_scheduler=OFF` bila Anda
+   menambahkannya di langkah 4.
 7. Baru sesudah itu hapus berkas `dbpanel-start-lock.sql` yang disebut
    baris tadi. Urutan ini wajib: mysqld menolak menyala bila konfigurasinya
    menyebut berkas yang tidak ada.
