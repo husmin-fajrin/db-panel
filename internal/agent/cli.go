@@ -955,7 +955,7 @@ func mainPair(args []string, stdout, stderr io.Writer) int {
 }
 
 // panelDirMessage refuses pairing into a directory holding the panel's CA.
-const panelDirMessage = "Direktori ini milik panel (ada ca.key). Pasang agent di direktorinya sendiri (" +
+var panelDirMessage = "Direktori ini milik panel (ada ca.key). Pasang agent di direktorinya sendiri (" +
 	config.DefaultDir + "); di host panel, install.sh sudah memasangkannya."
 
 // mainPairTokenFile is "agent pair --token-file": the token and the panel's

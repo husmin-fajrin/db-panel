@@ -36,10 +36,12 @@ import (
 // refused before it writes once the directory is full, and stopped (its
 // file removed) when it would pass the cap.
 
+// DefaultSalvageDir is where salvage files are written (0700 root) when
+// Driver.SalvageDir is empty. A variable only so the tests can point it
+// away from the system's directory.
+var DefaultSalvageDir = "/var/lib/dbpanel/salvage"
+
 const (
-	// DefaultSalvageDir is where salvage files are written (0700 root)
-	// when Driver.SalvageDir is empty.
-	DefaultSalvageDir = "/var/lib/dbpanel/salvage"
 	// SalvageMaxAge is how long a salvage file is kept.
 	SalvageMaxAge = 7 * 24 * time.Hour
 	// salvageMaxSize is the largest salvage file written; a larger one is

@@ -14,7 +14,8 @@ import (
 // StartResultFile is the worst start of MySQL since the quarantine (spec
 // 5.5): kept on disk so an agent restart or a lost event does not lose it,
 // and carried in every health snapshot while the role pin is quarantined.
-const StartResultFile = "/var/lib/dbpanel/start-result"
+// A variable only so the tests can point it away from the system's file.
+var StartResultFile = "/var/lib/dbpanel/start-result"
 
 // maxInitFile caps the init_file a snapshot carries.
 const maxInitFile = 4096

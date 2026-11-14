@@ -11,8 +11,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DefaultDir holds the agent's configuration, key and certificates.
-const DefaultDir = "/etc/dbpanel"
+// DefaultDir holds the agent's configuration, key and certificates. A
+// variable only so the tests can point it away from the system's
+// directory.
+var DefaultDir = "/etc/dbpanel"
 
 // FileName is the agent configuration in the agent directory.
 const FileName = "agent.yaml"

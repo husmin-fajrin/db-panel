@@ -48,13 +48,15 @@ const LockFlockFile = "promote-lock.flock"
 var lockFlockWait = 10 * time.Second
 
 // SeenFile is where the agent records the replicas that read this
-// server's binary log (Driver.SeenPath overrides it).
-const SeenFile = "/var/lib/dbpanel/replicas-seen"
+// server's binary log (Driver.SeenPath overrides it). A variable only so
+// the tests can point it away from the system's file.
+var SeenFile = "/var/lib/dbpanel/replicas-seen"
 
 // SeenPortsFile is where the agent records the ports those replicas
 // reported (Driver.SeenPortsPath overrides it), one "<port> <RFC3339>"
-// line per port.
-const SeenPortsFile = "/var/lib/dbpanel/replica-ports-seen"
+// line per port. A variable only so the tests can point it away from the
+// system's file.
+var SeenPortsFile = "/var/lib/dbpanel/replica-ports-seen"
 
 const (
 	// maxRecordSize bounds what is read from the lock and the promotion
