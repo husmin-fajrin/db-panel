@@ -192,12 +192,23 @@ func (d *Driver) registerRebuildApproval(reg *commands.Registry) {
 	})
 }
 
-// rebuildApprovalState is the answer to mysql.rebuildApproval at now: not
-// required unless the role pin is quarantined; the approval when one
+// rebuildApprovalState is the answer to mysql.rebuildApproval at now: a
+// parameter error while the pins cannot be read; not required unless the
+// role pin is quarantined; the approval when one
 // holds; else the request (made when none is valid) with why an approval
 // on file does not hold.
 func (d *Driver) rebuildApprovalState(ctx context.Context, now time.Time) (proto.RebuildApprovalResult, error) {
-	if d.pins == nil || d.pins.Role() != roleQuarantined {
+	if d.pins == nil {
+		return proto.RebuildApprovalResult{}, nil
+	}
+	// Pins that cannot be read never say "not required": every protected
+	// command would be refused by the gate.
+	role, err := d.pins.roleErr()
+	if err != nil {
+		return proto.RebuildApprovalResult{}, &commands.ParamError{Msg: fmt.Sprintf(
+			"pin peran/sumber agent tidak bisa dipakai, perintah mysql.rebuildApproval ditolak: %v", err)}
+	}
+	if role != roleQuarantined {
 		return proto.RebuildApprovalResult{}, nil
 	}
 	if _, ok := d.pins.pinnedSource(); !ok {

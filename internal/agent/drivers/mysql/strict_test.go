@@ -554,6 +554,19 @@ func TestStrictGateRefusesWithUnreadablePins(t *testing.T) {
 	}
 }
 
+// TestRebuildApprovalWithUnreadablePins: with pins that cannot be read
+// mysql.rebuildApproval does not say "not required"; it answers a
+// parameter error carrying the pin error, as the gate does.
+func TestRebuildApprovalWithUnreadablePins(t *testing.T) {
+	dir := pinDir(t, "quarantined", strictSource)
+	r := newPinRig(t, nil, dir)
+	if err := os.Chmod(filepath.Join(dir, mysql.RoleFile), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(t, "rebuildApproval", r.dispatch("mysql.rebuildApproval", nil),
+		"pin peran/sumber agent tidak bisa dipakai, perintah mysql.rebuildApproval ditolak: ", mysql.RoleFile)
+}
+
 // TestEnteringQuarantineClearsStaleApproval: an approval left on a
 // rebuilt server never holds when it is quarantined again; a quarantine
 // written again on a quarantined server keeps root's approval.
