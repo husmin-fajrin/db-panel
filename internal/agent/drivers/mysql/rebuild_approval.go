@@ -298,6 +298,11 @@ func (p *Pins) CheckRebuildApproval(ctx context.Context, now time.Time) (Rebuild
 		if ips, err = sourceIPs(ctx, host); err != nil {
 			return RebuildApproval{}, &SourceLookupError{Source: source, Err: err}
 		}
+		// No address and no error is a failed lookup, as in
+		// RebuildApprovalAddr.
+		if len(ips) == 0 {
+			return RebuildApproval{}, &SourceLookupError{Source: source, Err: errors.New("tidak ada alamat")}
+		}
 	}
 	if err := checkApproval(a, role, source, ips, now); err != nil {
 		return RebuildApproval{}, err

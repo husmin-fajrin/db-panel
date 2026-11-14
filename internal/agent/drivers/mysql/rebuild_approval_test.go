@@ -361,6 +361,19 @@ func TestCheckRebuildApproval(t *testing.T) {
 			t.Errorf("err = %v (code %q)", err, mysql.InvalidCode(err))
 		}
 	})
+	t.Run("no address and no error", func(t *testing.T) {
+		// The same answer RebuildApprovalAddr words as DNS ("tidak ada
+		// alamat"), so the panel words it one way.
+		p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
+		if err := p.WriteRebuildApproval(approval); err != nil {
+			t.Fatal(err)
+		}
+		defer resolve(nil, nil)()
+		_, err := p.CheckRebuildApproval(ctx, now)
+		if err == nil || !strings.Contains(err.Error(), "tidak ada alamat") || mysql.InvalidCode(err) != "dns" {
+			t.Errorf("err = %v (code %q)", err, mysql.InvalidCode(err))
+		}
+	})
 	t.Run("approved address", func(t *testing.T) {
 		p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
 		if err := p.WriteRebuildApproval(approval); err != nil {
