@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // The state a rebuild of an old master leaves when it fails, and the ways
@@ -221,4 +222,79 @@ func TestCancelRebuildAttemptThenDelete(t *testing.T) {
 	if err := e.r.DeleteServer(ctx, g.c.id); err != nil {
 		t.Fatalf("delete of the new master after: %v", err)
 	}
+}
+
+// TestLeftoverAfterCopyStarted (G-3): once a rebuild of the old master
+// reached "Salin data", Periksa and Amankan data tertinggal are refused
+// with one sentence (its binary logs were reset, databases dropped), also
+// on the plain quarantined old master after "Batalkan percobaan bangun
+// ulang" or after a cancel; before the copy they run.
+func TestLeftoverAfterCopyStarted(t *testing.T) {
+	const refusal = "Bangun ulang sebelumnya sudah mulai menyalin data ke server ini, jadi data lamanya sudah dihapus " +
+		"atau diganti; data tertinggal tidak bisa diperiksa atau diamankan lagi lewat panel."
+	ctx := context.Background()
+	t.Run("cancel attempt after copy", func(t *testing.T) {
+		g := rebuildRig(t)
+		e := g.e
+		failedRebuild(t, g, "mysql.configureReplication")
+		if err := e.r.CancelRebuildAttempt(ctx, g.m.id); err != nil {
+			t.Fatal(err)
+		}
+		if started, err := RebuildCopyStarted(e.st, g.m.id); err != nil || !started {
+			t.Fatalf("RebuildCopyStarted = %v, %v; want true", started, err)
+		}
+		for name, start := range map[string]func(context.Context, int64) (string, error){
+			"leftover": e.r.StartLeftover, "salvage": e.r.StartSalvage} {
+			if _, err := start(ctx, g.m.id); err == nil || err.Error() != refusal {
+				t.Fatalf("%s after the copy = %v, want %q", name, err, refusal)
+			}
+		}
+	})
+	t.Run("cancel of a running rebuild after copy", func(t *testing.T) {
+		g := rebuildRig(t)
+		e := g.e
+		block := make(chan struct{})
+		started := make(chan struct{}, 1)
+		g.m.on("mysql.configureReplication", func(json.RawMessage) (any, error) {
+			started <- struct{}{}
+			<-block
+			return nil, errors.New("dibatalkan")
+		})
+		g.m.reply("mysql.resetReplica", nil)
+		id, err := g.startRebuild()
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-started
+		if err := e.r.Cancel(id); err != nil {
+			t.Fatal(err)
+		}
+		close(block)
+		e.waitJob(id, store.JobCanceled)
+		e.waitIdle(id)
+		if srv := mustServer(t, e, g.m.id); srv.Role != store.RoleQuarantined {
+			t.Fatalf("role after the cancel = %s", srv.Role)
+		}
+		if _, err := e.r.StartLeftover(ctx, g.m.id); err == nil || err.Error() != refusal {
+			t.Fatalf("leftover after a cancel past the copy = %v, want %q", err, refusal)
+		}
+	})
+	t.Run("before copy", func(t *testing.T) {
+		g := rebuildRig(t)
+		e := g.e
+		failedRebuild(t, g, "mysql.preflight")
+		if err := e.r.CancelRebuildAttempt(ctx, g.m.id); err != nil {
+			t.Fatal(err)
+		}
+		if started, err := RebuildCopyStarted(e.st, g.m.id); err != nil || started {
+			t.Fatalf("RebuildCopyStarted = %v, %v; want false", started, err)
+		}
+		g.m.reply("mysql.leftover", proto.LeftoverResult{})
+		id, err := e.r.StartLeftover(ctx, g.m.id)
+		if err != nil {
+			t.Fatalf("leftover before the copy: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		e.waitIdle(id)
+	})
 }

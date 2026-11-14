@@ -379,7 +379,11 @@
       {{else}}
       <p class="text-muted">Belum diperiksa.</p>
       {{end}}
-      {{if not .RebuildFailed}}
+      {{if .CopyStarted}}
+      <p class="text-sm">{{copyStartedText}}</p>
+      {{else if .RebuildFailed}}
+      <p class="text-sm">{{attemptPendingText}}</p>
+      {{else}}
       <div class="flex flex-wrap gap-2">
         <form method="post" action="/servers/{{$s.ID}}/leftover"><button type="submit" class="btn btn-sm"{{if or (not .Online) .Busy}} disabled{{end}}>Periksa data tertinggal</button></form>
         {{with .Leftover}}{{if .Transactions}}

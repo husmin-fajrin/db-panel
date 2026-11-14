@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -116,6 +117,66 @@ func (r *Runner) oldMasterOf(serverID int64) (store.Topology, store.Promotion, e
 	return topo, prom, err
 }
 
+// CopyStartedText refuses Periksa and Amankan data tertinggal on an old
+// master whose rebuild reached the copy (RebuildCopyStarted); the page
+// shows it in their place (G-3).
+const CopyStartedText = "Bangun ulang sebelumnya sudah mulai menyalin data ke server ini, jadi data lamanya sudah " +
+	"dihapus atau diganti; data tertinggal tidak bisa diperiksa atau diamankan lagi lewat panel."
+
+// RebuildCopyStarted reports whether a rebuild of the old master serverID
+// started since its promotion reached the step "Salin data" (stepCopyName):
+// from there its databases may be dropped and, for a dump, its binary logs
+// reset, so what Periksa and Amankan data tertinggal read is gone. False
+// for a server that is no promotion's old master.
+func RebuildCopyStarted(st *store.Store, serverID int64) (bool, error) {
+	prom, err := st.PromotionByOldMaster(serverID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	jobs, err := st.ListJobsForServer(serverID, 0)
+	if err != nil {
+		return false, err
+	}
+	for _, j := range jobs {
+		if j.Kind != KindCreateReplica || j.CreatedAt.Before(prom.StartedAt) {
+			continue
+		}
+		var js jobState
+		if err := json.Unmarshal([]byte(j.ParamsJSON), &js); err != nil {
+			// Unreadable params: count it as a copy that may have started.
+			return true, nil
+		}
+		if !js.RebuildOldMaster {
+			continue
+		}
+		_, steps, err := st.GetJob(j.ID)
+		if err != nil {
+			return false, err
+		}
+		i := slices.IndexFunc(steps, func(s store.JobStep) bool { return s.Name == stepCopyName })
+		if i >= 0 && j.CurrentStep >= i {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// refuseAfterCopy is CopyStartedText once a rebuild of serverID reached
+// the copy.
+func (r *Runner) refuseAfterCopy(serverID int64) error {
+	started, err := RebuildCopyStarted(r.d.Store, serverID)
+	if err != nil {
+		return err
+	}
+	if started {
+		return errors.New(CopyStartedText)
+	}
+	return nil
+}
+
 // StartLeftover starts "Periksa data tertinggal" on the quarantined old
 // master serverID: the transactions it has that the new master lacks.
 func (r *Runner) StartLeftover(ctx context.Context, serverID int64) (string, error) {
@@ -123,6 +184,9 @@ func (r *Runner) StartLeftover(ctx context.Context, serverID int64) (string, err
 	defer r.startMu.Unlock()
 	topo, prom, err := r.oldMasterOf(serverID)
 	if err != nil {
+		return "", err
+	}
+	if err := r.refuseAfterCopy(serverID); err != nil {
 		return "", err
 	}
 	if !r.d.Hub.IsOnline(serverID) {
@@ -141,6 +205,9 @@ func (r *Runner) StartSalvage(ctx context.Context, serverID int64) (string, erro
 	defer r.startMu.Unlock()
 	topo, prom, err := r.oldMasterOf(serverID)
 	if err != nil {
+		return "", err
+	}
+	if err := r.refuseAfterCopy(serverID); err != nil {
 		return "", err
 	}
 	check, ok := LeftoverOf(prom)

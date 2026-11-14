@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -281,4 +282,73 @@ func TestCancelRebuildAttemptPost(t *testing.T) {
 		withToken(t, e, url.Values{}, web.ActCancelRebuildAttempt, "server", 1), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "server ini bukan master lama dengan percobaan bangun ulang yang gagal")
+}
+
+const (
+	copyStartedBox  = "Bangun ulang sebelumnya sudah mulai menyalin data ke server ini, jadi data lamanya sudah dihapus atau diganti; data tertinggal tidak bisa diperiksa atau diamankan lagi lewat panel."
+	copyStartedForm = "Bangun ulang sebelumnya sudah mulai menyalin data ke server ini; transaksi yang tidak sampai ke master baru tidak bisa lagi diperiksa atau diamankan lewat panel."
+	attemptPending  = "Data tertinggal belum bisa diperiksa selama percobaan bangun ulang yang gagal masih tercatat. Untuk memeriksa atau mengamankannya, tekan dulu &#34;Batalkan percobaan bangun ulang&#34; di halaman server ini."
+	leftoverAdvice  = "Jalankan Periksa data tertinggal"
+)
+
+// storeRebuildJob records a failed rebuild job of server 1 that stopped at
+// step at (an index of the create_replica steps).
+func storeRebuildJob(t *testing.T, e *env, id string, at int) {
+	t.Helper()
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: orchestrator.KindCreateReplica, ServerID: 1,
+		ParamsJSON: `{"master_server_id":2,"rebuild_old_master":true}`, CreatedAt: time.Now()},
+		[]string{"Periksa master", "Periksa server tujuan", "Pasang MySQL", "Siapkan replika", "Salin data",
+			"Pasang sertifikat MySQL", "Sambungkan replikasi", "Verifikasi"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobFailed, at, "gagal", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLeftoverWordingAfterFailedRebuild (G-3): the box and the rebuild form
+// no longer send the operator to Periksa/Amankan they cannot use: after
+// the copy started they say the data is gone; before it, that the failed
+// attempt must be cancelled first. A plain quarantined old master whose
+// earlier rebuild reached the copy says the same and offers no Periksa.
+func TestLeftoverWordingAfterFailedRebuild(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		at      int
+		box     string
+		form    string
+		quarant bool
+		periksa bool
+	}{
+		{name: "failed, copy started", at: 6, box: copyStartedBox, form: copyStartedForm},
+		{name: "failed, copy not started", at: 1, box: attemptPending, form: attemptPending},
+		{name: "quarantined, copy started", at: 6, box: copyStartedBox, form: copyStartedForm, quarant: true},
+		{name: "quarantined, copy not started", at: 1, quarant: true, periksa: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _, _ := failedRebuildEnv(t)
+			c := e.cookie()
+			storeRebuildJob(t, e, "5555555555555555555555555555555"+fmt.Sprint(tc.at), tc.at)
+			if tc.quarant {
+				if err := e.st.ReturnToQuarantine(1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			box := e.do("GET", "/servers/1", nil, c)
+			form := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+			wantCode(t, form, http.StatusOK)
+			if tc.box != "" {
+				wantBody(t, box, tc.box)
+				wantBody(t, form, tc.form)
+				wantNoBody(t, form, leftoverAdvice, "Data tertinggal belum diperiksa")
+			}
+			if tc.periksa {
+				wantBody(t, box, `action="/servers/1/leftover"`)
+				wantNoBody(t, box, copyStartedBox, attemptPending)
+				wantBody(t, form, leftoverAdvice)
+			} else {
+				wantNoBody(t, box, `action="/servers/1/leftover"`, `action="/servers/1/salvage"`)
+			}
+		})
+	}
 }

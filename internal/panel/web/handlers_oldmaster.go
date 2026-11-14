@@ -378,7 +378,20 @@ type oldMasterBox struct {
 	// (they need the quarantined role) nor Hapus server (a registered
 	// replica).
 	RebuildFailed bool
+	// CopyStarted: a rebuild of this old master reached its copy
+	// (orchestrator.RebuildCopyStarted): Periksa and Amankan data
+	// tertinggal are not offered, the box says why (G-3).
+	CopyStarted bool
 }
+
+// Form warnings about the leftover data of an old master whose rebuild
+// failed or reached its copy (G-3).
+const (
+	msgCopyStartedForm = "Bangun ulang sebelumnya sudah mulai menyalin data ke server ini; transaksi yang tidak sampai ke " +
+		"master baru tidak bisa lagi diperiksa atau diamankan lewat panel."
+	msgAttemptPending = "Data tertinggal belum bisa diperiksa selama percobaan bangun ulang yang gagal masih tercatat. " +
+		"Untuk memeriksa atau mengamankannya, tekan dulu \"Batalkan percobaan bangun ulang\" di halaman server ini."
+)
 
 // oldMasterAwaitingRebuild is orchestrator.AwaitingRebuild on the panel's
 // store: the one definition of an old master waiting for its rebuild.
@@ -479,6 +492,9 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	case err == nil:
 		box.Topology, box.HasTopology, box.CutoverPending = topo, true, topo.CutoverPending
 	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+	if box.CopyStarted, err = orchestrator.RebuildCopyStarted(a.Store, srv.ID); err != nil {
 		return err
 	}
 	if c, ok := orchestrator.LeftoverOf(prom); ok {
@@ -976,7 +992,32 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64, 
 		return nil, err
 	}
 	check, checked := orchestrator.LeftoverOf(prom)
+	copied, err := orchestrator.RebuildCopyStarted(a.Store, srv.ID)
+	if err != nil {
+		return nil, err
+	}
+	// Periksa and Amankan cannot run: after a copy began the data is gone;
+	// while a failed attempt is recorded (role replica) they wait for
+	// "Batalkan percobaan bangun ulang" (G-3).
+	noCheck := ""
 	switch {
+	case copied:
+		noCheck = msgCopyStartedForm
+	case srv.Role != store.RoleQuarantined:
+		noCheck = msgAttemptPending
+	}
+	switch {
+	case noCheck != "":
+		if a.startLateOpen(srv.ID) {
+			info.Warnings = append(info.Warnings, startLateWarning(srv)+".")
+		}
+		// After the copy that data is already gone: the sentence below
+		// says so.
+		if check.Transactions > 0 && !copied {
+			info.Warnings = append(info.Warnings, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
+				"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
+		}
+		info.Warnings = append(info.Warnings, noCheck)
 	case a.startLateOpen(srv.ID):
 		info.Warnings = append(info.Warnings, startLateWarning(srv)+": transaksi yang tidak sampai ke master baru akan "+
 			"hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu.")

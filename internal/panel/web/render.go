@@ -6,6 +6,7 @@ package web
 import (
 	"bytes"
 	"fmt"
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -167,6 +168,10 @@ var templateFuncs = template.FuncMap{
 	// cancelAttemptText is the sentence of "Batalkan percobaan bangun
 	// ulang" (G-2).
 	"cancelAttemptText": func() string { return msgCancelAttempt },
+	// copyStartedText and attemptPendingText replace Periksa and Amankan
+	// data tertinggal in the Master lama box (G-3).
+	"copyStartedText":    func() string { return orchestrator.CopyStartedText },
+	"attemptPendingText": func() string { return msgAttemptPending },
 }
 
 // partials are the templates shared by several pages and rendered on their

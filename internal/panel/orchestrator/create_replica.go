@@ -56,7 +56,7 @@ var errRebuildCutoverPending = errors.New("tekan \"Sudah saya alihkan\" dulu: me
 
 func createReplicaStepNames() []string {
 	return []string{"Periksa master", "Periksa server tujuan", "Pasang MySQL", "Siapkan replika",
-		"Salin data", stepInstallCert, stepConnectName, "Verifikasi"}
+		stepCopyName, stepInstallCert, stepConnectName, "Verifikasi"}
 }
 
 // stepConnectName is the step after which the target may have
@@ -64,6 +64,11 @@ func createReplicaStepNames() []string {
 // resync_replica, and between jobs stored before and after the
 // certificate step was added; connectIndex finds it in the stored steps.
 const stepConnectName = "Sambungkan replikasi"
+
+// stepCopyName is the step that drops the target's databases and copies
+// the master's data (for a dump, it also resets the target's binary
+// logs): an old master's leftover data is gone from there on (G-3).
+const stepCopyName = "Salin data"
 
 // connectIndex is the index of stepConnectName in a job's stored steps; -1
 // when it has none.
