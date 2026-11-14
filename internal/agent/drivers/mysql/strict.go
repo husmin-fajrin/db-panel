@@ -38,8 +38,11 @@ var strictCommands = map[string]strictClass{
 	"mysql.connections": strictAllowed,
 	"mysql.preflight":   strictAllowed,
 	"mysql.binlogTail":  strictAllowed,
-	// Only stores an account proved to log in to the local MySQL; needed
-	// for the rescue when the admin account changed.
+	// Stores an account proved to log in to a MySQL on this machine (any
+	// other host is refused for every role); on a quarantined server only
+	// an account with every privilege the grant check lists, so the guard
+	// can still put read-only back. Needed for the rescue when the admin
+	// account changed.
 	"mysql.connect":     strictAllowed,
 	"mysql.probeSource": strictAllowed, // reads the pinned source only
 	"mysql.waitSynced":  strictAllowed, // waits and reads GTIDs only

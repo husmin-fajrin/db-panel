@@ -258,6 +258,17 @@ func SetResolver(ip func(context.Context, string) ([]net.IP, error), addr func(c
 	return func() { lookupIP, lookupAddr = oldIP, oldAddr }
 }
 
+// SetInterfaceAddrs replaces the list of this machine's addresses the
+// locality check of mysql.connect reads.
+func SetInterfaceAddrs(f func() ([]net.Addr, error)) (restore func()) {
+	old := interfaceAddrs
+	interfaceAddrs = f
+	return func() { interfaceAddrs = old }
+}
+
+// LocalMySQL is the locality check of mysql.connect and the stored account.
+var LocalMySQL = localMySQL
+
 // SetRepointHook makes mysql.repoint call f at its test points.
 func SetRepointHook(f func(stage string)) (restore func()) {
 	old := repointHook

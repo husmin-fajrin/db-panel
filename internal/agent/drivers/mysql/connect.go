@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	drv "github.com/go-sql-driver/mysql"
 
@@ -120,6 +121,12 @@ func (d *Driver) registerConnect(reg *commands.Registry) {
 			return nil, errors.New("agent tidak punya tempat menyimpan kredensial MySQL")
 		}
 
+		// Only a MySQL on this machine: the guard and every later command
+		// act through the stored account.
+		if err := localMySQL(ctx, p.Host); err != nil {
+			return nil, &commands.ParamError{Msg: err.Error()}
+		}
+
 		// Try the new account without touching the stored one.
 		db, err := openWith(ctx, h.Layout().Socket, p)
 		if err != nil {
@@ -129,6 +136,17 @@ func (d *Driver) registerConnect(reg *commands.Registry) {
 		res, err := inventory(ctx, db)
 		if err != nil {
 			return nil, err
+		}
+		// A quarantined server (or one whose pins cannot be read) keeps
+		// its stored account unless the new one can do what the guard and
+		// the rebuild need: an account without SYSTEM_VARIABLES_ADMIN could
+		// not put read-only back.
+		if len(res.MissingGrants) > 0 && d.pins != nil {
+			if role, err := d.pins.roleErr(); err != nil || role == roleQuarantined {
+				return nil, &commands.ParamError{Msg: fmt.Sprintf("server ini dikarantina (quarantined): akun %s belum punya "+
+					"semua hak yang dibutuhkan; jalankan perintah GRANT berikut sebagai root lalu periksa ulang: %s",
+					res.Account, strings.Join(res.MissingGrants, "; "))}
+			}
 		}
 		if err := d.Creds.Save(p); err != nil {
 			return nil, fmt.Errorf("simpan kredensial MySQL: %w", err)
@@ -165,6 +183,57 @@ func (d *Driver) registerConnect(reg *commands.Registry) {
 		}
 		return nil, &commands.ParamError{Msg: "MySQL belum dihubungkan"}
 	})
+}
+
+// localLookupTimeout bounds the name lookup of a host given to
+// mysql.connect or loaded with the stored account.
+const localLookupTimeout = 5 * time.Second
+
+// interfaceAddrs are this machine's interface addresses; tests replace it.
+var interfaceAddrs = net.InterfaceAddrs
+
+// errNotLocal refuses a MySQL that is not on this machine.
+type errNotLocal struct{ host string }
+
+func (e *errNotLocal) Error() string {
+	return fmt.Sprintf("MySQL yang disambungkan harus berada di server ini (soket, 127.0.0.1, atau alamat server ini "+
+		"sendiri); %s bukan alamat server ini.", e.host)
+}
+
+// localMySQL accepts host only for a MySQL on this machine: no host or
+// localhost (the socket, or 127.0.0.1 with a port: DSN), a loopback
+// address, an address of one of this machine's interfaces, or a name every
+// address of which is one of those. Anything else, and a name that does not
+// resolve, is errNotLocal.
+func localMySQL(ctx context.Context, host string) error {
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ips := []net.IP{net.ParseIP(host)}
+	if ips[0] == nil {
+		lctx, cancel := context.WithTimeout(ctx, localLookupTimeout)
+		ips, _ = lookupIP(lctx, host)
+		cancel()
+	}
+	if len(ips) == 0 {
+		return &errNotLocal{host: host}
+	}
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		return &errNotLocal{host: host}
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() {
+			continue
+		}
+		if !slices.ContainsFunc(addrs, func(a net.Addr) bool {
+			n, ok := a.(*net.IPNet)
+			return ok && n.IP.Equal(ip)
+		}) {
+			return &errNotLocal{host: host}
+		}
+	}
+	return nil
 }
 
 // normalizeParams validates p and fills the default host.

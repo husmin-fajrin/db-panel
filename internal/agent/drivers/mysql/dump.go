@@ -294,6 +294,9 @@ func storedAccount(creds CredentialStore) (proto.ConnectParams, error) {
 	if !ok {
 		return p, errNotConnected
 	}
+	if err := localMySQL(context.Background(), p.Host); err != nil {
+		return p, err
+	}
 	return p, nil
 }
 
