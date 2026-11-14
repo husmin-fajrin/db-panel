@@ -1,9 +1,11 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -414,6 +416,36 @@ func TestHostileApprovalCodeNeverReachesJob(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUnusableApprovalLogged: the panel's log names the fields of an
+// answer it rejected, quoted and cut, on one line (an admin diagnoses a
+// broken agent from it).
+func TestUnusableApprovalLogged(t *testing.T) {
+	e := newEnv(t)
+	var buf bytes.Buffer
+	e.r.log = slog.New(slog.NewTextHandler(&buf, nil))
+	fa := e.agent("db-old", "10.0.0.9")
+	res := unusableApprovals["approved with hostile code"]
+	res.Invalid = strings.Repeat("y", 500)
+	res.InvalidCode = "lain"
+	fa.reply("mysql.rebuildApproval", res)
+	if _, err := e.r.RebuildApproval(context.Background(), fa.id); err == nil {
+		t.Fatal("RebuildApproval answered no error")
+	}
+	out := buf.String()
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("log is not one line: %q", out)
+	}
+	for _, want := range []string{"rebuild approval answer not usable", `code=\"000000\\n\\nCATATAN PANEL`,
+		`source=\"10.0.0.1:3306\"`, `addr=\"10.0.0.1\"`, `invalid_code=\"lain\"`, "(dipotong)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q lacks %q", out, want)
+		}
+	}
+	if strings.Contains(out, strings.Repeat("y", 200)) {
+		t.Errorf("log did not cut the agent's text: %q", out)
 	}
 }
 

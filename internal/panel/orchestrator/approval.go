@@ -55,7 +55,8 @@ func (r *Runner) RebuildApproval(ctx context.Context, serverID int64) (proto.Reb
 		return proto.RebuildApprovalResult{}, err
 	}
 	if !RebuildApprovalUsable(res) {
-		r.log.Warn("rebuild approval answer not usable", "server_id", serverID, "required", res.Required, "approved", res.Approved)
+		r.log.Warn("rebuild approval answer not usable", "server_id", serverID, "required", res.Required, "approved", res.Approved,
+			"answer", rejectedFields(res))
 		return proto.RebuildApprovalResult{}, errApprovalUnreadable
 	}
 	return res, nil
@@ -125,6 +126,15 @@ func (r *Runner) localApprovalErr(ctx context.Context, serverID int64, err error
 	}
 	return stepError(fmt.Sprintf("Server %s dikarantina (quarantined): langkah ini butuh persetujuan di server itu. "+
 		"Jalankan di server itu sebagai root: sudo dbpanel agent approve %s, lalu klik Ulangi.", name, res.Code))
+}
+
+// rejectedFields is an unusable answer's text fields for the panel's log
+// (an admin diagnoses a broken agent from it): each quoted and cut.
+func rejectedFields(res proto.RebuildApprovalResult) string {
+	const n = 100
+	return fmt.Sprintf("code=%q source=%q addr=%q remaining_sec=%d invalid_code=%q invalid=%q",
+		truncate(res.Code, n), truncate(res.Source, n), truncate(res.Addr, n), res.RemainingSec,
+		truncate(res.InvalidCode, n), truncate(res.Invalid, n))
 }
 
 // errApprovalUnreadable is an answer to mysql.rebuildApproval the panel
