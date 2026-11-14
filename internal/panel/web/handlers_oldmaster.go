@@ -761,6 +761,7 @@ func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
 		res.Code = monitor.AgentText(res.Code, maxAgentWords)
 		res.Source = monitor.AgentText(res.Source, maxAgentWords)
 		res.Addr = monitor.AgentText(res.Addr, maxAgentWords)
+		res.RemainingSec = min(max(res.RemainingSec, 0), maxRemainingSec)
 		info.InvalidReason = orchestrator.InvalidReason(res)
 		res.Invalid, res.InvalidCode = "", ""
 		info.Approval = &res
@@ -779,6 +780,10 @@ func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
 		info.ApprovalErr = msgApprovalUnreadable
 	}
 }
+
+// maxRemainingSec bounds the agent's RemainingSec before the page counts
+// minutes and hours from it (P-8).
+const maxRemainingSec = 31 * 24 * 3600
 
 const msgApprovalUnreadable = "Persetujuan di server tidak bisa diperiksa sekarang; klik Periksa lagi."
 

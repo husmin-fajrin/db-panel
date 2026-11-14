@@ -135,7 +135,7 @@ var errApprovalUnreadable = errors.New("rebuild approval answer not usable")
 // RebuildApprovalUsable reports whether an agent's answer can be shown and
 // acted on: an approval names a source host:port and an IP address; a
 // request names a source host:port and a code of exactly six ASCII
-// digits (it goes into a command root runs). An answer that needs no
+// digits (it goes into a command root runs) and time left. An answer that needs no
 // approval, or holds one, carries no code: one that does is not usable
 // (P-1), whatever the code.
 func RebuildApprovalUsable(res proto.RebuildApprovalResult) bool {
@@ -153,7 +153,9 @@ func RebuildApprovalUsable(res proto.RebuildApprovalResult) bool {
 	if res.Approved {
 		return net.ParseIP(res.Addr) != nil
 	}
-	return validApprovalCode(res.Code)
+	// A request with no time left is not one root can approve: the agent
+	// makes a new one on the next read (P-8).
+	return validApprovalCode(res.Code) && res.RemainingSec > 0
 }
 
 func validApprovalCode(code string) bool {

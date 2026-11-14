@@ -304,6 +304,10 @@ var unusableApprovals = map[string]proto.RebuildApprovalResult{
 	"source long name":   {Required: true, Code: "123456", Source: strings.Repeat("abcdefghi.", 25) + "lann:3306", RemainingSec: 1700},
 	"source empty label": {Required: true, Code: "123456", Source: "db..lan:3306", RemainingSec: 1700},
 	"source underscore":  {Required: true, Code: "123456", Source: "db_baru:3306", RemainingSec: 1700},
+	// A request with no time left (P-8): the agent makes a new one on
+	// the next read.
+	"request no time left":  {Required: true, Code: "123456", Source: "10.0.0.1:3306"},
+	"request negative time": {Required: true, Code: "123456", Source: "10.0.0.1:3306", RemainingSec: -60},
 	// A field the answer's state does not use (P-1).
 	"not required with code":   {Code: hostileCode},
 	"not required with digits": {Code: "123456"},
