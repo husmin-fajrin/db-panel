@@ -46,6 +46,9 @@ func SetAfterStartLockOpen(f func(path string)) (restore func()) {
 	return func() { afterStartLockOpen = old }
 }
 
+// DefaultOpenLogFile is readTail's own opener for reading.
+var DefaultOpenLogFile = openLogFile
+
 // SetOpenLogFile replaces how readTail opens the error log after its
 // Lstat check; it returns the function that restores it.
 func SetOpenLogFile(f func(path string) (*os.File, error)) (restore func()) {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -377,30 +378,41 @@ func (d *Driver) sendRoundEvents() {
 	}
 }
 
-// openLogFile opens the error log readTail checked; tests replace it.
+// oPath is Linux's O_PATH (the same value on amd64 and arm64); package
+// syscall does not name it. An O_PATH open resolves the path and gives a
+// descriptor without opening the file itself, so no device's open runs.
+const oPath = 0x200000
+
+// openLogFile opens for reading the file readTail checked, by the
+// /proc/self/fd path of its O_PATH descriptor; tests replace it.
 var openLogFile = func(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 }
 
 // readTail is the last n bytes of the regular file at path. The error log
-// lives in a directory the mysql user owns and the guard runs as root: it
-// is opened without following a symlink and without blocking (a FIFO
-// planted there would otherwise hang the guard loop for good, with
-// promoteMu held), and read only when what was opened is a regular file
-// (SA-6). The path comes from the service account's option files, so it is
-// checked with Lstat first and only a regular file is opened at all:
-// opening a device node can have effects (a watchdog is armed by an open).
-// What was opened must still be a regular file and the same file as the
-// one checked.
+// lives in a directory the mysql user owns and the guard runs as root:
+// SA-6, and the path comes from the service account's option files. The
+// path is resolved once, with O_PATH|O_NOFOLLOW (a symlink as the last
+// part is refused; a device is never opened: arming a watchdog takes an
+// open), and only a regular file is then opened for reading, through that
+// descriptor (/proc/self/fd), so a directory on the path swapped for a
+// symlink afterwards changes nothing. The file opened must be the same
+// regular file; any failure, /proc missing included, is unreadable.
 func readTail(path string, n int64) ([]byte, error) {
-	checked, err := os.Lstat(path)
+	fd, err := syscall.Open(path, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	pf := os.NewFile(uintptr(fd), path)
+	defer pf.Close()
+	checked, err := pf.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !checked.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s bukan berkas biasa", path)
 	}
-	f, err := openLogFile(path)
+	f, err := openLogFile("/proc/self/fd/" + strconv.Itoa(fd))
 	if err != nil {
 		return nil, err
 	}

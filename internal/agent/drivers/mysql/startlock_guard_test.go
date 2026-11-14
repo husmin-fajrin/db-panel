@@ -456,22 +456,35 @@ func TestReadTailOnlyRegularFiles(t *testing.T) {
 	}
 }
 
-// TestReadTailNeverOpensDevice: an error log path that names a device
-// node (log_error comes from the MySQL service account's option files and
-// root opens it) is refused by its Lstat before any open: opening some
-// devices (a watchdog) has effects. Proved with the open seam, which must
-// never be called for it; a regular file still goes through the seam.
-func TestReadTailNeverOpensDevice(t *testing.T) {
+// readOpens records every path readTail opens for reading through the
+// open seam (the default opener does the opening).
+func readOpens(t *testing.T, before func(path string)) *[]string {
 	var opened []string
 	t.Cleanup(mysql.SetOpenLogFile(func(path string) (*os.File, error) {
+		if before != nil {
+			before(path)
+		}
 		opened = append(opened, path)
-		return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+		if fi, err := os.Stat(path); err == nil && !fi.Mode().IsRegular() {
+			t.Errorf("opened for reading: %s (%v)", path, fi.Mode())
+		}
+		return mysql.DefaultOpenLogFile(path)
 	}))
+	return &opened
+}
+
+// TestReadTailNeverOpensDevice: an error log path that names a device
+// node (log_error comes from the MySQL service account's option files and
+// root opens it) is never opened for reading: opening some devices (a
+// watchdog) has effects. Proved with the open seam, which must never be
+// called for it; a regular file is still read through the seam.
+func TestReadTailNeverOpensDevice(t *testing.T) {
+	opened := readOpens(t, nil)
 	if b, err := mysql.ReadTail("/dev/null", 1024); err == nil {
 		t.Errorf("ReadTail(/dev/null) = %q, want refused", b)
 	}
-	if len(opened) != 0 {
-		t.Errorf("a device node was opened: %q", opened)
+	if len(*opened) != 0 {
+		t.Errorf("a device node was opened: %q", *opened)
 	}
 	regular := filepath.Join(t.TempDir(), "error.log")
 	if err := os.WriteFile(regular, []byte("baris\n"), 0o644); err != nil {
@@ -480,30 +493,81 @@ func TestReadTailNeverOpensDevice(t *testing.T) {
 	if b, err := mysql.ReadTail(regular, 1024); err != nil || string(b) != "baris\n" {
 		t.Errorf("ReadTail(regular) = %q, %v", b, err)
 	}
-	if len(opened) != 1 || opened[0] != regular {
-		t.Errorf("opened = %q, want only the regular file", opened)
+	if len(*opened) != 1 {
+		t.Errorf("opened = %q, want the regular file once", *opened)
 	}
 }
 
-// TestReadTailRefusesSwappedFile: a path replaced between the check and
-// the open (another file put in its place) is not read: the opened file
-// must be the one that was checked.
-func TestReadTailRefusesSwappedFile(t *testing.T) {
-	dir := t.TempDir()
-	path, other := filepath.Join(dir, "error.log"), filepath.Join(dir, "other.log")
-	for _, p := range []string{path, other} {
-		if err := os.WriteFile(p, []byte(p+"\n"), 0o644); err != nil {
+// swapRig is an error log at <dir>/d/error.log, a regular file, and a
+// directory <dir>/evil whose error.log is a FIFO.
+func swapRig(t *testing.T) (dir, path string) {
+	dir = t.TempDir()
+	for _, d := range []string{"d", "evil"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(mysql.SetOpenLogFile(func(p string) (*os.File, error) {
-		if err := os.Rename(other, p); err != nil {
-			t.Fatal(err)
-		}
-		return os.Open(p)
-	}))
+	path = filepath.Join(dir, "d", "error.log")
+	if err := os.WriteFile(path, []byte("asli\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "evil", "error.log"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir, path
+}
+
+// swapDir replaces <dir>/d by a symlink to target.
+func swapDir(t *testing.T, dir, target string) {
+	if err := os.Rename(filepath.Join(dir, "d"), filepath.Join(dir, "d.old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "d")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReadTailDirectorySwappedForSymlink (re-review C-5): a directory on
+// the log path that is a symlink to a directory holding a FIFO, or to
+// /dev, is refused without opening anything for reading.
+func TestReadTailDirectorySwappedForSymlink(t *testing.T) {
+	opened := readOpens(t, nil)
+	dir, path := swapRig(t)
+	swapDir(t, dir, filepath.Join(dir, "evil"))
 	if b, err := mysql.ReadTail(path, 1024); err == nil {
-		t.Errorf("ReadTail of a swapped file = %q, want refused", b)
+		t.Errorf("ReadTail through a symlinked directory to a FIFO = %q, want refused", b)
+	}
+	dev := filepath.Join(t.TempDir(), "devlink")
+	if err := os.Symlink("/dev", dev); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := mysql.ReadTail(filepath.Join(dev, "null"), 1024); err == nil {
+		t.Errorf("ReadTail through a symlink to /dev = %q, want refused", b)
+	}
+	if len(*opened) != 0 {
+		t.Errorf("opened for reading: %q", *opened)
+	}
+}
+
+// TestReadTailSwapBetweenCheckAndRead (re-review C-5, the remaining
+// race): the directory is swapped for a symlink to a directory holding a
+// FIFO after the file was checked and before it is opened for reading.
+// What is read is the file that was checked; the FIFO is never opened.
+func TestReadTailSwapBetweenCheckAndRead(t *testing.T) {
+	dir, path := swapRig(t)
+	swapped := false
+	opened := readOpens(t, func(string) {
+		if !swapped {
+			swapped = true
+			swapDir(t, dir, filepath.Join(dir, "evil"))
+		}
+	})
+	b, err := mysql.ReadTail(path, 1024)
+	if err == nil && string(b) != "asli\n" {
+		t.Errorf("ReadTail after the swap = %q, want the checked file's content or a refusal", b)
+	}
+	if !swapped || len(*opened) != 1 {
+		t.Errorf("opened = %q (swapped %v)", *opened, swapped)
 	}
 }
 
