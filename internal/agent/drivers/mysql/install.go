@@ -134,6 +134,9 @@ func (d *Driver) registerInstall(reg *commands.Registry) {
 		if _, ok := installSeries[p.Series]; !ok {
 			return nil, &commands.ParamError{Msg: fmt.Sprintf("seri MySQL harus 8.0, 8.4 atau 9, bukan %q", p.Series)}
 		}
+		if err := d.allow("mysql.install", p); err != nil {
+			return nil, err
+		}
 		switch {
 		case d.Sys == nil:
 			return nil, errors.New("agent tidak bisa memasang MySQL di server ini")

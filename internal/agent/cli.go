@@ -473,6 +473,7 @@ func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Persetujuan bangun ulang (rebuild) server ini\n\nServer ini  : %s\nPeran       : dikarantina (quarantined)\nSumber data : %s\nAlamat IP   : %s\n", name, source, addr)
 	fmt.Fprint(stdout, `
 Bila disetujui, SEMUA data MySQL di server ini dibuang dan diganti salinan dari sumber di atas. Data yang dibuang tidak bisa dikembalikan.
+Selama persetujuan berlaku (24 jam), panel juga boleh mengubah pengaturan replikasi, akun replikasi, pengaturan dan sertifikat MySQL di server ini, dan memulai ulang MySQL.
 Pastikan nama dan alamat IP di atas memang master baru Anda, yaitu server yang sekarang dipakai aplikasi.
 Bila promote tadi promote darurat, jalankan dulu "Periksa data tertinggal" (dan "Amankan data tertinggal" bila ada) di halaman server ini di panel.
 Persetujuan berlaku 24 jam, hanya untuk sumber di atas.

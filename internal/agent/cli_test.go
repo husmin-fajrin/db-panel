@@ -1055,7 +1055,10 @@ func TestCLIApprove(t *testing.T) {
 		}
 		last := -1
 		for _, want := range []string{"Server ini  : db-lama", "Sumber data : 127.0.0.1:3306", "Alamat IP   : 127.0.0.1",
-			"SEMUA data MySQL di server ini dibuang", "Periksa data tertinggal", "Ketik ya"} {
+			"SEMUA data MySQL di server ini dibuang",
+			"Data yang dibuang tidak bisa dikembalikan.\nSelama persetujuan berlaku (24 jam), panel juga boleh mengubah " +
+				"pengaturan replikasi, akun replikasi, pengaturan dan sertifikat MySQL di server ini, dan memulai ulang MySQL.\n",
+			"Periksa data tertinggal", "Ketik ya"} {
 			i := strings.Index(out, want)
 			if i < 0 || i < last {
 				t.Fatalf("stdout lacks %q in order: %q", want, out)

@@ -78,7 +78,8 @@ var strictCommands = map[string]strictClass{
 	"mysql.resetReplica":         strictProtected,
 	"mysql.configure":            strictProtected,
 	"mysql.restart":              strictProtected,
-	"mysql.install":              strictProtected,
+	// No rebuild installs MySQL on an old master (it has one).
+	"mysql.install": strictRoleRefused,
 	// Accounts (the agent's own sweep calls the driver, not the registry).
 	"mysql.createReplUser": strictProtected,
 	"mysql.createDumpUser": strictProtected,
@@ -118,7 +119,7 @@ func StrictClassNames() map[string]string {
 // to the role table runs only under root's valid approval. Without one the
 // answer is needs_local_approval with the request's code, made here.
 // While the pin files cannot be read only the allowed commands pass (some
-// handlers, mysql.install and mysql.sweepDumpUsers, never ask the pins).
+// handlers, such as mysql.sweepDumpUsers, never ask the pins).
 func (d *Driver) strictGate(ctx context.Context, cmd string) error {
 	role, err := d.pins.roleErr()
 	if err != nil {

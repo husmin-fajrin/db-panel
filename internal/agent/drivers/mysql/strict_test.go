@@ -35,7 +35,6 @@ var protectedCases = []pinCase{
 	{"mysql.resetReplica", nil},
 	{"mysql.configure", proto.ConfigureParams{Role: "replica"}},
 	{"mysql.restart", nil},
-	{"mysql.install", proto.InstallParams{Series: "8.4"}},
 	{"mysql.createReplUser", proto.ReplUserParams{User: "dbpanel_repl", Password: "rahasia"}},
 	{"mysql.createDumpUser", proto.DumpUserParams{User: "dbpanel_dump_0123abcd", FromHost: "10.0.0.2", Password: "rahasia"}},
 	{"mysql.dropUser", proto.DropUserParams{User: "dbpanel_dump_0123abcd", FromHost: "10.0.0.2"}},
@@ -186,6 +185,27 @@ func TestStrictApprovalOpensRebuildPath(t *testing.T) {
 	other.Host = "10.0.0.2"
 	wantRefused(t, "dumpFrom another host", r.dispatch("mysql.dumpFrom", other),
 		"server ini dipin mengikuti sumber "+strictSource)
+}
+
+// TestQuarantinedApprovalLimits: an approval never opens mysql.install on
+// a quarantined server (no rebuild installs MySQL on an old master), and
+// under it mysql.dropUser drops only the per-job dump accounts, as on a
+// master.
+func TestQuarantinedApprovalLimits(t *testing.T) {
+	dir := pinDir(t, "quarantined", strictSource)
+	r := newPinRig(t, nil, dir)
+	install := proto.InstallParams{Series: "8.4"}
+	wantRefused(t, "install without an approval", r.dispatch("mysql.install", install),
+		"server ini dipin sebagai quarantined", "perintah mysql.install ditolak")
+	approveRebuild(t, dir, strictSource)
+	wantRefused(t, "install with an approval", r.dispatch("mysql.install", install),
+		"server ini dipin sebagai quarantined", "perintah mysql.install ditolak")
+	for _, u := range []proto.DropUserParams{{User: "dbpanel_repl", FromHost: "%"}, {User: "dbpanel_admin", FromHost: "localhost"}} {
+		wantRefused(t, "dropUser "+u.User, r.dispatch("mysql.dropUser", u),
+			"server ini dipin sebagai quarantined", "perintah mysql.dropUser ditolak")
+	}
+	wantPastPins(t, "dropUser of a dump account", r.dispatch("mysql.dropUser",
+		proto.DropUserParams{User: "dbpanel_dump_0123abcd", FromHost: "10.0.0.2"}))
 }
 
 // TestStrictApprovalVoidedBySourceDNSExpiryAndSetRole: an approval holds

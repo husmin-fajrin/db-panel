@@ -82,7 +82,8 @@ var dumpAccountRe = regexp.MustCompile(`^dbpanel_dump_[0-9a-f]{8}$`)
 // roleRefuses is the refusal table of spec 5.5: per pinned role, the
 // commands refused whatever their parameters, plus the parameter-dependent
 // rules in refusedByRole (configure's role, setReadOnly's direction, on a
-// master every dropUser but a per-job dump account's and every
+// master or quarantined server every dropUser but a per-job dump
+// account's, on a master every
 // createDumpUser but a per-job dump account from one IP address, and on a
 // master, replica or quarantined server every createReplUser but the
 // replication account's, mysql.promote and mysql.repoint anywhere but on
@@ -119,6 +120,8 @@ var roleRefuses = map[string]map[string]bool{
 		// Only a finished rebuild or root on the host ends a quarantine.
 		"mysql.releaseRole":   true,
 		"mysql.unlockPromote": true,
+		// An approval is for a rebuild, which never installs MySQL.
+		"mysql.install": true,
 	},
 }
 
@@ -887,8 +890,9 @@ func refusedByRole(role, cmd string, params any) (bool, error) {
 			return false, fmt.Errorf("pins: %s with %T", cmd, params)
 		}
 		// The replication account (and any other) stays: dropping it would
-		// cut every replica off.
-		return role == roleMaster && !strings.HasPrefix(u.User, dumpUserPrefix), nil
+		// cut every replica off. A quarantined server, whose approval is for
+		// a rebuild, keeps them the same way.
+		return (role == roleMaster || role == roleQuarantined) && !strings.HasPrefix(u.User, dumpUserPrefix), nil
 	case "mysql.createDumpUser":
 		u, ok := params.(proto.DumpUserParams)
 		if !ok {
