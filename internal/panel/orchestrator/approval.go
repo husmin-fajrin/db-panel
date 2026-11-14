@@ -113,7 +113,9 @@ func (r *Runner) localApprovalErr(ctx context.Context, serverID int64, err error
 	}
 	name := r.nameOf(serverID)
 	res, rerr := r.RebuildApproval(ctx, serverID)
-	if rerr != nil || res.Code == "" {
+	// A code only from a request (RebuildApproval let through only a
+	// usable answer: its code is six ASCII digits).
+	if rerr != nil || !res.Required || res.Approved || !validApprovalCode(res.Code) {
 		r.log.Warn("needs local approval; code not readable", "server_id", serverID, "err", logErr(rerr))
 		return stepError(fmt.Sprintf("Server %s dikarantina (quarantined): langkah ini butuh persetujuan di server itu. "+
 			"Buka form Bangun ulang sebagai replika, klik Periksa lagi, jalankan perintah yang ditampilkan di server itu, "+
@@ -132,8 +134,14 @@ var errApprovalUnreadable = errors.New("rebuild approval answer not usable")
 // acted on: an approval names a source host:port and an IP address; a
 // request names a source host:port and a code of exactly six ASCII
 // digits (it goes into a command root runs). An answer that needs no
-// approval is usable as it is.
+// approval, or holds one, carries no code: one that does is not usable
+// (P-1), whatever the code.
 func RebuildApprovalUsable(res proto.RebuildApprovalResult) bool {
+	if !res.Required || res.Approved {
+		if res.Code != "" {
+			return false
+		}
+	}
 	if !res.Required {
 		return true
 	}
