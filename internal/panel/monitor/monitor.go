@@ -365,8 +365,11 @@ func (m *Monitor) configure(ctx context.Context, id int64) {
 		m.log.Warn("monitor.configure: read server", "server_id", id, "err", err)
 		return
 	}
+	// The hint only lets an agent pin a role it has none for (Bootstrap):
+	// "" pins nothing. A quarantined server gets "" too, which every agent
+	// version accepts (an older one refuses "quarantined").
 	hint := srv.Role
-	if hint == store.RoleUnassigned {
+	if hint == store.RoleUnassigned || hint == store.RoleQuarantined {
 		hint = ""
 	}
 	m.mu.Lock()

@@ -330,6 +330,21 @@ func replicaSnap(received string) proto.HealthSnapshot {
 	return s
 }
 
+// TestConfigureQuarantinedSendsNoHint: a quarantined server gets the
+// panel's intervals with an empty role hint, which every agent version
+// accepts (an older one refuses "quarantined"); "" never pins a role.
+func TestConfigureQuarantinedSendsNoHint(t *testing.T) {
+	r := newRig(t)
+	id := r.server("db-old")
+	if err := r.st.SetServerRole(id, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	a := r.agent(id, true, masterSnap(srcUUID+":1-100")).attach()
+	if p := a.lastConfig(); p != (proto.MonitorConfigureParams{CheckEverySec: 15, SummaryEverySec: 120, LagThresholdSec: 60}) {
+		t.Fatalf("quarantined configure params = %+v, want no role hint", p)
+	}
+}
+
 func TestSnapshotStoredAndStatusDerived(t *testing.T) {
 	r := newRig(t)
 	mID, topo := r.master("db-master")
