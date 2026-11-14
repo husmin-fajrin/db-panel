@@ -1056,12 +1056,12 @@ func TestE2EPromotePlanned(t *testing.T) {
 	// Acknowledged but not approved by root on the old master: it stops
 	// at the approval and names the command to run there (spec 5.13).
 	form, vals = e.replicaForm(t, ra, m, true)
-	if !strings.Contains(form, "Persetujuan di server") || !rebuildButtonDisabled.MatchString(form) {
+	if !strings.Contains(form, "Persetujuan di server") || !rebuildButtonDisabled(form) {
 		t.Fatalf("rebuild form before the approval lacks the box or enables the button:\n%s", textOf(form))
 	}
 	vals.Set("accept_connections", "1")
 	status, body = ui.post(fmt.Sprintf("/masters/%d/replicas", ra.srv()), vals)
-	if status == http.StatusSeeOther || !strings.Contains(body, "sudo dbpanel agent approve ") {
+	if status != http.StatusBadRequest || !strings.Contains(textOf(body), "butuh persetujuan di server itu") {
 		t.Fatalf("rebuild without the approval = %d:\n%s", status, textOf(body))
 	}
 	if j, busy, err := p.Store.ActiveJobForServer(m.srv()); err != nil || busy {

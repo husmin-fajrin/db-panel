@@ -490,7 +490,7 @@ func tightenStepNames(replicaNames []string) []string {
 // master's certificate, then each replica's certificate and its
 // replication pointed at the master again with verification. It refuses a
 // server that is not a master and a topology whose master or a replica has
-// an unfinished job.
+// an unfinished job. A quarantined server with a replica row is left out.
 func (r *Runner) StartTightenTLS(ctx context.Context, masterServerID int64) (string, error) {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -518,6 +518,12 @@ func (r *Runner) StartTightenTLS(ctx context.Context, masterServerID int64) (str
 		rs, err := r.d.Store.GetServer(rep.ServerID)
 		if err != nil {
 			return "", err
+		}
+		// A quarantined old master (its rebuild failed) gets no
+		// certificate: its agent needs root's approval for it.
+		if rs.Role == store.RoleQuarantined {
+			r.log.Info("tighten tls: quarantined server left out", "server_id", rs.ID)
+			continue
 		}
 		if err := r.refuseBusy(rep.ServerID, "replika "+rs.Name); err != nil {
 			return "", err
@@ -774,4 +780,20 @@ func (st jobState) tightenReplicaAt(idx int) (serverID int64, repoint, ok bool) 
 		return 0, false, false
 	}
 	return st.TightenReplicas[i], idx%2 == 0, true
+}
+
+// refuseQuarantinedTLS refuses running a mysql_tls job again on a server
+// that is quarantined now (P15).
+func (r *Runner) refuseQuarantinedTLS(j store.Job) error {
+	if j.Kind != KindMySQLTLS {
+		return nil
+	}
+	srv, err := r.d.Store.GetServer(j.ServerID)
+	if err != nil {
+		return err
+	}
+	if srv.Role == store.RoleQuarantined {
+		return errMySQLTLSQuarantined
+	}
+	return nil
 }

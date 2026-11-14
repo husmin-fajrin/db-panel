@@ -102,6 +102,7 @@
 
     {{with .Rebuild}}{{template "accept-connections" .}}{{end}}
 
+    {{with .Rebuild}}{{if not .ApprovalOK}}<p class="text-sm text-warning-text">Tombol ini aktif setelah bangun ulang disetujui di server; lihat kotak Persetujuan di server di atas.</p>{{end}}{{end}}
     <div class="card-actions justify-between">
       <a href="/masters/{{.Master.ID}}" class="btn btn-ghost">Batal</a>
       {{with .Rebuild}}

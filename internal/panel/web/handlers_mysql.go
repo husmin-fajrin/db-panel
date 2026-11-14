@@ -736,6 +736,11 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		a.Logger.Warn("create replica refused", "master", master.ID, "target", p.Target, "err", logErr(err))
+		// The box on the page with the refusal is read again, so both say
+		// the same moment.
+		if errors.Is(err, orchestrator.ErrRebuildNeedsApproval) && p.Rebuild != nil {
+			a.rebuildApproval(r.Context(), p.Rebuild)
+		}
 		fail(shownError(err))
 		return
 	}

@@ -270,3 +270,139 @@ func TestTLSSkipsQuarantined(t *testing.T) {
 		t.Fatal("a quarantined server was asked for a certificate request")
 	}
 }
+
+// unusableApprovals are answers the panel cannot make sense of: a code
+// that is not six ASCII digits, or a source or address that does not
+// parse. None of their values may reach a page, an error or a job.
+var unusableApprovals = map[string]proto.RebuildApprovalResult{
+	"hostile code":       {Required: true, Code: "123456 && rm", Source: "10.0.0.1:3306", RemainingSec: 1700},
+	"seven digits":       {Required: true, Code: "1234567", Source: "10.0.0.1:3306", RemainingSec: 1700},
+	"non-ASCII digits":   {Required: true, Code: "١٢٣٤٥٦", Source: "10.0.0.1:3306", RemainingSec: 1700},
+	"empty code":         {Required: true, Source: "10.0.0.1:3306", RemainingSec: 1700},
+	"request bad source": {Required: true, Code: "123456", Source: "sumber-aneh", RemainingSec: 1700},
+	"approved no source": {Required: true, Approved: true, Addr: "10.0.0.1", RemainingSec: 86000},
+	"approved bad addr":  {Required: true, Approved: true, Source: "10.0.0.1:3306", Addr: "bukan-ip", RemainingSec: 86000},
+}
+
+// TestRebuildApprovalUnusableAnswers: such an answer is "cannot be read":
+// the start is refused with P10b (no code), a job's refusal is P12b, and
+// an "approved" the panel cannot make sense of never lets a rebuild run.
+func TestRebuildApprovalUnusableAnswers(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	const p10b = "Bangun ulang db-master butuh persetujuan di server itu, tetapi kodenya tidak bisa dibaca dari agent. " +
+		"Buka form Bangun ulang sebagai replika dan klik Periksa lagi."
+	const p12b = "Server db-master dikarantina (quarantined): langkah ini butuh persetujuan di server itu. Buka form Bangun ulang " +
+		"sebagai replika, klik Periksa lagi, jalankan perintah yang ditampilkan di server itu, lalu klik Ulangi."
+	jr := &jobRun{r: e.r, steps: []step{{title: "Langkah"}}}
+	g.m.failCode("mysql.stopReplica", "butuh persetujuan")
+	for name, res := range unusableApprovals {
+		g.m.reply("mysql.rebuildApproval", res)
+		if RebuildApprovalUsable(res) {
+			t.Errorf("%s: usable", name)
+		}
+		_, err := g.startRebuild()
+		if !errors.Is(err, ErrRebuildNeedsApproval) || err.Error() != p10b {
+			t.Errorf("%s: StartCreateReplica = %v, want P10b", name, err)
+		}
+		noRebuildStarted(t, g)
+		if err := jr.call(context.Background(), g.m.id, "mysql.stopReplica", nil, nil); err == nil || err.Error() != p12b {
+			t.Errorf("%s: mid-job refusal = %v, want P12b", name, err)
+		}
+		if _, err := e.r.RebuildApproval(context.Background(), g.m.id); err == nil {
+			t.Errorf("%s: RebuildApproval answered no error", name)
+		}
+	}
+
+	// Retry: the same refusal, the job stays failed.
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	g.m.fail("mysql.preflight", "pemeriksaan gagal")
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	g.m.reply("mysql.rebuildApproval", unusableApprovals["hostile code"])
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err == nil || err.Error() != p10b {
+		t.Fatalf("Retry = %v, want P10b", err)
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed || strings.Contains(j.Error, "rm") {
+		t.Fatalf("job after a refused retry = %+v", j)
+	}
+}
+
+// TestRebuildApprovalUsable: well-formed answers pass the check.
+func TestRebuildApprovalUsable(t *testing.T) {
+	for _, res := range []proto.RebuildApprovalResult{
+		{},
+		{Required: true, Code: "012345", Source: "db-baru.lan:3306", RemainingSec: 1700},
+		{Required: true, Approved: true, Source: "[fd00::1]:3306", Addr: "fd00::1", RemainingSec: 86000, AgeSec: 60},
+		{Required: true, Approved: true, Source: "10.0.0.1:3306", Addr: "10.0.0.1"},
+	} {
+		if !RebuildApprovalUsable(res) {
+			t.Errorf("%+v not usable", res)
+		}
+	}
+}
+
+// TestTightenTLSLeavesOutQuarantined: a quarantined server with a replica
+// row (its rebuild failed) gets no tighten steps and no TLS command.
+func TestTightenTLSLeavesOutQuarantined(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	e.followingReplica(topo, "a")
+	q := e.agent("db-old", "10.0.0.9")
+	if _, err := e.st.AddReplica(topo.ID, q.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(q.id, store.ReplicaFailed, "gagal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetServerRole(q.id, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	id, err := e.r.StartTightenTLS(context.Background(), m.id)
+	if err != nil {
+		t.Fatalf("StartTightenTLS: %v", err)
+	}
+	_, steps := e.waitJob(id, store.JobSucceeded)
+	if got, want := stepNames(steps), []string{"Pasang sertifikat di master", "Pasang sertifikat di replica1",
+		"Arahkan ulang replica1 dengan verifikasi"}; !slices.Equal(got, want) {
+		t.Fatalf("steps = %q, want %q", got, want)
+	}
+	if st := e.storedState(id); slices.Contains(st.TightenReplicas, q.id) {
+		t.Fatalf("tighten replicas %v hold the quarantined server", st.TightenReplicas)
+	}
+	if n := len(q.cmds(0)); n != 0 {
+		t.Fatalf("the quarantined server got %v", q.cmds(0))
+	}
+}
+
+// TestRetryMySQLTLSRefusedWhenQuarantined: a mysql_tls job that failed
+// before its server was quarantined is not retried (P15).
+func TestRetryMySQLTLSRefusedWhenQuarantined(t *testing.T) {
+	e := newEnv(t)
+	q := e.connectedMaster("db-old")
+	const id = "4444444444444444444444444444444a"
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: KindMySQLTLS, ServerID: q.id, ParamsJSON: "{}", CreatedAt: time.Now()},
+		mysqlTLSStepNames()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobFailed, 0, "gagal", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetServerRole(q.id, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	err := e.r.Retry(id, JobAck{})
+	if err == nil || err.Error() != "Server ini dikarantina (quarantined); sertifikat MySQL-nya dipasang lagi saat dibangun ulang sebagai replika." {
+		t.Fatalf("Retry = %v, want P15", err)
+	}
+	if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+		t.Fatalf("job after a refused retry = %+v", j)
+	}
+	if n := len(q.cmds(0)); n != 0 {
+		t.Fatalf("the quarantined server got %v", q.cmds(0))
+	}
+}

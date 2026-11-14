@@ -928,7 +928,8 @@ func TestPromoteNewMasterReadyForReplicas(t *testing.T) {
 	}
 	g.m.reply("mysql.connections", proto.ConnectionsResult{Typed: true})
 	// Root on the old master approved its rebuild.
-	g.m.reply("mysql.rebuildApproval", proto.RebuildApprovalResult{Required: true, Approved: true})
+	g.m.reply("mysql.rebuildApproval", proto.RebuildApprovalResult{Required: true, Approved: true,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2"})
 	rebuildID, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
 		RebuildOldMaster: true})
 	if err != nil {

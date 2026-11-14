@@ -757,9 +757,16 @@ func (e *e2ePromoteTopology) createReplica(t *testing.T, master, target *e2eNode
 	return id
 }
 
-// rebuildButtonDisabled is the rebuild form's button while it may not be
-// pressed.
-var rebuildButtonDisabled = regexp.MustCompile(`<button type="submit" class="btn btn-error" disabled data-confirm-action="rebuild_old_master"`)
+// rebuildButtonRe is the rebuild form's submit button, whatever the order
+// of its other attributes.
+var rebuildButtonRe = regexp.MustCompile(`<button type="submit" class="btn btn-error"[^>]*data-confirm-action="rebuild_old_master"[^>]*>`)
+
+// rebuildButtonDisabled reports whether form has the rebuild button and
+// it is disabled.
+func rebuildButtonDisabled(form string) bool {
+	b := rebuildButtonRe.FindString(form)
+	return b != "" && strings.Contains(b, " disabled")
+}
 
 // approveCodeRe finds the command the rebuild form's box "Persetujuan di
 // server" tells root to run, and its code.

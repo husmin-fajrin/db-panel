@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -31,7 +33,9 @@ func (e rebuildApprovalError) Is(target error) bool { return target == ErrRebuil
 // its rebuild needs root's approval and whether it has one; while it has
 // none the agent keeps a request whose code root approves. An agent
 // without the command: AgentNeedsUpgrade and an outdatedAgentError
-// (errors.Is ErrAgentOutdated) saying the rebuild is refused.
+// (errors.Is ErrAgentOutdated) saying the rebuild is refused. An answer
+// that is not RebuildApprovalUsable is errApprovalUnreadable, so no
+// caller sees its values.
 func (r *Runner) RebuildApproval(ctx context.Context, serverID int64) (proto.RebuildApprovalResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, directReadTimeout)
 	defer cancel()
@@ -48,6 +52,10 @@ func (r *Runner) RebuildApproval(ctx context.Context, serverID int64) (proto.Reb
 	if err != nil {
 		return proto.RebuildApprovalResult{}, err
 	}
+	if !RebuildApprovalUsable(res) {
+		r.log.Warn("rebuild approval answer not usable", "server_id", serverID, "required", res.Required, "approved", res.Approved)
+		return proto.RebuildApprovalResult{}, errApprovalUnreadable
+	}
 	return res, nil
 }
 
@@ -56,6 +64,10 @@ func (r *Runner) RebuildApproval(ctx context.Context, serverID int64) (proto.Reb
 // the command to run there with the agent's code.
 func (r *Runner) requireRebuildApproval(ctx context.Context, serverID int64) (proto.RebuildApprovalResult, error) {
 	res, err := r.RebuildApproval(ctx, serverID)
+	if errors.Is(err, errApprovalUnreadable) {
+		return res, rebuildApprovalError{fmt.Sprintf("Bangun ulang %s butuh persetujuan di server itu, tetapi kodenya tidak "+
+			"bisa dibaca dari agent. Buka form Bangun ulang sebagai replika dan klik Periksa lagi.", r.nameOf(serverID))}
+	}
 	if err != nil {
 		return res, err
 	}
@@ -109,4 +121,48 @@ func (r *Runner) localApprovalErr(ctx context.Context, serverID int64, err error
 	}
 	return stepError(fmt.Sprintf("Server %s dikarantina (quarantined): langkah ini butuh persetujuan di server itu. "+
 		"Jalankan di server itu sebagai root: sudo dbpanel agent approve %s, lalu klik Ulangi.", name, res.Code))
+}
+
+// errApprovalUnreadable is an answer to mysql.rebuildApproval the panel
+// cannot make sense of (see RebuildApprovalUsable): treated as one that
+// could not be read, never shown or acted on.
+var errApprovalUnreadable = errors.New("rebuild approval answer not usable")
+
+// RebuildApprovalUsable reports whether an agent's answer can be shown and
+// acted on: an approval names a source host:port and an IP address; a
+// request names a source host:port and a code of exactly six ASCII
+// digits (it goes into a command root runs). An answer that needs no
+// approval is usable as it is.
+func RebuildApprovalUsable(res proto.RebuildApprovalResult) bool {
+	if !res.Required {
+		return true
+	}
+	if !validApprovalSource(res.Source) {
+		return false
+	}
+	if res.Approved {
+		return net.ParseIP(res.Addr) != nil
+	}
+	return validApprovalCode(res.Code)
+}
+
+func validApprovalCode(code string) bool {
+	if len(code) != 6 {
+		return false
+	}
+	for i := 0; i < len(code); i++ {
+		if code[i] < '0' || code[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validApprovalSource(source string) bool {
+	host, port, err := net.SplitHostPort(source)
+	if err != nil || host == "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
 }

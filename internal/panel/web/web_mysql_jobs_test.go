@@ -85,6 +85,8 @@ type fakeOrch struct {
 	approval      proto.RebuildApprovalResult
 	approvalErr   error
 	approvalCalls int
+	// onStart runs in StartCreateReplica before it answers.
+	onStart func()
 }
 
 func (f *fakeOrch) record(call string) {
@@ -149,7 +151,11 @@ func (f *fakeOrch) StartCreateReplica(_ context.Context, p orchestrator.CreateRe
 	f.record(fmt.Sprintf("create-replica %d->%d", p.MasterServerID, p.TargetServerID))
 	f.mu.Lock()
 	f.replicas = append(f.replicas, p)
+	onStart := f.onStart
 	f.mu.Unlock()
+	if onStart != nil {
+		onStart()
+	}
 	if f.err != nil {
 		return "", f.err
 	}

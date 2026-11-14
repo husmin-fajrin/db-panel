@@ -731,6 +731,7 @@ func (i *rebuildInfo) ApprovalHourMinutes() int64 {
 // rebuildApproval fills info's approval from srv's agent; an offline
 // agent is not asked.
 func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
+	info.Approval, info.ApprovalErr, info.ApprovalOK = nil, "", false
 	srv := info.Server
 	offline := fmt.Sprintf("Persetujuan di server tidak bisa diperiksa: agent %s offline.", srv.Name)
 	if !srv.Paired || !a.Hub.IsOnline(srv.ID) {
@@ -744,6 +745,10 @@ func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
 		a.Logger.Warn("read rebuild approval", "server", srv.ID, "err", logErr(err))
 	}
 	switch {
+	case err == nil && !orchestrator.RebuildApprovalUsable(res):
+		// The orchestrator checks this too; the page never shows a code
+		// or source it cannot make sense of.
+		info.ApprovalErr = msgApprovalUnreadable
 	case err == nil:
 		// The agent's words, shown bounded (SP-11).
 		res.Code = monitor.AgentText(res.Code, maxAgentWords)
@@ -762,9 +767,11 @@ func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
 		// or why its pin files cannot be used).
 		info.ApprovalErr = monitor.AgentText(err.Error(), maxAgentWords)
 	default:
-		info.ApprovalErr = "Persetujuan di server tidak bisa diperiksa sekarang; klik Periksa lagi."
+		info.ApprovalErr = msgApprovalUnreadable
 	}
 }
+
+const msgApprovalUnreadable = "Persetujuan di server tidak bisa diperiksa sekarang; klik Periksa lagi."
 
 // localApprovalDetail adds to an audit detail the approval root holds on
 // serverID now: "local_approval" (false when it cannot be read) and

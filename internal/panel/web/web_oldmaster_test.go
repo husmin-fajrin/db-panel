@@ -1002,6 +1002,8 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 		box     = "Persetujuan di server"
 		why     = "Bangun ulang membuang semua data MySQL di server ini. Persetujuan di server memastikan orang yang memegang server itu melihat dari mana data penggantinya diambil, sehingga panel saja tidak bisa melakukannya."
 		recheck = `<a class="btn btn-sm" href="/masters/2/replicas/new?bangun-ulang=1">Periksa lagi</a>`
+		hint    = "Tombol ini aktif setelah bangun ulang disetujui di server; lihat kotak Persetujuan di server di atas."
+		unread  = "Persetujuan di server tidak bisa diperiksa sekarang; klik Periksa lagi."
 	)
 	approved := proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
 		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
@@ -1043,6 +1045,21 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 			"sudo dbpanel agent set-source <host:port>"},
 			want:    []string{"Pin master barunya dulu di server ini: sudo dbpanel agent set-source &lt;host:port&gt;", recheck},
 			wantNot: []string{"sudo dbpanel agent approve"}, disabled: true},
+		// Answers the panel cannot make sense of: "cannot be read", none
+		// of their values shown.
+		{name: "hostile code", approval: proto.RebuildApprovalResult{Required: true, Code: "123456 && rm", Source: "10.0.0.2:3306", RemainingSec: 1700},
+			want: []string{unread, recheck}, wantNot: []string{"123456", "&amp;&amp; rm", "sudo dbpanel agent approve"}, disabled: true},
+		{name: "seven digits", approval: proto.RebuildApprovalResult{Required: true, Code: "1234567", Source: "10.0.0.2:3306", RemainingSec: 1700},
+			want: []string{unread}, wantNot: []string{"1234567", "sudo dbpanel agent approve"}, disabled: true},
+		{name: "non-ASCII digits", approval: proto.RebuildApprovalResult{Required: true, Code: "١٢٣٤٥٦", Source: "10.0.0.2:3306", RemainingSec: 1700},
+			want: []string{unread}, wantNot: []string{"١٢٣٤٥٦", "sudo dbpanel agent approve"}, disabled: true},
+		{name: "empty code", approval: proto.RebuildApprovalResult{Required: true, Source: "10.0.0.2:3306", RemainingSec: 1700},
+			want: []string{unread}, wantNot: []string{"sudo dbpanel agent approve"}, disabled: true},
+		{name: "approved without source", approval: proto.RebuildApprovalResult{Required: true, Approved: true, Addr: "10.0.0.2", RemainingSec: 86000},
+			want: []string{unread}, wantNot: []string{"Sudah disetujui", "untuk sumber"}, disabled: true},
+		{name: "approved with a bad address", approval: proto.RebuildApprovalResult{Required: true, Approved: true, Source: "10.0.0.2:3306",
+			Addr: "bukan-ip", RemainingSec: 86000},
+			want: []string{unread}, wantNot: []string{"Sudah disetujui", "bukan-ip"}, disabled: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1062,7 +1079,23 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 			if got := strings.Contains(button, " disabled"); got != tc.disabled {
 				t.Fatalf("button %s: disabled = %v, want %v", button, got, tc.disabled)
 			}
+			// The reason next to the button, only for the approval.
+			if got := strings.Contains(rec.Body.String(), hint); got != tc.disabled {
+				t.Fatalf("hint shown = %v, want %v", got, tc.disabled)
+			}
 		})
+	}
+
+	// Disabled for another reason only (the cutover is pending): no hint.
+	{
+		e, f, _ := promotedEnv(t)
+		f.approval = approved
+		rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, e.cookie())
+		if button := rebuildButton.FindString(rec.Body.String()); !strings.Contains(button, " disabled") {
+			t.Fatalf("button while the cutover is pending: %s", button)
+		}
+		wantBody(t, rec, "Sudah disetujui di ")
+		wantNoBody(t, rec, hint)
 	}
 
 	// Agent offline: not asked, said so.
@@ -1134,4 +1167,34 @@ func wantAuditDetail(t *testing.T, e *env, action string, subs ...string) {
 		return
 	}
 	t.Fatalf("no %s audit entry", action)
+}
+
+// TestRebuildRefusalRereadsApproval: when the start is refused for the
+// approval, the box on the page with the refusal is read again, so both
+// come from the same moment.
+func TestRebuildRefusalRereadsApproval(t *testing.T) {
+	e, f, topo := promotedEnv(t)
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+	const refusal = "Bangun ulang db-master butuh persetujuan di server itu. Jalankan di server itu sebagai root: " +
+		"sudo dbpanel agent approve 654321, lalu coba lagi."
+	f.onStart = func() {
+		// The approval was canceled on the server between the form's
+		// read and the start.
+		f.mu.Lock()
+		f.approval = proto.RebuildApprovalResult{Required: true, Code: "654321", Source: "10.0.0.2:3306", RemainingSec: 1790}
+		f.mu.Unlock()
+	}
+	f.err = fmt.Errorf("%w: %s", orchestrator.ErrRebuildNeedsApproval, refusal)
+	rec := e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm("accept_connections", "1"),
+		web.ActRebuildOldMaster, "server", 1), e.cookie())
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "<code>sudo dbpanel agent approve 654321</code>", "Kode berlaku 30 menit lagi.")
+	wantNoBody(t, rec, "Sudah disetujui di ")
+	if button := rebuildButton.FindString(rec.Body.String()); !strings.Contains(button, " disabled") {
+		t.Fatalf("button after the refusal: %s", button)
+	}
 }
