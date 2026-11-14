@@ -12,7 +12,10 @@
 // password (an error shows, nothing is submitted), then the right one with
 // the typed name: the resync form must be posted with a confirm_token and
 // the typed confirm_name. It prints the job page path the panel answered
-// with. Needs Node with the playwright package and its Chromium.
+// with. Any console error, failed or blocked request, or answer of 400 or
+// more on the pages it visits fails it, except the one refusal of the
+// wrong password it provokes (POST /confirm). Needs Node with the
+// playwright package and its Chromium.
 "use strict";
 const { chromium } = require("playwright");
 
@@ -39,6 +42,40 @@ async function main() {
     const page = await context.newPage();
     const pageErrors = [];
     page.on("pageerror", (e) => pageErrors.push(e.message));
+    // Console errors (a CSP or Permissions-Policy violation, a resource
+    // that did not load), failed or blocked requests and error answers.
+    // wrongPassword marks the step whose POST /confirm is refused on
+    // purpose; requests a navigation cuts off (an event stream, a poll)
+    // end net::ERR_ABORTED and are not failures.
+    let wrongPassword = false;
+    const confirmURL = `${base}/confirm`;
+    const problems = [];
+    page.on("console", (m) => {
+      if (m.type() !== "error") {
+        return;
+      }
+      const at = (m.location() || {}).url || "";
+      if (wrongPassword && at === confirmURL && m.text().startsWith("Failed to load resource")) {
+        return;
+      }
+      problems.push(`console error: ${m.text()} (${at})`);
+    });
+    page.on("requestfailed", (r) => {
+      const why = (r.failure() || {}).errorText || "";
+      if (why === "net::ERR_ABORTED") {
+        return;
+      }
+      problems.push(`request failed: ${r.method()} ${r.url()}: ${why}`);
+    });
+    page.on("response", (r) => {
+      if (r.status() < 400) {
+        return;
+      }
+      if (wrongPassword && r.url() === confirmURL && r.request().method() === "POST") {
+        return;
+      }
+      problems.push(`answer ${r.status()}: ${r.request().method()} ${r.url()}`);
+    });
     const resyncPosts = [];
     page.on("request", (r) => {
       if (r.method() === "POST" && r.url() === resyncURL) {
@@ -94,8 +131,10 @@ async function main() {
     // The dialog has a second name field (promote's replica name), hidden here.
     await confirm.locator('input[x-ref="typed"]').fill(name);
     await confirm.locator('input[type="password"]').fill(password + "-salah");
+    wrongPassword = true;
     await ok.click();
     await confirm.locator("p[data-confirm-error]").filter({ hasText: /\S/ }).waitFor();
+    wrongPassword = false;
     if (resyncPosts.length !== 0) {
       throw new Error("the resync form was posted after a wrong password");
     }
@@ -117,6 +156,11 @@ async function main() {
     await page.waitForURL(/\/jobs\/[^/]+$/);
     if (pageErrors.length !== 0) {
       throw new Error("script errors on the page: " + pageErrors.join("; "));
+    }
+    // Let the job page load its scripts and styles before judging.
+    await page.waitForLoadState("load");
+    if (problems.length !== 0) {
+      throw new Error("the pages had errors:\n" + problems.join("\n"));
     }
     console.log(new URL(page.url()).pathname);
   } finally {

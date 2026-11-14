@@ -269,7 +269,7 @@ const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 
 // permissionsPolicy turns off browser features the panel never uses.
 // clipboard-write stays allowed: the copy buttons need it.
 const permissionsPolicy = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), " +
-	"bluetooth=(), display-capture=(), clipboard-read=(), interest-cohort=()"
+	"bluetooth=(), display-capture=(), clipboard-read=()"
 
 // SecurityHeaders sets the baseline security headers on every UI and
 // agent-bootstrap response. Cache-Control defaults to no-store (pages

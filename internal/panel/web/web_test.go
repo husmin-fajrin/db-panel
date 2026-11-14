@@ -731,7 +731,7 @@ var baseHeaders = map[string]string{
 	"Referrer-Policy":        "same-origin",
 	// clipboard-write is not listed: the copy buttons need it.
 	"Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), " +
-		"bluetooth=(), display-capture=(), clipboard-read=(), interest-cohort=()",
+		"bluetooth=(), display-capture=(), clipboard-read=()",
 	"Cross-Origin-Opener-Policy":   "same-origin",
 	"Cross-Origin-Resource-Policy": "same-origin",
 	"Cross-Origin-Embedder-Policy": "require-corp",
