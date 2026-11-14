@@ -171,7 +171,8 @@ var errApprovalUnreadable = errors.New("rebuild approval answer not usable")
 // request names a source host:port and a code of exactly six ASCII
 // digits (it goes into a command root runs) and time left. An answer that needs no
 // approval, or holds one, carries no code: one that does is not usable
-// (P-1), whatever the code.
+// (P-1), whatever the code; one that needs no approval carries no
+// approval data either (N-2).
 func RebuildApprovalUsable(res proto.RebuildApprovalResult) bool {
 	if !res.Required || res.Approved {
 		if res.Code != "" {
@@ -179,7 +180,9 @@ func RebuildApprovalUsable(res proto.RebuildApprovalResult) bool {
 		}
 	}
 	if !res.Required {
-		return true
+		// Nor any approval data (N-2): an answer must not carry a field
+		// its state does not use.
+		return !res.Approved && res.Source == "" && res.Addr == "" && res.RemainingSec == 0 && res.AgeSec == 0
 	}
 	if !validApprovalSource(res.Source) {
 		return false

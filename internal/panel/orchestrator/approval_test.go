@@ -439,6 +439,14 @@ var unusableApprovals = map[string]proto.RebuildApprovalResult{
 	// A field the answer's state does not use (P-1).
 	"not required with code":   {Code: hostileCode},
 	"not required with digits": {Code: "123456"},
+	// Approval data on an answer that needs no approval (N-2): the audit
+	// would record local_approval true for an agent that reported no
+	// quarantine.
+	"not required approved":       {Approved: true},
+	"not required with source":    {Source: "10.0.0.1:3306"},
+	"not required with address":   {Addr: "10.0.0.1"},
+	"not required with time left": {RemainingSec: 86000},
+	"not required with an age":    {AgeSec: 60},
 	"approved with code": {Required: true, Approved: true, Code: "123456", Source: "10.0.0.1:3306", Addr: "10.0.0.1",
 		RemainingSec: 86000},
 	"approved with hostile code": {Required: true, Approved: true, Code: hostileCode, Source: "10.0.0.1:3306",
