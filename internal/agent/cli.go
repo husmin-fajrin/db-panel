@@ -306,7 +306,7 @@ const (
 	setRoleNoMysqld       = "MySQL tidak ditemukan di server ini; tidak ada kunci start yang perlu dilepas."
 	setRoleNoCheck        = "kunci start tidak bisa diperiksa (%v); peran tidak diubah. Bila agent tidak bisa dijalankan, lepas dengan tangan: lihat README, bagian \"Melepas kunci start dengan tangan\"."
 	setRoleNextMaster     = "Langkah berikutnya: bila MySQL di server ini masih baca-saja (read-only) dan server ini memang akan dipakai aplikasi sebagai master, pastikan master lain tidak lagi dipakai, lalu buka dengan: sudo dbpanel agent unlock-master"
-	setRoleNextUnassigned = "Langkah berikutnya: bila server ini sudah dihapus dari panel, tambahkan lagi lewat Tambah server, lalu jalankan Siapkan master atau Buat replika. Sampai itu MySQL-nya tetap baca-saja (read-only)."
+	setRoleNextUnassigned = "Langkah berikutnya: bila server ini sudah dihapus dari panel, tambahkan lagi lewat Tambah server, lalu jalankan Siapkan master atau Buat replika. Perhatian: server ini tidak lagi dikarantina; agent tidak lagi menjaga MySQL-nya tetap baca-saja (read-only)."
 )
 
 // parseSetRoleArgs parses "[--dir DIR] [--ya] ROLE [--dir DIR] [--ya]":
@@ -395,7 +395,9 @@ func mainSetRole(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	switch {
 	case role == "master":
 		fmt.Fprintln(stdout, setRoleNextMaster)
-	case role == "unassigned" && was == "quarantined":
+	// Unreadable pins may have hidden a quarantine (the operator was told
+	// so): said as for one.
+	case role == "unassigned" && (was == "quarantined" || readErr != nil):
 		fmt.Fprintln(stdout, setRoleNextUnassigned)
 	}
 	return 0

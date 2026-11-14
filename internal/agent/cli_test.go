@@ -1520,8 +1520,7 @@ func TestSetRoleOnQuarantinedAsks(t *testing.T) {
 	t.Run("unassigned confirmed", func(t *testing.T) {
 		dir := quarantined()
 		code, out, errOut := runSetRole("ya\n", "set-role", "unassigned", "--dir", dir)
-		if code != 0 || !strings.Contains(out, "membuang semua datanya") ||
-			!strings.Contains(out, "Langkah berikutnya: bila server ini sudah dihapus dari panel") {
+		if code != 0 || !strings.Contains(out, "membuang semua datanya") || !strings.Contains(out, nextUnassignedText+"\n") {
 			t.Errorf("code %d, out %q, err %q", code, out, errOut)
 		}
 		if _, err := os.Stat(filepath.Join(dir, mysql.RoleFile)); !errors.Is(err, os.ErrNotExist) {
@@ -1656,6 +1655,33 @@ func TestSetRoleMasterOutcomes(t *testing.T) {
 	if code != 1 || !strings.Contains(errOut, "kunci start tidak bisa diperiksa (") || !strings.Contains(errOut, "boom") ||
 		!strings.Contains(errOut, "Melepas kunci start dengan tangan") || role(dir) != "quarantined" || strings.Contains(out, next) {
 		t.Errorf("other error: code %d, out %q, err %q, role %q", code, out, errOut, role(dir))
+	}
+}
+
+// nextUnassignedText (C12) is what leaving a quarantine for unassigned
+// says comes next, and that the agent no longer keeps MySQL read-only.
+const nextUnassignedText = "Langkah berikutnya: bila server ini sudah dihapus dari panel, tambahkan lagi lewat Tambah server, " +
+	"lalu jalankan Siapkan master atau Buat replika. Perhatian: server ini tidak lagi dikarantina; agent tidak lagi menjaga " +
+	"MySQL-nya tetap baca-saja (read-only)."
+
+// TestSetRoleUnreadablePinsUnassignedSaysNext: leaving pins that cannot be
+// read (maybe a quarantine) for unassigned says what comes next as a
+// quarantine left does.
+func TestSetRoleUnreadablePinsUnassignedSaysNext(t *testing.T) {
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { return noMysqldHost(t.TempDir()), nil })
+	for _, args := range [][]string{{"set-role", "unassigned"}, {"set-role", "unassigned", "--ya"}} {
+		dir := t.TempDir()
+		writePinFiles(t, dir, map[string]string{mysql.RoleFile: "quarantined\n", mysql.SourceFile: "garbage\n"})
+		code, out, errOut := runSetRole("ya\n", append(args, "--dir", dir)...)
+		if code != 0 || !strings.Contains(out, nextUnassignedText+"\n") {
+			t.Errorf("%v: code %d, out %q, err %q", args, code, out, errOut)
+		}
+	}
+	// From an unassigned or replica pin nothing is said.
+	dir := t.TempDir()
+	writePinFiles(t, dir, map[string]string{mysql.RoleFile: "replica\n", mysql.SourceFile: "10.0.0.1:3306\n"})
+	if code, out, _ := runSetRole("", "set-role", "unassigned", "--dir", dir); code != 0 || strings.Contains(out, "Langkah berikutnya") {
+		t.Errorf("replica -> unassigned: code %d, out %q", code, out)
 	}
 }
 
