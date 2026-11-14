@@ -529,9 +529,17 @@ func TestWSLogsReplacedConnection(t *testing.T) {
 	if got := waitID(t, e.l.online, "second OnOnline"); got != id {
 		t.Fatalf("online id = %d, want %d", got, id)
 	}
-	out := e.logs.String()
-	if !strings.Contains(out, `level=WARN msg="agent connection replaced an existing one`) ||
-		!strings.Contains(out, "remote=127.0.0.1:") {
+	// The hub reports the connection online inside Attach; the handler
+	// logs the replacement after Attach returns, so wait for the line.
+	replaced := func(out string) bool {
+		return strings.Contains(out, `level=WARN msg="agent connection replaced an existing one`) &&
+			strings.Contains(out, "remote=127.0.0.1:")
+	}
+	deadline := time.Now().Add(wait)
+	for !replaced(e.logs.String()) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if out := e.logs.String(); !replaced(out) {
 		t.Fatalf("replacement not logged at Warn with the remote address:\n%s", out)
 	}
 }
