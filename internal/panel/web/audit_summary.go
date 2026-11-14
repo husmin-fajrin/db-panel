@@ -87,15 +87,16 @@ var auditSkippedKeys = map[string]bool{"target_kind": true, "target_id": true}
 // confirmActionLabels name the confirmation actions that are not audit
 // actions themselves (the detail of confirm_issued and the like).
 var confirmActionLabels = map[string]string{
-	ActResync:             "Resync ulang",
-	ActDetach:             "Lepas replika",
-	ActDeleteServer:       "Hapus server",
-	ActUnlockMaster:       "Buka kunci master",
-	ActPrepareMasterAgain: "Siapkan ulang sebagai master",
-	ActRebuildOldMaster:   "Bangun ulang master lama",
-	ActCertUpload:         "Pasang sertifikat keamanan panel sendiri",
-	ActCertRevert:         "Kembali ke sertifikat panel",
-	ActCertNames:          "Ubah nama sertifikat panel",
+	ActResync:               "Resync ulang",
+	ActDetach:               "Lepas replika",
+	ActDeleteServer:         "Hapus server",
+	ActUnlockMaster:         "Buka kunci master",
+	ActPrepareMasterAgain:   "Siapkan ulang sebagai master",
+	ActRebuildOldMaster:     "Bangun ulang master lama",
+	ActCancelRebuildAttempt: "Batalkan percobaan bangun ulang",
+	ActCertUpload:           "Pasang sertifikat keamanan panel sendiri",
+	ActCertRevert:           "Kembali ke sertifikat panel",
+	ActCertNames:            "Ubah nama sertifikat panel",
 }
 
 // auditDetailSummary words an audit entry's detail_json for people (design

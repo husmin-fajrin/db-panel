@@ -584,6 +584,34 @@ func (a *app) oldMasterFromPath(w http.ResponseWriter, r *http.Request) (store.S
 	return srv, true
 }
 
+// cancelRebuildAttempt is "Batalkan percobaan bangun ulang" (G-2), behind a
+// confirmation token: the old master left by a failed rebuild is a plain
+// quarantined old master again (the orchestrator checks the state).
+func (a *app) cancelRebuildAttempt(w http.ResponseWriter, r *http.Request) {
+	srv, ok := a.serverFromPath(w, r)
+	if !ok || !a.requireConfirm(w, r, ActCancelRebuildAttempt, auditServer, srv.ID) {
+		return
+	}
+	err := a.Orchestrator.CancelRebuildAttempt(r.Context(), srv.ID)
+	a.audit(r, "cancel_rebuild_attempt", auditServer, srv.ID, map[string]any{}, outcomeOf(err))
+	if err != nil {
+		a.Logger.Warn("cancel rebuild attempt refused", "server", srv.ID, "err", logErr(err))
+		if fresh, ferr := a.Store.GetServer(srv.ID); ferr == nil {
+			srv = fresh
+		}
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		return
+	}
+	a.Logger.Info("rebuild attempt cancelled", "server", srv.ID, "by", auth.UsernameFrom(r.Context()))
+	http.Redirect(w, r, serverURL(srv.ID)+"?pesan=percobaan-dibatalkan", http.StatusSeeOther)
+}
+
+// msgCancelAttempt is the sentence next to "Batalkan percobaan bangun
+// ulang" and in its confirmation (G-2).
+const msgCancelAttempt = "Server ini kembali tercatat sebagai master lama yang dikarantina; data di server ini tidak diubah. " +
+	"Sesudah itu Hapus server dan Bangun ulang sebagai replika tersedia lagi, dan tombol \"Ulangi dari tahap ini\" pada " +
+	"pekerjaan yang gagal tidak bisa dipakai lagi."
+
 // startLeftover is "Periksa data tertinggal" (no token: it only reads).
 func (a *app) startLeftover(w http.ResponseWriter, r *http.Request) {
 	a.startOldMasterJob(w, r, "leftover_check", a.Orchestrator.StartLeftover)

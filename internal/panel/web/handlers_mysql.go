@@ -37,6 +37,9 @@ type Orchestrator interface {
 	Relock(ctx context.Context, serverID int64) error
 	UnlockMaster(ctx context.Context, serverID int64) error
 	DetachReplica(ctx context.Context, serverID int64, stop bool) error
+	// CancelRebuildAttempt makes an old master left by a failed rebuild a
+	// plain quarantined old master again (G-2).
+	CancelRebuildAttempt(ctx context.Context, serverID int64) error
 	DeleteServer(ctx context.Context, serverID int64) error
 	// DeleteUnquarantined deletes a quarantined old master whose
 	// quarantine never arrived (a dead server); guard it with a typed
@@ -116,6 +119,8 @@ var notices = map[string]string{
 	"dihentikan": "Replikasi dihentikan. Lag membesar sampai Anda menjalankannya lagi dengan Start replika.",
 	"dijalankan": "Replikasi dijalankan lagi. Status terbaru tampil setelah laporan berikutnya dari agent.",
 	"dikunci":    "Replika dikunci hanya-baca lagi.",
+	"percobaan-dibatalkan": "Percobaan bangun ulang dibatalkan; server ini kembali tercatat sebagai master lama yang " +
+		"dikarantina.",
 	"dilepas": "Replika dilepas. MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; " +
 		"panel tidak lagi memantaunya.",
 	"dilepas-henti": "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca; " +
@@ -763,6 +768,10 @@ type replicaPage struct {
 	// rebuild (oldMasterAwaitingRebuild); Resync ulang and Lepas replika
 	// are not offered on it.
 	RebuildURL string
+	// CancelAttempt: the server is an old master left by a failed rebuild
+	// (role replica): "Batalkan percobaan bangun ulang" is offered in
+	// place of Lepas replika (G-2).
+	CancelAttempt bool
 	// CanRepoint offers "Arahkan sekarang" (needs_repoint, spec 5.6);
 	// RepointInfo is why it just did not repoint (the replica must be
 	// rebuilt), shown as information.
@@ -918,6 +927,7 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 	}
 	if p.RebuildURL != "" {
 		p.CanResync, p.CanDetach = false, false
+		p.CancelAttempt = srv.Role == store.RoleReplica
 	}
 	a.render.renderStatus(w, status, "replica_detail", p)
 }

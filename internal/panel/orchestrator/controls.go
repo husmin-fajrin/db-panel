@@ -143,6 +143,34 @@ func (r *Runner) DetachReplica(ctx context.Context, serverID int64, stop bool) e
 	return nil
 }
 
+// errNotFailedRebuild refuses "Batalkan percobaan bangun ulang" for a
+// server that is not an old master left by a failed rebuild.
+var errNotFailedRebuild = errors.New("server ini bukan master lama dengan percobaan bangun ulang yang gagal")
+
+// CancelRebuildAttempt is "Batalkan percobaan bangun ulang" (G-2): an old
+// master left by a failed rebuild (role replica, failed row, still the
+// topology's old master) becomes a plain quarantined old master again, in
+// the panel only: its failed replica row goes and its role is
+// quarantined, in one store transaction, with no agent call (its agent
+// never left the quarantine). Its failed rebuild job is then superseded.
+func (r *Runner) CancelRebuildAttempt(ctx context.Context, serverID int64) error {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if err := r.refuseBusy(serverID, "server ini"); err != nil {
+		return err
+	}
+	if err := r.d.Store.ReturnToQuarantine(serverID); errors.Is(err, store.ErrNotFailedRebuild) {
+		return errNotFailedRebuild
+	} else if err != nil {
+		return err
+	}
+	r.log.Info("failed rebuild attempt cancelled: quarantined again", "server_id", serverID)
+	r.replicaChanged(serverID)
+	// The failed rebuild job leaves no open job_failed behind.
+	r.jobEnded(serverID, "")
+	return nil
+}
+
 func (r *Runner) detachable(serverID int64) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()

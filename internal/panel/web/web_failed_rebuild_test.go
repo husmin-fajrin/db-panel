@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -215,4 +216,69 @@ func TestRebuildFailedAfterSettleIsOrdinary(t *testing.T) {
 	wantBody(t, rec, "Ulangi dari tahap ini")
 	wantNoBody(t, rec, "tidak menolong")
 	wantCode(t, e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c), http.StatusBadRequest)
+}
+
+const (
+	cancelAttemptButton   = "Batalkan percobaan bangun ulang"
+	cancelAttemptSentence = `Server ini kembali tercatat sebagai master lama yang dikarantina; data di server ini tidak diubah. Sesudah itu Hapus server dan Bangun ulang sebagai replika tersedia lagi, dan tombol &#34;Ulangi dari tahap ini&#34; pada pekerjaan yang gagal tidak bisa dipakai lagi.`
+	cancelAttemptAction   = `action="/servers/1/rebuild-attempt/cancel"`
+)
+
+// TestCancelRebuildAttemptOffered (G-2): the Master lama box and the
+// replica page offer "Batalkan percobaan bangun ulang" with its sentence;
+// Lepas replika is not offered on the replica page.
+func TestCancelRebuildAttemptOffered(t *testing.T) {
+	e, _, _ := failedRebuildEnv(t)
+	c := e.cookie()
+	for _, u := range []string{"/servers/1", "/replicas/1"} {
+		rec := e.do("GET", u, nil, c)
+		wantCode(t, rec, http.StatusOK)
+		wantBody(t, rec, cancelAttemptButton, cancelAttemptSentence, cancelAttemptAction,
+			`data-confirm-action="cancel_rebuild_attempt"`)
+		wantNoBody(t, rec, `data-open-modal="modal-detach"`)
+	}
+	// Not for a plain quarantined old master, nor for an ordinary replica.
+	e2, _, topo := promotedEnv(t)
+	if err := e2.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := e2.st.SetReplicaState(3, store.ReplicaFailed, "gagal"); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{"/servers/1", "/servers/3", "/replicas/3"} {
+		wantNoBody(t, e2.do("GET", u, nil, e2.cookie()), cancelAttemptButton)
+	}
+}
+
+// TestCancelRebuildAttemptPost (G-2): the POST needs a token; with one the
+// server is a plain quarantined old master afterwards (box with Periksa,
+// Hapus and the rebuild), the failed job is no longer retried, and the
+// action is audited.
+func TestCancelRebuildAttemptPost(t *testing.T) {
+	e, f, _ := failedRebuildEnv(t)
+	c := e.cookie()
+	const jobID = "4444444444444444444444444444444d"
+	storeJob(t, e.st, jobID, orchestrator.KindCreateReplica, 1, `{"master_server_id":2,"rebuild_old_master":true}`,
+		store.JobFailed, "Periksa master", "Periksa server tujuan")
+	wantCode(t, e.do("POST", "/servers/1/rebuild-attempt/cancel", url.Values{}, c), http.StatusForbidden)
+	wantCalls(t, f)
+	rec := e.do("POST", "/servers/1/rebuild-attempt/cancel",
+		withToken(t, e, url.Values{}, web.ActCancelRebuildAttempt, "server", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "cancel-rebuild-attempt 1")
+	wantAuditDetail(t, e, "cancel_rebuild_attempt", "{")
+	if srv, _ := e.st.GetServer(1); srv.Role != store.RoleQuarantined {
+		t.Fatalf("role after = %s", srv.Role)
+	}
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, rec, "data-old-master", rebuildLink, `action="/servers/1/leftover"`, `data-open-modal="modal-hapus"`)
+	wantNoBody(t, rec, cancelAttemptButton)
+	wantCode(t, e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c), http.StatusOK)
+
+	// Refused by the orchestrator: shown on the server page.
+	f.err = errors.New("server ini bukan master lama dengan percobaan bangun ulang yang gagal")
+	rec = e.do("POST", "/servers/1/rebuild-attempt/cancel",
+		withToken(t, e, url.Values{}, web.ActCancelRebuildAttempt, "server", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "server ini bukan master lama dengan percobaan bangun ulang yang gagal")
 }

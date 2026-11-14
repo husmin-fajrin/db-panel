@@ -363,6 +363,54 @@ func (s *Store) RemoveReplica(serverID int64) error {
 	return nil
 }
 
+// ErrNotFailedRebuild refuses ReturnToQuarantine for a server that is not
+// an old master left by a failed rebuild.
+var ErrNotFailedRebuild = errors.New("not an old master left by a failed rebuild")
+
+// ReturnToQuarantine undoes a failed rebuild attempt of an old master in
+// the panel only (G-2): in one transaction it removes serverID's replica
+// row and sets its role to quarantined, provided the row is failed, the
+// role is replica and the row's topology still names serverID as its old
+// master. Otherwise nothing changes and it answers ErrNotFailedRebuild.
+func (s *Store) ReturnToQuarantine(serverID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	var topoID int64
+	var state string
+	err = tx.QueryRow(`SELECT topology_id, state FROM replicas WHERE server_id = ?`, serverID).Scan(&topoID, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFailedRebuild
+	}
+	if err != nil {
+		return fmt.Errorf("read replica: %w", err)
+	}
+	role, err := serverRoleTx(tx, serverID)
+	if err != nil {
+		return err
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM topologies WHERE id = ? AND old_master_server_id = ?`,
+		topoID, serverID).Scan(&n); err != nil {
+		return fmt.Errorf("check old master: %w", err)
+	}
+	if state != ReplicaFailed || role != RoleReplica || n != 1 {
+		return ErrNotFailedRebuild
+	}
+	if _, err := tx.Exec(`DELETE FROM replicas WHERE server_id = ?`, serverID); err != nil {
+		return fmt.Errorf("delete replica: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleQuarantined, serverID); err != nil {
+		return fmt.Errorf("set role: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
 // GetTopologyByOldMaster returns the topology whose previous master is
 // serverID, or ErrNotFound.
 func (s *Store) GetTopologyByOldMaster(serverID int64) (Topology, error) {

@@ -213,6 +213,16 @@ func (f *fakeOrch) DetachReplica(_ context.Context, id int64, stop bool) error {
 	return f.err
 }
 
+// CancelRebuildAttempt returns the old master to quarantine in the store
+// like the orchestrator.
+func (f *fakeOrch) CancelRebuildAttempt(_ context.Context, id int64) error {
+	f.record(fmt.Sprintf("cancel-rebuild-attempt %d", id))
+	if f.err != nil {
+		return f.err
+	}
+	return f.st.ReturnToQuarantine(id)
+}
+
 // DeleteServer deletes the server from the store like the orchestrator.
 func (f *fakeOrch) DeleteServer(_ context.Context, id int64) error {
 	f.record(fmt.Sprintf("delete-server %d", id))

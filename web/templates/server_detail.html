@@ -401,7 +401,9 @@
         <a class="btn btn-sm" href="/masters/{{.Topology.MasterServerID}}/replicas/new?bangun-ulang={{$s.ID}}">Bangun ulang sebagai replika</a>
         {{end}}
         {{if and (not $p.Local) (not .RebuildFailed)}}{{template "server-delete-button" $p}}{{end}}
+        {{if .RebuildFailed}}{{template "cancel-rebuild-attempt" $s}}{{end}}
       </div>
+      {{if .RebuildFailed}}<p class="help">{{cancelAttemptText}}</p>{{end}}
       {{if .CutoverPending}}<p class="help">Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini.</p>{{end}}
       {{with $p.DeleteBlocked}}{{if not $p.Local}}<p class="help">{{.}}</p>{{end}}{{end}}
     </div>

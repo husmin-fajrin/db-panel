@@ -39,6 +39,9 @@ const (
 	ActRebuildOldMaster = "rebuild_old_master"
 	ActSalvageDownload  = "salvage_download"
 	ActSalvageDelete    = "salvage_delete"
+	// ActCancelRebuildAttempt: "Batalkan percobaan bangun ulang" of an old
+	// master left by a failed rebuild (G-2), bound to that server.
+	ActCancelRebuildAttempt = "cancel_rebuild_attempt"
 	// The panel's HTTPS certificate (target kind settings, id 0): a session
 	// alone must not swap the key the panel serves or widen its web CA.
 	ActCertUpload = "cert_upload"
@@ -61,7 +64,7 @@ var jobActions = []string{ActJobRetry, ActJobApprove}
 // confirmActions are the actions POST /confirm issues tokens for.
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,
 	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActPromote, ActCertUpload, ActCertRevert, ActCertNames,
-	ActRebuildOldMaster, ActSalvageDownload, ActSalvageDelete}
+	ActRebuildOldMaster, ActSalvageDownload, ActSalvageDelete, ActCancelRebuildAttempt}
 
 // fileActions are the confirmActions issued only for one salvage file,
 // as "<action>:<name>" (spec 5.4: the token is issued for that file).

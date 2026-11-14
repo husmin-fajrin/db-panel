@@ -164,6 +164,9 @@ var templateFuncs = template.FuncMap{
 	"banner": func(tone, text string) Banner { return Banner{Tone: tone, Text: text} },
 	// bytesOf is a size in bytes from the agent (int64) for fmtBytes.
 	"bytesOf": func(n int64) uint64 { return uint64(max(n, 0)) },
+	// cancelAttemptText is the sentence of "Batalkan percobaan bangun
+	// ulang" (G-2).
+	"cancelAttemptText": func() string { return msgCancelAttempt },
 }
 
 // partials are the templates shared by several pages and rendered on their

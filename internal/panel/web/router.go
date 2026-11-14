@@ -206,6 +206,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /servers/{id}/status-fragment", authed(a.statusFragment))
 	mux.Handle("GET /servers/{id}/connections-fragment", authed(a.connectionsFragment))
 	mux.Handle("POST /servers/{id}/leftover", authedPost(a.startLeftover))
+	mux.Handle("POST /servers/{id}/rebuild-attempt/cancel", authedPost(a.cancelRebuildAttempt))
 	mux.Handle("POST /servers/{id}/salvage", authedPost(a.startSalvage))
 	mux.Handle("GET /servers/{id}/salvage/{name}", authed(a.salvageDownload))
 	mux.Handle("POST /servers/{id}/salvage/{name}/delete", authedPost(a.salvageDelete))

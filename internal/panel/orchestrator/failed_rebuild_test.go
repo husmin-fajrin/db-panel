@@ -143,3 +143,82 @@ func TestCancelAfterSettleIsOrdinaryCancel(t *testing.T) {
 		t.Fatalf("cancel after the settle sent %v, want mysql.releaseRole", g.m.cmds(mark))
 	}
 }
+
+// TestCancelRebuildAttempt (G-2): "Batalkan percobaan bangun ulang" makes a
+// failed rebuild's old master a plain quarantined old master, with no agent
+// command: the failed job is superseded, the server can be deleted (then
+// the new master too), and a new rebuild runs.
+func TestCancelRebuildAttempt(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	ctx := context.Background()
+	id := failedRebuild(t, g, "mysql.preflight")
+	mark := g.m.mark()
+	if err := e.r.CancelRebuildAttempt(ctx, g.m.id); err != nil {
+		t.Fatalf("CancelRebuildAttempt: %v", err)
+	}
+	if cmds := g.m.cmds(mark); len(cmds) != 0 {
+		t.Fatalf("sent %v to the old master", cmds)
+	}
+	if _, err := e.st.GetReplicaByServer(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("row after: %v", err)
+	}
+	if srv := mustServer(t, e, g.m.id); srv.Role != store.RoleQuarantined {
+		t.Fatalf("role after = %s", srv.Role)
+	}
+	if reason := e.r.Superseded(id); reason == "" {
+		t.Fatal("the failed rebuild job is not superseded")
+	}
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err == nil {
+		t.Fatal("Retry of the failed rebuild accepted")
+	}
+	// A second time: nothing to cancel.
+	const refusal = "server ini bukan master lama dengan percobaan bangun ulang yang gagal"
+	if err := e.r.CancelRebuildAttempt(ctx, g.m.id); err == nil || err.Error() != refusal {
+		t.Fatalf("second CancelRebuildAttempt = %v, want %q", err, refusal)
+	}
+	// An ordinary failed replica is refused the same way.
+	if err := e.st.SetReplicaState(g.b.id, store.ReplicaFailed, "gagal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.r.CancelRebuildAttempt(ctx, g.b.id); err == nil || err.Error() != refusal {
+		t.Fatalf("CancelRebuildAttempt(ordinary failed replica) = %v, want %q", err, refusal)
+	}
+
+	// A new rebuild runs from here.
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	again, err := g.startRebuild()
+	if err != nil {
+		t.Fatalf("rebuild after the cancel: %v", err)
+	}
+	e.waitJob(again, store.JobSucceeded)
+	e.waitIdle(again)
+}
+
+// TestCancelRebuildAttemptThenDelete (G-2): after the cancel the old master
+// can be deleted, and once its row and the other replicas are gone the new
+// master can be deleted too.
+func TestCancelRebuildAttemptThenDelete(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	ctx := context.Background()
+	failedRebuild(t, g, "mysql.preflight")
+	for _, fa := range []*fakeAgent{g.b, g.d} {
+		if err := e.r.DetachReplica(ctx, fa.id, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.r.DeleteServer(ctx, g.c.id); !errors.Is(err, ErrServerIsMaster) {
+		t.Fatalf("delete of the new master while the failed row exists = %v, want ErrServerIsMaster", err)
+	}
+	if err := e.r.CancelRebuildAttempt(ctx, g.m.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.r.DeleteServer(ctx, g.m.id); err != nil {
+		t.Fatalf("delete of the old master after the cancel: %v", err)
+	}
+	g.c.reply("mysql.releaseRole", nil)
+	if err := e.r.DeleteServer(ctx, g.c.id); err != nil {
+		t.Fatalf("delete of the new master after: %v", err)
+	}
+}

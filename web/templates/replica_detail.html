@@ -87,6 +87,7 @@
         {{if .CanDetach}}<button type="button" class="btn btn-sm btn-error" data-open-modal="modal-detach">Lepas replika</button>{{end}}
       </div>
       {{with .RebuildURL}}<p class="text-sm">Server ini master lama yang masih dikarantina. Pakai <a class="link" href="{{.}}">Bangun ulang sebagai replika</a>.</p>{{end}}
+      {{if .CancelAttempt}}<div class="flex flex-wrap gap-2">{{template "cancel-rebuild-attempt" .Server}}</div><p class="help">{{cancelAttemptText}}</p>{{end}}
       {{template "server-controls" .Controls}}
     </div>
   </section>
