@@ -386,8 +386,27 @@ func TestRebuildApprovalCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	res = decode[proto.RebuildApprovalResult](t, r.dispatch("mysql.rebuildApproval", nil))
-	if !res.Required || res.Approved || !strings.Contains(res.Invalid, "10.0.0.9:3306") || res.Code == "" || res.Addr != "" {
+	if !res.Required || res.Approved || !strings.Contains(res.Invalid, "10.0.0.9:3306") || res.Code == "" || res.Addr != "" ||
+		res.InvalidCode != "source" {
 		t.Errorf("approval for another source = %+v", res)
+	}
+	// Expired: the code says so too.
+	if err := mustPins(t, dir).WriteRebuildApproval(mysql.NewRebuildApproval(strictSource, "10.0.0.1",
+		time.Now().Add(-25*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	res = decode[proto.RebuildApprovalResult](t, r.dispatch("mysql.rebuildApproval", nil))
+	if res.Approved || res.InvalidCode != "expired" || !strings.Contains(res.Invalid, "sudah habis") {
+		t.Errorf("expired approval = %+v", res)
+	}
+	// No approval on file: neither a reason nor its code.
+	if err := mustPins(t, dir).RemoveRebuildApproval(); err != nil {
+		t.Fatal(err)
+	}
+	resp := r.dispatch("mysql.rebuildApproval", nil)
+	res = decode[proto.RebuildApprovalResult](t, resp)
+	if res.Invalid != "" || res.InvalidCode != "" || strings.Contains(string(resp.Result), "invalid_code") {
+		t.Errorf("no approval = %+v (%s)", res, resp.Result)
 	}
 }
 

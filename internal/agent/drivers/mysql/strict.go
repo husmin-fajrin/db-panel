@@ -225,9 +225,9 @@ func (d *Driver) rebuildApprovalState(ctx context.Context, now time.Time) (proto
 			Addr:         a.Addr,
 		}, nil
 	}
-	invalid := checkErr.Error()
+	why, code := checkErr.Error(), InvalidCode(checkErr)
 	if _, has, err := d.pins.ReadRebuildApproval(); err == nil && !has {
-		invalid = ""
+		why, code = "", ""
 	}
 	req, err := d.ensureRebuildRequest(now)
 	if err != nil {
@@ -238,6 +238,7 @@ func (d *Driver) rebuildApprovalState(ctx context.Context, now time.Time) (proto
 		Code:         req.Code,
 		Source:       req.Source,
 		RemainingSec: int64(req.Created.Add(RebuildRequestTTL).Sub(now) / time.Second),
-		Invalid:      invalid,
+		Invalid:      why,
+		InvalidCode:  code,
 	}, nil
 }

@@ -57,6 +57,47 @@ func (e *SourceLookupError) Error() string {
 
 func (e *SourceLookupError) Unwrap() error { return e.Err }
 
+// The reasons an approval on file does not hold (RebuildApprovalResult's
+// InvalidCode).
+const (
+	InvalidRole     = "role"     // the server is not quarantined
+	InvalidSource   = "source"   // approved for another source than the pinned one
+	InvalidAddr     = "addr"     // the source's name resolves to another address
+	InvalidDNS      = "dns"      // the source's name does not resolve
+	InvalidFuture   = "future"   // approved in the future
+	InvalidLifetime = "lifetime" // a validity that is not 0..24 hours
+	InvalidExpired  = "expired"  // past its expiry
+	InvalidFile     = "file"     // the file is missing or cannot be used
+)
+
+// approvalInvalid is why an approval does not hold: code (Invalid*) and
+// the agent's words.
+type approvalInvalid struct {
+	code string
+	err  error
+}
+
+func (e *approvalInvalid) Error() string { return e.err.Error() }
+func (e *approvalInvalid) Unwrap() error { return e.err }
+
+// invalid is err with code.
+func invalid(code string, err error) error { return &approvalInvalid{code: code, err: err} }
+
+// InvalidCode is the reason code of an error from checkApproval or
+// CheckRebuildApproval: InvalidDNS for a SourceLookupError, "" for nil or
+// an error of another kind.
+func InvalidCode(err error) string {
+	var ai *approvalInvalid
+	if errors.As(err, &ai) {
+		return ai.code
+	}
+	var le *SourceLookupError
+	if errors.As(err, &le) {
+		return InvalidDNS
+	}
+	return ""
+}
+
 // NewRebuildApproval is the approval root gives at now.
 func NewRebuildApproval(source, addr string, now time.Time) RebuildApproval {
 	return RebuildApproval{Source: source, Addr: addr, Approved: now, Expires: now.Add(RebuildApprovalTTL)}
@@ -96,13 +137,13 @@ const approvalTimeFormat = "2006-01-02 15:04 MST"
 
 // checkApproval is the rule of spec 5.2; ips are what the source's host
 // resolves to now (the host itself when it is an IP). nil means valid; an
-// error's text says why.
+// error's text says why and InvalidCode gives its code.
 func checkApproval(a RebuildApproval, role, source string, ips []net.IP, now time.Time) error {
 	if role != roleQuarantined {
-		return fmt.Errorf("server ini tidak dikarantina (peran: %s)", role)
+		return invalid(InvalidRole, fmt.Errorf("server ini tidak dikarantina (peran: %s)", role))
 	}
 	if !sameSource(a.Source, source) {
-		return fmt.Errorf("persetujuan untuk sumber %s, bukan sumber yang dipin sekarang (%s)", a.Source, source)
+		return invalid(InvalidSource, fmt.Errorf("persetujuan untuk sumber %s, bukan sumber yang dipin sekarang (%s)", a.Source, source))
 	}
 	// Every address the name resolves to must be the approved one: the
 	// copy and the replication link connect by name and resolve again.
@@ -115,19 +156,20 @@ func checkApproval(a RebuildApproval, role, source string, ips []net.IP, now tim
 		}
 	}
 	if !same {
-		return fmt.Errorf("nama sumber %s sekarang mengarah ke alamat lain, bukan alamat yang disetujui (%s)", source, a.Addr)
+		return invalid(InvalidAddr, fmt.Errorf("nama sumber %s sekarang mengarah ke alamat lain, bukan alamat yang disetujui (%s)", source, a.Addr))
 	}
 	if a.Approved.After(now.Add(approvalFutureSlack)) {
-		return fmt.Errorf("waktu persetujuan %s lebih dari 5 menit di masa depan; periksa jam server ini", a.Approved.Local().Format(approvalTimeFormat))
+		return invalid(InvalidFuture, fmt.Errorf("waktu persetujuan %s lebih dari 5 menit di masa depan; periksa jam server ini",
+			a.Approved.Local().Format(approvalTimeFormat)))
 	}
 	if a.Expires.Before(a.Approved) {
-		return errors.New("berkas persetujuan tidak bisa dipakai: waktu habis lebih awal dari waktu persetujuan")
+		return invalid(InvalidLifetime, errors.New("berkas persetujuan tidak bisa dipakai: waktu habis lebih awal dari waktu persetujuan"))
 	}
 	if a.Expires.Sub(a.Approved) > RebuildApprovalTTL {
-		return errors.New("masa berlaku persetujuan lebih dari 24 jam")
+		return invalid(InvalidLifetime, errors.New("masa berlaku persetujuan lebih dari 24 jam"))
 	}
 	if !now.Before(a.Expires) {
-		return fmt.Errorf("persetujuan sudah habis pada %s", a.Expires.Local().Format(approvalTimeFormat))
+		return invalid(InvalidExpired, fmt.Errorf("persetujuan sudah habis pada %s", a.Expires.Local().Format(approvalTimeFormat)))
 	}
 	return nil
 }
@@ -240,10 +282,10 @@ func sourceIPs(ctx context.Context, host string) ([]net.IP, error) {
 func (p *Pins) CheckRebuildApproval(ctx context.Context, now time.Time) (RebuildApproval, error) {
 	a, ok, err := p.ReadRebuildApproval()
 	if err != nil {
-		return RebuildApproval{}, fmt.Errorf("berkas persetujuan tidak bisa dipakai: %v", err)
+		return RebuildApproval{}, invalid(InvalidFile, fmt.Errorf("berkas persetujuan tidak bisa dipakai: %v", err))
 	}
 	if !ok {
-		return RebuildApproval{}, fmt.Errorf("berkas persetujuan tidak bisa dipakai: %v", errors.New("berkas tidak ada"))
+		return RebuildApproval{}, invalid(InvalidFile, fmt.Errorf("berkas persetujuan tidak bisa dipakai: %v", errors.New("berkas tidak ada")))
 	}
 	role := p.Role()
 	host, port, hasSrc := p.Source()

@@ -171,8 +171,15 @@ func TestRebuildApprovalValidity(t *testing.T) {
 			"quarantined", "db-b:3306", ips, now,
 			"berkas persetujuan tidak bisa dipakai: waktu habis lebih awal dari waktu persetujuan"},
 	}
+	codes := map[string]string{
+		"role": "role", "other source": "source", "other address": "addr", "mixed answer": "addr", "no address": "addr",
+		"expired": "expired", "future": "future", "too long": "lifetime", "expires before approved": "lifetime",
+	}
 	for _, c := range cases {
 		err := mysql.CheckApproval(c.a, c.role, c.source, c.ips, c.now)
+		if got := mysql.InvalidCode(err); got != codes[c.name] {
+			t.Errorf("%s: code %q, want %q", c.name, got, codes[c.name])
+		}
 		switch {
 		case c.want == "" && err != nil:
 			t.Errorf("%s: %v, want valid", c.name, err)
@@ -322,8 +329,9 @@ func TestCheckRebuildApproval(t *testing.T) {
 	t.Run("no file", func(t *testing.T) {
 		p := mustPins(t, pinDir(t, "quarantined", "db-b:3306"))
 		defer resolve([]net.IP{net.ParseIP("10.0.0.5")}, nil)()
-		if _, err := p.CheckRebuildApproval(ctx, now); err == nil || !strings.Contains(err.Error(), "berkas persetujuan tidak bisa dipakai") {
-			t.Errorf("err = %v", err)
+		if _, err := p.CheckRebuildApproval(ctx, now); err == nil || !strings.Contains(err.Error(), "berkas persetujuan tidak bisa dipakai") ||
+			mysql.InvalidCode(err) != "file" {
+			t.Errorf("err = %v (code %q)", err, mysql.InvalidCode(err))
 		}
 	})
 	t.Run("untrusted file", func(t *testing.T) {
@@ -336,8 +344,9 @@ func TestCheckRebuildApproval(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer resolve([]net.IP{net.ParseIP("10.0.0.5")}, nil)()
-		if _, err := p.CheckRebuildApproval(ctx, now); err == nil || !strings.Contains(err.Error(), "berkas persetujuan tidak bisa dipakai") {
-			t.Errorf("err = %v", err)
+		if _, err := p.CheckRebuildApproval(ctx, now); err == nil || !strings.Contains(err.Error(), "berkas persetujuan tidak bisa dipakai") ||
+			mysql.InvalidCode(err) != "file" {
+			t.Errorf("err = %v (code %q)", err, mysql.InvalidCode(err))
 		}
 	})
 	t.Run("DNS error", func(t *testing.T) {
@@ -347,8 +356,9 @@ func TestCheckRebuildApproval(t *testing.T) {
 		}
 		defer resolve(nil, errors.New("servfail"))()
 		_, err := p.CheckRebuildApproval(ctx, now)
-		if err == nil || !strings.Contains(err.Error(), "tidak ditemukan (DNS)") || !strings.Contains(err.Error(), "db-b:3306") {
-			t.Errorf("err = %v", err)
+		if err == nil || !strings.Contains(err.Error(), "tidak ditemukan (DNS)") || !strings.Contains(err.Error(), "db-b:3306") ||
+			mysql.InvalidCode(err) != "dns" {
+			t.Errorf("err = %v (code %q)", err, mysql.InvalidCode(err))
 		}
 	})
 	t.Run("approved address", func(t *testing.T) {

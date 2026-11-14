@@ -787,5 +787,9 @@ type RebuildApprovalResult struct {
 	Code         string `json:"code,omitempty"`          // not approved: the request's code
 	Source       string `json:"source,omitempty"`        // host:port the approval is or would be for
 	Addr         string `json:"addr,omitempty"`          // approved: the approved address
-	Invalid      string `json:"invalid,omitempty"`       // why an approval on file does not hold
+	Invalid      string `json:"invalid,omitempty"`       // why an approval on file does not hold (agent's words, for older panels)
+	// InvalidCode is why, as one of role, source, addr, dns, future,
+	// lifetime, expired, file; set with Invalid by newer agents. The panel
+	// words the reason from it and never shows Invalid.
+	InvalidCode string `json:"invalid_code,omitempty"`
 }
