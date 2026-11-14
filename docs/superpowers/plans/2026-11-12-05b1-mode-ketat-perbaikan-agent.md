@@ -256,6 +256,75 @@ kedua putaran, masing-masing dinilai dengan aturan yang ada, mengatakan
 terkunci. Ukuran keluaran dan waktu tiap putaran dibatasi (256 KiB,
 10 dtk).
 
+### Bukti daftar database yang lengkap (temuan tinjauan ulang A-1)
+
+**Diukur pada gelombang perbaikan akhir, bagian C:** mysqld
+`8.0.46-0ubuntu0.24.04.4` sementara (datadir baru dari
+`--initialize-insecure`, dijalankan sebagai root dengan `user=nobody`,
+`partial_revokes` bawaan `0`). Database `old1`, `old2` (dua database lama)
+dan `x`. Tiap akun `@localhost` tanpa sandi, masuk lewat soket. Kolom
+"daftar" adalah `SELECT schema_name FROM information_schema.schemata`
+(yang dipakai `userDatabases`) dari akun itu. "`FOR CURRENT_USER()`" adalah
+`SHOW GRANTS FOR CURRENT_USER()` (yang dibaca `inventory` untuk
+`missingGrants`); "`FOR` nama" adalah `SHOW GRANTS FOR 'u'@'localhost'`
+dengan nama akun itu sendiri, dijalankan oleh akun itu.
+
+| Akun | Hak | `partial_revokes` | Daftar | `FOR CURRENT_USER()` | `FOR` nama |
+|---|---|---|---|---|---|
+| (a) `a_sel` | `SELECT ON *.*` | 0 dan 1 | semua (`mysql`, `old1`, `old2`, `sys`, `x`, …) | `GRANT SELECT ON *.*` | sama |
+| (b) `b_show` | `SHOW DATABASES ON *.*` | 0 | semua | `GRANT SHOW DATABASES ON *.*` | sama |
+| (c) `c_scoped` | `RELOAD, SUPER`, `SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN ON *.*`, `ALL ON x.*` | 0 | hanya `information_schema`, `performance_schema`, `x` | tiga baris itu | sama (akun tanpa hak di `mysql` boleh menjalankannya) |
+| (d) `d_partial` | `SELECT ON *.*`, `REVOKE SELECT ON old1.*` | 1 | semua kecuali `old1` | `GRANT SELECT ON *.*` dan `REVOKE SELECT ON old1.*` | sama |
+| (d') `g_show` | `SHOW DATABASES ON *.*`, `REVOKE SHOW DATABASES ON old1.*` (diterima MySQL) | 1 | semua kecuali `old1` | `GRANT SHOW DATABASES ON *.*` dan `REVOKE SHOW DATABASES ON old1.*` | sama |
+| (e) `e_sel_def` | peran `r_sel` (`SELECT ON *.*`), peran bawaan aktif | 0 | semua | **`GRANT SELECT ON *.*`** (hak peran ditulis seolah milik akun) dan `GRANT r_sel@% TO …` | `GRANT USAGE ON *.*` dan `GRANT r_sel@% TO …` |
+| (e) `e_sel_off` | peran `r_sel`, tidak aktif | 0 | hanya `information_schema`, `performance_schema` | `GRANT USAGE ON *.*` dan baris peran | sama |
+| (e) `e_show_def` | peran `r_show` (`SHOW DATABASES ON *.*`), aktif | 0 | semua | **`GRANT SHOW DATABASES ON *.*`** dan baris peran | `GRANT USAGE ON *.*` dan baris peran |
+| (e) `e_show_off` | peran `r_show`, tidak aktif | 0 | hanya `information_schema`, `performance_schema` | `GRANT USAGE ON *.*` dan baris peran | sama |
+| `f_show` | `SHOW DATABASES ON *.*` langsung, ditambah peran aktif yang berisi `REVOKE SHOW DATABASES ON old1.*` | 1 | semua | `GRANT SHOW DATABASES ON *.*` dan baris peran | sama |
+| `k_all` | `ALL ON *.*`, `REVOKE ALL ON old2.*` | 1 | semua | baris `REVOKE` hanya memuat hak tingkat database (tanpa `SHOW DATABASES`) | sama |
+
+Sesudah `GRANT SHOW DATABASES ON *.* TO <akun>` (saran di teks
+penolakan):
+
+| Akun | `FOR` nama sesudahnya | Daftar |
+|---|---|---|
+| (c) `c_scoped` | `GRANT RELOAD, SHOW DATABASES, SUPER ON *.*` … | semua |
+| (d) `d_partial` | `GRANT SELECT, SHOW DATABASES ON *.*`, `REVOKE SELECT ON old1.*` tetap | semua |
+| (d') `g_show` | `GRANT SHOW DATABASES ON *.*`; baris `REVOKE SHOW DATABASES` hilang | semua |
+| (e) `e_sel_off`, `e_sel_def` | `GRANT SHOW DATABASES ON *.*` dan baris peran | semua |
+| (a) `a_sel` | `GRANT SELECT, SHOW DATABASES ON *.*` | semua |
+
+Pemeriksaan hak yang ada (`missingGrants`, dipakai `mysql.connect` dan
+aturan A-2) tertipu oleh (d) dan (e): ia membaca `SHOW GRANTS FOR
+CURRENT_USER()`, mengabaikan baris `REVOKE`, dan hak peran yang aktif
+tampil sebagai baris `GRANT … ON *.*` akun itu. Untuk (d) dengan
+`SELECT ON *.*` ia tidak melaporkan apa pun yang kurang; untuk (e) aktif
+juga tidak; untuk (e) tidak aktif ia meminta `GRANT SELECT`.
+
+Kesimpulan untuk aturan "daftar database lengkap" (dibaca di sambungan
+yang sama, tepat sebelum daftar):
+
+- Hak dibaca dengan `SHOW GRANTS FOR '<user>'@'<host>'` (nama dari
+  `CURRENT_USER()`), bukan `FOR CURRENT_USER()`, supaya hak lewat peran
+  tidak terhitung.
+- Lengkap bila akun memegang `SHOW DATABASES` (atau `ALL`) langsung di
+  `ON *.*` **dan tidak ada baris `REVOKE` yang memuat `SHOW DATABASES`**
+  (koreksi atas aturan semula: (d') membuktikan `SHOW DATABASES` bisa
+  dicabut per database bila `partial_revokes` menyala); peran tidak bisa
+  menyembunyikan database dari hak langsung itu (`f_show`).
+- Atau bila akun memegang `SELECT` (atau `ALL`) langsung di `ON *.*` dan
+  `@@GLOBAL.partial_revokes` terbaca `0`. Semua versi yang didukung agent
+  (8.0.26 ke atas) punya variabel itu, jadi variabel yang tidak terbaca
+  berarti tidak terbukti.
+- Selain itu (hak hanya lewat peran, hak tidak terbaca, galat kueri):
+  tidak lengkap. Saran `GRANT SHOW DATABASES ON *.*` membuat semua kasus di
+  atas lengkap, termasuk (d) dan (d').
+- Akun pemasangan agent (`GRANT ALL PRIVILEGES ON *.* … WITH GRANT
+  OPTION`) dan contoh README (`GRANT ALL ON *.*`) memegang `SHOW
+  DATABASES` langsung; akun dengan daftar hak minimum README (`SELECT ON
+  *.*` tanpa `SHOW DATABASES`) lengkap selama `partial_revokes` mati
+  (bawaan).
+
 ---
 
 ## File Structure
