@@ -93,3 +93,52 @@ func TestQuotesPhrasesFixedPoint(t *testing.T) {
 		}
 	}
 }
+
+// adjacentInputs put a kept literal right before a literal in the other
+// quote character (H-3, N-G4).
+var adjacentInputs = []string{
+	`'Paksa dump'"Budi"`,
+	`"Ulangi dari tahap ini"'Budi'`,
+	`'Sudah saya alihkan'"Budi" dan "Budi"`,
+	`tidak bisa dipastikan lengkap: akun MySQL 'a'@'b.c'"Budi"`,
+	`'dbpanel_repl'@'h.x'"Budi"`,
+	`'Paksa dump'"Budi`,
+	`'Paksa dump''Budi'`,
+}
+
+// TestQuotesAdjacentFixedPoint: Quotes(Quotes(s)) == Quotes(s) with
+// adjacent literals, every input cut at every byte, and no leak.
+func TestQuotesAdjacentFixedPoint(t *testing.T) {
+	for _, in := range adjacentInputs {
+		for n := 0; n <= len(in); n++ {
+			once := Quotes(in[:n])
+			if twice := Quotes(once); twice != once {
+				t.Errorf("cut at %d: Quotes(%q) = %q, again %q", n, in[:n], once, twice)
+			}
+			if strings.Contains(once, "Budi") {
+				t.Errorf("cut at %d: Quotes(%q) = %q leaks", n, in[:n], once)
+			}
+		}
+	}
+}
+
+// TestQuotesAdvisedAccountAnchored (H-3, N-G5): an account-shaped pair is
+// kept only after the agent's whole sentence prefixes, at a word boundary.
+func TestQuotesAdvisedAccountAnchored(t *testing.T) {
+	for _, in := range []string{
+		"Unknown column 'x' akun MySQL 'NIK3201234567890001'@'budi.santoso' y' in 'where clause'",
+		"Unknown column 'x' GRANT SHOW DATABASES ON *.* TO 'Budi_Santoso'@'1985.03.12' y' in 'field list'",
+		"Variable 'sql_mode' can't be set to the value of 'x akun MySQL 'Budi_Santoso'@'budi.santoso' y'",
+		"Deadlock found when trying to get lock; 'x' akun MySQL 'Budi_Santoso'@'rs.lokal'",
+		"xtidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal'",
+		"édi server ini: GRANT SHOW DATABASES ON *.* TO 'Budi_Santoso'@'rs.lokal'",
+	} {
+		got := Quotes(in)
+		for _, leak := range []string{"Budi_Santoso", "NIK3201234567890001", "budi.santoso", "1985.03.12"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("Quotes(%q) = %q keeps %q", in, got, leak)
+			}
+		}
+	}
+	// The agent's texts still pass whole (TestQuotesKeepsPanelPhrases).
+}

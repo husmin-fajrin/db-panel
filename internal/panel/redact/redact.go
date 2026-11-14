@@ -49,20 +49,42 @@ func Quotes(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	account := -1 // where the last panel account literal ended
+	// kept is the quote that ends the output when its last bytes are a
+	// kept literal (0 otherwise). A censored literal right after a kept
+	// one ending in ' is written with " (H-3, N-G4): '…' there would make
+	// the two quotes read as an escaped one on a second pass, and Quotes
+	// would not be a fixed point.
+	var kept byte
+	censor := func(open bool) {
+		token := Censored
+		if !open {
+			token = "'…"
+		}
+		if kept == '\'' {
+			token = strings.ReplaceAll(token, "'", `"`)
+		}
+		b.WriteString(token)
+		kept = 0
+	}
+	keep := func(lit string) {
+		b.WriteString(lit)
+		kept = lit[len(lit)-1]
+	}
 	for i := 0; i < len(s); {
 		q := s[i]
 		if (q != '\'' && q != '"') || apostrophe(s, i) {
 			b.WriteByte(q)
+			kept = 0
 			i++
 			continue
 		}
 		if end, ok := template(s, i); ok {
-			b.WriteString(Censored)
+			censor(true)
 			i = end + 1
 			continue
 		}
 		if end, ok := advisedAccount(s, i); ok {
-			b.WriteString(s[i : end+1])
+			keep(s[i : end+1])
 			i = end + 1
 			continue
 		}
@@ -70,20 +92,20 @@ func Quotes(s string) string {
 			lit := s[i+1 : end]
 			switch {
 			case panelPhrase(lit):
-				b.WriteString(s[i : end+1])
+				keep(s[i : end+1])
 			case q == '\'' && panelAccount(lit):
-				b.WriteString(s[i : end+1])
+				keep(s[i : end+1])
 				account = end
 			case q == '\'' && account >= 0 && i == account+2 && s[account+1] == '@' && host(lit):
-				b.WriteString(s[i : end+1])
+				keep(s[i : end+1])
 			default:
-				b.WriteString(Censored)
+				censor(true)
 			}
 			i = end + 1
 			continue
 		}
 		// Never closed: the rest of the line.
-		b.WriteString("'…")
+		censor(false)
 		i++
 		for i < len(s) && s[i] != '\n' && s[i] != '\r' {
 			i++
@@ -115,9 +137,12 @@ func panelPhrase(lit string) bool {
 	return false
 }
 
-// accountLeads are the texts right before the account the listing refusal
-// advises (rebuild_load.go errListIncomplete prints quoteAccount there).
-var accountLeads = []string{"akun MySQL ", "GRANT SHOW DATABASES ON *.* TO "}
+// accountLeads are the agent's own sentence parts right before the
+// account the listing refusal advises (rebuild_load.go errListIncomplete
+// prints quoteAccount there), whole so that a value holding a shorter
+// lead is not taken for it (H-3, N-G5). A lead counts only at the start of
+// the message or after a non-word character.
+var accountLeads = []string{"tidak bisa dipastikan lengkap: akun MySQL ", "di server ini: GRANT SHOW DATABASES ON *.* TO "}
 
 // advisedAccount reports where the account 'user'@'host' opened at
 // s[open] ends, when it directly follows one of accountLeads, its user
@@ -128,7 +153,9 @@ func advisedAccount(s string, open int) (int, bool) {
 	}
 	lead := false
 	for _, l := range accountLeads {
-		lead = lead || strings.HasSuffix(s[:open], l)
+		if p := open - len(l); strings.HasSuffix(s[:open], l) && (p == 0 || !word(s[p-1])) {
+			lead = true
+		}
 	}
 	if !lead {
 		return 0, false
