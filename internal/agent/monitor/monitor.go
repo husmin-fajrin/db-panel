@@ -245,6 +245,10 @@ func (m *Monitor) Configure(p proto.MonitorConfigureParams) error {
 	}
 	switch p.RoleHint {
 	case "", "master", "replica":
+	case "quarantined":
+		// A panel's hint for a quarantined server: Bootstrap never
+		// changes an existing pin, and "" never pins anything.
+		p.RoleHint = ""
 	default:
 		return &commands.ParamError{Msg: "role_hint harus master, replica atau kosong"}
 	}

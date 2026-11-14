@@ -585,6 +585,22 @@ func TestChangeWaitsBehindBacklog(t *testing.T) {
 	}
 }
 
+// TestConfigureAcceptsQuarantinedHint: a panel that sends "quarantined"
+// for a quarantined server is accepted (its intervals apply) and the hint
+// counts as "": it never pins anything.
+func TestConfigureAcceptsQuarantinedHint(t *testing.T) {
+	r := newRig(t, base())
+	if err := r.m.Configure(proto.MonitorConfigureParams{CheckEverySec: 30, SummaryEverySec: 600, RoleHint: "quarantined"}); err != nil {
+		t.Fatalf("configure with role_hint quarantined: %v", err)
+	}
+	if o := r.m.options(); o.CheckEvery != 30*time.Second || o.SummaryEvery != 600*time.Second {
+		t.Errorf("options = %+v, want the panel's intervals", o)
+	}
+	if h := r.m.LastRoleHint(); h != "" {
+		t.Errorf("role hint = %q, want \"\"", h)
+	}
+}
+
 func TestConfigureRejectsOutOfRange(t *testing.T) {
 	r := newRig(t, base())
 	bad := []proto.MonitorConfigureParams{

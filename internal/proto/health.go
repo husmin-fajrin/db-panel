@@ -99,6 +99,6 @@ type MonitorConfigureParams struct {
 	SummaryEverySec int `json:"summary_every_sec"`
 	LagThresholdSec int `json:"lag_threshold_sec"`
 	// RoleHint is the role the panel records for the server: "master",
-	// "replica" or "" when it has none.
+	// "replica" or "" when it has none; an agent takes "quarantined" as "".
 	RoleHint string `json:"role_hint,omitempty"`
 }
