@@ -23,6 +23,18 @@ const Censored = "'…'"
 // data, and the panel's advice quotes them as SQL to run (DROP USER,
 // GRANT); censoring them would leave the advice useless.
 //
+// Two more kinds are kept (G-6), because the agent's advice quotes them
+// and censoring them makes the advice unreadable:
+//   - a literal whose whole content is exactly one of panelPhrases (a
+//     button label or a README section name), case-sensitive;
+//   - the account the listing refusal names, 'user'@'host', when the user
+//     holds only the characters of the agent's proof (proofUser), the host
+//     passes host, and the pair directly follows "akun MySQL " or
+//     "GRANT SHOW DATABASES ON *.* TO " (accountLeads).
+//
+// MySQL's templates (below) still win: such a phrase or account as the
+// value of "Duplicate entry '…'" or "Query: '…'" is censored.
+//
 // MySQL prints some values without escaping them (Duplicate entry,
 // Incorrect … value, Last_SQL_Error's message and Query): those values
 // are found by MySQL's own message templates first (templates), so a
@@ -49,9 +61,16 @@ func Quotes(s string) string {
 			i = end + 1
 			continue
 		}
+		if end, ok := advisedAccount(s, i); ok {
+			b.WriteString(s[i : end+1])
+			i = end + 1
+			continue
+		}
 		if end, ok := closing(s, i); ok {
 			lit := s[i+1 : end]
 			switch {
+			case panelPhrase(lit):
+				b.WriteString(s[i : end+1])
 			case q == '\'' && panelAccount(lit):
 				b.WriteString(s[i : end+1])
 				account = end
@@ -71,6 +90,79 @@ func Quotes(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// panelPhrases are the panel's own phrases that operator texts quote and
+// that reach Quotes (inventory in the part G report): button labels and
+// README section names. The agent's texts in internal/agent quote them;
+// a text that quotes a new phrase needs it added here (and a copy of the
+// text in phrases_test.go).
+var panelPhrases = []string{
+	"Ulangi dari tahap ini",                                 // quarantine.go errNoLoadRecord; rebuild_load.go errListIncomplete
+	"Database yang tidak ada di master baru",                // rebuild_load.go errNotReplaced (A6)
+	"Memberi hak SHOW DATABASES di server yang dikarantina", // rebuild_load.go errListIncomplete
+	"Paksa dump",         // clone.go cloneError
+	"Sudah saya alihkan", // orchestrator errRebuildCutoverPending, errCutoverStillPending, deletable (panel log)
+}
+
+// panelPhrase reports whether lit is exactly one of panelPhrases.
+func panelPhrase(lit string) bool {
+	for _, p := range panelPhrases {
+		if lit == p {
+			return true
+		}
+	}
+	return false
+}
+
+// accountLeads are the texts right before the account the listing refusal
+// advises (rebuild_load.go errListIncomplete prints quoteAccount there).
+var accountLeads = []string{"akun MySQL ", "GRANT SHOW DATABASES ON *.* TO "}
+
+// advisedAccount reports where the account 'user'@'host' opened at
+// s[open] ends, when it directly follows one of accountLeads, its user
+// holds only proofUser characters and its host passes host.
+func advisedAccount(s string, open int) (int, bool) {
+	if s[open] != '\'' {
+		return 0, false
+	}
+	lead := false
+	for _, l := range accountLeads {
+		lead = lead || strings.HasSuffix(s[:open], l)
+	}
+	if !lead {
+		return 0, false
+	}
+	userEnd := strings.IndexByte(s[open+1:], '\'')
+	if userEnd < 0 {
+		return 0, false
+	}
+	userEnd += open + 1
+	if !proofUser(s[open+1:userEnd]) || !strings.HasPrefix(s[userEnd+1:], "@'") {
+		return 0, false
+	}
+	hostOpen := userEnd + 2
+	hostEnd, ok := closing(s, hostOpen)
+	if !ok || !host(s[hostOpen+1:hostEnd]) {
+		return 0, false
+	}
+	return hostEnd, true
+}
+
+// proofUser reports whether user holds only the characters the agent's
+// listing proof accepts in an account name ([A-Za-z0-9_.$-]+, proofUserRe
+// in internal/agent/drivers/mysql; copied, not imported).
+func proofUser(user string) bool {
+	if user == "" {
+		return false
+	}
+	for i := 0; i < len(user); i++ {
+		c := user[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("_.$-", c) >= 0) {
+			return false
+		}
+	}
+	return true
 }
 
 // templates are MySQL's messages that print a value without escaping it

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,5 +331,35 @@ func TestTLSSkipsFailedRebuild(t *testing.T) {
 	}
 	if reason := e.r.Superseded(rebuildID); reason != "" {
 		t.Fatalf("the failed rebuild is superseded: %s", reason)
+	}
+}
+
+// TestListingRefusalReachesJobUnchanged (G-6): the agent's listing refusal,
+// with its advised account, README section and button label, is stored as
+// the job's error, step message and replica's last error unchanged.
+func TestListingRefusalReachesJobUnchanged(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	const text = "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'panel_admin'@'10.0.0.5' yang " +
+		"dipakai agent tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW " +
+		"DATABASES ON *.* TO 'panel_admin'@'10.0.0.5'; Server ini baca-saja, jadi perintah itu harus dijalankan dengan " +
+		"langkah di README, bagian \"Memberi hak SHOW DATABASES di server yang dikarantina\". Sesudah itu tekan " +
+		"\"Ulangi dari tahap ini\" pada pekerjaan di panel."
+	id := failedRebuild(t, g, "mysql.configureReplication")
+	g.m.fail("mysql.configureReplication", text)
+	scriptRetry := func() string {
+		if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+			t.Fatalf("Retry: %v", err)
+		}
+		j, _ := e.waitJob(id, store.JobFailed)
+		e.waitIdle(id)
+		return j.Error
+	}
+	got := scriptRetry()
+	if want := "Sambungkan replikasi: " + text; got != want {
+		t.Fatalf("job error = %q, want %q", got, want)
+	}
+	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || !strings.Contains(rep.LastError, text) {
+		t.Fatalf("replica last error = %q, %v", rep.LastError, err)
 	}
 }
