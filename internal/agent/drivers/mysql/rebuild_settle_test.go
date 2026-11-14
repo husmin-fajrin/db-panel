@@ -70,7 +70,8 @@ func TestRebuildPartialDumpKeepsQuarantine(t *testing.T) {
 		t.Fatalf("configureReplication with old databases left = %+v, want an error", resp)
 	}
 	want := "server ini masih punya database yang tidak disalin dari sumber " + r.src + " (kecil, rs_lama); " +
-		"karantina tidak diakhiri. Selamatkan atau hapus database itu lewat panel, lalu ulangi Bangun ulang sebagai replika."
+		"karantina tidak diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak karena " +
+		"database itu tidak ada di master baru, lihat README, bagian \"Database yang tidak ada di master baru\"."
 	if resp.Error.Message != want {
 		t.Errorf("message = %q\nwant      %q", resp.Error.Message, want)
 	}

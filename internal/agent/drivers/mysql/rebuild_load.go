@@ -160,7 +160,8 @@ func (e *errNotReplaced) Error() string {
 		list += ", …"
 	}
 	return fmt.Sprintf("server ini masih punya database yang tidak disalin dari sumber %s (%s); karantina tidak diakhiri. "+
-		"Selamatkan atau hapus database itu lewat panel, lalu ulangi Bangun ulang sebagai replika.", e.source, list)
+		"Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak karena database itu tidak ada di master "+
+		"baru, lihat README, bagian \"Database yang tidak ada di master baru\".", e.source, list)
 }
 
 // notCopied lists the server's non-system databases now (present) against

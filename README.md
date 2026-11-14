@@ -1793,8 +1793,9 @@ pemuatan dump itu sendiri. Database yang sudah ada sebelum pemuatan, atau
 yang tidak termasuk database yang di-dump, membuat langkah pengaturan
 replikasi gagal dengan "server ini masih punya database yang tidak disalin
 dari sumber <host:port> (<nama database, paling banyak 10>); karantina tidak
-diakhiri. Selamatkan atau hapus database itu lewat panel, lalu ulangi
-Bangun ulang sebagai replika." Pin tetap `quarantined` dan persetujuan
+diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu
+menolak karena database itu tidak ada di master baru, lihat README, bagian
+"Database yang tidak ada di master baru"." Pin tetap `quarantined` dan persetujuan
 tidak dihapus oleh langkah itu. Bangun ulang biasa dari panel tidak
 berakhir begini: pekerjaan itu menghapus semua database yang tertinggal di
 server (setelah daftarnya Anda setujui) sebelum memuat dump. Bila teks itu
