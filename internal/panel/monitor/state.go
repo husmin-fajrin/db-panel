@@ -61,6 +61,9 @@ type serverState struct {
 	// startPin: the last readable role pin of a report taken ("" not known
 	// yet); the role-pin close of start alerts acts on its change.
 	startPin string
+	// startOpens: per alert kind, the limit on the start alerts the start
+	// state opens (allowStartOpen); in memory only.
+	startOpens map[string]*startOpenBucket
 	// graceUntil: the report was loaded from the store at startup and does
 	// not count as stale before this time (one StaleAfter after startup);
 	// zero once a report arrives.

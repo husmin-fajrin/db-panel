@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"fmt"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -2670,6 +2671,44 @@ func TestStartStateR4StaleReportIgnored(t *testing.T) {
 	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
 	ma.send()
 	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
+}
+
+// A hostile agent alternating a bypassed start with new ids and its end
+// opens a bounded number of alerts from its reports; the first alert of
+// another kind still opens at once, and a start held back opens once the
+// limit refills.
+func TestStartAlertOpensRateLimited(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	for i := range 50 {
+		id := fmt.Sprintf("B%d", i)
+		ma.state(sk(bypassed, id, 1, false))
+		ma.send()
+		ma.state(sk(bypassed, id, 2, true))
+		ma.send()
+		r.clk.Add(time.Second)
+	}
+	if n := r.count(mID, KindMasterStartBypassed); n != startOpenBurst {
+		t.Fatalf("bypassed alerts after 100 alternating reports = %d, want %d", n, startOpenBurst)
+	}
+	// A genuine late start: its first alert opens at once.
+	ma.state(sk(late, "L1", 0, false))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	// A bypass held back by the limit opens when the limit refills, if the
+	// state still says so; until then it is not accounted.
+	ma.state(sk(bypassed, "B-echt", 1, false))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, startOpenBurst, false)
+	if got := r.mark(mID, KindMasterStartBypassed); got == "B-echt" {
+		t.Fatal("a start held back by the limit was marked")
+	}
+	r.clk.Add(startOpenRefill)
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartBypassed, startOpenBurst+1, true)
+	if got := r.mark(mID, KindMasterStartBypassed); got != "B-echt" {
+		t.Fatalf("mark = %q, want B-echt", got)
+	}
 }
 
 // A report with a lower Seq, carrying an older start id1, after the report

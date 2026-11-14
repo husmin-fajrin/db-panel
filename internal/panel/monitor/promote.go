@@ -884,11 +884,62 @@ func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSna
 		m.markStart(id, kind, startID)
 		return ups
 	}
+	if !m.allowStartOpen(id, s, kind) {
+		return ups // not marked: it opens once the limit allows, if still so
+	}
 	ups, open := m.raiseOpenLocked(id, kind, msg, ups)
 	if open {
 		m.markStart(id, kind, startID)
 	}
 	return ups
+}
+
+// The start alerts the start state opens are limited per server and kind
+// (a hostile agent alternating states or ids would otherwise open and
+// close one per report): a bucket of startOpenBurst opens, refilled with
+// one every startOpenRefill. The first alert of a kind for a server always
+// finds a full bucket.
+const (
+	startOpenBurst  = 5
+	startOpenRefill = 10 * time.Minute
+)
+
+// startOpenBucket is one server's limit on opening one kind of start
+// alert.
+type startOpenBucket struct {
+	tokens   float64
+	last     time.Time // when tokens was last refilled
+	warnedAt time.Time // when the limit was last logged (zero: not since it last allowed)
+}
+
+// allowStartOpen takes a token from the bucket of kind on s; without one
+// it logs at most once per startOpenRefill and reports false. The caller
+// holds mu.
+func (m *Monitor) allowStartOpen(id int64, s *serverState, kind string) bool {
+	now := m.now()
+	if s.startOpens == nil {
+		s.startOpens = map[string]*startOpenBucket{}
+	}
+	b, ok := s.startOpens[kind]
+	if !ok {
+		b = &startOpenBucket{tokens: startOpenBurst, last: now}
+		s.startOpens[kind] = b
+	}
+	if elapsed := now.Sub(b.last); elapsed > 0 {
+		b.tokens = min(startOpenBurst, b.tokens+float64(elapsed)/float64(startOpenRefill))
+		b.last = now
+	}
+	if b.tokens >= 1 {
+		b.tokens--
+		b.warnedAt = time.Time{}
+		return true
+	}
+	if b.warnedAt.IsZero() || now.Sub(b.warnedAt) >= startOpenRefill {
+		b.warnedAt = now
+		m.log.Warn("start alert not opened: over the rate limit; it opens when the limit allows if the agent still reports it",
+			"server_id", id, "kind", kind)
+	}
+	return false
 }
 
 // closeStartAlertsLeftQuarantine acts once per end of quarantine seen on
