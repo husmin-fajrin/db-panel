@@ -202,11 +202,14 @@ func (e *errListIncomplete) Error() string {
 	if e.unsupported {
 		return "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat " +
 			"karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya " +
-			"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin), lalu ulangi bangun ulang dari panel."
+			"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan \"Ulangi " +
+			"dari tahap ini\" pada pekerjaan di panel."
 	}
 	return fmt.Sprintf("daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent "+
-		"tidak punya hak SHOW DATABASES. Jalankan sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO %s; "+
-		"lalu ulangi bangun ulang dari panel.", e.account, e.account)
+		"tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO %s; "+
+		"Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, bagian \"Memberi hak SHOW "+
+		"DATABASES di server yang dikarantina\". Sesudah itu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel.",
+		e.account, e.account)
 }
 
 func (e *errListIncomplete) Unwrap() error { return e.cause }

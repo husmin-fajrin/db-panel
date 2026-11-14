@@ -129,7 +129,8 @@ func TestListUnsupportedAccountText(t *testing.T) {
 	got := (&errListIncomplete{unsupported: true}).Error()
 	want := "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat " +
 		"karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya " +
-		"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin), lalu ulangi bangun ulang dari panel."
+		"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan \"Ulangi dari " +
+		"tahap ini\" pada pekerjaan di panel."
 	if got != want {
 		t.Errorf("text = %q\nwant   %q", got, want)
 	}
@@ -158,8 +159,10 @@ func TestMissingGrantsCraftedRow(t *testing.T) {
 func TestListIncompleteText(t *testing.T) {
 	got := (&errListIncomplete{account: quoteAccount("rs_scoped@localhost")}).Error()
 	want := "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'rs_scoped'@'localhost' yang dipakai " +
-		"agent tidak punya hak SHOW DATABASES. Jalankan sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO " +
-		"'rs_scoped'@'localhost'; lalu ulangi bangun ulang dari panel."
+		"agent tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* " +
+		"TO 'rs_scoped'@'localhost'; Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, " +
+		"bagian \"Memberi hak SHOW DATABASES di server yang dikarantina\". Sesudah itu tekan \"Ulangi dari tahap ini\" " +
+		"pada pekerjaan di panel."
 	if got != want {
 		t.Errorf("text = %q\nwant   %q", got, want)
 	}

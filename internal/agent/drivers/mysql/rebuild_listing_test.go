@@ -1,6 +1,7 @@
 package mysql_test
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -11,8 +12,42 @@ import (
 // listIncomplete is the C-1 refusal for account ('user'@'host').
 func listIncomplete(account string) string {
 	return "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL " + account + " yang dipakai agent " +
-		"tidak punya hak SHOW DATABASES. Jalankan sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO " +
-		account + "; lalu ulangi bangun ulang dari panel."
+		"tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO " +
+		account + "; Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, bagian " +
+		"\"Memberi hak SHOW DATABASES di server yang dikarantina\". Sesudah itu tekan \"Ulangi dari tahap ini\" pada " +
+		"pekerjaan di panel."
+}
+
+// grantAsAdvised runs, as MySQL root on the quarantined target, the GRANT
+// the refusal advises the way the README tells the operator to on a
+// read-only server: one mysql client fed SET GLOBAL super_read_only=OFF,
+// SET SESSION sql_log_bin=OFF, the GRANT and SET GLOBAL
+// super_read_only=ON (plan evidence, part E). The target must be
+// super_read_only before, and is so again after, with gtid_executed
+// unchanged.
+func (r *settleRig) grantAsAdvised(t *testing.T, account string) {
+	t.Helper()
+	db := rootDB(t, r.target)
+	state := func() (ro, sro bool, gtid string) {
+		if err := db.QueryRow("SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only, @@GLOBAL.gtid_executed").Scan(&ro, &sro, &gtid); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	ro, sro, gtid := state()
+	if !ro || !sro {
+		t.Fatalf("target before the GRANT: read_only=%v super_read_only=%v, want both on", ro, sro)
+	}
+	cmd := exec.Command("mysql", "-S", r.target.Socket, "-uroot")
+	cmd.Stdin = strings.NewReader("SET GLOBAL super_read_only=OFF; SET SESSION sql_log_bin=OFF; GRANT SHOW DATABASES ON *.* TO " +
+		account + "; SET GLOBAL super_read_only=ON;\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("mysql: %v\n%s", err, out)
+	}
+	ro2, sro2, gtid2 := state()
+	if !ro2 || !sro2 || gtid2 != gtid {
+		t.Fatalf("target after the GRANT: read_only=%v super_read_only=%v gtid %q (before %q)", ro2, sro2, gtid2, gtid)
+	}
 }
 
 // onTarget runs stmts as root on the quarantined target, with
@@ -96,7 +131,7 @@ func TestRebuildPartialRevokeAccount(t *testing.T) {
 		t.Error("the refused dump loaded kecil")
 	}
 
-	r.onTarget(t, "GRANT SHOW DATABASES ON *.* TO rs_partial@localhost")
+	r.grantAsAdvised(t, "'rs_partial'@'localhost'")
 	if d := r.snap.run(t, "mysql.dumpFrom", dumpParams(r.master, "kecil")); !d.OK {
 		t.Fatalf("dumpFrom after the advised GRANT = %+v", d)
 	}
@@ -129,7 +164,7 @@ func TestRebuildRoleOnlyAccountAtSettle(t *testing.T) {
 	}
 	r.assertStillQuarantined(t)
 
-	r.onTarget(t, "GRANT SHOW DATABASES ON *.* TO rs_viarole@localhost")
+	r.grantAsAdvised(t, "'rs_viarole'@'localhost'")
 	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil")))
 	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
 		t.Errorf("role pin after the advised GRANT = %q, want replica", role)
@@ -140,8 +175,8 @@ func TestRebuildRoleOnlyAccountAtSettle(t *testing.T) {
 // handle.
 const listUnsupported = "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai " +
 	"agent memuat karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang " +
-	"namanya hanya huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin), lalu ulangi bangun " +
-	"ulang dari panel."
+	"namanya hanya huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan " +
+	"\"Ulangi dari tahap ini\" pada pekerjaan di panel."
 
 // TestRebuildCraftedAccountNameCannotSettle: the re-review's forgery. The
 // database-scoped account of TestRebuildScopedAccountCannotSettle is named
