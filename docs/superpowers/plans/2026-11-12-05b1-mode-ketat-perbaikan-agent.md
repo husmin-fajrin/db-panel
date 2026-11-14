@@ -228,6 +228,34 @@ Keputusan pengendali (Task 6):
    `/etc/mysql/my.cnf` ada. Satu pemeriksaan tambahan memastikan bahwa
    dengan `--defaults-file` `.my.cnf` itu tidak mengubah hasil.
 
+**Diukur pada gelombang perbaikan akhir (temuan audit A-3; mysqld yang
+sama, tanpa server berjalan):** `--print-defaults` dijalankan sebagai uid
+tanpa hak (`nobody`/`nogroup`, lewat `setpriv --reuid=nobody
+--regid=nogroup --init-groups`). Mesin ini tidak punya `/etc/my.cnf` atau
+`/etc/mysql/`, dan konfigurasi sistem tidak boleh diubah, jadi "berkas
+sistem" diwakili `$MYSQL_HOME/my.cnf` (berkas global yang dicari mysqld
+dengan jalur kode yang sama) di direktori sementara; `<home>/.my.cnf`
+milik `nobody`, mode 0600.
+
+| Percobaan | Hasil |
+|---|---|
+| `nobody`, `HOME=<home>`, `.my.cnf` berisi `init_file=/from/home` | `--init_file=/from/home`, keluar 0: `~/.my.cnf` dari `HOME` dibaca |
+| ditambah `MYSQL_HOME=<sys>`, `my.cnf` 0644 berisi `init_file=/from/sys-readable` | `--init_file=/from/sys-readable --init_file=/from/home`, keluar 0: berkas sistem yang bisa dibaca uid itu ikut dibaca, sebelum `~/.my.cnf` |
+| `MYSQL_HOME=<sys2>`, `my.cnf` milik root 0600 berisi `init_file=/from/sys-unreadable` | hanya `--init_file=/from/home`, keluar 0, tanpa pesan: berkas sistem yang tidak bisa dibaca uid itu **dilewati diam-diam** |
+| root, `HOME=/nonexistent`, `MYSQL_HOME=<sys2>` | `--init_file=/from/sys-unreadable`: putaran root tetap melihat berkas itu |
+| `nobody`, `.my.cnf` memuat `!include <berkas root 0600>` | stderr `File '…' not found (OS errno 13 - Permission denied)` dan `Stopped processing the 'include' directive …`, keluar 0, keluaran tetap diawali "would have been started with the following arguments" |
+| `nobody`, `.my.cnf` memuat `!include <fifo milik nobody>` | mysqld menunggu sampai dihentikan batas waktu (5 dtk di percobaan): hanya batas waktu yang membatasinya |
+| `nobody`, `.my.cnf` berisi `user=root` | `--user=root`: aturan "opsi user di ~/.my.cnf berbeda" tetap berlaku pada putaran uid layanan |
+
+Kesimpulan untuk rancangan: putaran dengan `HOME` akun layanan dijalankan
+dengan uid/gid akun itu (beserta grup tambahannya) sehingga root tidak
+pernah membuka path yang ditulis akun itu; karena berkas sistem yang tidak
+bisa dibaca uid itu dilewati diam-diam, putaran root dengan
+`HOME=/nonexistent` tetap dipakai, dan kunci start hanya terkunci bila
+kedua putaran, masing-masing dinilai dengan aturan yang ada, mengatakan
+terkunci. Ukuran keluaran dan waktu tiap putaran dibatasi (256 KiB,
+10 dtk).
+
 ---
 
 ## File Structure
