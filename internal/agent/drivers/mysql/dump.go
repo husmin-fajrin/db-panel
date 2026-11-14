@@ -119,6 +119,15 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		return res, err
 	}
 
+	// A rebuild relies on the listing of databases before its load
+	// (listBefore, which proves it again): an account whose listing cannot
+	// be proved complete is refused before anything local changes.
+	if mark != nil {
+		if _, err := completeUserDatabases(ctx, db); err != nil {
+			return res, err
+		}
+	}
+
 	// From here on local data changes.
 	if rs != nil {
 		if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {

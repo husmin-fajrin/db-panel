@@ -19,6 +19,7 @@ import (
 type settleRig struct {
 	*pinRig
 	snap   *snapshotRig
+	creds  *memCreds
 	master *testmysql.Instance
 	target *testmysql.Instance
 	dir    string
@@ -50,7 +51,7 @@ func newSettleRig(t *testing.T, oldDatabases ...string) *settleRig {
 	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir}
 	d.Register(snap.reg)
 	approveRebuild(t, dir, src)
-	return &settleRig{pinRig: &pinRig{t: t, reg: snap.reg, d: d}, snap: snap, master: master, target: target, dir: dir, src: src}
+	return &settleRig{pinRig: &pinRig{t: t, reg: snap.reg, d: d}, snap: snap, creds: creds, master: master, target: target, dir: dir, src: src}
 }
 
 // TestRebuildPartialDumpKeepsQuarantine: the auditor's sequence. Under one

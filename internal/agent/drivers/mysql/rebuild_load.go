@@ -3,8 +3,10 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -90,12 +92,13 @@ func (m *loadMark) clear() {
 }
 
 // listBefore records the non-system databases db holds now, right before
-// a dump's load begins; nil m records nothing and reads nothing.
+// a dump's load begins, from a listing proved complete
+// (completeUserDatabases); nil m records nothing and reads nothing.
 func (m *loadMark) listBefore(ctx context.Context, db *sql.DB) error {
 	if m == nil {
 		return nil
 	}
-	names, err := userDatabases(ctx, db)
+	names, err := completeUserDatabases(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -182,8 +185,121 @@ func (c loadCopy) notCopied(present []string) []string {
 	return out
 }
 
+// errListIncomplete refuses to rely on a database listing that cannot be
+// proved complete: information_schema shows an account only the databases
+// it holds some privilege on. account is 'user'@'host' (quoteAccount);
+// cause, for the log, is why the proof failed.
+type errListIncomplete struct {
+	account string
+	cause   error
+}
+
+func (e *errListIncomplete) Error() string {
+	return fmt.Sprintf("daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent "+
+		"tidak punya hak SHOW DATABASES. Jalankan sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO %s; "+
+		"lalu ulangi bangun ulang dari panel.", e.account, e.account)
+}
+
+func (e *errListIncomplete) Unwrap() error { return e.cause }
+
+// completeUserDatabases is userDatabases on one connection of db, after
+// proving on that same connection that the account sees every database
+// (listingComplete); otherwise errListIncomplete.
+func completeUserDatabases(ctx context.Context, db *sql.DB) ([]string, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("baca daftar database: %w", err)
+	}
+	defer conn.Close()
+	var account string
+	if err := conn.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&account); err != nil {
+		return nil, fmt.Errorf("baca akun MySQL: %w", err)
+	}
+	if err := listingComplete(ctx, conn, account); err != nil {
+		return nil, &errListIncomplete{account: quoteAccount(account), cause: err}
+	}
+	return userDatabases(ctx, conn)
+}
+
+// listingComplete proves that account's listing of databases on conn is
+// complete (plan evidence "Bukti daftar database yang lengkap"): the
+// account holds SHOW DATABASES directly on *.*, not partially revoked; or
+// it holds SELECT directly on *.* and partial revokes are off, so none can
+// hide a database from it. The grants are read for the account by name:
+// SHOW GRANTS FOR CURRENT_USER() would show an active role's privileges as
+// the account's own. Anything else, a query error included, is no proof.
+func listingComplete(ctx context.Context, conn *sql.Conn, account string) error {
+	rows, err := conn.QueryContext(ctx, "SHOW GRANTS FOR "+quoteAccount(account))
+	if err != nil {
+		return fmt.Errorf("SHOW GRANTS: %w", err)
+	}
+	var grants []string
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err != nil {
+			rows.Close()
+			return fmt.Errorf("SHOW GRANTS: %w", err)
+		}
+		grants = append(grants, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("SHOW GRANTS: %w", err)
+	}
+	show, sel := listingProof(grants)
+	if show {
+		return nil
+	}
+	if !sel {
+		return errors.New("neither SHOW DATABASES nor SELECT granted directly on *.*")
+	}
+	var partial bool
+	if err := conn.QueryRowContext(ctx, "SELECT @@GLOBAL.partial_revokes").Scan(&partial); err != nil {
+		return fmt.Errorf("read partial_revokes: %w", err)
+	}
+	if partial {
+		return errors.New("global SELECT without SHOW DATABASES while partial_revokes is on")
+	}
+	return nil
+}
+
+// revokeRow matches a partial revoke row of SHOW GRANTS, e.g.
+// "REVOKE SELECT, SHOW DATABASES ON `old`.* FROM `u`@`h`".
+var revokeRow = regexp.MustCompile("(?s)^REVOKE (.+?) ON .+ FROM ")
+
+// listingProof reads SHOW GRANTS rows of one account: show is SHOW
+// DATABASES (or ALL) granted on *.* with no revoke row naming it; sel is
+// SELECT (or ALL) granted on *.*. Role grants are no global grant.
+func listingProof(grants []string) (show, sel bool) {
+	held, revoked := map[string]bool{}, false
+	for _, g := range grants {
+		g = strings.TrimSpace(g)
+		if m := globalGrant.FindStringSubmatch(g); m != nil {
+			for _, p := range strings.Split(m[1], ",") {
+				held[strings.ToUpper(strings.TrimSpace(p))] = true
+			}
+			continue
+		}
+		if m := revokeRow.FindStringSubmatch(g); m != nil {
+			for _, p := range strings.Split(m[1], ",") {
+				switch strings.ToUpper(strings.TrimSpace(p)) {
+				case "SHOW DATABASES", "ALL", "ALL PRIVILEGES":
+					revoked = true
+				}
+			}
+		}
+	}
+	all := held["ALL"] || held["ALL PRIVILEGES"]
+	return (all || held["SHOW DATABASES"]) && !revoked, all || held["SELECT"]
+}
+
+// rowsQuerier is a *sql.DB or one of its connections.
+type rowsQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // userDatabases are db's databases outside systemDatabases, sorted.
-func userDatabases(ctx context.Context, db *sql.DB) ([]string, error) {
+func userDatabases(ctx context.Context, db rowsQuerier) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "SELECT schema_name FROM information_schema.schemata")
 	if err != nil {
 		return nil, fmt.Errorf("baca daftar database: %w", err)

@@ -42,3 +42,53 @@ func TestNotCopied(t *testing.T) {
 		}
 	}
 }
+
+// TestListingProof: which SHOW GRANTS rows (read for the account by name,
+// so a role's privileges never show as the account's) prove that the
+// account's database listing is complete (plan evidence "Bukti daftar
+// database yang lengkap").
+func TestListingProof(t *testing.T) {
+	const to = " TO `u`@`localhost`"
+	cases := []struct {
+		name          string
+		grants        []string
+		show, select_ bool
+	}{
+		{"global SELECT", []string{"GRANT SELECT ON *.*" + to}, false, true},
+		{"SHOW DATABASES", []string{"GRANT SHOW DATABASES ON *.*" + to}, true, false},
+		{"ALL", []string{"GRANT ALL PRIVILEGES ON *.*" + to + " WITH GRANT OPTION"}, true, true},
+		{"install account (8.0 lists static privileges)", []string{
+			"GRANT SELECT, INSERT, RELOAD, SHOW DATABASES, SUPER ON *.*" + to + " WITH GRANT OPTION",
+			"GRANT BACKUP_ADMIN,SYSTEM_VARIABLES_ADMIN ON *.*" + to + " WITH GRANT OPTION"}, true, true},
+		{"database-scoped admin", []string{
+			"GRANT RELOAD, SUPER ON *.*" + to,
+			"GRANT REPLICATION_SLAVE_ADMIN,SYSTEM_VARIABLES_ADMIN ON *.*" + to,
+			"GRANT ALL PRIVILEGES ON `x`.*" + to}, false, false},
+		{"SHOW DATABASES on one database is no global grant", []string{"GRANT SELECT ON `old`.*" + to}, false, false},
+		{"role only", []string{"GRANT USAGE ON *.*" + to, "GRANT `r_all`@`%`" + to}, false, false},
+		{"partial revoke of SELECT keeps SHOW DATABASES", []string{
+			"GRANT SELECT, SHOW DATABASES ON *.*" + to, "REVOKE SELECT ON `old1`.* FROM `u`@`localhost`"}, true, true},
+		{"partial revoke of SHOW DATABASES", []string{
+			"GRANT SHOW DATABASES ON *.*" + to, "REVOKE SHOW DATABASES ON `old1`.* FROM `u`@`localhost`"}, false, false},
+		{"partial revoke of everything on one database", []string{
+			"GRANT ALL PRIVILEGES ON *.*" + to, "REVOKE SELECT, INSERT, DROP ON `old2`.* FROM `u`@`localhost`"}, true, true},
+		{"nothing", nil, false, false},
+	}
+	for _, c := range cases {
+		show, sel := listingProof(c.grants)
+		if show != c.show || sel != c.select_ {
+			t.Errorf("%s: listingProof = (show %v, select %v), want (%v, %v)", c.name, show, sel, c.show, c.select_)
+		}
+	}
+}
+
+// TestListIncompleteText: the C-1 refusal, character for character.
+func TestListIncompleteText(t *testing.T) {
+	got := (&errListIncomplete{account: quoteAccount("rs_scoped@localhost")}).Error()
+	want := "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'rs_scoped'@'localhost' yang dipakai " +
+		"agent tidak punya hak SHOW DATABASES. Jalankan sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO " +
+		"'rs_scoped'@'localhost'; lalu ulangi bangun ulang dari panel."
+	if got != want {
+		t.Errorf("text = %q\nwant   %q", got, want)
+	}
+}

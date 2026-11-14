@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -457,6 +458,14 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 	}
 	if !copied.whole {
 		left, err := d.databasesNotCopied(ctx, copied)
+		var incomplete *errListIncomplete
+		if errors.As(err, &incomplete) {
+			if d.Logger != nil {
+				d.Logger.Warn("quarantine kept: the database listing cannot be proved complete", "source", source,
+					"err", incomplete.cause)
+			}
+			return incomplete
+		}
 		if err != nil {
 			return fmt.Errorf("sumber replikasi sudah diatur, tetapi daftar database di server ini tidak bisa dibaca; "+
 				"karantina tidak diakhiri: %w", err)
@@ -501,7 +510,7 @@ func (d *Driver) databasesNotCopied(ctx context.Context, copied loadCopy) ([]str
 		return nil, err
 	}
 	defer db.Close()
-	present, err := userDatabases(ctx, db)
+	present, err := completeUserDatabases(ctx, db)
 	if err != nil {
 		return nil, err
 	}
