@@ -581,6 +581,10 @@ type JobAck struct {
 	// AcceptConnections: the connections to the old master are acknowledged
 	// (Retry of a rebuild).
 	AcceptConnections bool
+	// Approval, when set, receives the agent's answer about root's
+	// approval that a rebuild's Retry or Approve decided on, for the
+	// audit.
+	Approval *ApprovalSeen
 }
 
 // confirmMaxAge is how long the last confirmation of a job that drops data
@@ -782,7 +786,7 @@ func (r *Runner) launchRefused(id string) error {
 // its AddExisting (ErrAddExistingNames).
 func (r *Runner) Approve(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
-	if err := r.rebuildApprovalForJob(jobID); err != nil {
+	if err := r.rebuildApprovalForJob(jobID, ack.Approval); err != nil {
 		return err
 	}
 	r.startMu.Lock()
@@ -839,7 +843,7 @@ func (r *Runner) refuseCutWipeList(j store.Job) error {
 // confirmation is stored before the job runs.
 func (r *Runner) Retry(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
-	if err := r.rebuildApprovalForJob(jobID); err != nil {
+	if err := r.rebuildApprovalForJob(jobID, ack.Approval); err != nil {
 		return err
 	}
 	r.startMu.Lock()

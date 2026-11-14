@@ -1199,19 +1199,32 @@ func TestAgentRefusalLabelled(t *testing.T) {
 
 // TestRebuildAuditHasLocalApproval: the audit entry of a rebuild, and of
 // Ulangi and Setujui of one, records the approval root gave on the server
-// and its age, read again by the handler.
+// and its age, as the orchestrator's decision read it (not a later read).
 func TestRebuildAuditHasLocalApproval(t *testing.T) {
 	e, f, topo := promotedEnv(t)
 	c := e.cookie()
 	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+	approved := proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
 		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+	f.approval = approved
+	// The approval is canceled on the server right after the decision:
+	// the audit records what the decision used.
+	f.onStart = func() {
+		f.mu.Lock()
+		f.approval = proto.RebuildApprovalResult{Required: true, Code: "654321", Source: "10.0.0.2:3306", RemainingSec: 1790}
+		f.mu.Unlock()
+	}
 	rec := e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm("accept_connections", "1"),
 		web.ActRebuildOldMaster, "server", 1), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantAuditDetail(t, e, "create_replica", `"local_approval":true`, `"local_approval_age_sec":60`)
+	f.mu.Lock()
+	f.onStart = nil
+	f.approval = approved
+	calls := f.approvalCalls
+	f.mu.Unlock()
 
 	// Ulangi of a rebuild job, then Setujui of one whose approval cannot
 	// be read.
@@ -1230,6 +1243,12 @@ func TestRebuildAuditHasLocalApproval(t *testing.T) {
 	rec = e.do("POST", "/jobs/"+approveID+"/approve", withToken(t, e, url.Values{}, "job_approve:"+approveID, "job", 1), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantAuditDetail(t, e, "job_approve", `"local_approval":false`)
+	// No read of its own after the action.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.approvalCalls != calls {
+		t.Fatalf("the handler read the approval %d more times", f.approvalCalls-calls)
+	}
 }
 
 // wantAuditDetail fails unless the newest audit entry of action holds

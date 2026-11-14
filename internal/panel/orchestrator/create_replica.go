@@ -38,6 +38,9 @@ type CreateReplicaParams struct {
 	// be counted) and what they wrote is lost. Without it a rebuild is
 	// refused unless the connection list is complete and empty.
 	AcceptConnections bool
+	// Approval, when set, receives the agent's answer about root's
+	// approval that the start decided on (a rebuild only), for the audit.
+	Approval *ApprovalSeen
 }
 
 // ErrConnectionsRemain refuses rebuilding the old master while
@@ -99,7 +102,7 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	// Root's approval on the old master, asked before the start lock (an
 	// agent call): its agent refuses the wipe without one anyway.
 	if p.RebuildOldMaster {
-		if _, err := r.requireRebuildApproval(ctx, p.TargetServerID); err != nil {
+		if err := r.requireRebuildApproval(ctx, p.TargetServerID, p.Approval); err != nil {
 			return "", err
 		}
 	}

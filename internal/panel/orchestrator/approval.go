@@ -62,31 +62,44 @@ func (r *Runner) RebuildApproval(ctx context.Context, serverID int64) (proto.Reb
 	return res, nil
 }
 
+// ApprovalSeen is the agent's answer about root's approval that a
+// rebuild's start, retry or approval decided on (for the audit): Read is
+// false when no usable answer was read.
+type ApprovalSeen struct {
+	Read   bool
+	Result proto.RebuildApprovalResult
+}
+
 // requireRebuildApproval is nil only when serverID's agent needs no
 // approval or holds one; without one it is a rebuildApprovalError naming
-// the command to run there with the agent's code.
-func (r *Runner) requireRebuildApproval(ctx context.Context, serverID int64) (proto.RebuildApprovalResult, error) {
+// the command to run there with the agent's code. The answer it decided
+// on goes to seen, when set.
+func (r *Runner) requireRebuildApproval(ctx context.Context, serverID int64, seen *ApprovalSeen) error {
 	res, err := r.RebuildApproval(ctx, serverID)
+	if seen != nil {
+		*seen = ApprovalSeen{Read: err == nil, Result: res}
+	}
 	if errors.Is(err, errApprovalUnreadable) {
-		return res, rebuildApprovalError{fmt.Sprintf("Bangun ulang %s butuh persetujuan di server itu, tetapi kodenya tidak "+
+		return rebuildApprovalError{fmt.Sprintf("Bangun ulang %s butuh persetujuan di server itu, tetapi kodenya tidak "+
 			"bisa dibaca dari agent. Buka form Bangun ulang sebagai replika dan klik Periksa lagi.", r.nameOf(serverID))}
 	}
 	if err != nil {
-		return res, err
+		return err
 	}
 	if !res.Required || res.Approved {
-		return res, nil
+		return nil
 	}
 	r.log.Info("rebuild refused: no local approval on the server", "server_id", serverID)
-	return res, rebuildApprovalError{fmt.Sprintf("Bangun ulang %s butuh persetujuan di server itu. Jalankan di server itu "+
+	return rebuildApprovalError{fmt.Sprintf("Bangun ulang %s butuh persetujuan di server itu. Jalankan di server itu "+
 		"sebagai root: sudo dbpanel agent approve %s, lalu coba lagi.", r.nameOf(serverID), res.Code)}
 }
 
 // rebuildApprovalForJob is requireRebuildApproval on the server of a
 // create_replica job that rebuilds an old master and is failed, partial
 // or waiting (what Retry and Approve run again); nil for any other job.
-// It asks the agent, so callers run it before startMu.
-func (r *Runner) rebuildApprovalForJob(jobID string) error {
+// It asks the agent, so callers run it before startMu; the answer it
+// decided on goes to seen, when set.
+func (r *Runner) rebuildApprovalForJob(jobID string, seen *ApprovalSeen) error {
 	j, _, err := r.d.Store.GetJob(jobID)
 	if err != nil || j.Kind != KindCreateReplica {
 		return nil
@@ -102,8 +115,7 @@ func (r *Runner) rebuildApprovalForJob(jobID string) error {
 	}
 	ctx, cancel := context.WithTimeout(r.base, callTimeout)
 	defer cancel()
-	_, err = r.requireRebuildApproval(ctx, j.ServerID)
-	return err
+	return r.requireRebuildApproval(ctx, j.ServerID, seen)
 }
 
 // localApprovalErr words a needs_local_approval answer from serverID in

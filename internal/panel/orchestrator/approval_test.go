@@ -172,6 +172,45 @@ func TestRebuildRetryAndApproveRecheckApproval(t *testing.T) {
 	e.waitJob(id, store.JobSucceeded)
 }
 
+// TestRebuildDecisionHandedBack: Start, Retry and Approve of a rebuild
+// hand back the approval answer they decided on (the audit records it).
+func TestRebuildDecisionHandedBack(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	approved := proto.RebuildApprovalResult{Required: true, Approved: true, Source: "10.0.0.1:3306", Addr: "10.0.0.1",
+		RemainingSec: 86000, AgeSec: 60}
+	g.m.reply("mysql.rebuildApproval", approved)
+	g.m.fail("mysql.preflight", "pemeriksaan gagal")
+	var seen ApprovalSeen
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{MasterServerID: g.c.id,
+		TargetServerID: g.m.id, RebuildOldMaster: true, ConfirmWipe: true, Approval: &seen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !seen.Read || seen.Result != approved {
+		t.Fatalf("start handed back %+v", seen)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+
+	g.m.reply("mysql.rebuildApproval", notApproved("123456"))
+	seen = ApprovalSeen{}
+	if err := e.r.Retry(id, JobAck{Confirmed: true, Approval: &seen}); !errors.Is(err, ErrRebuildNeedsApproval) {
+		t.Fatalf("Retry = %v", err)
+	}
+	if !seen.Read || seen.Result != notApproved("123456") {
+		t.Fatalf("retry handed back %+v", seen)
+	}
+	g.m.reply("mysql.rebuildApproval", unusableApprovals["hostile code"])
+	seen = ApprovalSeen{Read: true}
+	if err := e.r.Approve(id, JobAck{Confirmed: true, Approval: &seen}); err == nil {
+		t.Fatal("Approve passed")
+	}
+	if seen.Read || seen.Result != (proto.RebuildApprovalResult{}) {
+		t.Fatalf("approve of an unusable answer handed back %+v", seen)
+	}
+}
+
 // TestNeedsLocalApprovalMidJobNamesCommand: a step refused by strict mode
 // on the old master (its approval ran out meanwhile) fails the job with
 // the command to run there and the code, read from the agent.

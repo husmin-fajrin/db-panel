@@ -726,13 +726,17 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		fail(msgReplicaConfirm)
 		return
 	}
+	var seen *orchestrator.ApprovalSeen
+	if rebuild {
+		seen = &orchestrator.ApprovalSeen{}
+	}
 	id, err := a.Orchestrator.StartCreateReplica(r.Context(), orchestrator.CreateReplicaParams{
 		MasterServerID: master.ID, TargetServerID: p.Target,
 		Databases: selected, ForceDump: p.ForceDump, ConfirmWipe: true, RebuildOldMaster: rebuild,
-		AcceptConnections: acceptConnections,
+		AcceptConnections: acceptConnections, Approval: seen,
 	})
 	if rebuild {
-		a.localApprovalDetail(r.Context(), p.Target, detail)
+		localApprovalDetail(seen, detail)
 	}
 	if err != nil {
 		a.Logger.Warn("create replica refused", "master", master.ID, "target", p.Target, "err", logErr(err))

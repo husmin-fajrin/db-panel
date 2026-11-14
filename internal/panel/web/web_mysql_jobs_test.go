@@ -149,6 +149,9 @@ func (f *fakeOrch) StartPrepareMaster(_ context.Context, serverID int64) (string
 
 func (f *fakeOrch) StartCreateReplica(_ context.Context, p orchestrator.CreateReplicaParams) (string, error) {
 	f.record(fmt.Sprintf("create-replica %d->%d", p.MasterServerID, p.TargetServerID))
+	if p.RebuildOldMaster {
+		f.decideApproval(p.Approval)
+	}
 	f.mu.Lock()
 	f.replicas = append(f.replicas, p)
 	onStart := f.onStart
@@ -246,8 +249,20 @@ func (f *fakeOrch) Retry(id string, ack orchestrator.JobAck) error {
 }
 func (f *fakeOrch) Cancel(id string) error { f.record("cancel " + id); return f.err }
 
+// decideApproval is the orchestrator's read of the approval a rebuild
+// decides on, handed to seen.
+func (f *fakeOrch) decideApproval(seen *orchestrator.ApprovalSeen) {
+	if seen == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	*seen = orchestrator.ApprovalSeen{Read: f.approvalErr == nil, Result: f.approval}
+}
+
 func (f *fakeOrch) jobAck(call, id string, ack orchestrator.JobAck) error {
 	f.record(call)
+	f.decideApproval(ack.Approval)
 	f.mu.Lock()
 	f.acks = append(f.acks, ack)
 	drops := f.drops[id]

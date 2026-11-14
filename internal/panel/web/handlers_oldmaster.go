@@ -787,20 +787,16 @@ const maxRemainingSec = 31 * 24 * 3600
 
 const msgApprovalUnreadable = "Persetujuan di server tidak bisa diperiksa sekarang; klik Periksa lagi."
 
-// localApprovalDetail adds to an audit detail the approval root holds on
-// serverID now: "local_approval" (false when it cannot be read) and
-// "local_approval_age_sec".
-func (a *app) localApprovalDetail(ctx context.Context, serverID int64, detail map[string]any) {
-	ctx, cancel := context.WithTimeout(ctx, pageCallTimeout)
-	defer cancel()
-	res, err := a.Orchestrator.RebuildApproval(ctx, serverID)
-	if err != nil {
-		a.Logger.Warn("read rebuild approval for the audit", "server", serverID, "err", logErr(err))
+// localApprovalDetail adds to an audit detail the approval root held on
+// the server when the orchestrator decided (seen): "local_approval"
+// (false when it was not read) and "local_approval_age_sec".
+func localApprovalDetail(seen *orchestrator.ApprovalSeen, detail map[string]any) {
+	if !seen.Read {
 		detail["local_approval"] = false
 		return
 	}
-	detail["local_approval"] = res.Approved
-	detail["local_approval_age_sec"] = res.AgeSec
+	detail["local_approval"] = seen.Result.Approved
+	detail["local_approval_age_sec"] = seen.Result.AgeSec
 }
 
 // shownError is an orchestrator refusal as a page shows it: an agent's

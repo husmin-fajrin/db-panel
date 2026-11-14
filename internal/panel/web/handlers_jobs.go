@@ -436,7 +436,7 @@ func (a *app) cancelJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a.jobAction(w, r, job, "job_cancel", a.Orchestrator.Cancel)
+	a.jobAction(w, r, job, "job_cancel", nil, a.Orchestrator.Cancel)
 }
 
 const msgRetryRefresh = "Daftar database tidak bisa disegarkan, jadi dialog Ulangi tidak dibuka: "
@@ -462,7 +462,7 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 		a.internalError(w, "drops data check", err)
 		return
 	}
-	var ack orchestrator.JobAck
+	ack := orchestrator.JobAck{Approval: &orchestrator.ApprovalSeen{}}
 	if drops {
 		if !a.requireConfirm(w, r, jobConfirmAction(name, job.ID), auditJob, job.ServerID) {
 			return
@@ -490,7 +490,7 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 			}
 		}
 	}
-	a.jobAction(w, r, job, name, func(id string) error { return do(id, ack) })
+	a.jobAction(w, r, job, name, ack.Approval, func(id string) error { return do(id, ack) })
 }
 
 // retryAckRefused checks the wipe_only[] of a retry against the job's wipe
@@ -579,12 +579,14 @@ func (a *app) prepareRetry(w http.ResponseWriter, r *http.Request) {
 // there: 400 for connections the rebuild's retry must acknowledge, 403 for
 // a job that needs a confirmation, 409 otherwise (the job is not in a state
 // that allows it). name is the audit action; the entry's target is the
-// job's server.
-func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, name string, do func(jobID string) error) {
+// job's server. seen, when set, is where do hands back the approval a
+// rebuild's retry or approval decided on (audited).
+func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, name string, seen *orchestrator.ApprovalSeen,
+	do func(jobID string) error) {
 	err := do(job.ID)
 	detail := map[string]any{"job_id": job.ID, "kind": job.Kind}
-	if (name == ActJobRetry || name == ActJobApprove) && job.Kind == orchestrator.KindCreateReplica && paramsOf(job).RebuildOldMaster {
-		a.localApprovalDetail(r.Context(), job.ServerID, detail)
+	if seen != nil && job.Kind == orchestrator.KindCreateReplica && paramsOf(job).RebuildOldMaster {
+		localApprovalDetail(seen, detail)
 	}
 	a.audit(r, name, auditJob, job.ServerID, detail, outcomeOf(err))
 	if err != nil {
