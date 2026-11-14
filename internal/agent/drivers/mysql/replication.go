@@ -88,8 +88,8 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 			if err := d.pins.claimSource(p.Host, p.Port); err != nil {
 				return nil, fmt.Errorf("sumber replikasi sudah diatur, tetapi pin sumber gagal ditulis: %w", err)
 			}
-			if err := d.settleRebuilt(p.Host, p.Port); err != nil {
-				return nil, fmt.Errorf("sumber replikasi sudah diatur, tetapi pin peran replica gagal ditulis: %w", err)
+			if err := d.settleRebuilt(ctx, p.Host, p.Port); err != nil {
+				return nil, err
 			}
 		}
 		d.log("mysql replication configured", "host", p.Host, "port", p.Port, "user", p.User, "ssl", p.SSL,

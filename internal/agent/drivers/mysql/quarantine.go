@@ -435,27 +435,49 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // dumpFrom or cloneFrom from that source succeeded in this agent run
 // (loadedFrom); without it the pin stays quarantined and the agent logs
 // why, so a configureReplication alone never ends a quarantine with the
-// leftover data unchecked. Once settled, the rebuild request and approval
-// are removed.
-func (d *Driver) settleRebuilt(host string, port int) error {
+// leftover data unchecked. After a dump the agent also lists the
+// databases on the server now: one that was not copied from the source
+// (loadCopy.notCopied) keeps the quarantine and the approval, and the
+// command answers errNotReplaced. Once settled, the rebuild request and
+// approval are removed.
+func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error {
 	d.promoteMu.Lock()
 	defer d.promoteMu.Unlock()
 	if !d.pins.quarantinedUnder(host, port) {
 		return nil
 	}
-	if !d.loadedFrom(host, port) {
+	source := net.JoinHostPort(host, fmt.Sprint(port))
+	copied, ok := d.loadedFrom(host, port)
+	if !ok {
 		if d.Logger != nil {
 			d.Logger.Warn("quarantine kept: replication points at the pinned source, but no dump or clone from it "+
-				"succeeded in this agent run", "source", net.JoinHostPort(host, fmt.Sprint(port)))
+				"succeeded in this agent run", "source", source)
 		}
 		return nil
 	}
+	if !copied.whole {
+		left, err := d.databasesNotCopied(ctx, copied)
+		if err != nil {
+			return fmt.Errorf("sumber replikasi sudah diatur, tetapi daftar database di server ini tidak bisa dibaca; "+
+				"karantina tidak diakhiri: %w", err)
+		}
+		if len(left) > 0 {
+			if d.Logger != nil {
+				d.Logger.Warn("quarantine kept: databases not copied from the pinned source remain", "source", source,
+					"databases", left)
+			}
+			return &errNotReplaced{source: source, names: left}
+		}
+	}
 	settled, err := d.pins.settleRebuilt(host, port)
-	if err != nil || !settled {
-		return err
+	if err != nil {
+		return fmt.Errorf("sumber replikasi sudah diatur, tetapi pin peran replica gagal ditulis: %w", err)
+	}
+	if !settled {
+		return nil
 	}
 	d.quarantinePending = false
-	d.log("quarantine ended: rebuilt as a replica of its pinned source", "source", net.JoinHostPort(host, fmt.Sprint(port)))
+	d.log("quarantine ended: rebuilt as a replica of its pinned source", "source", source)
 	d.clearStartResult()
 	// The approval was for this rebuild; the quarantine ends whether or
 	// not its files go (a replica never asks for them).
@@ -464,3 +486,28 @@ func (d *Driver) settleRebuilt(host string, port int) error {
 	}
 	return nil
 }
+
+// databasesNotCopied lists the local MySQL's non-system databases and
+// returns those copied does not account for.
+func (d *Driver) databasesNotCopied(ctx context.Context, copied loadCopy) ([]string, error) {
+	h, err := d.host()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, settleListTimeout)
+	defer cancel()
+	db, err := openAdmin(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	present, err := userDatabases(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return copied.notCopied(present), nil
+}
+
+// settleListTimeout bounds the database listing settleRebuilt does under
+// promoteMu.
+const settleListTimeout = 30 * time.Second

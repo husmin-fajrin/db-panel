@@ -143,7 +143,9 @@ func (p *Pins) SettleRebuilt(host string, port int) (bool, error) { return p.set
 
 // SettleRebuilt is the driver's end of a quarantine after a successful
 // mysql.configureReplication toward host:port.
-func (d *Driver) SettleRebuilt(host string, port int) error { return d.settleRebuilt(host, port) }
+func (d *Driver) SettleRebuilt(host string, port int) error {
+	return d.settleRebuilt(context.Background(), host, port)
+}
 
 // HostWithoutPort is a processlist HOST without its port.
 var HostWithoutPort = hostWithoutPort
@@ -304,11 +306,11 @@ func (d *Driver) RebuildLoadMarked() bool {
 	return d.rebuild.active
 }
 
-// MarkRebuildLoaded records a successful snapshot job from host:port, as
-// dumpFrom and cloneFrom do on a quarantined server under that source.
+// MarkRebuildLoaded records a successful CLONE from host:port, as
+// cloneFrom does on a quarantined server under that source.
 func (d *Driver) MarkRebuildLoaded(host string, port int) bool {
 	m := d.rebuildMark(host, port)
-	m.done()
+	m.done(true, nil)
 	return m != nil
 }
 

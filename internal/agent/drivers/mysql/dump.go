@@ -136,6 +136,12 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		}
 	}
 
+	// A rebuild's load records what was here before it: those databases
+	// keep every table the dump does not overwrite, so they never count as
+	// copied from the source (settleRebuilt).
+	if err := mark.listBefore(ctx, db); err != nil {
+		return res, err
+	}
 	j.Logf("info", "dumping %s from %s:%d as %s (gtid purged %s)", databaseList(p.Databases), p.Host, p.Port, p.User, gtidMode)
 	j.Progress(0, "dump dimulai")
 	var dumpGTID string

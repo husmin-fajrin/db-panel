@@ -84,7 +84,7 @@ func (d *Driver) registerSnapshotJob(reg *commands.Registry, cmd, method string,
 			if err != nil {
 				return nil, err
 			}
-			mark.done()
+			mark.done(method == methodClone, p.Databases)
 			// A copy before any source pin (create_replica copies before
 			// it configures replication) pins the master it came from.
 			if d.pins != nil {
