@@ -201,6 +201,15 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	}
 	st := jobState{MasterServerID: p.MasterServerID, Databases: dbs, ForceDump: p.ForceDump, ConfirmWipe: p.ConfirmWipe,
 		RebuildOldMaster: p.RebuildOldMaster, AcceptConnections: p.RebuildOldMaster && p.AcceptConnections}
+	if p.RebuildOldMaster {
+		// The promotion this rebuild belongs to (H-4: matched by identity,
+		// not by the clock).
+		// Without it (a store error) the job is matched by time, as one
+		// stored before the field.
+		if prom, err := r.d.Store.PromotionByOldMaster(target.ID); err == nil {
+			st.RebuildPromotionID = prom.ID
+		}
+	}
 	id, err := r.createJob(KindCreateReplica, target.ID, topo.ID, st, createReplicaStepNames())
 	if err != nil {
 		if rerr := r.d.Store.RemoveReplica(target.ID); rerr != nil {
@@ -758,10 +767,24 @@ func (jr *jobRun) replicaSnapshot(ctx context.Context, approved bool) (outcome, 
 		jr.logf("info", "Salinan dari percobaan sebelumnya masih berjalan atau sudah selesai; ditunggu, tidak diulang.")
 	}
 	var res proto.SnapshotResult
-	if err := jr.copySnapshot(ctx, cmd, p, reattach, &res); err != nil {
+	sentBefore := jr.st.CopySent
+	jr.copyWatch = jr.st.RebuildOldMaster
+	err = jr.copySnapshot(ctx, cmd, p, reattach, &res)
+	jr.copyWatch = false
+	if err != nil {
+		// The agent refused the copy command itself: it does that before
+		// any local change, so this attempt did not send a copy after all.
+		if jr.st.RebuildOldMaster && !sentBefore && jr.st.CopySent && !jr.st.CopyBegan && !jr.agentStarted &&
+			jr.startRefused {
+			jr.st.CopySent = false
+			jr.save()
+		}
 		return outcome{}, err
 	}
 	jr.st.SnapshotGTID = res.GTIDExecuted
+	if jr.st.RebuildOldMaster {
+		jr.st.CopyBegan = true
+	}
 	jr.save()
 	if res.AdminReplaced {
 		jr.st.AdminReplaced = true

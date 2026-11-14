@@ -1233,6 +1233,18 @@ type jobState struct {
 	// the answer and the save leaves it unset (the safe side); a Retry of
 	// the connect step sets it.
 	QuarantineEnded bool `json:"quarantine_ended,omitempty"`
+	// RebuildPromotionID: the promotion whose old master this rebuild
+	// rebuilds, recorded at its start (H-4); RebuildCopyState matches the
+	// job to the promotion by it. Jobs stored before it have 0.
+	RebuildPromotionID int64 `json:"rebuild_promotion_id,omitempty"`
+	// CopySent: the copy command (mysql.dumpFrom or mysql.cloneFrom) was
+	// sent, recorded before it is sent so a lost answer counts; cleared
+	// again when the agent refused that very call, which it does before
+	// any local change. CopyBegan: the agent reported what it reports only
+	// once the old master's data began to change (a progress event of the
+	// copy job, or its result). See RebuildCopyState (H-1d).
+	CopySent  bool `json:"copy_sent,omitempty"`
+	CopyBegan bool `json:"copy_began,omitempty"`
 	// AcceptConnections: the user acknowledged the connections to the old
 	// master when starting the rebuild (a record only: a Retry reads the
 	// connections again and needs its own acknowledgement, JobAck).
@@ -1432,6 +1444,16 @@ type jobRun struct {
 	// agentStarted: the last runAgentJob had an agent job (started, or
 	// one from an earlier attempt); false when its start call failed.
 	agentStarted bool
+	// lastRefused: the last call's error was the agent's own answer (not a
+	// timeout or a lost connection), so the agent refused before doing
+	// anything (promoteStartRefused).
+	lastRefused bool
+	// startRefused: the last runAgentJob's start call was refused by the
+	// agent itself (lastRefused of that call).
+	startRefused bool
+	// copyWatch: the agent job being waited for is the copy of a rebuild
+	// (H-1d): its progress events are evidence that the copy began.
+	copyWatch bool
 	// promoteStartUnknown: the start call of mysql.promote failed without
 	// an answer from the agent (a timeout, a dropped link), so the agent
 	// may have started the job anyway.
@@ -1666,6 +1688,7 @@ func (jr *jobRun) callWithin(ctx context.Context, d time.Duration, serverID int6
 	cctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	err := jr.r.d.Hub.Call(cctx, serverID, cmd, params, result)
+	jr.lastRefused = err != nil && promoteStartRefused(err)
 	if errors.Is(err, proto.ErrOffline) {
 		return stepError(fmt.Sprintf("agent %s terputus saat %s", jr.serverName(serverID), jr.steps[jr.idx].title))
 	}

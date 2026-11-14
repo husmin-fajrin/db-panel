@@ -20,7 +20,7 @@ import (
 func (jr *jobRun) runAgentJob(ctx context.Context, serverID int64, cmd string, params, result any) error {
 	r := jr.r
 	agentID := ""
-	jr.agentStarted = false
+	jr.agentStarted, jr.startRefused = false, false
 	if jr.st.AgentJobID != "" && jr.st.AgentServerID == serverID && jr.st.AgentCmd == cmd {
 		var s proto.JobStatus
 		err := jr.call(ctx, serverID, "job.status", proto.JobIDParams{JobID: jr.st.AgentJobID}, &s)
@@ -48,6 +48,7 @@ func (jr *jobRun) runAgentJob(ctx context.Context, serverID int64, cmd string, p
 	if agentID == "" {
 		var started proto.StartedJob
 		if err := jr.call(ctx, serverID, cmd, params, &started); err != nil {
+			jr.startRefused = jr.lastRefused
 			return err
 		}
 		agentID = started.JobID
@@ -132,6 +133,13 @@ func (jr *jobRun) handleEvents(agentID string, result any) (bool, error) {
 		}
 		switch ev.Type {
 		case proto.EventJobProgress:
+			// The copy job reports progress only once local data began to
+			// change (dump: after the binary log reset; CLONE: right before
+			// CLONE INSTANCE), see RebuildCopyState.
+			if jr.copyWatch && !jr.st.CopyBegan {
+				jr.st.CopyBegan = true
+				jr.save()
+			}
 			var p proto.JobProgress
 			if json.Unmarshal(ev.Payload, &p) == nil {
 				jr.setStep(store.StepRunning, fmt.Sprintf("%s (%d%%)", p.Message, p.Percent))

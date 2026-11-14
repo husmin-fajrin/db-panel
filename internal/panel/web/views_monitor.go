@@ -119,8 +119,12 @@ func (a *app) statusFragment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	sv := a.statusOf(srv.ID, srv.Role)
+	if err := a.copyStatusAdvice(srv, &sv); err != nil {
+		a.Logger.Warn("copy state for the status advice", "server", srv.ID, "err", err)
+	}
 	a.render.RenderFragment(w, "status-fragment",
-		statusFragment{statusView: a.statusOf(srv.ID, srv.Role), Row: r.URL.Query().Get("tampilan") == "baris"})
+		statusFragment{statusView: sv, Row: r.URL.Query().Get("tampilan") == "baris"})
 }
 
 // masterFacts is the master page's reading of its last report.

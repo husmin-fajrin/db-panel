@@ -384,6 +384,7 @@
       {{else if .RebuildFailed}}
       <p class="text-sm">{{attemptPendingText}}</p>
       {{else}}
+      {{if .CopyUncertain}}<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<p class="flex-1">{{copyUncertainText}}</p></div>{{end}}
       <div class="flex flex-wrap gap-2">
         <form method="post" action="/servers/{{$s.ID}}/leftover"><button type="submit" class="btn btn-sm"{{if or (not .Online) .Busy}} disabled{{end}}>Periksa data tertinggal</button></form>
         {{with .Leftover}}{{if .Transactions}}

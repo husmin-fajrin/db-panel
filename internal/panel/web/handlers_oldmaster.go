@@ -378,10 +378,14 @@ type oldMasterBox struct {
 	// (they need the quarantined role) nor Hapus server (a registered
 	// replica).
 	RebuildFailed bool
-	// CopyStarted: a rebuild of this old master reached its copy
-	// (orchestrator.RebuildCopyStarted): Periksa and Amankan data
-	// tertinggal are not offered, the box says why (G-3).
+	// CopyStarted: evidence that a rebuild of this old master began to
+	// change its data (orchestrator.RebuildCopyState CopyStarted): Periksa
+	// and Amankan data tertinggal are not offered, the box says why (G-3).
 	CopyStarted bool
+	// CopyUncertain: a copy was sent with no evidence that it began
+	// (CopyUncertain): Periksa and Amankan stay offered, with
+	// msgCopyUncertain above them (H-1d).
+	CopyUncertain bool
 }
 
 // Form warnings about the leftover data of an old master whose rebuild
@@ -391,7 +395,29 @@ const (
 		"master baru tidak bisa lagi diperiksa atau diamankan lewat panel."
 	msgAttemptPending = "Data tertinggal belum bisa diperiksa selama percobaan bangun ulang yang gagal masih tercatat. " +
 		"Untuk memeriksa atau mengamankannya, tekan dulu \"Batalkan percobaan bangun ulang\" di halaman server ini."
+	// msgCopyUncertain: the box warning and the form warning when a copy
+	// was sent but nothing shows it began (H-1d).
+	msgCopyUncertain = "Bangun ulang sebelumnya berhenti di tahap Salin data. Bila penyalinan sempat mulai, catatan " +
+		"transaksi lama di server ini sudah dihapus, dan hasil \"tidak ada data tertinggal\" dari pemeriksaan ini belum " +
+		"tentu benar."
 )
+
+// copyStatusAdvice replaces, on a quarantined old master whose rebuild
+// began its copy, the monitor's advice to run Periksa data tertinggal
+// (the page no longer offers it) with the box sentence (H-1d, N-G3).
+func (a *app) copyStatusAdvice(srv store.Server, sv *statusView) error {
+	if srv.Role != store.RoleQuarantined || sv.Explain == nil || sv.Code != monitor.StatusQuarantined {
+		return nil
+	}
+	state, err := orchestrator.RebuildCopyState(a.Store, srv.ID)
+	if err != nil || state != orchestrator.CopyStarted {
+		return err
+	}
+	e := *sv.Explain
+	e.Advice = orchestrator.CopyStartedText
+	sv.Explain = &e
+	return nil
+}
 
 // oldMasterAwaitingRebuild is orchestrator.AwaitingRebuild on the panel's
 // store: the one definition of an old master waiting for its rebuild.
@@ -494,7 +520,13 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	case !errors.Is(err, store.ErrNotFound):
 		return err
 	}
-	if box.CopyStarted, err = orchestrator.RebuildCopyStarted(a.Store, srv.ID); err != nil {
+	state, err := orchestrator.RebuildCopyState(a.Store, srv.ID)
+	if err != nil {
+		return err
+	}
+	box.CopyStarted = state == orchestrator.CopyStarted
+	box.CopyUncertain = state == orchestrator.CopyUncertain
+	if err := a.copyStatusAdvice(srv, &box.Status); err != nil {
 		return err
 	}
 	if c, ok := orchestrator.LeftoverOf(prom); ok {
@@ -992,10 +1024,11 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64, 
 		return nil, err
 	}
 	check, checked := orchestrator.LeftoverOf(prom)
-	copied, err := orchestrator.RebuildCopyStarted(a.Store, srv.ID)
+	copyState, err := orchestrator.RebuildCopyState(a.Store, srv.ID)
 	if err != nil {
 		return nil, err
 	}
+	copied := copyState == orchestrator.CopyStarted
 	// Periksa and Amankan cannot run: after a copy began the data is gone;
 	// while a failed attempt is recorded (role replica) they wait for
 	// "Batalkan percobaan bangun ulang" (G-3).
@@ -1027,6 +1060,11 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64, 
 	case check.Transactions > 0:
 		info.Warnings = append(info.Warnings, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
 			"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
+	}
+	// A copy sent with no evidence it began: Periksa stays offered, its
+	// result may be wrong (H-1d).
+	if noCheck == "" && copyState == orchestrator.CopyUncertain {
+		info.Warnings = append(info.Warnings, msgCopyUncertain)
 	}
 	if ask {
 		a.rebuildApproval(ctx, info)

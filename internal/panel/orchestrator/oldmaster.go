@@ -118,60 +118,101 @@ func (r *Runner) oldMasterOf(serverID int64) (store.Topology, store.Promotion, e
 }
 
 // CopyStartedText refuses Periksa and Amankan data tertinggal on an old
-// master whose rebuild reached the copy (RebuildCopyStarted); the page
+// master whose rebuild began its copy (RebuildCopyState CopyStarted); the page
 // shows it in their place (G-3).
 const CopyStartedText = "Bangun ulang sebelumnya sudah mulai menyalin data ke server ini, jadi data lamanya sudah " +
 	"dihapus atau diganti; data tertinggal tidak bisa diperiksa atau diamankan lagi lewat panel."
 
-// RebuildCopyStarted reports whether a rebuild of the old master serverID
-// started since its promotion reached the step "Salin data" (stepCopyName):
-// from there its databases may be dropped and, for a dump, its binary logs
-// reset, so what Periksa and Amankan data tertinggal read is gone. False
-// for a server that is no promotion's old master.
-func RebuildCopyStarted(st *store.Store, serverID int64) (bool, error) {
+// CopyState is what the panel knows of the copy of an old master's
+// rebuild attempts since its promotion (H-1d).
+type CopyState int
+
+const (
+	// CopyNotStarted: no copy command (mysql.dumpFrom, mysql.cloneFrom)
+	// was sent, or the agent refused it before any local change.
+	CopyNotStarted CopyState = iota
+	// CopyUncertain: a copy command was sent but nothing shows it changed
+	// anything (its answer may be lost, or the copy job ended without a
+	// progress report); also a job whose params cannot be read.
+	CopyUncertain
+	// CopyStarted: evidence that the agent began to change the old
+	// master's data: the job went past the copy step, the copy job
+	// reported progress (dump: after the binary log reset; CLONE: right
+	// before CLONE INSTANCE) or its result.
+	CopyStarted
+)
+
+// RebuildCopyState is the most advanced CopyState of the rebuild jobs of
+// the old master serverID that belong to its latest promotion: by the
+// promotion recorded in the job (RebuildPromotionID), or for a job stored
+// before that by its creation time. Periksa and Amankan data tertinggal
+// are refused only for CopyStarted. CopyNotStarted for a server that is no
+// promotion's old master.
+func RebuildCopyState(st *store.Store, serverID int64) (CopyState, error) {
 	prom, err := st.PromotionByOldMaster(serverID)
 	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
+		return CopyNotStarted, nil
 	}
 	if err != nil {
-		return false, err
+		return CopyNotStarted, err
 	}
 	jobs, err := st.ListJobsForServer(serverID, 0)
 	if err != nil {
-		return false, err
+		return CopyNotStarted, err
 	}
+	state := CopyNotStarted
 	for _, j := range jobs {
-		if j.Kind != KindCreateReplica || j.CreatedAt.Before(prom.StartedAt) {
+		if j.Kind != KindCreateReplica {
 			continue
 		}
 		var js jobState
 		if err := json.Unmarshal([]byte(j.ParamsJSON), &js); err != nil {
-			// Unreadable params: count it as a copy that may have started.
-			return true, nil
+			// Unreadable params: nothing is refused on corruption.
+			if !j.CreatedAt.Before(prom.StartedAt) {
+				state = max(state, CopyUncertain)
+			}
+			continue
 		}
 		if !js.RebuildOldMaster {
 			continue
 		}
+		if js.RebuildPromotionID != 0 {
+			if js.RebuildPromotionID != prom.ID {
+				continue
+			}
+		} else if j.CreatedAt.Before(prom.StartedAt) {
+			continue
+		}
 		_, steps, err := st.GetJob(j.ID)
 		if err != nil {
-			return false, err
+			return CopyNotStarted, err
 		}
 		i := slices.IndexFunc(steps, func(s store.JobStep) bool { return s.Name == stepCopyName })
-		if i >= 0 && j.CurrentStep >= i {
-			return true, nil
+		if i < 0 {
+			continue
+		}
+		switch {
+		case j.CurrentStep > i, js.CopyBegan:
+			state = max(state, CopyStarted)
+		case js.RebuildPromotionID != 0 && js.CopySent:
+			state = max(state, CopyUncertain)
+		case js.RebuildPromotionID == 0 && j.CurrentStep == i && (js.AgentJobID != "" || js.SnapshotGTID != ""):
+			// Stored before the copy flags: an agent job or a copy result
+			// at the copy step is no proof either way.
+			state = max(state, CopyUncertain)
 		}
 	}
-	return false, nil
+	return state, nil
 }
 
 // refuseAfterCopy is CopyStartedText once a rebuild of serverID reached
 // the copy.
 func (r *Runner) refuseAfterCopy(serverID int64) error {
-	started, err := RebuildCopyStarted(r.d.Store, serverID)
+	state, err := RebuildCopyState(r.d.Store, serverID)
 	if err != nil {
 		return err
 	}
-	if started {
+	if state == CopyStarted {
 		return errors.New(CopyStartedText)
 	}
 	return nil

@@ -172,6 +172,7 @@ var templateFuncs = template.FuncMap{
 	// data tertinggal in the Master lama box (G-3).
 	"copyStartedText":    func() string { return orchestrator.CopyStartedText },
 	"attemptPendingText": func() string { return msgAttemptPending },
+	"copyUncertainText":  func() string { return msgCopyUncertain },
 }
 
 // partials are the templates shared by several pages and rendered on their

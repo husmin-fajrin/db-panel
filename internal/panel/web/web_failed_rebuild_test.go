@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
@@ -365,4 +366,96 @@ func TestBuatReplikaLeavesOutFailedRebuild(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, `<option value="3"`)
 	wantNoBody(t, rec, `<option value="1"`)
+}
+
+const copyUncertain = "Bangun ulang sebelumnya berhenti di tahap Salin data. Bila penyalinan sempat mulai, catatan transaksi lama di server ini sudah dihapus, dan hasil &#34;tidak ada data tertinggal&#34; dari pemeriksaan ini belum tentu benar."
+
+// storeRebuildJobParams records a failed rebuild job of server 1 at step at
+// with params.
+func storeRebuildJobParams(t *testing.T, e *env, id string, at int, params string) {
+	t.Helper()
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: orchestrator.KindCreateReplica, ServerID: 1, ParamsJSON: params,
+		CreatedAt: time.Now()}, []string{"Periksa master", "Periksa server tujuan", "Pasang MySQL", "Siapkan replika",
+		"Salin data", "Pasang sertifikat MySQL", "Sambungkan replikasi", "Verifikasi"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobFailed, at, "gagal", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCopyUncertainWording (H-1d): a copy that was sent with no evidence it
+// began keeps Periksa and Amankan offered on the plain quarantined old
+// master, with the warning above them and as the form warning; the
+// status advice to run Periksa stays. With evidence, the box sentence
+// replaces the advice too.
+func TestCopyUncertainWording(t *testing.T) {
+	e, _, _ := failedRebuildEnv(t)
+	c := e.cookie()
+	prom, err := e.st.PromotionByOldMaster(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeRebuildJobParams(t, e, "6666666666666666666666666666666a", 4,
+		fmt.Sprintf(`{"master_server_id":2,"rebuild_old_master":true,"rebuild_promotion_id":%d,"copy_sent":true}`, prom.ID))
+	// Still recorded as a failed attempt: the attempt-pending sentence.
+	wantBody(t, e.do("GET", "/servers/1", nil, c), attemptPending)
+	if err := e.st.ReturnToQuarantine(1); err != nil {
+		t.Fatal(err)
+	}
+	box := e.do("GET", "/servers/1", nil, c)
+	wantBody(t, box, copyUncertain, `action="/servers/1/leftover"`)
+	wantNoBody(t, box, copyStartedBox)
+	form := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantBody(t, form, copyUncertain)
+	wantNoBody(t, form, copyStartedForm)
+
+	// Evidence that the copy began (a second attempt of this promotion).
+	storeRebuildJobParams(t, e, "6666666666666666666666666666666b", 4,
+		fmt.Sprintf(`{"master_server_id":2,"rebuild_old_master":true,"rebuild_promotion_id":%d,"copy_sent":true,"copy_began":true}`, prom.ID))
+	box = e.do("GET", "/servers/1", nil, c)
+	wantBody(t, box, copyStartedBox)
+	wantNoBody(t, box, copyUncertain, `action="/servers/1/leftover"`)
+}
+
+// TestCopyStartedStatusAdvice (H-1d, N-G3): on a quarantined old master
+// whose rebuild began its copy, the status advice does not send the
+// operator to Periksa data tertinggal (not offered) but says why; with an
+// uncertain copy the advice stays. The page and the status fragment agree.
+func TestCopyStartedStatusAdvice(t *testing.T) {
+	const periksaAdvice = `Tekan &#34;Periksa data tertinggal&#34; untuk melihat transaksi`
+	for _, tc := range []struct {
+		name   string
+		params string
+		advice bool
+	}{
+		{"uncertain", `"copy_sent":true`, true},
+		{"started", `"copy_sent":true,"copy_began":true`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mon := &fakeMonitor{}
+			e, _, topo := promotedEnv(t, func(d *web.Deps) { d.Monitor = mon })
+			if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			mon.setView(monitor.View{ServerID: 1, Role: store.RoleQuarantined, ReceivedAt: time.Now(),
+				Status: monitor.DeriveQuarantined(false)})
+			prom, err := e.st.PromotionByOldMaster(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			storeRebuildJobParams(t, e, "6666666666666666666666666666666c", 4,
+				fmt.Sprintf(`{"master_server_id":2,"rebuild_old_master":true,"rebuild_promotion_id":%d,%s}`, prom.ID, tc.params))
+			for _, u := range []string{"/servers/1", "/servers/1/status-fragment"} {
+				rec := e.do("GET", u, nil, e.cookie())
+				wantBody(t, rec, "data-explain")
+				if tc.advice {
+					wantBody(t, rec, periksaAdvice)
+				} else {
+					wantNoBody(t, rec, periksaAdvice)
+					wantBody(t, rec, copyStartedBox)
+				}
+			}
+		})
+	}
 }

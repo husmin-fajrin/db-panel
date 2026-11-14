@@ -242,8 +242,8 @@ func TestLeftoverAfterCopyStarted(t *testing.T) {
 		if err := e.r.CancelRebuildAttempt(ctx, g.m.id); err != nil {
 			t.Fatal(err)
 		}
-		if started, err := RebuildCopyStarted(e.st, g.m.id); err != nil || !started {
-			t.Fatalf("RebuildCopyStarted = %v, %v; want true", started, err)
+		if state, err := RebuildCopyState(e.st, g.m.id); err != nil || state != CopyStarted {
+			t.Fatalf("RebuildCopyState = %v, %v; want started", state, err)
 		}
 		for name, start := range map[string]func(context.Context, int64) (string, error){
 			"leftover": e.r.StartLeftover, "salvage": e.r.StartSalvage} {
@@ -288,8 +288,8 @@ func TestLeftoverAfterCopyStarted(t *testing.T) {
 		if err := e.r.CancelRebuildAttempt(ctx, g.m.id); err != nil {
 			t.Fatal(err)
 		}
-		if started, err := RebuildCopyStarted(e.st, g.m.id); err != nil || started {
-			t.Fatalf("RebuildCopyStarted = %v, %v; want false", started, err)
+		if state, err := RebuildCopyState(e.st, g.m.id); err != nil || state != CopyNotStarted {
+			t.Fatalf("RebuildCopyState = %v, %v; want not started", state, err)
 		}
 		g.m.reply("mysql.leftover", proto.LeftoverResult{})
 		id, err := e.r.StartLeftover(ctx, g.m.id)
