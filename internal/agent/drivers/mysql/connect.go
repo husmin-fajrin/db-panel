@@ -227,8 +227,13 @@ func (e *errLookupLocal) Error() string {
 // the first), so the connection goes where the check looked (a second
 // lookup at dial time could answer otherwise).
 func localMySQL(ctx context.Context, host string) (dial string, err error) {
-	if host == "" || strings.EqualFold(host, "localhost") {
-		return host, nil
+	if host == "" {
+		return "", nil
+	}
+	if strings.EqualFold(host, "localhost") {
+		// DSN and the client's option file treat only this spelling as
+		// local; another would be dialled by name.
+		return "localhost", nil
 	}
 	ips := []net.IP{net.ParseIP(host)}
 	if ips[0] == nil {

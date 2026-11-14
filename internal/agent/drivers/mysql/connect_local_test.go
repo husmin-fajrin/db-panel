@@ -2,6 +2,7 @@ package mysql_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"strings"
@@ -314,4 +315,22 @@ func TestDialPrefersIPv4(t *testing.T) {
 		t.Fatalf("Open with a stored dual-stack name = %v", err)
 	}
 	db.Close()
+}
+
+// TestLocalhostAnyCaseIsLocalhost: localhost in any letter case is
+// dialled as localhost (the socket, or 127.0.0.1 with a port), never by
+// name.
+func TestLocalhostAnyCaseIsLocalhost(t *testing.T) {
+	t.Cleanup(mysql.SetResolver(func(_ context.Context, host string) ([]net.IP, error) {
+		t.Errorf("lookup of %q", host)
+		return nil, errors.New("no lookup expected")
+	}, nil))
+	for _, h := range []string{"localhost", "LOCALHOST", "LocalHost"} {
+		if got, err := mysql.LocalMySQLDial(context.Background(), h); err != nil || got != "localhost" {
+			t.Errorf("%q: dial %q, %v; want localhost", h, got, err)
+		}
+	}
+	if got, err := mysql.LocalMySQLDial(context.Background(), ""); err != nil || got != "" {
+		t.Errorf(`"": dial %q, %v; want ""`, got, err)
+	}
 }

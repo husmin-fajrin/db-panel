@@ -267,6 +267,9 @@ func SetInterfaceAddrs(f func() ([]net.Addr, error)) (restore func()) {
 }
 
 // LocalMySQL is the locality check of mysql.connect and the stored account.
+// LocalMySQLDial is the address the locality check returns for host.
+var LocalMySQLDial = localMySQL
+
 func LocalMySQL(ctx context.Context, host string) error {
 	_, err := localMySQL(ctx, host)
 	return err
