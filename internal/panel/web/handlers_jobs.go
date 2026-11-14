@@ -596,7 +596,11 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, n
 		case errors.Is(err, orchestrator.ErrJobNeedsConfirm):
 			status = http.StatusForbidden
 		}
-		a.renderJob(w, r, status, shownError(err))
+		name := "#" + strconv.FormatInt(job.ServerID, 10)
+		if srv, serr := a.Store.GetServer(job.ServerID); serr == nil {
+			name = srv.Name
+		}
+		a.renderJob(w, r, status, shownError(err, name))
 		return
 	}
 	a.Logger.Info("job action", "action", name, "job", job.ID, "by", auth.UsernameFrom(r.Context()))

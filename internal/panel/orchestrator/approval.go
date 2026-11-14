@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -173,4 +174,40 @@ func validApprovalSource(source string) bool {
 	}
 	n, err := strconv.Atoi(port)
 	return err == nil && n >= 1 && n <= 65535
+}
+
+// AgentQuote is an agent's own sentence as the panel shows it (P-2): after
+// a label saying whose words they are, made one line and cut by
+// monitor.AgentText, so it never reads as the panel's instruction.
+func AgentQuote(server, text string) string {
+	return fmt.Sprintf("Pesan dari agent %s (bukan dari panel): %s", server, monitor.AgentText(text, maxAgentQuote))
+}
+
+// maxAgentQuote bounds the agent's sentence in an AgentQuote.
+const maxAgentQuote = 300
+
+// invalidReasons word why an approval on file no longer holds, from the
+// agent's InvalidCode (P-2); the agent's own sentence is never shown.
+var invalidReasons = map[string]string{
+	"expired":  "masa berlakunya sudah habis",
+	"source":   "sumber yang dipin di server itu sudah berubah",
+	"addr":     "nama sumbernya sekarang mengarah ke alamat lain",
+	"dns":      "alamat untuk nama sumbernya tidak ditemukan (DNS)",
+	"future":   "waktu persetujuannya di masa depan; periksa jam server itu",
+	"lifetime": "masa berlakunya tidak wajar",
+	"role":     "server itu tidak lagi dikarantina",
+	"file":     "berkas persetujuannya tidak bisa dipakai",
+}
+
+// InvalidReason words why res's approval on file no longer holds: the
+// panel's sentence for its InvalidCode, a fallback for a code this panel
+// does not know, "" when the agent names no reason.
+func InvalidReason(res proto.RebuildApprovalResult) string {
+	if res.Invalid == "" && res.InvalidCode == "" {
+		return ""
+	}
+	if reason, ok := invalidReasons[res.InvalidCode]; ok {
+		return reason
+	}
+	return "alasannya tidak dikenali panel ini"
 }

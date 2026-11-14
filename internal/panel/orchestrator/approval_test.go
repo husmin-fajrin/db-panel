@@ -198,8 +198,8 @@ func TestNeedsLocalApprovalMidJobNamesCommand(t *testing.T) {
 
 // TestCallWithinLocalApprovalMapping: needs_local_approval of any command
 // but mysql.releaseRole becomes P12 (P12b when the code cannot be read);
-// releaseRole's own refusal names another local command and passes as
-// the agent wrote it.
+// releaseRole's own refusal names another local command and passes in
+// the agent's words, quoted as the agent's (P-2).
 func TestCallWithinLocalApprovalMapping(t *testing.T) {
 	e := newEnv(t)
 	fa := e.agent("db-old", "10.0.0.9")
@@ -211,8 +211,16 @@ func TestCallWithinLocalApprovalMapping(t *testing.T) {
 	fa.failCode("mysql.releaseRole", release)
 	fa.reply("mysql.rebuildApproval", notApproved("222222"))
 	err := jr.call(ctx, fa.id, "mysql.releaseRole", nil, nil)
-	if !errors.Is(err, &proto.Error{Code: proto.CodeNeedsLocalApproval}) || err.Error() != release {
-		t.Fatalf("releaseRole refusal = %v, want the agent's own", err)
+	if !errors.Is(err, &proto.Error{Code: proto.CodeNeedsLocalApproval}) ||
+		err.Error() != "Pesan dari agent db-old (bukan dari panel): "+release {
+		t.Fatalf("releaseRole refusal = %v, want the agent's own, quoted", err)
+	}
+	// Made one line and cut, whatever the agent sends.
+	fa.failCode("mysql.releaseRole", "baris satu\n\u202ebaris dua "+strings.Repeat("x", 400))
+	err = jr.call(ctx, fa.id, "mysql.releaseRole", nil, nil)
+	if got := err.Error(); !strings.HasPrefix(got, "Pesan dari agent db-old (bukan dari panel): baris satu baris dua x") ||
+		strings.ContainsAny(got, "\n\u202e") || len(got) > 400 {
+		t.Fatalf("hostile releaseRole refusal = %q", got)
 	}
 	if n := fa.count("mysql.rebuildApproval"); n != 0 {
 		t.Fatalf("releaseRole refusal read the approval %d times", n)

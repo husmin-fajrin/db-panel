@@ -15,13 +15,14 @@
     <h2 id="persetujuan-judul" class="card-title text-lg">Persetujuan di server</h2>
     {{if .ApprovalErr}}
     <p>{{.ApprovalErr}}</p>
+    {{with .ApprovalAgentMsg}}<blockquote class="border-l-4 border-base-300 pl-3 text-sm">{{.}}</blockquote>{{end}}
     {{else}}{{with .Approval}}
     {{if not .Required}}
     <p>Agent {{$rb.Server.Name}} tidak melaporkan server ini dikarantina, jadi persetujuan di server tidak diperlukan.</p>
     {{else if .Approved}}
     <p>Sudah disetujui di {{$rb.Server.Name}} untuk sumber {{.Source}} ({{.Addr}}); berlaku {{$rb.ApprovalHours}} jam {{$rb.ApprovalHourMinutes}} menit lagi. Untuk membatalkan, jalankan di server itu: <code>sudo dbpanel agent approve batal</code></p>
     {{else}}
-    {{with .Invalid}}<p>Persetujuan yang ada di {{$rb.Server.Name}} tidak berlaku lagi: {{.}}.</p>{{end}}
+    {{with $rb.InvalidReason}}<p>Persetujuan yang ada di {{$rb.Server.Name}} tidak berlaku lagi: {{.}}.</p>{{end}}
     <p>Belum disetujui. Jalankan perintah ini di {{$rb.Server.Name}} sebagai root, lalu klik Periksa lagi:</p>
     <pre class="whitespace-pre-wrap break-all rounded bg-base-200 p-3 text-base"><code>sudo dbpanel agent approve {{.Code}}</code></pre>
     <p>Kode berlaku {{$rb.ApprovalMinutes}} menit lagi.</p>

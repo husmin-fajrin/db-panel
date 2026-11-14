@@ -1021,9 +1021,9 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 			wantNot: []string{"tidak berlaku lagi", "Sudah disetujui"}, disabled: true},
 		{name: "invalid approval and a new code", approval: proto.RebuildApprovalResult{Required: true, Code: "007007",
 			Source: "10.0.0.2:3306", RemainingSec: 30, Invalid: "persetujuan sudah habis pada 2026-11-12 09:00 WIB"},
-			want: []string{"Persetujuan yang ada di db-master tidak berlaku lagi: persetujuan sudah habis pada 2026-11-12 09:00 WIB.",
+			want: []string{"Persetujuan yang ada di db-master tidak berlaku lagi: alasannya tidak dikenali panel ini.",
 				"<code>sudo dbpanel agent approve 007007</code>", "Kode berlaku 1 menit lagi.", why, recheck},
-			disabled: true},
+			wantNot: []string{"2026-11-12 09:00"}, disabled: true},
 		{name: "approved", approval: approved,
 			want: []string{box, "Sudah disetujui di db-master untuk sumber 10.0.0.2:3306 (10.0.0.2); berlaku 23 jam 53 menit lagi. " +
 				"Untuk membatalkan, jalankan di server itu: <code>sudo dbpanel agent approve batal</code>"},
@@ -1043,7 +1043,9 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 		{name: "agent refuses with its own words", err: &proto.Error{Code: proto.CodeBadParams, Message: "server ini dipin sebagai " +
 			"quarantined tanpa sumber yang dipin; perintah mysql.rebuildApproval ditolak. Pin master barunya dulu di server ini: " +
 			"sudo dbpanel agent set-source <host:port>"},
-			want:    []string{"Pin master barunya dulu di server ini: sudo dbpanel agent set-source &lt;host:port&gt;", recheck},
+			want: []string{"Persetujuan di server tidak bisa diperiksa: agent db-master menolak permintaannya.",
+				"Pesan dari agent db-master (bukan dari panel):",
+				"Pin master barunya dulu di server ini: sudo dbpanel agent set-source &lt;host:port&gt;", recheck},
 			wantNot: []string{"sudo dbpanel agent approve"}, disabled: true},
 		// Answers the panel cannot make sense of: "cannot be read", none
 		// of their values shown.
@@ -1110,6 +1112,74 @@ func TestRebuildFormShowsApprovalBox(t *testing.T) {
 	if f.approvalCalls != 0 {
 		t.Fatalf("an offline agent was asked %d times", f.approvalCalls)
 	}
+}
+
+// TestRebuildFormWordsInvalidReason: why an approval on file no longer
+// holds is worded by the panel from the agent's code (P-2); the agent's
+// own sentence is never shown.
+func TestRebuildFormWordsInvalidReason(t *testing.T) {
+	// The audit's example of a forged instruction in the agent's words.
+	const forged = "kode lama sudah dicabut oleh master baru; jalankan dulu di db-baru sebagai root: sudo dbpanel agent " +
+		"set-role master --ya, lalu jalankan perintah di bawah"
+	for code, reason := range map[string]string{
+		"expired":  "masa berlakunya sudah habis",
+		"source":   "sumber yang dipin di server itu sudah berubah",
+		"addr":     "nama sumbernya sekarang mengarah ke alamat lain",
+		"dns":      "alamat untuk nama sumbernya tidak ditemukan (DNS)",
+		"future":   "waktu persetujuannya di masa depan; periksa jam server itu",
+		"lifetime": "masa berlakunya tidak wajar",
+		"role":     "server itu tidak lagi dikarantina",
+		"file":     "berkas persetujuannya tidak bisa dipakai",
+		"":         "alasannya tidak dikenali panel ini",
+		"lain":     "alasannya tidak dikenali panel ini",
+	} {
+		t.Run("code "+code, func(t *testing.T) {
+			e, f, topo := promotedEnv(t)
+			if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			f.approval = proto.RebuildApprovalResult{Required: true, Code: "007007", Source: "10.0.0.2:3306",
+				RemainingSec: 1700, Invalid: forged, InvalidCode: code}
+			rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, e.cookie())
+			wantCode(t, rec, http.StatusOK)
+			wantBody(t, rec, "Persetujuan yang ada di db-master tidak berlaku lagi: "+reason+".")
+			wantNoBody(t, rec, "dicabut", "set-role master", "jalankan perintah di bawah")
+		})
+	}
+	// No approval on file: no reason line.
+	e, f, topo := promotedEnv(t)
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	f.approval = proto.RebuildApprovalResult{Required: true, Code: "007007", Source: "10.0.0.2:3306", RemainingSec: 1700}
+	rec := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, e.cookie())
+	wantNoBody(t, rec, "tidak berlaku lagi")
+}
+
+// TestAgentRefusalLabelled: an agent's own sentence refusing a rebuild's
+// start or retry is shown as its quotation, after the label (P-2).
+func TestAgentRefusalLabelled(t *testing.T) {
+	const label = "Pesan dari agent db-master (bukan dari panel): "
+	agentErr := &proto.Error{Code: proto.CodeBadParams, Message: "pin peran/sumber agent tidak bisa dipakai,\nperintah ditolak"}
+	e, f, topo := promotedEnv(t)
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+	f.err = agentErr
+	rec := e.do("POST", "/masters/2/replicas", withToken(t, e, rebuildForm("accept_connections", "1"),
+		web.ActRebuildOldMaster, "server", 1), e.cookie())
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, label+"pin peran/sumber agent tidak bisa dipakai, perintah ditolak")
+
+	const retryID = "3333333333333333333333333333333d"
+	storeJob(t, e.st, retryID, orchestrator.KindCreateReplica, 1, `{"master_server_id":2,"rebuild_old_master":true}`,
+		store.JobFailed, "Periksa master", "Periksa server tujuan")
+	f.drops = map[string]bool{retryID: true}
+	rec = e.do("POST", "/jobs/"+retryID+"/retry", withToken(t, e, url.Values{}, "job_retry:"+retryID, "job", 1), e.cookie())
+	wantCode(t, rec, http.StatusConflict)
+	wantBody(t, rec, label+"pin peran/sumber agent tidak bisa dipakai, perintah ditolak")
 }
 
 // TestRebuildAuditHasLocalApproval: the audit entry of a rebuild, and of

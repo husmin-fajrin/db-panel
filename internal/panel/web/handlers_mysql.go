@@ -741,7 +741,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, orchestrator.ErrRebuildNeedsApproval) && p.Rebuild != nil {
 			a.rebuildApproval(r.Context(), p.Rebuild)
 		}
-		fail(shownError(err))
+		fail(shownError(err, p.Targets[i].Name))
 		return
 	}
 	detail["job_id"] = id

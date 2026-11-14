@@ -701,6 +701,12 @@ type rebuildInfo struct {
 	Approval    *proto.RebuildApprovalResult
 	ApprovalErr string
 	ApprovalOK  bool
+	// InvalidReason is why an approval on file no longer holds, in the
+	// panel's words (the agent's Invalid is never shown).
+	InvalidReason string
+	// ApprovalAgentMsg is the agent's own refusal, quoted as its words
+	// (orchestrator.AgentQuote), shown in a block of its own.
+	ApprovalAgentMsg string
 }
 
 // ApprovalMinutes is how many minutes the code to approve is still valid,
@@ -732,6 +738,7 @@ func (i *rebuildInfo) ApprovalHourMinutes() int64 {
 // agent is not asked.
 func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
 	info.Approval, info.ApprovalErr, info.ApprovalOK = nil, "", false
+	info.InvalidReason, info.ApprovalAgentMsg = "", ""
 	srv := info.Server
 	offline := fmt.Sprintf("Persetujuan di server tidak bisa diperiksa: agent %s offline.", srv.Name)
 	if !srv.Paired || !a.Hub.IsOnline(srv.ID) {
@@ -754,7 +761,8 @@ func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
 		res.Code = monitor.AgentText(res.Code, maxAgentWords)
 		res.Source = monitor.AgentText(res.Source, maxAgentWords)
 		res.Addr = monitor.AgentText(res.Addr, maxAgentWords)
-		res.Invalid = strings.TrimSuffix(monitor.AgentText(res.Invalid, maxAgentWords), ".")
+		info.InvalidReason = orchestrator.InvalidReason(res)
+		res.Invalid, res.InvalidCode = "", ""
 		info.Approval = &res
 		info.ApprovalOK = res.Approved || !res.Required
 	case errors.Is(err, proto.ErrOffline):
@@ -764,8 +772,9 @@ func (a *app) rebuildApproval(ctx context.Context, info *rebuildInfo) {
 			"ulang agent di halaman server itu, jalankan perintahnya, lalu klik Periksa lagi.", srv.Name)
 	case errors.Is(err, &proto.Error{Code: proto.CodeBadParams}):
 		// The agent's refusal says what to run on the server (set-source,
-		// or why its pin files cannot be used).
-		info.ApprovalErr = monitor.AgentText(err.Error(), maxAgentWords)
+		// or why its pin files cannot be used): quoted as its words.
+		info.ApprovalErr = fmt.Sprintf("Persetujuan di server tidak bisa diperiksa: agent %s menolak permintaannya.", srv.Name)
+		info.ApprovalAgentMsg = orchestrator.AgentQuote(srv.Name, err.Error())
 	default:
 		info.ApprovalErr = msgApprovalUnreadable
 	}
@@ -790,10 +799,11 @@ func (a *app) localApprovalDetail(ctx context.Context, serverID int64, detail ma
 }
 
 // shownError is an orchestrator refusal as a page shows it: an agent's
-// own text (a *proto.Error) bounded (SP-11), the panel's as it is.
-func shownError(err error) string {
+// own text (a *proto.Error from server) quoted as its words and bounded
+// (orchestrator.AgentQuote, SP-11), the panel's as it is.
+func shownError(err error, server string) string {
 	if _, ok := errors.AsType[*proto.Error](err); ok && !errors.Is(err, proto.ErrOffline) {
-		return monitor.AgentText(err.Error(), maxAgentWords)
+		return orchestrator.AgentQuote(server, err.Error())
 	}
 	return err.Error()
 }

@@ -1376,6 +1376,16 @@ type stepError string
 
 func (e stepError) Error() string { return string(e) }
 
+// agentQuoteError is an agent's refusal quoted as the agent's words
+// (AgentQuote); it still matches the agent's error.
+type agentQuoteError struct {
+	msg string
+	err error
+}
+
+func (e agentQuoteError) Error() string { return e.msg }
+func (e agentQuoteError) Unwrap() error { return e.err }
+
 // catchUpError is a verify that ran out of time while replication itself
 // works: the job fails, but replication keeps running (stopping it would
 // only make the replica fall further behind).
@@ -1635,8 +1645,8 @@ func (jr *jobRun) call(ctx context.Context, serverID int64, cmd string, params, 
 
 // callWithin runs cmd on serverID within d. A refusal by strict mode
 // (needs_local_approval) becomes localApprovalErr's words, except for
-// mysql.releaseRole, whose refusal names another local command and is
-// kept as the agent wrote it.
+// mysql.releaseRole, whose refusal names another local command: it is
+// kept in the agent's words, quoted as the agent's (AgentQuote).
 func (jr *jobRun) callWithin(ctx context.Context, d time.Duration, serverID int64, cmd string, params, result any) error {
 	cctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
@@ -1644,7 +1654,10 @@ func (jr *jobRun) callWithin(ctx context.Context, d time.Duration, serverID int6
 	if errors.Is(err, proto.ErrOffline) {
 		return stepError(fmt.Sprintf("agent %s terputus saat %s", jr.serverName(serverID), jr.steps[jr.idx].title))
 	}
-	if cmd != "mysql.releaseRole" && errors.Is(err, &proto.Error{Code: proto.CodeNeedsLocalApproval}) {
+	if errors.Is(err, &proto.Error{Code: proto.CodeNeedsLocalApproval}) {
+		if cmd == "mysql.releaseRole" {
+			return agentQuoteError{msg: AgentQuote(jr.serverName(serverID), err.Error()), err: err}
+		}
 		return jr.r.localApprovalErr(ctx, serverID, err)
 	}
 	return err
