@@ -302,7 +302,23 @@ server ini sendiri); <host> bukan alamat server ini." Akun tersimpan dari
 versi lama yang menyebut host lain tidak dipakai: setiap akses agent ke
 MySQL gagal dengan teks yang sama, dan laporan pemantauan server itu
 membawanya. Perbaikannya: **Hubungkan MySQL** lagi dari panel dengan
-host kosong atau alamat server itu sendiri. Agent menyimpan akun itu tersegel di
+host kosong atau alamat server itu sendiri.
+
+Nama host yang tidak bisa dicari tetap ditolak, dengan "alamat MySQL
+<host> tidak bisa dicari (DNS): <sebab>. MySQL yang disambungkan harus
+berada di server ini (soket, 127.0.0.1, atau alamat server ini sendiri)."
+(sebabnya "tidak ada alamat" bila nama itu tidak punya alamat sama
+sekali); periksa DNS server itu. Agent mencari nama itu sekali dan
+tersambung ke alamat yang sudah diperiksa. Setelah agent dimutakhirkan,
+server yang akun tersimpannya menyebut alamat yang tidak ada di salah satu
+antarmuka server itu sendiri (misalnya alamat NAT atau alamat publik)
+gagal di setiap akses MySQL dengan teks "… bukan alamat server ini." di
+atas, termasuk penjaga karantina, sampai Anda menjalankan **Hubungkan
+MySQL** lagi dari panel dengan host lokal; pada server yang dikarantina
+akun itu harus punya semua hak yang diperiksa panel (lihat "Peran dan
+sumber yang dipin").
+
+Agent menyimpan akun itu tersegel di
 `/etc/dbpanel/mysql.cred` di server itu; panel tidak menyimpannya dan
 tidak menampilkannya lagi. Bila akun kurang hak, panel menampilkan
 perintah `GRANT` yang perlu dijalankan.
@@ -1806,6 +1822,29 @@ server itu tidak bisa dibaca saat itu, langkahnya gagal dengan "sumber
 replikasi sudah diatur, tetapi daftar database di server ini tidak bisa
 dibaca; karantina tidak diakhiri: <sebab>"; tekan **Ulangi dari tahap
 ini**.
+
+Daftar database itu hanya dipercaya bila akun MySQL yang dipakai agent
+pasti melihat semua database: akun itu memegang `SHOW DATABASES` langsung
+di `ON *.*` (tidak dicabut untuk satu database pun), atau `SELECT`
+langsung di `ON *.*` selama `partial_revokes` mati (bawaan MySQL). Hak
+yang hanya didapat lewat role tidak dihitung. Akun yang dibuat agent saat
+memasang MySQL dan contoh `GRANT ALL ON *.*` di "Hubungkan MySQL" sudah
+memenuhinya. Bila tidak, dump bangun ulang gagal sebelum memuat apa pun,
+atau langkah pengaturan replikasi gagal dengan pin tetap `quarantined` dan
+persetujuan tidak dihapus, keduanya dengan "daftar database di server ini
+tidak bisa dipastikan lengkap: akun MySQL <akun> yang dipakai agent tidak
+punya hak SHOW DATABASES. Jalankan sebagai root MySQL di server ini: GRANT
+SHOW DATABASES ON *.* TO <akun>; lalu ulangi bangun ulang dari panel."
+Jalankan `GRANT` itu, lalu tekan **Ulangi dari tahap ini**.
+
+Bila agent dimulai ulang di antara salinan data dan pengaturan replikasi,
+agent tidak lagi punya catatan salinan itu. Langkah pengaturan replikasi
+lalu gagal dengan "sumber replikasi sudah diatur, tetapi server ini tetap
+dikarantina: agent tidak punya catatan salinan data dari bangun ulang ini
+(misalnya karena agent dimulai ulang di tengah jalan). Ulangi bangun ulang
+dari panel." Pin tetap `quarantined` dan persetujuan tidak dihapus.
+**Ulangi dari tahap ini** tidak menyalin data lagi, jadi mulai lagi
+**Bangun ulang sebagai replika** dari panel.
 
 Agent versi lama belum mengenal persetujuan di server. Panel menolak
 membangun ulangnya dengan "Agent perlu dimutakhirkan: agent di <server>
