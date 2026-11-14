@@ -2672,6 +2672,29 @@ func TestStartStateR4StaleReportIgnored(t *testing.T) {
 	r.wantAlerts(mID, KindMasterStartBypassed, 2, true)
 }
 
+// A report with a lower Seq, carrying an older start id1, after the report
+// with id2 was taken (a replayed backlog report after a reconnect)
+// changes nothing: it does not open an alert for id1 again and does not
+// move the mark.
+func TestStartStateOlderIDLowerSeqIgnored(t *testing.T) {
+	r := newRig(t)
+	mID, pid, ma := r.quarantined(plainQuar())
+	ma.send()
+	ma.state(sk(late, "L2", 0, false))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	r.clk.Add(time.Minute)
+	r.checkLeftover(pid)
+	r.wantAlerts(mID, KindMasterStartLate, 1, false)
+	old := plainQuar()
+	old.StartResult = &proto.StartResultState{Result: late, StartID: "L1", Kinds: []proto.StartKindState{sk(late, "L1", 0, false)}}
+	ma.emit(proto.HealthEvent{Seq: 1, Snapshot: old})
+	r.wantAlerts(mID, KindMasterStartLate, 1, false)
+	if got := r.mark(mID, KindMasterStartLate); got != "L2" {
+		t.Fatalf("mark after an older report = %q, want L2", got)
+	}
+}
+
 // R4-3: the L1 alert is open; "Periksa data tertinggal" is stored, then a
 // newer late start L2 is reported before the tick closes L1. L1 closes as
 // checked, L2 opens its own alert, and the tick closes nothing more.
