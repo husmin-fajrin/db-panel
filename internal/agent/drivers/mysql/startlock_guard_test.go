@@ -456,6 +456,57 @@ func TestReadTailOnlyRegularFiles(t *testing.T) {
 	}
 }
 
+// TestReadTailNeverOpensDevice: an error log path that names a device
+// node (log_error comes from the MySQL service account's option files and
+// root opens it) is refused by its Lstat before any open: opening some
+// devices (a watchdog) has effects. Proved with the open seam, which must
+// never be called for it; a regular file still goes through the seam.
+func TestReadTailNeverOpensDevice(t *testing.T) {
+	var opened []string
+	t.Cleanup(mysql.SetOpenLogFile(func(path string) (*os.File, error) {
+		opened = append(opened, path)
+		return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	}))
+	if b, err := mysql.ReadTail("/dev/null", 1024); err == nil {
+		t.Errorf("ReadTail(/dev/null) = %q, want refused", b)
+	}
+	if len(opened) != 0 {
+		t.Errorf("a device node was opened: %q", opened)
+	}
+	regular := filepath.Join(t.TempDir(), "error.log")
+	if err := os.WriteFile(regular, []byte("baris\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := mysql.ReadTail(regular, 1024); err != nil || string(b) != "baris\n" {
+		t.Errorf("ReadTail(regular) = %q, %v", b, err)
+	}
+	if len(opened) != 1 || opened[0] != regular {
+		t.Errorf("opened = %q, want only the regular file", opened)
+	}
+}
+
+// TestReadTailRefusesSwappedFile: a path replaced between the check and
+// the open (another file put in its place) is not read: the opened file
+// must be the one that was checked.
+func TestReadTailRefusesSwappedFile(t *testing.T) {
+	dir := t.TempDir()
+	path, other := filepath.Join(dir, "error.log"), filepath.Join(dir, "other.log")
+	for _, p := range []string{path, other} {
+		if err := os.WriteFile(p, []byte(p+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(mysql.SetOpenLogFile(func(p string) (*os.File, error) {
+		if err := os.Rename(other, p); err != nil {
+			t.Fatal(err)
+		}
+		return os.Open(p)
+	}))
+	if b, err := mysql.ReadTail(path, 1024); err == nil {
+		t.Errorf("ReadTail of a swapped file = %q, want refused", b)
+	}
+}
+
 // TestBootstrapFailureReportedWhenGuardRecreatesFile (FR-4): the lock file
 // was deleted while the agent was down and MySQL then refused to start;
 // the guard writes the file again (a new mtime) and still reports the

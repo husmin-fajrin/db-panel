@@ -377,14 +377,30 @@ func (d *Driver) sendRoundEvents() {
 	}
 }
 
+// openLogFile opens the error log readTail checked; tests replace it.
+var openLogFile = func(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+}
+
 // readTail is the last n bytes of the regular file at path. The error log
 // lives in a directory the mysql user owns and the guard runs as root: it
 // is opened without following a symlink and without blocking (a FIFO
 // planted there would otherwise hang the guard loop for good, with
 // promoteMu held), and read only when what was opened is a regular file
-// (SA-6).
+// (SA-6). The path comes from the service account's option files, so it is
+// checked with Lstat first and only a regular file is opened at all:
+// opening a device node can have effects (a watchdog is armed by an open).
+// What was opened must still be a regular file and the same file as the
+// one checked.
 func readTail(path string, n int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	checked, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !checked.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s bukan berkas biasa", path)
+	}
+	f, err := openLogFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +409,7 @@ func readTail(path string, n int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() {
+	if !fi.Mode().IsRegular() || !os.SameFile(checked, fi) {
 		return nil, fmt.Errorf("%s bukan berkas biasa", path)
 	}
 	if off := fi.Size() - n; off > 0 {

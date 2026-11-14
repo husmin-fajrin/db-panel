@@ -1,6 +1,9 @@
 package mysql
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // The caps of the seen files and of the promote lock's fan-out (SA-4).
 var (
@@ -41,4 +44,12 @@ func SetAfterStartLockOpen(f func(path string)) (restore func()) {
 	old := afterStartLockOpen
 	afterStartLockOpen = f
 	return func() { afterStartLockOpen = old }
+}
+
+// SetOpenLogFile replaces how readTail opens the error log after its
+// Lstat check; it returns the function that restores it.
+func SetOpenLogFile(f func(path string) (*os.File, error)) (restore func()) {
+	old := openLogFile
+	openLogFile = f
+	return func() { openLogFile = old }
 }
