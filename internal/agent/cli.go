@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"log/syslog"
 	"net"
 	"os"
 	"os/signal"
@@ -411,11 +412,14 @@ func mainApprove(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	if arg == "batal" {
 		// Clearing does not depend on the pins being readable.
 		p, _ := mysql.LoadPins(dir)
+		a, _, _ := p.ReadRebuildApproval()
+		r, _, _ := p.ReadRebuildRequest()
 		if err := p.ClearRebuild(); err != nil {
 			fmt.Fprintf(stderr, "Gagal menghapus: %v\n", err)
 			return 1
 		}
 		fmt.Fprintln(stdout, "Persetujuan dan permintaan bangun ulang di server ini dihapus.")
+		approvalSyslog("rebuild approval cancelled", a, r.Created, stderr)
 		return 0
 	}
 	p, err := mysql.LoadPins(dir)
@@ -510,7 +514,47 @@ Ketik ya untuk menyetujui, atau apa saja untuk membatalkan: `)
 	}
 	fmt.Fprintf(stdout, "Disetujui sampai %s. Kembali ke panel dan klik Periksa lagi. Untuk membatalkan: sudo dbpanel agent approve batal\n",
 		approval.Expires.Local().Format("2006-01-02 15:04 MST"))
+	approvalSyslog("rebuild approval written", approval, req.Created, stderr)
 	return 0
+}
+
+// cliSyslog writes line to the system log (facility auth, tag
+// dbpanel-agent); tests replace it.
+var cliSyslog = func(line string) error {
+	w, err := syslog.New(syslog.LOG_AUTH|syslog.LOG_NOTICE, "dbpanel-agent")
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	return w.Notice(line)
+}
+
+// approvalSyslog records an approval written or cancelled (action) in the
+// system log: its source, address and expiry, when the request it answered
+// was made, and who ran the command. The code is never logged. A log that
+// cannot be written is a warning on stderr; the outcome stands.
+func approvalSyslog(action string, a mysql.RebuildApproval, requested time.Time, stderr io.Writer) {
+	or := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
+	at := func(t time.Time) string {
+		if t.IsZero() {
+			return "-"
+		}
+		return t.UTC().Format(time.RFC3339)
+	}
+	who := "uid=" + strconv.Itoa(os.Getuid())
+	if u := getenv("SUDO_USER"); u != "" {
+		who = fmt.Sprintf("user=%s sudo_uid=%s %s", strconv.Quote(u), or(getenv("SUDO_UID")), who)
+	}
+	line := fmt.Sprintf("%s: source=%s addr=%s expires=%s request_created=%s %s", action,
+		or(a.Source), or(a.Addr), at(a.Expires), at(requested), who)
+	if err := cliSyslog(line); err != nil {
+		fmt.Fprintf(stderr, "Peringatan: catatan ke log sistem gagal ditulis (%v).\n", err)
+	}
 }
 
 // sameSourceText reports whether a and b are the same host:port (host

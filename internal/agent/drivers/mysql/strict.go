@@ -168,17 +168,22 @@ func (d *Driver) ensureRebuildRequest(now time.Time) (RebuildRequest, error) {
 }
 
 // logApprovalUse logs the first command an approval lets through, once
-// per approval.
+// per approval, and every command it lets through.
 func (d *Driver) logApprovalUse(cmd string, a RebuildApproval) {
 	key := a.Source + "|" + a.Approved.Format(time.RFC3339Nano)
 	d.approvalMu.Lock()
 	first := d.approvalLogged != key
 	d.approvalLogged = key
 	d.approvalMu.Unlock()
-	if first && d.Logger != nil {
+	if d.Logger == nil {
+		return
+	}
+	if first {
 		d.Logger.Info("local rebuild approval used", "cmd", cmd, "source", a.Source, "addr", a.Addr,
 			"approved", a.Approved, "expires", a.Expires)
 	}
+	d.Logger.Info("protected command allowed by the local rebuild approval", "cmd", cmd, "source", a.Source,
+		"approved", a.Approved)
 }
 
 func (d *Driver) registerRebuildApproval(reg *commands.Registry) {

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -1284,6 +1285,55 @@ func TestCLIApproveAddressErrors(t *testing.T) {
 			t.Errorf("code = %d, stderr %q", code, errOut)
 		}
 	})
+}
+
+// TestCLIApproveSyslog: approve and approve batal each write one line to
+// the system log with the source, address, expiry, request time and the
+// invoking user, never the code; a log that cannot be written is a
+// warning and changes nothing.
+func TestCLIApproveSyslog(t *testing.T) {
+	var lines []string
+	logErr := error(nil)
+	oldLog, oldEnv := cliSyslog, getenv
+	t.Cleanup(func() { cliSyslog, getenv = oldLog, oldEnv })
+	cliSyslog = func(line string) error {
+		lines = append(lines, line)
+		return logErr
+	}
+	getenv = func(k string) string {
+		return map[string]string{"SUDO_USER": "budi", "SUDO_UID": "1001"}[k]
+	}
+	dir, req := approveSetup(t, "127.0.0.1:3306")
+	code, out, errOut := approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
+	if code != 0 || len(lines) != 1 {
+		t.Fatalf("approve = %d (%q, %q), log lines %q", code, out, errOut, lines)
+	}
+	for _, want := range []string{"rebuild approval written", "source=127.0.0.1:3306", "addr=127.0.0.1", "expires=",
+		"request_created=" + req.Created.UTC().Format(time.RFC3339), `user="budi"`, "sudo_uid=1001"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("log line %q lacks %q", lines[0], want)
+		}
+	}
+	if strings.Contains(lines[0], req.Code) {
+		t.Errorf("log line %q holds the code", lines[0])
+	}
+	code, _, errOut = approveRun(strings.NewReader(""), "approve", "batal", "--dir", dir)
+	if code != 0 || len(lines) != 2 || !strings.Contains(lines[1], "rebuild approval cancelled") ||
+		!strings.Contains(lines[1], "source=127.0.0.1:3306") || !strings.Contains(lines[1], `user="budi"`) {
+		t.Fatalf("cancel = %d (%q), log lines %q", code, errOut, lines)
+	}
+
+	// Without sudo: the uid.
+	getenv = func(string) string { return "" }
+	logErr = errors.New("no syslog")
+	dir, req = approveSetup(t, "127.0.0.1:3306")
+	code, out, errOut = approveRun(strings.NewReader("ya\n"), "approve", req.Code, "--dir", dir)
+	if code != 0 || !strings.Contains(out, "Disetujui sampai") || !fileExists(filepath.Join(dir, mysql.RebuildApprovalFile)) {
+		t.Errorf("approve with a failing log = %d, %q, %q", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "no syslog") || !strings.Contains(lines[2], "uid="+strconv.Itoa(os.Getuid())) {
+		t.Errorf("stderr %q, log line %q; want a warning and the uid", errOut, lines[2])
+	}
 }
 
 // TestCLIApproveNameChecks: approve always looks the source's name up

@@ -324,6 +324,36 @@ func TestApprovalFirstUseLogged(t *testing.T) {
 	}
 }
 
+// TestApprovedCommandsLogged: every protected command that passes the
+// gate under an approval is logged at Info with its name, the source and
+// the approval time.
+func TestApprovedCommandsLogged(t *testing.T) {
+	dir := pinDir(t, "quarantined", strictSource)
+	r := newPinRig(t, nil, dir)
+	var buf bytes.Buffer
+	r.d.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+	approveRebuild(t, dir, strictSource)
+	wantPastPins(t, "dropDatabases", r.dispatch("mysql.dropDatabases", proto.DropDatabasesParams{Databases: []string{"toko"}}))
+	wantPastPins(t, "dumpFrom", r.dispatch("mysql.dumpFrom", validSnapshot))
+	wantPastPins(t, "status", r.dispatch("mysql.status", nil)) // allowed: not logged
+	var lines []string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, `msg="protected command allowed by the local rebuild approval"`) {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("approved commands logged %d times, want twice:\n%s", len(lines), buf.String())
+	}
+	for i, cmd := range []string{"mysql.dropDatabases", "mysql.dumpFrom"} {
+		for _, want := range []string{"level=INFO", "cmd=" + cmd, "source=" + strictSource, "approved="} {
+			if !strings.Contains(lines[i], want) {
+				t.Errorf("log line %q does not contain %q", lines[i], want)
+			}
+		}
+	}
+}
+
 // TestRebuildApprovalCommand: mysql.rebuildApproval tells the panel
 // whether an approval is needed, the code to show while none holds, and
 // the approval while one does.
