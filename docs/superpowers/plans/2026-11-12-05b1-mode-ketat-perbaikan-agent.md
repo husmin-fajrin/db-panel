@@ -444,6 +444,50 @@ dimatikan dengan `SET GLOBAL`. Karena itu perintah satu pemanggilan di atas
 harus memasang `super_read_only=ON` sendiri, dan bila ia berhenti di tengah,
 operator menjalankan `SET GLOBAL super_read_only=ON` sendiri.
 
+### Bukti perintah tangan di server yang dikarantina (tinjauan ulang D, bagian F)
+
+**Diukur pada gelombang perbaikan akhir, bagian F:** mysqld
+`8.0.46-0ubuntu0.24.04.4` sementara seperti di atas, sebagai root lewat
+soket (`mysql -S <soket>`; README menulis `mysql` untuk shell root). Server
+di keadaan karantina: `SET PERSIST read_only=ON` dan
+`super_read_only=ON`, jadi `1 1`. Kolom "sesudah" adalah
+`@@read_only @@super_read_only` lalu `gtid_executed`; `gtid_executed`
+sebelum setiap baris sama dengan sesudahnya kecuali disebut lain.
+
+| Bentuk | Pernyataan tengah | Galat yang tampil | Keluar | Sesudah | `gtid_executed` |
+|---|---|---|---|---|---|
+| drop, `mysql -e '… DROP DATABASE `x` …'` (bentuk README, dengan `SET SESSION sql_log_bin=OFF`) | berhasil (database ada) | — | 0 | `1 1` | tidak berubah |
+| drop, sama | gagal (database tidak ada) | `ERROR 1008 (HY000) at line 1: Can't drop database 'tidakada'; database doesn't exist` | 1 | **`1 0`** | tidak berubah |
+| drop, sama dengan `--force` | gagal | sama | 1 | **`1 0`** (`--force` tidak berlaku untuk `-e`: pernyataan sesudah galat tidak dijalankan) | tidak berubah |
+| drop di heredoc `mysql --force <<'EOF'` | gagal | sama | **0** | `1 1` | tidak berubah |
+| GRANT di heredoc `mysql <<'EOF'` (bentuk README) | gagal (akun tidak ada) | `ERROR 1410 (42000) at line 1: You are not allowed to create a user with GRANT` | 1 | **`1 0`** | tidak berubah |
+| GRANT di heredoc `mysql --force <<'EOF'` | gagal | sama | **0** | `1 1` | tidak berubah |
+| GRANT di heredoc `mysql --force <<'EOF'`, akun `'a$b'@'localhost'` | berhasil | — | 0 | `1 1`; `SHOW GRANTS` memuat `GRANT SHOW DATABASES ON *.* TO `a$b`@`localhost`` | tidak berubah |
+| `echo "… TO 'a$b'@…"` dengan `b=XYZ` (tanda kutip ganda) | — | — | — | shell menulis `'aXYZ'` | — |
+| heredoc `mysql <<'EOF'` dengan dua GRANT seperti teks kurang hak (`GRANT RELOAD, PROCESS ON *.* … WITH GRANT OPTION; GRANT SYSTEM_VARIABLES_ADMIN, CONNECTION_ADMIN ON *.* … WITH GRANT OPTION;`) | berhasil | — | 0 | `1 1`; kedua hak ada di `SHOW GRANTS` | tidak berubah |
+| heredoc dengan `CREATE USER 'panel_admin'@'localhost' …; GRANT ALL ON *.* … WITH GRANT OPTION;` | berhasil | — | 0 | `1 1`; akun ada dengan semua hak | tidak berubah |
+| `GRANT SHOW DATABASES ON *.* TO 'gu'@'localhost'` tanpa mematikan `super_read_only` | — | `ERROR 1290 (HY000) … --super-read-only option …` | 1 | `1 1` | tidak berubah |
+
+Kesimpulan untuk README: `--force` membuat pernyataan terakhir jalan pada
+heredoc, tetapi tidak pada bentuk `-e` yang dipakai bagian hapus database,
+dan dengan `--force` `mysql` keluar 0 walau ada galat. Karena tidak berlaku
+untuk kedua bentuk, README tidak memakai `--force`; kedua bagian berakhir
+dengan pemeriksaan `1 1` dan perintah `SET GLOBAL super_read_only=ON` bila
+tidak. Test agent menjalankan urutan GRANT tanpa `--force`, sama dengan
+README.
+
+Perintah lain yang dipakai README:
+
+| Perintah | Hasil |
+|---|---|
+| `mysqldump … --databases "lama app" > "<dir>/lama app-cadangan.sql"` (nama dengan spasi) | keluar 0; 2134 byte; `grep -c 'CREATE DATABASE'` menulis `1` |
+| `mysqldump … --databases "tidakada" > …` (database tidak ada) | keluar 2, "Got error: 1049: Unknown database 'tidakada'"; berkas tetap ada (798 byte), `grep -c` menulis `0` |
+| `mysql -e 'SET GLOBAL …; DROP DATABASE `lama app`; …'` | keluar 0; database hilang; `1 1` |
+| `mysql -e 'SHOW DATABASES LIKE "lama app";'` | menulis nama itu bila ada; kosong bila tidak ada |
+| `mysql -e 'SELECT @@read_only, @@super_read_only;'` | `1 1` |
+| `SELECT ID, USER, HOST, DB, COMMAND, TIME FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID();` di master | `event_scheduler` (`Daemon`) dan satu sesi aplikasi `gu` (`Query`) saat aplikasi tersambung; sesudah aplikasi selesai hanya `event_scheduler` |
+| sama, di replika yang mengikuti master itu | `event_scheduler` dan enam baris `USER` `system user` (thread replikasi) |
+
 ---
 
 ## File Structure
