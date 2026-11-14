@@ -521,8 +521,9 @@ func (d *Driver) databasesNotCopied(ctx context.Context, copied loadCopy) ([]str
 // quarantine for want of a copy from the source in this agent run, so the
 // panel's job does not look finished (role and approval are unchanged).
 var errNoLoadRecord = errors.New("sumber replikasi sudah diatur, tetapi server ini tetap dikarantina: agent tidak punya " +
-	"catatan salinan data dari bangun ulang ini (misalnya karena agent dimulai ulang di tengah jalan). Ulangi bangun " +
-	"ulang dari panel.")
+	"catatan salinan data dari bangun ulang ini (misalnya karena agent dimulai ulang di tengah jalan). Mulai lagi Bangun " +
+	"ulang sebagai replika dari panel; tombol \"Ulangi dari tahap ini\" pada pekerjaan ini tidak cukup, karena salinan " +
+	"data harus diulang.")
 
 // settleListTimeout bounds the database listing settleRebuilt does under
 // promoteMu.

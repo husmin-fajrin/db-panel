@@ -1841,10 +1841,25 @@ Bila agent dimulai ulang di antara salinan data dan pengaturan replikasi,
 agent tidak lagi punya catatan salinan itu. Langkah pengaturan replikasi
 lalu gagal dengan "sumber replikasi sudah diatur, tetapi server ini tetap
 dikarantina: agent tidak punya catatan salinan data dari bangun ulang ini
-(misalnya karena agent dimulai ulang di tengah jalan). Ulangi bangun ulang
-dari panel." Pin tetap `quarantined` dan persetujuan tidak dihapus.
-**Ulangi dari tahap ini** tidak menyalin data lagi, jadi mulai lagi
-**Bangun ulang sebagai replika** dari panel.
+(misalnya karena agent dimulai ulang di tengah jalan). Mulai lagi Bangun
+ulang sebagai replika dari panel; tombol "Ulangi dari tahap ini" pada
+pekerjaan ini tidak cukup, karena salinan data harus diulang." Pin tetap
+`quarantined` dan persetujuan tidak dihapus. **Ulangi dari tahap ini**
+hanya mengulang langkah pengaturan replikasi, tanpa menyalin data lagi,
+jadi gagal lagi dengan teks yang sama. Mulai bangun ulang baru:
+
+1. Buka halaman server itu. Kotak **Master lama** tetap tampil (di panel
+   server itu kini tercatat sebagai replika yang gagal) dan berisi tombol
+   **Bangun ulang sebagai replika**. Tautan yang sama ada di halaman
+   pekerjaan yang gagal, di bawah **Ulangi dari tahap ini**, dan di halaman
+   replika server itu.
+2. Isi form seperti bangun ulang pertama: koneksi aplikasi, kata sandi dan
+   nama server diminta lagi.
+3. Persetujuan di server dipakai lagi selama masih berlaku (24 jam sejak
+   disetujui) dan sumbernya tidak berubah; kotak **Persetujuan di server**
+   menulis "Sudah disetujui …". Bila sudah habis, kotak itu menampilkan
+   kode baru: jalankan `sudo dbpanel agent approve <kode>` di server itu
+   seperti di atas, lalu klik **Periksa lagi**.
 
 Agent versi lama belum mengenal persetujuan di server. Panel menolak
 membangun ulangnya dengan "Agent perlu dimutakhirkan: agent di <server>

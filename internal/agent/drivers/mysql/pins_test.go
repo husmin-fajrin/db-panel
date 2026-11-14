@@ -1195,7 +1195,8 @@ func TestConfigureReplicationEndsQuarantine(t *testing.T) {
 	// why (the panel's job must not look finished).
 	resp := r.dispatch("mysql.configureReplication", validSource)
 	const noLoad = "sumber replikasi sudah diatur, tetapi server ini tetap dikarantina: agent tidak punya catatan salinan " +
-		"data dari bangun ulang ini (misalnya karena agent dimulai ulang di tengah jalan). Ulangi bangun ulang dari panel."
+		"data dari bangun ulang ini (misalnya karena agent dimulai ulang di tengah jalan). Mulai lagi Bangun ulang sebagai " +
+		"replika dari panel; tombol \"Ulangi dari tahap ini\" pada pekerjaan ini tidak cukup, karena salinan data harus diulang."
 	if resp.OK || resp.Error == nil || resp.Error.Message != noLoad {
 		t.Fatalf("configureReplication without a load = %+v, want the error %q", resp, noLoad)
 	}
