@@ -1055,6 +1055,16 @@ trigger/routine ber-`DEFINER=root@localhost` butuh `SET_USER_ID` **dan**
 `SYSTEM_USER`; teks `loadFailure` hanya menyebut `SET_USER_ID`. Keduanya
 sama dengan `read_only` mati; tidak diubah oleh rencana ini.
 
+Catatan kontrol CLONE dengan `super_read_only=ON`: sebelum galat 1290,
+log galat T mencatat
+`2026-11-16T01:01:06.526001Z 14 [Warning] [MY-013460] [InnoDB] Clone removing all user data for provisioning: Started`
+(utas 14, sesi kontrol itu), dan tidak ada baris `Finished` untuk utas
+14; baris `Started`/`Finished` berikutnya milik utas 17, yaitu CLONE
+dengan `super_read_only=OFF`. Apakah data pengguna T masih utuh sesudah
+kontrol itu tidak diperiksa (tidak dicatat): CLONE berikutnya dijalankan
+tanpa membaca daftar database atau isi tabel lebih dulu, dan menimpa
+semuanya. Tidak diselidiki lebih jauh.
+
 ### M2. Daftar database dengan akun dump (server S)
 
 Akun dibuat dengan pernyataan `createAccount` untuk `mysql.createDumpUser`
