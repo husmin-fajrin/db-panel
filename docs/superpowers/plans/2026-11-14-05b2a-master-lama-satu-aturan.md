@@ -969,7 +969,263 @@ Teks:
 
 ## Bukti pengukuran
 
-(Diisi Task 2.)
+Diukur 2026-11-16 pada **MySQL 8.0.46-0ubuntu0.24.04.4** (paket Ubuntu
+24.04 `mysql-server-core-8.0`, `mysql-client-core-8.0`), dua mysqld coba
+yang disusun persis seperti `testmysql.Start`: `--initialize-insecure`,
+direktori `/var/tmp/dbpanel-m-<n>` milik `nobody:nogroup`, `user=nobody`,
+`bind-address=127.0.0.1`, port sendiri, `log-bin=binlog`, `gtid-mode=ON`,
+`enforce-gtid-consistency=ON`, dijalankan `mysqld --defaults-file=<my.cnf>
+--daemonize`. Tidak ada supervisor (seperti harness). Server **T** (tujuan,
+peran "master lama") dan server **S** (sumber/master baru). Kedua instance
+dihentikan dan direktorinya dihapus sesudahnya. Bukan MySQL mesin ini.
+
+Akun di T (semua `'…'@'%'`, `WITH GRANT OPTION`, tanpa SUPER):
+
+| Akun | Hak |
+|---|---|
+| **A** `dbpanel_adm` | persis `staticGrants` + `dynamicGrants` + `FLUSH_TABLES` (`requiredGrants`, 8.0.46 ≥ 8.0.31): `CREATE USER, RELOAD, PROCESS, SELECT, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, REPLICATION CLIENT, REPLICATION SLAVE` + `SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, BACKUP_ADMIN, CLONE_ADMIN, PERSIST_RO_VARIABLES_ADMIN, CONNECTION_ADMIN, FLUSH_TABLES` |
+| **A-r** `dbpanel_admr` | A + `replicaDataGrants` (`RequiredReplicaGrants`): `DROP, CREATE, INSERT, UPDATE, DELETE, ALTER, INDEX, CREATE VIEW, CREATE ROUTINE, ALTER ROUTINE, REFERENCES, CREATE TEMPORARY TABLES` |
+| **A-d** `dbpanel_admd` | A-r + `SET_USER_ID, SYSTEM_USER` (yang disarankan `loadFailure` untuk DEFINER akun lain) |
+| **B** `appuser` | `ALL PRIVILEGES ON localold.*` + `CREATE ON *.*`; tanpa `CONNECTION_ADMIN` |
+
+Setiap pernyataan dijalankan lewat klien `mysql --defaults-file=<berkas>`
+(TCP 127.0.0.1), satu sesi per baris tabel. "Kontrol" = pernyataan yang sama
+dengan bendera lain, untuk memisahkan penolakan karena baca-saja dari
+penolakan karena hak.
+
+### M1a. Bendera itu sendiri (akun A)
+
+| Keadaan awal (`read_only`/`super_read_only`) | Pernyataan | Hasil | Sesudahnya |
+|---|---|---|---|
+| ON/ON | `SET GLOBAL read_only=OFF` | berhasil, tidak ada galat | **OFF/OFF** (ikut mematikan `super_read_only`) |
+| OFF/OFF | `SET GLOBAL super_read_only=ON` | berhasil | **ON/ON** (ikut menyalakan `read_only`) |
+| ON/ON | `SET GLOBAL super_read_only=OFF` | berhasil | ON/OFF |
+| OFF/OFF | `SET GLOBAL read_only=ON` | berhasil | **ON/OFF** (`super_read_only` tidak berubah) |
+| ON/ON | `SET GLOBAL read_only=ON` | berhasil | ON/ON (tidak berubah) |
+| OFF/OFF | `SET GLOBAL read_only=OFF; SET GLOBAL super_read_only=ON` | berhasil | ON/ON |
+
+### M1b. Akun B dengan `read_only=ON`, `super_read_only=OFF`
+
+| Pernyataan | Hasil |
+|---|---|
+| `INSERT INTO localold.t VALUES (2)` | ditolak: `ERROR 1290 (HY000): The MySQL server is running with the --read-only option so it cannot execute this statement` |
+| `CREATE DATABASE appnew` | ditolak: `ERROR 1290 (HY000)`, teks sama |
+| `CREATE TABLE localold.t2 (id INT)` | ditolak: `ERROR 1290 (HY000)`, teks sama |
+| `SELECT COUNT(*) FROM localold.t` | berhasil (`1`) |
+
+Pembanding: `INSERT` dan `CREATE DATABASE` yang sama oleh A-r berhasil;
+oleh A ditolak karena hak (`ERROR 1142 (42000): INSERT command denied to
+user 'dbpanel_adm'@'localhost' for table 't'`, `ERROR 1044 (42000): Access
+denied for user 'dbpanel_adm'@'%' to database 'appnew'`), bukan karena
+baca-saja.
+
+### M1c. Pernyataan setiap pemakai `liftReadOnly` dengan `read_only=ON`, `super_read_only=OFF`
+
+| Pemakai | Pernyataan (persis seperti kode) | Akun | `read_only=ON`, `super_read_only=OFF` | Kontrol |
+|---|---|---|---|---|
+| `dumpFrom` | `RESET MASTER` (`resetBinaryLogs`, 8.0) | A | berhasil; `gtid_executed` kosong | `super_read_only=ON`: juga berhasil |
+| `dumpFrom` | muat `mysqldump --all-databases` (lihat bawah) dengan `mysql --defaults-file=<f> --binary-mode --init-command=SET sql_log_bin=0`, diakhiri `FLUSH PRIVILEGES;` (`flushTrailer`) | A-d | **berhasil, exit 0**: `app` (tabel, view `vw`, procedure `p`, trigger `tr`, event `ev`), `` `with space` ``, skema `mysql` termuat; `gtid_executed` = `gtid_purged` = `…:1-18` dari `SET @@GLOBAL.GTID_PURGED` dump (tidak ada GTID lokal); bendera tetap ON/OFF; sesudah `FLUSH PRIVILEGES` akun A-d tidak ada lagi (`ERROR 1045`, jalur `AdminReplaced`) | `super_read_only=ON`: `SET @@GLOBAL.GTID_PURGED` (baris 26) lolos, lalu `ERROR 1290 (HY000) at line 32: The MySQL server is running with the --super-read-only option so it cannot execute this statement` (`CREATE DATABASE … mysql`) |
+| `dumpFrom` | muat yang sama | A-r | gagal karena hak: `ERROR 1419 (HY000) at line 1084: You do not have the SUPER privilege and binary logging is enabled (you *might* want to use the less safe log_bin_trust_function_creators variable)` (trigger dengan `DEFINER=root@localhost`) | `read_only=OFF`: galat sama persis, baris sama |
+| `dumpFrom` | muat yang sama | A-r + `SET_USER_ID` saja | gagal karena hak: `ERROR 1227 (42000) at line 1084: Access denied; you need (at least one of) the SYSTEM_USER privilege(s) for this operation` | — |
+| `dumpFrom` | muat yang sama | A | gagal karena hak: `ERROR 1044 (42000) at line 32: Access denied for user 'dbpanel_adm'@'%' to database 'mysql'` | — |
+| `cloneFrom` | `CLONE INSTANCE FROM 'dbpanel_repl'@'127.0.0.1':<port S> IDENTIFIED BY '…'` (sesudah `SET GLOBAL clone_valid_donor_list`, `clone_ssl_ca = ''`; donor S dengan akun `REPLICATION SLAVE, BACKUP_ADMIN`, plugin clone terpasang di keduanya) | A | **fase data selesai**: `ERROR 3707 (HY000): Restart server failed (mysqld is not managed by supervisor process).` (hasil yang `isCloneRestart` anggap selesai); log: `Clone removing all user data for provisioning: Finished`; sesudah mysqld dinyalakan lagi: `performance_schema.clone_status` = `Completed 0`, database = milik S, `gtid_executed` = milik S | `super_read_only=ON`: `ERROR 1290 (HY000): The MySQL server is running with the --super-read-only option so it cannot execute this statement`; `clone_status` = `Failed 1290` |
+| `installClonePlugin` | `INSTALL PLUGIN clone SONAME 'mysql_clone.so'` | A-r | **berhasil**; `PLUGIN_STATUS` = `ACTIVE`; kedua kali `ERROR 1125 (HY000): Function 'clone' already exists` (`errUDFExists`, yang memang diterima kode) | `super_read_only=ON`: `ERROR 1290 (HY000) … --super-read-only …` |
+| `installClonePlugin` | sama | A | gagal karena hak: `ERROR 1142 (42000): INSERT command denied to user 'dbpanel_adm'@'localhost' for table 'plugin'` | `read_only=OFF`: galat sama |
+| `DropDatabases` | ``SET SESSION sql_log_bin = 0; DROP DATABASE IF EXISTS `dropme` `` | A-r | **berhasil**; database hilang; `gtid_executed` tidak bertambah | `super_read_only=ON`: `ERROR 1290 (HY000) … --super-read-only …` |
+| `DropDatabases` | sama | A | gagal karena hak: `ERROR 1044 (42000): Access denied for user 'dbpanel_adm'@'%' to database 'dropme'` | `read_only=OFF`: galat 1044 sama |
+| `createAccount` (mode lokal), akun baru | `SET SESSION sql_log_bin = 0; CREATE USER IF NOT EXISTS 'dbpanel_repl'@'%' IDENTIFIED BY '…'; ALTER USER 'dbpanel_repl'@'%' REQUIRE NONE; GRANT REPLICATION SLAVE, BACKUP_ADMIN ON *.* TO 'dbpanel_repl'@'%'` | A | **berhasil**; `gtid_executed` tidak bertambah | `super_read_only=ON`: `CREATE USER` dan `GRANT` masing-masing `ERROR 1290 (HY000) … --super-read-only …` |
+| `createAccount` (mode lokal), akun sudah ada | `SET SESSION sql_log_bin = 0; ALTER USER … IDENTIFIED BY '…'; ALTER USER … REQUIRE NONE; REVOKE ALL PRIVILEGES, GRANT OPTION FROM …; GRANT REPLICATION SLAVE, BACKUP_ADMIN ON *.* TO …` | A | **berhasil** | — |
+| (bentuk akun dump) | `CREATE USER IF NOT EXISTS …; ALTER USER … REQUIRE NONE WITH MAX_USER_CONNECTIONS 2 PASSWORD EXPIRE INTERVAL 1 DAY; GRANT SELECT, FLUSH_TABLES, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT ON *.* TO …; DROP USER IF EXISTS …` | A | **berhasil** | — |
+
+Dump yang dimuat: dari S (GTID ON, `gtid_executed …:1-18`) dengan akun
+`mysql.createDumpUser` (`SELECT, FLUSH_TABLES, LOCK TABLES, SHOW VIEW,
+TRIGGER, EVENT`, `MAX_USER_CONNECTIONS 2`, `PASSWORD EXPIRE INTERVAL 1 DAY`)
+dan argumen `dumpArgs`: `mysqldump --defaults-file=<f> --single-transaction
+--set-gtid-purged=ON --triggers --routines --events --skip-lock-tables
+--column-statistics=0 --no-tablespaces --all-databases` (exit 0, 1 293 243
+byte). Kepalanya memuat `SET @@SESSION.SQL_LOG_BIN= 0;` dan `SET
+@@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '…:1-18';`. Urutan seperti `dumpFrom`:
+`RESET MASTER`, lalu muat.
+
+Catatan di luar baca-saja (bukan keputusan Task 2, untuk pengendali):
+akun A persis (hak wajib `mysql.connect`) tidak bisa menjalankan
+`DROP DATABASE`, `INSTALL PLUGIN` maupun muat dump di server mana pun —
+hak datanya tidak ada. Muat `--all-databases` dari master yang punya
+trigger/routine ber-`DEFINER=root@localhost` butuh `SET_USER_ID` **dan**
+`SYSTEM_USER`; teks `loadFailure` hanya menyebut `SET_USER_ID`. Keduanya
+sama dengan `read_only` mati; tidak diubah oleh rencana ini.
+
+### M2. Daftar database dengan akun dump (server S)
+
+Akun dibuat dengan pernyataan `createAccount` untuk `mysql.createDumpUser`
+(8.0.46: `dumpGrants`); `SHOW GRANTS`:
+``GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER ON *.* TO `dbpanel_dump_m2`@`%` ``
+dan ``GRANT FLUSH_TABLES ON *.* TO `dbpanel_dump_m2`@`%` ``. Database di S: `app`, `with space`,
+`` back`tick ``, `rumah_sakit_é`, `数据库` (dibuat dengan
+`--default-character-set=utf8mb4`), `rahasia` (berisi tabel) dan `kosong`;
+tidak satu pun diberi hak khusus untuk akun dump.
+
+Perintah: `mysql --defaults-file=<f> -N -B -e "SELECT HEX(schema_name) FROM
+information_schema.schemata"` (berkas `[client]` user/password/host/port/
+`get-server-public-key`, seperti `clientDefaults`). Exit 0, stderr kosong.
+Keluaran sama persis dengan `LANG=C` dan `LANG=C.UTF-8`:
+
+| Baris keluaran (persis) | Nama |
+|---|---|
+| `6D7973716C` | `mysql` |
+| `696E666F726D6174696F6E5F736368656D61` | `information_schema` |
+| `706572666F726D616E63655F736368656D61` | `performance_schema` |
+| `737973` | `sys` |
+| `617070` | `app` |
+| `77697468207370616365` | `with space` |
+| `6261636B607469636B` | `` back`tick `` |
+| `72616861736961` | `rahasia` |
+| `6B6F736F6E67` | `kosong` |
+| `72756D61685F73616B69745FC3A9` | `rumah_sakit_é` |
+| `E695B0E68DAEE5BA93` | `数据库` |
+
+Bentuk: satu nama per baris, heksadesimal **huruf besar**, tiap baris
+diakhiri `\n` (termasuk yang terakhir), tanpa judul kolom, tanpa urutan
+abjad (urutan server), skema sistem ikut. Hex adalah byte UTF-8 nama
+(kolom `schema_name` utf8mb3), tidak bergantung pada charset klien. Akun
+dump melihat **semua** 11 database, sama dengan root (`COUNT(*)` = 11),
+karena `SELECT ON *.*`.
+
+### M3. `mysqlbinlog` dan indeks sebagai uid pemilik direktori data
+
+Direktori data S: `drwxr-x--- nobody:nogroup`; `binlog.000001` dan
+`binlog.index` `-rw-r----- nobody:nogroup`. Dijalankan dengan `setpriv
+--reuid=<u> --regid=<g> --clear-groups` (sama dengan
+`SysProcAttr.Credential`):
+
+| Uid | Perintah | Hasil |
+|---|---|---|
+| `nobody` (pemilik) | `mysqlbinlog --no-defaults /var/tmp/…/data/binlog.000001` | exit 0, 629 baris, 43 `GTID_NEXT`; juga dengan `--reset-env` dan `HOME=/nonexistent` |
+| `nobody` | `cat /var/tmp/…/data/binlog.index` | exit 0: `./binlog.000001` (jalur **relatif** terhadap direktori data) |
+| `daemon` (bukan pemilik) | `mysqlbinlog --no-defaults …/binlog.000001` | exit 1: `mysqlbinlog: File '…/binlog.000001' not found (OS errno 13 - Permission denied)` lalu `ERROR: Could not open log file` |
+| `daemon` | `cat …/binlog.index` | exit 1: `Permission denied` |
+
+AppArmor (Debian/Ubuntu): paket `mysql-server-8.0_8.0.46-0ubuntu0.24.04.5_amd64.deb`
+(arsip Ubuntu noble, sha256 `2c304181…5669`) hanya membawa
+`/etc/apparmor.d/usr.sbin.mysqld`, profil untuk `/usr/sbin/mysqld` saja;
+`mysql-client-core-8.0` tidak membawa profil. Tidak ada profil untuk
+`/usr/bin/mysqlbinlog`, jadi ia berjalan tanpa kurungan dan hanya izin
+berkas biasa yang berlaku. `postinst` paket itu memasang `/var/lib/mysql`
+`mysql:mysql` mode `0700` dan `/var/log/mysql` `mysql:adm` `0750`
+(`error.log` `0640`): uid `mysql` bisa membaca binlog, indeks dan log
+galat bawaan. Paket Debian sendiri (bukan Ubuntu) dan paket Oracle
+(`mysql-community-*`) tidak diperiksa.
+
+SELinux (RHEL): mesin ini tidak punya SELinux; yang dibaca hanya sumber
+kebijakan. `fedora-selinux/selinux-policy` (commit `5df11316`) kini hanya
+membawa `mysql.if`; modul `mysql` ada di `devexp-db/mysql-selinux`
+(commit `1014b7fb`), yang `mysql.fc`-nya tidak memberi label pada
+`mysqlbinlog` (hanya `mysqld`, `mysqld_safe`, `mysql_upgrade`, dll.), jadi
+`mysqlbinlog` (`bin_t`) berjalan di domain pemanggil tanpa transisi;
+`/var/lib/mysql` berlabel `mysqld_db_t`, `/var/log/mysql` `mysqld_log_t`.
+Domain SELinux tidak berubah karena ganti uid, jadi menjalankan sebagai
+uid `mysql` tidak menambah atau mengurangi izin SELinux dibanding root.
+**Tidak diverifikasi:** RPM RHEL yang sebenarnya (versi `mysql-selinux`
+yang dikirim, mode `/var/lib/mysql` dari RPM `mysql-server`), dan domain
+tempat agent berjalan di RHEL.
+
+### M4. `SHOW GRANTS FOR` di bawah pengaturan sesi
+
+Akun `'dbpanel_adm'@'%'` di S dengan `partial_revokes=ON`: hak global,
+hak dinamis, hak database, partial revoke, hak kolom, dan peran.
+
+Bawaan (`sql_quote_show_create=1`, `sql_mode` bawaan 8.0), juga sama
+persis dengan `sql_mode=''`:
+
+```
+GRANT SELECT, RELOAD, SHOW DATABASES ON *.* TO `dbpanel_adm`@`%` WITH GRANT OPTION
+GRANT CONNECTION_ADMIN,SYSTEM_VARIABLES_ADMIN ON *.* TO `dbpanel_adm`@`%`
+GRANT INSERT ON `app`.* TO `dbpanel_adm`@`%`
+REVOKE SELECT ON `rahasia`.* FROM `dbpanel_adm`@`%`
+GRANT SELECT (`id`) ON `app`.`t` TO `dbpanel_adm`@`%`
+GRANT `dbpanel_role`@`%` TO `dbpanel_adm`@`%`
+```
+
+`SET SESSION sql_quote_show_create=OFF`:
+
+```
+GRANT SELECT, RELOAD, SHOW DATABASES ON *.* TO dbpanel_adm@`%` WITH GRANT OPTION
+GRANT CONNECTION_ADMIN,SYSTEM_VARIABLES_ADMIN ON *.* TO dbpanel_adm@`%`
+GRANT INSERT ON app.* TO dbpanel_adm@`%`
+REVOKE SELECT ON rahasia.* FROM dbpanel_adm@`%`
+GRANT SELECT (id) ON app.t TO dbpanel_adm@`%`
+GRANT dbpanel_role@`%` TO dbpanel_adm@`%`
+```
+
+`SET SESSION sql_mode='ANSI_QUOTES'` (juga `sql_mode='ANSI'` dan bawaan +
+`,ANSI_QUOTES`):
+
+```
+GRANT SELECT, RELOAD, SHOW DATABASES ON *.* TO "dbpanel_adm"@"%" WITH GRANT OPTION
+GRANT CONNECTION_ADMIN,SYSTEM_VARIABLES_ADMIN ON *.* TO "dbpanel_adm"@"%"
+GRANT INSERT ON "app".* TO "dbpanel_adm"@"%"
+REVOKE SELECT ON "rahasia".* FROM "dbpanel_adm"@"%"
+GRANT SELECT ("id") ON "app"."t" TO "dbpanel_adm"@"%"
+GRANT "dbpanel_role"@"%" TO "dbpanel_adm"@"%"
+```
+
+Keduanya (`sql_quote_show_create=OFF`, `sql_mode='ANSI_QUOTES'`): seperti
+OFF, tetapi yang masih dikutip memakai `"`: `GRANT SELECT, RELOAD, SHOW DATABASES ON *.* TO dbpanel_adm@"%" WITH GRANT OPTION`.
+
+Dengan OFF, hanya nama yang tidak perlu dikutip yang dilepas kutipnya
+(diukur per akun):
+
+| Akun | Baris dengan `sql_quote_show_create=OFF` |
+|---|---|
+| `'dbpanel_x'@'localhost'` | `GRANT SELECT ON *.* TO dbpanel_x@localhost` |
+| `'dbpanel_x'@'127.0.0.1'` | ``GRANT SELECT ON *.* TO dbpanel_x@`127.0.0.1` `` |
+| `'dbpanel_x'@'10.0.%'` | ``GRANT SELECT ON *.* TO dbpanel_x@`10.0.%` `` |
+| `'select'@'localhost'` | ``GRANT SELECT ON *.* TO `select`@localhost `` |
+| `'dbpanel-y'@'localhost'` | ``GRANT SELECT ON *.* TO `dbpanel-y`@localhost `` |
+
+Nilai global diwarisi sesi baru: sesudah `SET GLOBAL
+sql_quote_show_create=OFF`, sesi baru membaca `@@SESSION.sql_quote_show_create
+= 0` dan baris tanpa kutip; sesudah `SET GLOBAL sql_mode='ANSI_QUOTES'`,
+sesi baru memakai `ANSI_QUOTES`. Pada sesi baru seperti itu, `SET SESSION
+sql_quote_show_create = ON, sql_mode = ''` mengembalikan bentuk backtick
+bawaan persis (diukur, juga untuk keenam baris di atas). Pernyataan itu
+tidak butuh hak apa pun: akun tanpa hak global (`appuser_src`) menjalankannya
+dengan berhasil.
+
+### Keputusan
+
+Menurut aturan keputusan Task 2 (`both = false` untuk yang berhasil pada
+M1 dengan `read_only` menyala):
+
+- `dumpFrom` (muat dump): **`both = false`**. Muat `--all-databases`
+  lengkap, `RESET MASTER`, `SET @@GLOBAL.GTID_PURGED` dan `FLUSH
+  PRIVILEGES` berhasil dengan `read_only=ON`, `super_read_only=OFF`. Butir
+  pertama 5.3 tetap berlaku untuk muat dump.
+- `cloneFrom` (CLONE): **`both = false`**. Fase data CLONE selesai dengan
+  `read_only=ON`, `super_read_only=OFF` (hanya `super_read_only` yang
+  menolak, 1290). Pengecualian "penjaga tidak menyentuh apa pun" di 5.2
+  tidak dibutuhkan.
+- `installClonePlugin`: **`both = false`**.
+- `DropDatabases`: **`both = false`**.
+- `createAccount` (mode lokal): **`both = false`**.
+- Akibat M1a untuk Task 3: mematikan hanya `super_read_only` memakai
+  `SET GLOBAL super_read_only = OFF` (meninggalkan `read_only=ON`); jangan
+  pernah mengirim `SET GLOBAL read_only = OFF`, karena itu ikut mematikan
+  `super_read_only` tanpa galat. Sebaliknya `SET GLOBAL super_read_only =
+  ON` ikut menyalakan `read_only`, sedangkan `SET GLOBAL read_only = ON`
+  tidak menyentuh `super_read_only`.
+- Task 7: **dibangun.** `mysqlbinlog --no-defaults` dan pembacaan indeks
+  berhasil sebagai uid pemilik direktori data; uid lain ditolak `errno 13`.
+  Pada pemasangan Ubuntu bawaan tidak ada profil AppArmor yang mengurung
+  `mysqlbinlog`; pada RHEL, menurut sumber kebijakan, SELinux tidak
+  bergantung pada uid (tidak diverifikasi di mesin RHEL). Entri indeks
+  bisa relatif (`./binlog.000001`) terhadap direktori data. Jalan balik ke
+  root dengan satu baris peringatan (5.5) tetap dibangun.
+- Task 10: sesi bukti daftar lengkap menjalankan, pada sambungan yang sama
+  dan sebelum `SHOW GRANTS FOR`, tepat satu pernyataan:
+  `SET SESSION sql_quote_show_create = ON, sql_mode = ''`. Sesudahnya
+  setiap nama di baris `SHOW GRANTS` dikutip backtick, termasuk akun dan
+  host (bentuk di atas).
 
 ## Perubahan sesudah tinjauan rancangan
 
