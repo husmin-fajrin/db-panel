@@ -541,7 +541,7 @@ func (ag *e2eAgent) start(t *testing.T) {
 	}
 	d := &mysql.Driver{Host: ag.inst.HostWith(creds), Creds: creds, Jobs: runner, Logger: logger, Sys: sys, Cfg: ag.cfg,
 		PinDir: ag.dir, SeenPath: filepath.Join(ag.dir, "replicas-seen"), SalvageDir: filepath.Join(ag.dir, "salvage"),
-		Events: events}
+		LiftLock: filepath.Join(ag.dir, "agent", "lift.lock"), Events: events}
 	d.Register(reg)
 	// The health monitor, as "dbpanel agent" runs it; the panel sends its
 	// intervals with monitor.configure once the agent is online.

@@ -37,9 +37,11 @@ var errReplicaRunning = errors.New("replikasi masih berjalan; hentikan dulu")
 type snapshotFunc func(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error)
 
 func (d *Driver) registerSnapshot(reg *commands.Registry) {
-	d.registerSnapshotJob(reg, "mysql.cloneFrom", methodClone, cloneFrom)
+	d.registerSnapshotJob(reg, "mysql.cloneFrom", methodClone, func(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error) {
+		return cloneFrom(j, h, p, mark, d.liftGate())
+	})
 	d.registerSnapshotJob(reg, "mysql.dumpFrom", methodDump, func(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error) {
-		return dumpFrom(j, h, d.Creds, p, mark)
+		return dumpFrom(j, h, d.Creds, p, mark, d.liftGate())
 	})
 }
 

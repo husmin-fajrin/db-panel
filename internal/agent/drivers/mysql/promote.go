@@ -694,7 +694,7 @@ func (d *Driver) ensureReplUser(ctx context.Context, j *jobs.Job, h Host, db *sq
 		return nil
 	}
 	a := account{User: replUserName, Host: "%", Password: password}
-	if err := createAccount(ctx, h, a, replGrants, "replikasi", accountMode{keepExisting: true, local: j.Logf}); err != nil {
+	if err := createAccount(ctx, h, a, replGrants, "replikasi", accountMode{keepExisting: true, local: j.Logf, gate: d.liftGate()}); err != nil {
 		return err
 	}
 	j.Logf("info", "user replikasi %s@'%%' dibuat", replUserName)

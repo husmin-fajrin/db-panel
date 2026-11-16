@@ -58,6 +58,9 @@ type Driver struct {
 	// SalvageDir holds the salvage files (salvage.go); empty means
 	// DefaultSalvageDir. Tests point it elsewhere.
 	SalvageDir string
+	// LiftLock is the lift lock file (lift.go); empty means
+	// DefaultLiftLock. Tests point it elsewhere.
+	LiftLock string
 
 	mu sync.RWMutex // guards Host once Register has run
 
@@ -171,6 +174,11 @@ type Driver struct {
 	leftoverSet   string
 	leftoverKnown bool
 
+	// lift counts this agent's lifts of read-only (lift.go); one gate per
+	// driver, made by Register (or on first use).
+	liftOnce sync.Once
+	lift     *liftGate
+
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
 	newHost hostFactory
@@ -187,6 +195,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 		p.logger = d.Logger
 		d.pins = p
 	}
+	d.liftGate()
 	// Strict mode on a quarantined server (strict.go).
 	if d.pins != nil {
 		reg.SetGate(d.strictGate)
@@ -211,6 +220,20 @@ func (d *Driver) Register(reg *commands.Registry) {
 	d.registerSalvage(reg)
 	d.registerRecordReplicas(reg)
 	d.registerRebuildApproval(reg)
+}
+
+// liftLockPath is the lift lock file: LiftLock, else DefaultLiftLock.
+func (d *Driver) liftLockPath() string {
+	if d.LiftLock != "" {
+		return d.LiftLock
+	}
+	return DefaultLiftLock
+}
+
+// liftGate is the driver's one lift gate.
+func (d *Driver) liftGate() *liftGate {
+	d.liftOnce.Do(func() { d.lift = newLiftGate(d.liftLockPath()) })
+	return d.lift
 }
 
 // Pins is the driver's pinned role and source; nil without PinDir. The

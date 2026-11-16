@@ -55,7 +55,7 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 		}
 		// A pinned master keeps its server_id (SEC-51a): the panel never
 		// asks for one, and another would only confuse the replicas.
-		res, err := configure(ctx, h, p, d.pins.RoleIs(roleMaster))
+		res, err := configure(ctx, h, p, d.pins.RoleIs(roleMaster), d.liftGate())
 		if err != nil {
 			return nil, err
 		}
@@ -120,14 +120,16 @@ func (d *Driver) registerConfigure(reg *commands.Registry) {
 
 // Configure prepares the server for p.Role: it writes the managed config
 // block (validated by mysqld, rolled back otherwise), then makes what can
-// change online take effect now with SET PERSIST.
+// change online take effect now with SET PERSIST. Outside a Driver a lift
+// (installing the clone plugin) has a gate of its own on DefaultLiftLock.
 func Configure(ctx context.Context, h Host, p proto.ConfigureParams) (proto.ConfigureResult, error) {
-	return configure(ctx, h, p, false)
+	return configure(ctx, h, p, false, newLiftGate(DefaultLiftLock))
 }
 
 // configure is Configure; keepServerID ignores a requested server_id other
-// than the current one (as if none was asked for).
-func configure(ctx context.Context, h Host, p proto.ConfigureParams, keepServerID bool) (proto.ConfigureResult, error) {
+// than the current one (as if none was asked for); g is the driver's lift
+// gate.
+func configure(ctx context.Context, h Host, p proto.ConfigureParams, keepServerID bool, g *liftGate) (proto.ConfigureResult, error) {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return proto.ConfigureResult{}, err
@@ -193,7 +195,7 @@ func configure(ctx context.Context, h Host, p proto.ConfigureParams, keepServerI
 		}
 	}
 	if p.EnableClone {
-		installed, err := installClonePlugin(ctx, db, func(string, string, ...any) {})
+		installed, err := installClonePlugin(ctx, db, func(string, string, ...any) {}, g)
 		if err != nil {
 			return res, err
 		}
@@ -441,16 +443,16 @@ func waitAnonymousDone(ctx context.Context, db *sql.DB) error {
 // INSTALL PLUGIN writes mysql.plugin, which super_read_only refuses (a
 // target an earlier attempt left read-only): read-only is lifted around it
 // and put back.
-func installClonePlugin(ctx context.Context, db *sql.DB, logf func(level, format string, args ...any)) (bool, error) {
+func installClonePlugin(ctx context.Context, db *sql.DB, logf func(level, format string, args ...any), g *liftGate) (bool, error) {
 	status, err := clonePluginStatus(ctx, db)
 	if err != nil || status == "ACTIVE" {
 		return false, err
 	}
-	restore, err := liftReadOnly(ctx, logf, db, nil)
+	hold, err := liftReadOnly(ctx, logf, db, nil, g)
 	if err != nil {
 		return false, err
 	}
-	defer restore()
+	defer hold.end()
 	installed := true
 	if _, err := db.ExecContext(ctx, "INSTALL PLUGIN clone SONAME 'mysql_clone.so'"); err != nil {
 		var me *drv.MySQLError

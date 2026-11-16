@@ -58,12 +58,15 @@ var errLoadEnded = errors.New("mysql load ended")
 // mode this server's gtid_executed after the load (the purged set); in
 // COMMENTED mode (see dumpGTIDMode) the set in the dump's commented header,
 // as this server keeps its own history.
+//
+// Outside a Driver the lift has a gate of its own on DefaultLiftLock.
 func DumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams) (proto.SnapshotResult, error) {
-	return dumpFrom(j, h, creds, p, nil)
+	return dumpFrom(j, h, creds, p, nil, newLiftGate(DefaultLiftLock))
 }
 
-// dumpFrom is DumpFrom with the rebuild mark of the load (nil: none).
-func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error) {
+// dumpFrom is DumpFrom with the rebuild mark of the load (nil: none) and
+// the driver's lift gate.
+func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams, mark *loadMark, g *liftGate) (proto.SnapshotResult, error) {
 	ctx := j.Context()
 	start := time.Now()
 	res := proto.SnapshotResult{Method: methodDump}
@@ -128,17 +131,23 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		}
 	}
 
+	// read_only stays on during the load: an account that cannot write
+	// past it is refused before anything local changes.
+	if err := refuseWeakLoadAccount(ctx, db); err != nil {
+		return res, err
+	}
+
 	// From here on local data changes.
 	if rs != nil {
 		if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
 			return res, fmt.Errorf("STOP REPLICA: %w", err)
 		}
 	}
-	restore, err := liftReadOnly(ctx, j.Logf, db, mark)
+	hold, err := liftReadOnly(ctx, j.Logf, db, mark, g)
 	if err != nil {
 		return res, err
 	}
-	defer restore()
+	defer hold.end()
 	if gtidMode == "ON" {
 		if err := resetBinaryLogs(ctx, db); err != nil {
 			return res, err
@@ -155,10 +164,7 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	j.Progress(0, "dump dimulai")
 	var dumpGTID string
 	var found bool
-	trailer := ""
-	if len(p.Databases) == 0 {
-		trailer = flushTrailer
-	}
+	trailer := loadTrailer(len(p.Databases) == 0, hold.superWasOn())
 	res.Bytes, dumpGTID, found, err = pipeDump(j, h, dumpBin, args, loadBin, loadArgs(localFile), trailer, p.EstimateBytes)
 	if err != nil {
 		return res, err
@@ -421,53 +427,63 @@ func writeDefaultsFile(h Host, p proto.ConnectParams, socket string, port int, t
 	return f.Name(), nil
 }
 
-// liftReadOnly turns super_read_only and read_only off for the load (the
-// admin account needs neither SUPER nor CONNECTION_ADMIN) and returns the
-// function that turns back on what was on. SET GLOBAL, not PERSIST: a
-// restart restores the configured values whatever happens here. logf
-// receives what it did (a job's Logf). A non-nil mark (a rebuild load from
-// the pinned source on a quarantined server) is set once read-only is
-// off, so the quarantine guard defers, and cleared by restore after
-// read-only is back on.
-func liftReadOnly(ctx context.Context, logf func(level, format string, args ...any), db *sql.DB, mark *loadMark) (restore func() error, err error) {
-	var ro, sro bool
-	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only").Scan(&ro, &sro); err != nil {
-		return nil, fmt.Errorf("baca read_only: %w", err)
-	}
-	// restore puts both back; it logs each failure and returns the first.
-	restore = func() error {
-		defer mark.clear()
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
-		defer cancel()
-		var stmts []string
-		if ro {
-			stmts = append(stmts, "SET GLOBAL read_only = ON")
-		}
-		if sro {
-			stmts = append(stmts, "SET GLOBAL super_read_only = ON")
-		}
-		var first error
-		for _, q := range stmts {
-			if _, err := db.ExecContext(rctx, q); err != nil {
-				logf("error", "%s failed: %v", q, err)
-				if first == nil {
-					first = fmt.Errorf("%s: %w", q, err)
-				}
-			}
-		}
-		return first
-	}
-	for _, q := range []string{"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF"} {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			restore()
-			return nil, fmt.Errorf("%s: %w", q, err)
-		}
-	}
+// liftReadOnly lifts read-only for one of its users through the driver's
+// gate g (lift.go): only super_read_only is turned off, read_only stays on,
+// and the hold's end puts back what was on (abandon puts back nothing).
+// SET GLOBAL, not PERSIST: a restart restores the configured values
+// whatever happens here. logf receives what it did (a job's Logf). A
+// non-nil mark (a rebuild load from the pinned source on a quarantined
+// server) is set before the lift, so the quarantine guard defers from the
+// start, and cleared once the hold has ended.
+func liftReadOnly(ctx context.Context, logf func(level, format string, args ...any), db *sql.DB, mark *loadMark, g *liftGate) (*liftHold, error) {
 	mark.set()
-	if ro || sro {
-		logf("info", "read_only lifted for the load")
+	hold, err := g.begin(ctx, db, logf)
+	if err != nil {
+		mark.clear()
+		return nil, err
 	}
-	return restore, nil
+	hold.mark = mark
+	return hold, nil
+}
+
+// errLoadAccountWeak is T10: a load account with neither CONNECTION_ADMIN
+// nor SUPER while read_only is on (X2: it fails mid-load, after the binary
+// logs are reset). %s is the account (CURRENT_USER(), quoted).
+var errLoadAccountWeak = errors.New("akun MySQL %s yang dipakai agent tidak punya hak CONNECTION_ADMIN maupun SUPER, jadi tidak bisa " +
+	"memuat data selagi server ini baca-saja (read_only); tidak ada yang diubah. Di server yang dikarantina jalankan: " +
+	"sudo dbpanel agent grant-admin; di server lain beri hak itu sebagai root MySQL. Sesudah itu tekan \"Ulangi dari " +
+	"tahap ini\" pada pekerjaan di panel.")
+
+// loadAccountWeakError is errLoadAccountWeak for one account.
+type loadAccountWeakError struct{ account string }
+
+func (e *loadAccountWeakError) Error() string {
+	return fmt.Sprintf(errLoadAccountWeak.Error(), e.account)
+}
+
+func (e *loadAccountWeakError) Is(target error) bool { return target == errLoadAccountWeak }
+
+// refuseWeakLoadAccount refuses, while read_only is on, a load account that
+// holds neither CONNECTION_ADMIN nor SUPER on *.*: read_only stays on
+// during the load and only those let it write. Either one is enough.
+func refuseWeakLoadAccount(ctx context.Context, db *sql.DB) error {
+	var ro bool
+	var account string
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.read_only, CURRENT_USER()").Scan(&ro, &account); err != nil {
+		return fmt.Errorf("baca read_only: %w", err)
+	}
+	if !ro {
+		return nil
+	}
+	grants, err := showGrants(ctx, db)
+	if err != nil {
+		return err
+	}
+	if len(missingGrants(grants, account, grantSet{dynamic: []string{"CONNECTION_ADMIN"}})) == 0 ||
+		len(missingGrants(grants, account, grantSet{static: []string{"SUPER"}})) == 0 {
+		return nil
+	}
+	return &loadAccountWeakError{account: quoteAccount(account)}
 }
 
 // dropDatabases drops the local copies of databases, without binary
@@ -513,6 +529,21 @@ func resetBinaryLogs(ctx context.Context, db *sql.DB) error {
 // the master's) loses its dynamic privileges (SYSTEM_USER, SET_USER_ID), so
 // the views, routines and triggers that follow fail on their DEFINER.
 const flushTrailer = "\nFLUSH PRIVILEGES;\n"
+
+// loadTrailer is what the agent appends to the load stream: nothing for
+// named databases; for every database flushTrailer, preceded, when the
+// lift found super_read_only on, by putting it back. That must come before
+// FLUSH PRIVILEGES: once the master's accounts are loaded, no session of
+// the agent may set it (X7).
+func loadTrailer(full, superWasOn bool) string {
+	switch {
+	case !full:
+		return ""
+	case superWasOn:
+		return "\nSET GLOBAL super_read_only = ON;" + flushTrailer
+	}
+	return flushTrailer
+}
 
 // pipeDump runs mysqldump into mysql through a pipe, reporting the bytes
 // through it against estimate; trailer, when not empty, is fed to mysql

@@ -21,6 +21,7 @@ func init() {
 	SeenPortsFile = filepath.Join(dir, "replica-ports-seen")
 	StartResultFile = filepath.Join(dir, "start-result")
 	DefaultSalvageDir = filepath.Join(dir, "salvage")
+	DefaultLiftLock = filepath.Join(dir, "agent", "lift.lock")
 }
 
 func TestMain(m *testing.M) {
@@ -37,6 +38,7 @@ func TestDefaultsAwayFromSystemPaths(t *testing.T) {
 		"SeenFile": SeenFile, "SeenPortsFile": SeenPortsFile, "StartResultFile": StartResultFile,
 		"DefaultSalvageDir": DefaultSalvageDir, "seenPath": d.seenPath(), "seenPortsPath": d.seenPortsPath(),
 		"startResultPath": d.startResultPath(), "salvageDir": d.salvageDir(),
+		"DefaultLiftLock": DefaultLiftLock, "liftLockPath": d.liftLockPath(),
 	} {
 		if strings.HasPrefix(p, "/var/lib") || strings.HasPrefix(p, "/etc") || !strings.HasPrefix(p, testDefaultsDir+"/") {
 			t.Errorf("%s = %s, want it under %s", name, p, testDefaultsDir)

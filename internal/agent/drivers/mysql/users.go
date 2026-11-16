@@ -98,6 +98,7 @@ func (d *Driver) registerUsers(reg *commands.Registry) {
 		mode := accountMode{keepExisting: strictReplUser(role)}
 		if replicaLike(role) {
 			mode.local = func(level, format string, args ...any) { d.log(fmt.Sprintf(format, args...), "level", level) }
+			mode.gate = d.liftGate()
 		}
 		if err := createAccount(ctx, h, a, replGrants, "replikasi", mode); err != nil {
 			return nil, err
@@ -264,11 +265,12 @@ type accountMode struct {
 	// refuse when a row of the user exists at any host.
 	keepExisting bool
 	// local, when set (a pinned replica or quarantined server), makes the
-	// account on this server only: super_read_only and read_only are
-	// lifted for the statements and put back (liftReadOnly, logging
-	// through local), and the session does not write the binary log, so
-	// the replica gets no GTID of its own.
+	// account on this server only: super_read_only is lifted for the
+	// statements through gate and put back (liftReadOnly, logging through
+	// local), and the session does not write the binary log, so the
+	// replica gets no GTID of its own.
 	local func(level, format string, args ...any)
+	gate  *liftGate
 }
 
 // createAccount creates a, or sets the password of the existing account,
@@ -312,13 +314,13 @@ func createAccount(ctx context.Context, h Host, a account, grants, what string, 
 		if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
 			return fmt.Errorf("SET sql_log_bin: %w", err)
 		}
-		restore, lerr := liftReadOnly(ctx, m.local, db, nil)
+		hold, lerr := liftReadOnly(ctx, m.local, db, nil, m.gate)
 		if lerr != nil {
 			return lerr
 		}
 		defer func() {
 			// A replica left writable is a failure, whatever came before.
-			if rerr := restore(); rerr != nil && err == nil {
+			if rerr := hold.end(); rerr != nil && err == nil {
 				err = fmt.Errorf("akun %s dibuat, tetapi read_only server ini gagal dipasang kembali (%v); jalankan: SET GLOBAL super_read_only = ON", what, rerr)
 			}
 		}()

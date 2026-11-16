@@ -27,9 +27,9 @@ func (d *Driver) registerDatabases(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		res, err := DropDatabases(ctx, h, p.Databases, func(level, format string, args ...any) {
+		res, err := dropLocalDatabases(ctx, h, p.Databases, func(level, format string, args ...any) {
 			d.log(fmt.Sprintf(format, args...), "level", level)
-		})
+		}, d.liftGate())
 		if err != nil {
 			return nil, err
 		}
@@ -64,11 +64,18 @@ func validateDropDatabases(dbs []string) error {
 // DropDatabases drops the given databases on a replica that is not
 // replicating, without binary logging: the panel uses it to clear what an
 // earlier attempt left before a dump loads afresh. A server that replicas
-// read from is refused: its replicas would never see the drop. read_only
-// and super_read_only are lifted for the drops and restored afterwards, as
-// dumpFrom does. The result names the databases that existed (compared
+// read from is refused: its replicas would never see the drop.
+// super_read_only is lifted for the drops (read_only stays on) and
+// restored afterwards, as dumpFrom does. The result names the databases that existed (compared
 // without case, as lower_case_table_names may fold them).
+//
+// Outside a Driver the lift has a gate of its own on DefaultLiftLock.
 func DropDatabases(ctx context.Context, h Host, databases []string, logf func(level, format string, args ...any)) (proto.DropDatabasesResult, error) {
+	return dropLocalDatabases(ctx, h, databases, logf, newLiftGate(DefaultLiftLock))
+}
+
+// dropLocalDatabases is DropDatabases with the driver's lift gate.
+func dropLocalDatabases(ctx context.Context, h Host, databases []string, logf func(level, format string, args ...any), g *liftGate) (proto.DropDatabasesResult, error) {
 	res := proto.DropDatabasesResult{Dropped: []string{}}
 	db, err := openAdmin(ctx, h)
 	if err != nil {
@@ -98,11 +105,11 @@ func DropDatabases(ctx context.Context, h Host, databases []string, logf func(le
 	if err := rows.Err(); err != nil {
 		return res, fmt.Errorf("baca daftar database: %w", err)
 	}
-	restore, err := liftReadOnly(ctx, logf, db, nil)
+	hold, err := liftReadOnly(ctx, logf, db, nil, g)
 	if err != nil {
 		return res, err
 	}
-	defer restore()
+	defer hold.end()
 	if err := dropDatabases(ctx, db, databases); err != nil {
 		return res, err
 	}

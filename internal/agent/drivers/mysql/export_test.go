@@ -584,3 +584,39 @@ func (q *EventQueue) Drain() []proto.Event {
 		q.q.popFront()
 	}
 }
+
+// The lift gate (lift.go).
+type (
+	LiftGate = liftGate
+	LiftHold = liftHold
+)
+
+func NewLiftGate(path string) *LiftGate { return newLiftGate(path) }
+
+func (g *liftGate) Begin(ctx context.Context, db *sql.DB, logf func(level, format string, args ...any)) (*LiftHold, error) {
+	return g.begin(ctx, db, logf)
+}
+
+func (g *liftGate) TryGuard() (release func(), free bool) { return g.tryGuard() }
+
+func (h *liftHold) End() error       { return h.end() }
+func (h *liftHold) Abandon()         { h.abandon() }
+func (h *liftHold) SuperWasOn() bool { return h.superWasOn() }
+
+// LiftGate is the driver's gate.
+func (d *Driver) LiftGate() *LiftGate { return d.liftGate() }
+
+// LiftLockPath is the lock file the driver's gate uses.
+func (d *Driver) LiftLockPath() string { return d.liftLockPath() }
+
+var (
+	OpenLiftLock = openLiftLock
+	LoadTrailer  = loadTrailer
+)
+
+// SetLiftLockWait shortens how long a job waits for a held lift lock.
+func SetLiftLockWait(d time.Duration) (restore func()) {
+	old := liftLockWait
+	liftLockWait = d
+	return func() { liftLockWait = old }
+}

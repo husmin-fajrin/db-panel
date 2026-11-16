@@ -40,14 +40,16 @@ const (
 // is simply lost; without a supervisor it fails with 3707 and the server
 // shuts down. Both mean the data phase is over: the server is started (a
 // no-op when systemd already did) and clone_status must read Completed.
+//
+// Outside a Driver the lift has a gate of its own on DefaultLiftLock.
 func CloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams) (proto.SnapshotResult, error) {
-	return cloneFrom(j, h, p, nil)
+	return cloneFrom(j, h, p, nil, newLiftGate(DefaultLiftLock))
 }
 
-// cloneFrom is CloneFrom with the rebuild mark of the load (nil: none).
-// After the data phase the restart puts the lock back; the mark is then
-// cleared when the job ends (registerSnapshotJob).
-func cloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (proto.SnapshotResult, error) {
+// cloneFrom is CloneFrom with the rebuild mark of the load (nil: none) and
+// the driver's lift gate. After the data phase the restart puts the lock
+// back; the lift is abandoned then and the mark cleared with it.
+func cloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark, g *liftGate) (proto.SnapshotResult, error) {
 	ctx := j.Context()
 	start := time.Now()
 	res := proto.SnapshotResult{Method: methodClone}
@@ -63,7 +65,7 @@ func cloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (pro
 	if err := refuseOnSource(ctx, db); err != nil {
 		return res, err
 	}
-	if _, err := installClonePlugin(ctx, db, j.Logf); err != nil {
+	if _, err := installClonePlugin(ctx, db, j.Logf, g); err != nil {
 		return res, err
 	}
 	// The host is validated (no quote, no colon) and the port an integer.
@@ -81,17 +83,22 @@ func cloneFrom(j *jobs.Job, h Host, p proto.SnapshotParams, mark *loadMark) (pro
 	// CLONE first drops this server's user schemas, which super_read_only
 	// refuses (1290) even for the admin account: a resync clones into a
 	// locked replica that holds data. The lock is lifted with SET GLOBAL and
-	// put back only when CLONE fails before its data phase; after it, the
-	// old server is gone and the restart applies the persisted and my.cnf
-	// lock again.
-	restore, err := liftReadOnly(ctx, j.Logf, db, mark)
+	// put back (end) only when CLONE fails before its data phase; after it,
+	// the old server is gone and the restart applies the persisted and
+	// my.cnf lock again (X6), so the lift is abandoned once MySQL is back
+	// (and, for a rebuild, read-only persisted again). Until then the lift
+	// stays counted: nothing puts super_read_only back under a running
+	// CLONE, which would fail it with 1290 after it began dropping data.
+	hold, err := liftReadOnly(ctx, j.Logf, db, mark, g)
 	if err != nil {
 		return res, err
 	}
 	dataReplaced := false
 	defer func() {
-		if !dataReplaced {
-			restore()
+		if dataReplaced {
+			hold.abandon()
+		} else {
+			hold.end()
 		}
 	}()
 

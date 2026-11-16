@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,7 @@ type jobEvents struct {
 	mu       sync.Mutex
 	progress []proto.JobProgress
 	logs     []string
+	errs     []string // the messages logged at level error
 	done     chan proto.JobDone
 }
 
@@ -56,6 +58,9 @@ func (e *jobEvents) Emit(ev proto.Event) error {
 		_ = json.Unmarshal(ev.Payload, &l)
 		e.mu.Lock()
 		e.logs = append(e.logs, l.Message)
+		if l.Level == "error" {
+			e.errs = append(e.errs, l.Message)
+		}
 		e.mu.Unlock()
 	case proto.EventJobDone:
 		var d proto.JobDone
@@ -1142,5 +1147,204 @@ func TestLoadIgnoresClientCommands(t *testing.T) {
 	}
 	if n := count(t, db, "SELECT COUNT(*) FROM evil.t"); n != 1 {
 		t.Errorf("evil.t rows = %d, want 1", n)
+	}
+}
+
+// TestDumpKeepsReadOnlyDuringLoad: the load runs with read_only on, only
+// super_read_only lifted, so an account without CONNECTION_ADMIN cannot
+// write meanwhile. The load is held at the table it replaces by another
+// session's open transaction, which keeps that table's metadata lock.
+func TestDumpKeepsReadOnlyDuringLoad(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	target := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	fillMaster(t, mdb)
+	dumpUser(t, mdb)
+	tdb := rootDB(t, target)
+	execAll(t, tdb,
+		"CREATE DATABASE x", "CREATE TABLE x.t (id INT)",
+		"CREATE USER app@'%' IDENTIFIED BY 'app-pw'", "GRANT SELECT, INSERT ON x.* TO app@'%'",
+		"CREATE DATABASE a", "CREATE TABLE a.t (id INT PRIMARY KEY, v VARCHAR(20))",
+		"SET GLOBAL super_read_only = ON")
+	locker, err := tdb.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	for _, q := range []string{"BEGIN", "SELECT COUNT(*) FROM a.t"} {
+		if _, err := locker.ExecContext(context.Background(), q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	rig := newSnapshotRig(target.HostWith(&memCreds{p: proto.ConnectParams{User: "root"}}), &memCreds{p: proto.ConnectParams{User: "root"}})
+	rig.start(t, "mysql.dumpFrom", dumpParams(master, "a"))
+	deadline := time.Now().Add(2 * time.Minute)
+	for count(t, tdb, "SELECT COUNT(*) FROM information_schema.processlist WHERE STATE LIKE 'Waiting for % metadata lock'") == 0 {
+		if time.Now().After(deadline) {
+			rows, _ := tdb.Query("SELECT CONCAT_WS(' | ', COMMAND, STATE, INFO) FROM information_schema.processlist")
+			var ps []string
+			for rows != nil && rows.Next() {
+				var l sql.NullString
+				rows.Scan(&l)
+				ps = append(ps, l.String)
+			}
+			t.Fatalf("the load never reached the locked table; processlist %q", ps)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := flags(t, tdb); got != "1 0" {
+		t.Errorf("flags during the load = %s, want 1 0", got)
+	}
+	app, err := sql.Open("mysql", mysql.DSN(proto.ConnectParams{User: "app", Password: "app-pw", Host: "127.0.0.1", Port: target.Port}, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	if _, err := app.Exec("INSERT INTO x.t VALUES (1)"); err == nil || !strings.Contains(err.Error(), "1290") {
+		t.Errorf("INSERT by an account without CONNECTION_ADMIN during the load = %v, want 1290", err)
+	}
+	if _, err := locker.ExecContext(context.Background(), "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	if d := rig.wait(t); !d.OK {
+		t.Fatalf("dump = %+v", d)
+	}
+	if got := flags(t, tdb); got != "1 1" {
+		t.Errorf("flags after the load = %s, want 1 1", got)
+	}
+}
+
+// noSuperAdmin creates adm@localhost with every privilege but those named
+// (SUPER always), and returns the stored account for it.
+func noSuperAdmin(t *testing.T, inst *testmysql.Instance, without ...string) *memCreds {
+	t.Helper()
+	const pw = `Adm1n'pw\"x`
+	qs := []string{
+		"CREATE USER adm@localhost IDENTIFIED BY " + sqlLiteral(pw),
+		"GRANT ALL PRIVILEGES ON *.* TO adm@localhost WITH GRANT OPTION",
+	}
+	for _, p := range without {
+		qs = append(qs, "REVOKE "+p+" ON *.* FROM adm@localhost")
+	}
+	execAll(t, rootDB(t, inst), qs...)
+	return &memCreds{p: proto.ConnectParams{User: "adm", Password: pw}}
+}
+
+// TestFullDumpRebuildRestoresLockInStream: a rebuild loads every database,
+// the master's accounts replace the stored one, which holds no SUPER, so
+// no agent session could put super_read_only back afterwards (X7); the
+// load's own stream does, before FLUSH PRIVILEGES.
+func TestFullDumpRebuildRestoresLockInStream(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	target := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	dumpUser(t, mdb)
+	execAll(t, mdb, "CREATE DATABASE toko", "CREATE TABLE toko.t (id INT PRIMARY KEY)", "INSERT INTO toko.t VALUES (1)")
+	creds := noSuperAdmin(t, target, "SUPER")
+	execAll(t, rootDB(t, target), "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+
+	src := "127.0.0.1:" + strconv.Itoa(master.Port)
+	dir := pinDir(t, "quarantined", src)
+	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
+	runner := jobs.NewRunner(jev, slog.New(slog.DiscardHandler))
+	rig := &snapshotRig{reg: commands.NewRegistry(), runner: runner, events: jev}
+	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir,
+		LiftLock: filepath.Join(t.TempDir(), "agent", "lift.lock")}
+	d.Register(rig.reg)
+	approveRebuild(t, dir, src)
+
+	res := snapshotResult(t, rig.run(t, "mysql.dumpFrom", dumpParams(master)))
+	if !res.AdminReplaced {
+		t.Fatalf("result = %+v, want AdminReplaced", res)
+	}
+	if got := flags(t, rootDB(t, target)); got != "1 1" {
+		t.Errorf("flags after the rebuild = %s, want 1 1", got)
+	}
+	jev.mu.Lock()
+	errs := jev.errs
+	jev.mu.Unlock()
+	if len(errs) != 0 {
+		t.Errorf("the lift's end logged errors: %q", errs)
+	}
+	release, err := mysql.AcquireLiftLock(d.LiftLockPath())
+	if err != nil {
+		t.Fatalf("lift lock after the rebuild: %v", err)
+	}
+	release()
+}
+
+// stopReplicaCount is how many STOP REPLICA statements the server ran.
+func stopReplicaCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	return count(t, db, "SELECT COALESCE(SUM(VARIABLE_VALUE), 0) FROM performance_schema.global_status "+
+		"WHERE VARIABLE_NAME IN ('Com_stop_replica', 'Com_slave_stop', 'Com_replica_stop')")
+}
+
+// TestDumpRefusesLoadAccountWithoutBypass (X2): while read_only is on, a
+// load account with neither CONNECTION_ADMIN nor SUPER is refused before
+// anything changes, on a quarantined server and on an ordinary replica;
+// SUPER alone is enough.
+func TestDumpRefusesLoadAccountWithoutBypass(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	target := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	dumpUser(t, mdb)
+	execAll(t, mdb, "CREATE DATABASE toko", "CREATE TABLE toko.t (id INT PRIMARY KEY)", "INSERT INTO toko.t VALUES (1)")
+	weak := noSuperAdmin(t, target, "SUPER", "CONNECTION_ADMIN")
+	tdb := rootDB(t, target)
+	execAll(t, tdb, "CREATE DATABASE lama", "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+	before := gtidExecuted(t, tdb)
+	want := "akun MySQL 'adm'@'localhost' yang dipakai agent tidak punya hak CONNECTION_ADMIN maupun SUPER, jadi tidak bisa " +
+		"memuat data selagi server ini baca-saja (read_only); tidak ada yang diubah. Di server yang dikarantina jalankan: " +
+		"sudo dbpanel agent grant-admin; di server lain beri hak itu sebagai root MySQL. Sesudah itu tekan \"Ulangi dari " +
+		"tahap ini\" pada pekerjaan di panel."
+	unchanged := func(what string, stops int) {
+		t.Helper()
+		if got := gtidExecuted(t, tdb); got != before {
+			t.Errorf("%s: gtid_executed = %q, want %q", what, got, before)
+		}
+		if got := flags(t, tdb); got != "1 1" {
+			t.Errorf("%s: flags = %s, want 1 1", what, got)
+		}
+		if got := stopReplicaCount(t, tdb); got != stops {
+			t.Errorf("%s: STOP REPLICA ran %d times, want %d", what, got, stops)
+		}
+	}
+
+	// A quarantined server.
+	src := "127.0.0.1:" + strconv.Itoa(master.Port)
+	dir := pinDir(t, "quarantined", src)
+	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
+	runner := jobs.NewRunner(jev, slog.New(slog.DiscardHandler))
+	q := &snapshotRig{reg: commands.NewRegistry(), runner: runner, events: jev}
+	(&mysql.Driver{Host: target.HostWith(weak), Creds: weak, Jobs: runner, PinDir: dir}).Register(q.reg)
+	approveRebuild(t, dir, src)
+	stops := stopReplicaCount(t, tdb)
+	if d := q.run(t, "mysql.dumpFrom", dumpParams(master, "toko")); d.OK || d.Error != want {
+		t.Errorf("dump on a quarantined server with a weak account = %+v\nwant error %q", d, want)
+	}
+	unchanged("quarantined", stops)
+
+	// An ordinary replica, configured and stopped (STOP REPLICA would run).
+	execAll(t, tdb, fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '127.0.0.1', SOURCE_PORT = %d, "+
+		"SOURCE_USER = 'dumper', SOURCE_PASSWORD = %s, SOURCE_AUTO_POSITION = 1", master.Port, sqlLiteral(dumpPassword)))
+	stops = stopReplicaCount(t, tdb)
+	r := newSnapshotRig(target.HostWith(weak), weak)
+	if d := r.run(t, "mysql.dumpFrom", dumpParams(master, "toko")); d.OK || d.Error != want {
+		t.Errorf("dump on a replica with a weak account = %+v\nwant error %q", d, want)
+	}
+	unchanged("replica", stops)
+
+	// SUPER alone is enough.
+	execAll(t, tdb, "SET GLOBAL super_read_only = OFF", "GRANT SUPER ON *.* TO adm@localhost", "SET GLOBAL super_read_only = ON")
+	if d := r.run(t, "mysql.dumpFrom", dumpParams(master, "toko")); !d.OK {
+		t.Fatalf("dump with SUPER and without CONNECTION_ADMIN = %+v", d)
+	}
+	if n := count(t, tdb, "SELECT COUNT(*) FROM toko.t"); n != 1 {
+		t.Errorf("toko.t rows = %d, want 1", n)
+	}
+	if got := flags(t, tdb); got != "1 1" {
+		t.Errorf("flags after the accepted load = %s, want 1 1", got)
 	}
 }
