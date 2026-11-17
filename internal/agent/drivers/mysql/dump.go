@@ -184,16 +184,29 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	if err != nil {
 		return res, err
 	}
+	// Every database includes the mysql schema: the master's accounts may
+	// have replaced this server's (the dump ends with FLUSH PRIVILEGES).
+	replaced := len(p.Databases) == 0 && storedLoginRefused(ctx, h)
 	if full {
 		if err := listSourceAgain(j, h, loadBin, srcFile, srcTLS, mark); err != nil {
+			if !replaced {
+				return res, err
+			}
+			// The load does not count, but it did replace the accounts:
+			// the guard's refused logins are expected as after a
+			// successful load (the success path's adminReplaced is in
+			// registerSnapshotJob), and the operator must reconnect first.
+			mark.adminReplaced()
+			if errors.Is(err, errSecondListFailed) {
+				return res, errSecondListFailedReplaced
+			}
 			return res, err
 		}
 	}
-	if len(p.Databases) == 0 && storedLoginRefused(ctx, h) {
-		// Every database includes the mysql schema: the master's accounts
-		// replaced this server's (the dump ends with FLUSH PRIVILEGES), and
-		// the stored one no longer logs in. In ON mode the dump's header
-		// is the purged set, which is this server's gtid_executed now.
+	if replaced {
+		// The master's accounts replaced this server's, and the stored one
+		// no longer logs in. In ON mode the dump's header is the purged
+		// set, which is this server's gtid_executed now.
 		res.AdminReplaced = true
 		if found {
 			res.GTIDExecuted = dumpGTID
@@ -227,6 +240,12 @@ const (
 // after the load, so the load does not count.
 var errSecondListFailed = errors.New(`salinan selesai dimuat, tetapi daftar database master baru tidak bisa dibaca ` +
 	`sesudahnya, jadi salinan ini tidak dihitung; tekan "Ulangi dari tahap ini"`)
+
+// errSecondListFailedReplaced is T11b: T11 after a load that also
+// replaced this server's MySQL accounts (the stored one is refused).
+var errSecondListFailedReplaced = errors.New(`salinan selesai dimuat, tetapi daftar database master baru tidak bisa ` +
+	`dibaca sesudahnya, jadi salinan ini tidak dihitung; salinan itu juga mengganti akun MySQL server ini: jalankan ` +
+	`"Hubungkan MySQL" untuk server ini dengan akun admin MySQL master, lalu tekan "Ulangi dari tahap ini"`)
 
 // listSourceAgain lists the source's databases after a full dump's load
 // into mark, trying sourceListTries times; errSecondListFailed when every

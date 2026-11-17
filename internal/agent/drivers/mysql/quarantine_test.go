@@ -1252,6 +1252,17 @@ func TestFailedPersistAfterFlagsOnCostsNothing(t *testing.T) {
 // the driver's guard watched.
 func adminReplacedRig(t *testing.T) (*flagRig, *memCreds) {
 	t.Helper()
+	r, creds, d := fullDumpRebuildRig(t, nil)
+	if res := snapshotResult(t, d); !res.AdminReplaced {
+		t.Fatalf("result = %+v, want AdminReplaced", res)
+	}
+	return r, creds
+}
+
+// fullDumpRebuildRig is adminReplacedRig with the driver's host going
+// through hook (nil: none); it returns the full dump's outcome unchecked.
+func fullDumpRebuildRig(t *testing.T, hook *hookHost) (*flagRig, *memCreds, proto.JobDone) {
+	t.Helper()
 	master := testmysql.Start(t, testmysql.Options{})
 	mdb := rootDB(t, master)
 	dumpUser(t, mdb)
@@ -1261,7 +1272,12 @@ func adminReplacedRig(t *testing.T) (*flagRig, *memCreds) {
 	creds := r.guardAdmin("SUPER")
 	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
 	runner := jobs.NewRunner(jev, slog.New(slog.DiscardHandler))
-	r.d = &mysql.Driver{Host: r.inst.HostWith(creds), Creds: creds, Jobs: runner, PinDir: r.dir, Events: r.ev,
+	var h mysql.Host = r.inst.HostWith(creds)
+	if hook != nil {
+		hook.Host = h
+		h = hook
+	}
+	r.d = &mysql.Driver{Host: h, Creds: creds, Jobs: runner, PinDir: r.dir, Events: r.ev,
 		LiftLock: lockPath(t), SeenPath: filepath.Join(t.TempDir(), "replicas-seen")}
 	r.ev.flush = r.d.FlushEvents
 	r.reg = commands.NewRegistry()
@@ -1270,10 +1286,48 @@ func adminReplacedRig(t *testing.T) (*flagRig, *memCreds) {
 	approveRebuild(t, r.dir, src)
 	r.mustTick()
 	snap := &snapshotRig{reg: r.reg, runner: runner, events: jev}
-	if res := snapshotResult(t, snap.run(t, "mysql.dumpFrom", dumpParams(master))); !res.AdminReplaced {
-		t.Fatalf("result = %+v, want AdminReplaced", res)
+	return r, creds, snap.run(t, "mysql.dumpFrom", dumpParams(master))
+}
+
+// TestSecondListFailureAfterAccountsReplaced: a full dump that replaced
+// the stored admin account, whose listing of the source fails three times
+// after the load, fails with T11b and keeps no load record; the guard's
+// refused logins are expected as after a successful load (no unverified
+// report) until it has logged in once.
+func TestSecondListFailureAfterAccountsReplaced(t *testing.T) {
+	hook := &hookHost{fail: func(n int) bool { return n > 1 }}
+	r, creds, d := fullDumpRebuildRig(t, hook)
+	const t11b = `salinan selesai dimuat, tetapi daftar database master baru tidak bisa dibaca sesudahnya, jadi salinan ` +
+		`ini tidak dihitung; salinan itu juga mengganti akun MySQL server ini: jalankan "Hubungkan MySQL" untuk server ` +
+		`ini dengan akun admin MySQL master, lalu tekan "Ulangi dari tahap ini"`
+	if d.OK || d.Error != t11b {
+		t.Errorf("dumpFrom{all} = %+v\nwant error %q", d, t11b)
 	}
-	return r, creds
+	if n := hook.listings(); n != 4 {
+		t.Errorf("source listings = %d, want 4", n)
+	}
+	host, port, err := mysql.ParseSource(pinFile(t, r.dir, mysql.SourceFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.d.LoadedFrom(host, port) {
+		t.Error("a load whose second listing failed was recorded")
+	}
+	r.wantFlags("after the failed listing", "1 1")
+	for range 4 {
+		r.mustTick()
+	}
+	r.wantRelocks("refused rounds after the replaced accounts", "")
+	// "Hubungkan MySQL": the account works again; refused logins count
+	// once it has logged in.
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF", "CREATE USER adm@localhost IDENTIFIED BY "+sqlLiteral(creds.p.Password),
+		"GRANT ALL PRIVILEGES ON *.* TO adm@localhost", "SET GLOBAL super_read_only = ON")
+	r.mustTick()
+	r.refuseLogin(true, creds)
+	for range 3 {
+		r.mustTick()
+	}
+	r.wantRelocks("three refused rounds after a login", proto.QuarantineWhileUnverified)
 }
 
 // TestFullDumpRebuildLeavesNoRelock: after a full-dump rebuild that
