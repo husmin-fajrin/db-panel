@@ -2111,7 +2111,7 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    `TestQuarantineGuardDefersToRebuildLoad` kini hanya menghitung
    kejadian start yang `While`-nya kosong, karena penjaganya sekarang
    juga mengantre laporan "dikunci lagi".
-5. Task 6, daftar gagal sesudah akun terganti (2026-11-18). Tinjauan
+5. Task 6, daftar gagal sesudah akun terganti (2026-11-17). Tinjauan
    tugas menemukan: bila muat penuh sudah mengganti akun MySQL server
    itu lalu daftar kedua gagal tiga kali, penjaga menghitung login yang
    ditolak, dan saran T11 ("Ulangi dari tahap ini") pasti gagal di
@@ -2128,7 +2128,7 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    bisa dibaca; data di server ini belum diubah: <sebab>`; di dalam
    sebab itu: `daftar database master lebih dari 1048576 byte` dan
    `daftar database master berisi baris yang tidak dikenali: "<baris>"`.
-7. Uji yang ada `TestCloneCancel` (2026-11-18). Uji ini kadang gagal
+7. Uji yang ada `TestCloneCancel` (2026-11-17). Uji ini kadang gagal
    karena salinan selesai sebelum sempat dibatalkan. Pesan gagalnya kini
    menyebut keadaan pekerjaan dan galat pemeriksaan terakhir, dan
    tunggunya berhenti begitu pekerjaan selesai; yang diuji tidak
