@@ -25,14 +25,16 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 )
 
-// Texts of drop-database: spec 5.8 (C1, C2, C6–C10, C12, C15) and the
-// lines this command words itself.
+// Texts of drop-database: spec 5.8 (C1, C2, C6, C7, C9, C10, C12, C15),
+// spec 7's --tanpa-cadangan block (P1, which takes C8's place, and P2), and
+// the lines this command words itself.
 const (
 	textNotQuarantined  = "perintah ini hanya untuk server yang dikarantina (quarantined); peran server ini: %s"
 	textNotLocked       = "kunci baca-saja server ini sedang tidak terpasang penuh; tunggu beberapa detik (agent memasangnya lagi) lalu ulangi"
 	textBackupExists    = "berkas cadangan %s sudah ada; tidak ada yang ditimpa dan tidak ada yang dihapus. Jalankan perintah ini lagi."
 	textSharedFolder    = "Peringatan: folder %s bukan milik root atau bisa ditulis pengguna lain; cadangan di sana bisa diubah atau dihapus pengguna lain."
-	textBackupFailed    = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila cadangan tetap tidak bisa dibuat, jalan yang tersisa: Hapus server ini dari panel, lalu pasang lagi sebagai replika baru."
+	textBackupFailed    = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database %s --tanpa-cadangan"
+	textConfirmNoBackup = "Cadangan database %s tidak bisa dibuat (%s). Dengan --tanpa-cadangan database itu dihapus TANPA cadangan dan tidak bisa dikembalikan. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: "
 	textCheckNewMaster  = `Periksa dulu di master baru (hanya membaca): mysql -e 'SHOW DATABASES LIKE "%s"'. Jawabannya harus kosong.`
 	textCheckNewHex     = `Periksa dulu di master baru (hanya membaca): mysql -e 'SELECT schema_name FROM information_schema.schemata WHERE HEX(schema_name) = "%s"'. Jawabannya harus kosong.`
 	textConfirmDrop     = "Agent tidak bisa memastikan database ini tidak ada di master baru. Bila database ini ada di master baru, menghapusnya di sini merusak replikasi server ini. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: "
@@ -60,6 +62,11 @@ Simpan juga salinannya di server lain, misalnya:
 `
 	textCancelled  = "Dibatalkan; tidak ada yang dihapus. Cadangan tadi tetap ada di %s."
 	textDropFailed = "Database %s tidak bisa dihapus (%s). Kunci baca-saja sudah terpasang lagi. Cadangan tadi tetap ada di %s."
+	// The same three without a backup (--tanpa-cadangan): no sentence
+	// about a file that does not exist.
+	textDropWaitedNoBackup = "Database %s sedang dipakai sambungan lain, jadi belum dihapus. Kunci baca-saja sudah terpasang lagi. Hentikan aplikasi atau sesi yang masih memakai database itu, lalu jalankan perintah ini lagi."
+	textCancelledNoBackup  = "Dibatalkan; tidak ada yang dihapus."
+	textDropFailedNoBackup = "Database %s tidak bisa dihapus (%s). Kunci baca-saja sudah terpasang lagi."
 )
 
 // Why a backup fails its checks (the cause in C8).
@@ -73,6 +80,7 @@ const (
 	causeCreate      = "berkas %s tidak bisa dibuat: %v"
 	causeReadBack    = "berkas tidak bisa dibaca lagi: %v"
 	causeSync        = "berkas tidak bisa disimpan ke disk: %v"
+	causeNoSpace     = "ruang kosong di folder %s (%d byte) kurang dari perkiraan %d byte"
 )
 
 // systemSchemas are never dropped (compared without case).
@@ -135,15 +143,20 @@ var (
 	cliBackupFS = osBackupFS
 )
 
-type dropOptions struct{ dir, name, folder, user string }
+type dropOptions struct {
+	dir, name, folder, user string
+	noBackup                bool // --tanpa-cadangan
+}
 
-// parseDropArgs parses "<nama> [--ke FOLDER] [--pengguna NAMA] [--dir DIR]",
-// the flags before or after the name.
+// parseDropArgs parses "<nama> [--ke FOLDER] [--pengguna NAMA] [--dir DIR]
+// [--tanpa-cadangan]", the flags before or after the name. --tanpa-cadangan
+// is left out of the help on purpose (spec 7).
 func parseDropArgs(args []string, stderr io.Writer) (o dropOptions, ok bool) {
 	fs := newFlagSet("agent drop-database", stderr)
 	dir := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
 	folder := fs.String("ke", "", "folder cadangan (bawaan "+cliBackupDir+")")
 	user := fs.String("pengguna", "", "akun administrator MySQL selain root")
+	noBackup := fs.Bool("tanpa-cadangan", false, "")
 	if err := fs.Parse(args); err != nil {
 		return o, false
 	}
@@ -159,7 +172,7 @@ func parseDropArgs(args []string, stderr io.Writer) (o dropOptions, ok bool) {
 		fs.Usage()
 		return o, false
 	}
-	o.dir, o.folder, o.user = *dir, *folder, *user
+	o.dir, o.folder, o.user, o.noBackup = *dir, *folder, *user, *noBackup
 	return o, true
 }
 
@@ -167,7 +180,10 @@ func parseDropArgs(args []string, stderr io.Writer) (o dropOptions, ok bool) {
 // it makes a checked backup of one database, shows it and how to look for
 // the database on the new master, asks for the name to be typed, and
 // drops the database in a window of read-only lifted (runLifted). Each
-// drop is recorded with writeSyslog.
+// drop is recorded with writeSyslog. A backup that cannot be made stops the
+// command (P1), unless --tanpa-cadangan was given: then the operator is
+// told why and asked for the name (P2), and the database is dropped without
+// a backup; every other check and refusal is the same.
 func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, writeSyslog func(string) error) int {
 	o, ok := parseDropArgs(args, stderr)
 	if !ok {
@@ -253,39 +269,60 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	if err != nil {
 		return fail(textFolderUnusable, pfolder, err)
 	}
+	// 6–7. The backup, checked and synced; without one (--tanpa-cadangan)
+	// noBackup says why, and nothing of the attempt is left.
+	var b *backup
+	var noBackup string
 	if free <= estimate {
-		return fail(textNoSpace, pfolder, free, pname, estimate)
+		if !o.noBackup {
+			return fail(textNoSpace, pfolder, free, pname, estimate)
+		}
+		noBackup = fmt.Sprintf(causeNoSpace, pfolder, free, estimate)
+	} else {
+		var exists *backupExistsError
+		b, err = makeBackup(ctx, s, folder, name, tables)
+		switch {
+		case errors.As(err, &exists):
+			return fail(textBackupExists, printable(exists.path))
+		case errors.Is(err, errDumpInterrupted):
+			return fail(textDumpInterrupted)
+		case err != nil && !o.noBackup:
+			return fail(textBackupFailed, pname, printable(err.Error()), shellArg(pname))
+		case err != nil:
+			noBackup = printable(err.Error())
+		}
 	}
-
-	// 6–7. The backup, checked and synced.
-	b, err := makeBackup(ctx, s, folder, name, tables)
-	var exists *backupExistsError
-	switch {
-	case errors.As(err, &exists):
-		return fail(textBackupExists, printable(exists.path))
-	case errors.Is(err, errDumpInterrupted):
-		return fail(textDumpInterrupted)
-	case err != nil:
-		return fail(textBackupFailed, pname, printable(err.Error()))
+	var ppath string
+	if b != nil {
+		defer b.f.Close()
+		ppath = printable(b.path)
 	}
-	defer b.f.Close()
-	ppath := printable(b.path)
 
 	// 8. What was made, how to look on the new master, the name typed.
-	fmt.Fprintf(stdout, textBackupSummary, pname, pname, tables, ppath, b.size, b.sum,
-		shellArg(ppath), shellArg(filepath.Base(ppath)))
+	if b != nil {
+		fmt.Fprintf(stdout, textBackupSummary, pname, pname, tables, ppath, b.size, b.sum,
+			shellArg(ppath), shellArg(filepath.Base(ppath)))
+	}
 	if plainName.MatchString(name) {
 		fmt.Fprintf(stdout, textCheckNewMaster+"\n", name)
 	} else {
 		fmt.Fprintf(stdout, textCheckNewHex+"\n", strings.ToUpper(hex.EncodeToString([]byte(name))))
 	}
-	fmt.Fprint(stdout, textConfirmDrop)
+	if b != nil {
+		fmt.Fprint(stdout, textConfirmDrop)
+	} else {
+		fmt.Fprintf(stdout, textConfirmNoBackup, pname, noBackup)
+	}
 	answer, err := answers.line()
 	if err != nil || answer != name {
 		if err != nil {
 			fmt.Fprintln(stdout)
 		}
-		fmt.Fprintf(stdout, textCancelled+"\n", ppath)
+		if b != nil {
+			fmt.Fprintf(stdout, textCancelled+"\n", ppath)
+		} else {
+			fmt.Fprintln(stdout, textCancelledNoBackup)
+		}
 		return 1
 	}
 
@@ -314,18 +351,26 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	var relock *relockError
 	switch err := runLifted(ctx, s, o.dir, cliLiftLock, recheck, drop); {
 	case err == nil:
+	case errors.Is(err, errLockWait) && b == nil:
+		return fail(textDropWaitedNoBackup, pname)
 	case errors.Is(err, errLockWait):
 		return fail(textDropWaited, pname, ppath)
 	case errors.Is(err, errStateChanged), errors.Is(err, errInterrupted), errors.Is(err, errWindowCap),
 		errors.As(err, &relock), errors.Is(err, mysql.ErrLiftBusy), errors.As(err, &lockErr):
 		return fail("%s", err)
+	case b == nil:
+		return fail(textDropFailedNoBackup, pname, printable(err.Error()))
 	default:
 		return fail(textDropFailed, pname, printable(err.Error()), ppath)
 	}
 
 	// 10. Recorded, and what comes next.
-	line := fmt.Sprintf("database dropped: name=%s backup=%s sha256=%s size=%d tables=%d mysql_user=%s %s",
-		strconv.Quote(name), strconv.Quote(b.path), b.sum, b.size, tables, strconv.Quote(s.User), syslogWho())
+	kept := "backup=none backup_error=" + strconv.Quote(noBackup)
+	if b != nil {
+		kept = fmt.Sprintf("backup=%s sha256=%s size=%d", strconv.Quote(b.path), b.sum, b.size)
+	}
+	line := fmt.Sprintf("database dropped: name=%s %s tables=%d mysql_user=%s %s",
+		strconv.Quote(name), kept, tables, strconv.Quote(s.User), syslogWho())
 	if err := writeSyslog(line); err != nil {
 		fmt.Fprintf(stderr, "Peringatan: catatan ke log sistem gagal ditulis (%v).\n", err)
 	}

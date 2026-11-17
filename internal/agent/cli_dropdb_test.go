@@ -22,11 +22,14 @@ import (
 
 // The operator texts of drop-database, as spec 5.8 words them.
 const (
-	c1  = "perintah ini hanya untuk server yang dikarantina (quarantined); peran server ini: %s"
-	c2  = "kunci baca-saja server ini sedang tidak terpasang penuh; tunggu beberapa detik (agent memasangnya lagi) lalu ulangi"
-	c6  = "berkas cadangan %s sudah ada; tidak ada yang ditimpa dan tidak ada yang dihapus. Jalankan perintah ini lagi."
-	c7  = "Peringatan: folder %s bukan milik root atau bisa ditulis pengguna lain; cadangan di sana bisa diubah atau dihapus pengguna lain."
-	c8  = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila cadangan tetap tidak bisa dibuat, jalan yang tersisa: Hapus server ini dari panel, lalu pasang lagi sebagai replika baru."
+	c1 = "perintah ini hanya untuk server yang dikarantina (quarantined); peran server ini: %s"
+	c2 = "kunci baca-saja server ini sedang tidak terpasang penuh; tunggu beberapa detik (agent memasangnya lagi) lalu ulangi"
+	c6 = "berkas cadangan %s sudah ada; tidak ada yang ditimpa dan tidak ada yang dihapus. Jalankan perintah ini lagi."
+	c7 = "Peringatan: folder %s bukan milik root atau bisa ditulis pengguna lain; cadangan di sana bisa diubah atau dihapus pengguna lain."
+	// p1 replaces C8 (spec 7, the --tanpa-cadangan block): the name, the
+	// cause, then the name again as one shell word.
+	p1  = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database %s --tanpa-cadangan"
+	p2  = "Cadangan database %s tidak bisa dibuat (%s). Dengan --tanpa-cadangan database itu dihapus TANPA cadangan dan tidak bisa dikembalikan. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: "
 	c9  = `Periksa dulu di master baru (hanya membaca): mysql -e 'SHOW DATABASES LIKE "%s"'. Jawabannya harus kosong.`
 	c9b = `Periksa dulu di master baru (hanya membaca): mysql -e 'SELECT schema_name FROM information_schema.schemata WHERE HEX(schema_name) = "%s"'. Jawabannya harus kosong.`
 	c10 = "Agent tidak bisa memastikan database ini tidak ada di master baru. Bila database ini ada di master baru, menghapusnya di sini merusak replikasi server ini. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: "
@@ -214,7 +217,7 @@ const (
 )
 
 // TestDropDatabaseTruncatedDumpStops: a dump that ended early, or that is
-// not plausible, stops with C8 naming why; the incomplete file is removed
+// not plausible, stops with P1 (in place of C8) naming why; the incomplete file is removed
 // and nothing is dropped.
 func TestDropDatabaseTruncatedDumpStops(t *testing.T) {
 	r := newDropRig(t)
@@ -235,7 +238,7 @@ func TestDropDatabaseTruncatedDumpStops(t *testing.T) {
 			script, _ := fakeDump(t, c.body, c.code)
 			setVar(t, &cliMysqldump, script)
 			code, out, errOut := r.run(strings.NewReader("potong\n"), "potong")
-			if want := fmt.Sprintf(c8, "potong", c.cause) + "\n"; code == 0 || errOut != want {
+			if want := fmt.Sprintf(p1, "potong", c.cause, "potong") + "\n"; code == 0 || errOut != want {
 				t.Errorf("drop-database = %d\nstderr %q\nwant   %q\nstdout %q", code, errOut, want, out)
 			}
 			if strings.Contains(out, c10) {
@@ -342,7 +345,8 @@ func TestDropDatabaseConfirmation(t *testing.T) {
 
 // TestDropDatabaseOddNames: names with spaces, backticks, capitals and
 // non-ASCII letters are dropped exactly, with a safe file name and the
-// hint that suits them; names with quotes cannot be dumped and end at C8.
+// hint that suits them; names with quotes cannot be dumped and end at P1
+// (in place of C8).
 func TestDropDatabaseOddNames(t *testing.T) {
 	r := newDropRig(t)
 	setVar(t, &cliNow, func() time.Time { return fixedNow })
@@ -377,12 +381,12 @@ func TestDropDatabaseOddNames(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"o'brien", `dq"uote`} {
+	for name, word := range map[string]string{"o'brien": `'o'\''brien'`, `dq"uote`: `'dq"uote'`} {
 		t.Run(name, func(t *testing.T) {
 			r.makeDB(name, 1)
 			code, out, errOut := r.run(strings.NewReader(name+"\n"), name)
 			prefix := fmt.Sprintf("Cadangan database %s tidak bisa dibuat (mysqldump keluar dengan kode 2", name)
-			suffix := "); tidak ada yang dihapus. Bila cadangan tetap tidak bisa dibuat, jalan yang tersisa: Hapus server ini dari panel, lalu pasang lagi sebagai replika baru.\n"
+			suffix := "); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database " + word + " --tanpa-cadangan\n"
 			if code == 0 || !strings.HasPrefix(errOut, prefix) || !strings.HasSuffix(errOut, suffix) || strings.Count(errOut, "\n") != 1 {
 				t.Errorf("drop-database %q = %d\nstderr %q\nstdout %q", name, code, errOut, out)
 			}
@@ -796,10 +800,25 @@ func TestCLIRefusesUnsafeLockFile(t *testing.T) {
 }
 
 // TestDropDatabaseRefusals: not quarantined (C1), a system schema, a name
-// that does not exist, and flags not 1 1 with the lock free (C2).
+// that does not exist, flags not 1 1 with the lock free (C2), the lift lock
+// held (C3) or unsafe (C4); the same with --tanpa-cadangan.
 func TestDropDatabaseRefusals(t *testing.T) {
 	r := newDropRig(t)
 	r.makeDB("tolak", 1)
+	var held func()
+	holdLock := func() func() {
+		release, err := mysql.AcquireLiftLock(r.lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return release
+	}
+	holdLock()() // the lock file exists from here on
+	chmodLock := func(mode os.FileMode) {
+		if err := os.Chmod(r.lock, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, c := range []struct {
 		name, arg, want string
 		prep, undo      func()
@@ -811,18 +830,24 @@ func TestDropDatabaseRefusals(t *testing.T) {
 		{"no such database", "tidak_ada", fmt.Sprintf(wantNoSuchDatabase, "tidak_ada"), func() {}, func() {}},
 		{"flags off", "tolak", c2,
 			func() { r.exec("SET GLOBAL super_read_only = OFF") }, func() { r.exec("SET GLOBAL super_read_only = ON") }},
+		{"lift lock held", "tolak", mysql.ErrLiftBusy.Error(), func() { held = holdLock() }, func() { held() }},
+		{"unsafe lift lock file", "tolak", (&mysql.LiftLockError{Path: r.lock, Reason: "bisa dibaca atau ditulis pengguna lain"}).Error(),
+			func() { chmodLock(0o644) }, func() { chmodLock(0o600) }},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			c.prep()
-			code, out, errOut := r.run(strings.NewReader(c.arg+"\n"), c.arg)
-			c.undo()
-			if code == 0 || errOut != c.want+"\n" {
-				t.Errorf("drop-database %s = %d\nstderr %q\nwant   %q\nstdout %q", c.arg, code, errOut, c.want+"\n", out)
-			}
-			if files := backupFiles(t, r.backups); len(files) != 0 || !r.exists("tolak") {
-				t.Errorf("backups %v, exists %v", files, r.exists("tolak"))
-			}
-		})
+		// --tanpa-cadangan changes none of the refusals.
+		for _, extra := range [][]string{nil, {"--tanpa-cadangan"}} {
+			t.Run(strings.TrimSpace(c.name+" "+strings.Join(extra, " ")), func(t *testing.T) {
+				c.prep()
+				code, out, errOut := r.run(strings.NewReader(c.arg+"\n"), append([]string{c.arg}, extra...)...)
+				c.undo()
+				if code == 0 || errOut != c.want+"\n" {
+					t.Errorf("drop-database %s %v = %d\nstderr %q\nwant   %q\nstdout %q", c.arg, extra, code, errOut, c.want+"\n", out)
+				}
+				if files := backupFiles(t, r.backups); len(files) != 0 || !r.exists("tolak") {
+					t.Errorf("backups %v, exists %v", files, r.exists("tolak"))
+				}
+			})
+		}
 	}
 	if code, _, _ := r.run(strings.NewReader(""), "satu", "dua"); code != 2 {
 		t.Errorf("two names: code %d, want 2", code)
@@ -861,11 +886,12 @@ func TestCLIOutputEscapesNames(t *testing.T) {
 		t.Errorf("system log %q", logged)
 	}
 
-	// mysqldump cannot dump a name with a newline: C8, named cleanly.
+	// mysqldump cannot dump a name with a newline: P1, named cleanly.
 	withNewline := "a\nb\x1bc"
 	r.makeDB(withNewline, 1)
 	code, out, errOut = r.run(strings.NewReader(""), withNewline)
-	if code == 0 || !strings.HasPrefix(errOut, "Cadangan database a b c tidak bisa dibuat (") || strings.Count(errOut, "\n") != 1 {
+	if code == 0 || !strings.HasPrefix(errOut, "Cadangan database a b c tidak bisa dibuat (") || !strings.HasSuffix(errOut, "drop-database 'a b c' --tanpa-cadangan\n") ||
+		strings.Count(errOut, "\n") != 1 {
 		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
 	}
 	clean("stdout", out)
@@ -917,5 +943,137 @@ func TestDropDatabaseInterruptedBackupRemoved(t *testing.T) {
 	}
 	if files := backupFiles(t, r.backups); len(files) != 0 || !r.exists("berhenti") || r.flags() != "1 1" {
 		t.Errorf("backups %v, exists %v, flags %s", files, r.exists("berhenti"), r.flags())
+	}
+}
+
+// TestFailedBackupTextNamesOption: without --tanpa-cadangan a backup that
+// cannot be made ends at P1 exactly, which names the option.
+func TestFailedBackupTextNamesOption(t *testing.T) {
+	r := newDropRig(t)
+	r.makeDB("gagal", 1)
+	script, _ := fakeDump(t, "", 2)
+	setVar(t, &cliMysqldump, script)
+	code, out, errOut := r.run(strings.NewReader("gagal\n"), "gagal")
+	want := fmt.Sprintf(p1, "gagal", "mysqldump keluar dengan kode 2", "gagal") + "\n"
+	if code == 0 || errOut != want {
+		t.Errorf("drop-database = %d\nstderr %q\nwant   %q\nstdout %q", code, errOut, want, out)
+	}
+	if strings.Contains(out, "TANPA cadangan") || !r.exists("gagal") || len(backupFiles(t, r.backups)) != 0 {
+		t.Errorf("stdout %q, exists %v, backups %v", out, r.exists("gagal"), backupFiles(t, r.backups))
+	}
+}
+
+// TestDropDatabaseWithoutBackup: with --tanpa-cadangan a database whose
+// backup cannot be made (a name with a quote) is dropped once its name is
+// typed at P2: no backup file left or shown, 1 1, backup=none in the
+// system log. Any other answer cancels with nothing changed. The window's
+// own rules hold on this path (C12 without a backup sentence).
+func TestDropDatabaseWithoutBackup(t *testing.T) {
+	r := newDropRig(t)
+	const name = "o'brien"
+	cause := "mysqldump keluar dengan kode 2: mysqldump: Couldn't execute 'use `o\\'brien`': Unknown database 'o\\'brien' (1049)"
+	ask := fmt.Sprintf(p2, name, cause)
+	hint := fmt.Sprintf(c9b, strings.ToUpper(hex.EncodeToString([]byte(name))))
+	check := func(t *testing.T, atPrompt, out string) {
+		t.Helper()
+		if !strings.Contains(atPrompt, hint+"\n") || !strings.HasSuffix(atPrompt, ask) {
+			t.Errorf("before the question stdout was %q\nwant C9b then %q", atPrompt, ask)
+		}
+		for _, bad := range []string{"SHA-256", "Berkas", "Ukuran", c10} {
+			if strings.Contains(out, bad) {
+				t.Errorf("stdout shows %q without a backup: %q", bad, out)
+			}
+		}
+		if files := backupFiles(t, r.backups); len(files) != 0 {
+			t.Errorf("backup files left: %v", files)
+		}
+	}
+
+	r.makeDB(name, 2)
+	for _, answer := range []string{"ya", "O'BRIEN", ""} {
+		var atPrompt string
+		code, out, errOut := r.runHook(answer+"\n", func(s string) { atPrompt = s }, name, "--tanpa-cadangan")
+		check(t, atPrompt, out)
+		if code == 0 || !strings.Contains(out, "Dibatalkan; tidak ada yang dihapus.\n") || strings.Contains(out, "Cadangan tadi") ||
+			!r.exists(name) || r.flags() != "1 1" {
+			t.Errorf("answer %q: code %d, exists %v, flags %s\nstdout %q\nstderr %q", answer, code, r.exists(name), r.flags(), out, errOut)
+		}
+	}
+	if len(r.syslogLines()) != 0 {
+		t.Errorf("system log after cancelling: %q", r.syslogLines())
+	}
+
+	// Blocked by another session: C12 without the backup sentence.
+	t.Run("blocked", func(t *testing.T) {
+		setVar(t, &cliLockWaitTimeout, 2)
+		release := r.holdRead("`o'brien`.t1")
+		code, out, errOut := r.run(strings.NewReader(name+"\n"), name, "--tanpa-cadangan")
+		release()
+		want := "Database o'brien sedang dipakai sambungan lain, jadi belum dihapus. Kunci baca-saja sudah terpasang lagi. " +
+			"Hentikan aplikasi atau sesi yang masih memakai database itu, lalu jalankan perintah ini lagi.\n"
+		if code == 0 || errOut != want || !r.exists(name) || r.flags() != "1 1" {
+			t.Errorf("code %d, exists %v, flags %s\nstderr %q\nwant   %q\nstdout %q", code, r.exists(name), r.flags(), errOut, want, out)
+		}
+	})
+
+	// A table added while the operator read: C11, nothing dropped.
+	t.Run("recheck", func(t *testing.T) {
+		code, _, errOut := r.runHook(name+"\n", func(string) {
+			r.exec("SET GLOBAL read_only = OFF", "CREATE TABLE `o'brien`.extra (id INT)", "SET GLOBAL super_read_only = ON")
+		}, name, "--tanpa-cadangan")
+		if code == 0 || errOut != c11+"\n" || !r.exists(name) || r.flags() != "1 1" {
+			t.Errorf("code %d, exists %v, flags %s, stderr %q", code, r.exists(name), r.flags(), errOut)
+		}
+	})
+
+	before := r.gtidExecuted()
+	var atPrompt string
+	code, out, errOut := r.runHook(name+"\n", func(s string) { atPrompt = s }, name, "--tanpa-cadangan")
+	if code != 0 {
+		t.Fatalf("drop-database --tanpa-cadangan = %d\nstdout %q\nstderr %q", code, out, errOut)
+	}
+	check(t, atPrompt, out)
+	if !strings.HasSuffix(out, c15+"\n") || r.exists(name) || r.flags() != "1 1" || r.gtidExecuted() != before || !r.lockFree() {
+		t.Errorf("exists %v, flags %s, gtid changed %v, lock free %v\nstdout %q", r.exists(name), r.flags(), r.gtidExecuted() != before, r.lockFree(), out)
+	}
+	logged := r.syslogLines()
+	if len(logged) != 1 || !strings.Contains(logged[0], "backup=none") || !strings.Contains(logged[0], strconv.Quote(name)) || strings.ContainsAny(logged[0], "\n\r") {
+		t.Errorf("system log %q", logged)
+	}
+}
+
+// TestDropDatabaseWithoutBackupStillBacksUpWhenItCan: --tanpa-cadangan on
+// a database that can be dumped takes the ordinary path: the backup is
+// made and shown, C10 is asked, P2 never is.
+func TestDropDatabaseWithoutBackupStillBacksUpWhenItCan(t *testing.T) {
+	r := newDropRig(t)
+	setVar(t, &cliNow, func() time.Time { return fixedNow })
+	r.makeDB("biasa", 2)
+	var atPrompt string
+	code, out, errOut := r.runHook("biasa\n", func(s string) { atPrompt = s }, "biasa", "--tanpa-cadangan")
+	if code != 0 {
+		t.Fatalf("drop-database = %d\nstdout %q\nstderr %q", code, out, errOut)
+	}
+	if !strings.HasSuffix(atPrompt, c10) || strings.Contains(out, "TANPA cadangan") {
+		t.Errorf("stdout %q", out)
+	}
+	path := filepath.Join(r.backups, "biasa-"+fixedStamp+".sql")
+	if !strings.HasPrefix(lastLine(readFile(t, path)), "-- Dump completed") || !strings.Contains(out, path) {
+		t.Errorf("backup %s missing or not shown", path)
+	}
+	if logged := r.syslogLines(); len(logged) != 1 || strings.Contains(logged[0], "backup=none") || !strings.Contains(logged[0], strconv.Quote(path)) {
+		t.Errorf("system log %q", logged)
+	}
+	if r.exists("biasa") || r.flags() != "1 1" {
+		t.Errorf("exists %v, flags %s", r.exists("biasa"), r.flags())
+	}
+}
+
+// TestCLIUsageHidesWithoutBackup: --tanpa-cadangan is not in the help.
+func TestCLIUsageHidesWithoutBackup(t *testing.T) {
+	var out bytes.Buffer
+	RunCLI([]string{"help"}, strings.NewReader(""), &out, io.Discard)
+	if strings.Contains(out.String(), "tanpa-cadangan") {
+		t.Error("usage names --tanpa-cadangan")
 	}
 }
