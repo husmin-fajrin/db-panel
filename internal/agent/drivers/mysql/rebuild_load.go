@@ -40,8 +40,9 @@ type rebuildLoad struct {
 	// (noteWritableAfterLoad); settleRebuilt then refuses (T7).
 	writableSince bool
 	// expectRefused: a load replaced the accounts (AdminReplaced), so the
-	// guard's login is refused until it works again; such refusals are no
-	// round the guard could not check.
+	// guard's login is refused until it works again; such refusals (any
+	// login error the server sends, serverRefusedLogin) are no round the
+	// guard could not check.
 	expectRefused bool
 }
 

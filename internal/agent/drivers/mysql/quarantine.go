@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	drv "github.com/go-sql-driver/mysql"
+
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -261,21 +263,21 @@ const mysqlUptimeSlack = 2
 //     relock when a flag was read off. monitor.quarantined (under the
 //     pinned source) is reported once a quarantine written while MySQL was
 //     down takes effect, and whenever the flags had to be put back.
-//  6. A round that could not check (login refused, the flags not read, or
-//     a flag off and its relock failed under the lock, error 1205
-//     included) counts; three in a row are reported as unverified
-//     (unverifiedRound).
+//  6. A round that could not check (a login the server refused with any
+//     error of its own, the flags not read, or a flag off and its relock
+//     failed under the lock, error 1205 included) counts; three in a row
+//     are reported as unverified (unverifiedRound).
 //
 // The caller holds promoteMu.
 func (d *Driver) guardQuarantined(ctx context.Context, h Host, now time.Time) error {
 	db, err := h.Open(ctx)
 	if err != nil {
 		d.guard.up, d.qUp = false, false
-		if LoginRefused(err) && !d.expectingRefusal() {
+		if serverRefusedLogin(err) && !d.expectingRefusal() {
 			d.unverifiedRound(h, now)
 		} else {
-			// MySQL down, or refused while a load's new accounts are
-			// expected: no round that could not check.
+			// MySQL not answering at all, or refused while a load's new
+			// accounts are expected: no round that could not check.
 			d.checkedRound()
 		}
 		return nil
@@ -433,6 +435,17 @@ func (d *Driver) unverifiedRound(h Host, now time.Time) {
 	d.noteWritableAfterLoad()
 	d.warn("quarantine guard could not check read-only for several rounds", "rounds", d.qUnverified)
 	d.relock(h, now, proto.QuarantineWhileUnverified)
+}
+
+// serverRefusedLogin reports whether the MySQL server itself answered a
+// login with an error (a refused password, a locked account, too many
+// connections, …): for the guard's three-round rule that is a login
+// refused (ruling D24). Only transport failures (nothing listening, a
+// timeout, no socket) mean MySQL did not answer at all. LoginRefused is
+// narrower (1045, 1698) and has other callers.
+func serverRefusedLogin(err error) bool {
+	var me *drv.MySQLError
+	return errors.As(err, &me)
 }
 
 // checkedRound ends a streak of rounds that could not check the flags.

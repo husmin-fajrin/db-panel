@@ -755,6 +755,9 @@ type flagRig struct {
 	ev   *eventLog
 	rl   *relockLog
 	now  time.Time
+	// lockAccount: refuseLogin locks the account instead of changing its
+	// password.
+	lockAccount bool
 }
 
 // newFlagRig builds the rig; creds, when not nil, is the stored account
@@ -1080,57 +1083,87 @@ func (r *flagRig) guardAdmin(without ...string) *memCreds {
 	return creds
 }
 
-// refuseLogin changes adm's password (on) or puts it back, so the guard's
-// login is refused (1045) or works again.
+// refuseLogin makes the server refuse adm's login (on) or accept it again:
+// by a changed password (1045), or, with r.lockAccount, by ACCOUNT LOCK
+// (3118).
 func (r *flagRig) refuseLogin(on bool, creds *memCreds) {
 	r.t.Helper()
-	pw := creds.p.Password
-	if on {
-		pw = "lain"
+	q := "ALTER USER adm@localhost IDENTIFIED BY " + sqlLiteral(creds.p.Password) + " ACCOUNT UNLOCK"
+	switch {
+	case on && r.lockAccount:
+		q = "ALTER USER adm@localhost ACCOUNT LOCK"
+	case on:
+		q = "ALTER USER adm@localhost IDENTIFIED BY " + sqlLiteral("lain")
 	}
-	execAll(r.t, r.root, "SET GLOBAL super_read_only = OFF", "ALTER USER adm@localhost IDENTIFIED BY "+sqlLiteral(pw),
-		"SET GLOBAL super_read_only = ON")
+	execAll(r.t, r.root, "SET GLOBAL super_read_only = OFF", q, "SET GLOBAL super_read_only = ON")
 }
 
-// TestGuardReportsWhenItCannotLogIn: three refused logins in a row, with
-// no load mark and the lift lock free, are reported once as unverified and
+// TestGuardReportsWhenItCannotLogIn: three logins in a row that the server
+// refuses (the stored account locked, or its password changed), with no
+// load mark and the lift lock free, are reported once as unverified and
 // recorded as writable since the load; again no sooner than ten minutes
 // later. Two refused rounds and then a login report nothing.
 func TestGuardReportsWhenItCannotLogIn(t *testing.T) {
-	r := newFlagRig(t, nil, guardCandidateKey)
-	creds := r.guardAdmin()
-	r.mustTick()
-	r.refuseLogin(true, creds)
-	r.mustTick()
-	r.mustTick()
-	r.wantRelocks("two refused rounds", "")
-	r.mustTick()
-	r.wantRelocks("three refused rounds", proto.QuarantineWhileUnverified)
-	if !r.d.WritableAfterLoad() {
-		t.Error("writable since the load not recorded")
+	for _, c := range []struct {
+		name string
+		lock bool
+	}{{"account locked", true}, {"password changed", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newFlagRig(t, nil, guardCandidateKey)
+			r.lockAccount = c.lock
+			creds := r.guardAdmin()
+			r.mustTick()
+			r.refuseLogin(true, creds)
+			r.mustTick()
+			r.mustTick()
+			r.wantRelocks("two refused rounds", "")
+			r.mustTick()
+			r.wantRelocks("three refused rounds", proto.QuarantineWhileUnverified)
+			if !r.d.WritableAfterLoad() {
+				t.Error("writable since the load not recorded")
+			}
+			for range 5 {
+				r.mustTick()
+			}
+			r.wantRelocks("refused rounds within ten minutes", proto.QuarantineWhileUnverified)
+			r.now = r.now.Add(10 * time.Minute)
+			r.mustTick()
+			r.wantRelocks("ten minutes later", proto.QuarantineWhileUnverified+","+proto.QuarantineWhileUnverified)
+
+			// Two refused rounds, then a login: nothing.
+			r.setDriver(creds)
+			r.refuseLogin(false, creds)
+			r.mustTick()
+			r.refuseLogin(true, creds)
+			r.mustTick()
+			r.mustTick()
+			r.refuseLogin(false, creds)
+			r.mustTick()
+			r.mustTick()
+			r.wantRelocks("two refused rounds then a login", "")
+			if r.d.WritableAfterLoad() {
+				t.Error("two refused rounds recorded as writable since the load")
+			}
+		})
 	}
+}
+
+// TestGuardQuietWhileMySQLDown: MySQL not answering at all is no round
+// the guard could not check: no unverified report, nothing recorded.
+func TestGuardQuietWhileMySQLDown(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.mustTick()
+	r.inst.Stop(t)
 	for range 5 {
 		r.mustTick()
 	}
-	r.wantRelocks("refused rounds within ten minutes", proto.QuarantineWhileUnverified)
-	r.now = r.now.Add(10 * time.Minute)
-	r.mustTick()
-	r.wantRelocks("ten minutes later", proto.QuarantineWhileUnverified+","+proto.QuarantineWhileUnverified)
-
-	// Two refused rounds, then a login: nothing.
-	r.setDriver(creds)
-	r.refuseLogin(false, creds)
-	r.mustTick()
-	r.refuseLogin(true, creds)
-	r.mustTick()
-	r.mustTick()
-	r.refuseLogin(false, creds)
-	r.mustTick()
-	r.mustTick()
-	r.wantRelocks("two refused rounds then a login", "")
+	r.wantRelocks("rounds with MySQL down", "")
 	if r.d.WritableAfterLoad() {
-		t.Error("two refused rounds recorded as writable since the load")
+		t.Error("rounds with MySQL down recorded as writable since the load")
 	}
+	r.inst.Restart(t)
+	r.mustTick()
+	r.wantRelocks("MySQL back", "")
 }
 
 // TestGuardReportsWhenRelockFails: a flag off and an agent account that
