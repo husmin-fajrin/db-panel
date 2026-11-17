@@ -237,8 +237,10 @@ func (h *host) DiskFree(path string) (free, total uint64, err error) {
 const stderrTail = 4096
 
 // ErrNotStarted is wrapped by ExecEnvAs when the program never ran: the
-// fork, the change of user or group ids, or the exec failed. A program
-// that ran and exited non-zero, or was stopped by its context, is not it.
+// fork, the change of user or group ids, or the exec failed. The start's
+// own error (its errno: EAGAIN when the account is at its process limit)
+// is wrapped beside it. A program that ran and exited non-zero, or was
+// stopped by its context, is not it.
 var ErrNotStarted = errors.New("program tidak bisa dimulai")
 
 func (h *host) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
@@ -265,7 +267,7 @@ func (h *host) ExecEnvAs(ctx context.Context, cred *syscall.Credential, env []st
 	cmd.Stderr = &stderr
 	err := cmd.Start()
 	if err != nil && ctx.Err() == nil {
-		return fmt.Errorf("%s gagal: %w: %v", name, ErrNotStarted, err)
+		return fmt.Errorf("%s gagal: %w: %w", name, ErrNotStarted, err)
 	}
 	if err == nil {
 		err = cmd.Wait()

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -407,12 +408,53 @@ func TestServiceToolFailureIsNotRetriedAsRoot(t *testing.T) {
 	}
 }
 
+// notStarted is ExecEnvAs's error for name whose start failed with errno.
+func notStarted(name string, errno syscall.Errno) error {
+	return fmt.Errorf("%s gagal: %w: %w", name, mysql.ErrNotStarted, &fs.PathError{Op: "fork/exec", Path: name, Err: errno})
+}
+
+// serviceAtLimit is T19b, the error when the service account is at its
+// process limit.
+const serviceAtLimit = "akun layanan MySQL sudah mencapai batas jumlah proses, jadi program ini tidak bisa dijalankan sebagai akun itu dan tidak dijalankan sebagai root; periksa proses milik akun itu di server ini, lalu ulangi"
+
+// TestServiceToolAtProcessLimitNotRunAsRoot: a start that failed with
+// EAGAIN under the owner's ids (the account is at its process limit,
+// which the account itself decides) is neither run as root nor read in
+// the agent: T19b, without T19.
+func TestServiceToolAtProcessLimitNotRunAsRoot(t *testing.T) {
+	t.Cleanup(mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 1234, 4321, nil }))
+	h := &fakeExecHost{out: "keluaran", asErr: notStarted("mysqlbinlog", syscall.EAGAIN)}
+	var w warnings
+	var out bytes.Buffer
+	err := mysql.ExecAsService(context.Background(), h, "/var/lib/mysql", w.warn, nil, &out, "mysqlbinlog", "x")
+	if err == nil || !strings.HasPrefix(err.Error(), serviceAtLimit+": ") || !errors.Is(err, syscall.EAGAIN) {
+		t.Errorf("err = %v, want T19b then the cause", err)
+	}
+	if len(h.runs) != 1 || h.runs[0].cred == nil || out.Len() != 0 || len(w.msgs) != 0 {
+		t.Errorf("runs %+v out %q warnings %q, want one run as the owner, nothing as root, no warning", h.runs, out.String(), w.msgs)
+	}
+
+	log := filepath.Join(t.TempDir(), "error.log")
+	if err := os.WriteFile(log, []byte("isi yang tidak boleh terbaca\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h = &fakeExecHost{asErr: notStarted("tail", syscall.EAGAIN)}
+	got, err := mysql.ReadBootLogTail(context.Background(), h, log, w.warn)
+	if err == nil || !strings.HasPrefix(err.Error(), serviceAtLimit+": ") || len(got) != 0 {
+		t.Errorf("tail at the limit = %q, %v; want nothing and T19b", got, err)
+	}
+	if len(h.runs) != 1 || h.runs[0].cred == nil || len(w.msgs) != 0 {
+		t.Errorf("tail runs %+v warnings %q, want one run as the owner and no warning", h.runs, w.msgs)
+	}
+}
+
 // TestServiceToolNotStartedFallsBackToRoot: a program that could not be
-// started under the owner's ids runs as root, once, with T19 once; any
-// other failure under the ids is returned and never run as root.
+// started under the owner's ids for another cause than the process limit
+// (EPERM here) runs as root, once, with T19 once; any other failure under
+// the ids is returned and never run as root.
 func TestServiceToolNotStartedFallsBackToRoot(t *testing.T) {
 	t.Cleanup(mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 1234, 4321, nil }))
-	h := &fakeExecHost{out: "keluaran", asErr: fmt.Errorf("mysqlbinlog gagal: %w: fork/exec: resource temporarily unavailable", mysql.ErrNotStarted)}
+	h := &fakeExecHost{out: "keluaran", asErr: notStarted("mysqlbinlog", syscall.EPERM)}
 	var w warnings
 	var out bytes.Buffer
 	if err := mysql.ExecAsService(context.Background(), h, "/var/lib/mysql", w.warn, nil, &out, "mysqlbinlog", "x"); err != nil {
@@ -463,6 +505,55 @@ func TestExecEnvAsReportsNotStarted(t *testing.T) {
 			t.Errorf("cred %+v: program stopped by its context err = %v, want a failure that is not ErrNotStarted", cred, err)
 		}
 	}
+}
+
+// nprocHelperEnv makes the test binary act as
+// TestExecEnvAsReportsProcessLimit's helper.
+const nprocHelperEnv = "DBPANEL_TEST_NPROC_HELPER"
+
+// TestExecEnvAsReportsProcessLimit: the real ExecEnvAs, asked to run a
+// program as an account that already has a process while RLIMIT_NPROC is
+// 0, says ErrNotStarted with EAGAIN (execve refuses it). The limit is set
+// in a helper process (this test binary again), never in the tests' own.
+func TestExecEnvAsReportsProcessLimit(t *testing.T) {
+	if os.Getenv(nprocHelperEnv) == "1" {
+		nprocHelper()
+		return
+	}
+	needRoot(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExecEnvAsReportsProcessLimit$", "-test.count=1")
+	cmd.Env = append(os.Environ(), nprocHelperEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "hasil: ErrNotStarted=true EAGAIN=true") {
+		t.Errorf("helper: %v\n%s", err, out)
+	}
+}
+
+// nprocHelper holds a process as nobody, sets its own RLIMIT_NPROC soft
+// limit to 0 and runs true as nobody through the real host, printing what
+// the error is.
+func nprocHelper() {
+	nobody := &syscall.Credential{Uid: 65534, Gid: 65534}
+	held := exec.Command("sleep", "60")
+	held.SysProcAttr = &syscall.SysProcAttr{Credential: nobody}
+	if err := held.Start(); err != nil {
+		fmt.Println("hold:", err)
+		return
+	}
+	defer func() { held.Process.Kill(); held.Wait() }()
+	const rlimitNproc = 6 // RLIMIT_NPROC on Linux
+	var rl syscall.Rlimit
+	if err := syscall.Getrlimit(rlimitNproc, &rl); err != nil {
+		fmt.Println("getrlimit:", err)
+		return
+	}
+	if err := syscall.Setrlimit(rlimitNproc, &syscall.Rlimit{Cur: 0, Max: rl.Max}); err != nil {
+		fmt.Println("setrlimit:", err)
+		return
+	}
+	h := mysql.NewHost(mysql.Layout{}, nil, nil, probe.RealSystem(), nil)
+	err := h.ExecEnvAs(context.Background(), nobody, nil, nil, io.Discard, "true")
+	fmt.Printf("hasil: ErrNotStarted=%v EAGAIN=%v (%v)\n", errors.Is(err, mysql.ErrNotStarted), errors.Is(err, syscall.EAGAIN), err)
 }
 
 // TestBootLogTailAsDirectoryOwner: the guard reads the end of the error
@@ -529,7 +620,7 @@ func TestBootLogTailAsDirectoryOwner(t *testing.T) {
 		}
 		w.wantT19Once(t, what)
 	}
-	wantInAgent("tail not started", &fakeExecHost{asErr: fmt.Errorf("tail gagal: %w", mysql.ErrNotStarted)})
+	wantInAgent("tail not started", &fakeExecHost{asErr: notStarted("tail", syscall.EPERM)})
 	mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, nil })
 	wantInAgent("root's directory", &fakeExecHost{})
 	mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, errors.New("lstat gagal (test)") })
