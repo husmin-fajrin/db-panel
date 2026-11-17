@@ -2104,6 +2104,13 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    yang terkunci baca-saja, karena settle membaca kedua bendera sendiri.
    Dua uji penjaga yang ada kini membuka kunci seperti pembukaan
    sungguhan (hanya `super_read_only`).
+4. Task 5, tempat kode (2026-11-17). Catatan dan laporan "dikunci lagi"
+   seluruhnya ada di `start_result.go` (di samping `recordStartResult`),
+   ujinya di `start_result_test.go`; `startlock_guard.go` dan dua berkas
+   uji lain di daftar Files tidak diubah. Uji yang ada
+   `TestQuarantineGuardDefersToRebuildLoad` kini hanya menghitung
+   kejadian start yang `While`-nya kosong, karena penjaganya sekarang
+   juga mengantre laporan "dikunci lagi".
 
 ## Teks baru untuk dibaca pemilik
 
