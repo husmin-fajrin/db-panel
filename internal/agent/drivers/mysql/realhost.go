@@ -236,6 +236,12 @@ func (h *host) DiskFree(path string) (free, total uint64, err error) {
 // stderrTail bounds how much of a command's stderr ends up in its error.
 const stderrTail = 4096
 
+// serviceWaitDelay bounds how long ExecEnvAs waits, for a command run with
+// cred, for its output and error pipes once its context ended or the
+// command exited: a process the account left behind (one it could inject
+// with ptrace) may hold them open forever.
+const serviceWaitDelay = 2 * time.Second
+
 // ErrNotStarted is wrapped by ExecEnvAs when the program never ran: the
 // fork, the change of user or group ids, or the exec failed. The start's
 // own error (its errno: EAGAIN when the account is at its process limit)
@@ -258,6 +264,7 @@ func (h *host) ExecEnvAs(ctx context.Context, cred *syscall.Credential, env []st
 			cmd.SysProcAttr = &syscall.SysProcAttr{}
 		}
 		cmd.SysProcAttr.Credential = cred
+		cmd.WaitDelay = serviceWaitDelay
 	}
 	cmd.Stdin, cmd.Stdout = stdin, stdout
 	if len(env) > 0 {

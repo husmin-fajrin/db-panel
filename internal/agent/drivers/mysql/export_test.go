@@ -709,3 +709,7 @@ func SetLstatOwner(f func(path string) (uid, gid uint32, err error)) (restore fu
 	lstatOwner = f
 	return func() { lstatOwner = old }
 }
+
+// ServiceWaitDelay bounds the wait for a command's output once it was
+// stopped or exited, for a command run as another account.
+const ServiceWaitDelay = serviceWaitDelay

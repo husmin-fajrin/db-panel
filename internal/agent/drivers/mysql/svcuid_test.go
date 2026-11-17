@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -274,19 +275,19 @@ func TestServiceCredentialRootCountsAsMissing(t *testing.T) {
 	w.wantT19Once(t, "root's directory")
 }
 
-// TestServiceCredentialMissingFallsBackToRoot: when the directory's
-// owner cannot be read, Periksa and Amankan still run (as root), warn
-// once each and give what they give as the owner.
-func TestServiceCredentialMissingFallsBackToRoot(t *testing.T) {
+// TestServiceCredentialRootOwnedSameResult: when root owns the binary log
+// directory, Periksa and Amankan run as root, warn once each and give
+// what they give as the owner.
+func TestServiceCredentialRootOwnedSameResult(t *testing.T) {
 	needRoot(t)
 	r, h, logs := committedLeftover(t)
 	owned := r.leftover()
 	salvaged := decode[proto.SalvageFile](t, r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: owned.GTIDSet}))
 	if strings.Contains(logs.String(), serviceWarning) {
-		t.Fatalf("warned before the owner was hidden:\n%s", logs)
+		t.Fatalf("warned before the directory was root's:\n%s", logs)
 	}
 
-	t.Cleanup(mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, errors.New("lstat gagal (test)") }))
+	t.Cleanup(mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, nil }))
 	h.runs = nil
 	if got := r.leftover(); !reflect.DeepEqual(got, owned) {
 		t.Errorf("leftover as root = %+v, want %+v", got, owned)
@@ -316,6 +317,84 @@ func TestServiceCredentialMissingFallsBackToRoot(t *testing.T) {
 	}
 	if len(a) == 0 || !bytes.Equal(a, b) {
 		t.Errorf("salvage as root (%d bytes) differs from the owner's (%d bytes)", len(b), len(a))
+	}
+}
+
+// unreadableOwner is T19c's text around dir: the error when dir's owner
+// cannot be read.
+func unreadableOwner(dir string) (head, tail string) {
+	return "pemilik direktori " + dir + " tidak bisa dibaca (",
+		"), jadi program ini tidak dijalankan; periksa direktori itu di server ini, lalu ulangi"
+}
+
+// wantUnreadable fails unless err is T19c for dir with cause inside.
+func wantUnreadable(t *testing.T, what string, err error, dir, cause string) {
+	t.Helper()
+	head, tail := unreadableOwner(dir)
+	if err == nil || !strings.Contains(err.Error(), head+cause) || !strings.Contains(err.Error(), tail) {
+		t.Errorf("%s: err = %v, want T19c for %s with %q", what, err, dir, cause)
+	}
+}
+
+// TestServiceCredentialUnreadableIsNotRunAsRoot: when the owner of the
+// directory cannot be read (the account may have renamed it away), the
+// program is not run at all: Periksa and Amankan fail with T19c, nothing
+// runs as the owner or as root, no T19, Amankan leaves no file, and the
+// error log is not read in the agent either.
+func TestServiceCredentialUnreadableIsNotRunAsRoot(t *testing.T) {
+	const cause = "lstat gagal (test)"
+	t.Cleanup(mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, errors.New(cause) }))
+	h := &fakeExecHost{out: "keluaran"}
+	var w warnings
+	var out bytes.Buffer
+	err := mysql.ExecAsService(context.Background(), h, "/var/lib/mysql", w.warn, nil, &out, "mysqlbinlog", "x")
+	wantUnreadable(t, "execAsService", err, "/var/lib/mysql", cause)
+	log := filepath.Join(t.TempDir(), "error.log")
+	if err := os.WriteFile(log, []byte("isi yang tidak boleh terbaca\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mysql.ReadBootLogTail(context.Background(), h, log, w.warn)
+	wantUnreadable(t, "error log tail", err, filepath.Dir(log), cause)
+	if len(got) != 0 || len(h.runs) != 0 || out.Len() != 0 || len(w.msgs) != 0 {
+		t.Errorf("read %q, runs %+v, out %q, warnings %q; want nothing run, read or warned", got, h.runs, out.String(), w.msgs)
+	}
+
+	if os.Geteuid() != 0 {
+		return
+	}
+	r, ch, logs := committedLeftover(t)
+	t.Cleanup(mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, nil }))
+	res := r.leftover() // as root: the set Amankan may take
+	mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, errors.New(cause) })
+	ch.runs = nil
+	logs.Reset()
+	head, tail := unreadableOwner(r.master.DataDir)
+	for _, c := range []struct {
+		cmd    string
+		params any
+	}{
+		{"mysql.leftover", proto.LeftoverParams{NewMaster: r.nm}},
+		{"mysql.salvage", proto.SalvageParams{GTIDSet: res.GTIDSet}},
+	} {
+		resp := r.dispatch(c.cmd, c.params)
+		if resp.OK || !strings.Contains(resp.Error.Message, head+cause) || !strings.Contains(resp.Error.Message, tail) {
+			t.Errorf("%s with the owner unreadable = %+v, want T19c for %s", c.cmd, resp, r.master.DataDir)
+		}
+	}
+	if runs := ch.of("mysqlbinlog"); len(runs) != 0 {
+		t.Errorf("mysqlbinlog ran: %+v", runs)
+	}
+	if strings.Contains(logs.String(), serviceWarning) {
+		t.Errorf("warned T19:\n%s", logs)
+	}
+	entries, err := os.ReadDir(r.d.SalvageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != mysql.LeftoverSetFile {
+			t.Errorf("salvage directory holds %s", e.Name())
+		}
 	}
 }
 
@@ -507,6 +586,65 @@ func TestExecEnvAsReportsNotStarted(t *testing.T) {
 	}
 }
 
+// TestExecEnvAsBoundsGrandchildHoldingOutput: a program run as another
+// account that leaves a process holding its output (one the account
+// could inject with ptrace) does not hold ExecEnvAs past its context
+// plus ServiceWaitDelay, or past ServiceWaitDelay once the program itself
+// has exited; the failure is not ErrNotStarted.
+func TestExecEnvAsBoundsGrandchildHoldingOutput(t *testing.T) {
+	needRoot(t)
+	h := mysql.NewHost(mysql.Layout{}, nil, nil, probe.RealSystem(), nil)
+	nobody := &syscall.Credential{Uid: 65534, Gid: 65534}
+	const margin = 2 * time.Second
+	for _, c := range []struct {
+		name    string
+		script  string
+		timeout time.Duration
+	}{
+		{"child and grandchild hang", "sleep 600 & echo $!; exec sleep 600", time.Second},
+		{"only the grandchild holds output", "sleep 600 & echo $!", time.Minute},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var out syncBuffer
+			t.Cleanup(func() {
+				// The grandchild (its pid is the first line out holds).
+				for _, f := range strings.Fields(out.String()) {
+					if pid, err := strconv.Atoi(f); err == nil && pid > 1 {
+						syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+			defer cancel()
+			bound := mysql.ServiceWaitDelay + margin
+			if c.timeout < time.Minute {
+				bound += c.timeout
+			}
+			done := make(chan error, 1)
+			start := time.Now()
+			go func() { done <- h.ExecEnvAs(ctx, nobody, nil, nil, &out, "sh", "-c", c.script) }()
+			select {
+			case err := <-done:
+				if err == nil || errors.Is(err, mysql.ErrNotStarted) {
+					t.Errorf("err = %v, want a failure that is not ErrNotStarted", err)
+				}
+				if took := time.Since(start); took > bound {
+					t.Errorf("returned after %v, want within %v", took, bound)
+				}
+			case <-time.After(bound + 5*time.Second):
+				t.Errorf("ExecEnvAs still blocked after %v (output %q)", time.Since(start), out.String())
+				cancel()
+				for _, f := range strings.Fields(out.String()) {
+					if pid, err := strconv.Atoi(f); err == nil && pid > 1 {
+						syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+				<-done
+			}
+		})
+	}
+}
+
 // nprocHelperEnv makes the test binary act as
 // TestExecEnvAsReportsProcessLimit's helper.
 const nprocHelperEnv = "DBPANEL_TEST_NPROC_HELPER"
@@ -559,8 +697,8 @@ func nprocHelper() {
 // TestBootLogTailAsDirectoryOwner: the guard reads the end of the error
 // log with tail -c 65536 as the owner of the log's directory, at most 64
 // KiB, within 5 seconds (a program that hangs is stopped); a directory of
-// root's, one whose owner cannot be read, or a tail that could not start
-// is read in the agent (readTail) with T19.
+// root's, or a tail that could not start (not at the process limit), is
+// read in the agent (readTail) with T19.
 func TestBootLogTailAsDirectoryOwner(t *testing.T) {
 	dir := t.TempDir()
 	log := filepath.Join(dir, "error.log")
@@ -623,8 +761,6 @@ func TestBootLogTailAsDirectoryOwner(t *testing.T) {
 	wantInAgent("tail not started", &fakeExecHost{asErr: notStarted("tail", syscall.EPERM)})
 	mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, nil })
 	wantInAgent("root's directory", &fakeExecHost{})
-	mysql.SetLstatOwner(func(string) (uint32, uint32, error) { return 0, 0, errors.New("lstat gagal (test)") })
-	wantInAgent("owner unknown", &fakeExecHost{})
 
 	if os.Geteuid() == 0 {
 		// The real tail as nobody reads a file nobody may read.
