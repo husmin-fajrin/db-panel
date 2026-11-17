@@ -59,6 +59,12 @@ const usage = `Penggunaan:
   dbpanel agent approve <kode> [--dir DIR]               setujui bangun ulang server yang dikarantina;
                                                          kode dari form "Bangun ulang sebagai replika"
   dbpanel agent approve batal [--dir DIR]                hapus persetujuan dan permintaan bangun ulang
+  dbpanel agent drop-database <nama> [--ke FOLDER] [--pengguna NAMA] [--dir DIR]
+                                                         di server yang dikarantina (quarantined): buat
+                                                         cadangan satu database ke FOLDER (bawaan
+                                                         /var/lib/dbpanel/dibuang), periksa, lalu hapus
+                                                         database itu; --pengguna: akun administrator
+                                                         MySQL selain root
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -142,6 +148,8 @@ func RunCLIWith(args []string, in io.Reader, stdout, stderr io.Writer, seams CLI
 			return mainSetRole(args[1:], in, stdout, stderr, seams.LayoutHost)
 		case "approve":
 			return mainApprove(args[1:], in, stdout, stderr, seams.Syslog)
+		case "drop-database":
+			return mainDropDatabase(args[1:], in, stdout, stderr, seams.Syslog)
 		case "set-source":
 			return mainSetSource(args[1:], stdout, stderr)
 		case "lock-master":
@@ -577,15 +585,25 @@ func approvalSyslog(action string, a mysql.RebuildApproval, requested time.Time,
 		}
 		return t.UTC().Format(time.RFC3339)
 	}
-	who := "uid=" + strconv.Itoa(os.Getuid())
-	if u := getenv("SUDO_USER"); u != "" {
-		who = fmt.Sprintf("user=%s sudo_uid=%s %s", strconv.Quote(u), or(getenv("SUDO_UID")), who)
-	}
 	line := fmt.Sprintf("%s: source=%s addr=%s expires=%s request_created=%s %s", action,
-		or(a.Source), or(a.Addr), at(a.Expires), at(requested), who)
+		or(a.Source), or(a.Addr), at(a.Expires), at(requested), syslogWho())
 	if err := writeSyslog(line); err != nil {
 		fmt.Fprintf(stderr, "Peringatan: catatan ke log sistem gagal ditulis (%v).\n", err)
 	}
+}
+
+// syslogWho is who ran a command, for its system log line: the uid, and
+// the sudo user (quoted) and uid when it ran through sudo.
+func syslogWho() string {
+	who := "uid=" + strconv.Itoa(os.Getuid())
+	if u := getenv("SUDO_USER"); u != "" {
+		uid := getenv("SUDO_UID")
+		if uid == "" {
+			uid = "-"
+		}
+		who = fmt.Sprintf("user=%s sudo_uid=%s %s", strconv.Quote(u), uid, who)
+	}
+	return who
 }
 
 // sameSourceText reports whether a and b are the same host:port (host

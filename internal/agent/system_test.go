@@ -29,6 +29,7 @@ func init() {
 	mysql.DefaultLiftLock = filepath.Join(dir, "agent", "lift.lock")
 	config.DefaultDir = filepath.Join(dir, "etc")
 	cliSeenPath, cliSeenPortsPath = mysql.SeenFile, mysql.SeenPortsFile
+	cliLiftLock, cliBackupDir = mysql.DefaultLiftLock, filepath.Join(dir, "dibuang")
 	cliSyslog = func(string) error { return nil }
 }
 
@@ -45,6 +46,7 @@ func TestDefaultsAwayFromSystemPaths(t *testing.T) {
 		"mysql.SeenFile": mysql.SeenFile, "mysql.SeenPortsFile": mysql.SeenPortsFile,
 		"mysql.StartResultFile": mysql.StartResultFile, "mysql.DefaultSalvageDir": mysql.DefaultSalvageDir,
 		"mysql.DefaultLiftLock": mysql.DefaultLiftLock, "config.DefaultDir": config.DefaultDir, "cliSeenPath": cliSeenPath, "cliSeenPortsPath": cliSeenPortsPath,
+		"cliLiftLock": cliLiftLock, "cliBackupDir": cliBackupDir,
 	} {
 		if strings.HasPrefix(p, "/var/lib") || strings.HasPrefix(p, "/etc") || !strings.HasPrefix(p, testDefaultsDir+"/") {
 			t.Errorf("%s = %s, want it under %s", name, p, testDefaultsDir)
