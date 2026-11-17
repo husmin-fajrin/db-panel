@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -44,7 +45,7 @@ func (d *Driver) registerBinlog(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		return BinlogTail(ctx, h)
+		return BinlogTail(ctx, h, d.serviceWarn("mysql.binlogTail"))
 	})
 }
 
@@ -55,8 +56,9 @@ func (d *Driver) registerBinlog(reg *commands.Registry) {
 // its greeting but then cannot be read (refused login, TLS, a query that
 // hangs) is an error, never a snapshot of a live server's files. File is
 // the last binary log file either way ("" when MySQL answers but its
-// index cannot be read).
-func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
+// index cannot be read). The index and the binary log are read as the
+// owner of their directory (execAsService, warn).
+func BinlogTail(ctx context.Context, h Host, warn func(string)) (proto.BinlogTailResult, error) {
 	var res proto.BinlogTailResult
 	l := h.Layout()
 	if perr := localGreeting(ctx, l); perr == nil {
@@ -66,7 +68,7 @@ func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 		}
 		res.GTIDExecuted, res.MySQLRunning = set, true
 		if idx != "" {
-			res.File, _ = lastBinlogFile(idx, l.DataDir)
+			res.File, _ = lastBinlogFile(ctx, h, warn, idx, l.DataDir)
 		}
 		return res, nil
 	}
@@ -74,7 +76,7 @@ func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 	if err != nil {
 		return res, err
 	}
-	file, err := lastBinlogFile(index, h.Layout().DataDir)
+	file, err := lastBinlogFile(ctx, h, warn, index, h.Layout().DataDir)
 	if err != nil {
 		return res, err
 	}
@@ -82,7 +84,7 @@ func BinlogTail(ctx context.Context, h Host) (proto.BinlogTailResult, error) {
 	if err != nil {
 		return res, err
 	}
-	logged, err := readBinlogGTIDs(ctx, h, bin, file)
+	logged, err := readBinlogGTIDs(ctx, h, warn, filepath.Dir(index), bin, file)
 	if err != nil {
 		return res, err
 	}
@@ -179,20 +181,23 @@ func binlogIndexPath(l Layout) (string, error) {
 }
 
 // lastBinlogFile is the last file listed in the index, relative names
-// taken from dataDir (where mysqld runs).
-func lastBinlogFile(index, dataDir string) (string, error) {
-	f, err := os.Open(index)
-	if err != nil {
-		return "", fmt.Errorf("baca indeks binlog: %w", err)
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxIndexSize+1))
-	if err != nil {
+// taken from dataDir (where mysqld runs). The index is read by cat as the
+// owner of its directory (execAsService, warn).
+func lastBinlogFile(ctx context.Context, h Host, warn func(string), index, dataDir string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, indexReadTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	lw := &limitWriter{w: &out, max: maxIndexSize, stop: cancel}
+	err := execAsService(ctx, h, filepath.Dir(index), warn, nil, lw, "cat", "--", index)
+	switch {
+	case lw.over:
+		return "", fmt.Errorf("indeks binlog %s terlalu besar", index)
+	case ctx.Err() == context.DeadlineExceeded:
+		return "", fmt.Errorf("indeks binlog %s tidak terbaca dalam %v", index, indexReadTimeout)
+	case err != nil:
 		return "", fmt.Errorf("baca indeks binlog %s: %w", index, err)
 	}
-	if len(b) > maxIndexSize {
-		return "", fmt.Errorf("indeks binlog %s terlalu besar", index)
-	}
+	b := out.Bytes()
 	last := ""
 	for _, ln := range strings.Split(string(b), "\n") {
 		if ln = strings.TrimSpace(ln); ln != "" {
@@ -209,15 +214,16 @@ func lastBinlogFile(index, dataDir string) (string, error) {
 }
 
 // readBinlogGTIDs runs mysqlbinlog --no-defaults on file (rows not
-// printed: GTID_NEXT and Previous-GTIDs stay) and collects its
-// Previous-GTIDs and every GTID_NEXT, reading the output line by line.
-func readBinlogGTIDs(ctx context.Context, h Host, bin, file string) (gtidSet, error) {
+// printed: GTID_NEXT and Previous-GTIDs stay), as the owner of dir
+// (execAsService, warn), and collects its Previous-GTIDs and every
+// GTID_NEXT, reading the output line by line.
+func readBinlogGTIDs(ctx context.Context, h Host, warn func(string), dir, bin, file string) (gtidSet, error) {
 	ctx, cancel := context.WithTimeout(ctx, binlogReadTimeout)
 	defer cancel()
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := h.Exec(ctx, nil, pw, bin, "--no-defaults", "--base64-output=DECODE-ROWS", file)
+		err := execAsService(ctx, h, dir, warn, nil, pw, bin, "--no-defaults", "--base64-output=DECODE-ROWS", file)
 		pw.CloseWithError(err)
 		done <- err
 	}()

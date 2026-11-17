@@ -236,6 +236,11 @@ func (h *host) DiskFree(path string) (free, total uint64, err error) {
 // stderrTail bounds how much of a command's stderr ends up in its error.
 const stderrTail = 4096
 
+// ErrNotStarted is wrapped by ExecEnvAs when the program never ran: the
+// fork, the change of user or group ids, or the exec failed. A program
+// that ran and exited non-zero, or was stopped by its context, is not it.
+var ErrNotStarted = errors.New("program tidak bisa dimulai")
+
 func (h *host) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
 	return h.ExecEnv(ctx, nil, stdin, stdout, name, args...)
 }
@@ -258,7 +263,14 @@ func (h *host) ExecEnvAs(ctx context.Context, cred *syscall.Credential, env []st
 	}
 	var stderr tailBuffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Start()
+	if err != nil && ctx.Err() == nil {
+		return fmt.Errorf("%s gagal: %w: %v", name, ErrNotStarted, err)
+	}
+	if err == nil {
+		err = cmd.Wait()
+	}
+	if err != nil {
 		return fmt.Errorf("%s gagal: %v: %s", name, err, strings.TrimSpace(string(stderr.b)))
 	}
 	return nil

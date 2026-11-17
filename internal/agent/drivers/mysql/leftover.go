@@ -61,7 +61,7 @@ func (d *Driver) registerLeftover(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		res, err := leftover(ctx, h, dial)
+		res, err := leftover(ctx, h, dial, d.serviceWarn("mysql.leftover"))
 		if err != nil {
 			return nil, err
 		}
@@ -94,8 +94,9 @@ func (d *Driver) pinnedNewMaster(nm proto.PeerCred, cmd string) (proto.PeerCred,
 }
 
 // leftover reads nm's gtid_executed, subtracts it from this server's and
-// reads what the rest touched from the binary log.
-func leftover(ctx context.Context, h Host, nm proto.PeerCred) (proto.LeftoverResult, error) {
+// reads what the rest touched from the binary log, as the owner of its
+// directory (execAsService, warn).
+func leftover(ctx context.Context, h Host, nm proto.PeerCred, warn func(string)) (proto.LeftoverResult, error) {
 	var res proto.LeftoverResult
 	st := readPeer(ctx, nm, peerTimeout)
 	if !st.Reachable {
@@ -135,7 +136,7 @@ func leftover(ctx context.Context, h Host, nm proto.PeerCred) (proto.LeftoverRes
 	}
 	sc := newLeftoverScan(g)
 	args := append([]string{"--no-defaults", "--base64-output=DECODE-ROWS", "--verbose", "--include-gtids=" + res.GTIDSet}, paths...)
-	if err := streamBinlog(ctx, h, bin, args, leftoverTimeout, sc.line); err != nil {
+	if err := streamBinlog(ctx, h, warn, filepath.Dir(paths[0]), bin, args, leftoverTimeout, sc.line); err != nil {
 		return res, err
 	}
 	if err := sc.result(&res); err != nil {
@@ -290,16 +291,17 @@ func previousGTIDs(ctx context.Context, db *sql.DB, name string) (string, error)
 	return set, rows.Err()
 }
 
-// streamBinlog runs mysqlbinlog (bin) with args within timeout and hands
-// its output to fn line by line, each cut at maxBinlogLine; the output is
-// never held whole. An error from fn stops the run.
-func streamBinlog(ctx context.Context, h Host, bin string, args []string, timeout time.Duration, fn func(string) error) error {
+// streamBinlog runs mysqlbinlog (bin) with args within timeout, as the
+// owner of dir (execAsService, warn), and hands its output to fn line by
+// line, each cut at maxBinlogLine; the output is never held whole. An
+// error from fn stops the run.
+func streamBinlog(ctx context.Context, h Host, warn func(string), dir, bin string, args []string, timeout time.Duration, fn func(string) error) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := h.Exec(ctx, nil, pw, bin, args...)
+		err := execAsService(ctx, h, dir, warn, nil, pw, bin, args...)
 		pw.CloseWithError(err)
 		done <- err
 	}()

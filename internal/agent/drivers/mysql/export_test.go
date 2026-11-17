@@ -692,3 +692,20 @@ const SourceListQuery = sourceListQuery
 
 // ErrSecondListFailed is T11.
 var ErrSecondListFailed = errSecondListFailed
+
+// Running the binary log tools and the error log's tail as the owner of
+// the directory they read (svcuid.go).
+var (
+	ServiceCredential = serviceCredential
+	ExecAsService     = execAsService
+	ReadBootLogTail   = readBootLogTail
+	ErrServiceRoot    = errServiceRoot
+)
+
+// SetLstatOwner replaces how serviceCredential reads a directory's owner;
+// it returns the function that restores it.
+func SetLstatOwner(f func(path string) (uid, gid uint32, err error)) (restore func()) {
+	old := lstatOwner
+	lstatOwner = f
+	return func() { lstatOwner = old }
+}

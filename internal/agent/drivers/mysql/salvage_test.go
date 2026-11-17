@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -293,7 +294,12 @@ type slowHost struct {
 	entered, release chan struct{}
 }
 
-func (h *slowHost) Exec(ctx context.Context, _ io.Reader, stdout io.Writer, _ string, _ ...string) error {
+func (h *slowHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
+	return h.ExecEnvAs(ctx, nil, nil, stdin, stdout, name, args...)
+}
+
+// ExecEnvAs: mysqlbinlog runs as the owner of the binary log directory.
+func (h *slowHost) ExecEnvAs(ctx context.Context, _ *syscall.Credential, _ []string, _ io.Reader, stdout io.Writer, _ string, _ ...string) error {
 	close(h.entered)
 	select {
 	case <-h.release:

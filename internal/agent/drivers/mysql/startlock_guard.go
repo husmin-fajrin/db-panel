@@ -310,10 +310,11 @@ func (d *Driver) warnStartLock(now time.Time, msg string, err error) {
 	}
 }
 
-// watchBootFailure reads the end of MySQL's error log while a quarantined
-// server's MySQL does not answer, and reports a line newer than the lock
-// file, or than bootSince when the guard had to write the file again (and
-// newer than the last one reported) saying mysqld could not open it
+// watchBootFailure reads the end of MySQL's error log (as the owner of
+// its directory, readBootLogTail) while a quarantined server's MySQL does
+// not answer, and reports a line newer than the lock file, or than
+// bootSince when the guard had to write the file again (and newer than
+// the last one reported) saying mysqld could not open it
 // (EventQuarantineStartFailed). Without a log_error option the log is not
 // watched. The caller holds promoteMu.
 func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
@@ -345,7 +346,7 @@ func (d *Driver) watchBootFailure(ctx context.Context, h Host, now time.Time) {
 	if d.bootLog == "" {
 		return
 	}
-	tail, err := readTail(d.bootLog, bootLogTail)
+	tail, err := readBootLogTail(ctx, h, d.bootLog, func(msg string) { d.warnLimited(msg, "file", d.bootLog) })
 	if err != nil {
 		if now.Sub(d.bootLogWarnAt) >= startLockRetry || now.Before(d.bootLogWarnAt) {
 			d.bootLogWarnAt = now

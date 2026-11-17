@@ -103,7 +103,7 @@ func (d *Driver) registerSalvage(reg *commands.Registry) {
 			return nil, &commands.ParamError{Msg: "salvage lain sedang berjalan di server ini; tunggu sampai selesai lalu ulangi"}
 		}
 		defer d.salvageRun.Unlock()
-		f, err := d.salvage(ctx, h, set)
+		f, err := d.salvage(ctx, h, set, d.serviceWarn("mysql.salvage"))
 		if err != nil {
 			return nil, err
 		}
@@ -216,7 +216,9 @@ func (d *Driver) openSalvageDir() (*os.Root, error) {
 // mysqlbinlog run writes a temporary file of its own without any lock;
 // salvageMu is held only to check the final name is free and rename to
 // it, so the list, a delete and the monitor's sweep never wait for it.
-func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.SalvageFile, error) {
+// mysqlbinlog runs as the owner of the binary log directory
+// (execAsService, warn); root writes its output.
+func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet, warn func(string)) (proto.SalvageFile, error) {
 	var f proto.SalvageFile
 	qctx, cancel := context.WithTimeout(ctx, leftoverQueryTimeout)
 	defer cancel()
@@ -300,7 +302,7 @@ func (d *Driver) salvage(ctx context.Context, h Host, set gtidSet) (proto.Salvag
 	defer stop()
 	lw := &limitWriter{w: out, max: limit, stop: stop}
 	args := append([]string{"--no-defaults", "--include-gtids=" + s, "--skip-gtids", "--verbose"}, paths...)
-	err = h.Exec(rctx, nil, lw, bin, args...)
+	err = execAsService(rctx, h, filepath.Dir(paths[0]), warn, nil, lw, bin, args...)
 	switch {
 	case lw.over:
 		return f, overErr
