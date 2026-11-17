@@ -497,12 +497,16 @@ menggantikan pulang-awal `if d.guard.up && sameRun { return nil }` dan
    terbaca mati, juga bila `persistReadOnly` gagal. `persistReadOnly`
    yang gagal sesudah kedua bendera terbaca menyala tidak mencatat apa
    pun dan diulang putaran berikutnya.
-6. Putaran "tidak bisa memeriksa": (a) `h.Open` gagal dengan
-   `LoginRefused`; (b) pembacaan bendera gagal; (c) ada bendera terbaca
+6. Putaran "tidak bisa memeriksa": (a) `h.Open` gagal dengan galat
+   apa pun yang dikirim server MySQL sendiri saat login
+   (`*mysql.MySQLError`: 1045, 1698, akun dikunci 3118, dan lainnya;
+   `LoginRefused` di conn.go tidak diperlebar); (b) pembacaan bendera
+   gagal; (c) ada bendera terbaca
    mati, kunci didapat, dan pernyataan pemasangnya gagal, termasuk galat
    1205 (`lock_wait_timeout` habis). Hitungan `d.qUnverified` naik pada
    putaran seperti itu dan kembali nol pada putaran lain (MySQL yang
-   tidak menjawab sama sekali bukan putaran seperti itu). Saat hitungan
+   tidak menjawab sama sekali — tidak ada yang mendengarkan, batas
+   waktu, soket tidak ada — bukan putaran seperti itu). Saat hitungan
    mencapai 3, bila `tryGuard` bebas, tidak ada tanda muat, dan
    `expectRefused` salah: `d.relocked(h, now,
    proto.QuarantineWhileUnverified)` dan `noteWritableAfterLoad()`;
@@ -558,12 +562,15 @@ seperti sekarang, jadi restart itu tidak dilaporkan sebagai start.
     kembali; sesudah `UNLOCK TABLES` putaran berikutnya memasang `1 1`
     dan memanggil `relocked` dengan `"running"`. Tiga putaran berturut
     di belakang kunci itu → `relocked` dengan `"unverified"`.
-  - `TestGuardReportsWhenItCannotLogIn`: akun tersimpan dikunci (login
-    ditolak) tiga putaran, tanpa tanda muat, kunci bebas → `relocked`
+  - `TestGuardReportsWhenItCannotLogIn`: dua kasus, akun tersimpan
+    dikunci (`ACCOUNT LOCK`, galat 3118) dan kata sandinya diganti
+    (1045); login ditolak tiga putaran, tanpa tanda muat, kunci bebas → `relocked`
     dipanggil sekali dengan `"unverified"`, `writableAfterLoad()` benar;
     putaran berikutnya dalam 10 menit tidak memanggil lagi; sesudah 10
     menit (jam disuntik) sekali lagi. Dua putaran ditolak lalu berhasil →
     tidak ada panggilan.
+  - `TestGuardQuietWhileMySQLDown`: mysqld berhenti lima putaran → tidak
+    ada laporan, `writableAfterLoad()` tetap salah.
   - `TestGuardReportsWhenRelockFails`: bendera mati, akun agent tanpa
     `SYSTEM_VARIABLES_ADMIN` → sesudah tiga putaran `"unverified"`.
   - `TestGuardUnverifiedNotDuringLift`: login ditolak tiga putaran
@@ -592,8 +599,13 @@ seperti sekarang, jadi restart itu tidak dilaporkan sebagai start.
     `quarantined`, `writableAfterLoad()` salah; sesudah dilepas, settle
     berhasil.
   - `TestFailedLoadDropsEarlierLoadRecord`: muat penuh berhasil; muat
-    kedua gagal seketika (kata sandi akun dump salah) → `loadedFrom`
-    salah, `mysql.configureReplication` menjawab `errNoLoadRecord`.
+    kedua gagal sesudah pembukaannya dimulai (di dalam aliran muat) →
+    `loadedFrom` salah, `mysql.configureReplication` menjawab
+    `errNoLoadRecord`.
+  - `TestEarlyFailedLoadKeepsRecordAndWritableFlag`: muat kedua gagal
+    sebelum ada perubahan lokal (kata sandi akun dump salah, gagal di
+    uji klien) → catatan muat lama dan tanda "sempat bisa ditulis"
+    tetap; settle tetap menjawab T7.
   - Test peralihan yang ada (`TestQuarantineGuardDefersToRebuildLoad`,
     `TestQuarantineStartEvents`, …) tetap lulus tanpa diubah maknanya:
     tanda muat saja tetap menahan penjaga (langkah 4).
@@ -2066,6 +2078,32 @@ Keputusan pra-pelaksanaan yang tetap berlaku: penjaga menoleransi
 `Driver.relocked` nil di antara Task 4 dan Task 5; Task 9 boleh
 memperbarui harapan test panel yang menyimpan salinan teks agent lama;
 `drop-database` menolak bila nama berkas cadangan sudah ada (C6).
+
+## Perubahan selama pelaksanaan
+
+1. Task 4, uji catatan muat (2026-11-16). Muat yang gagal karena kata
+   sandi akun dump salah berhenti di uji klien, sebelum pembukaan
+   baca-saja, jadi `mark.set()` tidak berjalan dan catatan muat lama
+   tetap ada. Itu benar: server masih seperti ditinggalkan muat
+   sebelumnya. `TestFailedLoadDropsEarlierLoadRecord` kini membuat muat
+   kedua gagal sesudah pembukaannya dimulai, dan
+   `TestEarlyFailedLoadKeepsRecordAndWritableFlag` menjaga kasus gagal
+   lebih awal.
+2. Task 4, login penjaga yang ditolak (2026-11-17). Tinjauan tugas
+   menemukan bahwa hanya galat 1045 dan 1698 yang dihitung; akun agent
+   yang dikunci (3118) membuat penjaga diam. Kini setiap galat yang
+   dikirim server MySQL sendiri saat login dihitung untuk aturan tiga
+   putaran; hanya MySQL yang tidak menjawab sama sekali yang tidak.
+   Akibatnya: server yang menolak login tiga putaran berturut-turut
+   karena sebab sementara (misalnya sambungan penuh, galat 1040) juga
+   membuka peringatan "tidak bisa memeriksa".
+3. Task 4, uji settle yang ada. Empat uji settle
+   (`TestConfigureReplicationEndsQuarantine`,
+   `TestStartKindsGoWithTheFile`, `TestSettleRebuiltClearsStartResult`,
+   `TestSettleRebuiltClearsApproval`) kini memakai mysqld sungguhan
+   yang terkunci baca-saja, karena settle membaca kedua bendera sendiri.
+   Dua uji penjaga yang ada kini membuka kunci seperti pembukaan
+   sungguhan (hanya `super_read_only`).
 
 ## Teks baru untuk dibaca pemilik
 
