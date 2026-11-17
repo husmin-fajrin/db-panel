@@ -36,6 +36,7 @@ type startKindRecord struct {
 	Decided  time.Time `json:"decided"`             // when the agent judged that start; its id is derived from it
 	InitFile string    `json:"init_file,omitempty"` // failed: the lock file
 	Over     bool      `json:"over,omitempty"`      // a later start ended it (never set for late)
+	While    string    `json:"while,omitempty"`     // late: a relock or an unchecked guard, not a start (proto.QuarantineWhile*)
 }
 
 // startKindOrder is the order of the kinds in a snapshot.
@@ -266,7 +267,7 @@ func (d *Driver) StartResult(now time.Time) *proto.StartResultState {
 			continue
 		}
 		sr.Kinds = append(sr.Kinds, proto.StartKindState{Kind: k, StartID: startID(rec.Decided),
-			AgeSec: startAge(now, rec.Decided), InitFile: cutInitFile(rec.InitFile), Over: rec.Over && k != proto.QuarantineStartLate})
+			AgeSec: startAge(now, rec.Decided), InitFile: cutInitFile(rec.InitFile), Over: rec.Over && k != proto.QuarantineStartLate, While: rec.While})
 	}
 	return sr
 }
@@ -320,4 +321,39 @@ func (d *Driver) setQuarantined(newSource, addr string) error {
 		}
 	}
 	return d.pins.SetQuarantinedAt(newSource, addr)
+}
+
+// recordRelock keeps a relock or an unchecked guard (while) found at t as
+// the late entry, and as the worst start (late outranks every other
+// result). It never judges a start: the failed and bypassed entries are
+// left as they are. Every incident writes a new decided time. The state is
+// published first, then written. The caller holds promoteMu.
+func (d *Driver) recordRelock(t time.Time, while string) error {
+	stored := d.currentStartState().rec
+	kinds := maps.Clone(stored.Kinds)
+	if kinds == nil {
+		kinds = map[string]startKindRecord{}
+	}
+	kinds[proto.QuarantineStartLate] = startKindRecord{Decided: t, While: while}
+	return d.setStartResult(startResult{Result: proto.QuarantineStartLate, Decided: t, Kinds: kinds})
+}
+
+// relockEvery is the least time between two queued relock events; every
+// relock is recorded all the same.
+const relockEvery = 60 * time.Second
+
+// reportRelocked is Driver.relocked: it records the incident (recordRelock),
+// then queues a late start report with its while, at most once per
+// relockEvery by the guard's clock. It only writes a file and queues, so
+// the guard may call it under promoteMu.
+func (d *Driver) reportRelocked(_ Host, now time.Time, while string) {
+	if err := d.recordRelock(now, while); err != nil {
+		d.warn("relock not kept on disk; the report is still sent", "while", while, "err", err)
+	}
+	if !d.relockQueuedAt.IsZero() && now.Sub(d.relockQueuedAt) < relockEvery {
+		return
+	}
+	d.relockQueuedAt = now
+	d.enqueue(proto.EventQuarantineStart, proto.QuarantineStartEvent{
+		Result: proto.QuarantineStartLate, StartID: startID(now), While: while})
 }

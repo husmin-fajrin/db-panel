@@ -627,6 +627,10 @@ type StartKindState struct {
 	// Over: a later start ended it (MySQL came up after a failed start; a
 	// start used the lock after a bypassed one). Never set for late.
 	Over bool `json:"over,omitempty"`
+	// While: late only, and only for an entry that is no start of MySQL:
+	// QuarantineWhileRunning or QuarantineWhileUnverified. Empty for a
+	// start, and from an older agent.
+	While string `json:"while,omitempty"`
 }
 
 // QuarantineStartEvent is the payload of EventQuarantineStart. Bypassed:
@@ -639,6 +643,10 @@ type QuarantineStartEvent struct {
 	// StartID is the StartID the start has in StartResultState (also for a
 	// start that is not kept there: ok, or worse one on file).
 	StartID string `json:"start_id,omitempty"`
+	// While: for a late result that is no start of MySQL,
+	// QuarantineWhileRunning or QuarantineWhileUnverified; empty for a
+	// start. An older panel ignores it.
+	While string `json:"while,omitempty"`
 }
 
 // EventQuarantineStartFailed: MySQL of a quarantined server failed to

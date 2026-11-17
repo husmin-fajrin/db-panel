@@ -569,6 +569,17 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	d := &mysql.Driver{Host: inst.Host(), PinDir: dir, Events: ev, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
 	ev.flush = d.FlushEvents
 	d.Register(commands.NewRegistry())
+	// The relock the guard reports while running (a late entry that is no
+	// start) is not what this test counts: only real starts.
+	starts := func() []proto.QuarantineStartEvent {
+		var out []proto.QuarantineStartEvent
+		for _, p := range startEvents(t, ev) {
+			if p.While == "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
 	tick := func() {
 		t.Helper()
 		if err := d.GuardTick(context.Background(), time.Now()); err != nil {
@@ -620,7 +631,7 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 		t.Fatalf("guard after the load: super_read_only=%v read_only=%v, want both on", sro, ro)
 	}
 	// The load's restart is not a start of the quarantined server.
-	if got := startEvents(t, ev); len(got) != 1 {
+	if got := starts(); len(got) != 1 {
 		t.Errorf("start events after the load = %+v, want only the agent's start", got)
 	}
 	// And the next restart is a transition again, reported.
@@ -629,7 +640,7 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	if sro, ro := readOnly(t, db); !sro || !ro {
 		t.Fatalf("guard after a restart without a load: super_read_only=%v read_only=%v", sro, ro)
 	}
-	if got := startEvents(t, ev); len(got) != 2 || got[1].Result != proto.QuarantineStartLate {
+	if got := starts(); len(got) != 2 || got[1].Result != proto.QuarantineStartLate {
 		t.Errorf("start events after a restart without a load = %+v, want a second, late", got)
 	}
 
@@ -645,7 +656,7 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	if sro, ro := readOnly(t, db); !sro || !ro {
 		t.Fatalf("guard after an unseen load: super_read_only=%v read_only=%v, want both on", sro, ro)
 	}
-	if got := startEvents(t, ev); len(got) != 2 {
+	if got := starts(); len(got) != 2 {
 		t.Errorf("start events after an unseen load = %+v, want still two", got)
 	}
 

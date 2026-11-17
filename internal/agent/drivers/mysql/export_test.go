@@ -653,3 +653,20 @@ var ErrWritableSinceLoad = errWritableSinceLoad
 
 // ErrNoLoadRecord is the settle's refusal without a load record.
 var ErrNoLoadRecord = errNoLoadRecord
+
+// ReportRelocked is reportRelocked, as the guard calls it under promoteMu.
+func (d *Driver) ReportRelocked(h Host, now time.Time, while string) {
+	d.promoteMu.Lock()
+	defer d.promoteMu.Unlock()
+	d.reportRelocked(h, now, while)
+}
+
+// RecordRelock is recordRelock under promoteMu.
+func (d *Driver) RecordRelock(t time.Time, while string) error {
+	d.promoteMu.Lock()
+	defer d.promoteMu.Unlock()
+	return d.recordRelock(t, while)
+}
+
+// HasRelockedHook is whether Register wired a relock report.
+func (d *Driver) HasRelockedHook() bool { return d.relocked != nil }

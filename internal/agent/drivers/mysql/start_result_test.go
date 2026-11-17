@@ -524,3 +524,181 @@ func TestStartResultInitFileCutOnRuneBoundary(t *testing.T) {
 		t.Errorf("InitFile = %d bytes, valid UTF-8 %v; want valid and 4093..4096 bytes", len(s.InitFile), s != nil && utf8.ValidString(s.InitFile))
 	}
 }
+
+// relockRig is a quarantined server's driver (no MySQL) whose start-result
+// file and events are the test's own.
+func relockRig(t *testing.T) (*pinRig, *eventLog, string) {
+	t.Helper()
+	r := newPinRig(t, nil, pinDir(t, "quarantined", guardCandidateKey))
+	ev := &eventLog{}
+	r.d.Events = ev
+	ev.flush = r.d.FlushEvents
+	path := filepath.Join(t.TempDir(), "start-result")
+	r.d.StartResultPath = path
+	return r, ev, path
+}
+
+// lateKind is the late entry of a snapshot's start result.
+func lateKind(t *testing.T, s *proto.StartResultState) proto.StartKindState {
+	t.Helper()
+	if s == nil {
+		t.Fatal("no start result in the snapshot")
+	}
+	for _, k := range s.Kinds {
+		if k.Kind == proto.QuarantineStartLate {
+			return k
+		}
+	}
+	t.Fatalf("no late kind in %+v", s)
+	return proto.StartKindState{}
+}
+
+// relockEvents is the start events the log holds, decoded.
+func relockEvents(t *testing.T, ev *eventLog) []proto.QuarantineStartEvent {
+	t.Helper()
+	var out []proto.QuarantineStartEvent
+	for _, e := range ev.all() {
+		if e.Type != proto.EventQuarantineStart {
+			continue
+		}
+		var p proto.QuarantineStartEvent
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// A relock is written to the start-result file before its event is
+// queued; the event, the file and the snapshot carry the same id and while.
+func TestRelockRecordedBeforeQueued(t *testing.T) {
+	r, ev, path := relockRig(t)
+	now := time.Now().UTC()
+	var inFile string
+	defer mysql.SetEmitStartHook(func(*mysql.Driver) {
+		if rec, ok := readStartResultFile(t, path); ok {
+			inFile = rec.Kinds[proto.QuarantineStartLate].While
+		}
+	})()
+	r.d.ReportRelocked(nil, now, proto.QuarantineWhileRunning)
+	if inFile != "running" {
+		t.Errorf("the file held while %q when the event was queued, want running", inFile)
+	}
+	evs := relockEvents(t, ev)
+	if len(evs) != 1 {
+		t.Fatalf("start events = %+v, want one", evs)
+	}
+	got := evs[0]
+	if got.Result != proto.QuarantineStartLate || got.While != "running" || got.StartID != now.Format(time.RFC3339Nano) {
+		t.Errorf("event = %+v, want late, running, start id %s", got, now.Format(time.RFC3339Nano))
+	}
+	k := lateKind(t, r.d.StartResult(now))
+	if k.StartID != got.StartID || k.While != "running" {
+		t.Errorf("snapshot late kind = %+v, want id %s and while running", k, got.StartID)
+	}
+	if rec, _ := readStartResultFile(t, path); rec.Result != "late" || rec.Kinds["late"].While != "running" {
+		t.Errorf("file = %+v, want late with while running", rec)
+	}
+}
+
+// A new agent on the same file still reports the relock with its while.
+func TestRelockSurvivesAgentRestart(t *testing.T) {
+	r, _, path := relockRig(t)
+	now := time.Now().UTC()
+	r.d.ReportRelocked(nil, now, proto.QuarantineWhileRunning)
+	r2 := newPinRig(t, nil, pinDir(t, "quarantined", guardCandidateKey))
+	r2.d.StartResultPath = path
+	k := lateKind(t, r2.d.StartResult(now))
+	if k.While != "running" || k.StartID != now.Format(time.RFC3339Nano) {
+		t.Errorf("late kind after a restart = %+v, want running with the same id", k)
+	}
+}
+
+// An older panel reads the event without the while field.
+func TestRelockReportReadableByOldPanelShape(t *testing.T) {
+	r, ev, _ := relockRig(t)
+	r.d.ReportRelocked(nil, time.Now(), proto.QuarantineWhileRunning)
+	var raw []byte
+	for _, e := range ev.all() {
+		if e.Type == proto.EventQuarantineStart {
+			raw = e.Payload
+		}
+	}
+	var old struct {
+		Result   string `json:"result"`
+		Bypassed bool   `json:"bypassed"`
+		InitFile string `json:"init_file"`
+		StartID  string `json:"start_id"`
+	}
+	if err := json.Unmarshal(raw, &old); err != nil || old.Result != "late" {
+		t.Errorf("event %s read as the old shape = %+v, %v; want late", raw, old, err)
+	}
+}
+
+// Every relock is written; the event is queued at most once per minute.
+func TestRelockRecordsEveryIncidentQueuesOncePerMinute(t *testing.T) {
+	r, ev, path := relockRig(t)
+	t0 := time.Now().UTC().Truncate(time.Second)
+	for _, d := range []time.Duration{0, 20 * time.Second, 40 * time.Second} {
+		r.d.ReportRelocked(nil, t0.Add(d), proto.QuarantineWhileRunning)
+	}
+	rec, _ := readStartResultFile(t, path)
+	if want := t0.Add(40 * time.Second); !rec.Kinds["late"].Decided.Equal(want) || !rec.Decided.Equal(want) {
+		t.Errorf("file decided = %v / %v, want the third incident %v", rec.Decided, rec.Kinds["late"].Decided, want)
+	}
+	if evs := relockEvents(t, ev); len(evs) != 1 || evs[0].StartID != startIDOf(t0) {
+		t.Fatalf("events after three incidents in a minute = %+v, want only the first", evs)
+	}
+	r.d.ReportRelocked(nil, t0.Add(70*time.Second), proto.QuarantineWhileUnverified)
+	evs := relockEvents(t, ev)
+	if len(evs) != 2 || evs[1].StartID != startIDOf(t0.Add(70*time.Second)) || evs[1].While != "unverified" {
+		t.Errorf("events after a minute = %+v, want a second one for the fourth incident", evs)
+	}
+}
+
+func startIDOf(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+// A relock fills only the late entry: bypassed and failed stay as stored.
+func TestRelockLeavesBypassedAndFailedEntriesAlone(t *testing.T) {
+	r, _, path := relockRig(t)
+	was := time.Now().Add(-time.Hour).UTC()
+	b, _ := json.Marshal(mysql.StartResultRecord{Result: "failed", Decided: was, Kinds: map[string]mysql.StartKindRecord{
+		"failed": {Decided: was, InitFile: "/x"}, "bypassed": {Decided: was}}})
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := r.d.RecordRelock(now, proto.QuarantineWhileRunning); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := readStartResultFile(t, path)
+	checkKinds(t, "after a relock", rec, map[string]wantKind{
+		"late": {id: startIDOf(now)}, "failed": {id: startIDOf(was)}, "bypassed": {id: startIDOf(was)}})
+	if rec.Kinds["failed"].InitFile != "/x" || rec.Result != "late" {
+		t.Errorf("file = %+v, want failed kept with its init file and late the worst", rec)
+	}
+}
+
+func TestUnverifiedRecordedWithItsWhile(t *testing.T) {
+	r, ev, path := relockRig(t)
+	now := time.Now().UTC()
+	r.d.ReportRelocked(nil, now, proto.QuarantineWhileUnverified)
+	if rec, _ := readStartResultFile(t, path); rec.Kinds["late"].While != "unverified" {
+		t.Errorf("file late = %+v, want unverified", rec.Kinds["late"])
+	}
+	if k := lateKind(t, r.d.StartResult(now)); k.While != "unverified" {
+		t.Errorf("snapshot late = %+v, want unverified", k)
+	}
+	if evs := relockEvents(t, ev); len(evs) != 1 || evs[0].While != "unverified" {
+		t.Errorf("events = %+v, want one unverified", evs)
+	}
+}
+
+// Register wires the report; a hook a test set stays.
+func TestRelockedHookWiredByRegister(t *testing.T) {
+	r, _, _ := relockRig(t)
+	if !r.d.HasRelockedHook() {
+		t.Error("Register left Driver.relocked nil")
+	}
+}

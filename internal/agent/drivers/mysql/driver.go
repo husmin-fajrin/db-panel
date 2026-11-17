@@ -136,6 +136,9 @@ type Driver struct {
 	// could not check it (proto.QuarantineWhileUnverified); nil reports
 	// nothing. Called under promoteMu: it must only queue.
 	relocked func(h Host, now time.Time, while string)
+	// relockQueuedAt is the guard clock when a relock event was last
+	// queued (reportRelocked). The caller holds promoteMu.
+	relockQueuedAt time.Time
 	// qNotice: the quarantine took effect in this guard round
 	// (guardQuarantined), queued once the round's work is done
 	// (sendRoundEvents). The caller holds promoteMu.
@@ -206,6 +209,9 @@ func (d *Driver) Register(reg *commands.Registry) {
 		d.pins = p
 	}
 	d.liftGate()
+	if d.relocked == nil {
+		d.relocked = d.reportRelocked
+	}
 	// Strict mode on a quarantined server (strict.go).
 	if d.pins != nil {
 		reg.SetGate(d.strictGate)
