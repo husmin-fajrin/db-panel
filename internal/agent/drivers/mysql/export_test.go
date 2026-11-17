@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"os/user"
 	"strings"
@@ -620,3 +621,35 @@ func SetLiftLockWait(d time.Duration) (restore func()) {
 	liftLockWait = d
 	return func() { liftLockWait = old }
 }
+
+// SetRelocked sets the driver's relock report (guardQuarantined).
+func (d *Driver) SetRelocked(f func(h Host, now time.Time, while string)) { d.relocked = f }
+
+// WritableAfterLoad reports the guard's "writable since the load" record.
+func (d *Driver) WritableAfterLoad() bool { return d.writableAfterLoad() }
+
+// LoadedFrom reports whether the driver keeps a load record for host:port.
+func (d *Driver) LoadedFrom(host string, port int) bool {
+	_, ok := d.loadedFrom(host, port)
+	return ok
+}
+
+// SetGuardLockWaitTimeout shortens the guard's lock_wait_timeout (seconds).
+func SetGuardLockWaitTimeout(sec int) (restore func()) {
+	old := guardLockWaitTimeout
+	guardLockWaitTimeout = sec
+	return func() { guardLockWaitTimeout = old }
+}
+
+// SetGuardLockOpener replaces how tryGuard opens the lift lock file.
+func SetGuardLockOpener(f func(path string, replace bool) (*os.File, error)) (restore func()) {
+	old := openGuardLock
+	openGuardLock = f
+	return func() { openGuardLock = old }
+}
+
+// ErrWritableSinceLoad is T7.
+var ErrWritableSinceLoad = errWritableSinceLoad
+
+// ErrNoLoadRecord is the settle's refusal without a load record.
+var ErrNoLoadRecord = errNoLoadRecord

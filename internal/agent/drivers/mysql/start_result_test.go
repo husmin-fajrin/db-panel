@@ -301,7 +301,7 @@ func TestStartResultWriteFailureDoesNotStopTheEvent(t *testing.T) {
 
 func TestSettleRebuiltClearsStartResult(t *testing.T) {
 	dir := pinDir(t, "quarantined", strictSource)
-	r := newPinRig(t, nil, dir)
+	r := newPinRig(t, readOnlyHost(t), dir)
 	path := filepath.Join(filepath.Dir(r.d.SeenPath), "start-result")
 	if err := r.d.RecordStartResult(mysql.StartResultRecord{Result: "late", Decided: time.Now()}); err != nil {
 		t.Fatal(err)

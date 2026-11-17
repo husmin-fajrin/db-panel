@@ -1,10 +1,12 @@
 package mysql_test
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
@@ -139,4 +141,138 @@ func TestRebuildDumpOverOldDatabaseKeepsQuarantine(t *testing.T) {
 	if role := pinFile(t, r.dir, mysql.RoleFile); role != "quarantined" {
 		t.Errorf("role pin = %q, want quarantined", role)
 	}
+}
+
+// tick runs one guard round of the rig's driver.
+func (r *settleRig) tick() {
+	r.t.Helper()
+	if err := r.d.GuardTick(context.Background(), time.Now()); err != nil {
+		r.t.Fatalf("GuardTick: %v", err)
+	}
+}
+
+// wantSettleRefused dispatches configureReplication toward the master and
+// checks it is refused with want, the role pin and the approval kept.
+func (r *settleRig) wantSettleRefused(what, want string) {
+	r.t.Helper()
+	resp := r.dispatch("mysql.configureReplication", sourceParams(r.master))
+	if resp.OK || resp.Error == nil || resp.Error.Message != want {
+		r.t.Errorf("%s: configureReplication = %+v\nwant error %q", what, resp, want)
+	}
+	if role := pinFile(r.t, r.dir, mysql.RoleFile); role != "quarantined" {
+		r.t.Errorf("%s: role pin = %q, want quarantined", what, role)
+	}
+	if got := pinFile(r.t, r.dir, mysql.RebuildApprovalFile); got == "" {
+		r.t.Errorf("%s: the approval was cleared by a refused settle", what)
+	}
+}
+
+// dump runs a dump of dbs (none: every database) from the master and
+// requires it to succeed.
+func (r *settleRig) dump(dbs ...string) {
+	r.t.Helper()
+	if d := r.snap.run(r.t, "mysql.dumpFrom", dumpParams(r.master, dbs...)); !d.OK {
+		r.t.Fatalf("dumpFrom%v = %+v", dbs, d)
+	}
+}
+
+// TestSettleRefusedAfterWritableSinceLoad: the guard found a flag off
+// after the load: the settle answers T7 and keeps the quarantine and the
+// approval. The next load drops that record.
+func TestSettleRefusedAfterWritableSinceLoad(t *testing.T) {
+	r := newSettleRig(t)
+	r.dump("toko")
+	r.tick()
+	execAll(t, rootDB(t, r.target), "SET GLOBAL super_read_only = OFF")
+	r.tick()
+	if !r.d.WritableAfterLoad() {
+		t.Fatal("writable since the load not recorded")
+	}
+	r.wantSettleRefused("after the guard relocked", mysql.ErrWritableSinceLoad.Error())
+	execAll(t, rootDB(t, r.target), "STOP REPLICA")
+	r.dump("toko")
+	if r.d.WritableAfterLoad() {
+		t.Error("the next load kept the writable-since-load record")
+	}
+}
+
+// TestSettleRefusedWhenFlagsOffNow: a flag off when the settle reads them
+// itself, before any guard round saw it: T7.
+func TestSettleRefusedWhenFlagsOffNow(t *testing.T) {
+	r := newSettleRig(t)
+	r.dump("toko")
+	execAll(t, rootDB(t, r.target), "SET GLOBAL super_read_only = OFF")
+	r.wantSettleRefused("flags off at the settle", mysql.ErrWritableSinceLoad.Error())
+}
+
+// TestSettleWaitsForCLILift: while a dbpanel agent command holds the lift
+// lock the settle answers T12 (it can be retried) and records nothing;
+// once the command let go the settle ends the quarantine.
+func TestSettleWaitsForCLILift(t *testing.T) {
+	r := newSettleRig(t)
+	r.dump("toko")
+	release, err := mysql.AcquireLiftLock(r.d.LiftLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.wantSettleRefused("while a command holds the lift lock", mysql.ErrLiftHeldByCommand.Error())
+	release()
+	if r.d.WritableAfterLoad() {
+		t.Error("a command's lift recorded as writable since the load")
+	}
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master)))
+	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
+		t.Errorf("role pin after the command let go = %q, want replica", role)
+	}
+}
+
+// TestFailedLoadDropsEarlierLoadRecord: a load that began changing local
+// data and failed leaves no load record: the earlier one no longer
+// describes the server. The second load fails in its load stream: the old
+// master's toko.t has been made a view, so the dump's CREATE TABLE fails.
+func TestFailedLoadDropsEarlierLoadRecord(t *testing.T) {
+	r := newSettleRig(t)
+	r.dump()
+	host, port := "127.0.0.1", r.master.Port
+	if !r.d.LoadedFrom(host, port) {
+		t.Fatal("no load record after the full load")
+	}
+	execAll(t, rootDB(t, r.target), "SET GLOBAL super_read_only = OFF", "DROP TABLE toko.t",
+		"CREATE VIEW toko.t AS SELECT 1 AS id", "SET GLOBAL super_read_only = ON")
+	d := r.snap.run(t, "mysql.dumpFrom", dumpParams(r.master, "toko"))
+	if d.OK {
+		t.Fatalf("second load = %+v, want it to fail in its stream", d)
+	}
+	t.Logf("second load failed: %s", d.Error)
+	if r.d.LoadedFrom(host, port) {
+		t.Error("the earlier load record survived a load that began")
+	}
+	r.wantSettleRefused("after the failed load", mysql.ErrNoLoadRecord.Error())
+}
+
+// TestEarlyFailedLoadKeepsRecordAndWritableFlag: a second load refused by
+// its client check (wrong password of the dump account) changed nothing:
+// the earlier record stays, and so does the guard's writable-since-load
+// record, so the settle answers T7.
+func TestEarlyFailedLoadKeepsRecordAndWritableFlag(t *testing.T) {
+	r := newSettleRig(t)
+	r.dump()
+	r.tick()
+	execAll(t, rootDB(t, r.target), "SET GLOBAL super_read_only = OFF")
+	r.tick()
+	if !r.d.WritableAfterLoad() {
+		t.Fatal("writable since the load not recorded")
+	}
+	p := dumpParams(r.master, "toko")
+	p.Password = "salah"
+	if d := r.snap.run(t, "mysql.dumpFrom", p); d.OK || !strings.Contains(d.Error, "uji dump dari master gagal") {
+		t.Fatalf("dump with a wrong password = %+v, want the client check's refusal", d)
+	}
+	if !r.d.LoadedFrom("127.0.0.1", r.master.Port) {
+		t.Error("a load refused before any local change dropped the earlier record")
+	}
+	if !r.d.WritableAfterLoad() {
+		t.Error("a load refused before any local change cleared writable since the load")
+	}
+	r.wantSettleRefused("after the refused load", mysql.ErrWritableSinceLoad.Error())
 }

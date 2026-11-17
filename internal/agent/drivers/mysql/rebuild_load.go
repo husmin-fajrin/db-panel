@@ -35,6 +35,14 @@ type rebuildLoad struct {
 	// copied is what that job replaced: the whole server (CLONE) or the
 	// databases a dump load created (see loadMark).
 	copied loadCopy
+	// writableSince: since the last load began, the guard found a flag
+	// off without a legitimate lift, or could not check the flags
+	// (noteWritableAfterLoad); settleRebuilt then refuses (T7).
+	writableSince bool
+	// expectRefused: a load replaced the accounts (AdminReplaced), so the
+	// guard's login is refused until it works again; such refusals are no
+	// round the guard could not check.
+	expectRefused bool
 }
 
 // loadCopy is what one successful snapshot job replaced on this server.
@@ -69,7 +77,10 @@ func (d *Driver) rebuildMark(host string, port int) *loadMark {
 	return &loadMark{r: &d.rebuild, source: net.JoinHostPort(host, strconv.Itoa(port))}
 }
 
-// set marks the load in progress.
+// set marks the load in progress. A load that begins changing local data
+// ends what is known of the one before it: its record (loaded, copied)
+// no longer describes the server, and neither does the guard's
+// writable-since-load record or the refused logins it expected.
 func (m *loadMark) set() {
 	if m == nil {
 		return
@@ -77,6 +88,8 @@ func (m *loadMark) set() {
 	m.r.mu.Lock()
 	defer m.r.mu.Unlock()
 	m.r.active, m.r.source, m.r.deferred = true, m.source, false
+	m.r.writableSince, m.r.expectRefused = false, false
+	m.r.loaded, m.r.copied = "", loadCopy{}
 }
 
 // clear ends the load's mark; clearing again is a no-op.
@@ -121,6 +134,49 @@ func (m *loadMark) done(whole bool, named []string) {
 	}
 	m.r.loaded = m.source
 	m.r.copied = loadCopy{whole: whole, before: m.before, named: slices.Clone(named)}
+}
+
+// adminReplaced records that the load replaced this server's accounts
+// (AdminReplaced): until the guard logs in again its refused logins are
+// expected.
+func (m *loadMark) adminReplaced() {
+	if m == nil {
+		return
+	}
+	m.r.mu.Lock()
+	defer m.r.mu.Unlock()
+	m.r.expectRefused = true
+}
+
+// noteWritableAfterLoad records that the server was writable, or could not
+// be checked, since the last load began.
+func (d *Driver) noteWritableAfterLoad() {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	d.rebuild.writableSince = true
+}
+
+// writableAfterLoad reports noteWritableAfterLoad since the last load
+// began.
+func (d *Driver) writableAfterLoad() bool {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	return d.rebuild.writableSince
+}
+
+// expectingRefusal reports whether a load replaced the accounts and the
+// guard has not logged in since.
+func (d *Driver) expectingRefusal() bool {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	return d.rebuild.expectRefused
+}
+
+// loggedIn ends expectingRefusal: the guard logged in.
+func (d *Driver) loggedIn() {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	d.rebuild.expectRefused = false
 }
 
 // takeRecheck reports, once, that a load ended since the guard's last
@@ -377,18 +433,31 @@ func userDatabases(ctx context.Context, db rowsQuerier) ([]string, error) {
 func (d *Driver) deferringToRebuild() (source string, first, ok bool) {
 	d.rebuild.mu.Lock()
 	defer d.rebuild.mu.Unlock()
-	if !d.rebuild.active {
-		return "", false, false
-	}
-	host, ps, err := net.SplitHostPort(d.rebuild.source)
-	if err != nil {
-		return "", false, false
-	}
-	port, err := strconv.Atoi(ps)
-	if err != nil || d.pins == nil || !d.pins.quarantinedUnder(host, port) {
+	if !d.markHonoured() {
 		return "", false, false
 	}
 	first = !d.rebuild.deferred
 	d.rebuild.deferred = true
 	return d.rebuild.source, first, true
+}
+
+// rebuildMarked is deferringToRebuild's ok, without recording a deferral.
+func (d *Driver) rebuildMarked() bool {
+	d.rebuild.mu.Lock()
+	defer d.rebuild.mu.Unlock()
+	return d.markHonoured()
+}
+
+// markHonoured: a load is marked and its source is still the pinned
+// source of a quarantined server. The caller holds d.rebuild.mu.
+func (d *Driver) markHonoured() bool {
+	if !d.rebuild.active {
+		return false
+	}
+	host, ps, err := net.SplitHostPort(d.rebuild.source)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(ps)
+	return err == nil && d.pins != nil && d.pins.quarantinedUnder(host, port)
 }

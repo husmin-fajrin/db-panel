@@ -126,6 +126,16 @@ type Driver struct {
 	// qStartPending: a start of MySQL it has not reported yet.
 	qUp           bool
 	qStartPending bool
+	// qUnverified counts the guard's rounds in a row that could not check
+	// the flags (guardQuarantined, step 6); qUnverifiedAt is when such a
+	// streak was last reported. The caller holds promoteMu.
+	qUnverified   int
+	qUnverifiedAt time.Time
+	// relocked reports that the guard found a quarantined server writable
+	// without a legitimate lift (while: proto.QuarantineWhileRunning) or
+	// could not check it (proto.QuarantineWhileUnverified); nil reports
+	// nothing. Called under promoteMu: it must only queue.
+	relocked func(h Host, now time.Time, while string)
 	// qNotice: the quarantine took effect in this guard round
 	// (guardQuarantined), queued once the round's work is done
 	// (sendRoundEvents). The caller holds promoteMu.

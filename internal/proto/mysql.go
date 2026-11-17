@@ -591,6 +591,18 @@ const (
 // start on the lock file.
 const QuarantineStartFailed = "failed"
 
+// What a late entry that is no start of MySQL records (spec 5.2): the
+// guard of a quarantined server found it writable while MySQL kept
+// running, or could not check it.
+const (
+	// QuarantineWhileRunning: a flag was read off without a legitimate
+	// lift and the guard locked the server again.
+	QuarantineWhileRunning = "running"
+	// QuarantineWhileUnverified: for three rounds in a row the guard could
+	// not log in, read the flags, or set them again.
+	QuarantineWhileUnverified = "unverified"
+)
+
 // StartResultState is the worst start of MySQL since the quarantine (spec 5.5).
 type StartResultState struct {
 	Result   string `json:"result"`              // late | failed | bypassed | ok

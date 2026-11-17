@@ -86,6 +86,11 @@ func (d *Driver) registerSnapshotJob(reg *commands.Registry, cmd, method string,
 			if err != nil {
 				return nil, err
 			}
+			// The load replaced the accounts: the guard's login is refused
+			// until it works again, and that is expected.
+			if res.AdminReplaced {
+				mark.adminReplaced()
+			}
 			mark.done(method == methodClone, p.Databases)
 			// A copy before any source pin (create_replica copies before
 			// it configures replication) pins the master it came from.

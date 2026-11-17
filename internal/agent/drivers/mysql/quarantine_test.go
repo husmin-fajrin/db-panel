@@ -6,9 +6,12 @@ import (
 	"database/sql"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,16 +188,22 @@ func TestQuarantineIdempotent(t *testing.T) {
 	r.wantEvents(proto.EventQuarantined)
 
 	// The guard: nothing to do while read-only. Flags lifted while MySQL
-	// stays up (a rebuild's load) are left alone; a MySQL that comes back
-	// writable is made read-only again and reported.
+	// stays up (a rebuild's load, through the lift gate) are left alone; a
+	// MySQL that comes back writable is made read-only again and reported.
 	r.tick()
 	r.wantEvents(proto.EventQuarantined)
-	execAll(t, r.db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+	hold, err := r.d.LiftGate().Begin(context.Background(), r.db, func(string, string, ...any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.tick()
-	if sro, ro := readOnly(t, r.db); sro || ro {
-		t.Errorf("guard put read-only back while MySQL stayed up: super_read_only=%v read_only=%v", sro, ro)
+	if sro, _ := readOnly(t, r.db); sro {
+		t.Errorf("guard put super_read_only back during a lift while MySQL stayed up")
 	}
 	r.wantEvents(proto.EventQuarantined)
+	if err := hold.End(); err != nil {
+		t.Fatal(err)
+	}
 	execAll(t, r.db, "RESET PERSIST super_read_only", "RESET PERSIST read_only")
 	r.inst.Restart(t)
 	// The start lock written by the quarantine locks it at start; opened
@@ -566,11 +575,12 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 			t.Fatalf("GuardTick: %v", err)
 		}
 	}
-	// What the load does after its restart: read-only off by SET GLOBAL.
+	// What the load does after its restart: super_read_only off by SET
+	// GLOBAL (a lift never turns read_only off, spec 5.2).
 	restartAndLift := func() {
 		t.Helper()
 		inst.Restart(t)
-		execAll(t, db, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
+		execAll(t, db, "SET GLOBAL super_read_only = OFF")
 	}
 	tick()
 	// The first tick reports how MySQL started (this agent's start).
@@ -591,8 +601,8 @@ func TestQuarantineGuardDefersToRebuildLoad(t *testing.T) {
 	restartAndLift()
 	tick()
 	tick()
-	if sro, ro := readOnly(t, db); sro || ro {
-		t.Fatalf("guard put read-only back during the load: super_read_only=%v read_only=%v", sro, ro)
+	if sro, _ := readOnly(t, db); sro {
+		t.Fatalf("guard put super_read_only back during the load")
 	}
 	if n := strings.Count(logs.String(), "quarantine guard deferring: a rebuild load from the pinned source is running"); n != 1 {
 		t.Errorf("deferral logged %d times, want once:\n%s", n, logs.String())
@@ -706,4 +716,556 @@ func TestRebuildConfigureAndCloneKeepReadOnly(t *testing.T) {
 	if role := pinFile(t, dir, mysql.RoleFile); role != "replica" {
 		t.Errorf("role pin after the clone and configureReplication = %q, want replica", role)
 	}
+}
+
+// relockLog records the driver's relock reports (Driver.relocked).
+type relockLog struct {
+	mu     sync.Mutex
+	whiles []string
+}
+
+func watchRelocks(d *mysql.Driver) *relockLog {
+	l := &relockLog{}
+	d.SetRelocked(func(_ mysql.Host, _ time.Time, while string) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.whiles = append(l.whiles, while)
+	})
+	return l
+}
+
+// got is the reports so far, comma-joined.
+func (l *relockLog) got() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.whiles, ",")
+}
+
+// flagRig is a quarantined server, read_only and super_read_only PERSISTed
+// ON, and a driver over it with its own lift lock file, its events and
+// relock reports recorded, and a clock of its own that each round moves on
+// by monitor.GuardEvery.
+type flagRig struct {
+	t    *testing.T
+	inst *testmysql.Instance
+	root *sql.DB
+	dir  string
+	reg  *commands.Registry
+	d    *mysql.Driver
+	ev   *eventLog
+	rl   *relockLog
+	now  time.Time
+}
+
+// newFlagRig builds the rig; creds, when not nil, is the stored account
+// (else root). source is the source pin.
+func newFlagRig(t *testing.T, creds *memCreds, source string) *flagRig {
+	t.Helper()
+	inst := testmysql.Start(t, testmysql.Options{})
+	root := rootDB(t, inst)
+	execAll(t, root, "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+	r := &flagRig{t: t, inst: inst, root: root, dir: pinDir(t, "quarantined", source), ev: &eventLog{}, now: time.Now()}
+	r.setDriver(creds)
+	return r
+}
+
+// setDriver makes a new driver (a new agent run) over the rig's server.
+func (r *flagRig) setDriver(creds *memCreds) {
+	h := r.inst.Host()
+	r.d = &mysql.Driver{PinDir: r.dir, Events: r.ev, LiftLock: lockPath(r.t),
+		SeenPath: filepath.Join(r.t.TempDir(), "replicas-seen")}
+	if creds != nil {
+		h = r.inst.HostWith(creds)
+		r.d.Creds = creds
+	}
+	r.d.Host = h
+	r.ev.flush = r.d.FlushEvents
+	r.reg = commands.NewRegistry()
+	r.d.Register(r.reg)
+	r.rl = watchRelocks(r.d)
+}
+
+// tick runs one guard round, GuardEvery after the last one.
+func (r *flagRig) tick() error {
+	r.now = r.now.Add(5 * time.Second)
+	return r.d.GuardTick(context.Background(), r.now)
+}
+
+// mustTick is tick that fails the test on an error.
+func (r *flagRig) mustTick() {
+	r.t.Helper()
+	if err := r.tick(); err != nil {
+		r.t.Fatalf("GuardTick: %v", err)
+	}
+}
+
+// wantFlags checks read_only and super_read_only ("1 0": read_only on).
+func (r *flagRig) wantFlags(when, want string) {
+	r.t.Helper()
+	if got := flags(r.t, r.root); got != want {
+		r.t.Errorf("%s: flags = %s, want %s", when, got, want)
+	}
+}
+
+// wantRelocks checks the relock reports so far (comma-joined).
+func (r *flagRig) wantRelocks(when, want string) {
+	r.t.Helper()
+	if got := r.rl.got(); got != want {
+		r.t.Errorf("%s: relock reports = %q, want %q", when, got, want)
+	}
+}
+
+// lift opens read-only through the driver's gate, as an agent job does.
+func (r *flagRig) lift() *mysql.LiftHold {
+	r.t.Helper()
+	hold, err := r.d.LiftGate().Begin(context.Background(), r.root, func(string, string, ...any) {})
+	if err != nil {
+		r.t.Fatalf("lift: %v", err)
+	}
+	return hold
+}
+
+// TestGuardRelocksWhileUp: a flag switched off from outside while MySQL
+// keeps running is put back on the next round, PERSISTed, and reported
+// once as relocked while running.
+func TestGuardRelocksWhileUp(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.mustTick()
+	r.wantRelocks("first round", "")
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF")
+	r.mustTick()
+	r.wantFlags("after the round", "1 1")
+	if s, ro := persisted(t, r.root, "super_read_only"), persisted(t, r.root, "read_only"); s != "ON" || ro != "ON" {
+		t.Errorf("persisted super_read_only=%q read_only=%q, want ON", s, ro)
+	}
+	r.wantRelocks("after the round", proto.QuarantineWhileRunning)
+	r.mustTick()
+	r.wantRelocks("a quiet round after", proto.QuarantineWhileRunning)
+}
+
+// TestGuardNormalRoundDoesNotTouchLockFile: a transition round takes the
+// lift lock; a round with both flags on and no transition does not even
+// open the lock file.
+func TestGuardNormalRoundDoesNotTouchLockFile(t *testing.T) {
+	var opens atomic.Int32
+	defer mysql.SetGuardLockOpener(func(path string, replace bool) (*os.File, error) {
+		opens.Add(1)
+		return mysql.OpenLiftLock(path, replace)
+	})()
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.mustTick()
+	if opens.Load() == 0 {
+		t.Fatal("the transition round did not take the lift lock")
+	}
+	opens.Store(0)
+	for range 3 {
+		r.mustTick()
+	}
+	if n := opens.Load(); n != 0 {
+		t.Errorf("normal rounds opened the lift lock file %d times", n)
+	}
+}
+
+// TestGuardLeavesRegisteredLiftAlone: while a lift of the driver's gate is
+// open, the guard, on its transition round too, leaves super_read_only
+// off and reports nothing.
+func TestGuardLeavesRegisteredLiftAlone(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	hold := r.lift()
+	r.mustTick()
+	r.mustTick()
+	r.wantFlags("during the lift", "1 0")
+	r.wantRelocks("during the lift", "")
+	if evs := r.ev.all(); len(evs) != 0 {
+		t.Errorf("events during the lift = %+v", evs)
+	}
+	if err := hold.End(); err != nil {
+		t.Fatal(err)
+	}
+	r.wantFlags("after the lift", "1 1")
+	r.mustTick()
+	r.wantRelocks("after the lift", "")
+}
+
+// TestGuardKeepsReadOnlyDuringLift: read_only switched off from outside
+// during a lift is put back (super_read_only stays off for the lift),
+// reported as relocked while running and recorded as writable since the
+// load.
+func TestGuardKeepsReadOnlyDuringLift(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.mustTick()
+	hold := r.lift()
+	defer hold.End()
+	execAll(t, r.root, "SET GLOBAL read_only = OFF")
+	r.wantFlags("before the round", "0 0")
+	r.mustTick()
+	r.wantFlags("after the round", "1 0")
+	r.wantRelocks("after the round", proto.QuarantineWhileRunning)
+	if !r.d.WritableAfterLoad() {
+		t.Error("writable since the load not recorded")
+	}
+}
+
+// TestGuardLeavesLongLiftAlone: a lift open for twelve rounds is left
+// alone and nothing is reported.
+func TestGuardLeavesLongLiftAlone(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.mustTick()
+	start := len(r.ev.all())
+	hold := r.lift()
+	for range 12 {
+		r.mustTick()
+	}
+	r.wantFlags("after twelve rounds", "1 0")
+	r.wantRelocks("after twelve rounds", "")
+	if n := len(r.ev.all()) - start; n != 0 {
+		t.Errorf("%d events during the lift", n)
+	}
+	if r.d.WritableAfterLoad() {
+		t.Error("a legitimate lift recorded as writable since the load")
+	}
+	if err := hold.End(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGuardSkipsWhenCLIHoldsLock: while another descriptor (a dbpanel
+// agent command) holds the lift lock, super_read_only off with read_only
+// on is left alone and nothing is reported.
+func TestGuardSkipsWhenCLIHoldsLock(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.mustTick()
+	release, err := mysql.AcquireLiftLock(r.d.LiftLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF")
+	for range 3 {
+		r.mustTick()
+	}
+	r.wantFlags("while the command holds the lock", "1 0")
+	r.wantRelocks("while the command holds the lock", "")
+}
+
+// TestGuardTransitionDuringUnmarkedLift: a lift without a load mark
+// (mysql.dropDatabases, held behind another session's metadata lock) is
+// running at the guard's transition round: the guard PERSISTs nothing and
+// reports nothing.
+func TestGuardTransitionDuringUnmarkedLift(t *testing.T) {
+	const src = "10.0.0.1:3306"
+	r := newFlagRig(t, nil, src)
+	approveRebuild(t, r.dir, src)
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF", "CREATE DATABASE lama", "CREATE TABLE lama.t (id INT)",
+		"SET GLOBAL super_read_only = ON", "RESET PERSIST read_only", "RESET PERSIST super_read_only")
+	// Another session holds a metadata lock on lama.t: DROP DATABASE waits.
+	ctx := context.Background()
+	blocker, err := r.root.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	for _, q := range []string{"BEGIN", "SELECT COUNT(*) FROM lama.t"} {
+		if _, err := blocker.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan proto.Response, 1)
+	params := mustJSON(t, proto.DropDatabasesParams{Databases: []string{"lama"}})
+	go func() {
+		done <- r.reg.Dispatch(ctx, proto.Request{ID: "1", Cmd: "mysql.dropDatabases", Params: params})
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for count(t, r.root, "SELECT COUNT(*) FROM information_schema.processlist WHERE info LIKE 'DROP DATABASE%'") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("DROP DATABASE never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	r.wantFlags("during the drop", "1 0")
+	r.mustTick()
+	r.wantFlags("after the transition round", "1 0")
+	if s, ro := persisted(t, r.root, "super_read_only"), persisted(t, r.root, "read_only"); s != "" || ro != "" {
+		t.Errorf("persisted during the lift: super_read_only=%q read_only=%q, want none", s, ro)
+	}
+	r.wantRelocks("after the transition round", "")
+	if evs := r.ev.all(); len(evs) != 0 {
+		t.Errorf("events during the lift = %+v", evs)
+	}
+	if _, err := blocker.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	if resp := <-done; !resp.OK {
+		t.Fatalf("dropDatabases = %+v", resp)
+	}
+	r.wantFlags("after the drop", "1 1")
+}
+
+// TestGuardBoundedBehindTableLock (X4): with super_read_only off and a
+// session that may write holding LOCK TABLES … WRITE, the guard's statement
+// ends with error 1205 after its lock_wait_timeout, changes nothing and
+// leaves nothing waiting on the server; the round returns. After UNLOCK
+// TABLES the next round locks the server and reports it; three rounds in
+// a row behind the lock are reported as unverified.
+func TestGuardBoundedBehindTableLock(t *testing.T) {
+	defer mysql.SetGuardLockWaitTimeout(1)()
+	r := newFlagRig(t, nil, guardCandidateKey)
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF", "CREATE DATABASE app", "CREATE TABLE app.t (id INT)",
+		"SET GLOBAL super_read_only = ON")
+	r.mustTick()
+	ctx := context.Background()
+	holder, err := r.root.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	lock := func() {
+		t.Helper()
+		for _, q := range []string{"SET GLOBAL super_read_only = OFF", "LOCK TABLES app.t WRITE", "INSERT INTO app.t VALUES (1)"} {
+			if _, err := holder.ExecContext(ctx, q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+	}
+	unlock := func() {
+		t.Helper()
+		if _, err := holder.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waiting := func() int {
+		return count(t, r.root, "SELECT COUNT(*) FROM information_schema.processlist WHERE info LIKE 'SET PERSIST%'")
+	}
+
+	lock()
+	began := time.Now()
+	err = r.tick()
+	took := time.Since(began)
+	if err == nil || !strings.Contains(err.Error(), "1205") {
+		t.Errorf("round behind the table lock = %v, want error 1205", err)
+	}
+	if took < 900*time.Millisecond || took > 8*time.Second {
+		t.Errorf("round behind the table lock took %v, want about the 1 s bound", took)
+	}
+	r.wantFlags("behind the table lock", "1 0")
+	if n := waiting(); n != 0 {
+		t.Errorf("%d guard statements still waiting on the server", n)
+	}
+	r.wantRelocks("behind the table lock", "")
+	unlock()
+	r.mustTick()
+	r.wantFlags("after UNLOCK TABLES", "1 1")
+	r.wantRelocks("after UNLOCK TABLES", proto.QuarantineWhileRunning)
+
+	lock()
+	defer unlock()
+	for range 3 {
+		r.tick()
+	}
+	r.wantFlags("three rounds behind the table lock", "1 0")
+	r.wantRelocks("three rounds behind the table lock", proto.QuarantineWhileRunning+","+proto.QuarantineWhileUnverified)
+	if n := waiting(); n != 0 {
+		t.Errorf("%d guard statements still waiting on the server", n)
+	}
+}
+
+// guardAdmin is a stored admin account adm@localhost (ALL, minus without)
+// on r's server, the driver using it.
+func (r *flagRig) guardAdmin(without ...string) *memCreds {
+	r.t.Helper()
+	execAll(r.t, r.root, "SET GLOBAL super_read_only = OFF")
+	creds := noSuperAdmin(r.t, r.inst, without...)
+	execAll(r.t, r.root, "SET GLOBAL super_read_only = ON")
+	r.setDriver(creds)
+	return creds
+}
+
+// refuseLogin changes adm's password (on) or puts it back, so the guard's
+// login is refused (1045) or works again.
+func (r *flagRig) refuseLogin(on bool, creds *memCreds) {
+	r.t.Helper()
+	pw := creds.p.Password
+	if on {
+		pw = "lain"
+	}
+	execAll(r.t, r.root, "SET GLOBAL super_read_only = OFF", "ALTER USER adm@localhost IDENTIFIED BY "+sqlLiteral(pw),
+		"SET GLOBAL super_read_only = ON")
+}
+
+// TestGuardReportsWhenItCannotLogIn: three refused logins in a row, with
+// no load mark and the lift lock free, are reported once as unverified and
+// recorded as writable since the load; again no sooner than ten minutes
+// later. Two refused rounds and then a login report nothing.
+func TestGuardReportsWhenItCannotLogIn(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	creds := r.guardAdmin()
+	r.mustTick()
+	r.refuseLogin(true, creds)
+	r.mustTick()
+	r.mustTick()
+	r.wantRelocks("two refused rounds", "")
+	r.mustTick()
+	r.wantRelocks("three refused rounds", proto.QuarantineWhileUnverified)
+	if !r.d.WritableAfterLoad() {
+		t.Error("writable since the load not recorded")
+	}
+	for range 5 {
+		r.mustTick()
+	}
+	r.wantRelocks("refused rounds within ten minutes", proto.QuarantineWhileUnverified)
+	r.now = r.now.Add(10 * time.Minute)
+	r.mustTick()
+	r.wantRelocks("ten minutes later", proto.QuarantineWhileUnverified+","+proto.QuarantineWhileUnverified)
+
+	// Two refused rounds, then a login: nothing.
+	r.setDriver(creds)
+	r.refuseLogin(false, creds)
+	r.mustTick()
+	r.refuseLogin(true, creds)
+	r.mustTick()
+	r.mustTick()
+	r.refuseLogin(false, creds)
+	r.mustTick()
+	r.mustTick()
+	r.wantRelocks("two refused rounds then a login", "")
+	if r.d.WritableAfterLoad() {
+		t.Error("two refused rounds recorded as writable since the load")
+	}
+}
+
+// TestGuardReportsWhenRelockFails: a flag off and an agent account that
+// cannot set it (no SYSTEM_VARIABLES_ADMIN): after three rounds the guard
+// reports unverified.
+func TestGuardReportsWhenRelockFails(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.guardAdmin("SUPER", "SYSTEM_VARIABLES_ADMIN")
+	r.tick()
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF")
+	r.tick()
+	r.tick()
+	r.wantRelocks("two rounds", "")
+	r.tick()
+	r.wantRelocks("three rounds", proto.QuarantineWhileUnverified)
+	r.wantFlags("three rounds", "1 0")
+	if !r.d.WritableAfterLoad() {
+		t.Error("writable since the load not recorded")
+	}
+}
+
+// TestGuardUnverifiedNotDuringLift: refused logins while another
+// descriptor holds the lift lock are not reported.
+func TestGuardUnverifiedNotDuringLift(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	creds := r.guardAdmin()
+	r.mustTick()
+	release, err := mysql.AcquireLiftLock(r.d.LiftLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	r.refuseLogin(true, creds)
+	for range 4 {
+		r.mustTick()
+	}
+	r.wantRelocks("refused rounds during a lift", "")
+	if r.d.WritableAfterLoad() {
+		t.Error("refused rounds during a lift recorded as writable since the load")
+	}
+}
+
+// TestFailedPersistAfterFlagsOnCostsNothing: on a transition round both
+// flags read on and SET PERSIST fails: nothing is recorded or reported,
+// and the next round tries again.
+func TestFailedPersistAfterFlagsOnCostsNothing(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	r.guardAdmin("SUPER", "SYSTEM_VARIABLES_ADMIN")
+	execAll(t, r.root, "RESET PERSIST read_only", "RESET PERSIST super_read_only")
+	r.wantFlags("before", "1 1")
+	if err := r.tick(); err == nil {
+		t.Error("round with a failing SET PERSIST returned no error")
+	}
+	if r.d.WritableAfterLoad() {
+		t.Error("a failed PERSIST with both flags on recorded as writable since the load")
+	}
+	r.wantRelocks("failed PERSIST", "")
+	if evs := r.ev.all(); len(evs) != 0 {
+		t.Errorf("events after a failed PERSIST = %+v", evs)
+	}
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF", "GRANT SYSTEM_VARIABLES_ADMIN ON *.* TO adm@localhost",
+		"SET GLOBAL super_read_only = ON")
+	r.mustTick()
+	if s, ro := persisted(t, r.root, "super_read_only"), persisted(t, r.root, "read_only"); s != "ON" || ro != "ON" {
+		t.Errorf("next round: persisted super_read_only=%q read_only=%q, want ON", s, ro)
+	}
+	r.wantRelocks("next round", "")
+	if st := startEvents(t, r.ev); len(st) != 1 || st[0].Result != proto.QuarantineStartOK {
+		t.Errorf("start events = %+v, want one ok", st)
+	}
+}
+
+// adminReplacedRig is a quarantined server rebuilt with a full dump from
+// its pinned source that replaced the stored admin account (AdminReplaced),
+// the driver's guard watched.
+func adminReplacedRig(t *testing.T) (*flagRig, *memCreds) {
+	t.Helper()
+	master := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	dumpUser(t, mdb)
+	execAll(t, mdb, "CREATE DATABASE toko", "CREATE TABLE toko.t (id INT PRIMARY KEY)", "INSERT INTO toko.t VALUES (1)")
+	src := "127.0.0.1:" + strconv.Itoa(master.Port)
+	r := newFlagRig(t, nil, src)
+	creds := r.guardAdmin("SUPER")
+	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
+	runner := jobs.NewRunner(jev, slog.New(slog.DiscardHandler))
+	r.d = &mysql.Driver{Host: r.inst.HostWith(creds), Creds: creds, Jobs: runner, PinDir: r.dir, Events: r.ev,
+		LiftLock: lockPath(t), SeenPath: filepath.Join(t.TempDir(), "replicas-seen")}
+	r.ev.flush = r.d.FlushEvents
+	r.reg = commands.NewRegistry()
+	r.d.Register(r.reg)
+	r.rl = watchRelocks(r.d)
+	approveRebuild(t, r.dir, src)
+	r.mustTick()
+	snap := &snapshotRig{reg: r.reg, runner: runner, events: jev}
+	if res := snapshotResult(t, snap.run(t, "mysql.dumpFrom", dumpParams(master))); !res.AdminReplaced {
+		t.Fatalf("result = %+v, want AdminReplaced", res)
+	}
+	return r, creds
+}
+
+// TestFullDumpRebuildLeavesNoRelock: after a full-dump rebuild that
+// replaced the admin account, twelve guard rounds (refused logins) leave
+// the flags 1 1 and report nothing.
+func TestFullDumpRebuildLeavesNoRelock(t *testing.T) {
+	r, _ := adminReplacedRig(t)
+	for range 12 {
+		r.mustTick()
+	}
+	r.wantFlags("after twelve rounds", "1 1")
+	r.wantRelocks("after twelve rounds", "")
+	if r.d.WritableAfterLoad() {
+		t.Error("the rebuild recorded as writable since the load")
+	}
+}
+
+// TestGuardQuietWhileAdminReplaced: refused logins after a load that
+// replaced the accounts are expected and not reported; the first login
+// that works ends the exception.
+func TestGuardQuietWhileAdminReplaced(t *testing.T) {
+	r, creds := adminReplacedRig(t)
+	for range 12 {
+		r.mustTick()
+	}
+	r.wantRelocks("twelve refused rounds", "")
+	if r.d.WritableAfterLoad() {
+		t.Error("refused rounds after the load recorded as writable since the load")
+	}
+	// "Hubungkan MySQL": the account works again.
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF", "CREATE USER adm@localhost IDENTIFIED BY "+sqlLiteral(creds.p.Password),
+		"GRANT ALL PRIVILEGES ON *.* TO adm@localhost", "SET GLOBAL super_read_only = ON")
+	r.mustTick()
+	r.refuseLogin(true, creds)
+	for range 3 {
+		r.mustTick()
+	}
+	r.wantRelocks("three refused rounds after a login", proto.QuarantineWhileUnverified)
 }

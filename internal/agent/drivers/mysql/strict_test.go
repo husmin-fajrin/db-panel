@@ -414,7 +414,7 @@ func TestRebuildApprovalCommand(t *testing.T) {
 // rebuild removes the request and the approval.
 func TestSettleRebuiltClearsApproval(t *testing.T) {
 	dir := pinDir(t, "quarantined", strictSource)
-	r := newPinRig(t, nil, dir)
+	r := newPinRig(t, readOnlyHost(t), dir)
 	p := mustPins(t, dir)
 	if _, err := p.EnsureRebuildRequest(time.Now()); err != nil {
 		t.Fatal(err)

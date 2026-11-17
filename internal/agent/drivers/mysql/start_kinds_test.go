@@ -261,7 +261,7 @@ func TestStartKindsGoWithTheFile(t *testing.T) {
 	}
 
 	dir := pinDir(t, "quarantined", strictSource)
-	p := newPinRig(t, nil, dir)
+	p := newPinRig(t, readOnlyHost(t), dir)
 	path = filepath.Join(filepath.Dir(p.d.SeenPath), "start-result")
 	if err := p.d.RecordJudgedStart(mysql.StartResultRecord{Result: "failed", Decided: time.Now(), InitFile: "/x"}, false); err != nil {
 		t.Fatal(err)

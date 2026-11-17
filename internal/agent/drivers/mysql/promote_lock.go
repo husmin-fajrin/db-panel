@@ -565,7 +565,7 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	// not; the start lock's housekeeping (which may run --print-defaults)
 	// comes after it, whatever it answered (FR-13 b).
 	if d.pins.Role() == roleQuarantined {
-		err := d.guardQuarantined(ctx, h)
+		err := d.guardQuarantined(ctx, h, now)
 		d.guardStartLock(ctx, h, now)
 		return err
 	}

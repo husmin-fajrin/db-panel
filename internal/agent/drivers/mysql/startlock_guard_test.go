@@ -1134,3 +1134,71 @@ func TestStartLockReleaseRaceAcrossProcesses(t *testing.T) {
 		t.Error("no release, or no rewrite by the guard: the race was not exercised")
 	}
 }
+
+// TestGuardTransitionDuringCLILift: a dbpanel agent command holds the lift
+// lock with super_read_only off at the first round of a new agent run: the
+// guard writes nothing and reports nothing. Once the command put the flag
+// back and let go, the start is reported once, ok, never late.
+func TestGuardTransitionDuringCLILift(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	release, err := mysql.AcquireLiftLock(r.d.LiftLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF", "RESET PERSIST super_read_only")
+	r.mustTick()
+	r.mustTick()
+	r.wantFlags("during the command", "1 0")
+	if s := persisted(t, r.root, "super_read_only"); s != "" {
+		t.Errorf("persisted super_read_only during the command = %q, want none", s)
+	}
+	r.wantRelocks("during the command", "")
+	if evs := r.ev.all(); len(evs) != 0 {
+		t.Errorf("events during the command = %+v", evs)
+	}
+	execAll(t, r.root, "SET GLOBAL super_read_only = ON")
+	release()
+	r.mustTick()
+	r.mustTick()
+	if got := startEvents(t, r.ev); len(got) != 1 || got[0].Result != proto.QuarantineStartOK {
+		t.Errorf("start events = %+v, want one ok", got)
+	}
+	r.wantRelocks("after the command", "")
+	r.wantFlags("after the command", "1 1")
+}
+
+// TestCloneRestartIsNoStart: MySQL comes back (with the recipient's own
+// persisted 1 1, X6) while a load mark and a lift through the gate are
+// still open, as after a CLONE's restart: no start is reported, nothing is
+// relocked, and nothing is recorded as writable since the load.
+func TestCloneRestartIsNoStart(t *testing.T) {
+	const src = "10.0.0.1:3306"
+	r := newFlagRig(t, nil, src)
+	r.mustTick()
+	if got := startEvents(t, r.ev); len(got) != 1 {
+		t.Fatalf("start events of the first round = %+v, want the agent's start", got)
+	}
+	clear, ok := r.d.MarkRebuildLoad("10.0.0.1", 3306)
+	if !ok {
+		t.Fatal("no rebuild mark")
+	}
+	hold := r.lift()
+	r.mustTick()
+	r.inst.Restart(t)
+	r.wantFlags("after the restart", "1 1")
+	r.mustTick()
+	r.mustTick()
+	hold.Abandon()
+	clear()
+	r.mustTick()
+	r.mustTick()
+	// The load's restart is not a start of the quarantined server.
+	if got := startEvents(t, r.ev); len(got) != 1 {
+		t.Errorf("start events after the load = %+v, want only the agent's start", got)
+	}
+	r.wantRelocks("after the load", "")
+	if r.d.WritableAfterLoad() {
+		t.Error("the clone restart recorded as writable since the load")
+	}
+	r.wantFlags("after the load", "1 1")
+}

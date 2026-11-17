@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -203,8 +204,9 @@ func (d *Driver) requarantine(ctx context.Context, h Host, nm proto.PeerCred, up
 	return withStartLock(res, d.lockStart(ctx, h)), nil
 }
 
-// persistReadOnly turns read_only and super_read_only on for good.
-func persistReadOnly(ctx context.Context, db *sql.DB) error {
+// persistReadOnly turns read_only and super_read_only on for good, on db
+// (a pool, or one connection whose session settings bound the statements).
+func persistReadOnly(ctx context.Context, db execer) error {
 	for _, q := range []string{"SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON"} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("karantina (%s): %w", q, err)
@@ -231,66 +233,93 @@ func localServerUUID(ctx context.Context, h Host) (string, error) {
 // last reading plus the time since predicts within one run of mysqld.
 const mysqlUptimeSlack = 2
 
-// guardQuarantined is GuardTick on a quarantined server, after the start
-// lock's guard. It acts only on a transition: MySQL answers after the
-// guard last saw it down, or it restarted since the last reading (its
-// Uptime fell short), which covers agent start, MySQL back after a
-// restart, and MySQL back after a quarantine written while it was down;
-// and after a rebuild load ended. It then PERSISTs read_only and
-// super_read_only on, before anything else, whether or not either is off
-// (which proves the start lock may go once the server is a replica:
-// startLockProved). While MySQL stays up it does nothing, so the rebuild
-// from the pinned source, which lifts read-only for its load
-// (liftReadOnly), is not undone. On a start it reports how MySQL came up
-// (monitor.quarantineStart: reportQuarantineStart); a restart a rebuild
-// load made is no such start, even when no tick saw it deferring.
-// monitor.quarantined (under the pinned source) is reported once a
-// quarantine written while MySQL was down takes effect, read-only or not,
-// and whenever the flags had to be put back. A MySQL that starts writable
-// (the start lock bypassed) stays so until the guard's next tick. The
-// caller holds promoteMu.
-func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
+// guardQuarantined is GuardTick on a quarantined server at now (the
+// driver's clock, for its relock reports), after the start lock's guard
+// (spec 5.2). Every round with MySQL answering it reads super_read_only,
+// read_only and init_file on one connection whose lock_wait_timeout bounds
+// its statements on the server (X4: a client's cancel does not). It writes
+// super_read_only, reports a start, or reports a relock only while it holds
+// the lift lock itself (tryGuard) and no load mark is active:
+//
+//  1. Transitions as before: MySQL answers after the guard last saw it
+//     down (agent start, MySQL back after a restart or after a quarantine
+//     written while it was down), it restarted since the last reading (its
+//     Uptime fell short), or a rebuild load ended (takeRecheck; a restart
+//     the load made is no start to report).
+//  2. Both flags on and no transition: done, the lock file untouched.
+//  3. Otherwise it tries the lift lock without waiting and looks at the
+//     load mark.
+//  4. Lock held elsewhere or a load marked: a legitimate lift may be open,
+//     so super_read_only is left alone; read_only off is put back (SET
+//     GLOBAL read_only = ON leaves super_read_only as it is), reported and
+//     recorded as writable since the load. A pending start is judged on
+//     the first round after the lift ended.
+//  5. Lock held by the guard and no load marked: both flags are PERSISTed
+//     on under the lock (which proves the start lock may go once the
+//     server is a replica: startLockProved); then a pending start is
+//     reported (monitor.quarantineStart: reportQuarantineStart), else a
+//     relock when a flag was read off. monitor.quarantined (under the
+//     pinned source) is reported once a quarantine written while MySQL was
+//     down takes effect, and whenever the flags had to be put back.
+//  6. A round that could not check (login refused, the flags not read, or
+//     a flag off and its relock failed under the lock, error 1205
+//     included) counts; three in a row are reported as unverified
+//     (unverifiedRound).
+//
+// The caller holds promoteMu.
+func (d *Driver) guardQuarantined(ctx context.Context, h Host, now time.Time) error {
 	db, err := h.Open(ctx)
 	if err != nil {
 		d.guard.up, d.qUp = false, false
+		if LoginRefused(err) && !d.expectingRefusal() {
+			d.unverifiedRound(h, now)
+		} else {
+			// MySQL down, or refused while a load's new accounts are
+			// expected: no round that could not check.
+			d.checkedRound()
+		}
 		return nil
 	}
 	defer db.Close()
+	d.loggedIn()
 	// MySQL answers after it did not (or at agent start): a start to
 	// report, unless it ends a rebuild load.
 	if !d.qUp {
 		d.qStartPending = true
 	}
 	d.qUp = true
-	// A rebuild load from the pinned source runs with read-only lifted:
-	// the guard leaves it be, and checks again once the load is over.
-	if src, first, ok := d.deferringToRebuild(); ok {
-		if first {
-			d.log("quarantine guard deferring: a rebuild load from the pinned source is running", "source", src)
-		}
-		d.guard.up = false
-		return nil
-	}
-	// A load just ended: read the flags again (its restore may have
-	// failed), whether or not a tick deferred during it. A restart the
-	// load made is not a start to report (cleared below, after the Uptime
-	// reading, which still predates the load).
+	// A load just ended: write the flags again (its restore may have
+	// failed), whether or not a round saw it. A restart the load made is
+	// not a start to report (cleared below, after the Uptime reading).
 	afterLoad := d.takeRecheck()
 	if afterLoad {
 		d.guard.up = false
 	}
-	// A restart between two ticks is a transition too.
+	// Every statement of the round runs on one connection, bounded on the
+	// server by its lock_wait_timeout.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		d.unverifiedRound(h, now)
+		return fmt.Errorf("buka sambungan MySQL: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET SESSION lock_wait_timeout = "+strconv.Itoa(guardLockWaitTimeout)); err != nil {
+		d.unverifiedRound(h, now)
+		return fmt.Errorf("SET SESSION lock_wait_timeout: %w", err)
+	}
+	// A restart between two rounds is a transition too.
 	var name string
 	var uptime int64
-	if err := db.QueryRowContext(ctx, "SHOW GLOBAL STATUS LIKE 'Uptime'").Scan(&name, &uptime); err != nil {
+	if err := conn.QueryRowContext(ctx, "SHOW GLOBAL STATUS LIKE 'Uptime'").Scan(&name, &uptime); err != nil {
+		d.unverifiedRound(h, now)
 		return fmt.Errorf("baca Uptime: %w", err)
 	}
 	// Same run of mysqld: Uptime grew by the (monotonic) time since the
 	// last reading, give or take a second of rounding each way.
-	now := time.Now()
-	expected := d.qUptime + int64(now.Sub(d.qUptimeAt)/time.Second)
+	at := time.Now()
+	expected := d.qUptime + int64(at.Sub(d.qUptimeAt)/time.Second)
 	sameRun := uptime >= expected-mysqlUptimeSlack
-	// Without an earlier reading (the first tick after this agent run
+	// Without an earlier reading (the first round after this agent run
 	// quarantined a live server) a short Uptime is no start.
 	if !sameRun && !d.qUptimeAt.IsZero() {
 		d.qStartPending = true
@@ -298,26 +327,71 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 	if afterLoad {
 		d.qStartPending = false
 	}
-	d.qUptime, d.qUptimeAt = uptime, now
-	if d.guard.up && sameRun {
-		return nil
-	}
+	d.qUptime, d.qUptimeAt = uptime, at
 	var sro, ro bool
 	var initFile sql.NullString
-	if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only, @@global.init_file").Scan(&sro, &ro, &initFile); err != nil {
+	if err := conn.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only, @@global.init_file").Scan(&sro, &ro, &initFile); err != nil {
+		d.unverifiedRound(h, now)
 		return fmt.Errorf("baca super_read_only: %w", err)
 	}
-	put := !sro || !ro
-	if err := persistReadOnly(ctx, db); err != nil {
+	off := !sro || !ro
+	if !off && d.guard.up && sameRun {
+		d.checkedRound()
+		return nil
+	}
+
+	release, free := d.liftGate().tryGuard()
+	loading := false
+	if src, first, ok := d.deferringToRebuild(); ok {
+		loading = true
+		if first {
+			d.log("quarantine guard deferring: a rebuild load from the pinned source is running", "source", src)
+		}
+	}
+	if !free || loading {
+		// A legitimate lift may be open: super_read_only is its own;
+		// read_only stays on throughout any lift.
+		release()
+		d.checkedRound()
+		d.guard.up = false
+		if ro {
+			return nil
+		}
+		d.noteWritableAfterLoad()
+		if _, err := conn.ExecContext(ctx, "SET GLOBAL read_only = ON"); err != nil {
+			return fmt.Errorf("pasang lagi read_only selagi baca-saja dibuka: %w", err)
+		}
+		d.warn("quarantined server: read_only was off during a lift of read-only; put back on")
+		d.relock(h, now, proto.QuarantineWhileRunning)
+		return nil
+	}
+	err = persistReadOnly(ctx, conn)
+	release()
+	if err != nil {
+		if off {
+			// Read off and not locked again: the server may be writable.
+			d.noteWritableAfterLoad()
+			d.unverifiedRound(h, now)
+		} else {
+			// Both read on: retried next round, it costs nothing.
+			d.checkedRound()
+		}
 		return err
 	}
+	d.checkedRound()
 	d.startLockProved = true
 	d.guard.up = true
+	if off {
+		d.noteWritableAfterLoad()
+	}
 	if d.qStartPending {
 		d.qStartPending = false
-		d.reportQuarantineStart(h, now, put, initFile.String, uptime)
+		d.reportQuarantineStart(h, at, off, initFile.String, uptime)
+	} else if off {
+		d.warn("quarantined server was writable while MySQL ran; read-only put back on")
+		d.relock(h, now, proto.QuarantineWhileRunning)
 	}
-	if !put && !d.quarantinePending {
+	if !off && !d.quarantinePending {
 		return nil
 	}
 	d.quarantinePending = false
@@ -325,9 +399,52 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host) error {
 	if host, port, ok := d.pins.Source(); ok {
 		src = net.JoinHostPort(host, fmt.Sprint(port))
 	}
-	d.warn("quarantine in effect: read-only on", "new_source", src, "flags_put_back", put)
+	d.warn("quarantine in effect: read-only on", "new_source", src, "flags_put_back", off)
 	d.qNotice = &proto.QuarantinedEvent{NewSource: src}
 	return nil
+}
+
+// Rounds of the guard that could not check the flags (guardQuarantined,
+// step 6): reported once unverifiedRounds come in a row, then at most once
+// per unverifiedRepeat while it lasts.
+const (
+	unverifiedRounds = 3
+	unverifiedRepeat = 10 * time.Minute
+)
+
+// unverifiedRound counts a round that could not check the flags; at
+// unverifiedRounds in a row, with the lift lock free, no load mark and no
+// refused logins expected, it reports unverified and records the server as
+// writable since the load. The caller holds promoteMu.
+func (d *Driver) unverifiedRound(h Host, now time.Time) {
+	d.qUnverified++
+	if d.qUnverified < unverifiedRounds {
+		return
+	}
+	if !d.qUnverifiedAt.IsZero() && now.Sub(d.qUnverifiedAt) < unverifiedRepeat {
+		return
+	}
+	release, free := d.liftGate().tryGuard()
+	release()
+	if !free || d.rebuildMarked() || d.expectingRefusal() {
+		return
+	}
+	d.qUnverifiedAt = now
+	d.noteWritableAfterLoad()
+	d.warn("quarantine guard could not check read-only for several rounds", "rounds", d.qUnverified)
+	d.relock(h, now, proto.QuarantineWhileUnverified)
+}
+
+// checkedRound ends a streak of rounds that could not check the flags.
+func (d *Driver) checkedRound() {
+	d.qUnverified, d.qUnverifiedAt = 0, time.Time{}
+}
+
+// relock reports a relock (relocked); nil reports nothing.
+func (d *Driver) relock(h Host, now time.Time, while string) {
+	if d.relocked != nil {
+		d.relocked(h, now, while)
+	}
 }
 
 // Resolver lookups of the seen check; tests replace them.
@@ -439,8 +556,13 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // never ends a quarantine with the leftover data unchecked. After a dump the agent also lists the
 // databases on the server now: one that was not copied from the source
 // (loadCopy.notCopied) keeps the quarantine and the approval, and the
-// command answers errNotReplaced. Once settled, the rebuild request and
-// approval are removed.
+// command answers errNotReplaced. The quarantine is kept with T7
+// (errWritableSinceLoad) when the guard found the server writable, or could
+// not check it, since the load began (writableAfterLoad), or when the
+// flags, read under the lift lock right before the end, are not both on;
+// while a dbpanel agent command holds that lock it answers T12
+// (ErrLiftHeldByCommand). Once settled, the rebuild request and approval
+// are removed.
 func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error {
 	d.promoteMu.Lock()
 	defer d.promoteMu.Unlock()
@@ -455,6 +577,14 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 				"succeeded in this agent run", "source", source)
 		}
 		return errNoLoadRecord
+	}
+	// The guard found the server writable, or could not check it, since
+	// the load began: what the load copied proves nothing any more.
+	if d.writableAfterLoad() {
+		if d.Logger != nil {
+			d.Logger.Warn("quarantine kept: the server was writable or unchecked since the load", "source", source)
+		}
+		return errWritableSinceLoad
 	}
 	if !copied.whole {
 		left, err := d.databasesNotCopied(ctx, copied)
@@ -478,6 +608,20 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 			return &errNotReplaced{source: source, names: left}
 		}
 	}
+	// Read the flags under the lift lock, right before the quarantine
+	// ends: a lift by a dbpanel agent command is waited for (T12, retried
+	// by the operator); anything but both on is T7.
+	release, free := d.liftGate().tryGuard()
+	defer release()
+	if !free {
+		return ErrLiftHeldByCommand
+	}
+	if err := d.flagsOnNow(ctx); err != nil {
+		if d.Logger != nil {
+			d.Logger.Warn("quarantine kept: read-only is not on as the settle reads it", "source", source, "err", err)
+		}
+		return errWritableSinceLoad
+	}
 	settled, err := d.pins.settleRebuilt(host, port)
 	if err != nil {
 		return fmt.Errorf("sumber replikasi sudah diatur, tetapi pin peran replica gagal ditulis: %w", err)
@@ -492,6 +636,30 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 	// not its files go (a replica never asks for them).
 	if err := d.pins.ClearRebuild(); err != nil && d.Logger != nil {
 		d.Logger.Error("rebuild approval files not removed after the rebuild", "err", err)
+	}
+	return nil
+}
+
+// flagsOnNow reads read_only and super_read_only; nil only when both are
+// on.
+func (d *Driver) flagsOnNow(ctx context.Context) error {
+	h, err := d.host()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, settleListTimeout)
+	defer cancel()
+	db, err := openAdmin(ctx, h)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var sro, ro bool
+	if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only").Scan(&sro, &ro); err != nil {
+		return fmt.Errorf("baca super_read_only: %w", err)
+	}
+	if !sro || !ro {
+		return fmt.Errorf("read_only=%v super_read_only=%v", ro, sro)
 	}
 	return nil
 }
@@ -524,6 +692,18 @@ var errNoLoadRecord = errors.New("sumber replikasi sudah diatur, tetapi server i
 	"catatan salinan data dari bangun ulang ini (misalnya karena agent dimulai ulang di tengah jalan). Mulai lagi Bangun " +
 	"ulang sebagai replika dari panel; tombol \"Ulangi dari tahap ini\" pada pekerjaan ini tidak cukup, karena salinan " +
 	"data harus diulang.")
+
+// errWritableSinceLoad (T7) keeps the quarantine when the server was
+// writable, or could not be checked, since the last load began, or its
+// flags are not both on as the settle reads them.
+var errWritableSinceLoad = errors.New("server ini sempat tidak terkunci selama atau sesudah salinan data; karantina " +
+	"tidak diakhiri. Mulai lagi Bangun ulang sebagai replika dari panel; tombol \"Ulangi dari tahap ini\" tidak " +
+	"cukup, karena salinan data harus diulang.")
+
+// guardLockWaitTimeout is the guard's session lock_wait_timeout in seconds:
+// its statements wait behind LOCK TABLES … WRITE or a running write at
+// most this long, on the server (X4); tests shorten it.
+var guardLockWaitTimeout = 10
 
 // settleListTimeout bounds the database listing settleRebuilt does under
 // promoteMu.

@@ -336,6 +336,9 @@ func (g *liftGate) acquire(ctx context.Context) (*os.File, error) {
 	}
 }
 
+// openGuardLock opens the lock file for tryGuard; tests count its calls.
+var openGuardLock = openLiftLock
+
 // tryGuard takes the lift lock for the quarantine guard through a
 // descriptor of its own, without waiting. free is true when it got the
 // lock and no lift of this process is open (or starting or ending);
@@ -349,7 +352,7 @@ func (g *liftGate) tryGuard() (release func(), free bool) {
 	if g.holders > 0 {
 		return none, false
 	}
-	f, err := openLiftLock(g.path, true)
+	f, err := openGuardLock(g.path, true)
 	if err != nil {
 		return none, false
 	}

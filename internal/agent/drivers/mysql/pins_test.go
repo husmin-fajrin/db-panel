@@ -95,6 +95,16 @@ func newPinRig(t *testing.T, h mysql.Host, dir string) *pinRig {
 	return &pinRig{t: t, reg: reg, d: d}
 }
 
+// readOnlyHost is a real MySQL with read_only and super_read_only on, as a
+// quarantined server is: the settle reads both flags before it ends a
+// quarantine.
+func readOnlyHost(t *testing.T) mysql.Host {
+	t.Helper()
+	inst := testmysql.Start(t, testmysql.Options{})
+	execAll(t, rootDB(t, inst), "SET GLOBAL read_only = ON", "SET GLOBAL super_read_only = ON")
+	return inst.Host()
+}
+
 func (r *pinRig) dispatch(cmd string, params any) proto.Response {
 	r.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -1173,6 +1183,8 @@ func TestSalvageFileCommandsByRole(t *testing.T) {
 // and logs it, once a load from that source succeeded in this agent run. A master refuses configureReplication and keeps its pin.
 func TestConfigureReplicationEndsQuarantine(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
+	// A quarantined server is read-only; the settle reads both flags.
+	execAll(t, rootDB(t, inst), "SET GLOBAL read_only = ON", "SET GLOBAL super_read_only = ON")
 	const src = "10.0.0.1:3306" // validSource's
 	dir := pinDir(t, "quarantined", src)
 	var logBuf bytes.Buffer
