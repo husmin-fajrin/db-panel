@@ -788,16 +788,27 @@ Yang sama pada ketiganya:
   bukan oleh root di dalam proses.
 - Pemilik dibaca dengan `lstat` atas direktori itu (uid dan gid; tanpa
   grup tambahan). Tidak ada lagi pencarian akun dari opsi `--user`.
-- **Penyelamatan tidak pernah ditolak karena ini.** Bila pemilik tidak
-  bisa dibaca atau pemiliknya root, agent berjalan seperti sekarang
-  (sebagai root) dan menulis satu baris peringatan (T19) di log
-  pekerjaan. Ini berlaku di semua peran.
+- **Bila pemiliknya root**, agent berjalan seperti sekarang (sebagai
+  root) dan menulis satu baris peringatan (T19) di log agent. Ini berlaku
+  di semua peran.
 - **Jalan balik ke root hanya bila proses tidak bisa dimulai** di bawah
   uid itu (fork, ganti uid, atau exec gagal). Program yang sudah mulai
   lalu gagal adalah Periksa/Amankan yang gagal dengan galatnya sendiri;
   ia **tidak pernah** diulang sebagai root. Tanpa aturan ini akun layanan
   yang menentukan kapan root menjalankan program itu (cukup dengan
   membuat program gagal sebagai uid-nya).
+- **Diubah saat pelaksanaan (2026-11-17, menunggu dibaca pemilik):** dua
+  keadaan yang bisa dipancing akun layanan **tidak** lagi berujung di
+  root; keduanya gagal dengan teksnya sendiri dan tidak mengubah data.
+  (a) Proses tidak bisa dimulai karena akun itu sudah mencapai batas
+  jumlah prosesnya (`EAGAIN`): teks T19b. (b) Pemilik direktori tidak
+  bisa dibaca (`lstat` gagal, misalnya direktori dipindahkan sesaat):
+  teks T19c. Kalimat lama "penyelamatan tidak pernah ditolak karena ini"
+  tidak berlaku untuk dua keadaan itu: Periksa/Amankan gagal dulu dan
+  bisa diulang.
+- Agent menunggu paling lama 2 detik sesudah program selesai atau
+  dihentikan sebelum melepas pipanya, supaya proses lain milik akun itu
+  yang ikut memegang pipa tidak menahan agent.
 - M3 mengizinkannya (pemasangan Ubuntu bawaan diukur; RHEL dibaca dari
   sumber kebijakan saja, lihat bagian 8).
 
@@ -884,7 +895,9 @@ belum ada, atau berbunyi lain, saat pemilik menyetujui rancangan ini.
 - T16 daftar tidak bisa dipastikan lengkap, akun kurang hak: `daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent tidak punya hak SHOW DATABASES. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
 - T17 daftar tidak bisa dipastikan lengkap, nama akun tidak didukung: `daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat karakter yang tidak didukung pemeriksaan ini (yang didukung: huruf, angka, garis bawah, titik, tanda hubung, dan tanda dolar). Jalankan di server ini: sudo dbpanel agent reset-admin, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
 - T18 sumber kanal replikasi bukan sumber yang dipin: `sumber kanal replikasi di server ini (%s) bukan sumber yang dipin (%s); perintah %s ditolak`
-- T19 baris peringatan di log pekerjaan saat program dijalankan root: `tidak bisa menjalankan sebagai akun layanan MySQL; dijalankan sebagai root`
+- T19 baris peringatan di log agent saat program dijalankan root: `tidak bisa menjalankan sebagai akun layanan MySQL; dijalankan sebagai root`
+- T19b galat bila akun layanan sudah mencapai batas jumlah proses: `akun layanan MySQL sudah mencapai batas jumlah proses, jadi program ini tidak bisa dijalankan sebagai akun itu dan tidak dijalankan sebagai root; periksa proses milik akun itu di server ini, lalu ulangi`
+- T19c galat bila pemilik direktori tidak bisa dibaca: `pemilik direktori <dir> tidak bisa dibaca (<sebab>), jadi program ini tidak dijalankan; periksa direktori itu di server ini, lalu ulangi`
 
 **Keluaran perintah CLI di server**
 
@@ -1182,11 +1195,18 @@ ya, dengan batas berikut.
 - **Skema sistem tidak dibandingkan saat karantina diakhiri** (SEC-213)
   dan **hak lewat peran (role) tidak dihitung bukti daftar lengkap**
   (SEC-214, gagal tertutup): keduanya menurut rancangan, tidak diubah.
-- **Bila pemilik direktori tidak bisa dibaca atau pemiliknya root**,
-  `mysqlbinlog` dan pembaca log tetap dijalankan root seperti sekarang
-  (5.5). Proses yang dijalankan sebagai pemilik direktori tidak membawa
-  grup tambahan akun itu. RHEL tidak diverifikasi di mesin sungguhan
-  (M3).
+- **Bila pemilik direktori itu root**, `mysqlbinlog` dan pembaca log
+  tetap dijalankan root seperti sekarang (5.5), juga bila direktori
+  milik root itu bisa ditulis grup atau pengguna lain. Proses yang
+  dijalankan sebagai pemilik direktori tidak membawa grup tambahan akun
+  itu, tetapi membawa grup direktori itu walau akun itu bukan anggotanya
+  (Debian: `/var/log/mysql` milik `mysql:adm`). RHEL tidak diverifikasi
+  di mesin sungguhan (M3).
+- **Akun layanan bisa menggagalkan Periksa/Amankan dan pembacaan log
+  galat** (memenuhi batas prosesnya, memindahkan direktori, atau
+  menghentikan program yang berjalan atas namanya); ia tidak bisa
+  membuat root yang menjalankannya. Pembacaan log galat yang ditahan
+  begitu memegang kunci penjaga paling lama 7 detik tiap putaran.
 - **Kata sandi root MySQL yang diketik** dikirim apa adanya ke apa pun
   yang mendengarkan di jalur socket, dan akun layanan menguasai direktori
   socket itu selagi mysqld mati.

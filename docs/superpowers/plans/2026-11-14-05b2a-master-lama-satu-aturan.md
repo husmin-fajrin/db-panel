@@ -1743,7 +1743,9 @@ Teks (dipakai persis):
 - Butir yang menunggu keputusan pemilik: perubahan spek 7.12–7.19 (teks
   T1b untuk Task 4/5/12; F-1 untuk Task 11; F-3 untuk Task 8; F-4 untuk
   Task 12) dan blok bertanda `--tanpa-cadangan` di Task 8. Task 3–7 tidak
-  bergantung pada jawaban itu kecuali teks T1b.
+  bergantung pada jawaban itu kecuali teks T1b. Ditambah saat
+  pelaksanaan: jalan balik ke root yang dipersempit di Task 7 (butir 8
+  "Perubahan selama pelaksanaan", spek 5.5).
 - Bila sebuah task menemukan bahwa keputusan spek tidak bisa bekerja
   seperti tertulis: berhenti, laporkan; jangan menambal.
 - Sesudah Task 15: tinjauan akhir seluruh cabang seperti biasa. Audit
@@ -2132,7 +2134,28 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    karena salinan selesai sebelum sempat dibatalkan. Pesan gagalnya kini
    menyebut keadaan pekerjaan dan galat pemeriksaan terakhir, dan
    tunggunya berhenti begitu pekerjaan selesai; yang diuji tidak
-   berubah.
+   berubah. Sebabnya ternyata uji memeriksa tiap 200 milidetik sedangkan
+   tahap salin berkas kadang hanya 80 milidetik; kini tiap 10 milidetik.
+8. Task 7, jalan balik ke root dipersempit (2026-11-17, mengubah spek
+   5.5; menunggu dibaca pemilik). Akun layanan MySQL bisa memancing dua
+   keadaan yang menurut spek berujung di root, jadi keduanya kini gagal
+   dengan teksnya sendiri dan tidak dijalankan root: (a) proses tidak
+   bisa dimulai karena akun itu sudah mencapai batas jumlah prosesnya,
+   teks baru T19b; (b) pemilik direktori tidak bisa dibaca, teks baru
+   T19c (uji `TestServiceCredentialMissingFallsBackToRoot` diganti
+   `TestServiceCredentialUnreadableIsNotRunAsRoot` dan
+   `TestServiceCredentialRootOwnedSameResult`). Jalan ke root tersisa
+   bila direktori milik root, atau proses tidak bisa dimulai karena
+   sebab lain. Agent juga menunggu paling lama 2 detik sebelum melepas
+   pipa program yang dijalankan sebagai akun itu, supaya proses lain
+   milik akun itu tidak menahan penjaga. Teks T19b dan T19c ada di spek
+   5.8 dan masuk daftar Task 15.
+9. Task 7, tempat T19 (2026-11-17). `mysql.leftover`, `mysql.salvage`
+   dan `mysql.binlogTail` adalah perintah langsung tanpa log pekerjaan,
+   jadi T19 ditulis ke log agent (sekali tiap perintah; di penjaga
+   paling sering sekali semenit), bukan ke log pekerjaan di panel.
+   Berkas uji `export_test.go` dan `salvage_test.go` ikut berubah
+   (di luar daftar Files; hanya pendukung uji).
 
 ## Teks baru untuk dibaca pemilik
 
