@@ -389,7 +389,9 @@ func TestCloneCancel(t *testing.T) {
 	master := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
 	replica := testmysql.Start(t, testmysql.Options{ExtraArgs: cloneArgs})
 	replUser(t, master)
-	// 64 MB that does not compress, so the copy outlasts the cancel.
+	// 64 MB that does not compress, so the copy outlasts the cancel: with
+	// clone_max_data_bandwidth = 1 (checked by MySQL about once a second)
+	// the redo copy after FILE COPY takes a second or more.
 	conn, err := rootDB(t, master).Conn(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -410,8 +412,10 @@ func TestCloneCancel(t *testing.T) {
 
 	rig := rootRig(replica)
 	id := rig.start(t, "mysql.cloneFrom", cloneParams(master))
-	// The wait ends early when the job has ended; the failure says why it
-	// ran out: the job's state and error, and the last poll error.
+	// The throttle lets the first burst through, so FILE COPY may last
+	// only about 80 ms (measured 8.0.46): it is polled every 10 ms. The
+	// wait ends early when the job has ended; the failure says why it ran
+	// out: the job's state and error, and the last poll error.
 	deadline := time.Now().Add(time.Minute)
 	var pollErr error
 	for {
@@ -427,7 +431,7 @@ func TestCloneCancel(t *testing.T) {
 			t.Fatalf("the clone never reached FILE COPY (job ended: %v, state %q, error %q; last poll error: %v)",
 				ended, st.State, st.Error, pollErr)
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !rig.runner.Cancel(id) {
 		t.Fatal("Cancel found no running job")
