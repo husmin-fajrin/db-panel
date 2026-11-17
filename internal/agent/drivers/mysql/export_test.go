@@ -670,3 +670,25 @@ func (d *Driver) RecordRelock(t time.Time, while string) error {
 
 // HasRelockedHook is whether Register wired a relock report.
 func (d *Driver) HasRelockedHook() bool { return d.relocked != nil }
+
+// SourceDatabases lists the non-system databases of the server p logs in
+// to, as a full dump's load lists its source (sourceDatabases), with h's
+// mysql client.
+func SourceDatabases(ctx context.Context, h Host, p proto.ConnectParams) ([]string, error) {
+	loadBin, err := findClientTool(h.Layout().MysqldPath, "mysql")
+	if err != nil {
+		return nil, err
+	}
+	f, err := writeDefaultsFile(h, p, "", 0, clientTLS{})
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(f)
+	return sourceDatabases(ctx, h, loadBin, f, clientTLS{})
+}
+
+// SourceListQuery is the statement a source's listing of databases runs.
+const SourceListQuery = sourceListQuery
+
+// ErrSecondListFailed is T11.
+var ErrSecondListFailed = errSecondListFailed

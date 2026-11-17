@@ -1010,6 +1010,65 @@ func TestDumpFailsBeforeChangingData(t *testing.T) {
 		t.Errorf("dump with a refused local account = %+v", d)
 	}
 	intact("refused local account")
+
+	// A rebuild's full dump cannot list the source's databases before its
+	// load.
+	src := "127.0.0.1:" + strconv.Itoa(master.Port)
+	dir := pinDir(t, "quarantined", src)
+	approveRebuild(t, dir, src)
+	creds := &memCreds{p: proto.ConnectParams{User: "root"}}
+	hook := &hookHost{Host: replica.HostWith(creds), fail: func(int) bool { return true }}
+	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
+	qrig := &snapshotRig{reg: commands.NewRegistry(), runner: jobs.NewRunner(jev, slog.New(slog.DiscardHandler)), events: jev}
+	(&mysql.Driver{Host: hook, Creds: creds, Jobs: qrig.runner, PinDir: dir}).Register(qrig.reg)
+	d = qrig.run(t, "mysql.dumpFrom", dumpParams(master))
+	if d.OK || !strings.HasPrefix(d.Error, "daftar database master baru tidak bisa dibaca; data di server ini belum diubah: ") {
+		t.Errorf("rebuild dump whose first source listing failed = %+v", d)
+	}
+	if n := hook.listings(); n != 1 {
+		t.Errorf("source listings = %d, want 1", n)
+	}
+	intact("first source listing unreadable")
+}
+
+// TestSourceDatabasesOddNames: the source's listing, read with the dump
+// account, gives back names with spaces, backticks, quotes, upper case and
+// non-ASCII letters whole, without the system schemas; a listing larger
+// than 1 MiB is refused.
+func TestSourceDatabasesOddNames(t *testing.T) {
+	master := testmysql.Start(t, testmysql.Options{})
+	mdb := rootDB(t, master)
+	dumpUser(t, mdb)
+	names := []string{"with space", "back`tick", "it's", `say "hi"`, "Besar", "rumah_sakit_é", "数据库"}
+	for _, n := range names {
+		execAll(t, mdb, "CREATE DATABASE `"+strings.ReplaceAll(n, "`", "``")+"`")
+	}
+	p := proto.ConnectParams{User: "dumper", Password: dumpPassword, Host: "127.0.0.1", Port: master.Port}
+	got, err := mysql.SourceDatabases(context.Background(), master.Host(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := slices.Sorted(slices.Values(names))
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("source databases = %q\nwant %q", got, want)
+	}
+
+	if _, err := mysql.SourceDatabases(context.Background(), &floodHost{Host: master.Host()}, p); err == nil ||
+		!strings.Contains(err.Error(), "daftar database master lebih dari 1048576 byte") {
+		t.Errorf("listing of more than 1 MiB: err = %v, want it refused", err)
+	}
+}
+
+// floodHost prints more than 1 MiB of valid listing lines after what each
+// program prints.
+type floodHost struct{ mysql.Host }
+
+func (h *floodHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
+	if err := h.Host.Exec(ctx, stdin, stdout, name, args...); err != nil {
+		return err
+	}
+	_, err := io.WriteString(stdout, strings.Repeat("6162\n", (1<<20)/5+1))
+	return err
 }
 
 // adminRig is a rig over inst whose stored admin account is adm@localhost

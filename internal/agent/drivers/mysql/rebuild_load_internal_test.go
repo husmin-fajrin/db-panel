@@ -41,6 +41,59 @@ func TestNotCopied(t *testing.T) {
 			t.Errorf("%s: notCopied = %q, want %q", c.name, got, c.want)
 		}
 	}
+
+	// A dump of every database also accounts only for what the source
+	// listed (before or after its load); a named dump and a CLONE do not
+	// look at the source's listing.
+	present = []string{"a", "B", "c"}
+	for _, c := range []struct {
+		name string
+		c    loadCopy
+		want string
+	}{
+		{"full dump", loadCopy{full: true, source: []string{"a", "b"}}, "c"},
+		{"full dump, case folded", loadCopy{full: true, source: []string{"A", "b", "C"}}, ""},
+		{"full dump and before", loadCopy{full: true, source: []string{"a", "b", "c"}, before: []string{"a"}}, "a"},
+		{"full dump, empty source", loadCopy{full: true}, "B,a,c"},
+		{"named", loadCopy{named: []string{"a", "b", "c"}, source: []string{"a"}}, ""},
+		{"clone", loadCopy{whole: true, source: []string{"a"}}, ""},
+	} {
+		if got := strings.Join(c.c.notCopied(present), ","); got != c.want {
+			t.Errorf("%s: notCopied = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestOnSource: a name is on the source's listing without regard to case.
+func TestOnSource(t *testing.T) {
+	c := loadCopy{full: true, source: []string{"Toko", "rumah_sakit_é"}}
+	for name, want := range map[string]bool{"toko": true, "TOKO": true, "rumah_sakit_é": true, "kecil": false, "": false} {
+		if got := c.onSource(name); got != want {
+			t.Errorf("onSource(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestSourceSeenUnion: the listings before and after a full dump's load
+// are kept together, a name in both (in any case) once; done stores them
+// for a full dump only.
+func TestSourceSeenUnion(t *testing.T) {
+	r := &rebuildLoad{}
+	m := &loadMark{r: r, source: "10.0.0.1:3306", listed: true}
+	m.sourceSeen([]string{"toko", "kecil"})
+	m.sourceSeen([]string{"Toko", "sesudah"})
+	m.done(false, nil)
+	if !r.copied.full || strings.Join(r.copied.source, ",") != "kecil,sesudah,toko" {
+		t.Errorf("full dump record = %+v, want full with kecil,sesudah,toko", r.copied)
+	}
+	m.done(false, []string{"toko"})
+	if r.copied.full || r.copied.source != nil {
+		t.Errorf("named dump record = %+v, want no source listing", r.copied)
+	}
+	m.done(true, nil)
+	if r.copied.full || r.copied.source != nil {
+		t.Errorf("clone record = %+v, want no source listing", r.copied)
+	}
 }
 
 // TestListingProof: which SHOW GRANTS rows (read for the account by name,

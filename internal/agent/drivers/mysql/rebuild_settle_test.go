@@ -2,9 +2,14 @@ package mysql_test
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +35,13 @@ type settleRig struct {
 
 func newSettleRig(t *testing.T, oldDatabases ...string) *settleRig {
 	t.Helper()
+	return newSettleRigHooked(t, nil, oldDatabases...)
+}
+
+// newSettleRigHooked is newSettleRig with the driver's host going through
+// hook (nil: none), which wraps the target's host.
+func newSettleRigHooked(t *testing.T, hook *hookHost, oldDatabases ...string) *settleRig {
+	t.Helper()
 	master := testmysql.Start(t, testmysql.Options{})
 	target := testmysql.Start(t, testmysql.Options{})
 	mdb := rootDB(t, master)
@@ -50,7 +62,12 @@ func newSettleRig(t *testing.T, oldDatabases ...string) *settleRig {
 	jev := &jobEvents{done: make(chan proto.JobDone, 4)}
 	runner := jobs.NewRunner(jev, slog.New(slog.DiscardHandler))
 	snap := &snapshotRig{reg: commands.NewRegistry(), runner: runner, events: jev}
-	d := &mysql.Driver{Host: target.HostWith(creds), Creds: creds, Jobs: runner, PinDir: dir}
+	var h mysql.Host = target.HostWith(creds)
+	if hook != nil {
+		hook.Host = h
+		h = hook
+	}
+	d := &mysql.Driver{Host: h, Creds: creds, Jobs: runner, PinDir: dir}
 	d.Register(snap.reg)
 	approveRebuild(t, dir, src)
 	return &settleRig{pinRig: &pinRig{t: t, reg: snap.reg, d: d}, snap: snap, creds: creds, master: master, target: target, dir: dir, src: src}
@@ -141,6 +158,132 @@ func TestRebuildDumpOverOldDatabaseKeepsQuarantine(t *testing.T) {
 	if role := pinFile(t, r.dir, mysql.RoleFile); role != "quarantined" {
 		t.Errorf("role pin = %q, want quarantined", role)
 	}
+}
+
+// hookHost is a host whose program runs can be watched and failed: every
+// listing of the source's databases is counted, onList runs before
+// listing n (from 1) and fail fails it; onLoad runs as the dump's load
+// (mysql reading the dump) starts. The hooks run on the job's goroutine.
+type hookHost struct {
+	mysql.Host
+	onList func(n int)
+	fail   func(n int) bool
+	onLoad func()
+
+	mu    sync.Mutex
+	lists int
+}
+
+func (h *hookHost) Exec(ctx context.Context, stdin io.Reader, stdout io.Writer, name string, args ...string) error {
+	switch {
+	case slices.Contains(args, mysql.SourceListQuery):
+		h.mu.Lock()
+		h.lists++
+		n := h.lists
+		h.mu.Unlock()
+		if h.onList != nil {
+			h.onList(n)
+		}
+		if h.fail != nil && h.fail(n) {
+			return fmt.Errorf("%s gagal: listing %d failed by the test", name, n)
+		}
+	case stdin != nil && filepath.Base(name) == "mysql" && h.onLoad != nil:
+		h.onLoad()
+	}
+	return h.Host.Exec(ctx, stdin, stdout, name, args...)
+}
+
+// listings is how many source listings ran.
+func (h *hookHost) listings() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lists
+}
+
+// TestRebuildFullDumpRefusesDatabaseCreatedDuringLoad: while a full dump
+// loads (read-only lifted), an account with SUPER creates a database. It
+// is on neither listing of the source, so it was not copied from it: the
+// settle refuses naming it and the quarantine stays.
+func TestRebuildFullDumpRefusesDatabaseCreatedDuringLoad(t *testing.T) {
+	hook := &hookHost{}
+	r := newSettleRigHooked(t, hook)
+	tdb := rootDB(t, r.target)
+	hook.onLoad = func() {
+		if _, err := tdb.Exec("CREATE DATABASE liar"); err != nil {
+			t.Errorf("CREATE DATABASE liar during the load: %v", err)
+		}
+	}
+	r.dump()
+	if n := hook.listings(); n != 2 {
+		t.Errorf("source listings = %d, want 2 (before and after the load)", n)
+	}
+	r.wantSettleRefused("a database created during the load", "server ini masih punya database yang tidak disalin dari sumber "+
+		r.src+" (liar); karantina tidak diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak "+
+		"karena database itu tidak ada di master baru, lihat README, bagian \"Database yang tidak ada di master baru\".")
+}
+
+// TestSecondSourceListRetriedThreeTimes: the listing after the load fails
+// twice, then works: the load counts, and the record holds both listings
+// together. Between them the source dropped kecil (first listing only) and
+// gained sesudah (second only); with both on this server the settle ends
+// the quarantine.
+func TestSecondSourceListRetriedThreeTimes(t *testing.T) {
+	hook := &hookHost{fail: func(n int) bool { return n == 2 || n == 3 }}
+	r := newSettleRigHooked(t, hook)
+	mdb := rootDB(t, r.master)
+	hook.onList = func(n int) {
+		if n != 2 {
+			return
+		}
+		for _, q := range []string{"DROP DATABASE kecil", "CREATE DATABASE sesudah"} {
+			if _, err := mdb.Exec(q); err != nil {
+				t.Errorf("%s on the source: %v", q, err)
+			}
+		}
+	}
+	r.dump()
+	if n := hook.listings(); n != 4 {
+		t.Errorf("source listings = %d, want 4 (one before, three after the load)", n)
+	}
+	if !r.d.LoadedFrom("127.0.0.1", r.master.Port) {
+		t.Fatal("no load record after the listing worked on its third try")
+	}
+	execAll(t, rootDB(t, r.target), "SET GLOBAL super_read_only = OFF", "CREATE DATABASE IF NOT EXISTS kecil",
+		"CREATE DATABASE sesudah", "SET GLOBAL super_read_only = ON")
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master)))
+	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
+		t.Errorf("role pin = %q, want replica", role)
+	}
+}
+
+// TestSecondSourceListFailureFailsCopyStep: the listing after the load
+// fails three times: the copy step fails with T11, no load record is kept,
+// and both read-only flags are on.
+func TestSecondSourceListFailureFailsCopyStep(t *testing.T) {
+	hook := &hookHost{fail: func(n int) bool { return n > 1 }}
+	r := newSettleRigHooked(t, hook)
+	d := r.snap.run(t, "mysql.dumpFrom", dumpParams(r.master))
+	if d.OK || d.Error != mysql.ErrSecondListFailed.Error() {
+		t.Fatalf("dumpFrom{all} = %+v\nwant error %q", d, mysql.ErrSecondListFailed.Error())
+	}
+	if d.Error != `salinan selesai dimuat, tetapi daftar database master baru tidak bisa dibaca sesudahnya, jadi salinan ini `+
+		`tidak dihitung; tekan "Ulangi dari tahap ini"` {
+		t.Errorf("T11 = %q", d.Error)
+	}
+	if n := hook.listings(); n != 4 {
+		t.Errorf("source listings = %d, want 4 (one before, three after the load)", n)
+	}
+	if r.d.LoadedFrom("127.0.0.1", r.master.Port) {
+		t.Error("a load whose second listing failed was recorded")
+	}
+	var ro, sro int
+	if err := rootDB(t, r.target).QueryRow("SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only").Scan(&ro, &sro); err != nil {
+		t.Fatal(err)
+	}
+	if ro != 1 || sro != 1 {
+		t.Errorf("flags = %d %d, want 1 1", ro, sro)
+	}
+	r.wantSettleRefused("after the failed listing", mysql.ErrNoLoadRecord.Error())
 }
 
 // tick runs one guard round of the rig's driver.

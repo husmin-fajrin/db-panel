@@ -50,11 +50,16 @@ type rebuildLoad struct {
 // A CLONE replaces the whole data directory. A dump only adds what it
 // loads: before lists the non-system databases present when its load
 // began (each of them keeps whatever tables the dump did not overwrite)
-// and named the databases it was asked for (empty: every database).
+// and named the databases it was asked for (empty: every database). A
+// dump of every database (full) also records source: the non-system
+// databases the source listed before the load and after it, together
+// (sourceSeen).
 type loadCopy struct {
 	whole  bool
 	before []string
 	named  []string
+	full   bool
+	source []string
 }
 
 // loadMark is the handle of one snapshot job on the driver's mark; nil
@@ -66,6 +71,9 @@ type loadMark struct {
 	// (before); a dump without that record never counts as a copy.
 	listed bool
 	before []string
+	// seen: the source's non-system databases, every listing of a full
+	// dump together (sourceSeen).
+	seen []string
 }
 
 // rebuildMark is the mark for a snapshot from host:port: a handle only when
@@ -120,10 +128,26 @@ func (m *loadMark) listBefore(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// sourceSeen adds names, a listing of the source's non-system databases
+// taken by a full dump, to what the mark's load records as on the source;
+// nil m records nothing.
+func (m *loadMark) sourceSeen(names []string) {
+	if m == nil {
+		return
+	}
+	for _, name := range names {
+		if !hasName(m.seen, name) {
+			m.seen = append(m.seen, name)
+		}
+	}
+	slices.Sort(m.seen)
+}
+
 // done records that the snapshot job copied the data from the mark's
 // source (the job succeeded): whole for a CLONE, else a dump of named
-// (empty: every database), which counts only once its load recorded the
-// databases present before it (listBefore).
+// (empty: every database, with the source's databases sourceSeen
+// recorded), which counts only once its load recorded the databases
+// present before it (listBefore).
 func (m *loadMark) done(whole bool, named []string) {
 	if m == nil {
 		return
@@ -134,7 +158,11 @@ func (m *loadMark) done(whole bool, named []string) {
 		return
 	}
 	m.r.loaded = m.source
-	m.r.copied = loadCopy{whole: whole, before: m.before, named: slices.Clone(named)}
+	full := !whole && len(named) == 0
+	m.r.copied = loadCopy{whole: whole, before: m.before, named: slices.Clone(named), full: full}
+	if full {
+		m.r.copied.source = slices.Clone(m.seen)
+	}
 }
 
 // adminReplaced records that the load replaced this server's accounts
@@ -223,24 +251,31 @@ func (e *errNotReplaced) Error() string {
 
 // notCopied lists the server's non-system databases now (present) against
 // what a dump load c copied: a database that was there before the load
-// began, or, for a dump of named databases, one not among them, was not
+// began, or, for a dump of named databases, one not among them, or, for a
+// dump of every database, one the source did not list (onSource), was not
 // copied from the source. Names compare without case, as
 // lower_case_table_names may fold them. A CLONE leaves nothing.
 func (c loadCopy) notCopied(present []string) []string {
 	if c.whole {
 		return nil
 	}
-	has := func(list []string, name string) bool {
-		return slices.ContainsFunc(list, func(n string) bool { return strings.EqualFold(n, name) })
-	}
 	var out []string
 	for _, name := range present {
-		if has(c.before, name) || (len(c.named) > 0 && !has(c.named, name)) {
+		if hasName(c.before, name) || (len(c.named) > 0 && !hasName(c.named, name)) || (c.full && !c.onSource(name)) {
 			out = append(out, name)
 		}
 	}
 	slices.Sort(out)
 	return out
+}
+
+// onSource reports whether the source listed name (without case) before
+// or after a full dump's load.
+func (c loadCopy) onSource(name string) bool { return hasName(c.source, name) }
+
+// hasName reports whether list holds name, compared without case.
+func hasName(list []string, name string) bool {
+	return slices.ContainsFunc(list, func(n string) bool { return strings.EqualFold(n, name) })
 }
 
 // errListIncomplete refuses to rely on a database listing that cannot be

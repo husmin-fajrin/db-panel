@@ -1,8 +1,10 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,6 +140,18 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 		return res, err
 	}
 
+	// A rebuild's full dump records which databases the source has: listed
+	// once now and again after the load (spec 5.3). A database here that is
+	// on neither listing was not copied from it (loadCopy.notCopied).
+	full := mark != nil && len(p.Databases) == 0
+	if full {
+		names, err := sourceDatabases(ctx, h, loadBin, srcFile, srcTLS)
+		if err != nil {
+			return res, fmt.Errorf("daftar database master baru tidak bisa dibaca; data di server ini belum diubah: %w", err)
+		}
+		mark.sourceSeen(names)
+	}
+
 	// From here on local data changes.
 	if rs != nil {
 		if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
@@ -169,6 +184,11 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	if err != nil {
 		return res, err
 	}
+	if full {
+		if err := listSourceAgain(j, h, loadBin, srcFile, srcTLS, mark); err != nil {
+			return res, err
+		}
+	}
 	if len(p.Databases) == 0 && storedLoginRefused(ctx, h) {
 		// Every database includes the mysql schema: the master's accounts
 		// replaced this server's (the dump ends with FLUSH PRIVILEGES), and
@@ -193,6 +213,81 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	res.TookMs = time.Since(start).Milliseconds()
 	j.Logf("info", "dump loaded: %d bytes, gtid %s", res.Bytes, res.GTIDExecuted)
 	return res, nil
+}
+
+// sourceListTries is how often the source's databases are listed after a
+// full dump's load before the copy is given up; sourceListPause is the
+// pause between tries.
+const (
+	sourceListTries = 3
+	sourceListPause = time.Second
+)
+
+// errSecondListFailed is T11: the source's databases could not be listed
+// after the load, so the load does not count.
+var errSecondListFailed = errors.New(`salinan selesai dimuat, tetapi daftar database master baru tidak bisa dibaca ` +
+	`sesudahnya, jadi salinan ini tidak dihitung; tekan "Ulangi dari tahap ini"`)
+
+// listSourceAgain lists the source's databases after a full dump's load
+// into mark, trying sourceListTries times; errSecondListFailed when every
+// try failed.
+func listSourceAgain(j *jobs.Job, h Host, loadBin, srcFile string, tls clientTLS, mark *loadMark) error {
+	ctx := j.Context()
+	for try := 1; ; try++ {
+		names, err := sourceDatabases(ctx, h, loadBin, srcFile, tls)
+		if err == nil {
+			mark.sourceSeen(names)
+			return nil
+		}
+		j.Logf("warn", "listing the source's databases after the load failed (try %d of %d): %v", try, sourceListTries, err)
+		if try == sourceListTries {
+			return errSecondListFailed
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sourceListPause):
+		}
+	}
+}
+
+// maxSourceListOutput bounds what the source's listing of databases may
+// print.
+const maxSourceListOutput = 1 << 20
+
+// sourceListQuery lists every database by its name's bytes in hex (plan
+// evidence M2): one upper-case hex line each, nothing to unquote.
+const sourceListQuery = "SELECT HEX(schema_name) FROM information_schema.schemata"
+
+// sourceDatabases lists the source's non-system databases with the mysql
+// client loadBin, logging in with the dump's option file srcFile and TLS
+// options tls. The names never pass through a shell.
+func sourceDatabases(ctx context.Context, h Host, loadBin, srcFile string, tls clientTLS) ([]string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var out bytes.Buffer
+	lw := &limitWriter{w: &out, max: maxSourceListOutput, stop: cancel}
+	args := append(append([]string{"--defaults-file=" + srcFile}, tls.args()...), "-N", "-B", "-e", sourceListQuery)
+	err := h.Exec(ctx, nil, lw, loadBin, args...)
+	if lw.over {
+		return nil, fmt.Errorf("daftar database master lebih dari %d byte", maxSourceListOutput)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for line := range strings.Lines(out.String()) {
+		line = strings.TrimSuffix(line, "\n")
+		name, err := hex.DecodeString(line)
+		if err != nil || len(name) == 0 {
+			return nil, fmt.Errorf("daftar database master berisi baris yang tidak dikenali: %q", line)
+		}
+		if !systemDatabases[strings.ToLower(string(name))] {
+			names = append(names, string(name))
+		}
+	}
+	slices.Sort(names)
+	return names, nil
 }
 
 // storedLoginRefused reports whether a fresh login with the stored admin
