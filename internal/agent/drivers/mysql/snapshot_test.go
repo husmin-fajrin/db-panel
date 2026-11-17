@@ -410,15 +410,22 @@ func TestCloneCancel(t *testing.T) {
 
 	rig := rootRig(replica)
 	id := rig.start(t, "mysql.cloneFrom", cloneParams(master))
+	// The wait ends early when the job has ended; the failure says why it
+	// ran out: the job's state and error, and the last poll error.
 	deadline := time.Now().Add(time.Minute)
+	var pollErr error
 	for {
 		var n int
-		_ = rdb.QueryRow("SELECT COUNT(*) FROM performance_schema.clone_progress WHERE STAGE = 'FILE COPY' AND STATE = 'In Progress'").Scan(&n)
+		if err := rdb.QueryRow("SELECT COUNT(*) FROM performance_schema.clone_progress WHERE STAGE = 'FILE COPY' AND STATE = 'In Progress'").Scan(&n); err != nil {
+			pollErr = err
+		}
 		if n > 0 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the clone never reached FILE COPY")
+		st, _ := rig.runner.Status(id)
+		if ended := st.FinishedAt != nil; ended || time.Now().After(deadline) {
+			t.Fatalf("the clone never reached FILE COPY (job ended: %v, state %q, error %q; last poll error: %v)",
+				ended, st.State, st.Error, pollErr)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
