@@ -478,6 +478,9 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
 					msg = append(msg, "database berikut tidak ada di daftar yang disetujui saat Resync ulang dimulai dan "+
 						"akan ikut dihapus lalu disalin ulang dari master: "+strings.Join(list, ", "))
+				case len(list) > 0 && jr.st.RebuildOldMaster:
+					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
+					msg = append(msg, fmt.Sprintf(wipeOldMasterText, strings.Join(list, ", ")))
 				case len(list) > 0:
 					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
 					msg = append(msg, "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: "+
@@ -588,6 +591,10 @@ func (jr *jobRun) leftoverDatabases(ctx context.Context) ([]string, error) {
 	slices.Sort(out)
 	return out, nil
 }
+
+// wipeOldMasterText (T9) asks to approve the deletion of an old master's
+// databases its rebuild copies again from the new master.
+const wipeOldMasterText = "database berikut di master lama ini akan dihapus lalu disalin ulang dari master baru: %s"
 
 // hashList binds a confirmation to the exact list shown.
 func hashList(list []string) string {

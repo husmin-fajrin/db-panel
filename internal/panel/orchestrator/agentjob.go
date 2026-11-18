@@ -133,15 +133,17 @@ func (jr *jobRun) handleEvents(serverID int64, agentID string, result any) (bool
 		}
 		switch ev.Type {
 		case proto.EventJobProgress:
+			var p proto.JobProgress
+			read := json.Unmarshal(ev.Payload, &p) == nil
 			// The copy job reports progress only once local data began to
-			// change (dump: after the binary log reset; CLONE: right before
-			// CLONE INSTANCE), see RebuildCopyState.
-			if jr.copyWatch && !jr.st.CopyBegan {
+			// change (dump: after the binary log reset), see
+			// RebuildCopyState. CLONE reports 0% right before CLONE
+			// INSTANCE, which is no proof yet; above 0% is (N-H4).
+			if jr.copyWatch && !jr.st.CopyBegan && (jr.st.AgentCmd != "mysql.cloneFrom" || read && p.Percent > 0) {
 				jr.st.CopyBegan = true
 				jr.save()
 			}
-			var p proto.JobProgress
-			if json.Unmarshal(ev.Payload, &p) == nil {
+			if read {
 				jr.setStep(store.StepRunning, fmt.Sprintf("%s (%d%%)", p.Message, p.Percent))
 			}
 		case proto.EventJobLog:

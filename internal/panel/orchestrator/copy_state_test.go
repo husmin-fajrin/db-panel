@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,7 @@ func TestCopyStateEvidence(t *testing.T) {
 	g := rebuildRig(t)
 	g.m.job("mysql.cloneFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
 		j.Progress(0, "CLONE dimulai")
+		j.Progress(3, "CLONE tahap FILE COPY: 12 MB")
 		time.Sleep(50 * time.Millisecond)
 		return nil, errors.New("CLONE gagal di tengah")
 	})
@@ -100,6 +102,7 @@ func TestCopyStateEarlierEvidenceCounts(t *testing.T) {
 	g := rebuildRig(t)
 	g.m.job("mysql.cloneFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
 		j.Progress(0, "CLONE dimulai")
+		j.Progress(3, "CLONE tahap FILE COPY: 12 MB")
 		time.Sleep(50 * time.Millisecond)
 		return nil, errors.New("CLONE gagal di tengah")
 	})
@@ -149,6 +152,8 @@ func TestCopyStateStoredJobs(t *testing.T) {
 		{"new shape, evidence", `{"rebuild_old_master":true,"rebuild_promotion_id":PROM,"copy_sent":true,"copy_began":true}`, copyIdx, false, CopyStarted},
 		{"new shape, clock stepped back", `{"rebuild_old_master":true,"rebuild_promotion_id":PROM,"copy_sent":true,"copy_began":true}`, copyIdx, true, CopyStarted},
 		{"new shape, another promotion", `{"rebuild_old_master":true,"rebuild_promotion_id":999999,"copy_began":true}`, copyIdx + 1, false, CopyNotStarted},
+		// N-H3: sent counts as uncertain whatever its promotion number.
+		{"sent without a promotion number", `{"rebuild_old_master":true,"copy_sent":true}`, copyIdx, false, CopyUncertain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := rebuildRig(t)
@@ -194,4 +199,119 @@ func replacePROM(s string, id int64) string {
 func itoa(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// TestCopyStateCloneNeedsRealProgress (N-H4): for CLONE, a progress of 0%
+// ("CLONE dimulai", sent right before CLONE INSTANCE) is no proof that the
+// copy began; progress above 0 or the copy's result is. A dump's first
+// progress is sent after its binary log reset, so it stays proof.
+func TestCopyStateCloneNeedsRealProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		fn     func(j *jobs.Job, _ json.RawMessage) (any, error)
+		after  func(g *promoteRig) // scripts a failure after the copy
+		want   CopyState
+	}{
+		{"clone at 0 percent", "clone", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+			j.Progress(0, "CLONE dimulai")
+			time.Sleep(50 * time.Millisecond)
+			return nil, errors.New("CLONE gagal")
+		}, nil, CopyUncertain},
+		{"clone above 0 percent", "clone", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+			j.Progress(0, "CLONE dimulai")
+			j.Progress(1, "CLONE tahap FILE COPY: 3 MB")
+			time.Sleep(50 * time.Millisecond)
+			return nil, errors.New("CLONE gagal")
+		}, nil, CopyStarted},
+		{"clone result", "clone", func(*jobs.Job, json.RawMessage) (any, error) {
+			return proto.SnapshotResult{Method: "clone", Bytes: 300, GTIDExecuted: masterGTID}, nil
+		}, func(g *promoteRig) {
+			// Fails once the copy is done (setReadOnly also runs before it).
+			g.m.on("mysql.setReadOnly", func(json.RawMessage) (any, error) {
+				if g.m.count("mysql.cloneFrom") > 0 {
+					return nil, errors.New("baca-saja tidak bisa dipasang")
+				}
+				return nil, nil
+			})
+		}, CopyStarted},
+		{"dump at 0 percent", "dump", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+			j.Progress(0, "dump dimulai")
+			time.Sleep(50 * time.Millisecond)
+			return nil, errors.New("dump gagal")
+		}, nil, CopyStarted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := rebuildRig(t)
+			scriptReplicaTarget(g.m, "db-master", tc.method)
+			cmd := "mysql.cloneFrom"
+			if tc.method == "dump" {
+				cmd = "mysql.dumpFrom"
+			}
+			g.m.job(cmd, tc.fn)
+			if tc.after != nil {
+				tc.after(g)
+			}
+			failedRebuildNoScript(t, g)
+			if s := copyStateOf(t, g); s != tc.want {
+				t.Fatalf("state = %v, want %v", s, tc.want)
+			}
+		})
+	}
+}
+
+// TestCopySentSaveFailureStopsStep (N-H1): when CopySent cannot be
+// stored, the step fails before the copy command is sent, so a lost
+// answer can never hide a copy the panel has no record of.
+func TestCopySentSaveFailureStopsStep(t *testing.T) {
+	g := rebuildRig(t)
+	g.e.r.paramsStore = func(jobID, paramsJSON string) error {
+		if strings.Contains(paramsJSON, `"copy_sent":true`) {
+			return errors.New("database is locked")
+		}
+		return g.e.st.SetJobParams(jobID, paramsJSON)
+	}
+	id := failedRebuildNoScript(t, g)
+	j, steps, err := g.e.st.GetJob(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[j.CurrentStep].Name != stepCopyName || j.Error != stepCopyName+": database is locked" {
+		t.Fatalf("job failed at %q with %q, want the copy step failing on the save", steps[j.CurrentStep].Name, j.Error)
+	}
+	if n := g.m.count("mysql.cloneFrom"); n != 0 {
+		t.Fatalf("copy command sent %d times", n)
+	}
+	if s := copyStateOf(t, g); s != CopyNotStarted {
+		t.Fatalf("state = %v, want not started", s)
+	}
+}
+
+// TestWipeApprovalTextForOldMaster (T9): the rebuild of an old master asks
+// to approve the deletion of its databases in T9's words; an ordinary
+// create keeps the old words.
+func TestWipeApprovalTextForOldMaster(t *testing.T) {
+	g := rebuildRig(t)
+	scriptLeftovers(g.m, "clone", "a", "b")
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps := g.e.waitJob(id, store.JobWaiting)
+	if want := "database berikut di master lama ini akan dihapus lalu disalin ulang dari master baru: a, b"; steps[j.CurrentStep].Message != want {
+		t.Fatalf("waiting message = %q, want %q", steps[j.CurrentStep].Message, want)
+	}
+
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "clone")
+	scriptLeftovers(r, "clone", "a", "b")
+	id, err = e.r.StartCreateReplica(context.Background(), CreateReplicaParams{MasterServerID: m.id, TargetServerID: r.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps = e.waitJob(id, store.JobWaiting)
+	if want := "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: a, b"; steps[j.CurrentStep].Message != want {
+		t.Fatalf("waiting message = %q, want %q", steps[j.CurrentStep].Message, want)
+	}
 }

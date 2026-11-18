@@ -1403,3 +1403,32 @@ func TestApproveAddExistingTypedNames(t *testing.T) {
 		t.Fatalf("ack = %+v", ack)
 	}
 }
+
+// TestMissingGrantsBannerOnQuarantined (T21): on a quarantined server the
+// missing-grants banner points to grant-admin, without the GRANT block (an
+// operator runs no SQL there); other roles keep the GRANT block.
+func TestMissingGrantsBannerOnQuarantined(t *testing.T) {
+	e, _, _ := newMySQLEnv(t)
+	c := e.cookie()
+	srv := e.pairedOnline(t, "db-lama")
+	grant := "GRANT RELOAD, REPLICATION CLIENT ON *.* TO 'admin'@'localhost'"
+	if err := e.st.SetInventory(store.Inventory{ServerID: srv.ID, Connected: true, Version: "8.4.2", Series: "8.4",
+		Databases: shopDatabases, MissingGrants: []string{grant}, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	const t21 = "Akun admin MySQL ini kurang hak. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu klik Segarkan."
+	const old = "Jalankan perintah berikut di MySQL server ini (sebagai root)"
+
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, old, template.HTMLEscapeString(grant))
+	wantNoBody(t, rec, "sudo dbpanel agent grant-admin")
+
+	if err := e.st.SetServerRole(srv.ID, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, t21)
+	wantNoBody(t, rec, old, template.HTMLEscapeString(grant), "GRANT RELOAD")
+}

@@ -51,13 +51,17 @@ func (jr *jobRun) earlierAgentJob(ctx context.Context, serverID int64, cmd strin
 // account (BACKUP_ADMIN).
 func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.SnapshotParams, reattach bool, res *proto.SnapshotResult) error {
 	if cmd != "mysql.dumpFrom" {
-		jr.markCopySent()
+		if err := jr.markCopySent(); err != nil {
+			return err
+		}
 		return jr.runAgentJob(ctx, jr.target(), cmd, p, res)
 	}
 	defer jr.dropDumpAccount(ctx)
 	if reattach {
 		p.User = jr.st.DumpUser
-		jr.markCopySent()
+		if err := jr.markCopySent(); err != nil {
+			return err
+		}
 		return jr.runAgentJob(ctx, jr.target(), cmd, p, res)
 	}
 	// One a cut-off attempt left behind.
@@ -103,7 +107,9 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 		jr.logf("warn", "%s", created.Warning) // any other shape: censored
 	}
 	p.User, p.Password = user, password
-	jr.markCopySent()
+	if err := jr.markCopySent(); err != nil {
+		return err
+	}
 	return jr.runAgentJob(ctx, jr.target(), cmd, p, res)
 }
 
@@ -189,11 +195,17 @@ func (jr *jobRun) dropDumpAccount(ctx context.Context) error {
 
 // markCopySent records, before the copy command of a rebuild of an old
 // master is sent, that it is being sent (CopySent, H-1d): a lost answer
-// then counts as a copy that may have begun.
-func (jr *jobRun) markCopySent() {
+// then counts as a copy that may have begun. When that cannot be stored,
+// the step fails here, before the command is sent (N-H1): a copy the
+// panel has no record of would let it call the old data still there.
+func (jr *jobRun) markCopySent() error {
 	if !jr.st.RebuildOldMaster || jr.st.CopySent {
-		return
+		return nil
 	}
 	jr.st.CopySent = true
-	jr.save()
+	if err := jr.saveState(); err != nil {
+		jr.st.CopySent = false // not sent: the step ends here
+		return err
+	}
+	return nil
 }

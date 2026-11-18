@@ -251,6 +251,9 @@
 <p class="text-muted">Belum ada database pengguna di MySQL ini.</p>
 {{end}}
 {{if .Inventory.MissingGrants}}
+{{if eq .Server.Role "quarantined"}}{{/* T21: on a quarantined server the operator runs grant-admin, not SQL */}}
+<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<div class="flex-1">Akun admin MySQL ini kurang hak. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu klik Segarkan.</div></div>
+{{else}}
 <div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}
   <div class="flex min-w-0 flex-1 flex-col gap-2">
     <span>Akun admin MySQL ini kurang hak. Jalankan perintah berikut di MySQL server ini (sebagai root), lalu klik <strong>Segarkan</strong>:</span>
@@ -258,6 +261,7 @@
 {{end}}</pre>
   </div>
 </div>
+{{end}}
 {{end}}
 <div class="mt-2 flex flex-wrap gap-2">
   <form method="post" action="/servers/{{.Server.ID}}/mysql/refresh">

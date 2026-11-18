@@ -132,13 +132,15 @@ const (
 	// was sent, or the agent refused it before any local change.
 	CopyNotStarted CopyState = iota
 	// CopyUncertain: a copy command was sent but nothing shows it changed
-	// anything (its answer may be lost, or the copy job ended without a
-	// progress report); also a job whose params cannot be read.
+	// anything (its answer may be lost, or the copy job ended without
+	// proof of a change), whatever promotion number its job holds (N-H3);
+	// also a job whose params cannot be read.
 	CopyUncertain
 	// CopyStarted: evidence that the agent began to change the old
 	// master's data: the job went past the copy step, the copy job
-	// reported progress (dump: after the binary log reset; CLONE: right
-	// before CLONE INSTANCE) or its result.
+	// reported progress (dump: any, sent after the binary log reset;
+	// CLONE: above 0%, since its 0% comes right before CLONE INSTANCE,
+	// N-H4) or its result.
 	CopyStarted
 )
 
@@ -194,7 +196,7 @@ func RebuildCopyState(st *store.Store, serverID int64) (CopyState, error) {
 		switch {
 		case j.CurrentStep > i, js.CopyBegan:
 			state = max(state, CopyStarted)
-		case js.RebuildPromotionID != 0 && js.CopySent:
+		case js.CopySent:
 			state = max(state, CopyUncertain)
 		case js.RebuildPromotionID == 0 && j.CurrentStep == i && (js.AgentJobID != "" || js.SnapshotGTID != ""):
 			// Stored before the copy flags: an agent job or a copy result

@@ -172,6 +172,9 @@ type Runner struct {
 	// settleStore, when set (tests), replaces Store.SettleRebuild in the
 	// connect step of a rebuild.
 	settleStore func(jobID, paramsJSON string, serverID int64) error
+	// paramsStore, when set (tests), replaces Store.SetJobParams in
+	// jobRun.save and jobRun.saveState.
+	paramsStore func(jobID, paramsJSON string) error
 
 	base context.Context // parent of every job context; ended by Close
 	stop context.CancelFunc
@@ -1847,15 +1850,25 @@ func (jr *jobRun) logLine(level, msg string) {
 
 // save stores the job's state in its ParamsJSON; an error is logged (the
 // settle of a rebuild, which must not go on without its state stored, uses
-// jobRun.settle).
+// jobRun.settle; a step that must not go on without it, saveState).
 func (jr *jobRun) save() {
-	b, err := json.Marshal(jr.st)
-	if err == nil {
-		err = jr.r.d.Store.SetJobParams(jr.job.ID, string(b))
-	}
-	if err != nil {
+	if err := jr.saveState(); err != nil {
 		jr.r.log.Warn("save job params", "job", jr.job.ID, "err", err)
 	}
+}
+
+// saveState stores the job's state in its ParamsJSON and returns a
+// failure.
+func (jr *jobRun) saveState() error {
+	b, err := json.Marshal(jr.st)
+	if err != nil {
+		return err
+	}
+	set := jr.r.d.Store.SetJobParams
+	if jr.r.paramsStore != nil {
+		set = jr.r.paramsStore
+	}
+	return set(jr.job.ID, string(b))
 }
 
 // call runs an ordinary agent command for the current step.
