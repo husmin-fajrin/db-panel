@@ -273,12 +273,18 @@ func TestE2ERebuildFailsBeforeCopyThenLeftoverThenRetry(t *testing.T) {
 	t.Logf("failed-before-copy flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }
 
+// conflictDelay is how long the conflicting statement sleeps on the target.
+const conflictDelay = 5 * time.Second
+
 // conflictWriter runs, on the new master, until stop is called, a
 // statement-logged INSERT of a row that exists already, which only the
 // server listening on port applies (@@port is read where the statement
 // runs): every one that the target receives after its copy stops its
 // applier with a duplicate key (1062); the new master and the other
-// replica insert nothing.
+// replica insert nothing. On the target the statement first sleeps
+// conflictDelay, so the applier is still running when "Sambungkan
+// replikasi" checks that replication started, and the error comes
+// during "Verifikasi" (whose START REPLICA runs it again).
 func conflictWriter(t *testing.T, master *e2eNode, port int) (stop func() (int, error)) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -295,7 +301,8 @@ func conflictWriter(t *testing.T, master *e2eNode, port int) (stop func() (int, 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		stmt := fmt.Sprintf("INSERT INTO a.t SELECT 1, 'konflik' FROM DUAL WHERE @@port = %d", port)
+		stmt := fmt.Sprintf("INSERT INTO a.t SELECT 1, 'konflik' FROM DUAL WHERE IF(@@port = %d, SLEEP(%d) = 0, FALSE)",
+			port, int(conflictDelay/time.Second))
 		for ctx.Err() == nil {
 			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				if ctx.Err() == nil {
