@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -962,5 +963,204 @@ func TestListingRefusalReachesJobUnchanged(t *testing.T) {
 	}
 	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || !strings.Contains(rep.LastError, text) {
 		t.Fatalf("replica last error = %q, %v", rep.LastError, err)
+	}
+}
+
+// legacyRebuild gives the old master the shape an earlier panel left for a
+// rebuild job stored without the flag: role replica, its row in state,
+// the marker kept, and the job id with status at step (the steps before
+// it done).
+func legacyRebuild(t *testing.T, g *promoteRig, id, state, status string, step int) {
+	t.Helper()
+	e := g.e
+	if _, err := e.st.AddReplica(g.topo.ID, g.m.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetServerRole(g.m.id, store.RoleReplica); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(g.m.id, state, ""); err != nil {
+		t.Fatal(err)
+	}
+	params := fmt.Sprintf(`{"master_server_id":%d,"rebuild_old_master":true,"confirm_wipe":true,"method":"clone"}`, g.c.id)
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: KindCreateReplica, ServerID: g.m.id, TopologyID: g.topo.ID,
+		ParamsJSON: params, CreatedAt: time.Now()}, createReplicaStepNames()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := range step {
+		if err := e.st.SetStep(id, i, store.StepDone, "", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.st.UpdateJob(id, store.JobRunning, step, "", now); err != nil {
+		t.Fatal(err)
+	}
+	if status != store.JobRunning {
+		if err := e.st.UpdateJob(id, status, step, "", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestNormalizeLegacyWaitingRebuild: a rebuild that was waiting for the
+// user when the earlier panel stopped (role replica, row creating, marker,
+// no flag) is normalised too: role quarantined, row and job as they were.
+// It is then approved and runs; or Batalkan leaves it quarantined, with no
+// mysql.releaseRole.
+func TestNormalizeLegacyWaitingRebuild(t *testing.T) {
+	const id = "99999999999999999999999999999993"
+	start := func(t *testing.T) *promoteRig {
+		t.Helper()
+		g := rebuildRig(t)
+		e := g.e
+		legacyRebuild(t, g, id, store.ReplicaCreating, store.JobWaiting, 0)
+		e.r.Resume(context.Background())
+		if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+			t.Fatalf("role after Resume = %s, want quarantined", got)
+		}
+		if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaCreating {
+			t.Fatalf("row after Resume = %+v, %v; want creating", rep, err)
+		}
+		if j, _, _ := e.st.GetJob(id); j.Status != store.JobWaiting {
+			t.Fatalf("job after Resume = %+v, want waiting", j)
+		}
+		if _, err := e.st.GetTopologyByOldMaster(g.m.id); err != nil {
+			t.Fatalf("marker after Resume: %v", err)
+		}
+		// An ordinary replica, not an old master, in any state: untouched.
+		if got := roleNow(e, g.d.id); got != store.RoleReplica {
+			t.Fatalf("ordinary replica: role = %s", got)
+		}
+		if rep, err := e.st.GetReplicaByServer(g.d.id); err != nil || rep.State != store.ReplicaReady {
+			t.Fatalf("ordinary replica: row = %+v, %v", rep, err)
+		}
+		// A second run changes nothing.
+		if err := e.r.normalizeFailedRebuilds(); err != nil {
+			t.Fatal(err)
+		}
+		if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+			t.Fatalf("role after a second run = %s", got)
+		}
+		return g
+	}
+	t.Run("approve", func(t *testing.T) {
+		g := start(t)
+		e := g.e
+		if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		e.waitIdle(id)
+		if got := roleNow(e, g.m.id); got != store.RoleReplica {
+			t.Fatalf("role at the end = %s", got)
+		}
+	})
+	t.Run("cancel", func(t *testing.T) {
+		g := start(t)
+		e := g.e
+		mark := g.m.mark()
+		if err := e.r.Cancel(id); err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+		e.waitJob(id, store.JobCanceled)
+		e.waitIdle(id)
+		if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+			t.Fatalf("role after the cancel = %s, want quarantined", got)
+		}
+		for _, c := range g.m.cmds(mark) {
+			if c == "mysql.releaseRole" {
+				t.Fatalf("cancel sent mysql.releaseRole: %v", g.m.cmds(mark))
+			}
+		}
+	})
+}
+
+// TestLegacyRebuildRetriedAfterConnectSettlesFirst: a rebuild job without
+// the flag that failed at its verify step (connect recorded as done) runs
+// the connect step again on Retry: mysql.configureReplication is sent
+// again and, on the agent's OK, the settle stores the flag, the role
+// replica and the end of the marker before verify runs. When the agent
+// refuses, the job fails and the old master stays quarantined.
+func TestLegacyRebuildRetriedAfterConnectSettlesFirst(t *testing.T) {
+	const id = "99999999999999999999999999999994"
+	verify := len(createReplicaStepNames()) - 1
+	for _, refused := range []bool{false, true} {
+		t.Run(fmt.Sprintf("agent refuses %v", refused), func(t *testing.T) {
+			g := rebuildRig(t)
+			e := g.e
+			legacyRebuild(t, g, id, store.ReplicaFailed, store.JobFailed, verify)
+			e.r.Resume(context.Background())
+			wantRebuildPending(t, g, "after Resume")
+			var mu sync.Mutex
+			var verifyRole string
+			g.m.before("mysql.waitSynced", func() {
+				mu.Lock()
+				defer mu.Unlock()
+				if verifyRole == "" {
+					verifyRole = roleNow(e, g.m.id)
+				}
+			})
+			if refused {
+				g.m.fail("mysql.configureReplication", "ditolak")
+			}
+			mark := g.m.mark()
+			if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+				t.Fatalf("Retry: %v", err)
+			}
+			if refused {
+				e.waitJob(id, store.JobFailed)
+				e.waitIdle(id)
+				wantRebuildPending(t, g, "after the refused connect")
+				if jobStateOf(t, e, id).QuarantineEnded {
+					t.Fatal("flag stored although the agent refused")
+				}
+				if n := g.m.count("mysql.waitSynced"); n != 0 {
+					t.Fatalf("verify ran after the refused connect (%d waitSynced)", n)
+				}
+				return
+			}
+			e.waitJob(id, store.JobSucceeded)
+			e.waitIdle(id)
+			if !slices.Contains(g.m.cmds(mark), "mysql.configureReplication") {
+				t.Fatalf("connect not run again: %v", g.m.cmds(mark))
+			}
+			mu.Lock()
+			if verifyRole != store.RoleReplica {
+				t.Errorf("role when verify ran = %q, want replica (settled before)", verifyRole)
+			}
+			mu.Unlock()
+			if !jobStateOf(t, e, id).QuarantineEnded {
+				t.Fatal("flag not stored")
+			}
+			if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("marker after the settle: %v", err)
+			}
+			if got := roleNow(e, g.m.id); got != store.RoleReplica {
+				t.Fatalf("role at the end = %s", got)
+			}
+		})
+	}
+}
+
+// TestRebuildVerifyWritesNoRole: the verify step of a rebuild writes no
+// role and clears no marker: with a settle that stores nothing (the seam
+// answers OK), the job runs to the end and the old master is still
+// quarantined with its marker.
+func TestRebuildVerifyWritesNoRole(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	e.r.settleStore = func(string, string, int64) error { return nil }
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	e.waitIdle(id)
+	if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+		t.Fatalf("role after verify = %s, want quarantined (only the settle writes it)", got)
+	}
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); err != nil {
+		t.Fatalf("marker cleared outside the settle: %v", err)
 	}
 }

@@ -1021,14 +1021,10 @@ func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {
 		return outcome{}, err
 	}
 	jr.setReplicaState(store.ReplicaReady, "")
-	if err := jr.r.d.Store.SetServerRole(jr.target(), store.RoleReplica); err != nil {
-		return outcome{}, err
-	}
-	if jr.st.RebuildOldMaster {
-		// Rebuilt: no longer the topology's old master, so a later failed
-		// attempt on it is not taken for a failed rebuild (which would
-		// quarantine it again).
-		if err := jr.r.d.Store.ClearOldMaster(jr.target()); err != nil {
+	// The role and the old-master marker of a rebuild are the settle's
+	// alone (replicaConnect, Store.SettleRebuild): verify writes neither.
+	if !jr.st.RebuildOldMaster {
+		if err := jr.r.d.Store.SetServerRole(jr.target(), store.RoleReplica); err != nil {
 			return outcome{}, err
 		}
 	}

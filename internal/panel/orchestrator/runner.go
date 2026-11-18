@@ -1087,7 +1087,7 @@ func (r *Runner) Cancel(jobID string) error {
 // and fails a job's replica row before the job itself: no Retry ever sees
 // a failed job whose row still reads creating. Then it brings the rows an
 // earlier panel left to the old-master rule (normalizeFailedRebuilds),
-// those it has just failed included.
+// those it has just failed and those of waiting jobs included.
 func (r *Runner) Resume(ctx context.Context) {
 	var tighten []store.Job
 	func() {
@@ -1173,8 +1173,8 @@ func (r *Runner) resumeJobs(ctx context.Context) []store.Job {
 }
 
 // normalizeFailedRebuilds brings the old masters an earlier panel left
-// after a failed rebuild (role replica, its replica row failed, still the
-// old master of that row's topology) to the old-master rule (spec 5.1,
+// with a rebuild's row (role replica, a replica row in any state, still
+// the old master of that row's topology) to the old-master rule (spec 5.1,
 // 5.9): when the newest create_replica job of the server is a rebuild
 // whose agent ended the quarantine (QuarantineEnded), the marker goes and
 // it stays an ordinary failed replica; otherwise, a missing or unreadable
@@ -1199,11 +1199,14 @@ func (r *Runner) normalizeFailedRebuild(srv store.Server) error {
 	if srv.Role != store.RoleReplica {
 		return nil
 	}
+	// A row in any state: after Resume the only creating rows left belong
+	// to waiting jobs, and no current state has the role replica with the
+	// marker, so such a row is always one an earlier panel left.
 	rep, err := r.d.Store.GetReplicaByServer(srv.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
-	if err != nil || rep.State != store.ReplicaFailed {
+	if err != nil {
 		return err
 	}
 	topo, err := r.d.Store.GetTopologyByOldMaster(srv.ID)
@@ -1694,8 +1697,18 @@ func matchStoredSteps(steps []step, rows []store.JobStep) []step {
 }
 
 // run executes the steps from from on. approved applies to the first one.
+// A rebuild of an old master whose agent has not ended the quarantine
+// (no QuarantineEnded) never runs a step after the connect step: it
+// starts again at the connect step, so the settle is stored before
+// anything that follows it (a job stored without the flag that got past
+// its connect step under an earlier panel).
 func (jr *jobRun) run(from int, approved bool) {
 	ctx := jr.lj.ctx
+	if jr.job.Kind == KindCreateReplica && jr.st.RebuildOldMaster && !jr.st.QuarantineEnded &&
+		jr.connect >= 0 && from > jr.connect {
+		jr.r.log.Info("rebuild without its settle continues at the connect step", "job", jr.job.ID, "from", from)
+		from, approved = jr.connect, false
+	}
 	switch {
 	case jr.job.Kind == KindCreateReplica:
 		jr.setReplicaState(store.ReplicaCreating, "")
