@@ -158,21 +158,8 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	if err := r.refuseBusy(target.ID, "server tujuan"); err != nil {
 		return "", err
 	}
-	// A target whose earlier attempt failed is free for a new one. A
-	// quarantined old master stays quarantined (RemoveReplica keeps it).
-	if rep, err := r.d.Store.GetReplicaByServer(target.ID); err == nil && rep.State == store.ReplicaFailed {
-		if err := r.d.Store.RemoveReplica(target.ID); err != nil {
-			return "", err
-		}
-		if target.Role != store.RoleQuarantined {
-			target.Role = store.RoleUnassigned
-		}
-		r.log.Info("failed replica attempt removed for a new one", "server_id", target.ID)
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return "", err
-	}
-	switch {
-	case target.Role == store.RoleQuarantined:
+	quarantined := target.Role == store.RoleQuarantined
+	if quarantined {
 		old, err := r.d.Store.GetTopologyByOldMaster(target.ID)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && old.ID != topo.ID) {
 			return "", errors.New("server tujuan bukan master lama topologi ini")
@@ -183,6 +170,26 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		if old.CutoverPending {
 			return "", errRebuildCutoverPending
 		}
+	}
+	// A target whose earlier attempt failed is free for a new one. So is
+	// any row of a quarantined old master that passed refuseBusy (no job
+	// queued, running or waiting): one left in another state by a panel
+	// stop between its registration and its job, or by a cancel that could
+	// not remove it (ruling D60). A quarantined old master stays
+	// quarantined (RemoveReplica keeps it).
+	if rep, err := r.d.Store.GetReplicaByServer(target.ID); err == nil && (rep.State == store.ReplicaFailed || quarantined) {
+		if err := r.d.Store.RemoveReplica(target.ID); err != nil {
+			return "", err
+		}
+		if !quarantined {
+			target.Role = store.RoleUnassigned
+		}
+		r.log.Info("earlier replica row removed for a new attempt", "server_id", target.ID, "state", rep.State)
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	switch {
+	case quarantined:
 	case p.RebuildOldMaster:
 		return "", errors.New("server tujuan bukan master lama yang dikarantina")
 	case target.Role != store.RoleUnassigned:

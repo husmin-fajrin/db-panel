@@ -112,6 +112,26 @@ func TestRebuildNotRequiredProceeds(t *testing.T) {
 	g.e.waitJob(id, store.JobSucceeded)
 }
 
+// TestRebuildReplacesOrphanRowOfQuarantined (ruling D60): a quarantined
+// old master left with a creating row and no job (the panel stopped
+// between its registration and the job, or a cancel could not remove the
+// row) can be rebuilt: the row is replaced by the new rebuild's.
+func TestRebuildReplacesOrphanRowOfQuarantined(t *testing.T) {
+	g := rebuildRig(t)
+	if _, err := g.e.st.AddReplica(g.topo.ID, g.m.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.e.st.SetReplicaState(g.m.id, store.ReplicaCreating, ""); err != nil {
+		t.Fatal(err)
+	}
+	g.m.reply("mysql.rebuildApproval", proto.RebuildApprovalResult{Required: false})
+	id, err := g.startRebuild()
+	if err != nil {
+		t.Fatalf("StartCreateReplica with an orphan creating row: %v", err)
+	}
+	g.e.waitJob(id, store.JobSucceeded)
+}
+
 // TestRebuildRetryAndApproveRecheckApproval: Ulangi and Setujui of the
 // rebuild ask the old master's agent again; an approval that no longer
 // holds refuses them and leaves the job as it was.
