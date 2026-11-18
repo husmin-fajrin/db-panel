@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -578,5 +580,82 @@ func TestAdminCommandInterruptedRelocksItself(t *testing.T) {
 				t.Errorf("missing %q, stored %q", m, r.stored().User)
 			}
 		})
+	}
+}
+
+// TestResetAdminRepairsBlockedAccount: a dbpanel_admin@localhost that
+// exists already and cannot log in (locked, needing SSL or X509, blocked
+// after failed logins, switched to auth_socket) is repaired: C19, and the
+// stored account logs in.
+func TestResetAdminRepairsBlockedAccount(t *testing.T) {
+	r := newAdminRig(t)
+	r.setup("INSTALL PLUGIN auth_socket SONAME 'auth_socket.so'")
+	const acct = "'dbpanel_admin'@'localhost'"
+	for name, create := range map[string]string{
+		"locked":       "CREATE USER " + acct + " IDENTIFIED BY 'Lama-12345678' ACCOUNT LOCK",
+		"ssl":          "CREATE USER " + acct + " IDENTIFIED BY 'Lama-12345678' REQUIRE SSL",
+		"x509":         "CREATE USER " + acct + " IDENTIFIED BY 'Lama-12345678' REQUIRE X509",
+		"failed login": "CREATE USER " + acct + " IDENTIFIED BY 'Lama-12345678' FAILED_LOGIN_ATTEMPTS 1 PASSWORD_LOCK_TIME 1",
+		"auth_socket":  "CREATE USER " + acct + " IDENTIFIED WITH auth_socket",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r.setup("DROP USER IF EXISTS "+acct, create)
+			r.store(proto.ConnectParams{User: "root"})
+			if name == "failed login" {
+				r.store(proto.ConnectParams{User: "dbpanel_admin", Password: "salah"})
+				mysql.StoredAccountName(context.Background(), r.inst.HostWith(r.creds())) // the one failed login
+			}
+			code, out, errOut := r.command("reset-admin", "ya\n")
+			if code != 0 || !strings.HasSuffix(out, c19+"\n") {
+				t.Fatalf("reset-admin = %d\nstdout %q\nstderr %q", code, out, errOut)
+			}
+			if name, err := mysql.StoredAccountName(context.Background(), r.inst.HostWith(r.creds())); err != nil || name != "dbpanel_admin@localhost" {
+				t.Errorf("the stored account after reset-admin: %q, %v", name, err)
+			}
+			if f := r.flags(); f != "1 1" {
+				t.Errorf("flags %s", f)
+			}
+		})
+	}
+}
+
+// TestResetAdminLoginCheckFails: when the new account cannot log in, the
+// store keeps the earlier account byte for byte (and it still logs in),
+// there is no C19, the exit code is not 0, the flags are 1 1, the operator
+// gets the cause and what it means, and a system log line is written.
+func TestResetAdminLoginCheckFails(t *testing.T) {
+	r := newAdminRig(t)
+	r.account("'agen'@'localhost'", "Agen-123", "SHOW DATABASES")
+	r.store(proto.ConnectParams{User: "agen", Password: "Agen-123"})
+	cred := filepath.Join(r.dir, credFile)
+	before := readFile(t, cred)
+	cause := "Error 1226 (42000): User 'dbpanel_admin' has exceeded the 'max_user_connections' resource (current value: 1)"
+	tried := false
+	setVar(t, &cliAdminLogin, func(_ context.Context, _ mysql.Host, p proto.ConnectParams) (string, error) {
+		tried = p.User == "dbpanel_admin" && p.Password != ""
+		return "", errors.New(cause)
+	})
+	code, out, errOut := r.command("reset-admin", "ya\n")
+	if !tried {
+		t.Error("the new account's login was never tried")
+	}
+	if code == 0 || strings.Contains(out, c19) {
+		t.Errorf("reset-admin = %d\nstdout %q", code, out)
+	}
+	if want := fmt.Sprintf(textResetLoginFailed, cause) + "\n" + textLockBack + "\n"; errOut != want {
+		t.Errorf("stderr %q\nwant   %q", errOut, want)
+	}
+	if after := readFile(t, cred); after != before {
+		t.Error("the stored credential changed")
+	}
+	if name, err := mysql.StoredAccountName(context.Background(), r.inst.HostWith(r.creds())); err != nil || name != "agen@localhost" {
+		t.Errorf("the earlier account: %q, %v", name, err)
+	}
+	if f := r.flags(); f != "1 1" || !r.lockFree() {
+		t.Errorf("flags %s, lock free %v", f, r.lockFree())
+	}
+	lines := r.syslogLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "admin account reset") || !strings.Contains(lines[0], "outcome=login-failed") {
+		t.Errorf("system log %q", lines)
 	}
 }

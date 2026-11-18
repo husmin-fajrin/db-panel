@@ -456,38 +456,61 @@ func proofAccount(account string) (user, host string, ok bool) {
 // the account's own. Anything else, a query error included, is no proof.
 // user and host passed proofAccount.
 func listingComplete(ctx context.Context, conn *sql.Conn, user, host string) error {
+	grants, err := accountGrants(ctx, conn, user, host)
+	if err != nil {
+		return err
+	}
+	ok, err := listingProvable(ctx, conn, grants, user, host)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("neither SHOW DATABASES on *.* without a revoke, nor SELECT on *.* with partial_revokes off")
+	}
+	return nil
+}
+
+// accountGrants are the SHOW GRANTS rows of user@host, read by name (user
+// and host passed proofAccount, so they need no escaping).
+func accountGrants(ctx context.Context, conn *sql.Conn, user, host string) ([]string, error) {
 	rows, err := conn.QueryContext(ctx, "SHOW GRANTS FOR "+quoteString(user)+"@"+quoteString(host))
 	if err != nil {
-		return fmt.Errorf("SHOW GRANTS: %w", err)
+		return nil, fmt.Errorf("SHOW GRANTS: %w", err)
 	}
+	defer rows.Close()
 	var grants []string
 	for rows.Next() {
 		var g string
 		if err := rows.Scan(&g); err != nil {
-			rows.Close()
-			return fmt.Errorf("SHOW GRANTS: %w", err)
+			return nil, fmt.Errorf("SHOW GRANTS: %w", err)
 		}
 		grants = append(grants, g)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("SHOW GRANTS: %w", err)
+		return nil, fmt.Errorf("SHOW GRANTS: %w", err)
 	}
+	return grants, nil
+}
+
+// listingProvable is the proof's decision for user@host from its grants
+// (accountGrants): SHOW DATABASES held on *.* and not revoked
+// (listingProof), or SELECT on *.* while partial_revokes, read on conn, is
+// off. The settle (listingComplete) and grant-admin (MissingAdminGrants)
+// both decide here, so they never disagree. The error is a failed read
+// only.
+func listingProvable(ctx context.Context, conn *sql.Conn, grants []string, user, host string) (bool, error) {
 	show, sel := listingProof(grants, user, host)
 	if show {
-		return nil
+		return true, nil
 	}
 	if !sel {
-		return errors.New("neither SHOW DATABASES nor SELECT granted directly on *.*")
+		return false, nil
 	}
 	var partial bool
 	if err := conn.QueryRowContext(ctx, "SELECT @@GLOBAL.partial_revokes").Scan(&partial); err != nil {
-		return fmt.Errorf("read partial_revokes: %w", err)
+		return false, fmt.Errorf("read partial_revokes: %w", err)
 	}
-	if partial {
-		return errors.New("global SELECT without SHOW DATABASES while partial_revokes is on")
-	}
-	return nil
+	return !partial, nil
 }
 
 // revokeRow is a partial revoke row of SHOW GRANTS, e.g.

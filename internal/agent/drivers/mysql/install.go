@@ -556,9 +556,11 @@ func createAdmin(ctx context.Context, socket string, creds CredentialStore) erro
 }
 
 // ResetAdmin creates adminUser@localhost (dbpanel_admin) on c when it is
-// missing, gives it a new random password and every privilege WITH GRANT
-// OPTION, and only then stores it in creds as the agent's account: once
-// creds holds it, every statement has run. Every statement runs on c with
+// missing, gives it a new random password (caching_sha2_password, no
+// REQUIRE, unlocked) and every privilege WITH GRANT OPTION, and only then
+// stores it in creds as the agent's account: once creds holds it, every
+// statement has run. A store whose Save logs in first (the CLI's) makes
+// that "and the account logs in". Every statement runs on c with
 // ctx. An account that exists keeps what else it has; no other account is
 // touched. The password reaches no error and no log: only the statements
 // and creds.
@@ -577,8 +579,16 @@ func ResetAdmin(ctx context.Context, c *sql.Conn, creds CredentialStore) error {
 	literal := quotePassword(password, strings.Contains(mode, "NO_BACKSLASH_ESCAPES"))
 	account := AdminAccount
 	// IF NOT EXISTS and ALTER: a retry after a half-created account works.
-	for _, stmt := range []string{"CREATE USER IF NOT EXISTS ", "ALTER USER "} {
-		if _, err := c.ExecContext(ctx, stmt+account+" IDENTIFIED BY "+literal); err != nil {
+	// The ALTER also clears what would keep an existing account from
+	// logging in (measured on 8.0.46): ACCOUNT LOCK, a temporary lock
+	// after failed logins, REQUIRE SSL or X509, and another plugin
+	// (auth_socket, mysql_no_login). caching_sha2_password is built in
+	// from 8.0 on.
+	for _, stmt := range []string{
+		"CREATE USER IF NOT EXISTS " + account + " IDENTIFIED BY " + literal,
+		"ALTER USER " + account + " IDENTIFIED WITH caching_sha2_password BY " + literal + " REQUIRE NONE ACCOUNT UNLOCK",
+	} {
+		if _, err := c.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("buat akun admin %s: %s", account, strings.ReplaceAll(err.Error(), password, "***"))
 		}
 	}

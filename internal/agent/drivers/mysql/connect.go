@@ -219,31 +219,14 @@ func MissingAdminGrants(ctx context.Context, c *sql.Conn, account string) ([]str
 	if err := c.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
 		return nil, fmt.Errorf("baca versi MySQL: %w", err)
 	}
-	rows, err := c.QueryContext(ctx, "SHOW GRANTS FOR "+quoteString(user)+"@"+quoteString(host))
+	grants, err := accountGrants(ctx, c, user, host)
 	if err != nil {
 		return nil, fmt.Errorf("baca hak akses MySQL: %w", err)
 	}
-	var grants []string
-	for rows.Next() {
-		var g string
-		if err := rows.Scan(&g); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("baca hak akses MySQL: %w", err)
-		}
-		grants = append(grants, g)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("baca hak akses MySQL: %w", err)
-	}
 	out := missingGrants(grants, account, requiredGrants(replicaGrants, version))
-	show, sel := listingProof(grants, user, host)
-	if !show && sel {
-		var partial bool
-		if err := c.QueryRowContext(ctx, "SELECT @@GLOBAL.partial_revokes").Scan(&partial); err != nil {
-			return nil, fmt.Errorf("baca partial_revokes: %w", err)
-		}
-		show = !partial
+	show, err := listingProvable(ctx, c, grants, user, host)
+	if err != nil {
+		return nil, err
 	}
 	if !show {
 		out = append(out, "GRANT SHOW DATABASES ON *.* TO "+quoteAccount(account))
@@ -268,11 +251,19 @@ func StoredAccountName(ctx context.Context, h Host) (string, error) {
 	if !stored {
 		return "", ErrNotConnected
 	}
-	// As OpenDB logs in with a stored account, without its fallback to root.
+	return LoginAs(ctx, h, p)
+}
+
+// LoginAs logs in once to h's MySQL as p, as the agent logs in with a
+// stored account (OpenDB, without its fallback to root), and reads
+// CURRENT_USER(). A login that fails is a *LoginError (LoginRefused
+// recognises a refusal). The password stays in memory.
+func LoginAs(ctx context.Context, h Host, p proto.ConnectParams) (string, error) {
+	var err error
 	if p.Host, err = localMySQL(ctx, p.Host); err != nil {
 		return "", err
 	}
-	db, err := openWith(ctx, hh.l.Socket, p)
+	db, err := openWith(ctx, h.Layout().Socket, p)
 	if err != nil {
 		return "", &LoginError{Err: err}
 	}

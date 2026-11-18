@@ -14,10 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/probe"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
 )
 
@@ -52,17 +54,17 @@ const (
 
 	textResetPlan = `Akun MySQL agent akan dibuat ulang: dbpanel_admin@localhost, dengan kata sandi acak baru dan semua hak. Pernyataan berikut dijalankan di MySQL server ini (tanpa masuk log biner), selagi kunci baca-saja dibuka sebentar:
   CREATE USER IF NOT EXISTS 'dbpanel_admin'@'localhost' IDENTIFIED BY <kata sandi acak>
-  ALTER USER 'dbpanel_admin'@'localhost' IDENTIFIED BY <kata sandi acak>
+  ALTER USER 'dbpanel_admin'@'localhost' IDENTIFIED WITH caching_sha2_password BY <kata sandi acak> REQUIRE NONE ACCOUNT UNLOCK
   GRANT ALL PRIVILEGES ON *.* TO 'dbpanel_admin'@'localhost' WITH GRANT OPTION
-Sesudah itu akun ini disimpan sebagai akun agent, menggantikan akun yang disimpan sekarang (akun itu tidak dihapus dari MySQL). Kata sandinya tidak ditampilkan.
+Sesudah itu perintah ini mencoba masuk ke MySQL dengan akun itu. Hanya bila berhasil, akun itu disimpan sebagai akun agent, menggantikan akun yang disimpan sekarang (akun itu tidak dihapus dari MySQL). Kata sandinya tidak ditampilkan.
 `
-	textResetFailed    = "Akun dbpanel_admin@localhost tidak bisa dibuat ulang (%s). Kunci baca-saja server ini sudah terpasang lagi."
-	textResetNotStored = "Akun yang disimpan agent belum diganti. Akun dbpanel_admin@localhost di MySQL mungkin sudah dibuat atau kata sandinya sudah diganti; bila agent memakai akun itu, agent tidak bisa masuk sampai perintah ini selesai. Jalankan perintah ini lagi."
-	textResetAbnormal  = "Perintah ini tidak selesai seperti biasa, tetapi akun dbpanel_admin@localhost sudah dibuat ulang dan disimpan sebagai akun agent; perintah ini tidak perlu dijalankan lagi."
-	textResetNoLogin   = "Akun dbpanel_admin@localhost sudah disimpan sebagai akun agent, tetapi belum bisa masuk (%s). Jalankan perintah ini lagi."
-	textResetUnknown   = "Tidak bisa dipastikan apakah akun dbpanel_admin@localhost sudah disimpan sebagai akun agent (%s). Jalankan perintah ini lagi."
-	textResetRunning   = "MySQL mungkin masih menjalankan pernyataan perintah ini pada akun dbpanel_admin@localhost, jadi hasilnya belum bisa dipastikan; akun yang disimpan agent belum diganti. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris CREATE USER, ALTER USER atau GRANT di sana, tunggu. Sesudah baris itu hilang, jalankan perintah ini lagi."
-	textSyslogFailed   = "Peringatan: catatan ke log sistem gagal ditulis (%v).\n"
+	textResetFailed      = "Akun dbpanel_admin@localhost tidak bisa dibuat ulang (%s). Kunci baca-saja server ini sudah terpasang lagi."
+	textResetNotStored   = "Akun yang disimpan agent belum diganti. Akun dbpanel_admin@localhost di MySQL mungkin sudah dibuat atau kata sandinya sudah diganti; bila agent memakai akun itu, agent tidak bisa masuk sampai perintah ini selesai. Jalankan perintah ini lagi."
+	textResetAbnormal    = "Perintah ini tidak selesai seperti biasa, tetapi akun dbpanel_admin@localhost sudah dibuat ulang dan disimpan sebagai akun agent; perintah ini tidak perlu dijalankan lagi."
+	textResetLoginFailed = "Akun dbpanel_admin@localhost sudah dibuat ulang di MySQL, tetapi tidak bisa dipakai masuk (%s), jadi tidak disimpan; akun yang disimpan agent tidak diganti. Bila agent memakai akun dbpanel_admin@localhost, agent tidak bisa masuk sekarang. Jalankan perintah ini lagi; bila sebab yang sama muncul lagi, sebab itu ada di pengaturan MySQL server ini dan perintah ini tidak bisa mengubahnya: periksa sebab itu bersama administrator MySQL server ini."
+	textResetUnknown     = "Tidak bisa dipastikan apakah akun dbpanel_admin@localhost sudah disimpan sebagai akun agent (%s). Jalankan perintah ini lagi."
+	textResetRunning     = "MySQL mungkin masih menjalankan pernyataan perintah ini pada akun dbpanel_admin@localhost, jadi hasilnya belum bisa dipastikan; akun yang disimpan agent belum diganti. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris CREATE USER, ALTER USER atau GRANT di sana, tunggu. Sesudah baris itu hilang, jalankan perintah ini lagi."
+	textSyslogFailed     = "Peringatan: catatan ke log sistem gagal ditulis (%v).\n"
 )
 
 // Seams: tests point the agent's credential store and its MySQL at their
@@ -82,6 +84,43 @@ var (
 		return mysql.NewRealHost(cfg, creds, probe.RealSystem(), slog.New(slog.DiscardHandler))
 	}
 )
+
+// cliAdminLogin logs in to h's MySQL as p and reads CURRENT_USER(), as the
+// agent would log in with p stored; tests replace it.
+var cliAdminLogin = mysql.LoginAs
+
+// adminLoginWait bounds reset-admin's login with the new account.
+const adminLoginWait = 30 * time.Second
+
+// loginCheckError is a new account whose login failed, so it was not
+// stored.
+type loginCheckError struct{ err error }
+
+func (e *loginCheckError) Error() string { return e.err.Error() }
+func (e *loginCheckError) Unwrap() error { return e.err }
+
+// verifyingStore is the agent's store, whose Save first logs in with the
+// account (on h, bounded by ctx and adminLoginWait) and stores it only when
+// that login worked as dbpanel_admin@localhost; otherwise Save is a
+// *loginCheckError and the store is untouched.
+type verifyingStore struct {
+	mysql.CredentialStore
+	ctx context.Context
+	h   mysql.Host
+}
+
+func (v *verifyingStore) Save(p proto.ConnectParams) error {
+	ctx, cancel := context.WithTimeout(v.ctx, adminLoginWait)
+	defer cancel()
+	account, err := cliAdminLogin(ctx, v.h, p)
+	if err == nil && account != "dbpanel_admin@localhost" {
+		err = fmt.Errorf("masuk sebagai %s", account)
+	}
+	if err != nil {
+		return &loginCheckError{err}
+	}
+	return v.CredentialStore.Save(p)
+}
 
 // parseAdminArgs parses "[--pengguna NAMA] [--dir DIR]".
 func parseAdminArgs(name string, args []string, stderr io.Writer) (dir, user string, ok bool) {
@@ -413,6 +452,14 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 	if err != nil {
 		return a.fail(textCredsUnusable, err)
 	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		cfg = config.Config{} // only a socket override is read from it
+	}
+	h, err := cliStoredHost(cfg, creds)
+	if err != nil {
+		return a.fail(textNoLayout, err)
+	}
 
 	// 4. Logged in as root, the server locked.
 	answers := newPromptReader(in)
@@ -441,7 +488,7 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 			return err // the window ended: nothing is sent
 		}
 		sent = true
-		return mysql.ResetAdmin(ctx, c, creds)
+		return mysql.ResetAdmin(ctx, c, &verifyingStore{CredentialStore: creds, ctx: ctx, h: h})
 	}
 	record := func(window, outcome string) {
 		line := fmt.Sprintf("admin account reset: account=%s window=%s outcome=%s mysql_user=%s %s",
@@ -473,28 +520,20 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 	}
 
 	// 7. What the store and the server show, and no more. The store is
-	// written last, so a new account in it means every statement ran.
+	// written last, after a login with the new account worked, so a new
+	// account in it means every statement ran and the account logs in.
 	window := windowName(err)
 	var lifted *liftedError
-	running := errors.As(err, &lifted) && lifted.Running
+	doErr := err
+	running := false
+	if errors.As(err, &lifted) {
+		doErr, running = lifted.DoErr, lifted.Running
+	}
+	var loginErr *loginCheckError
 	now, stored, lerr := creds.Load()
 	saved := lerr == nil && stored && now.User == "dbpanel_admin" && now.Password != before.Password
 	switch {
 	case saved:
-		cfg, cerr := config.Load(dir)
-		if cerr != nil {
-			cfg = config.Config{}
-		}
-		h, herr := cliStoredHost(cfg, creds)
-		if herr == nil {
-			_, herr = mysql.StoredAccountName(ctx, h)
-		}
-		if herr != nil {
-			record(window, "unknown stored=new")
-			failed()
-			fmt.Fprintf(stderr, textResetNoLogin+"\n", printable(herr.Error()))
-			return 1
-		}
 		record(window, "done")
 		fmt.Fprintln(stderr, textResetAbnormal)
 		a.lockLine(err)
@@ -507,6 +546,10 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 		record(window, "unknown stored=unread")
 		failed()
 		fmt.Fprintf(stderr, textResetUnknown+"\n", printable(lerr.Error()))
+	case !abnormal(err) && errors.As(doErr, &loginErr):
+		record(window, "login-failed")
+		fmt.Fprintf(stderr, textResetLoginFailed+"\n", printable(loginErr.Error()))
+		a.lockLine(err)
 	default:
 		record(window, "not-stored")
 		failed()
