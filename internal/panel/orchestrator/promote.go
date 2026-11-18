@@ -1426,9 +1426,26 @@ func (r *Runner) onOnline(ctx context.Context, serverID int64) {
 		if err != nil || !QuarantinePending(prom) {
 			return
 		}
-		topo, err := r.d.Store.GetTopologyByOldMaster(serverID)
-		if err != nil || topo.MasterServerID != prom.NewMasterServerID {
+		// The promotion's topology, also when it was promoted again since
+		// and its old-master marker moved on (ruling D58): the server is
+		// quarantined under the topology's current master, which holds
+		// its data's line. It will not be rebuilt from this quarantine
+		// (T6): the panel offers it only Hapus. Without that topology, or
+		// without a master, nothing is sent and it stays pending.
+		topo, err := r.d.Store.GetTopology(prom.TopologyID)
+		if err != nil {
+			r.log.Warn("pending quarantine not sent: the promotion's topology cannot be read", "server_id", serverID,
+				"topology_id", prom.TopologyID, "err", err)
 			return
+		}
+		if topo.MasterServerID == 0 || topo.MasterServerID == serverID {
+			r.log.Warn("pending quarantine not sent: the promotion's topology has no other master", "server_id", serverID,
+				"topology_id", topo.ID)
+			return
+		}
+		if topo.MasterServerID != prom.NewMasterServerID {
+			r.log.Info("pending quarantine sent under the topology's current master (promoted again since)",
+				"server_id", serverID, "master_id", topo.MasterServerID)
 		}
 		password, err := r.replPassword(topo)
 		if err != nil {

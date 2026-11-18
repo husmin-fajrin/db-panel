@@ -411,6 +411,81 @@ func TestPromoteEmergencyQuarantineDeferredUntilOnline(t *testing.T) {
 	}
 }
 
+// TestPendingQuarantineSentAfterSecondPromote (ruling D58): master A dies
+// and an emergency promote A→C defers A's quarantine; C dies before A's
+// agent returns and an emergency promote C→B moves the old-master marker
+// to C. When A's agent connects it still gets mysql.quarantine, under the
+// topology's current master B; the pending state ends only once the agent
+// answered OK, and a failure keeps it pending for the next connect.
+func TestPendingQuarantineSentAfterSecondPromote(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	ctx := context.Background()
+	g.offline(g.m)
+	g.offline(g.d)
+	for _, fa := range []*fakeAgent{g.c, g.b} {
+		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
+	}
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}})
+	if err != nil {
+		t.Fatalf("first promote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	first, err := e.st.PromotionByOldMaster(g.m.id)
+	if err != nil || !QuarantinePending(first) {
+		t.Fatalf("first promotion = %+v, %v; want its quarantine pending", first, err)
+	}
+
+	if _, err := e.r.ConfirmCutover(g.topo.ID); err != nil {
+		t.Fatal(err)
+	}
+	g.h.set(g.b.id, replicaView(masterGTID, masterGTID))
+	g.emergencyOnC()
+	id, err = e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+		Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}})
+	if err != nil {
+		t.Fatalf("second promote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a topology still names the first old master: %v", err)
+	}
+
+	// A's agent connects; its quarantine fails: still pending.
+	g.m.fail("mysql.quarantine", "master baru tidak bisa dibaca")
+	g.m.attach()
+	e.r.OnOnline(g.m.id)
+	e.waitFor("quarantine sent", func() bool { return g.m.count("mysql.quarantine") == 1 })
+	e.waitFor("the failure recorded", func() bool {
+		p, err := e.st.PromotionByOldMaster(g.m.id)
+		for _, s := range PromotionServers(p) {
+			if err == nil && s.Role == PromotionOldMaster && strings.Contains(s.Detail, "master baru tidak bisa dibaca") {
+				return true
+			}
+		}
+		return false
+	})
+	if p, err := e.st.PromotionByOldMaster(g.m.id); err != nil || !QuarantinePending(p) {
+		t.Fatalf("after a failed quarantine: %+v, %v; want still pending", p, err)
+	}
+	var q proto.QuarantineParams
+	g.m.params("mysql.quarantine", &q)
+	if q.NewMaster.Host != "10.0.0.3" || q.NewMaster.Port != 3306 {
+		t.Fatalf("quarantine params = %+v, want the topology's current master 10.0.0.3:3306", q)
+	}
+
+	// The next connect: the agent answers OK, the pending state ends.
+	g.m.reply("mysql.quarantine", proto.QuarantineResult{Applied: true})
+	e.r.OnOnline(g.m.id)
+	e.waitFor("quarantine recorded", func() bool {
+		p, err := e.st.PromotionByOldMaster(g.m.id)
+		return err == nil && !QuarantinePending(p)
+	})
+	if n := g.m.count("mysql.quarantine"); n != 2 {
+		t.Fatalf("quarantine sent %d times, want 2", n)
+	}
+}
+
 // TestPromoteViewWaitingMasterIsEmergency: a master whose agent connected
 // again but has not reported since (Menunggu laporan pertama) is judged
 // like one whose agent is away: its last report is old, so the mode is

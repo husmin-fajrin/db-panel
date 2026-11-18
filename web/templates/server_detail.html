@@ -348,7 +348,10 @@
     <div role="status" class="banner banner-info mb-0">{{template "banner-icon" "info"}}<p class="flex-1">{{rebuildRunningText}}</p><a class="btn btn-sm" href="/jobs/{{.RebuildJobID}}">Lihat pekerjaan</a></div>
     {{else if not .HasTopology}}
     {{/* No topology names it any more (a second promotion): T6 and Hapus
-         only (spec 5.1); the orchestrator refuses everything else. */}}
+         only (spec 5.1); the orchestrator refuses everything else. A
+         quarantine still pending keeps its status: the server is not
+         locked yet (ruling D58). */}}
+    {{if .QuarantinePending}}<div data-status-for="{{$s.ID}}">{{template "status-full" .Status}}</div>{{end}}
     {{with .Superseded}}<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<p class="flex-1">{{.}}</p></div>{{end}}
     {{if not $p.Local}}<div class="flex flex-wrap gap-2">{{template "server-delete-button" $p}}</div>
     {{with $p.DeleteBlocked}}<p class="help">{{.}}</p>{{end}}{{end}}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"math"
 	"net/http"
@@ -1511,6 +1512,46 @@ func TestStartLateLabel(t *testing.T) {
 	text := notify.FormatClosed(a, "db-master")
 	if !strings.Contains(text, "peringatan master lama sempat bisa ditulis ditutup: ") || strings.Contains(text, "saat menyala") {
 		t.Fatalf("notification:\n%s", text)
+	}
+}
+
+// TestOldMasterSupersededShowsPendingQuarantine (ruling D58): the T6 box
+// of a first old master whose quarantine is still pending keeps the
+// status that says it is not locked yet, so the box never reads as if the
+// server were read-only.
+func TestOldMasterSupersededShowsPendingQuarantine(t *testing.T) {
+	var mon *fakeMonitor
+	e, _, topo := promotedEnv(t, func(d *web.Deps) { mon = d.Monitor.(*fakeMonitor) })
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.st.LatestPromotion(topo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, _ := json.Marshal([]orchestrator.PromotionServer{{ServerID: 1, Role: orchestrator.PromotionOldMaster,
+		State: orchestrator.QuarantineStatePending}})
+	p.ReplicasJSON = string(servers)
+	if err := e.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SwapMaster(topo.ID, 2, 3, "10.0.0.3", 3306); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "emergency", OldMasterServerID: 2,
+		NewMasterServerID: 3, Status: "done", StartedAt: time.Now(), ReplicasJSON: "[]"}); err != nil {
+		t.Fatal(err)
+	}
+	pending := monitor.DeriveQuarantined(true)
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleQuarantined, Status: pending, ReceivedAt: time.Now()})
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	box := oldMasterBoxOf(t, rec.Body.String())
+	for _, s := range []string{oldMasterSupersededLine, `data-status-for="1"`, html.EscapeString(pending.Detail)} {
+		if !strings.Contains(box, s) {
+			t.Errorf("box lacks %q:\n%s", s, box)
+		}
 	}
 }
 
