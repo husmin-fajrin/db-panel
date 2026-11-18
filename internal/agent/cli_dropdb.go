@@ -80,7 +80,6 @@ const (
 	causeCreate      = "berkas %s tidak bisa dibuat: %v"
 	causeReadBack    = "berkas tidak bisa dibaca lagi: %v"
 	causeSync        = "berkas tidak bisa disimpan ke disk: %v"
-	causeNoSpace     = "ruang kosong di folder %s (%d byte) kurang dari perkiraan %d byte"
 )
 
 // systemSchemas are never dropped (compared without case).
@@ -269,28 +268,29 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	if err != nil {
 		return fail(textFolderUnusable, pfolder, err)
 	}
-	// 6–7. The backup, checked and synced; without one (--tanpa-cadangan)
+	// Another folder keeps the backup, so too little room is refused
+	// with --tanpa-cadangan as well: the drop without a backup is never
+	// offered while a safe way exists.
+	if free <= estimate {
+		return fail(textNoSpace, pfolder, free, pname, estimate)
+	}
+
+	// 6–7. The backup, checked and synced. Only a dump that was attempted
+	// and failed leads, with --tanpa-cadangan, to a drop without one;
 	// noBackup says why, and nothing of the attempt is left.
 	var b *backup
 	var noBackup string
-	if free <= estimate {
-		if !o.noBackup {
-			return fail(textNoSpace, pfolder, free, pname, estimate)
-		}
-		noBackup = fmt.Sprintf(causeNoSpace, pfolder, free, estimate)
-	} else {
-		var exists *backupExistsError
-		b, err = makeBackup(ctx, s, folder, name, tables)
-		switch {
-		case errors.As(err, &exists):
-			return fail(textBackupExists, printable(exists.path))
-		case errors.Is(err, errDumpInterrupted):
-			return fail(textDumpInterrupted)
-		case err != nil && !o.noBackup:
-			return fail(textBackupFailed, pname, printable(err.Error()), shellArg(pname))
-		case err != nil:
-			noBackup = printable(err.Error())
-		}
+	var exists *backupExistsError
+	b, err = makeBackup(ctx, s, folder, name, tables)
+	switch {
+	case errors.As(err, &exists):
+		return fail(textBackupExists, printable(exists.path))
+	case errors.Is(err, errDumpInterrupted):
+		return fail(textDumpInterrupted)
+	case err != nil && !o.noBackup:
+		return fail(textBackupFailed, pname, printable(err.Error()), shellArg(pname))
+	case err != nil:
+		noBackup = printable(err.Error())
 	}
 	var ppath string
 	if b != nil {

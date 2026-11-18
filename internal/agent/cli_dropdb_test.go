@@ -713,23 +713,33 @@ func TestDropDatabaseWarnsOnSharedFolder(t *testing.T) {
 }
 
 // TestDropDatabaseNoSpace: an estimate larger than the free space is
-// refused before mysqldump runs.
+// refused before mysqldump runs, with --tanpa-cadangan too: another folder
+// keeps the backup, so the drop without one is never offered (P2 not
+// asked, nothing dropped).
 func TestDropDatabaseNoSpace(t *testing.T) {
 	r := newDropRig(t)
 	r.makeDB("besar_sekali", 2)
 	script, mark := fakeDump(t, dumpHead+dumpTail, 0)
 	setVar(t, &cliMysqldump, script)
 	setVar(t, &cliStatfs, func(string) (uint64, error) { return 1, nil })
-	code, out, errOut := r.run(strings.NewReader("besar_sekali\n"), "besar_sekali")
-	prefix := fmt.Sprintf("Ruang kosong di folder %s (1 byte) tidak cukup untuk cadangan database besar_sekali (perkiraan ", r.backups)
-	if code == 0 || !strings.HasPrefix(errOut, prefix) || !strings.HasSuffix(errOut, " byte); tidak ada yang diubah. Pilih folder lain dengan --ke <folder>.\n") {
-		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
-	}
-	if _, err := os.Stat(mark); err == nil {
-		t.Error("mysqldump ran")
-	}
-	if files := backupFiles(t, r.backups); len(files) != 0 || !r.exists("besar_sekali") {
-		t.Errorf("backups %v, exists %v", files, r.exists("besar_sekali"))
+	for _, extra := range [][]string{nil, {"--tanpa-cadangan"}} {
+		t.Run(strings.TrimSpace("refused "+strings.Join(extra, " ")), func(t *testing.T) {
+			code, out, errOut := r.run(strings.NewReader("besar_sekali\n"), append([]string{"besar_sekali"}, extra...)...)
+			prefix := fmt.Sprintf("Ruang kosong di folder %s (1 byte) tidak cukup untuk cadangan database besar_sekali (perkiraan ", r.backups)
+			if code == 0 || !strings.HasPrefix(errOut, prefix) || !strings.HasSuffix(errOut, " byte); tidak ada yang diubah. Pilih folder lain dengan --ke <folder>.\n") ||
+				strings.Count(errOut, "\n") != 1 {
+				t.Errorf("drop-database %v = %d\nstderr %q\nstdout %q", extra, code, errOut, out)
+			}
+			if strings.Contains(out, "TANPA cadangan") || strings.Contains(out, c10) {
+				t.Errorf("asked to confirm: %q", out)
+			}
+			if _, err := os.Stat(mark); err == nil {
+				t.Error("mysqldump ran")
+			}
+			if files := backupFiles(t, r.backups); len(files) != 0 || !r.exists("besar_sekali") || r.flags() != "1 1" || len(r.syslogLines()) != 0 {
+				t.Errorf("backups %v, exists %v, flags %s, system log %q", files, r.exists("besar_sekali"), r.flags(), r.syslogLines())
+			}
+		})
 	}
 }
 
