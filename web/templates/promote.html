@@ -3,6 +3,8 @@
 <h1 class="break-words">Ganti master {{.Master.Name}}</h1>{{end}}
 {{define "page-actions"}}<a href="/masters/{{.Master.ID}}" class="btn btn-sm">Kembali ke halaman master</a>{{end}}
 {{define "content"}}
+{{/* $refusal: a planned promotion waits for the earlier old master (T4). */}}
+{{$refusal := .View.OldMasterRefusal}}
 <div class="mb-4 grid items-start gap-4 lg:grid-cols-12">
 <section class="card bg-base-100 min-w-0 lg:col-span-7" data-promote-summary>
   <div class="card-body gap-4 p-6">
@@ -90,6 +92,12 @@
 </div>
 {{end}}
 
+{{with $refusal}}
+<div role="alert" class="banner banner-error" data-old-master-pending>{{template "banner-icon" "error"}}<p class="flex-1">{{.}}</p></div>
+{{else}}{{with .View.PendingOldMaster}}
+<div role="alert" class="banner banner-warning" data-old-master-pending>{{template "banner-icon" "warning"}}<p class="flex-1">Master lama {{.}} dari promote sebelumnya belum dibangun ulang. Sesudah promote ini, server itu tidak bisa lagi diperiksa atau dibangun ulang dari panel; yang tersisa hanya Hapus server.</p></div>
+{{end}}{{end}}
+
 <form method="post" action="/masters/{{.Master.ID}}/promote" x-data="promotePicker">
   <input type="hidden" name="mode" value="{{.View.Mode}}">
   <section class="card bg-base-100 mb-4">
@@ -115,7 +123,7 @@
           <tbody>
             {{range .Rows}}
             <tr data-candidate-row="{{.ServerID}}" class="align-top{{if .Checked}} bg-primary/5{{end}}">
-              <td>{{if and .Selectable (not $.Blocked)}}<input type="radio" class="radio radio-sm radio-primary" name="candidate" value="{{.ServerID}}"{{if .Checked}} checked{{end}} data-name="{{.MasterName}}" data-replica-name="{{.ReplicaName}}" data-text="{{.ConfirmText}}" aria-label="Pilih {{.Name}}" required>{{else}}<span class="text-muted">-</span>{{end}}</td>
+              <td>{{if and .Selectable (not $.Blocked) (not $refusal)}}<input type="radio" class="radio radio-sm radio-primary" name="candidate" value="{{.ServerID}}"{{if .Checked}} checked{{end}} data-name="{{.MasterName}}" data-replica-name="{{.ReplicaName}}" data-text="{{.ConfirmText}}" aria-label="Pilih {{.Name}}" required>{{else}}<span class="text-muted">-</span>{{end}}</td>
               <td class="min-w-32">
                 <a class="link font-semibold whitespace-nowrap" href="/replicas/{{.ServerID}}">{{.Name}}</a>
                 {{with .Badges}}<div class="mt-1 flex flex-wrap gap-1">{{range .}}{{template "badge" .}}{{end}}</div>{{end}}
@@ -165,7 +173,7 @@
       </div>
       {{end}}
 
-      {{if not .Blocked}}
+      {{if not (or .Blocked $refusal)}}
       <div class="mt-2 flex flex-col gap-4 border-t border-base-300 pt-4 md:flex-row md:items-center md:justify-between" data-promote-footer>
         <div class="kotak-bahaya flex min-w-0 flex-1 flex-col gap-1 text-sm">
           {{if .Emergency}}<p class="font-semibold">Transaksi yang belum sampai ke replika terpilih akan hilang dari master baru. Bila master lama hidup kembali, panel bisa memeriksa dan mengamankannya.</p>{{end}}

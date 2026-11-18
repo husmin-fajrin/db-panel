@@ -360,7 +360,12 @@ type oldMasterBox struct {
 	Topology  store.Topology
 	// HasTopology: the topology still names this server as its old
 	// master.
-	HasTopology       bool
+	HasTopology bool
+	// Superseded is T6 when the promotion's topology was promoted again
+	// since and names another old master: the box offers only Hapus
+	// (spec 5.1); "" otherwise. A box without HasTopology offers only
+	// Hapus either way.
+	Superseded        string
 	CutoverPending    bool
 	QuarantinePending bool
 	Status            statusView
@@ -414,6 +419,10 @@ const (
 		"hapus server ini, atau tekan \"Ulangi dari tahap ini\" pada pekerjaan bangun ulangnya."
 	// msgRebuildRunning is T22, followed by a link to the job.
 	msgRebuildRunning = "Bangun ulang sebagai replika sedang berjalan."
+	// msgOldMasterSuperseded is T6, the box of a quarantined old master
+	// whose topology was promoted again since.
+	msgOldMasterSuperseded = "Topologi ini sudah promote lagi sejak server ini dikarantina. Data tertinggal dan Bangun ulang " +
+		"tidak tersedia lagi untuk server ini. Hapus server ini dari panel, lalu pasang lagi sebagai replika baru bila masih dipakai."
 	// msgQuarantinedReplica is T23, on the replica page of a quarantined
 	// server, followed by a link to its server page.
 	msgQuarantinedReplica = "Server ini master lama yang dikarantina. Tindakannya ada di halaman server."
@@ -573,6 +582,15 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		box.Topology, box.HasTopology, box.CutoverPending = topo, true, topo.CutoverPending
 	case !errors.Is(err, store.ErrNotFound):
 		return err
+	default:
+		// No topology names it: its promotion's topology was promoted
+		// again (its marker moved on), or is gone.
+		switch _, err := a.Store.GetTopology(prom.TopologyID); {
+		case err == nil:
+			box.Superseded = msgOldMasterSuperseded
+		case !errors.Is(err, store.ErrNotFound):
+			return err
+		}
 	}
 	state, err := orchestrator.RebuildCopyState(a.Store, srv.ID)
 	if err != nil {

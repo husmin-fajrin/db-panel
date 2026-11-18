@@ -75,12 +75,19 @@ type PromoteView struct {
 	// hold; a promotion is refused (spec 5.3).
 	Branched   bool
 	WritePause string // what the promotion means for writes, in Indonesian
+	// PendingOldMaster is the name of the topology's old master while its
+	// quarantine has not ended (pendingOldMaster); "" when there is none.
+	PendingOldMaster string
 }
 
 // Reasons a replica cannot be chosen.
 const (
 	reasonAgentOffline  = "Agent offline"
 	reasonAgentOutdated = "Agent perlu dimutakhirkan"
+	// reasonQuarantined (T24): a quarantined old master with a replica row
+	// (its rebuild runs, waits or failed); only its rebuild's settle makes
+	// it a replica (spec 5.1).
+	reasonQuarantined = "Master lama yang dikarantina"
 	// reasonStartLock: a start lock left by an earlier quarantine is still
 	// in place on the candidate; promoting it would leave a master that
 	// turns read-only on at its next start.
@@ -122,6 +129,17 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 		return PromoteView{}, err
 	}
 	v := PromoteView{Master: master}
+	if old, ok, err := r.pendingOldMaster(topo); err != nil {
+		return PromoteView{}, err
+	} else if ok {
+		v.PendingOldMaster = old.Name
+	}
+	srvs := make([]store.Server, len(reps))
+	for i, rep := range reps {
+		if srvs[i], err = r.d.Store.GetServer(rep.ServerID); err != nil {
+			return PromoteView{}, err
+		}
+	}
 
 	// Fresh reports first (the Monitor's rate limit applies).
 	if r.d.Health != nil {
@@ -193,7 +211,8 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 	probes := make([]probe, len(reps))
 	var wg sync.WaitGroup
 	for i, rep := range reps {
-		if !r.d.Hub.IsOnline(rep.ServerID) {
+		// A quarantined old master follows no master: it is not asked.
+		if !r.d.Hub.IsOnline(rep.ServerID) || srvs[i].Role == store.RoleQuarantined {
 			continue
 		}
 		wg.Add(1)
@@ -219,10 +238,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 	now := r.now()
 	sets := make([]gtidSet, len(reps)) // what each replica will hold once it applied its relay log
 	for i, rep := range reps {
-		srv, err := r.d.Store.GetServer(rep.ServerID)
-		if err != nil {
-			return PromoteView{}, err
-		}
+		srv := srvs[i]
 		c := Candidate{ServerID: rep.ServerID, Name: srv.Name, ProbeOK: probes[i].ok, ProbeErr: probes[i].err}
 		rv, ok := r.view(rep.ServerID)
 		if ok {
@@ -269,6 +285,8 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 			c.Status = monitor.StatusAgentOffline
 		}
 		switch {
+		case srv.Role == store.RoleQuarantined:
+			c.Reason = reasonQuarantined
 		case !online:
 			c.Reason = reasonAgentOffline
 		case r.agentOutdated(srv):
@@ -336,6 +354,34 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 
 	v.WritePause = r.writePause(v)
 	return v, nil
+}
+
+// pendingOldMaster is the server topo's old-master marker names while its
+// quarantine has not ended: it still exists and its role is quarantined,
+// with no replica row, with the row of a rebuild that runs or waits, or
+// with a failed one (spec 5.1). ok is false otherwise.
+func (r *Runner) pendingOldMaster(topo store.Topology) (srv store.Server, ok bool, err error) {
+	if topo.OldMasterServerID == 0 {
+		return store.Server{}, false, nil
+	}
+	srv, err = r.d.Store.GetServer(topo.OldMasterServerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.Server{}, false, nil
+	}
+	if err != nil {
+		return store.Server{}, false, err
+	}
+	return srv, srv.Role == store.RoleQuarantined, nil
+}
+
+// OldMasterRefusal is the refusal (T4) a planned promotion of this view
+// meets while PendingOldMaster is set; "" otherwise. The consideration
+// screen shows it in place of the choice.
+func (v PromoteView) OldMasterRefusal() string {
+	if v.Mode != proto.PromotePlanned || v.PendingOldMaster == "" {
+		return ""
+	}
+	return oldMasterPendingError{v.PendingOldMaster}.Error()
 }
 
 // errantCount counts the replica's executed transactions the master

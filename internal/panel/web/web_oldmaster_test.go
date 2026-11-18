@@ -1511,3 +1511,69 @@ func TestStartLateLabel(t *testing.T) {
 		t.Fatalf("notification:\n%s", text)
 	}
 }
+
+// oldMasterSupersededLine is T6, the box of a quarantined server no
+// topology names any more after a second promotion.
+const oldMasterSupersededLine = "Topologi ini sudah promote lagi sejak server ini dikarantina. Data tertinggal dan Bangun ulang " +
+	"tidak tersedia lagi untuk server ini. Hapus server ini dari panel, lalu pasang lagi sebagai replika baru bila masih dipakai."
+
+// TestOldMasterAfterSecondPromote (spec 5.1, T6): after an emergency
+// promotion of db-lain (3) replaced db-replika (2), the first old master
+// db-master (1), still quarantined, with no replica row or a failed one,
+// has a box with T6 and Hapus as its only action: no Periksa, Amankan,
+// rebuild link or status advice. Its replica page (with a row) says T23.
+// The new old master's box is the ordinary one.
+func TestOldMasterAfterSecondPromote(t *testing.T) {
+	for _, withRow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("row %v", withRow), func(t *testing.T) {
+			e, _, topo := promotedEnv(t)
+			c := e.cookie()
+			if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			setLeftover(t, e, topo, threeLeftover())
+			if withRow {
+				if _, err := e.st.AddReplica(topo.ID, 1, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.st.SetReplicaState(1, store.ReplicaFailed, "Sambungkan replikasi: gagal"); err != nil {
+					t.Fatal(err)
+				}
+				storeRebuildJob(t, e, "66666666666666666666666666666666", 1)
+			}
+			if err := e.st.SwapMaster(topo.ID, 2, 3, "10.0.0.3", 3306); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "emergency", OldMasterServerID: 2,
+				NewMasterServerID: 3, Status: "done", StartedAt: time.Now(), ReplicasJSON: "[]"}); err != nil {
+				t.Fatal(err)
+			}
+			rec := e.do("GET", "/servers/1", nil, c)
+			wantCode(t, rec, http.StatusOK)
+			box := oldMasterBoxOf(t, rec.Body.String())
+			for _, s := range []string{oldMasterSupersededLine, `data-open-modal="modal-hapus"`} {
+				if !strings.Contains(box, s) {
+					t.Errorf("box lacks %q", s)
+				}
+			}
+			for _, s := range []string{`action="/servers/1/leftover"`, `action="/servers/1/salvage"`, "bangun-ulang=1",
+				"Periksa data tertinggal", "Amankan data tertinggal", "Lihat pekerjaan", `data-status-for="1"`,
+				"Aplikasi belum dinyatakan dialihkan", "<form"} {
+				if strings.Contains(box, s) {
+					t.Errorf("box offers %q", s)
+				}
+			}
+			wantBody(t, rec, `id="modal-hapus"`)
+			if withRow {
+				wantBody(t, e.do("GET", "/replicas/1", nil, c), replicaPageLine, serverPageLink)
+			}
+			// The topology's old master now: the ordinary box.
+			rec = e.do("GET", "/servers/2", nil, c)
+			wantCode(t, rec, http.StatusOK)
+			box = oldMasterBoxOf(t, rec.Body.String())
+			if !strings.Contains(box, `action="/servers/2/leftover"`) || strings.Contains(box, oldMasterSupersededLine) {
+				t.Errorf("box of the new old master: %s", box)
+			}
+		})
+	}
+}

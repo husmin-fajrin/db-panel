@@ -659,3 +659,74 @@ func TestPromotePageStepsList(t *testing.T) {
 		}
 	}
 }
+
+// The second promotion while the first old master is pending (spec 5.1).
+const (
+	// oldMasterPendingLine is T4 for db-<lama> as the page escapes it.
+	oldMasterPendingLine = "master lama db-&lt;lama&gt; dari promote sebelumnya belum dibangun ulang atau dihapus; selesaikan itu dulu"
+	// emergencyPendingLine is T5 for db-<lama> as the page escapes it.
+	emergencyPendingLine = "Master lama db-&lt;lama&gt; dari promote sebelumnya belum dibangun ulang. Sesudah promote ini, " +
+		"server itu tidak bisa lagi diperiksa atau dibangun ulang dari panel; yang tersisa hanya Hapus server."
+)
+
+// TestPlannedPromoteRefusedWhileOldMasterPending (T4): the planned
+// consideration screen of a topology whose old master is pending says why
+// it cannot run and offers no choice and no Promote button; without a
+// pending old master it says nothing of it.
+func TestPlannedPromoteRefusedWhileOldMasterPending(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	v := plannedView()
+	v.PendingOldMaster = "db-<lama>"
+	f.setView(v)
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, oldMasterPendingLine, "data-old-master-pending")
+	wantNoBody(t, rec, `name="candidate"`, `data-confirm-action="promote"`, "db-<lama>", "Sesudah promote ini")
+
+	f.setView(plannedView())
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `name="candidate" value="2" checked`, `data-confirm-action="promote"`)
+	wantNoBody(t, rec, "data-old-master-pending", "dari promote sebelumnya")
+}
+
+// TestEmergencyPromoteNotRefused (T5): the emergency consideration screen
+// of a topology whose old master is pending warns what the promotion
+// leaves of it, and still offers the choice and the Promote button.
+func TestEmergencyPromoteNotRefused(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	v := emergencyView()
+	v.PendingOldMaster = "db-<lama>"
+	f.setView(v)
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, emergencyPendingLine, "data-old-master-pending", `name="candidate" value="2"`,
+		`data-confirm-action="promote"`)
+	wantNoBody(t, rec, "selesaikan itu dulu", "db-<lama>")
+
+	f.setView(emergencyView())
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, "data-old-master-pending", "dari promote sebelumnya")
+}
+
+// TestPromoteScreenNamesQuarantinedCandidate (T24): a quarantined server
+// with a replica row is listed with its reason and cannot be chosen.
+func TestPromoteScreenNamesQuarantinedCandidate(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	v := plannedView()
+	v.Candidates = append(v.Candidates, orchestrator.Candidate{ServerID: 9, Name: "db-lama",
+		Status: monitor.StatusQuarantined, ReportAgo: 4 * time.Second, Fresh: true, Reason: "Master lama yang dikarantina"})
+	f.setView(v)
+	rec := e.do("GET", "/masters/1/promote", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	row := between(rec.Body.String(), `data-candidate-row="9"`, "</tr>")
+	for _, s := range []string{"db-lama", "Tidak: Master lama yang dikarantina"} {
+		if !strings.Contains(row, s) {
+			t.Errorf("row of the quarantined server lacks %q: %s", s, row)
+		}
+	}
+	wantNoBody(t, rec, `name="candidate" value="9"`, "Replika gagal", "Replika sedang dibuat")
+}

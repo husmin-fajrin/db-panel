@@ -147,6 +147,15 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	// under startMu.
 	if topo, err := r.d.Store.GetTopologyByMaster(p.MasterServerID); err == nil && topo.CutoverPending {
 		return "", errCutoverStillPending
+	} else if err == nil {
+		if err := r.refuseQuarantinedCandidate(p.CandidateServerID); err != nil {
+			return "", err
+		}
+		if p.Mode == proto.PromotePlanned {
+			if err := r.refuseOldMasterPending(topo); err != nil {
+				return "", err
+			}
+		}
 	}
 	// The consideration data asks the agents; it is read before startMu.
 	view, err := r.PromoteView(ctx, p.MasterServerID)
@@ -174,6 +183,12 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		return "", errors.New("master masih sehat; jalankan promote terencana")
 	default:
 		return "", fmt.Errorf("mode promote tidak dikenal: %q", p.Mode)
+	}
+	// An emergency is never held back by it: the master is gone.
+	if mode == proto.PromotePlanned {
+		if err := r.refuseOldMasterPending(topo); err != nil {
+			return "", err
+		}
 	}
 	rep, err := r.d.Store.GetReplicaByServer(p.CandidateServerID)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && rep.TopologyID != topo.ID) {
@@ -392,6 +407,52 @@ func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) er
 	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka, "+
 		"dan memuat data membuat replika bisa ditulis sebentar dan penjaga kunci bisa mengkarantina master. "+
 		"%s baru bisa dijalankan mulai %s, saat penjaga kunci sudah memutuskan. %s", r.nameOf(masterID), what, at, howToUnlock)
+}
+
+// refuseOldMasterPending is errOldMasterPending while topo's old master
+// is pending (pendingOldMaster).
+func (r *Runner) refuseOldMasterPending(topo store.Topology) error {
+	old, ok, err := r.pendingOldMaster(topo)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return oldMasterPendingError{old.Name}
+	}
+	return nil
+}
+
+// refuseQuarantinedCandidate refuses a quarantined candidate as the
+// consideration screen does (reasonQuarantined), before any agent is asked.
+func (r *Runner) refuseQuarantinedCandidate(id int64) error {
+	srv, err := r.d.Store.GetServer(id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if srv.Role == store.RoleQuarantined {
+		return fmt.Errorf("%s tidak bisa dipromosikan: %s", srv.Name, reasonQuarantined)
+	}
+	return nil
+}
+
+// errOldMasterPending (T4) refuses a planned promotion while the
+// topology's old master is still quarantined; Error names it.
+var errOldMasterPending error = oldMasterPendingError{}
+
+// oldMasterPendingError is errOldMasterPending naming the old master;
+// every such error is errOldMasterPending for errors.Is.
+type oldMasterPendingError struct{ name string }
+
+func (e oldMasterPendingError) Error() string {
+	return fmt.Sprintf("master lama %s dari promote sebelumnya belum dibangun ulang atau dihapus; selesaikan itu dulu", e.name)
+}
+
+func (oldMasterPendingError) Is(target error) bool {
+	_, ok := target.(oldMasterPendingError)
+	return ok
 }
 
 var errCutoverStillPending = errors.New("promote sebelumnya masih menunggu pengalihan aplikasi; tekan \"Sudah saya alihkan\" dulu")

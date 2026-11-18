@@ -1249,3 +1249,263 @@ func TestRecordReplicasOutsideRepointMu(t *testing.T) {
 		t.Fatalf("mysql.recordReplicas ran %d times with repointMu held", n)
 	}
 }
+
+// ---- a second promotion while the first old master is pending ----
+
+// oldMasterPendingText is T4 for db-master.
+const oldMasterPendingText = "master lama db-master dari promote sebelumnya belum dibangun ulang atau dihapus; selesaikan itu dulu"
+
+// quarantinedReason is T24, the reason a quarantined server with a replica
+// row cannot be chosen.
+const quarantinedReason = "Master lama yang dikarantina"
+
+// secondPromoteRig is a promote rig after a planned promotion of c and its
+// cutover: c is the healthy master, b and d its replicas, m the
+// quarantined old master (read-only, as its quarantine leaves it) the
+// topology still names.
+func secondPromoteRig(t *testing.T) *promoteRig {
+	t.Helper()
+	g := rebuildRig(t)
+	g.h.set(g.c.id, healthyView(monitor.StatusHealthy, masterGTID, nil))
+	g.c.reply("mysql.binlogTail", proto.BinlogTailResult{GTIDExecuted: masterGTID, File: "binlog.000003", MySQLRunning: true})
+	g.h.set(g.m.id, monitor.View{Role: store.RoleQuarantined, Status: monitor.Status{Code: monitor.StatusQuarantined},
+		ReceivedAt: time.Now(), Snap: &proto.HealthSnapshot{MySQLOK: true, GTIDExecuted: masterGTID, SuperReadOnly: true}})
+	for _, fa := range []*fakeAgent{g.b, g.d} {
+		g.h.set(fa.id, replicaView(masterGTID, masterGTID))
+	}
+	return g
+}
+
+// marks is every rig agent's call count.
+func (g *promoteRig) marks() map[*fakeAgent]int {
+	out := map[*fakeAgent]int{}
+	for _, fa := range []*fakeAgent{g.m, g.c, g.b, g.d} {
+		out[fa] = fa.mark()
+	}
+	return out
+}
+
+// wantNoCommands fails when any rig agent received a command since from.
+func (g *promoteRig) wantNoCommands(t *testing.T, from map[*fakeAgent]int) {
+	t.Helper()
+	for fa, n := range from {
+		if got := fa.cmds(n); len(got) > 0 {
+			t.Errorf("%s received %v", fa.name, got)
+		}
+	}
+}
+
+// emergencyOnC makes the master c unreachable (only an emergency is
+// possible) and b ready to be promoted in one.
+func (g *promoteRig) emergencyOnC() {
+	g.offline(g.c)
+	g.b.job("mysql.promote", func(*jobs.Job, json.RawMessage) (any, error) {
+		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Mode: proto.PromoteEmergency}, nil
+	})
+	g.b.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs})
+}
+
+// TestPlannedPromoteRefusedWhileOldMasterPending (spec 5.1, T4): while the
+// topology's old master is quarantined, without a replica row, with a
+// running or waiting rebuild's row or with a failed one, a planned
+// promotion is refused with T4 before any agent is asked anything and
+// before anything is stored; resolved from the master's status ("" mode)
+// it is refused under the lock before any promote command.
+func TestPlannedPromoteRefusedWhileOldMasterPending(t *testing.T) {
+	for _, row := range []string{"", store.ReplicaCreating, store.ReplicaFailed} {
+		t.Run("row "+row, func(t *testing.T) {
+			g := secondPromoteRig(t)
+			e := g.e
+			if row != "" {
+				if _, err := e.st.AddReplica(g.topo.ID, g.m.id, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.st.SetReplicaState(g.m.id, row, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := context.Background()
+			v, err := e.r.PromoteView(ctx, g.c.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v.Mode != proto.PromotePlanned || v.PendingOldMaster != "db-master" {
+				t.Fatalf("view mode %s, pending old master %q", v.Mode, v.PendingOldMaster)
+			}
+			checks := len(g.h.checked())
+			from := g.marks()
+			_, err = e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id, Mode: proto.PromotePlanned})
+			if err == nil || err.Error() != oldMasterPendingText || !errors.Is(err, errOldMasterPending) {
+				t.Fatalf("planned promote = %v, want %q", err, oldMasterPendingText)
+			}
+			g.wantNoCommands(t, from)
+			if n := len(g.h.checked()); n != checks {
+				t.Errorf("reports asked for: %v", g.h.checked()[checks:])
+			}
+			// The mode the master's status allows (planned): refused under
+			// the lock, before any promote command.
+			from = g.marks()
+			_, err = e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id})
+			if err == nil || err.Error() != oldMasterPendingText {
+				t.Fatalf("promote in the status's mode = %v, want %q", err, oldMasterPendingText)
+			}
+			for fa, n := range from {
+				for _, cmd := range fa.cmds(n) {
+					switch cmd {
+					case "mysql.binlogTail", "mysql.probeSource": // the consideration data's reads
+					default:
+						t.Errorf("%s received %s", fa.name, cmd)
+					}
+				}
+			}
+			if p := g.promotion(); p.OldMasterServerID != g.m.id {
+				t.Fatalf("a promotion was stored: %+v", p)
+			}
+			if _, busy, err := e.st.ActiveJobForTopology(g.topo.ID); err != nil || busy {
+				t.Fatalf("a job was stored: %v, %v", busy, err)
+			}
+		})
+	}
+	// An old master that is gone, or no longer quarantined, holds nothing
+	// back.
+	g := secondPromoteRig(t)
+	if err := g.e.st.DeleteServer(g.m.id); err != nil {
+		t.Fatal(err)
+	}
+	v, err := g.e.r.PromoteView(context.Background(), g.c.id)
+	if err != nil || v.PendingOldMaster != "" {
+		t.Fatalf("view after the old master was deleted: %q, %v", v.PendingOldMaster, err)
+	}
+}
+
+// TestEmergencyPromoteNotRefused (spec 5.1, T5): an emergency promotion is
+// never held back by a pending old master: the view names it, and the
+// promotion runs; the topology's old master is then the master it
+// replaced.
+func TestEmergencyPromoteNotRefused(t *testing.T) {
+	g := secondPromoteRig(t)
+	e := g.e
+	g.emergencyOnC()
+	ctx := context.Background()
+	v, err := e.r.PromoteView(ctx, g.c.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Mode != proto.PromoteEmergency || v.PendingOldMaster != "db-master" {
+		t.Fatalf("view mode %s, pending old master %q", v.Mode, v.PendingOldMaster)
+	}
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+		Mode: proto.PromoteEmergency})
+	if err != nil {
+		t.Fatalf("emergency promote with a pending old master: %v", err)
+	}
+	if j, _ := e.waitJob(id, store.JobSucceeded); j.Kind != KindPromoteEmergency {
+		t.Fatalf("kind = %s", j.Kind)
+	}
+	topo, err := e.st.GetTopology(g.topo.ID)
+	if err != nil || topo.MasterServerID != g.b.id || topo.OldMasterServerID != g.c.id {
+		t.Fatalf("topology after = %+v, %v", topo, err)
+	}
+	if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+		t.Fatalf("first old master role = %s, want quarantined", got)
+	}
+}
+
+// TestPromoteScreenNamesQuarantinedCandidate (spec 5.1, T24): a
+// quarantined server with a replica row is a candidate that cannot be
+// chosen, for T24 whatever its row's state or its agent; a request naming
+// it anyway is refused before any agent is asked anything.
+func TestPromoteScreenNamesQuarantinedCandidate(t *testing.T) {
+	g := secondPromoteRig(t)
+	e := g.e
+	failedRebuild(t, g, "mysql.preflight")
+	g.emergencyOnC()
+	ctx := context.Background()
+	v, err := e.r.PromoteView(ctx, g.c.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(v.Candidates, func(c Candidate) bool { return c.ServerID == g.m.id })
+	if i < 0 {
+		t.Fatalf("candidates %+v lack db-master", v.Candidates)
+	}
+	if c := v.Candidates[i]; c.Eligible || c.Reason != quarantinedReason || c.ProbeOK != nil || c.ProbeErr != "" {
+		t.Fatalf("db-master candidate = %+v", c)
+	}
+	if g.m.count("mysql.probeSource") != 0 {
+		t.Fatal("the quarantined server was asked to probe the master")
+	}
+	g.m.detach()
+	v, err = e.r.PromoteView(ctx, g.c.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := v.Candidates[slices.IndexFunc(v.Candidates, func(c Candidate) bool { return c.ServerID == g.m.id })]; c.Reason != quarantinedReason {
+		t.Fatalf("offline db-master candidate reason = %q", c.Reason)
+	}
+	g.m.attach()
+	from := g.marks()
+	checks := len(g.h.checked())
+	_, err = e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.m.id, Mode: proto.PromoteEmergency})
+	if want := "db-master tidak bisa dipromosikan: " + quarantinedReason; err == nil || err.Error() != want {
+		t.Fatalf("promote of the quarantined server = %v, want %q", err, want)
+	}
+	g.wantNoCommands(t, from)
+	if n := len(g.h.checked()); n != checks {
+		t.Errorf("reports asked for: %v", g.h.checked()[checks:])
+	}
+}
+
+// TestOldMasterAfterSecondPromote (spec 5.1): after an emergency promotion
+// while the first old master's rebuild had failed, no topology names that
+// server; it keeps the role quarantined, so Periksa is refused with the
+// existing text, Ulangi of its rebuild is refused because the topology's
+// master changed, and deleting it works, with job.cancel for the agent job
+// stored on its rebuild.
+func TestOldMasterAfterSecondPromote(t *testing.T) {
+	g := secondPromoteRig(t)
+	e := g.e
+	rebuild := failedRebuild(t, g, "mysql.preflight")
+	e.setState(rebuild, func(st *jobState) {
+		st.AgentServerID, st.AgentJobID, st.AgentCmd = g.m.id, "agent-copy-9", "mysql.cloneFrom"
+	})
+	g.emergencyOnC()
+	ctx := context.Background()
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+		Mode: proto.PromoteEmergency})
+	if err != nil {
+		t.Fatalf("second promote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a topology still names the first old master: %v", err)
+	}
+	if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+		t.Fatalf("first old master role = %s, want quarantined", got)
+	}
+	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
+		t.Fatalf("first old master row = %+v, %v; want failed", rep, err)
+	}
+	from := g.marks()
+	if _, err := e.r.StartLeftover(ctx, g.m.id); err == nil || err.Error() != "server ini bukan lagi master lama sebuah topologi" {
+		t.Fatalf("Periksa = %v", err)
+	}
+	g.wantNoCommands(t, from)
+	if err := e.r.Retry(rebuild, JobAck{Confirmed: true, AcceptConnections: true}); err == nil ||
+		!strings.Contains(err.Error(), "master topologi ini sudah berganti sejak pekerjaan ini dibuat") {
+		t.Fatalf("Ulangi = %v", err)
+	}
+	mark := g.m.mark()
+	if err := e.r.DeleteServer(ctx, g.m.id); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	wantCmds(t, "first old master", g.m.cmds(mark), []string{"job.cancel"})
+	var p proto.JobIDParams
+	g.m.params("job.cancel", &p)
+	if p.JobID != "agent-copy-9" {
+		t.Fatalf("job.cancel for %q", p.JobID)
+	}
+	if _, err := e.st.GetServer(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("server after the delete: %v", err)
+	}
+}
