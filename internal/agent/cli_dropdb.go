@@ -69,6 +69,7 @@ Simpan juga salinannya di server lain, misalnya:
 	textDroppedNotRelocked  = "Database %s sudah dihapus; perintah ini tidak perlu dijalankan lagi."
 	// A drop whose outcome cannot be confirmed, and the lock's state.
 	textDropUnknown = "Tidak bisa dipastikan apakah database %s sudah dihapus. Lihat dulu di server ini (hanya membaca): mysql -e 'SHOW DATABASES'. Bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi."
+	textDropRunning = "MySQL mungkin masih menjalankan penghapusan database %s, jadi hasilnya belum bisa dipastikan. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris DROP DATABASE di sana, tunggu. Sesudah baris itu hilang, lihat mysql -e 'SHOW DATABASES': bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi."
 	textLockBack    = "Kunci baca-saja server ini sudah terpasang lagi."
 	// The same three without a backup (--tanpa-cadangan): no sentence
 	// about a file that does not exist.
@@ -363,8 +364,15 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	// must not end the command before the audit line of a drop.
 	hold := make(chan os.Signal, 4)
 	defer signal.Stop(hold)
+	// sent is set at the moment the DROP is handed to the driver: before
+	// it, no failure is a drop attempt (no check, no audit line).
+	sent := false
 	drop := func(ctx context.Context, c *sql.Conn) error {
 		signal.Notify(hold, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		if err := ctx.Err(); err != nil {
+			return err // the window already ended: nothing is sent
+		}
+		sent = true
 		_, err := c.ExecContext(ctx, "DROP DATABASE "+quoteIdent(name))
 		return err
 	}
@@ -394,7 +402,7 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	case errors.Is(err, errStateChanged), errors.Is(err, mysql.ErrLiftBusy), errors.As(err, &lockErr):
 		return fail("%s", err)
 	default:
-		return dropOutcome(ctx, s, err, name, b, stdout, stderr, record)
+		return dropOutcome(ctx, s, err, name, b, sent, stdout, stderr, record)
 	}
 
 	// 10. Recorded, and what comes next.
@@ -404,16 +412,33 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 }
 
 // dropOutcome ends drop-database after the window ended abnormally or the
-// DROP failed (err), claiming no more than the server shows: gone is
-// recorded and said as dropped; still there, with the server's statement
-// ended, gets the texts of what happened; anything else (the check failed,
-// or the statement may still be running) is said and recorded as not
-// known. It returns the exit code (never 0).
-func dropOutcome(ctx context.Context, s *rootSession, err error, name string, b *backup, stdout, stderr io.Writer,
+// DROP failed (err), claiming no more than the server shows. When the DROP
+// was never sent, it says that failure as before, without a check or an
+// audit line. Otherwise: gone is recorded and said as dropped; still there,
+// with the server's statement ended, gets the texts of what happened; when
+// MySQL may still be running the DROP it says so and advises waiting, not
+// running again; when the check failed it says the outcome is not known.
+// Both of the last two are recorded with outcome=unknown. It returns the
+// exit code (never 0).
+func dropOutcome(ctx context.Context, s *rootSession, err error, name string, b *backup, sent bool, stdout, stderr io.Writer,
 	record func(window, outcome string)) int {
 	pname := printable(name)
 	var lifted *liftedError
 	var relock *relockError
+	failed := func() {
+		switch {
+		case errors.As(err, &lifted), errors.Is(err, errInterrupted), errors.Is(err, errWindowCap), errors.As(err, &relock):
+			fmt.Fprintln(stderr, err)
+		case b == nil:
+			fmt.Fprintf(stderr, textDropFailedNoBackup+"\n", pname, printable(err.Error()))
+		default:
+			fmt.Fprintf(stderr, textDropFailed+"\n", pname, printable(err.Error()), printable(b.path))
+		}
+	}
+	if !sent {
+		failed()
+		return 1
+	}
 	window := "error"
 	switch {
 	case errors.As(err, &relock):
@@ -446,16 +471,13 @@ func dropOutcome(ctx context.Context, s *rootSession, err error, name string, b 
 		}
 		fmt.Fprintln(stdout, textDropDone)
 	case cerr == nil && !running:
-		switch {
-		case lifted != nil:
-			fmt.Fprintln(stderr, err)
-		case b == nil:
-			fmt.Fprintf(stderr, textDropFailedNoBackup+"\n", pname, printable(err.Error()))
-		default:
-			fmt.Fprintf(stderr, textDropFailed+"\n", pname, printable(err.Error()), printable(b.path))
-		}
+		failed()
+	case running:
+		record(window, "unknown statement=running")
+		fmt.Fprintf(stderr, textDropRunning+"\n", pname)
+		lockLine()
 	default:
-		record(window, "unknown")
+		record(window, "unknown statement=ended")
 		fmt.Fprintf(stderr, textDropUnknown+"\n", pname)
 		lockLine()
 	}

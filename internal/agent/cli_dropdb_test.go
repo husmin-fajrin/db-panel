@@ -1199,8 +1199,12 @@ func TestDropDatabaseBackupRefusals(t *testing.T) {
 	}
 }
 
-// dropUnknown is said when a drop's outcome cannot be confirmed.
+// dropUnknown is said when the DROP's statement has ended on the server
+// but whether the database went could not be read.
 const dropUnknown = "Tidak bisa dipastikan apakah database %s sudah dihapus. Lihat dulu di server ini (hanya membaca): mysql -e 'SHOW DATABASES'. Bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi."
+
+// dropRunning is said when MySQL may still be running the DROP.
+const dropRunning = "MySQL mungkin masih menjalankan penghapusan database %s, jadi hasilnya belum bisa dipastikan. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris DROP DATABASE di sana, tunggu. Sesudah baris itu hilang, lihat mysql -e 'SHOW DATABASES': bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi."
 
 // TestDropDatabaseStillRunningIsUnknown: a DROP the kill does not stop,
 // still running when the bounded wait ends (and blocking the relock): the
@@ -1217,16 +1221,19 @@ func TestDropDatabaseStillRunningIsUnknown(t *testing.T) {
 	release := r.holdRead("berjalan.t1")
 	code, out, errOut := r.run(strings.NewReader("berjalan\n"), "berjalan")
 	release()
-	if code == 0 || !strings.Contains(errOut, fmt.Sprintf(dropUnknown, "berjalan")+"\n") {
+	// The running line exactly, then the lock's state (here the relock
+	// failed: the waiting DROP blocks it).
+	first, rest, _ := strings.Cut(errOut, "\n")
+	if code == 0 || first != fmt.Sprintf(dropRunning, "berjalan") || !strings.HasPrefix(rest, "Kunci baca-saja server ini tidak bisa dipasang lagi (") {
 		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
 	}
-	for _, bad := range []string{"tidak bisa dihapus", "Jalankan perintah ini lagi", "Database berjalan sudah dihapus"} {
+	for _, bad := range []string{"Tidak bisa dipastikan", "tidak bisa dihapus", "Jalankan perintah ini lagi", "Database berjalan sudah dihapus"} {
 		if strings.Contains(out+errOut, bad) {
 			t.Errorf("output claims %q: stdout %q, stderr %q", bad, out, errOut)
 		}
 	}
 	logged := r.syslogLines()
-	if len(logged) != 1 || !strings.Contains(logged[0], "outcome=unknown") || !strings.Contains(logged[0], `name="berjalan"`) || !strings.Contains(logged[0], "window=") {
+	if len(logged) != 1 || !strings.Contains(logged[0], "outcome=unknown statement=running") || !strings.Contains(logged[0], `name="berjalan"`) || !strings.Contains(logged[0], "window=") {
 		t.Errorf("system log %q", logged)
 	}
 	waitFor(t, func() bool { return !r.exists("berjalan") }, func() string { return "the orphaned DROP never ended" })
@@ -1246,14 +1253,14 @@ func TestDropDatabaseCheckFailsIsUnknown(t *testing.T) {
 	r.makeDB("tak_tahu", 1)
 	r.holdRead("tak_tahu.t1")
 	code, out, errOut := r.run(strings.NewReader("tak_tahu\n"), "tak_tahu")
-	if code == 0 || !strings.Contains(errOut, fmt.Sprintf(dropUnknown, "tak_tahu")+"\n") || !strings.Contains(errOut, "Kunci baca-saja server ini sudah terpasang lagi.\n") {
-		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
+	if want := fmt.Sprintf(dropUnknown, "tak_tahu") + "\nKunci baca-saja server ini sudah terpasang lagi.\n"; code == 0 || errOut != want {
+		t.Errorf("drop-database = %d\nstderr %q\nwant   %q\nstdout %q", code, errOut, want, out)
 	}
-	if strings.Contains(out+errOut, "tidak bisa dihapus") || strings.Contains(out+errOut, "Jalankan perintah ini lagi") {
+	if strings.Contains(out+errOut, "MySQL mungkin") || strings.Contains(out+errOut, "tidak bisa dihapus") || strings.Contains(out+errOut, "Jalankan perintah ini lagi") {
 		t.Errorf("output claims more than it knows: stdout %q, stderr %q", out, errOut)
 	}
 	logged := r.syslogLines()
-	if len(logged) != 1 || !strings.Contains(logged[0], "outcome=unknown") || !strings.Contains(logged[0], "window=cap") {
+	if len(logged) != 1 || !strings.Contains(logged[0], "outcome=unknown statement=ended") || !strings.Contains(logged[0], "window=cap") {
 		t.Errorf("system log %q", logged)
 	}
 	if r.flags() != "1 1" || !r.lockFree() {
@@ -1281,5 +1288,43 @@ func TestDropDatabaseSecondSignalKeepsAuditLine(t *testing.T) {
 	}
 	if r.exists("dua_kali") || r.flags() != "1 1" || !r.lockFree() {
 		t.Errorf("exists %v, flags %s, lock free %v", r.exists("dua_kali"), r.flags(), r.lockFree())
+	}
+}
+
+// TestDropDatabaseNotSentIsNoAttempt: a failure before the DROP statement is
+// handed to the driver (here SET GLOBAL super_read_only = OFF refused for
+// an account without SYSTEM_VARIABLES_ADMIN or SUPER), with the server
+// check failing too, is no drop attempt: the text of that failure, neither
+// the "cannot tell" nor the "may still be running" line, no system log
+// line.
+func TestDropDatabaseNotSentIsNoAttempt(t *testing.T) {
+	r := newDropRig(t)
+	setVar(t, &cliNow, func() time.Time { return fixedNow })
+	setVar(t, &cliDroppedNow, func(context.Context, *rootSession, string) (bool, error) {
+		return false, errors.New("koneksi terputus (test)")
+	})
+	r.makeDB("tak_terkirim", 1)
+	r.setup("CREATE USER 'pembaca'@'localhost' IDENTIFIED BY ''",
+		"GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, PROCESS, RELOAD ON *.* TO 'pembaca'@'localhost'",
+		"GRANT SESSION_VARIABLES_ADMIN ON *.* TO 'pembaca'@'localhost'")
+	general := r.generalLog()
+	code, out, errOut := r.run(strings.NewReader("tak_terkirim\n"), "tak_terkirim", "--pengguna", "pembaca")
+	path := filepath.Join(r.backups, "tak_terkirim-"+fixedStamp+".sql")
+	prefix := "Database tak_terkirim tidak bisa dihapus (Error 1227 (42000): "
+	suffix := "). Kunci baca-saja sudah terpasang lagi. Cadangan tadi tetap ada di " + path + ".\n"
+	if code == 0 || !strings.HasPrefix(errOut, prefix) || !strings.HasSuffix(errOut, suffix) || strings.Count(errOut, "\n") != 1 {
+		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
+	}
+	if strings.Contains(out+errOut, "Tidak bisa dipastikan") || strings.Contains(out+errOut, "MySQL mungkin") {
+		t.Errorf("output speaks of an attempt: stdout %q, stderr %q", out, errOut)
+	}
+	if logged := r.syslogLines(); len(logged) != 0 {
+		t.Errorf("system log %q", logged)
+	}
+	if strings.Contains(general(), "DROP DATABASE") {
+		t.Error("a DROP DATABASE was sent")
+	}
+	if !r.exists("tak_terkirim") || r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("exists %v, flags %s, lock free %v", r.exists("tak_terkirim"), r.flags(), r.lockFree())
 	}
 }
