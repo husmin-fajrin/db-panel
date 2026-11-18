@@ -106,3 +106,37 @@ func ShownError(err error, name func(serverID int64) string) string {
 func agentLogLine(msg string) string {
 	return agentLogPrefix + monitor.AgentText(msg, maxLogLine)
 }
+
+// agentErrText is err's text with the words of an agent's failure in it
+// labelled (agentErrorText), the server named from the store; the hub's
+// own timeout and offline keep the panel's words, and a text already
+// labelled is kept as it is.
+func (r *Runner) agentErrText(err error) string { return agentErrorText(err, r.nameOf) }
+
+// agentWords is the text an agent sent in a field of its answer (not an
+// error), labelled as serverID's words and cut at limit characters.
+func (r *Runner) agentWords(serverID int64, text string, limit int) string {
+	return AgentQuoteN(r.nameOf(serverID), text, limit)
+}
+
+// agentPart is an agent's value inside a line already marked as the
+// agent's ("agent: " lines, or a sentence that names the agent as its
+// source): one line, cut at limit characters.
+func agentPart(s string, limit int) string { return monitor.AgentText(s, limit) }
+
+// maxShownGTID bounds a GTID set an agent reports, as a page or a job log
+// line shows it.
+const maxShownGTID = 512
+
+// shownGTID is a GTID set an agent reported, as the panel shows it: only
+// when it reads as a GTID set (parseGTIDSet), without its whitespace and
+// bounded; "" for anything else, which is then not shown at all.
+func shownGTID(s string) string {
+	if len(s) > 64<<10 {
+		return ""
+	}
+	if set, ok := parseGTIDSet(s); !ok || len(set) == 0 {
+		return ""
+	}
+	return truncate(strings.Join(strings.Fields(s), ""), maxShownGTID)
+}

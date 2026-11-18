@@ -102,9 +102,9 @@ func (jr *jobRun) copySnapshot(ctx context.Context, cmd string, p proto.Snapshot
 	case dumpGrantAdvice.MatchString(created.Warning):
 		// The agent's own advice, naming the admin account (from
 		// CURRENT_USER(), never row data) in a GRANT to run: kept whole.
-		jr.logLine("warn", created.Warning)
+		jr.logLine("warn", agentLogPrefix+agentPart(created.Warning, maxLogLine))
 	case created.Warning != "":
-		jr.logf("warn", "%s", created.Warning) // any other shape: censored
+		jr.logf("warn", agentLogPrefix+"%s", agentPart(created.Warning, maxLogLine)) // any other shape: censored
 	}
 	p.User, p.Password = user, password
 	if err := jr.markCopySent(); err != nil {

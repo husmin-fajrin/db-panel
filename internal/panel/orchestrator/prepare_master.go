@@ -87,7 +87,7 @@ func (jr *jobRun) masterPreflight(ctx context.Context, _ bool) (outcome, error) 
 	}
 	jr.logChecks(res.Checks)
 	if res.Worst == proto.CheckFail {
-		return outcome{}, errors.New(failedChecks(res.Checks, proto.CheckFail))
+		return outcome{}, agentTextError{server: jr.serverName(jr.job.ServerID), text: failedChecks(res.Checks, proto.CheckFail)}
 	}
 	jr.st.MasterPort = res.Status.Port
 	jr.st.MasterTLS = res.Status.TLSAvailable
@@ -130,7 +130,7 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 			// log in with what the panel stores.
 			return outcome{}, fmt.Errorf("akun replikasi %s sudah ada di master ini dari persiapan sebelumnya, dan master yang "+
 				"dipin tidak mengizinkan panel mengganti sandinya. Bila tidak ada replika lain yang memakainya, hapus akun itu di "+
-				"server ini (%s) lalu klik Ulangi. Pesan agent: %v", replUser, dropReplUserHint(err.Error()), err)
+				"server ini (%s) lalu klik Ulangi. %v", replUser, dropReplUserHint(err.Error()), err)
 		}
 		// Prepared before with the topology's password: it stays.
 		jr.logf("info", "User replikasi %s sudah ada di master; sandinya tidak diubah.", replUser)

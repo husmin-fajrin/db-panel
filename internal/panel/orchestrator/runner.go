@@ -1925,7 +1925,11 @@ func (jr *jobRun) logChecks(checks []proto.Check) {
 		if c.Status == proto.CheckFail {
 			level = "error"
 		}
-		jr.logf(level, "%s [%s]: %s", c.Title, c.Status, c.Detail)
+		// The agent's finding, one line after "agent: " (spec 5.6); each
+		// part is censored on its own by logf, so the agent's advice in
+		// a detail keeps its anchors (redact).
+		jr.logf(level, agentLogPrefix+"%s [%s]: %s", agentPart(c.Title, maxLogLine), agentPart(c.Status, 32),
+			agentPart(c.Detail, maxLogLine))
 	}
 }
 

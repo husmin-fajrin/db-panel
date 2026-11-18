@@ -34,14 +34,18 @@ func operatorInitFilesText(files []string) string {
 	if len(files) == 0 {
 		return ""
 	}
-	return " init_file milik operator berikut tidak dijalankan selama karantina: " + strings.Join(files, ", ") + "."
+	shown := make([]string, 0, len(files))
+	for _, f := range files {
+		shown = append(shown, agentPart(f, 300)) // the agent's file names: one line each
+	}
+	return " init_file milik operator berikut tidak dijalankan selama karantina: " + strings.Join(shown, ", ") + "."
 }
 
-// startLockReasonText is the agent's reason as given, truncated; an agent
-// that predates the start lock gives none.
-func startLockReasonText(reason string) string {
+// startLockReasonText is server's agent's reason, labelled as its words
+// (spec 5.6) and cut; an agent that predates the start lock gives none.
+func startLockReasonText(server, reason string) string {
 	if reason == "" {
 		return "agent tidak melaporkan kunci start (versi lama?)"
 	}
-	return truncate(reason, maxLogLine)
+	return AgentQuoteN(server, reason, maxLogLine)
 }

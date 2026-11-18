@@ -292,7 +292,7 @@ func matchIssuedSerial(certPEM, got string) error {
 	}
 	if got != want {
 		return stepError(fmt.Sprintf("agent melaporkan sertifikat terpasang dengan nomor seri %s, bukan %s yang "+
-			"diterbitkan panel; sertifikat tidak dicatat. Periksa server itu lalu Ulangi", got, want))
+			"diterbitkan panel; sertifikat tidak dicatat. Periksa server itu lalu Ulangi", agentPart(got, 64), want))
 	}
 	return nil
 }
@@ -352,16 +352,18 @@ func ioRefused(rs *proto.ReplicaStatus) bool {
 
 // unverifiedText says why awaitVerifiedLink's last status is not a
 // verified link.
-func unverifiedText(rs *proto.ReplicaStatus) string {
+func unverifiedText(server string, rs *proto.ReplicaStatus) string {
 	switch {
 	case rs == nil:
 		return "status replika tidak terbaca"
 	case rs.IORunning == "Yes" && rs.LastIOErrno == 0:
 		return "thread IO tersambung, tetapi agent tidak melaporkan SOURCE_SSL_VERIFY_SERVER_CERT=1 (agent versi lama?)"
 	case rs.LastIOErrno != 0:
-		return fmt.Sprintf("thread IO %s, error %d: %s", rs.IORunning, rs.LastIOErrno, truncate(rs.LastIOError, 200))
+		// The receiver's error is the agent's (MySQL's) words (spec 5.6).
+		return fmt.Sprintf("thread IO %s, error %d: %s", agentPart(rs.IORunning, 32), rs.LastIOErrno,
+			AgentQuoteN(server, rs.LastIOError, 200))
 	default:
-		return "thread IO " + rs.IORunning
+		return "thread IO " + agentPart(rs.IORunning, 32)
 	}
 }
 
@@ -695,12 +697,12 @@ func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, appro
 			// mismatch): it goes back, as when START REPLICA fails. The
 			// paused mark stays until restartReplica clears it.
 			return outcome{}, jr.revertUnverified(ctx, serverID, topo, password, rep.Databases,
-				errors.New(unverifiedText(last)))
+				errors.New(unverifiedText(jr.serverName(serverID), last)))
 		}
 		jr.unpause(serverID)
 		if !ok {
 			return outcome{}, stepError(fmt.Sprintf("replikasi %s belum tersambung ke master dengan verifikasi sertifikat (%s); "+
-				"tanda terverifikasi belum diberikan. Periksa replika lalu Ulangi", jr.serverName(serverID), unverifiedText(last)))
+				"tanda terverifikasi belum diberikan. Periksa replika lalu Ulangi", jr.serverName(serverID), unverifiedText(jr.serverName(serverID), last)))
 		}
 		if err := jr.r.d.Store.SetReplicaTLSVerified(serverID, true); err != nil {
 			return outcome{}, err
@@ -729,16 +731,16 @@ func (jr *jobRun) revertUnverified(ctx context.Context, serverID int64, topo sto
 	}, nil)
 	if err != nil {
 		jr.logf("error", "Replikasi %s tidak bisa dikembalikan tanpa verifikasi: %v", jr.serverName(serverID), err)
-		return stepError(fmt.Sprintf("verifikasi gagal: %v; mengembalikan replikasi tanpa verifikasi juga gagal (%v); "+
-			"periksa replika lalu Ulangi", cause, err))
+		return stepError(fmt.Sprintf("verifikasi gagal: %s; mengembalikan replikasi tanpa verifikasi juga gagal (%s); "+
+			"periksa replika lalu Ulangi", jr.r.agentErrText(cause), jr.r.agentErrText(err)))
 	}
 	jr.restartReplica(rctx, serverID)
 	if jr.st.TightenPaused == serverID {
-		return stepError(fmt.Sprintf("verifikasi gagal: %v; replikasi dikembalikan tanpa verifikasi tetapi belum berjalan; "+
-			"klik Start replika atau Ulangi", cause))
+		return stepError(fmt.Sprintf("verifikasi gagal: %s; replikasi dikembalikan tanpa verifikasi tetapi belum berjalan; "+
+			"klik Start replika atau Ulangi", jr.r.agentErrText(cause)))
 	}
 	jr.logf("warn", "Replikasi %s dikembalikan tanpa verifikasi dan berjalan lagi.", jr.serverName(serverID))
-	return stepError(fmt.Sprintf("verifikasi gagal: %v; replikasi dikembalikan tanpa verifikasi", cause))
+	return stepError(fmt.Sprintf("verifikasi gagal: %s; replikasi dikembalikan tanpa verifikasi", jr.r.agentErrText(cause)))
 }
 
 // unpause clears the paused mark tightenRepoint set on the replica, now

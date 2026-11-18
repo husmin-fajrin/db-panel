@@ -215,7 +215,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 			defer cancel()
 			var res proto.ProbeSourceResult
 			if err := r.d.Hub.Call(cctx, rep.ServerID, "mysql.probeSource", nil, &res); err != nil {
-				probes[i].err = truncate(err.Error(), maxLogLine)
+				probes[i].err = truncate(r.agentErrText(err), maxLogLine)
 				return
 			}
 			ok := res.Reachable

@@ -517,10 +517,11 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 	}
 	jr.logChecks(res.Checks)
 	if res.Worst == proto.CheckFail {
-		return outcome{}, errors.New(failedChecks(res.Checks, proto.CheckFail))
+		return outcome{}, agentTextError{server: jr.serverName(jr.target()), text: failedChecks(res.Checks, proto.CheckFail)}
 	}
 	if left := failedChecks(res.Checks, proto.CheckNeedsConfirm); left != "" {
-		return outcome{}, errors.New("masih perlu konfirmasi: " + left)
+		return outcome{}, errors.New("masih perlu konfirmasi: " +
+			agentTextError{server: jr.serverName(jr.target()), text: left}.Error())
 	}
 	if jr.st.Resync && len(jr.st.WipeList) > 0 {
 		jr.logf("info", "Database replika lama yang dibuang sebelum salinan: %s.", strings.Join(jr.st.WipeList, ", "))
@@ -997,7 +998,7 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 		} else {
 			jr.logf("warn", "Replikasi diatur memverifikasi sertifikat master %s, tetapi belum terbukti tersambung (%s); "+
 				"tanda terverifikasi belum diberikan. Jalankan Perketat sambungan replikasi di halaman master setelah replika tersambung.",
-				topo.SourceHost, unverifiedText(last))
+				topo.SourceHost, unverifiedText(jr.serverName(jr.target()), last))
 		}
 	}
 	return done("IO %s, SQL %s", rs.IORunning, rs.SQLRunning), nil
@@ -1080,7 +1081,7 @@ func (jr *jobRun) waitCaughtUp(ctx context.Context) (proto.WaitSyncedResult, err
 		s := w.Status
 		if s.LastIOErrno != 0 || s.LastSQLErrno != 0 || s.SQLRunning != "Yes" ||
 			(s.IORunning != "Yes" && s.IORunning != "Connecting") {
-			return w, notSynced(w, fmt.Sprintf("replikasi tidak berjalan (IO %s, SQL %s)", s.IORunning, s.SQLRunning))
+			return w, jr.notSynced(jr.target(), w, fmt.Sprintf("replikasi tidak berjalan (IO %s, SQL %s)", s.IORunning, s.SQLRunning))
 		}
 		if w.Executed == prev {
 			return w, catchUpError{fmt.Sprintf("replika tidak bertambah maju dalam %d menit (IO %s, SQL %s); "+
@@ -1102,15 +1103,20 @@ func (jr *jobRun) waitCaughtUp(ctx context.Context) (proto.WaitSyncedResult, err
 
 // notSynced explains a replica that did not reach the set: a replication
 // thread's error when there is one, otherwise lag.
-func notSynced(w proto.WaitSyncedResult, lag string) error {
+// The thread's error is the agent's (MySQL's) words, labelled as
+// serverID's (spec 5.6); lag, which carries the agent's thread states, is
+// made one line.
+func (jr *jobRun) notSynced(serverID int64, w proto.WaitSyncedResult, lag string) error {
 	s := w.Status
 	switch {
 	case s.LastIOError != "":
-		return fmt.Errorf("replika belum sinkron: IO %d %s", s.LastIOErrno, s.LastIOError)
+		return fmt.Errorf("replika belum sinkron: IO %d %s", s.LastIOErrno,
+			jr.r.agentWords(serverID, s.LastIOError, maxLogLine))
 	case s.LastSQLError != "":
-		return fmt.Errorf("replika belum sinkron: SQL %d %s", s.LastSQLErrno, s.LastSQLError)
+		return fmt.Errorf("replika belum sinkron: SQL %d %s", s.LastSQLErrno,
+			jr.r.agentWords(serverID, s.LastSQLError, maxLogLine))
 	}
-	return errors.New(lag)
+	return errors.New(agentPart(lag, maxLogLine))
 }
 
 // setReplicaState records the job's replica state; lastError may carry

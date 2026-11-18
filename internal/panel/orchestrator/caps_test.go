@@ -137,7 +137,7 @@ func TestJobLogCappedOnEveryPath(t *testing.T) {
 		{"published job error", published("job_update", "error", "AGENTERR"), maxLogLine},
 		{"replica last error", rep.LastError, maxLogLine},
 		{"failed step message", steps[j.CurrentStep].Message, maxLogLine},
-		{"agent progress step message", published("job_update", "message", "PROGRESS"), maxStepMessage},
+
 		{"change job's replica last error", changeJobLastError(t, long("CHANGEERR")), maxLogLine},
 	} {
 		if len(c.got) > c.max || !utf8.ValidString(c.got) || !strings.HasSuffix(c.got, "…(dipotong)") {
@@ -145,6 +145,37 @@ func TestJobLogCappedOnEveryPath(t *testing.T) {
 				utf8.ValidString(c.got), c.got[max(0, len(c.got)-16):])
 		}
 	}
+}
+
+// The agent's progress message is one line after "agent: ", cut at
+// maxLogLine characters (spec 5.6), well within maxStepMessage.
+func TestProgressStepMessageCapped(t *testing.T) {
+	e := newEnv(t)
+	m, _ := e.readyMaster("db-master")
+	r := e.replicaAgent("replica1", "dump")
+	r.job("mysql.dumpFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
+		j.Progress(10, "PROGRESS"+strings.Repeat("é", 3000)+strings.Repeat("x", maxStepMessage))
+		return nil, errors.New("berhenti")
+	})
+	id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+		MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	e.pubMu.Lock()
+	defer e.pubMu.Unlock()
+	for _, p := range e.pubs {
+		if s, _ := p.Data.(map[string]any)["message"].(string); p.Event == "job_update" && strings.Contains(s, "PROGRESS") {
+			if len(s) > maxStepMessage || !utf8.ValidString(s) || !strings.HasPrefix(s, "agent: PROGRESS") ||
+				!strings.HasSuffix(s, "… (10%)") {
+				t.Fatalf("progress step message kept %d bytes, ends %q", len(s), s[max(0, len(s)-16):])
+			}
+			return
+		}
+	}
+	t.Fatal("no progress step message")
 }
 
 // changeJobLastError fails an add_databases job with the agent error

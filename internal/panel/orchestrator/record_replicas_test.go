@@ -187,7 +187,8 @@ func TestQuarantineStepLogsUnguardedStartLock(t *testing.T) {
 			StartLockReason:   "berkas kunci tidak terbaca oleh pengguna mysql",
 			OperatorInitFiles: []string{"/etc/mysql/ops-init.sql"}})
 		for _, want := range []string{
-			"Master lama dipin dikarantina, tetapi belum terjamin terkunci saat MySQL menyala: berkas kunci tidak terbaca oleh pengguna mysql.",
+			"Master lama dipin dikarantina, tetapi belum terjamin terkunci saat MySQL menyala: Pesan dari agent db-master " +
+				"(bukan dari panel): berkas kunci tidak terbaca oleh pengguna mysql.",
 			"init_file milik operator berikut tidak dijalankan selama karantina: /etc/mysql/ops-init.sql.",
 		} {
 			if !strings.Contains(log, want) {

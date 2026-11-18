@@ -289,7 +289,7 @@ func (jr *jobRun) addCatchUp(ctx context.Context, approved bool) (outcome, error
 		return outcome{}, err
 	}
 	if !w.Synced {
-		return outcome{}, notSynced(w, "replika masih tertinggal; coba lagi setelah replika menyusul")
+		return outcome{}, jr.notSynced(jr.job.ServerID, w, "replika masih tertinggal; coba lagi setelah replika menyusul")
 	}
 	return done("replika sinkron dengan master"), nil
 }
@@ -431,7 +431,7 @@ func (jr *jobRun) changeVerify(timeoutSec int) func(context.Context, bool) (outc
 				return outcome{}, err
 			}
 			if !w.Synced {
-				return outcome{}, notSynced(w, fmt.Sprintf("replika belum menyusul master dalam %d detik (IO %s, SQL %s)",
+				return outcome{}, jr.notSynced(jr.job.ServerID, w, fmt.Sprintf("replika belum menyusul master dalam %d detik (IO %s, SQL %s)",
 					timeoutSec, w.Status.IORunning, w.Status.SQLRunning))
 			}
 		}

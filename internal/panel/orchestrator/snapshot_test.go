@@ -462,7 +462,7 @@ func TestDumpUserWarningReachesJobLog(t *testing.T) {
 	}
 	found := false
 	for _, l := range lines {
-		if l.Message == warning {
+		if l.Message == "agent: "+warning {
 			found = true
 			if l.Level != "warn" {
 				t.Errorf("warning logged at %q, want warn", l.Level)

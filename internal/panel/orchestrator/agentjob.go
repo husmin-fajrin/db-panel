@@ -144,7 +144,8 @@ func (jr *jobRun) handleEvents(serverID int64, agentID string, result any) (bool
 				jr.save()
 			}
 			if read {
-				jr.setStep(store.StepRunning, fmt.Sprintf("%s (%d%%)", p.Message, p.Percent))
+				// The agent's own words: one line after "agent: " (spec 5.6).
+				jr.setStep(store.StepRunning, fmt.Sprintf("%s%s (%d%%)", agentLogPrefix, agentPart(p.Message, maxLogLine), p.Percent))
 			}
 		case proto.EventJobLog:
 			var l proto.JobLog

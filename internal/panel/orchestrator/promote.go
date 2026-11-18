@@ -648,7 +648,7 @@ func (jr *jobRun) promoteCatchUp(ctx context.Context, _ bool) (outcome, error) {
 		}
 		s := w.Status
 		if s.LastIOErrno != 0 || s.LastSQLErrno != 0 || s.SQLRunning != "Yes" {
-			return outcome{}, notSynced(w, fmt.Sprintf("replikasi kandidat tidak berjalan (IO %s, SQL %s)", s.IORunning, s.SQLRunning))
+			return outcome{}, jr.notSynced(jr.candidate(), w, fmt.Sprintf("replikasi kandidat tidak berjalan (IO %s, SQL %s)", s.IORunning, s.SQLRunning))
 		}
 		if !jr.r.now().Before(deadline) {
 			return outcome{}, fmt.Errorf("kandidat belum menerapkan semua transaksi master dalam %s", jr.r.promoteCatchUp)
@@ -728,10 +728,10 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 		jr.logf("info", "Promote dilanjutkan dari langkah yang sudah membuka penulisan.")
 	}
 	if res.Mode != "" && res.Mode != mode {
-		jr.logf("warn", "Agent mencatat promote ini sebagai %s.", res.Mode)
+		jr.logf("warn", "Agent mencatat promote ini sebagai %s.", agentPart(res.Mode, 64))
 	}
 	if res.Unapplied != "" {
-		jr.logf("warn", "Transaksi yang tidak lengkap di relay log tidak diterapkan: %s", truncate(res.Unapplied, 512))
+		jr.logf("warn", "Transaksi yang tidak lengkap di relay log tidak diterapkan: %s", agentPart(res.Unapplied, 512))
 	}
 	name := jr.serverName(jr.candidate())
 	jr.logf("info", "%s sekarang menerima tulisan sebagai master baru (%d transaksi relay log diterapkan).", name, res.Applied)
@@ -780,7 +780,7 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 	}
 	if err != nil {
 		jr.deferStep()
-		msg := truncate("karantina tertunda: "+err.Error(), maxLogLine)
+		msg := truncate("karantina tertunda: "+jr.r.agentErrText(err), maxLogLine)
 		jr.logf("error", "Karantina master lama gagal: %v. Dikirim lagi saat agent tersambung ulang, atau tekan Ulangi.", err)
 		return outcome{store.StepFailed, msg}, nil
 	}
@@ -788,9 +788,9 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 	if !qres.StartLocked {
 		// Pinned all the same, but an older agent or a refused lock leaves
 		// MySQL free to start writable: say so in the job log. The reason
-		// is the agent's free text, shown as given.
+		// is the agent's free text, labelled as its words.
 		jr.logf("warn", "Master lama dipin dikarantina, tetapi belum terjamin terkunci saat MySQL menyala: %s.%s",
-			startLockReasonText(qres.StartLockReason), operatorInitFilesText(qres.OperatorInitFiles))
+			startLockReasonText(jr.serverName(old), qres.StartLockReason), operatorInitFilesText(qres.OperatorInitFiles))
 	}
 	return done("dikarantina"), nil
 }
@@ -883,8 +883,12 @@ func (jr *jobRun) promoteRepoint(ctx context.Context, _ bool) (outcome, error) {
 		case out.state == store.ReplicaNeedsRebuild:
 			rebuild++
 			jr.st.Repointed = append(jr.st.Repointed, rep.ServerID)
-			jr.logf("warn", "Replika %s punya transaksi yang tidak ada di master baru (%s): perlu dibangun ulang dengan Resync ulang.",
-				name, truncate(out.errant, 256))
+			if out.errant != "" {
+				jr.logf("warn", "Replika %s punya transaksi yang tidak ada di master baru (%s): perlu dibangun ulang dengan Resync ulang.",
+					name, truncate(out.errant, 256))
+			} else {
+				jr.logf("warn", "Replika %s punya transaksi yang tidak ada di master baru: perlu dibangun ulang dengan Resync ulang.", name)
+			}
 		default:
 			ok++
 			jr.st.Repointed = append(jr.st.Repointed, rep.ServerID)
@@ -1034,7 +1038,7 @@ func (jr *jobRun) promoteJobMayRun(ctx context.Context) (bool, string) {
 	case errors.As(err, &pe) && pe.Code == proto.CodeBadParams:
 		return false, ""
 	case err != nil:
-		return true, "tidak bisa diperiksa (" + err.Error() + ")"
+		return true, "tidak bisa diperiksa (" + jr.r.agentErrText(err) + ")"
 	case s.State == "running":
 		return true, "masih berjalan"
 	}
@@ -1212,7 +1216,7 @@ func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64,
 		}
 	}
 	if err != nil {
-		r.markQuarantine(promID, oldID, true, truncate(logErr(err), maxLogLine))
+		r.markQuarantine(promID, oldID, true, truncate(r.agentErrText(err), maxLogLine))
 		return res, err
 	}
 	r.markQuarantine(promID, oldID, false, "")
@@ -1224,7 +1228,7 @@ func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64,
 type repointOutcome struct {
 	state   string // the replica's state now
 	offline bool   // its agent was offline: it waits in needs_repoint
-	errant  string // NeedsRebuild: what it holds that the new master lacks
+	errant  string // NeedsRebuild: what it holds that the new master lacks (shownGTID; "" when unreadable)
 	ioErr   string // repointed, but its receiver has not connected yet
 	err     error  // it answered and refused or failed: needs_repoint
 	// record: its receiver is connected to the new master, which the
@@ -1279,10 +1283,15 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 	case errors.Is(err, proto.ErrOffline):
 		return set(repointOutcome{state: store.ReplicaNeedsRepoint, offline: true}, waitMsg)
 	case err != nil:
-		return set(repointOutcome{state: store.ReplicaNeedsRepoint, err: err}, truncate("Arahkan ulang gagal: "+logErr(err), maxLogLine))
+		return set(repointOutcome{state: store.ReplicaNeedsRepoint, err: err}, truncate("Arahkan ulang gagal: "+r.agentErrText(err), maxLogLine))
 	case res.NeedsRebuild:
-		return set(repointOutcome{state: store.ReplicaNeedsRebuild, errant: res.Errant},
-			truncate("Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru ("+res.Errant+")", maxLogLine))
+		// The agent's errant set is shown only when it reads as a GTID set.
+		errant := shownGTID(res.Errant)
+		msg := "Perlu dibangun ulang: replika ini punya transaksi yang tidak ada di master baru"
+		if errant != "" {
+			msg += " (" + errant + ")"
+		}
+		return set(repointOutcome{state: store.ReplicaNeedsRebuild, errant: errant}, msg)
 	}
 	// SEC-63c: verified only when the agent saw the receiver connected
 	// with SOURCE_SSL_VERIFY_SERVER_CERT=1; a receiver still connecting
@@ -1298,9 +1307,10 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 	}
 	o := repointOutcome{state: store.ReplicaReady}
 	if !res.IORunning {
-		o.ioErr = truncate(redact.Quotes(res.IOError), maxLogLine)
-		if o.ioErr == "" {
-			o.ioErr = "penerima replikasi belum tersambung"
+		o.ioErr = "penerima replikasi belum tersambung"
+		if res.IOError != "" {
+			// The receiver's error is the agent's (MySQL's) words.
+			o.ioErr = truncate(redact.Quotes(r.agentWords(rep.ServerID, res.IOError, maxLogLine)), maxLogLine)
 		}
 	}
 	out := set(o, "")
@@ -1366,8 +1376,10 @@ func (r *Runner) RepointNow(ctx context.Context, replicaServerID int64) error {
 		return errors.New("agent replika terputus; replika diarahkan otomatis saat agent tersambung lagi")
 	case out.err != nil:
 		return out.err
-	case out.state == store.ReplicaNeedsRebuild:
+	case out.state == store.ReplicaNeedsRebuild && out.errant != "":
 		return fmt.Errorf("%w (%s)", ErrNeedsRebuild, out.errant)
+	case out.state == store.ReplicaNeedsRebuild:
+		return ErrNeedsRebuild
 	}
 	return nil
 }
