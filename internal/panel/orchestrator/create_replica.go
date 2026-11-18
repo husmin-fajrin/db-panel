@@ -110,6 +110,9 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		if err := r.requireRebuildApproval(ctx, p.TargetServerID, p.Approval); err != nil {
 			return "", err
 		}
+		// After a panel restart the agent may still be copying for the
+		// last rebuild (spec 5.1).
+		r.cancelAgentCopy(ctx, p.TargetServerID)
 	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -126,6 +129,13 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		return "", err
 	} else if busy && j.Kind == KindPrepareMaster {
 		return "", errors.New("master masih menjalankan Siapkan master; selesaikan pekerjaan itu dulu")
+	}
+	// An old master whose quarantine has not ended takes only a rebuild:
+	// refused before anything else, its row and role untouched (D-10).
+	if !p.RebuildOldMaster {
+		if err := r.refuseAwaitingRebuild(target.ID); err != nil {
+			return "", err
+		}
 	}
 	if err := r.refuseUnconnectedTarget(target); err != nil {
 		return "", err
@@ -148,25 +158,14 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	if err := r.refuseBusy(target.ID, "server tujuan"); err != nil {
 		return "", err
 	}
-	// An old master left by a failed rebuild takes only a new rebuild:
-	// refused before its failed row goes or its role changes (D-10).
-	if !p.RebuildOldMaster {
-		if err := r.refuseAwaitingRebuild(target.ID); err != nil {
-			return "", err
-		}
-	}
-	// A target whose earlier attempt failed is free for a new one.
+	// A target whose earlier attempt failed is free for a new one. A
+	// quarantined old master stays quarantined (RemoveReplica keeps it).
 	if rep, err := r.d.Store.GetReplicaByServer(target.ID); err == nil && rep.State == store.ReplicaFailed {
 		if err := r.d.Store.RemoveReplica(target.ID); err != nil {
 			return "", err
 		}
-		target.Role = store.RoleUnassigned
-		// A failed rebuild of an old master leaves it quarantined.
-		if _, err := r.d.Store.GetTopologyByOldMaster(target.ID); err == nil {
-			if err := r.d.Store.SetServerRole(target.ID, store.RoleQuarantined); err != nil {
-				return "", err
-			}
-			target.Role = store.RoleQuarantined
+		if target.Role != store.RoleQuarantined {
+			target.Role = store.RoleUnassigned
 		}
 		r.log.Info("failed replica attempt removed for a new one", "server_id", target.ID)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -174,9 +173,6 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 	}
 	switch {
 	case target.Role == store.RoleQuarantined:
-		if !p.RebuildOldMaster {
-			return "", errors.New("server tujuan adalah master lama yang dikarantina; pakai Bangun ulang sebagai replika")
-		}
 		old, err := r.d.Store.GetTopologyByOldMaster(target.ID)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && old.ID != topo.ID) {
 			return "", errors.New("server tujuan bukan master lama topologi ini")
@@ -215,7 +211,6 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		if rerr := r.d.Store.RemoveReplica(target.ID); rerr != nil {
 			r.log.Warn("undo replica registration", "server_id", target.ID, "err", rerr)
 		}
-		r.keepQuarantined(target.ID, p.RebuildOldMaster)
 		return "", err
 	}
 	return id, nil
@@ -243,17 +238,6 @@ func (r *Runner) oldMasterConnectionsClear(ctx context.Context, serverID int64) 
 // acknowledgement the orchestrator then demands.
 func ConnectionsClear(res proto.ConnectionsResult) bool {
 	return res.Typed && res.Unreadable == "" && res.Incomplete == "" && len(res.Rows) == 0
-}
-
-// keepQuarantined puts the quarantined role back on an old master whose
-// rebuild was undone (RemoveReplica made it unassigned).
-func (r *Runner) keepQuarantined(serverID int64, rebuild bool) {
-	if !rebuild {
-		return
-	}
-	if err := r.d.Store.SetServerRole(serverID, store.RoleQuarantined); err != nil {
-		r.log.Warn("restore quarantined role", "server_id", serverID, "err", err)
-	}
 }
 
 // ErrTargetNotConnected refuses a target whose MySQL is installed but not
@@ -971,29 +955,16 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	}
 	// The old master's agent ends its quarantine in this command (G-1):
 	// from its OK answer on, the server is no longer the topology's old
-	// master, whatever the next steps do.
-	// The flag is stored before the marker is cleared, so a cancel never
-	// reads "not ended" with the marker gone; the marker is cleared on
-	// every pass (a Retry after a failed clear clears it, H-2).
+	// master, whatever the next steps do. The flag, the end of the marker
+	// and the role replica are stored in one transaction, on every pass (a
+	// Retry after a failed settle stores them; the agent answers OK again).
+	// When that fails nothing of it is stored and the step fails.
 	if jr.st.RebuildOldMaster {
 		first := !jr.st.QuarantineEnded
-		if first {
-			jr.st.QuarantineEnded = true
-			save := (*jobRun).saveErr
-			if jr.r.settleSave != nil {
-				save = jr.r.settleSave
-			}
-			if err := save(jr); err != nil {
-				jr.st.QuarantineEnded = false
-				return outcome{}, fmt.Errorf("simpan keadaan pekerjaan: %w", err)
-			}
-		}
-		clear := jr.r.d.Store.ClearOldMaster
-		if jr.r.settleClear != nil {
-			clear = jr.r.settleClear
-		}
-		if err := clear(jr.target()); err != nil {
-			return outcome{}, err
+		jr.st.QuarantineEnded = true
+		if err := jr.settle(); err != nil {
+			jr.st.QuarantineEnded = !first
+			return outcome{}, fmt.Errorf("simpan keadaan pekerjaan: %w", err)
 		}
 		if first {
 			jr.logf("info", "Karantina master lama berakhir: agent kini menyimpan peran replika.")
@@ -1023,6 +994,21 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 		}
 	}
 	return done("IO %s, SQL %s", rs.IORunning, rs.SQLRunning), nil
+}
+
+// settle stores the end of the old master's quarantine: the job's state
+// (with QuarantineEnded), no old-master marker, the role replica
+// (Store.SettleRebuild, or the settleStore seam in tests).
+func (jr *jobRun) settle() error {
+	b, err := json.Marshal(jr.st)
+	if err != nil {
+		return err
+	}
+	save := jr.r.d.Store.SettleRebuild
+	if jr.r.settleStore != nil {
+		save = jr.r.settleStore
+	}
+	return save(jr.job.ID, string(b), jr.target())
 }
 
 func (jr *jobRun) replicaVerify(ctx context.Context, _ bool) (outcome, error) {

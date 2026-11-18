@@ -369,3 +369,68 @@ func TestDeleteUnquarantinedRefusedWhenQuarantineNotPending(t *testing.T) {
 		t.Fatalf("DeleteServer of the quarantined old master: %v", err)
 	}
 }
+
+// TestQuarantinedWithRowRefusesResyncDetachCreate: an old master whose
+// rebuild failed before the settle, or runs, is refused Resync ulang, Lepas
+// replika (both modes) and a plain Buat replika with ErrAwaitingRebuild:
+// no agent command, no store change.
+func TestQuarantinedWithRowRefusesResyncDetachCreate(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rebuild running %v", running), func(t *testing.T) {
+			g := rebuildRig(t)
+			e := g.e
+			ctx := context.Background()
+			wantState := store.ReplicaFailed
+			if running {
+				gate := make(chan struct{})
+				defer close(gate)
+				g.m.before("mysql.preflight", func() { <-gate })
+				if _, err := g.startRebuild(); err != nil {
+					t.Fatal(err)
+				}
+				e.waitFor("rebuild at its preflight", func() bool { return g.m.count("mysql.preflight") == 1 })
+				wantState = store.ReplicaCreating
+			} else {
+				failedRebuild(t, g, "mysql.preflight")
+			}
+			jobs, err := e.st.ListJobsForServer(g.m.id, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unchanged := func(what string) {
+				t.Helper()
+				if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != wantState {
+					t.Fatalf("%s: row = %+v, %v; want %s", what, rep, err, wantState)
+				}
+				if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+					t.Fatalf("%s: role = %s", what, got)
+				}
+				if _, err := e.st.GetTopologyByOldMaster(g.m.id); err != nil {
+					t.Fatalf("%s: marker: %v", what, err)
+				}
+				if now, err := e.st.ListJobsForServer(g.m.id, 0); err != nil || len(now) != len(jobs) {
+					t.Fatalf("%s: jobs %d -> %d, %v", what, len(jobs), len(now), err)
+				}
+			}
+			mark := g.m.mark()
+			if _, err := e.r.StartResync(ctx, ResyncParams{ServerID: g.m.id}); !errors.Is(err, ErrAwaitingRebuild) {
+				t.Fatalf("StartResync = %v, want ErrAwaitingRebuild", err)
+			}
+			unchanged("resync")
+			for _, stop := range []bool{false, true} {
+				if err := e.r.DetachReplica(ctx, g.m.id, stop); !errors.Is(err, ErrAwaitingRebuild) {
+					t.Fatalf("DetachReplica(stop=%v) = %v, want ErrAwaitingRebuild", stop, err)
+				}
+				unchanged(fmt.Sprintf("detach stop=%v", stop))
+			}
+			if _, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+				ConfirmWipe: true}); !errors.Is(err, ErrAwaitingRebuild) {
+				t.Fatalf("StartCreateReplica (not a rebuild) = %v, want ErrAwaitingRebuild", err)
+			}
+			unchanged("create replica")
+			if cmds := g.m.cmds(mark); len(cmds) != 0 {
+				t.Fatalf("refusals sent %v to the old master", cmds)
+			}
+		})
+	}
+}

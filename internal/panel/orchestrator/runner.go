@@ -169,11 +169,9 @@ type Runner struct {
 	// afterReopen, when set (tests), runs in Retry between ReopenJob and
 	// launch.
 	afterReopen func(jobID string)
-	// settleSave and settleClear, when set (tests), replace the save of
-	// QuarantineEnded and the clear of the old-master marker in the
+	// settleStore, when set (tests), replaces Store.SettleRebuild in the
 	// connect step of a rebuild.
-	settleSave  func(*jobRun) error
-	settleClear func(serverID int64) error
+	settleStore func(jobID, paramsJSON string, serverID int64) error
 
 	base context.Context // parent of every job context; ended by Close
 	stop context.CancelFunc
@@ -557,6 +555,16 @@ func (r *Runner) failUnrunnable(j store.Job, rows []store.JobStep, cause error) 
 	if _, err := r.d.Store.AppendJobLog(j.ID, "error", msg, now); err != nil {
 		r.log.Warn("job log", "job", j.ID, "err", err)
 	}
+	// The replica row first, as fail does: a failed create_replica job
+	// never leaves its row creating (an old master's rebuild is then
+	// "failed before the settle", spec 5.1).
+	if j.Kind == KindCreateReplica {
+		if err := r.d.Store.SetReplicaState(j.ServerID, store.ReplicaFailed, msg); err != nil &&
+			!errors.Is(err, store.ErrNotFound) {
+			r.log.Warn("replica state of unrunnable job", "job", j.ID, "err", err)
+		}
+		r.replicaChanged(j.ServerID)
+	}
 	if err := r.d.Store.UpdateJob(j.ID, store.JobFailed, j.CurrentStep, msg, now); err != nil {
 		if !errors.Is(err, store.ErrJobFinished) {
 			r.log.Warn("fail unrunnable job", "job", j.ID, "err", err)
@@ -937,8 +945,29 @@ func (r *Runner) refuseSuperseded(j store.Job) error {
 // replica row replaced, re-created elsewhere or ready, a role changed, the
 // replica's databases changed). Running it again would apply its old
 // params over that (SEC-31).
+//
+// A rebuild of an old master its agent has not ended the quarantine of
+// needs the role quarantined, any other job of a replica the role replica
+// (spec 5.1). Periksa and Amankan data tertinggal, which only read the old
+// master, are no newer job for a rebuild still pending (pendingRebuild).
 func (r *Runner) supersededBy(j store.Job) (string, error) {
-	if newer, err := r.d.Store.NewerJobExists(j.ID, j.ServerID); err != nil {
+	var st jobState
+	stErr := json.Unmarshal([]byte(j.ParamsJSON), &st)
+	pending := false
+	if stErr == nil {
+		var err error
+		if pending, err = r.pendingRebuild(j, st); err != nil {
+			return "", err
+		}
+	}
+	var newer bool
+	var err error
+	if pending {
+		newer, err = r.d.Store.NewerJobExistsExcept(j.ID, j.ServerID, KindLeftover, KindSalvage)
+	} else {
+		newer, err = r.d.Store.NewerJobExists(j.ID, j.ServerID)
+	}
+	if err != nil {
 		return "", err
 	} else if newer {
 		return "server ini sudah punya pekerjaan yang lebih baru", nil
@@ -968,15 +997,18 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 		if rep.TopologyID != j.TopologyID {
 			return "server ini sekarang replika dari master lain", nil
 		}
-		if srv.Role != store.RoleReplica {
+		role := store.RoleReplica
+		if stErr == nil && j.Kind == KindCreateReplica && st.RebuildOldMaster && !st.QuarantineEnded {
+			role = store.RoleQuarantined
+		}
+		if srv.Role != role {
 			return "peran server ini sudah berubah", nil
 		}
 		// A job keeps the master it was made for: after a promotion it
 		// would check against the old master and copy from the new one
 		// (SP-4).
-		var st jobState
-		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
-			return "", err
+		if stErr != nil {
+			return "", stErr
 		}
 		topo, err := r.d.Store.GetTopology(rep.TopologyID)
 		if err != nil {
@@ -1002,6 +1034,32 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 	return "", nil
 }
 
+// pendingRebuild reports whether j is a rebuild of an old master that
+// failed before its agent ended the quarantine (spec 5.1): a
+// create_replica job with RebuildOldMaster and without QuarantineEnded
+// (st is its params), the server's replica row failed, and the server
+// still the old master of the job's topology.
+func (r *Runner) pendingRebuild(j store.Job, st jobState) (bool, error) {
+	if j.Kind != KindCreateReplica || !st.RebuildOldMaster || st.QuarantineEnded {
+		return false, nil
+	}
+	rep, err := r.d.Store.GetReplicaByServer(j.ServerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil || rep.State != store.ReplicaFailed {
+		return false, err
+	}
+	topo, err := r.d.Store.GetTopologyByOldMaster(j.ServerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return topo.ID == j.TopologyID, nil
+}
+
 // Cancel stops a job that has not finished: the agent job it waits for, if
 // any, is canceled too.
 func (r *Runner) Cancel(jobID string) error {
@@ -1024,26 +1082,53 @@ func (r *Runner) Cancel(jobID string) error {
 
 // Resume runs once at startup, before any job goroutine: a job still
 // running (or queued) in the store was cut off by the previous stop and is
-// failed at its step (Retry continues it); a waiting job keeps waiting.
+// failed at its step (Retry continues it); a waiting job keeps waiting. It
+// holds startMu while it fails them, so a Retry or a new job waits for it,
+// and fails a job's replica row before the job itself: no Retry ever sees
+// a failed job whose row still reads creating. Then it brings the rows an
+// earlier panel left to the old-master rule (normalizeFailedRebuilds),
+// those it has just failed included.
 func (r *Runner) Resume(ctx context.Context) {
+	var tighten []store.Job
+	func() {
+		r.startMu.Lock()
+		defer r.startMu.Unlock()
+		tighten = r.resumeJobs(ctx)
+		if err := r.normalizeFailedRebuilds(); err != nil {
+			r.log.Error("normalize failed rebuilds", "err", err)
+		}
+	}()
+	// Outside startMu: these call agents.
+	for _, j := range tighten {
+		if ctx.Err() != nil {
+			return
+		}
+		r.resumeTighten(ctx, j)
+	}
+}
+
+// resumeJobs fails the jobs a stop cut off and returns the tighten_tls jobs
+// among them. Callers hold startMu.
+func (r *Runner) resumeJobs(ctx context.Context) []store.Job {
 	jobs, err := r.d.Store.RunningJobs()
 	if err != nil {
 		r.log.Error("list running jobs", "err", err)
-		return
+		return nil
 	}
 	all, err := r.d.Store.ListJobs(0)
 	if err != nil {
 		r.log.Error("list jobs", "err", err)
-		return
+		return nil
 	}
 	for _, j := range all {
 		if j.Status == store.JobQueued {
 			jobs = append(jobs, j)
 		}
 	}
+	var tighten []store.Job
 	for _, j := range jobs {
 		if ctx.Err() != nil {
-			return
+			return tighten
 		}
 		r.mu.Lock()
 		_, live := r.live[j.ID]
@@ -1054,6 +1139,18 @@ func (r *Runner) Resume(ctx context.Context) {
 		now := r.now()
 		if err := r.d.Store.SetStep(j.ID, j.CurrentStep, store.StepFailed, resumeError, now); err != nil {
 			r.log.Warn("fail step on resume", "job", j.ID, "err", err)
+		}
+		// The replica row before the job's status.
+		state, lastErr := store.ReplicaFailed, resumeError
+		if changesDatabases(j.Kind) {
+			state, lastErr = store.ReplicaAttention, failedAt(j.Kind, j.CurrentStep, resumeError)
+		}
+		if seedsReplica(j.Kind) || changesDatabases(j.Kind) {
+			if err := r.d.Store.SetReplicaState(j.ServerID, state, lastErr); err != nil &&
+				!errors.Is(err, store.ErrNotFound) {
+				r.log.Warn("replica state on resume", "job", j.ID, "err", err)
+			}
+			r.replicaChanged(j.ServerID)
 		}
 		status := store.JobFailed
 		if isPromote(j.Kind) {
@@ -1067,22 +1164,93 @@ func (r *Runner) Resume(ctx context.Context) {
 			r.log.Warn("job log", "job", j.ID, "err", err)
 		}
 		r.jobFailed(j.ServerID, j.ID, j.Kind, r.stepName(j.ID, j.CurrentStep), resumeError)
-		state, lastErr := store.ReplicaFailed, resumeError
-		if changesDatabases(j.Kind) {
-			state, lastErr = store.ReplicaAttention, failedAt(j.Kind, j.CurrentStep, resumeError)
-		}
-		if seedsReplica(j.Kind) || changesDatabases(j.Kind) {
-			if err := r.d.Store.SetReplicaState(j.ServerID, state, lastErr); err != nil &&
-				!errors.Is(err, store.ErrNotFound) {
-				r.log.Warn("replica state on resume", "job", j.ID, "err", err)
-			}
-			r.replicaChanged(j.ServerID)
-		}
 		if j.Kind == KindTightenTLS {
-			r.resumeTighten(ctx, j)
+			tighten = append(tighten, j)
 		}
 		r.log.Info("job failed by restart", "job", j.ID, "kind", j.Kind, "step", j.CurrentStep)
 	}
+	return tighten
+}
+
+// normalizeFailedRebuilds brings the old masters an earlier panel left
+// after a failed rebuild (role replica, its replica row failed, still the
+// old master of that row's topology) to the old-master rule (spec 5.1,
+// 5.9): when the newest create_replica job of the server is a rebuild
+// whose agent ended the quarantine (QuarantineEnded), the marker goes and
+// it stays an ordinary failed replica; otherwise, a missing or unreadable
+// job included, its role becomes quarantined again. Any other server is
+// left alone, and a second run changes nothing. An error on one server
+// does not stop the others; they are all returned.
+func (r *Runner) normalizeFailedRebuilds() error {
+	servers, err := r.d.Store.ListServers()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, srv := range servers {
+		if err := r.normalizeFailedRebuild(srv); err != nil {
+			errs = append(errs, fmt.Errorf("server %d: %w", srv.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *Runner) normalizeFailedRebuild(srv store.Server) error {
+	if srv.Role != store.RoleReplica {
+		return nil
+	}
+	rep, err := r.d.Store.GetReplicaByServer(srv.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil || rep.State != store.ReplicaFailed {
+		return err
+	}
+	topo, err := r.d.Store.GetTopologyByOldMaster(srv.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil || topo.ID != rep.TopologyID {
+		return err
+	}
+	settled, err := r.latestRebuildSettled(srv.ID)
+	if err != nil {
+		return err
+	}
+	if settled {
+		if err := r.d.Store.ClearOldMaster(srv.ID); err != nil {
+			return err
+		}
+		r.log.Info("failed rebuild from an earlier panel: quarantine had ended, old-master marker cleared", "server_id", srv.ID)
+	} else {
+		if err := r.d.Store.SetServerRole(srv.ID, store.RoleQuarantined); err != nil {
+			return err
+		}
+		r.log.Info("failed rebuild from an earlier panel: quarantined again", "server_id", srv.ID)
+	}
+	r.replicaChanged(srv.ID)
+	return nil
+}
+
+// latestRebuildSettled reports whether the newest create_replica job of
+// serverID is a rebuild whose agent ended the quarantine. No such job, or
+// params that cannot be read, count as not ended.
+func (r *Runner) latestRebuildSettled(serverID int64) (bool, error) {
+	jobs, err := r.d.Store.ListJobsForServer(serverID, 0)
+	if err != nil {
+		return false, err
+	}
+	for _, j := range jobs {
+		if j.Kind != KindCreateReplica {
+			continue
+		}
+		var st jobState
+		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+			return false, nil
+		}
+		return st.RebuildOldMaster && st.QuarantineEnded, nil
+	}
+	return false, nil
 }
 
 // resumeTighten handles a tighten_tls job cut off by a restart while a
@@ -1175,16 +1343,15 @@ func (r *Runner) cancelJob(lj *liveJob, j store.Job, rows []store.JobStep) {
 			r.log.Warn("remove replica on cancel", "job", j.ID, "err", err)
 		}
 		// A canceled rebuild of an old master leaves it quarantined, pin
-		// included (releaseRole below is skipped for it), unless its
-		// agent already ended the quarantine (G-1): then it is canceled
-		// as any Buat replika.
+		// included (RemoveReplica keeps the role, releaseRole below is
+		// skipped for it), unless its agent already ended the quarantine
+		// (G-1): then it is canceled as any Buat replika.
 		oldMaster := st.RebuildOldMaster && !st.QuarantineEnded
-		r.keepQuarantined(j.ServerID, oldMaster)
-		// The target is unassigned again: it must not keep following the
-		// master, and its agent should not stay pinned as a replica. Once
-		// the connect step ran, replication (stopped above) is reset first,
-		// since the agent refuses releaseRole while it is configured. All
-		// best effort.
+		// Otherwise the target is unassigned again: it must not keep
+		// following the master, and its agent should not stay pinned as a
+		// replica. Once the connect step ran, replication (stopped above)
+		// is reset first, since the agent refuses releaseRole while it is
+		// configured. All best effort.
 		if jr.connect >= 0 && j.CurrentStep >= jr.connect {
 			if err := r.d.Hub.Call(ctx, j.ServerID, "mysql.resetReplica", nil, nil); err != nil {
 				r.log.Warn("reset replication on cancel", "job", j.ID, "server_id", j.ServerID, "err", logErr(err))
@@ -1669,22 +1836,17 @@ func (jr *jobRun) logLine(level, msg string) {
 	jr.r.d.Publish("job_log", map[string]any{"job_id": jr.job.ID, "id": id, "ts": now, "level": level, "message": msg})
 }
 
-// save stores the job's state in its ParamsJSON.
+// save stores the job's state in its ParamsJSON; an error is logged (the
+// settle of a rebuild, which must not go on without its state stored, uses
+// jobRun.settle).
 func (jr *jobRun) save() {
-	if err := jr.saveErr(); err != nil {
+	b, err := json.Marshal(jr.st)
+	if err == nil {
+		err = jr.r.d.Store.SetJobParams(jr.job.ID, string(b))
+	}
+	if err != nil {
 		jr.r.log.Warn("save job params", "job", jr.job.ID, "err", err)
 	}
-}
-
-// saveErr is save that returns the store's error instead of logging it,
-// for the one place that must not go on without the state stored (the
-// settle of a rebuild, H-2).
-func (jr *jobRun) saveErr() error {
-	b, err := json.Marshal(jr.st)
-	if err != nil {
-		return err
-	}
-	return jr.r.d.Store.SetJobParams(jr.job.ID, string(b))
 }
 
 // call runs an ordinary agent command for the current step.

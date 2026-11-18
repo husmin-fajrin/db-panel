@@ -26,14 +26,12 @@ func copyStateOf(t *testing.T, g *promoteRig) CopyState {
 	return s
 }
 
-// leftoverAccepted cancels the failed attempt and checks that Periksa data
-// tertinggal is accepted (want true) or refused with the copy sentence.
+// leftoverAccepted checks that Periksa data tertinggal on the old master
+// left by the failed attempt is accepted (want true) or refused with the
+// copy sentence.
 func leftoverAccepted(t *testing.T, g *promoteRig, want bool) {
 	t.Helper()
 	ctx := context.Background()
-	if err := g.e.r.CancelRebuildAttempt(ctx, g.m.id); err != nil {
-		t.Fatal(err)
-	}
 	g.m.reply("mysql.leftover", proto.LeftoverResult{})
 	id, err := g.e.r.StartLeftover(ctx, g.m.id)
 	switch {
@@ -100,16 +98,12 @@ func TestCopyStateEvidence(t *testing.T) {
 // the same.
 func TestCopyStateEarlierEvidenceCounts(t *testing.T) {
 	g := rebuildRig(t)
-	e := g.e
 	g.m.job("mysql.cloneFrom", func(j *jobs.Job, _ json.RawMessage) (any, error) {
 		j.Progress(0, "CLONE dimulai")
 		time.Sleep(50 * time.Millisecond)
 		return nil, errors.New("CLONE gagal di tengah")
 	})
 	failedRebuildNoScript(t, g)
-	if err := e.r.CancelRebuildAttempt(context.Background(), g.m.id); err != nil {
-		t.Fatal(err)
-	}
 	scriptReplicaTarget(g.m, "db-master", "clone")
 	g.m.fail("mysql.preflight", "pemeriksaan gagal")
 	failedRebuildNoScript(t, g)

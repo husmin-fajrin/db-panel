@@ -71,43 +71,24 @@ type ApprovalSeen struct {
 	Result proto.RebuildApprovalResult
 }
 
-// AwaitingRebuild reports whether srv is an old master waiting for its
-// rebuild: quarantined, or left by a failed rebuild (role replica, its
-// replica row failed, still the old master of a topology), which
-// StartCreateReplica takes for a new rebuild as it takes a quarantined
-// one. An ordinary failed replica, and an old master whose rebuild runs or
-// succeeded, are not (D-9). The web layer offers the rebuild by it; the
-// orchestrator refuses Resync ulang and Lepas replika by it (D-10).
+// AwaitingRebuild reports whether srv is an old master whose quarantine
+// has not ended: its role is quarantined (spec 5.1), whether it has a
+// replica row (a rebuild that runs, waits or failed before its agent ended
+// the quarantine) or not. Only the settle of a rebuild changes that role.
+// The web layer offers the rebuild by it; the orchestrator refuses Resync
+// ulang, Lepas replika and a plain Buat replika by it (D-10). st is not
+// read: the role alone decides.
 func AwaitingRebuild(st *store.Store, srv store.Server) (bool, error) {
-	switch srv.Role {
-	case store.RoleQuarantined:
-		return true, nil
-	case store.RoleReplica:
-	default:
-		return false, nil
-	}
-	rep, err := st.GetReplicaByServer(srv.ID)
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil || rep.State != store.ReplicaFailed {
-		return false, err
-	}
-	if _, err := st.GetTopologyByOldMaster(srv.ID); errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
-	return true, nil
+	return srv.Role == store.RoleQuarantined, nil
 }
 
-// ErrAwaitingRebuild refuses Resync ulang and Lepas replika of a replica
-// that is an old master left by a failed rebuild (AwaitingRebuild): only a
-// new rebuild ends its quarantine, with the rebuild's checks.
+// ErrAwaitingRebuild refuses Resync ulang, Lepas replika and a plain Buat
+// replika of an old master whose quarantine has not ended
+// (AwaitingRebuild): only a rebuild ends it, with the rebuild's checks.
 var ErrAwaitingRebuild = errors.New("server ini master lama yang masih dikarantina; pakai Bangun ulang sebagai replika")
 
-// refuseAwaitingRebuild is ErrAwaitingRebuild for a replica serverID left
-// by a failed rebuild of an old master; nil otherwise.
+// refuseAwaitingRebuild is ErrAwaitingRebuild for serverID while it is an
+// old master whose quarantine has not ended; nil otherwise.
 func (r *Runner) refuseAwaitingRebuild(serverID int64) error {
 	srv, err := r.d.Store.GetServer(serverID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -115,9 +96,6 @@ func (r *Runner) refuseAwaitingRebuild(serverID int64) error {
 	}
 	if err != nil {
 		return err
-	}
-	if srv.Role != store.RoleReplica {
-		return nil
 	}
 	awaiting, err := AwaitingRebuild(r.d.Store, srv)
 	if err != nil {

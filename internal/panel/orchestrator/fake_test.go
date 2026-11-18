@@ -374,11 +374,14 @@ type published struct {
 }
 
 type env struct {
-	t   *testing.T
-	st  *store.Store
-	hub *hub.Hub
-	box *secrets.Box
-	r   *Runner
+	t  *testing.T
+	st *store.Store
+	// dbPath is the store's file; a test opens it again to install a
+	// trigger that checks the order of the Runner's writes.
+	dbPath string
+	hub    *hub.Hub
+	box    *secrets.Box
+	r      *Runner
 	// mysqlCA signs the MySQL server certificates (Deps.MySQLCA).
 	mysqlCA *ca.MySQLCA
 	alerts  *fakeAlerts
@@ -406,7 +409,8 @@ func (l *testListener) OnEvent(id int64, ev proto.Event) {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "panel.db"))
+	dbPath := filepath.Join(dir, "panel.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +423,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	l := &testListener{}
-	e := &env{t: t, st: st, hub: hub.New(l), box: box, alerts: &fakeAlerts{}, mysqlCA: mysqlCA}
+	e := &env{t: t, st: st, dbPath: dbPath, hub: hub.New(l), box: box, alerts: &fakeAlerts{}, mysqlCA: mysqlCA}
 	e.r = New(Deps{Store: st, Hub: e.hub, Secrets: box, Publish: e.publish, Alerts: e.alerts,
 		Logger: slog.New(slog.DiscardHandler), Now: time.Now, PublicHost: "203.0.113.7", MySQLCA: mysqlCA})
 	e.r.offlineGrace = 300 * time.Millisecond

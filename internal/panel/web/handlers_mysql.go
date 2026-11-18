@@ -37,9 +37,6 @@ type Orchestrator interface {
 	Relock(ctx context.Context, serverID int64) error
 	UnlockMaster(ctx context.Context, serverID int64) error
 	DetachReplica(ctx context.Context, serverID int64, stop bool) error
-	// CancelRebuildAttempt makes an old master left by a failed rebuild a
-	// plain quarantined old master again (G-2).
-	CancelRebuildAttempt(ctx context.Context, serverID int64) error
 	DeleteServer(ctx context.Context, serverID int64) error
 	// DeleteUnquarantined deletes a quarantined old master whose
 	// quarantine never arrived (a dead server); guard it with a typed

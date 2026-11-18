@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -108,8 +109,9 @@ func (r *Runner) directCall(ctx context.Context, serverID int64, cmd string, par
 // replica registered), then its agent releases the pinned replica role
 // (best effort). Nothing is sent to the master, which may be offline; the
 // replication account there stays (it is shared by the topology's
-// replicas). super_read_only stays on. An old master left by a failed
-// rebuild is refused (ErrAwaitingRebuild) before anything is sent.
+// replicas). super_read_only stays on. An old master whose quarantine has
+// not ended (AwaitingRebuild) is refused (ErrAwaitingRebuild) before
+// anything is sent.
 func (r *Runner) DetachReplica(ctx context.Context, serverID int64, stop bool) error {
 	if err := r.detachable(serverID); err != nil {
 		return err
@@ -144,62 +146,6 @@ func (r *Runner) DetachReplica(ctx context.Context, serverID int64, stop bool) e
 	return nil
 }
 
-// errNotFailedRebuild refuses "Batalkan percobaan bangun ulang" for a
-// server that is not an old master left by a failed rebuild.
-var errNotFailedRebuild = errors.New("server ini bukan master lama dengan percobaan bangun ulang yang gagal")
-
-// CancelRebuildAttempt is "Batalkan percobaan bangun ulang" (G-2): an old
-// master left by a failed rebuild (role replica, failed row, still the
-// topology's old master) becomes a plain quarantined old master again, in
-// the panel only: its failed replica row goes and its role is
-// quarantined, in one store transaction, with no agent call (its agent
-// never left the quarantine). Its failed rebuild job is then superseded.
-func (r *Runner) CancelRebuildAttempt(ctx context.Context, serverID int64) error {
-	r.startMu.Lock()
-	defer r.startMu.Unlock()
-	if err := r.refuseBusy(serverID, "server ini"); err != nil {
-		return err
-	}
-	// Its agent ended the quarantine in the latest rebuild (the marker
-	// may be left when its clear failed, H-2): not an old master any more.
-	if ended, err := r.latestRebuildEnded(serverID); err != nil {
-		return err
-	} else if ended {
-		return errNotFailedRebuild
-	}
-	if err := r.d.Store.ReturnToQuarantine(serverID); errors.Is(err, store.ErrNotFailedRebuild) {
-		return errNotFailedRebuild
-	} else if err != nil {
-		return err
-	}
-	r.log.Info("failed rebuild attempt cancelled: quarantined again", "server_id", serverID)
-	r.replicaChanged(serverID)
-	// The failed rebuild job leaves no open job_failed behind.
-	r.jobEnded(serverID, "")
-	return nil
-}
-
-// latestRebuildEnded reports whether the newest create_replica job of
-// serverID rebuilt an old master whose agent ended the quarantine
-// (QuarantineEnded). A job whose params cannot be read counts as not ended.
-func (r *Runner) latestRebuildEnded(serverID int64) (bool, error) {
-	jobs, err := r.d.Store.ListJobsForServer(serverID, 0)
-	if err != nil {
-		return false, err
-	}
-	for _, j := range jobs {
-		if j.Kind != KindCreateReplica {
-			continue
-		}
-		var st jobState
-		if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
-			return false, nil
-		}
-		return st.RebuildOldMaster && st.QuarantineEnded, nil
-	}
-	return false, nil
-}
-
 func (r *Runner) detachable(serverID int64) error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
@@ -208,8 +154,8 @@ func (r *Runner) detachable(serverID int64) error {
 	} else if err != nil {
 		return err
 	}
-	// An old master left by a failed rebuild stays quarantined at its
-	// agent: detaching it would make the panel treat it as unassigned
+	// An old master whose quarantine has not ended stays quarantined at
+	// its agent: detaching it would make the panel treat it as unassigned
 	// (D-10).
 	if err := r.refuseAwaitingRebuild(serverID); err != nil {
 		return err
@@ -220,10 +166,12 @@ func (r *Runner) detachable(serverID int64) error {
 // DeleteServer removes a server that is not the panel's own, neither the
 // master of a topology with replicas nor a registered replica, nor a
 // quarantined old master whose cutover is pending, and has no unfinished
-// job: its agent releases its pinned role first (best effort; the agent may
-// be offline; not asked for a quarantined server, which stays quarantined),
-// then the server is deleted and its connection dropped. It answers
-// store.ErrNotFound for an unknown server.
+// job. A quarantined old master is deleted with the replica row of a
+// failed rebuild. The agent job stored on its last create_replica job is
+// canceled first (cancelAgentCopy), then its agent releases its pinned
+// role (best effort; the agent may be offline; not asked for a quarantined
+// server, which stays quarantined), then the server is deleted and its
+// connection dropped. It answers store.ErrNotFound for an unknown server.
 func (r *Runner) DeleteServer(ctx context.Context, serverID int64) error {
 	return r.deleteServer(ctx, serverID, false)
 }
@@ -241,6 +189,9 @@ func (r *Runner) deleteServer(ctx context.Context, serverID int64, unquarantined
 	if err := r.deletable(serverID, unquarantined); err != nil {
 		return err
 	}
+	// After a panel restart its agent may still be copying for the last
+	// rebuild (spec 5.1).
+	r.cancelAgentCopy(ctx, serverID)
 	srv, err := r.d.Store.GetServer(serverID)
 	if err != nil {
 		return err
@@ -345,10 +296,53 @@ func (r *Runner) deletableLocked(serverID int64, unquarantined bool) error {
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	if _, err := r.d.Store.GetReplicaByServer(serverID); err == nil {
-		return ErrServerIsReplica
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return err
+	// The row of an old master's failed rebuild goes with it (ON DELETE
+	// CASCADE): its quarantine never ended.
+	if srv.Role != store.RoleQuarantined {
+		if _, err := r.d.Store.GetReplicaByServer(serverID); err == nil {
+			return ErrServerIsReplica
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
 	}
 	return r.refuseBusy(serverID, "server ini")
+}
+
+// cancelAgentCopy asks, best effort, for the agent job stored on serverID's
+// newest create_replica job to be canceled (job.cancel, as cancelJob
+// does): after a panel restart an old master's agent may still be copying
+// for a rebuild the panel failed. Nothing is sent when that job stored no
+// agent job, its params cannot be read, or it is still unfinished (its
+// goroutine owns the agent job). It waits for the agent at most
+// cancelTimeout, and an error is only logged: it never stops the caller.
+func (r *Runner) cancelAgentCopy(ctx context.Context, serverID int64) {
+	jobs, err := r.d.Store.ListJobsForServer(serverID, 0)
+	if err != nil {
+		r.log.Warn("cancel agent copy: list jobs", "server_id", serverID, "err", err)
+		return
+	}
+	i := slices.IndexFunc(jobs, func(j store.Job) bool { return j.Kind == KindCreateReplica })
+	if i < 0 {
+		return
+	}
+	j := jobs[i]
+	switch j.Status {
+	case store.JobQueued, store.JobRunning, store.JobWaiting:
+		return
+	}
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil || st.AgentJobID == "" {
+		return
+	}
+	agent := st.AgentServerID
+	if agent == 0 {
+		agent = serverID
+	}
+	ctx, cancel := context.WithTimeout(ctx, cancelTimeout)
+	defer cancel()
+	if err := r.d.Hub.Call(ctx, agent, "job.cancel", proto.JobIDParams{JobID: st.AgentJobID}, nil); err != nil {
+		r.log.Warn("cancel agent copy", "job", j.ID, "agent_job", st.AgentJobID, "server_id", agent, "err", logErr(err))
+		return
+	}
+	r.log.Info("agent copy canceled", "job", j.ID, "agent_job", st.AgentJobID, "server_id", agent)
 }

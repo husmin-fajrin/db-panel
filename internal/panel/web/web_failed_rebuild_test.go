@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -16,10 +15,10 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// A rebuild of an old master that failed leaves the server's panel role
-// replica with a failed replica row while its agent stays quarantined; the
-// orchestrator takes a new rebuild of it (StartCreateReplica), and the
-// panel offers one (D-9).
+// A rebuild of an old master that failed before its agent ended the
+// quarantine leaves the server's panel role quarantined with a failed
+// replica row (spec 5.1); the orchestrator takes a new rebuild of it
+// (StartCreateReplica), and the panel offers one (D-9).
 
 const (
 	rebuildLink     = `href="/masters/2/replicas/new?bangun-ulang=1"`
@@ -28,7 +27,7 @@ const (
 )
 
 // failedRebuildEnv is promotedEnv after the cutover with db-master (1)
-// left by a failed rebuild: role replica, its replica row failed.
+// left by a failed rebuild: role quarantined, its replica row failed.
 func failedRebuildEnv(t *testing.T) (*env, *fakeOrch, store.Topology) {
 	t.Helper()
 	e, f, topo := promotedEnv(t)
@@ -44,9 +43,18 @@ func failedRebuildEnv(t *testing.T) (*env, *fakeOrch, store.Topology) {
 	return e, f, topo
 }
 
+// quarantineAgain makes db-master (1) a plain quarantined old master: its
+// replica row gone (the role stays quarantined).
+func quarantineAgain(t *testing.T, e *env) {
+	t.Helper()
+	if err := e.st.RemoveReplica(1); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestFailedRebuildOffersRebuildAgain: the server page shows the Master
-// lama box with Bangun ulang sebagai replika, and only actions that work in
-// this state; the form opens.
+// lama box with Bangun ulang sebagai replika, Periksa data tertinggal and
+// Hapus server (spec 5.1, "gagal sebelum settle"); the form opens.
 func TestFailedRebuildOffersRebuildAgain(t *testing.T) {
 	e, f, _ := failedRebuildEnv(t)
 	f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
@@ -56,11 +64,11 @@ func TestFailedRebuildOffersRebuildAgain(t *testing.T) {
 	rec := e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "data-old-master", "Master lama (dikarantina sejak", rebuildLink)
-	// Periksa and Amankan data tertinggal need the quarantined role
-	// (oldMasterFromPath, StartLeftover), and a registered replica cannot
-	// be deleted: none of them is offered.
-	wantNoBody(t, rec, `action="/servers/1/leftover"`, `action="/servers/1/salvage"`, `data-open-modal="modal-hapus"`,
-		"Server ini adalah replika.")
+	// The role stays quarantined: Periksa data tertinggal (the copy did
+	// not start) and Hapus server are offered, as the orchestrator takes
+	// them.
+	wantBody(t, rec, `action="/servers/1/leftover"`, `data-open-modal="modal-hapus"`)
+	wantNoBody(t, rec, "Server ini adalah replika.")
 
 	rec = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
 	wantCode(t, rec, http.StatusOK)
@@ -129,13 +137,14 @@ func TestFailedRebuildNotOtherServers(t *testing.T) {
 	wantBody(t, rec, "Resync ulang", "Lepas replika")
 	wantNoBody(t, rec, "Server ini master lama yang masih dikarantina.")
 
-	// db-master (1) with its rebuild running.
+	// db-master (1) with its rebuild running: its role stays quarantined,
+	// so it keeps its Master lama box (what the box shows while the
+	// rebuild runs is the web layer's next change).
 	if _, err := e.st.AddReplica(topo.ID, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	rec = e.do("GET", "/servers/1", nil, c)
-	wantNoBody(t, rec, "data-old-master", rebuildLink)
-	wantCode(t, e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c), http.StatusBadRequest)
+	wantBody(t, rec, "data-old-master")
 }
 
 // TestFailedRebuildReplicaPage: Resync ulang and Lepas replika are not
@@ -201,7 +210,11 @@ func TestFailedRebuildResyncDetachRefused(t *testing.T) {
 func TestRebuildFailedAfterSettleIsOrdinary(t *testing.T) {
 	e, f, _ := failedRebuildEnv(t)
 	c := e.cookie()
+	// The settle cleared the marker and made the role replica.
 	if err := e.st.ClearOldMaster(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetServerRole(1, store.RoleReplica); err != nil {
 		t.Fatal(err)
 	}
 	const id = "4444444444444444444444444444444c"
@@ -218,71 +231,6 @@ func TestRebuildFailedAfterSettleIsOrdinary(t *testing.T) {
 	wantBody(t, rec, "Ulangi dari tahap ini")
 	wantNoBody(t, rec, "tidak menolong")
 	wantCode(t, e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c), http.StatusBadRequest)
-}
-
-const (
-	cancelAttemptButton   = "Batalkan percobaan bangun ulang"
-	cancelAttemptSentence = `Server ini kembali tercatat sebagai master lama yang dikarantina; data di server ini tidak diubah. Sesudah itu Hapus server dan Bangun ulang sebagai replika tersedia lagi, dan tombol &#34;Ulangi dari tahap ini&#34; pada pekerjaan yang gagal tidak bisa dipakai lagi.`
-	cancelAttemptAction   = `action="/servers/1/rebuild-attempt/cancel"`
-)
-
-// TestCancelRebuildAttemptOffered (G-2): the Master lama box and the
-// replica page offer "Batalkan percobaan bangun ulang" with its sentence;
-// Lepas replika is not offered on the replica page.
-func TestCancelRebuildAttemptOffered(t *testing.T) {
-	e, _, _ := failedRebuildEnv(t)
-	c := e.cookie()
-	for _, u := range []string{"/servers/1", "/replicas/1"} {
-		rec := e.do("GET", u, nil, c)
-		wantCode(t, rec, http.StatusOK)
-		wantBody(t, rec, cancelAttemptButton, cancelAttemptSentence, cancelAttemptAction,
-			`data-confirm-action="cancel_rebuild_attempt"`)
-		wantNoBody(t, rec, `data-open-modal="modal-detach"`)
-	}
-	// Not for a plain quarantined old master, nor for an ordinary replica.
-	e2, _, topo := promotedEnv(t)
-	if err := e2.st.SetCutoverPending(topo.ID, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := e2.st.SetReplicaState(3, store.ReplicaFailed, "gagal"); err != nil {
-		t.Fatal(err)
-	}
-	for _, u := range []string{"/servers/1", "/servers/3", "/replicas/3"} {
-		wantNoBody(t, e2.do("GET", u, nil, e2.cookie()), cancelAttemptButton)
-	}
-}
-
-// TestCancelRebuildAttemptPost (G-2): the POST needs a token; with one the
-// server is a plain quarantined old master afterwards (box with Periksa,
-// Hapus and the rebuild), the failed job is no longer retried, and the
-// action is audited.
-func TestCancelRebuildAttemptPost(t *testing.T) {
-	e, f, _ := failedRebuildEnv(t)
-	c := e.cookie()
-	const jobID = "4444444444444444444444444444444d"
-	storeJob(t, e.st, jobID, orchestrator.KindCreateReplica, 1, `{"master_server_id":2,"rebuild_old_master":true}`,
-		store.JobFailed, "Periksa master", "Periksa server tujuan")
-	wantCode(t, e.do("POST", "/servers/1/rebuild-attempt/cancel", url.Values{}, c), http.StatusForbidden)
-	wantCalls(t, f)
-	rec := e.do("POST", "/servers/1/rebuild-attempt/cancel",
-		withToken(t, e, url.Values{}, web.ActCancelRebuildAttempt, "server", 1), c)
-	wantCode(t, rec, http.StatusSeeOther)
-	wantCalls(t, f, "cancel-rebuild-attempt 1")
-	wantAuditDetail(t, e, "cancel_rebuild_attempt", "{")
-	if srv, _ := e.st.GetServer(1); srv.Role != store.RoleQuarantined {
-		t.Fatalf("role after = %s", srv.Role)
-	}
-	rec = e.do("GET", "/servers/1", nil, c)
-	wantBody(t, rec, "data-old-master", rebuildLink, `action="/servers/1/leftover"`, `data-open-modal="modal-hapus"`)
-	wantNoBody(t, rec, cancelAttemptButton)
-	wantCode(t, e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c), http.StatusOK)
-
-	// Refused by the orchestrator: shown on the server page.
-	f.err = errors.New("server ini bukan master lama dengan percobaan bangun ulang yang gagal")
-	rec = e.do("POST", "/servers/1/rebuild-attempt/cancel",
-		withToken(t, e, url.Values{}, web.ActCancelRebuildAttempt, "server", 1), c)
-	wantCode(t, rec, http.StatusBadRequest)
-	wantBody(t, rec, "server ini bukan master lama dengan percobaan bangun ulang yang gagal")
 }
 
 const (
@@ -309,8 +257,8 @@ func storeRebuildJob(t *testing.T, e *env, id string, at int) {
 
 // TestLeftoverWordingAfterFailedRebuild (G-3): the box and the rebuild form
 // no longer send the operator to Periksa/Amankan they cannot use: after
-// the copy started they say the data is gone; before it, that the failed
-// attempt must be cancelled first. A plain quarantined old master whose
+// the copy started they say the data is gone; before it Periksa is offered,
+// with the failed row as without it. A plain quarantined old master whose
 // earlier rebuild reached the copy says the same and offers no Periksa.
 func TestLeftoverWordingAfterFailedRebuild(t *testing.T) {
 	for _, tc := range []struct {
@@ -322,7 +270,7 @@ func TestLeftoverWordingAfterFailedRebuild(t *testing.T) {
 		periksa bool
 	}{
 		{name: "failed, copy started", at: 6, box: copyStartedBox, form: copyStartedForm},
-		{name: "failed, copy not started", at: 1, box: attemptPending, form: attemptPending},
+		{name: "failed, copy not started", at: 1, periksa: true},
 		{name: "quarantined, copy started", at: 6, box: copyStartedBox, form: copyStartedForm, quarant: true},
 		{name: "quarantined, copy not started", at: 1, quarant: true, periksa: true},
 	} {
@@ -331,9 +279,8 @@ func TestLeftoverWordingAfterFailedRebuild(t *testing.T) {
 			c := e.cookie()
 			storeRebuildJob(t, e, "5555555555555555555555555555555"+fmt.Sprint(tc.at), tc.at)
 			if tc.quarant {
-				if err := e.st.ReturnToQuarantine(1); err != nil {
-					t.Fatal(err)
-				}
+				// A plain quarantined old master again (its row gone).
+				quarantineAgain(t, e)
 			}
 			box := e.do("GET", "/servers/1", nil, c)
 			form := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
@@ -398,12 +345,13 @@ func TestCopyUncertainWording(t *testing.T) {
 	}
 	storeRebuildJobParams(t, e, "6666666666666666666666666666666a", 4,
 		fmt.Sprintf(`{"master_server_id":2,"rebuild_old_master":true,"rebuild_promotion_id":%d,"copy_sent":true}`, prom.ID))
-	// Still recorded as a failed attempt: the attempt-pending sentence.
-	wantBody(t, e.do("GET", "/servers/1", nil, c), attemptPending)
-	if err := e.st.ReturnToQuarantine(1); err != nil {
-		t.Fatal(err)
-	}
+	// With the failed row and without it the same: the warning, and
+	// Periksa offered.
 	box := e.do("GET", "/servers/1", nil, c)
+	wantBody(t, box, copyUncertain, `action="/servers/1/leftover"`)
+	wantNoBody(t, box, copyStartedBox, attemptPending)
+	quarantineAgain(t, e)
+	box = e.do("GET", "/servers/1", nil, c)
 	wantBody(t, box, copyUncertain, `action="/servers/1/leftover"`)
 	wantNoBody(t, box, copyStartedBox)
 	form := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)

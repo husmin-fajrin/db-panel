@@ -333,3 +333,149 @@ func TestRetryRefusedAfterMasterSwapped(t *testing.T) {
 	}
 	wantCmds(t, "replica", r.cmds(mark), nil)
 }
+
+// TestSupersededRequiresQuarantinedWhileUnsettled: a rebuild job whose
+// agent has not ended the quarantine needs the role quarantined (another
+// role means "peran server ini sudah berubah"); once the flag is set, or
+// for an ordinary create_replica job, the role must be replica.
+func TestSupersededRequiresQuarantinedWhileUnsettled(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-master")
+	stored := func(name, role, params string) string {
+		t.Helper()
+		fa := e.agent(name, "10.0.0.9")
+		if _, err := e.st.AddReplica(topo.ID, fa.id, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.st.SetReplicaState(fa.id, store.ReplicaFailed, "gagal"); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.st.SetServerRole(fa.id, role); err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("%032x", fa.id)
+		e.failedJob(id, KindCreateReplica, fa.id, topo.ID, fmt.Sprintf(params, m.id), createReplicaStepNames(), 1)
+		return id
+	}
+	const changed = "peran server ini sudah berubah"
+	unsettled := stored("q-unsettled", store.RoleReplica, `{"master_server_id":%d,"rebuild_old_master":true}`)
+	if got := e.r.Superseded(unsettled); got != changed {
+		t.Fatalf("unsettled rebuild with role replica: Superseded = %q, want %q", got, changed)
+	}
+	settled := stored("q-settled", store.RoleReplica, `{"master_server_id":%d,"rebuild_old_master":true,"quarantine_ended":true}`)
+	if got := e.r.Superseded(settled); got != "" {
+		t.Fatalf("settled rebuild with role replica: Superseded = %q, want accepted", got)
+	}
+	ordinary := stored("q-ordinary", store.RoleQuarantined, `{"master_server_id":%d}`)
+	if got := e.r.Superseded(ordinary); got != changed {
+		t.Fatalf("ordinary create_replica with role quarantined: Superseded = %q, want %q", got, changed)
+	}
+}
+
+// TestRetryStillRefusedWhenSuperseded: a failed rebuild of the old master
+// is still refused when a newer rebuild or a certificate job exists, or
+// the topology's master changed; the role does not change.
+func TestRetryStillRefusedWhenSuperseded(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		after        func(t *testing.T, g *promoteRig)
+	}{
+		{"newer rebuild", "lebih baru", func(t *testing.T, g *promoteRig) {
+			failedRebuild(t, g, "mysql.preflight")
+		}},
+		{"certificate job", "lebih baru", func(t *testing.T, g *promoteRig) {
+			g.e.failedJob("4444444444444444444444444444444e", KindMySQLTLS, g.m.id, 0, "{}", mysqlTLSStepNames(), 0)
+		}},
+		{"master changed", "master topologi ini sudah berganti", func(t *testing.T, g *promoteRig) {
+			if err := g.e.st.SwapMaster(g.topo.ID, g.c.id, g.b.id, "10.0.0.3", 3306); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := rebuildRig(t)
+			e := g.e
+			id := failedRebuild(t, g, "mysql.preflight")
+			tc.after(t, g)
+			if got := e.r.Superseded(id); !strings.Contains(got, tc.reason) {
+				t.Fatalf("Superseded = %q, want %q", got, tc.reason)
+			}
+			err := e.r.Retry(id, JobAck{Confirmed: true})
+			if err == nil || !strings.Contains(err.Error(), "tidak berlaku") {
+				t.Fatalf("Retry = %v, want refused", err)
+			}
+			if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+				t.Fatalf("job after the refused retry = %+v", j)
+			}
+			if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+				t.Fatalf("role after the refused retry = %s", got)
+			}
+		})
+	}
+}
+
+// TestLeftoverDoesNotSupersedeFailedRebuild: after Periksa and Amankan data
+// tertinggal on an old master left by a failed rebuild, the rebuild is
+// still retried; a Periksa job does supersede a create_replica job that is
+// not a rebuild, or one whose agent ended the quarantine.
+func TestLeftoverDoesNotSupersedeFailedRebuild(t *testing.T) {
+	ctx := context.Background()
+	leftover := func(t *testing.T, g *promoteRig, salvage bool) {
+		t.Helper()
+		e := g.e
+		g.m.reply("mysql.leftover", proto.LeftoverResult{GTIDSet: masterUUID + ":121-123", Transactions: 3})
+		id, err := e.r.StartLeftover(ctx, g.m.id)
+		if err != nil {
+			t.Fatalf("Periksa: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		e.waitIdle(id)
+		if !salvage {
+			return
+		}
+		g.m.reply("mysql.salvage", proto.SalvageFile{Name: "20261105T094500Z-1.sql", Size: 2048,
+			CreatedAt: time.Now(), ExpiresAt: time.Now().Add(7 * 24 * time.Hour)})
+		id, err = e.r.StartSalvage(ctx, g.m.id)
+		if err != nil {
+			t.Fatalf("Amankan: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		e.waitIdle(id)
+	}
+	t.Run("failed rebuild", func(t *testing.T) {
+		g := rebuildRig(t)
+		e := g.e
+		id := failedRebuild(t, g, "mysql.preflight")
+		leftover(t, g, true)
+		if got := e.r.Superseded(id); got != "" {
+			t.Fatalf("Superseded after Periksa and Amankan = %q", got)
+		}
+		scriptReplicaTarget(g.m, "db-master", "clone")
+		if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+			t.Fatalf("Retry: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		e.waitIdle(id)
+	})
+	for name, params := range map[string]string{
+		"not a rebuild":    `{"master_server_id":%d}`,
+		"quarantine ended": `{"master_server_id":%d,"rebuild_old_master":true,"quarantine_ended":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := rebuildRig(t)
+			e := g.e
+			if _, err := e.st.AddReplica(g.topo.ID, g.m.id, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.st.SetReplicaState(g.m.id, store.ReplicaFailed, "gagal"); err != nil {
+				t.Fatal(err)
+			}
+			const id = "4444444444444444444444444444444f"
+			e.failedJob(id, KindCreateReplica, g.m.id, g.topo.ID, fmt.Sprintf(params, g.c.id), createReplicaStepNames(), 1)
+			leftover(t, g, false)
+			if got := e.r.Superseded(id); !strings.Contains(got, "lebih baru") {
+				t.Fatalf("Superseded = %q, want superseded by the newer Periksa job", got)
+			}
+		})
+	}
+}

@@ -264,6 +264,24 @@ func (s *Store) NewerJobExists(jobID string, serverID int64) (bool, error) {
 	return n > 0, nil
 }
 
+// NewerJobExistsExcept is NewerJobExists not counting jobs whose kind is
+// one of kinds.
+func (s *Store) NewerJobExistsExcept(jobID string, serverID int64, kinds ...string) (bool, error) {
+	q := `SELECT COUNT(*) FROM jobs WHERE server_id = ? AND rowid > (SELECT rowid FROM jobs WHERE id = ?)`
+	args := []any{serverID, jobID}
+	if len(kinds) > 0 {
+		q += ` AND kind NOT IN (?` + strings.Repeat(`, ?`, len(kinds)-1) + `)`
+		for _, k := range kinds {
+			args = append(args, k)
+		}
+	}
+	var n int
+	if err := s.db.QueryRow(q, args...).Scan(&n); err != nil {
+		return false, fmt.Errorf("newer job: %w", err)
+	}
+	return n > 0, nil
+}
+
 // ErrJobFinished is returned by UpdateJob for a job that already succeeded,
 // failed or was canceled: a finished job never changes again.
 var ErrJobFinished = errors.New("pekerjaan sudah selesai")

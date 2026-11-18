@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,7 +175,8 @@ func TestRebuildRetryAndApproveRecheckApproval(t *testing.T) {
 }
 
 // TestRebuildAgainAfterFailedRebuild (D-9): a rebuild that failed at the
-// configure step leaves the server a failed replica; a new rebuild of it
+// configure step leaves the server quarantined with a failed replica row; a
+// new rebuild of it
 // is checked as the first one (an unusable approval refuses it, nothing
 // changes), and with the approval it runs to the end, the server no longer
 // the topology's old master.
@@ -191,8 +193,8 @@ func TestRebuildAgainAfterFailedRebuild(t *testing.T) {
 	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
 		t.Fatalf("replica after the failed rebuild = %+v, %v", rep, err)
 	}
-	if srv, _ := e.st.GetServer(g.m.id); srv.Role != store.RoleReplica {
-		t.Fatalf("role after the failed rebuild = %s", srv.Role)
+	if srv, _ := e.st.GetServer(g.m.id); srv.Role != store.RoleQuarantined {
+		t.Fatalf("role after the failed rebuild = %s, want quarantined", srv.Role)
 	}
 
 	g.m.reply("mysql.rebuildApproval", unusableApprovals["hostile code"])
@@ -201,6 +203,9 @@ func TestRebuildAgainAfterFailedRebuild(t *testing.T) {
 	}
 	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
 		t.Fatalf("replica after the refused rebuild = %+v, %v", rep, err)
+	}
+	if srv, _ := e.st.GetServer(g.m.id); srv.Role != store.RoleQuarantined {
+		t.Fatalf("role after the refused rebuild = %s, want quarantined", srv.Role)
 	}
 
 	g.m.reply("mysql.rebuildApproval", proto.RebuildApprovalResult{Required: true, Approved: true,
@@ -220,7 +225,7 @@ func TestRebuildAgainAfterFailedRebuild(t *testing.T) {
 }
 
 // TestFailedRebuildRefusesResyncAndDetach (D-10): a server left by a
-// failed rebuild of an old master (role replica, failed row, still the
+// failed rebuild of an old master (role quarantined, failed row, still the
 // old master) is refused Resync ulang and Lepas replika (both modes) with
 // one sentence, before any agent command or store change; an ordinary
 // failed replica is not.
@@ -245,8 +250,8 @@ func TestFailedRebuildRefusesResyncAndDetach(t *testing.T) {
 		if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
 			t.Fatalf("%s: replica row = %+v, %v; want failed", what, rep, err)
 		}
-		if srv := mustServer(t, e, g.m.id); srv.Role != store.RoleReplica {
-			t.Fatalf("%s: role = %s, want replica", what, srv.Role)
+		if srv := mustServer(t, e, g.m.id); srv.Role != store.RoleQuarantined {
+			t.Fatalf("%s: role = %s, want quarantined", what, srv.Role)
 		}
 		if j, busy, err := e.st.ActiveJobForServer(g.m.id); err != nil || busy {
 			t.Fatalf("%s: left a job %+v, %v", what, j, err)
@@ -292,6 +297,43 @@ func TestFailedRebuildRefusesResyncAndDetach(t *testing.T) {
 		t.Fatalf("StartResync(ordinary failed replica): %v", err)
 	}
 	e.waitIdle(rid)
+}
+
+// TestApproveWaitingRebuildWithQuarantinedRole: a rebuild waiting for the
+// user (row creating, role quarantined) is approved; the approval does not
+// change the role.
+func TestApproveWaitingRebuildWithQuarantinedRole(t *testing.T) {
+	g := rebuildRig(t)
+	e := g.e
+	id := failedRebuild(t, g, "mysql.preflight")
+	j, _, _ := e.st.GetJob(id)
+	if err := e.st.ReopenJob(id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobWaiting, j.CurrentStep, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(g.m.id, store.ReplicaCreating, ""); err != nil {
+		t.Fatal(err)
+	}
+	if reason := e.r.Superseded(id); reason != "" {
+		t.Fatalf("the waiting rebuild is superseded: %s", reason)
+	}
+	gate := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(gate) }) }
+	defer open()
+	scriptReplicaTarget(g.m, "db-master", "clone")
+	g.m.before("mysql.preflight", func() { <-gate })
+	if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if srv := mustServer(t, e, g.m.id); srv.Role != store.RoleQuarantined {
+		t.Fatalf("role after Approve = %s, want quarantined", srv.Role)
+	}
+	open()
+	e.waitJob(id, store.JobSucceeded)
+	e.waitIdle(id)
 }
 
 func mustServer(t *testing.T, e *env, id int64) store.Server {

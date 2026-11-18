@@ -234,6 +234,8 @@ func (s *Store) ListTopologies() ([]Topology, error) {
 
 // AddReplica makes the server a replica of the topology, in state
 // ReplicaCreating. It fails when the server is already a master or replica.
+// A quarantined server (an old master being rebuilt) keeps its role: only
+// the settle of its rebuild (SettleRebuild) ends the quarantine.
 func (s *Store) AddReplica(topologyID, serverID int64, databases []string) (Replica, error) {
 	dbs, err := marshalDatabases(databases)
 	if err != nil {
@@ -270,8 +272,10 @@ func (s *Store) AddReplica(topologyID, serverID int64, databases []string) (Repl
 	if err != nil {
 		return Replica{}, fmt.Errorf("insert replica: %w", err)
 	}
-	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleReplica, serverID); err != nil {
-		return Replica{}, fmt.Errorf("set role: %w", err)
+	if role != RoleQuarantined {
+		if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleReplica, serverID); err != nil {
+			return Replica{}, fmt.Errorf("set role: %w", err)
+		}
 	}
 	rep, err := scanReplica(tx.QueryRow(`SELECT `+replicaColumns+` FROM replicas WHERE id = ?`, id))
 	if err != nil {
@@ -338,7 +342,8 @@ func (s *Store) GetReplicaByServer(serverID int64) (Replica, error) {
 }
 
 // RemoveReplica deletes the server's replica row and sets its role back to
-// unassigned.
+// unassigned. A quarantined server keeps its role: dropping the row of an
+// old master's rebuild does not end its quarantine.
 func (s *Store) RemoveReplica(serverID int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -354,7 +359,8 @@ func (s *Store) RemoveReplica(serverID int64) error {
 	} else if n == 0 {
 		return ErrNotFound
 	}
-	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleUnassigned, serverID); err != nil {
+	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ? AND role != ?`,
+		RoleUnassigned, serverID, RoleQuarantined); err != nil {
 		return fmt.Errorf("set role: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -363,50 +369,45 @@ func (s *Store) RemoveReplica(serverID int64) error {
 	return nil
 }
 
-// ErrNotFailedRebuild refuses ReturnToQuarantine for a server that is not
-// an old master left by a failed rebuild.
-var ErrNotFailedRebuild = errors.New("not an old master left by a failed rebuild")
-
-// ReturnToQuarantine undoes a failed rebuild attempt of an old master in
-// the panel only (G-2): in one transaction it removes serverID's replica
-// row and sets its role to quarantined, provided the row is failed, the
-// role is replica and the row's topology still names serverID as its old
-// master. Otherwise nothing changes and it answers ErrNotFailedRebuild.
-func (s *Store) ReturnToQuarantine(serverID int64) error {
+// SettleRebuild records the end of an old master's quarantine (its agent
+// answered mysql.configureReplication OK in the rebuild jobID), in one
+// transaction: the job's params (paramsJSON, which carries the flag), no
+// topology naming serverID as its old master any more, and serverID's role
+// replica. When any write fails none of them changes. Calling it again
+// with the same values changes nothing more.
+func (s *Store) SettleRebuild(jobID, paramsJSON string, serverID int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
-	var topoID int64
-	var state string
-	err = tx.QueryRow(`SELECT topology_id, state FROM replicas WHERE server_id = ?`, serverID).Scan(&topoID, &state)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFailedRebuild
+	if err := execOneTx(tx, `UPDATE jobs SET params_json = ? WHERE id = ?`, paramsJSON, jobID); err != nil {
+		return fmt.Errorf("save job params: %w", err)
 	}
-	if err != nil {
-		return fmt.Errorf("read replica: %w", err)
+	if _, err := tx.Exec(`UPDATE topologies SET old_master_server_id = 0 WHERE old_master_server_id = ?`, serverID); err != nil {
+		return fmt.Errorf("clear old master: %w", err)
 	}
-	role, err := serverRoleTx(tx, serverID)
-	if err != nil {
-		return err
-	}
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM topologies WHERE id = ? AND old_master_server_id = ?`,
-		topoID, serverID).Scan(&n); err != nil {
-		return fmt.Errorf("check old master: %w", err)
-	}
-	if state != ReplicaFailed || role != RoleReplica || n != 1 {
-		return ErrNotFailedRebuild
-	}
-	if _, err := tx.Exec(`DELETE FROM replicas WHERE server_id = ?`, serverID); err != nil {
-		return fmt.Errorf("delete replica: %w", err)
-	}
-	if _, err := tx.Exec(`UPDATE servers SET role = ? WHERE id = ?`, RoleQuarantined, serverID); err != nil {
+	if err := execOneTx(tx, `UPDATE servers SET role = ? WHERE id = ?`, RoleReplica, serverID); err != nil {
 		return fmt.Errorf("set role: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// execOneTx is execOne inside tx: ErrNotFound when no row matched.
+func execOneTx(tx *sql.Tx, query string, args ...any) error {
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
