@@ -1397,8 +1397,12 @@ daftar itu; namanya hanya ada di peringatan di atas.
 Promote, juga promote darurat, juga ditolak selama topologi itu masih
 punya pekerjaan yang belum selesai ("topologi ini masih punya pekerjaan
 yang belum selesai"). Itu termasuk **Bangun ulang sebagai replika** master
-lama sebelumnya yang sedang berjalan atau menunggu persetujuan. Buka
-pekerjaan itu dan tekan **Batalkan** dulu, lalu jalankan promote lagi.
+lama sebelumnya yang sedang berjalan atau menunggu persetujuan. Layar
+promote sudah menyebutnya sebelum apa pun diketik: "Topologi ini masih
+punya pekerjaan yang belum selesai. Buka pekerjaan itu dan tekan
+Batalkan, lalu kembali ke sini." dengan tombol **Buka pekerjaan** (untuk
+pekerjaan promote: **Buka pekerjaan promote**). Buka pekerjaan itu dan
+tekan **Batalkan** dulu, lalu jalankan promote lagi.
 
 ### Layar pertimbangan
 
@@ -1638,7 +1642,11 @@ dikarantina"). Pekerjaan agent sendiri (memuat salinan saat bangun ulang)
 dan ketiga perintah di server (`drop-database`, `grant-admin`,
 `reset-admin`) membuka `super_read_only` dengan sah sambil memegang berkas
 kunci `/var/lib/dbpanel/agent/lift.lock`; penjaga tidak mengunci di tengah
-pembukaan itu dan tidak melaporkannya. `read_only` tetap menyala selama
+pembukaan itu dan tidak melaporkannya. Bila berkas kunci itu tidak bisa
+dibuka agent (misalnya disk penuh) dan tidak ada pembukaan oleh agent itu
+sendiri yang sedang berjalan, tidak ada pembukaan sah yang terbukti:
+penjaga memasang lagi `super_read_only` seperti biasa dan mencatat sebabnya
+di log agent. `read_only` tetap menyala selama
 pembukaan itu: penjaga memasangnya lagi bila mati, juga di tengah
 pembukaan, dan melaporkannya.
 
@@ -1703,7 +1711,11 @@ Halaman server master lama memuat kotak **Master lama** dengan:
   ditampilkan). Hasilnya "Tidak ada data tertinggal" atau, misalnya, "Ada 1
   transaksi yang tidak sampai ke master baru, menyentuh simrs.pasien (1
   baris), antara 09:41:20 dan 09:41:20". Pada promote terencana hasilnya
-  selalu kosong.
+  selalu kosong. Bila ada transaksi tetapi hasilnya tidak bisa disimpan
+  agent di server itu, pemeriksaan gagal dengan "hasil Periksa data
+  tertinggal tidak bisa disimpan di server ini (<berkas>: <sebab>), jadi
+  Amankan data tertinggal belum bisa dijalankan; perbaiki sebabnya di
+  server itu, lalu jalankan Periksa data tertinggal lagi".
 - **Amankan data tertinggal** (bila ada): menulis transaksi itu sebagai
   berkas SQL di `/var/lib/dbpanel/salvage` di server master lama, yang bisa
   dijalankan dengan `mysql` dan berisi komentar yang bisa dibaca untuk tiap
@@ -1967,7 +1979,10 @@ replikasi**, tepat sebelum mengakhiri karantina:
   server (di bawah). Bila sedang, langkahnya gagal dengan "kunci baca-saja
   server ini sedang dibuka sebuah perintah dbpanel agent yang dijalankan di
   server itu; tunggu sampai perintah itu selesai, lalu tekan "Ulangi dari
-  tahap ini"".
+  tahap ini"". Bila berkas kuncinya sendiri tidak bisa dibuka agent,
+  langkahnya gagal dengan "berkas kunci baca-saja <berkas> di server ini
+  tidak bisa dibuka (<sebab>); karantina tidak diakhiri. Perbaiki sebabnya
+  di server itu, lalu tekan "Ulangi dari tahap ini"".
 - Daftar database server ini terbukti lengkap (di bawah).
 
 Akun yang memuat dump harus bisa menulis selagi `read_only` menyala. Bila
@@ -2329,7 +2344,13 @@ Bila sesuatu tidak berjalan biasa:
   tabel yang tidak terbaca), teksnya "Cadangan database <nama> tidak bisa
   dibuat (<sebab>); tidak ada yang dihapus. Bila database itu memang tidak
   diperlukan lagi, jalankan: sudo dbpanel agent drop-database <nama>
-  --tanpa-cadangan". Hanya dalam keadaan itu `--tanpa-cadangan` dipakai:
+  --tanpa-cadangan". Bila nama itu memuat karakter yang tidak bisa
+  ditampilkan apa adanya (baris baru, karakter kendali), nama yang tampil
+  bukan nama database itu, jadi tidak ada perintah yang dicetak: "Cadangan
+  database <nama> tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Bila
+  database itu memang tidak diperlukan lagi, jalankan lagi perintah yang
+  sama dengan tambahan --tanpa-cadangan di akhir." Hanya dalam keadaan itu
+  `--tanpa-cadangan` dipakai:
   perintah tetap mencoba membuat cadangan; bila MySQL lagi-lagi menolaknya
   dengan cara itu, ia
   menampilkan cara melihat di master baru dan bertanya "Cadangan database
