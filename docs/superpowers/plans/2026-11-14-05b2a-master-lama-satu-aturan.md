@@ -2263,6 +2263,29 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    dan form selagi bangun ulang berjalan (pernyataan yang dicabut dari
    `TestFailedRebuildNotOtherServers` dipasang lagi di sana); settle
    tidak memanggil `replicaChanged`.
+16. Task 12, monitor dan halaman (2026-11-18). Aturan pesan dan
+   penutupan `master_start_late` adalah sepasang fungsi murni
+   (`lateMessage`, `lateCloseReason`; `TestLateRuleDecisions`). Monitor
+   membaca peran setiap putaran (5 detik) dan setiap laporan, jadi ia
+   mengikuti settle tanpa panggilan dari orchestrator
+   (`TestStartLateSurvivesRebuildUntilCopied` memakai
+   `Store.SettleRebuild` lalu satu putaran). `Deps.CopyStarted`
+   dirangkai di `internal/panel/panel.go`; nil atau galat dihitung
+   "belum mulai" dan dicatat. T3/T3b hanya tampil untuk nilai `replica`,
+   `master`, `unassigned`; nilai lain dari laporan agent tidak pernah
+   dicetak. Form bangun ulang selagi bangun ulang berjalan atau menunggu
+   menjawab 400 dengan teks orchestrator yang ada ("server tujuan masih
+   punya pekerjaan yang belum selesai"). Peringatan data tertinggal
+   untuk form, dialog Ulangi dan dialog Setujui berasal dari
+   `leftoverWarnings` dan satu partial `leftover-warnings` di
+   `_wipe.html`. Label tampilan aksi audit `cancel_rebuild_attempt` di
+   `handlers_audit.go` dipertahankan untuk baris audit lama. Tiga test
+   brief sudah lulus sebelum kode produksi berubah (hasil Task 11):
+   `TestQuarantinedWithRowBox`, `TestRebuildFormFromQuarantinedWithRow`,
+   `TestJobPageOffersRetryFromQuarantined`. Ditinggalkan untuk Task 13:
+   kotak sesudah promote darurat kedua masih menawarkan Periksa dan
+   Amankan. Untuk Task 15: README masih memuat "Batalkan percobaan
+   bangun ulang".
 
 ## Teks baru untuk dibaca pemilik
 
