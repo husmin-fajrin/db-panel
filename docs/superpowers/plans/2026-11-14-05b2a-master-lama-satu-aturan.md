@@ -2356,8 +2356,8 @@ tampilnya. Setiap teks ditulis seperti di kode, satu baris; `%s`, `%d` dan
 
 - T27: nomor versi rilis belum diisi. Kedua bagian README yang ditulis
   ulang dibuka dengan `Perintah ini ada sejak versi <versi>; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).`,
-  dengan `<versi>` tertulis apa adanya sampai rilis pertama yang memuat
-  ketiga perintah diberi nomor.
+  dengan `<versi>` tertulis apa adanya (di README di antara backtick) sampai
+  rilis pertama yang memuat ketiga perintah diberi nomor.
 
 ### 1. Halaman server (kotak "Master lama" dan spanduk)
 
@@ -2424,7 +2424,7 @@ Galat langkah bangun ulang dan pemeriksaan:
 - T17, sama, nama akun memuat karakter yang tidak didukung: `daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat karakter yang tidak didukung pemeriksaan ini (yang didukung: huruf, angka, garis bawah, titik, tanda hubung, dan tanda dolar). Jalankan di server ini: sudo dbpanel agent reset-admin, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
 - T18, `mysql.startReplica` atau `mysql.startUntil` di server yang dikarantina dengan kanal dari sumber lain: `sumber kanal replikasi di server ini (%s) bukan sumber yang dipin (%s); perintah %s ditolak`
 - T19b, Periksa/Amankan data tertinggal atau pembacaan log galat, akun layanan MySQL sudah mencapai batas prosesnya: `akun layanan MySQL sudah mencapai batas jumlah proses, jadi program ini tidak bisa dijalankan sebagai akun itu dan tidak dijalankan sebagai root; periksa proses milik akun itu di server ini, lalu ulangi`
-- T19c, sama, pemilik direktori tidak terbaca: `pemilik direktori <dir> tidak bisa dibaca (<sebab>), jadi program ini tidak dijalankan; periksa direktori itu di server ini, lalu ulangi`
+- T19c, sama, pemilik direktori tidak terbaca: `pemilik direktori <dir> tidak bisa dibaca (<sebab>), jadi program ini tidak dijalankan; periksa direktori itu di server ini, lalu ulangi`. Sebab baru yang bisa ada di dalamnya: `data stat tidak dikenali`.
 - Amankan data tertinggal kini juga menolak dengan teks yang sudah ada sesudah `set-role`, sesudah karantina baru, atau sesudah agent diperbarui selagi dikarantina (catatan Periksa milik satu karantina): `Periksa data tertinggal (mysql.leftover) belum menemukan transaksi di agent ini; salvage hanya mengambil transaksi yang ditemukan pemeriksaan terakhir. Jalankan Periksa data tertinggal dulu`
 
 Hubungkan MySQL:
@@ -2616,7 +2616,6 @@ Semua teks perintah ini (selain bagian 9 dan yang sama dengan `grant-admin`):
 
 ### 14. Teks yang hilang
 
-- C8 (tidak pernah tampil; spek 5.8 masih memuatnya), digantikan P1 (cadangan gagal karena MySQL menolak sesudah tersambung) dan P1b (setiap kegagalan cadangan lain): `Cadangan database <nama> tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Bila cadangan tetap tidak bisa dibuat, jalan yang tersisa: Hapus server ini dari panel, lalu pasang lagi sebagai replika baru.`
 - T8 lama (agent, settle), digantikan T8a/T8b: `server ini masih punya database yang tidak disalin dari sumber %s (%s); karantina tidak diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak karena database itu tidak ada di master baru, lihat README, bagian "Database yang tidak ada di master baru".`
 - Teks daftar lama (agent), digantikan T16: `daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO %s; Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, bagian "Memberi hak SHOW DATABASES di server yang dikarantina". Sesudah itu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
 - Teks nama akun lama (agent), digantikan T17: `daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`

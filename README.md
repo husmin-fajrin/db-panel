@@ -1388,9 +1388,11 @@ hanya berisi kalimat "Topologi ini sudah promote lagi sejak server ini
 dikarantina. Data tertinggal dan Bangun ulang tidak tersedia lagi untuk
 server ini. Hapus server ini dari panel, lalu pasang lagi sebagai replika
 baru bila masih dipakai." dan tombol **Hapus server** (bila topologi itu
-sudah dihapus, hanya tombolnya). Di layar promote
-server itu tampil dengan alasan "Master lama yang dikarantina" dan tidak
-bisa dipilih.
+sudah dihapus, hanya tombolnya). Di daftar kandidat layar promote,
+master lama sebelumnya hanya tampil bila ia punya pekerjaan bangun ulang
+(yang berjalan, menunggu, atau gagal): dengan alasan "Master lama yang
+dikarantina", dan tidak bisa dipilih. Tanpa bangun ulang ia tidak tampil di
+daftar itu; namanya hanya ada di peringatan di atas.
 
 Promote, juga promote darurat, juga ditolak selama topologi itu masih
 punya pekerjaan yang belum selesai ("topologi ini masih punya pekerjaan
@@ -2057,7 +2059,7 @@ yang sama. Mulai bangun ulang baru:
    seperti di atas, lalu klik **Periksa lagi**.
 
 **Selama bangun ulang berjalan atau menunggu persetujuan**, server itu
-tetap dikarantina (peran "Master lama; dikarantina"). Kotak **Master lama**
+tetap dikarantina (status "Master lama (dikarantina)"). Kotak **Master lama**
 di halaman server hanya menulis "Bangun ulang sebagai replika sedang
 berjalan." dengan tautan **Lihat pekerjaan**; yang bisa dilakukan saat itu
 (**Setujui**, **Batalkan**) ada di halaman pekerjaan. Dasbor, halaman
@@ -2159,7 +2161,7 @@ lengkap.
 
 #### Database yang tidak ada di master baru
 
-Perintah ini ada sejak versi <versi>; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
+Perintah ini ada sejak versi `<versi>`; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
 
 Bagian ini untuk master lama yang bangun ulangnya berhenti karena database
 yang tidak ada di master baru. Itu terjadi bila:
@@ -2190,7 +2192,9 @@ lama itu melakukan keduanya.
    sudo mysql -e 'SHOW DATABASES LIKE "<nama>"'
    ```
 
-   Jawabannya harus kosong. Bila tampil nama yang persis sama, berhenti:
+   Bila root MySQL di master baru memakai kata sandi (jawabannya "Access
+   denied"), jalankan `sudo mysql -u root -p -e 'SHOW DATABASES LIKE
+   "<nama>"'` dan ketik kata sandinya. Jawabannya harus kosong. Bila tampil nama yang persis sama, berhenti:
    database yang ada di master baru dihapus oleh bangun ulang baru, bukan
    dengan perintah ini. Tanda `_` dan `%` di perintah itu cocok dengan huruf
    apa pun, jadi nama lain yang mirip boleh diabaikan.
@@ -2204,7 +2208,9 @@ lama itu melakukan keduanya.
    Tulis nama di dalam tanda kutip tunggal bila memuat spasi atau tanda
    lain, misalnya `sudo dbpanel agent drop-database 'nama aneh'`. Huruf
    besar-kecil boleh berbeda dari nama di MySQL bila hanya ada satu
-   database yang cocok.
+   database yang cocok. Saat diminta mengetik nama database, ketik nama
+   persis seperti di baris **Database** layar cadangan (ejaan MySQL);
+   ejaan lain membatalkan perintah.
 
 Perintah itu hanya bekerja di server yang dikarantina, dan memeriksa dulu,
 tanpa mengubah apa pun:
@@ -2307,14 +2313,17 @@ Bila sesuatu tidak berjalan biasa:
   `DROP DATABASE` di daftar proses. Ctrl-C selagi cadangan dibuat
   menghapus berkas cadangan yang belum selesai, dan tidak ada yang dihapus
   dari MySQL.
-- **Cadangan tidak bisa dibuat.** Tidak ada yang dihapus. Bila sebabnya bisa
-  diperbaiki (ruang kosong tidak cukup, folder tidak bisa dipakai,
-  `mysqldump` tidak bisa dijalankan atau tidak tersambung, berkas tidak
-  lulus pemeriksaan), teksnya "Cadangan database <nama> tidak bisa dibuat
-  (<sebab>); tidak ada yang dihapus. Perbaiki sebabnya atau pakai folder
-  lain dengan --ke <folder>, lalu jalankan perintah ini lagi." Ruang kosong
-  diperiksa sebelum cadangan dibuat ("Ruang kosong di folder … tidak cukup
-  … Pilih folder lain dengan --ke <folder>."). Bila `mysqldump` sudah
+- **Cadangan tidak bisa dibuat.** Tidak ada yang dihapus. Sebelum cadangan
+  dibuat, folder dan ruang kosongnya diperiksa: "Folder cadangan <folder>
+  tidak bisa dipakai (<sebab>); tidak ada yang diubah." dan "Ruang kosong di
+  folder <folder> (<n> byte) tidak cukup untuk cadangan database <nama>
+  (perkiraan <n> byte); tidak ada yang diubah. Pilih folder lain dengan --ke
+  <folder>." Bila cadangan lalu gagal karena sebab yang bisa diperbaiki
+  (disk penuh di tengah jalan, berkas cadangan tidak bisa dibuat atau
+  disimpan, `mysqldump` tidak bisa dijalankan atau tidak tersambung, berkas
+  tidak lulus pemeriksaan), teksnya "Cadangan database <nama> tidak bisa
+  dibuat (<sebab>); tidak ada yang dihapus. Perbaiki sebabnya atau pakai
+  folder lain dengan --ke <folder>, lalu jalankan perintah ini lagi." Bila `mysqldump` sudah
   tersambung lalu MySQL sendiri menolak membaca database itu (nama yang
   tidak bisa dipakai `mysqldump`, misalnya yang memuat tanda kutip, atau
   tabel yang tidak terbaca), teksnya "Cadangan database <nama> tidak bisa
@@ -2346,7 +2355,7 @@ Sesudah itu lanjutkan bangun ulangnya di panel:
 
 #### Memberi hak SHOW DATABASES di server yang dikarantina
 
-Perintah ini ada sejak versi <versi>; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
+Perintah ini ada sejak versi `<versi>`; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
 
 MySQL di server yang dikarantina baca-saja (`super_read_only`), jadi
 `GRANT` biasa ditolak dengan ERROR 1290. Dua perintah di server itu

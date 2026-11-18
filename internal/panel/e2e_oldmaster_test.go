@@ -386,8 +386,8 @@ func TestE2ERebuildFailsAfterSettle(t *testing.T) {
 		strings.Contains(repPage, textT23) {
 		t.Fatalf("replica page of the failed replica lacks Resync ulang (or says %q):\n%s", textT23, textOf(repPage))
 	}
-	if jobPage := textOf(ui.get("/jobs/" + id)); !strings.Contains(jobPage, "Ulangi dari tahap ini") {
-		t.Fatalf("job page of the rebuild failed at Verifikasi lacks Ulangi dari tahap ini:\n%s", jobPage)
+	if jobPage := ui.get("/jobs/" + id); !strings.Contains(jobPage, `action="/jobs/`+id+`/retry/prepare"`) {
+		t.Fatalf("job page of the rebuild failed at Verifikasi offers no Ulangi dari tahap ini:\n%s", textOf(jobPage))
 	}
 	t.Logf("failed-after-settle flow took %s after the topology was ready", time.Since(start).Round(time.Second))
 }
@@ -459,9 +459,16 @@ func TestE2ERelockAlert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := false
 	for _, a := range alerts {
-		if a.ID == late.ID && a.CloseReason != leftoverClosed {
-			t.Fatalf("master_start_late closed with %q, want %q", a.CloseReason, leftoverClosed)
+		if a.ID == late.ID {
+			found = true
+			if a.CloseReason != leftoverClosed {
+				t.Fatalf("master_start_late closed with %q, want %q", a.CloseReason, leftoverClosed)
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("master_start_late %d not among the alerts opened since %s: %+v", late.ID, late.OpenedAt, alerts)
 	}
 }
