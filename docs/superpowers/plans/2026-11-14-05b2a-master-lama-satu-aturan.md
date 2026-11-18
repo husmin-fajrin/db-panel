@@ -2240,6 +2240,29 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    berjalan seperti sekarang. Berkas di luar daftar Files: `pins.go`,
    `driver.go`, `export_test.go`. README langkah 8 (keluar karantina
    dengan tangan) perlu menyebut `quarantine-id` di Task 15.
+15. Task 11, aturan satu keadaan di orchestrator (2026-11-18).
+   `normalizeFailedRebuilds` dipanggil **sesudah** `Resume` menandai
+   baris gagal (Step 5 menulis "sesudah memanggil"), di bawah `startMu`
+   yang sama: dengan urutan di Step 5, bangun ulang lama yang terputus
+   oleh restart tetap berperan `replica` + baris gagal + tanda sampai
+   panel dinyalakan lagi. Penormalan berlaku untuk baris lama dalam
+   keadaan apa pun (`TestNormalizeLegacyWaitingRebuild`). Job bangun
+   ulang tanpa bendera `QuarantineEnded` yang langkah berikutnya sesudah
+   sambung mulai lagi di langkah sambung (`jobRun.run`), dan
+   `replicaVerify` tidak menulis peran maupun menghapus tanda untuk job
+   bangun ulang (`TestLegacyRebuildRetriedAfterConnectSettlesFirst`,
+   `TestRebuildVerifyWritesNoRole`). Buat replika biasa ke master lama
+   kini ditolak dengan `ErrAwaitingRebuild` sebelum pemeriksaan sibuk;
+   kalimat lama "server tujuan adalah master lama yang dikarantina;
+   pakai Bangun ulang sebagai replika" hilang bersama cabangnya.
+   `cancelAgentCopy` dibatasi 15 detik dan tidak mengirim apa pun selagi
+   job terbaru masih berjalan atau menunggu. Test
+   `TestLeftoverJobDoesNotSupersedeFailedRebuild` ditulis dengan nama
+   `TestLeftoverDoesNotSupersedeFailedRebuild`. Yang ditinggalkan untuk
+   Task 12: templat, teks dan label audit Batalkan yang kini mati; kotak
+   dan form selagi bangun ulang berjalan (pernyataan yang dicabut dari
+   `TestFailedRebuildNotOtherServers` dipasang lagi di sana); settle
+   tidak memanggil `replicaChanged`.
 
 ## Teks baru untuk dibaca pemilik
 

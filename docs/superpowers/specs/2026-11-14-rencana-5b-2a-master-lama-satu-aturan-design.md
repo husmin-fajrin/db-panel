@@ -474,6 +474,16 @@ Apa yang ditawarkan halaman, diterima orchestrator, dan dinilai monitor:
   bendera job bangun ulang terbarunya terpasang → tanda dihapus (replika
   gagal biasa); selain itu (juga bila job itu tidak ada atau tidak
   terbaca) → peran `quarantined`. Aman dijalankan berulang.
+  (ditambahkan saat pelaksanaan, Task 11) Penormalan berjalan sesudah
+  `Resume` menggagalkan job yang terputus, di bawah kunci yang sama, dan
+  berlaku untuk baris dalam keadaan apa pun, bukan hanya gagal: sesudah
+  `Resume` baris `creating` yang tersisa adalah milik bangun ulang yang
+  menunggu persetujuan, dan tanpa penormalan bangun ulang itu tidak bisa
+  disetujui maupun diulangi. Job bangun ulang yang benderanya belum
+  terpasang tidak pernah menjalankan langkah sesudah langkah sambung: ia
+  menjalankan langkah sambung lagi (agent menjawab OK lagi atau
+  menolak), dan langkah verifikasi tidak menulis peran maupun menghapus
+  tanda untuk job bangun ulang.
 - **Agent melaporkan peran lain.** Panel tidak pernah mengubah peran
   karena sebuah laporan. Untuk server berperan `quarantined` yang
   agentnya melaporkan pin peran lain (`replica`, `master`, `unassigned`),
