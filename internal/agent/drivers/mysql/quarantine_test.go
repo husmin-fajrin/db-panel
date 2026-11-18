@@ -1353,6 +1353,24 @@ func adminReplacedRig(t *testing.T) (*flagRig, *memCreds) {
 // through hook (nil: none); it returns the full dump's outcome unchecked.
 func fullDumpRebuildRig(t *testing.T, hook *hookHost) (*flagRig, *memCreds, proto.JobDone) {
 	t.Helper()
+	return fullDumpRebuildRigLogged(t, hook, nil)
+}
+
+// msgHandler is a slog handler that hands each record's message to f.
+type msgHandler struct{ f func(msg string) }
+
+func (h msgHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h msgHandler) Handle(_ context.Context, r slog.Record) error {
+	h.f(r.Message)
+	return nil
+}
+func (h msgHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h msgHandler) WithGroup(string) slog.Handler      { return h }
+
+// fullDumpRebuildRigLogged is fullDumpRebuildRig whose driver logs each
+// message to onLog (nil: no logger) with the driver.
+func fullDumpRebuildRigLogged(t *testing.T, hook *hookHost, onLog func(d *mysql.Driver, msg string)) (*flagRig, *memCreds, proto.JobDone) {
+	t.Helper()
 	master := testmysql.Start(t, testmysql.Options{})
 	mdb := rootDB(t, master)
 	dumpUser(t, mdb)
@@ -1369,6 +1387,10 @@ func fullDumpRebuildRig(t *testing.T, hook *hookHost) (*flagRig, *memCreds, prot
 	}
 	r.d = &mysql.Driver{Host: h, Creds: creds, Jobs: runner, PinDir: r.dir, Events: r.ev,
 		LiftLock: lockPath(t), SeenPath: filepath.Join(t.TempDir(), "replicas-seen")}
+	if onLog != nil {
+		d := r.d
+		d.Logger = slog.New(msgHandler{f: func(msg string) { onLog(d, msg) }})
+	}
 	r.ev.flush = r.d.FlushEvents
 	r.reg = commands.NewRegistry()
 	r.d.Register(r.reg)
@@ -1418,6 +1440,30 @@ func TestSecondListFailureAfterAccountsReplaced(t *testing.T) {
 		r.mustTick()
 	}
 	r.wantRelocks("three refused rounds after a login", proto.QuarantineWhileUnverified)
+}
+
+// TestAdminReplacedBeforeLoadMarkCleared: a full dump that replaced the
+// stored account records that refused logins are expected before its lift
+// ends and the load mark is cleared, so no guard round in between counts
+// them toward an unverified report. The snapshot job's "done" log line
+// comes after the mark was cleared.
+func TestAdminReplacedBeforeLoadMarkCleared(t *testing.T) {
+	var seen, expecting atomic.Bool
+	_, _, d := fullDumpRebuildRigLogged(t, nil, func(d *mysql.Driver, msg string) {
+		if msg == "mysql snapshot done" {
+			seen.Store(true)
+			expecting.Store(d.ExpectingRefusal())
+		}
+	})
+	if res := snapshotResult(t, d); !res.AdminReplaced {
+		t.Fatalf("result = %+v, want AdminReplaced", res)
+	}
+	if !seen.Load() {
+		t.Fatal("the snapshot job did not log it was done")
+	}
+	if !expecting.Load() {
+		t.Error("between the end of the lift and the job's end, refused logins were not expected")
+	}
 }
 
 // TestFullDumpRebuildLeavesNoRelock: after a full-dump rebuild that

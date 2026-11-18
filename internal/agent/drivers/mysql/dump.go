@@ -194,8 +194,7 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 			}
 			// The load does not count, but it did replace the accounts:
 			// the guard's refused logins are expected as after a
-			// successful load (the success path's adminReplaced is in
-			// registerSnapshotJob), and the operator must reconnect first.
+			// successful load, and the operator must reconnect first.
 			mark.adminReplaced()
 			if errors.Is(err, errSecondListFailed) {
 				return res, errSecondListFailedReplaced
@@ -205,8 +204,12 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	}
 	if replaced {
 		// The master's accounts replaced this server's, and the stored one
-		// no longer logs in. In ON mode the dump's header is the purged
-		// set, which is this server's gtid_executed now.
+		// no longer logs in. Recorded before the deferred hold.end clears
+		// the load mark, so that no guard round in between counts the
+		// refused logins (registerSnapshotJob records it again). In ON
+		// mode the dump's header is the purged set, which is this server's
+		// gtid_executed now.
+		mark.adminReplaced()
 		res.AdminReplaced = true
 		if found {
 			res.GTIDExecuted = dumpGTID

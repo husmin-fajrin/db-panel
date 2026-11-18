@@ -628,6 +628,10 @@ func SetLiftLockWait(d time.Duration) (restore func()) {
 // SetRelocked sets the driver's relock report (guardQuarantined).
 func (d *Driver) SetRelocked(f func(h Host, now time.Time, while string)) { d.relocked = f }
 
+// ExpectingRefusal reports whether a load replaced the accounts and the
+// guard has not logged in since.
+func (d *Driver) ExpectingRefusal() bool { return d.expectingRefusal() }
+
 // WritableAfterLoad reports the guard's "writable since the load" record.
 func (d *Driver) WritableAfterLoad() bool { return d.writableAfterLoad() }
 
