@@ -1110,11 +1110,28 @@ bangun ulang menolak selama database itu ada. Batasnya:
 - Selebihnya sama: cara melihat di master baru ditampilkan, keadaan
   diperiksa ulang sesudah konfirmasi, baris syslog mencatat "tanpa
   cadangan".
-- Opsi ini hanya untuk cadangan yang sudah dicoba dan gagal. Yang masih
-  punya jalan yang menyimpan cadangan tetap ditolak juga dengan opsi
-  ini: ruang kosong folder cadangan tidak cukup (pakai `--ke`), nama
-  berkas cadangan sudah ada (jalankan lagi), folder tidak bisa dipakai,
-  dan perintah yang dihentikan sinyal selagi mencadangkan.
+- Opsi ini hanya untuk database yang memang tidak bisa dicadangkan:
+  `mysqldump` sudah tersambung lalu MySQL menolak (kode keluar 2 atau 3
+  sesudah kepala dump: nama yang tidak bisa di-`use`, tabel yang tidak
+  terbaca). Hanya itu yang berujung ke P1 atau P2. Yang masih punya
+  jalan yang menyimpan cadangan ditolak dengan dan tanpa opsi ini,
+  dengan teks P1b yang tidak menyebut opsinya: ruang kosong tidak cukup
+  atau disk penuh di tengah jalan (pakai `--ke`), nama berkas cadangan
+  sudah ada (jalankan lagi), folder tidak bisa dipakai, program
+  `mysqldump` tidak bisa dijalankan atau tidak tersambung, pemeriksaan
+  cadangan gagal padahal `mysqldump` melapor berhasil, dan perintah
+  yang dihentikan sinyal selagi mencadangkan.
+- P1b: `Cadangan database <nama> tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Perbaiki sebabnya atau pakai folder lain dengan --ke <folder>, lalu jalankan perintah ini lagi.`
+- `mysqldump` dijalankan tanpa berkas login (`MYSQL_TEST_LOGIN_FILE`
+  dikosongkan) dan dipaksa lewat socket, supaya berkas `~/.mylogin.cnf`
+  tidak bisa membelokkan cadangan ke server lain (terukur: tanpa ini
+  berkas itu dibaca dan menang).
+- Bila perintah berakhir tidak biasa sesudah `DROP` terkirim, perintah
+  memeriksa server dan mengatakan salah satu dari tiga hal: sudah
+  dihapus, masih ada, atau tidak bisa dipastikan (dengan cara
+  melihatnya; bila MySQL mungkin masih menghapus, pesan melarang
+  mengulang dulu). Hasil "sudah dihapus" dan "tidak bisa dipastikan"
+  selalu meninggalkan baris syslog.
 
 ## 8. Risiko yang tersisa setelah 5b-2a
 

@@ -2154,6 +2154,49 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    paling sering sekali semenit), bukan ke log pekerjaan di panel.
    Berkas uji `export_test.go` dan `salvage_test.go` ikut berubah
    (di luar daftar Files; hanya pendukung uji).
+10. Task 8, `--tanpa-cadangan` dipersempit (2026-11-18; pemilik
+   menyetujui opsinya 2026-11-17). Tawaran menghapus tanpa cadangan (P1
+   tanpa opsi, P2 dengan opsi) hanya untuk `mysqldump` yang sudah
+   tersambung (keluarannya berawalan kepala dump) lalu keluar dengan
+   kode 2 atau 3: nama yang tidak bisa di-`use`, tabel yang tidak
+   terbaca. Semua kegagalan lain ditolak dengan dan tanpa opsi, dengan
+   teks baru P1b yang tidak menyebut opsi itu: `Cadangan database <nama>
+   tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Perbaiki
+   sebabnya atau pakai folder lain dengan --ke <folder>, lalu jalankan
+   perintah ini lagi.` Itu mencakup ruang kosong tidak cukup, berkas
+   tidak bisa dibuat, program tidak bisa dijalankan atau dihentikan
+   sinyal, `fsync` gagal, kode keluar 0 dengan pemeriksaan langkah 7
+   yang gagal, kode 5 (disk penuh di tengah jalan), dan keluaran kosong
+   (tidak pernah tersambung). Alasannya: selama masih ada jalan yang
+   menyimpan cadangan, jalan yang tidak bisa dikembalikan tidak
+   ditawarkan. C8 tidak lagi dicetak. Enam kasus
+   `TestDropDatabaseTruncatedDumpStops` kini mengharapkan P1b.
+11. Task 8, cadangan tidak bisa dibelokkan berkas login (2026-11-18).
+   Terukur di 8.0.46: `mysqldump` membaca `~/.mylogin.cnf` juga dengan
+   `--no-defaults` dan `--defaults-file`, dan isinya menang; berkas yang
+   menunjuk server lain membuat cadangan berisi data server itu dan
+   lolos semua pemeriksaan. `dumpCommand` kini memberi
+   `MYSQL_TEST_LOGIN_FILE=/dev/null` dan `--protocol=SOCKET`
+   (`TestDumpIgnoresLoginFile`). Juga ditambahkan `--` sebelum nama
+   database di argumen `mysqldump`.
+12. Task 8, kontrak `runLifted` (2026-11-18; dipakai Task 9). Tanda
+   tangan tetap. Akhir jendela yang tidak biasa (sinyal, batas 10
+   menit, kunci gagal dipasang lagi) dikembalikan sebagai
+   `*liftedError{Why, Ran, DoErr, Running}`: `errors.Is` tetap menjawab
+   `errInterrupted`/`errWindowCap`, `errors.As` menemukan `*relockError`.
+   Penjaga jendela membatalkan konteks `do`, mengulang `KILL QUERY`, dan
+   menunggu sampai server menunjukkan utasnya selesai (paling lama 60
+   detik) sebelum memasang kunci lagi; `Running` berarti pernyataan itu
+   mungkin masih berjalan. `do` wajib meneruskan konteksnya ke setiap
+   pernyataan. `drop-database` sesudah akhir yang tidak biasa memeriksa
+   server dan punya tiga hasil: sudah dihapus (baris syslog
+   `outcome=dropped`), masih ada (teks lama), atau tidak bisa dipastikan
+   (dua teks baru, satu bila MySQL mungkin masih menghapus dan melarang
+   mengulang dulu; baris syslog `outcome=unknown`). Sinyal ditahan
+   sampai baris syslog tertulis. Sinyal selagi `mysqldump` berjalan
+   menghapus cadangan setengah jadi (teks sendiri). Semua teks baru
+   masuk daftar Task 15. `internal/agent/system_test.go` ikut berubah
+   (dua baris pengalih jalur untuk uji).
 
 ## Teks baru untuk dibaca pemilik
 
