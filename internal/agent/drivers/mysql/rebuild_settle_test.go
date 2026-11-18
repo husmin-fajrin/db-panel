@@ -88,9 +88,10 @@ func TestRebuildPartialDumpKeepsQuarantine(t *testing.T) {
 	if resp.OK || resp.Error == nil {
 		t.Fatalf("configureReplication with old databases left = %+v, want an error", resp)
 	}
-	want := "server ini masih punya database yang tidak disalin dari sumber " + r.src + " (kecil, rs_lama); " +
-		"karantina tidak diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak karena " +
-		"database itu tidak ada di master baru, lihat README, bagian \"Database yang tidak ada di master baru\"."
+	want := "server ini masih punya database yang tidak disalin dari sumber " + r.src + "; karantina tidak diakhiri. " +
+		"Bila database itu tidak ada di master baru: jalankan di server ini sudo dbpanel agent drop-database <nama> " +
+		"untuk tiap nama, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel. Bila ada di master baru: mulai " +
+		"lagi Bangun ulang sebagai replika dari panel; panel menghapus dan menyalinnya ulang. Database itu: kecil, rs_lama."
 	if resp.Error.Message != want {
 		t.Errorf("message = %q\nwant      %q", resp.Error.Message, want)
 	}
@@ -152,7 +153,7 @@ func TestRebuildDumpOverOldDatabaseKeepsQuarantine(t *testing.T) {
 		t.Fatalf("dumpFrom{toko} = %+v", d)
 	}
 	resp := r.dispatch("mysql.configureReplication", sourceParams(r.master, "toko"))
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "("+"toko"+"); karantina tidak diakhiri") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "Database itu: toko.") {
 		t.Fatalf("configureReplication = %+v, want A6 naming toko", resp)
 	}
 	if role := pinFile(t, r.dir, mysql.RoleFile); role != "quarantined" {
@@ -218,8 +219,8 @@ func TestRebuildFullDumpRefusesDatabaseCreatedDuringLoad(t *testing.T) {
 		t.Errorf("source listings = %d, want 2 (before and after the load)", n)
 	}
 	r.wantSettleRefused("a database created during the load", "server ini masih punya database yang tidak disalin dari sumber "+
-		r.src+" (liar); karantina tidak diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak "+
-		"karena database itu tidak ada di master baru, lihat README, bagian \"Database yang tidak ada di master baru\".")
+		r.src+"; karantina tidak diakhiri. Yang tidak ada di master baru (liar): jalankan di server ini sudo dbpanel "+
+		"agent drop-database <nama> untuk tiap nama, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel.")
 }
 
 // TestSecondSourceListRetriedThreeTimes: the listing after the load fails

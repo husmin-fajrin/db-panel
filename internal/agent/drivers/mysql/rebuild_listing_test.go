@@ -1,7 +1,8 @@
 package mysql_test
 
 import (
-	"os/exec"
+	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -9,24 +10,24 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// listIncomplete is the C-1 refusal for account ('user'@'host').
+// listIncomplete is the listing refusal for account ('user'@'host'), T16.
 func listIncomplete(account string) string {
 	return "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL " + account + " yang dipakai agent " +
-		"tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO " +
-		account + "; Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, bagian " +
-		"\"Memberi hak SHOW DATABASES di server yang dikarantina\". Sesudah itu tekan \"Ulangi dari tahap ini\" pada " +
-		"pekerjaan di panel."
+		"tidak punya hak SHOW DATABASES. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan \"Ulangi " +
+		"dari tahap ini\" pada pekerjaan di panel."
 }
 
-// grantAsAdvised runs, as MySQL root on the quarantined target, the GRANT
-// the refusal advises the way the README tells the operator to on a
-// read-only server: one mysql client fed SET GLOBAL super_read_only=OFF,
-// SET SESSION sql_log_bin=OFF, the GRANT and SET GLOBAL
-// super_read_only=ON (plan evidence, part E). The target must be
-// super_read_only before, and is so again after, with gtid_executed
-// unchanged.
-func (r *settleRig) grantAsAdvised(t *testing.T, account string) {
+// grantAsCommand gives account (CURRENT_USER()'s user@host) what the
+// refusal's advice, sudo dbpanel agent grant-admin, gives it, the way that
+// command does on the quarantined target: the statements are
+// mysql.MissingAdminGrants read as root, and they run on one root
+// connection with sql_log_bin off between SET GLOBAL super_read_only = OFF
+// and = ON (the CLI's window, runLifted; the CLI itself is tested in
+// package agent). They must hold GRANT SHOW DATABASES. The target must be
+// read-only before, and is so again after, with gtid_executed unchanged.
+func (r *settleRig) grantAsCommand(t *testing.T, account string) {
 	t.Helper()
+	ctx := context.Background()
 	db := rootDB(t, r.target)
 	state := func() (ro, sro bool, gtid string) {
 		if err := db.QueryRow("SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only, @@GLOBAL.gtid_executed").Scan(&ro, &sro, &gtid); err != nil {
@@ -36,18 +37,39 @@ func (r *settleRig) grantAsAdvised(t *testing.T, account string) {
 	}
 	ro, sro, gtid := state()
 	if !ro || !sro {
-		t.Fatalf("target before the GRANT: read_only=%v super_read_only=%v, want both on", ro, sro)
+		t.Fatalf("target before the grants: read_only=%v super_read_only=%v, want both on", ro, sro)
 	}
-	cmd := exec.Command("mysql", "-S", r.target.Socket, "-uroot")
-	cmd.Stdin = strings.NewReader("SET GLOBAL super_read_only=OFF; SET SESSION sql_log_bin=OFF; GRANT SHOW DATABASES ON *.* TO " +
-		account + "; SET GLOBAL super_read_only=ON;\n")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("mysql: %v\n%s", err, out)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	stmts, err := mysql.MissingAdminGrants(ctx, conn, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(stmts, "GRANT SHOW DATABASES ON *.* TO "+quoteAcct(account)) {
+		t.Fatalf("MissingAdminGrants(%s) = %q, want GRANT SHOW DATABASES among them", account, stmts)
+	}
+	for _, q := range append(append([]string{"SET SESSION sql_log_bin = 0", "SET GLOBAL super_read_only = OFF"}, stmts...),
+		"SET GLOBAL super_read_only = ON") {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if again, err := mysql.MissingAdminGrants(ctx, conn, account); err != nil || len(again) != 0 {
+		t.Errorf("MissingAdminGrants after the grants = %q, %v; want none", again, err)
 	}
 	ro2, sro2, gtid2 := state()
 	if !ro2 || !sro2 || gtid2 != gtid {
-		t.Fatalf("target after the GRANT: read_only=%v super_read_only=%v gtid %q (before %q)", ro2, sro2, gtid2, gtid)
+		t.Fatalf("target after the grants: read_only=%v super_read_only=%v gtid %q (before %q)", ro2, sro2, gtid2, gtid)
 	}
+}
+
+// quoteAcct turns user@host into 'user'@'host' (plain names only).
+func quoteAcct(account string) string {
+	i := strings.LastIndex(account, "@")
+	return "'" + account[:i] + "'@'" + account[i+1:] + "'"
 }
 
 // onTarget runs stmts as root on the quarantined target, with
@@ -113,8 +135,8 @@ func TestRebuildScopedAccountCannotSettle(t *testing.T) {
 // TestRebuildPartialRevokeAccount: with partial_revokes on, an account
 // holding every global privilege but SHOW DATABASES, with everything on the
 // old database revoked, cannot see that database: the dump is refused. The
-// advised GRANT SHOW DATABASES makes the listing complete: the dump runs,
-// and the settle sees the old database (A6).
+// grants grant-admin gives (SHOW DATABASES among them) make the listing
+// complete: the dump runs, and the settle sees the old database (A6).
 func TestRebuildPartialRevokeAccount(t *testing.T) {
 	r := newSettleRig(t, "rs_lama")
 	r.onTarget(t, "SET GLOBAL partial_revokes = ON", "CREATE USER rs_partial@localhost",
@@ -131,13 +153,13 @@ func TestRebuildPartialRevokeAccount(t *testing.T) {
 		t.Error("the refused dump loaded kecil")
 	}
 
-	r.grantAsAdvised(t, "'rs_partial'@'localhost'")
+	r.grantAsCommand(t, "rs_partial@localhost")
 	if d := r.snap.run(t, "mysql.dumpFrom", dumpParams(r.master, "kecil")); !d.OK {
-		t.Fatalf("dumpFrom after the advised GRANT = %+v", d)
+		t.Fatalf("dumpFrom after grant-admin's grants = %+v", d)
 	}
 	resp := r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil"))
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "(rs_lama); karantina tidak diakhiri") {
-		t.Fatalf("configureReplication = %+v, want A6 naming rs_lama", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "Database itu: rs_lama.") {
+		t.Fatalf("configureReplication = %+v, want A6 (T8b) naming rs_lama", resp)
 	}
 	r.assertStillQuarantined(t)
 }
@@ -145,7 +167,7 @@ func TestRebuildPartialRevokeAccount(t *testing.T) {
 // TestRebuildRoleOnlyAccountAtSettle: the copy was made with a complete
 // account, but the account stored at the settle holds its privileges only
 // through a role: the settle is refused with the C-1 text, the role and the
-// approval stay. After the advised GRANT the same settle ends the
+// approval stay. After grant-admin's grants the same settle ends the
 // quarantine.
 func TestRebuildRoleOnlyAccountAtSettle(t *testing.T) {
 	r := newSettleRig(t)
@@ -164,19 +186,19 @@ func TestRebuildRoleOnlyAccountAtSettle(t *testing.T) {
 	}
 	r.assertStillQuarantined(t)
 
-	r.grantAsAdvised(t, "'rs_viarole'@'localhost'")
+	r.grantAsCommand(t, "rs_viarole@localhost")
 	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil")))
 	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
-		t.Errorf("role pin after the advised GRANT = %q, want replica", role)
+		t.Errorf("role pin after grant-admin's grants = %q, want replica", role)
 	}
 }
 
-// listUnsupported is the E-1 refusal for an account name the proof does not
-// handle.
+// listUnsupported is the listing refusal for an account name the proof
+// does not handle, T17.
 const listUnsupported = "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai " +
-	"agent memuat karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang " +
-	"namanya hanya huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan " +
-	"\"Ulangi dari tahap ini\" pada pekerjaan di panel."
+	"agent memuat karakter yang tidak didukung pemeriksaan ini (yang didukung: huruf, angka, garis bawah, titik, " +
+	"tanda hubung, dan tanda dolar). Jalankan di server ini: sudo dbpanel agent reset-admin, lalu tekan \"Ulangi " +
+	"dari tahap ini\" pada pekerjaan di panel."
 
 // TestRebuildCraftedAccountNameCannotSettle: the re-review's forgery. The
 // database-scoped account of TestRebuildScopedAccountCannotSettle is named

@@ -618,7 +618,7 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 				d.Logger.Warn("quarantine kept: databases not copied from the pinned source remain", "source", source,
 					"databases", left)
 			}
-			return &errNotReplaced{source: source, names: left}
+			return notReplaced(source, copied, left)
 		}
 	}
 	// Read the flags under the lift lock, right before the quarantine

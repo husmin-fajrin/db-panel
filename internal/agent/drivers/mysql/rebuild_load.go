@@ -229,24 +229,103 @@ func (d *Driver) loadedFrom(host string, port int) (loadCopy, bool) {
 	return d.rebuild.copied, true
 }
 
-// maxNamedLeftovers is how many databases the A6 refusal names.
+// maxNamedLeftovers is how many databases the A6 refusal names in each of
+// its lists.
 const maxNamedLeftovers = 10
 
+// maxNotReplacedBytes caps the whole A6 refusal: the panel's line limit
+// (1024) less its label and the step's title. Lists are cut shorter to fit;
+// the advice never is.
+const maxNotReplacedBytes = 800
+
 // errNotReplaced is the refusal to end a quarantine while databases that
-// were not copied from the source remain.
+// were not copied from the source remain. After a dump of every database
+// (named false) they are split by the source's listing: absent ones the
+// new master does not have (drop-database here), present ones it has (a
+// new rebuild copies them again), T8a. After a dump of named databases
+// (named true) the listing says nothing about them and every name is in
+// absent, T8b.
 type errNotReplaced struct {
-	source string
-	names  []string
+	source          string
+	absent, present []string
+	named           bool
 }
 
+// The parts of T8a and T8b.
+const (
+	notReplacedHead    = "server ini masih punya database yang tidak disalin dari sumber %s; karantina tidak diakhiri."
+	notReplacedAbsent  = " Yang tidak ada di master baru (%s): jalankan di server ini sudo dbpanel agent drop-database <nama> untuk tiap nama, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel."
+	notReplacedPresent = " Yang ada di master baru (%s): mulai lagi Bangun ulang sebagai replika dari panel; panel menghapus dan menyalinnya ulang."
+	notReplacedNamed   = " Bila database itu tidak ada di master baru: jalankan di server ini sudo dbpanel agent drop-database <nama> untuk tiap nama, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel. Bila ada di master baru: mulai lagi Bangun ulang sebagai replika dari panel; panel menghapus dan menyalinnya ulang. Database itu: %s."
+)
+
 func (e *errNotReplaced) Error() string {
-	list := strings.Join(e.names[:min(len(e.names), maxNamedLeftovers)], ", ")
-	if len(e.names) > maxNamedLeftovers {
-		list += ", …"
+	absent, present := e.absent, e.present
+	if e.named {
+		absent, present = slices.Sorted(slices.Values(slices.Concat(e.absent, e.present))), nil
 	}
-	return fmt.Sprintf("server ini masih punya database yang tidak disalin dari sumber %s (%s); karantina tidak diakhiri. "+
-		"Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak karena database itu tidak ada di master "+
-		"baru, lihat README, bagian \"Database yang tidak ada di master baru\".", e.source, list)
+	ka, kp := min(len(absent), maxNamedLeftovers), min(len(present), maxNamedLeftovers)
+	for {
+		s := e.text(absent, present, ka, kp)
+		if len(s) <= maxNotReplacedBytes || ka+kp == 0 {
+			return s
+		}
+		if ka >= kp {
+			ka--
+		} else {
+			kp--
+		}
+	}
+}
+
+// text is the refusal naming the first ka of absent and kp of present.
+func (e *errNotReplaced) text(absent, present []string, ka, kp int) string {
+	s := fmt.Sprintf(notReplacedHead, e.source)
+	if e.named {
+		return s + fmt.Sprintf(notReplacedNamed, shortList(absent, ka))
+	}
+	if len(absent) > 0 {
+		s += fmt.Sprintf(notReplacedAbsent, shortList(absent, ka))
+	}
+	if len(present) > 0 {
+		s += fmt.Sprintf(notReplacedPresent, shortList(present, kp))
+	}
+	return s
+}
+
+// shortList is the first k names, then ", …" when some are left out ("…"
+// alone when none is shown).
+func shortList(names []string, k int) string {
+	list := strings.Join(names[:k], ", ")
+	switch {
+	case k == len(names):
+		return list
+	case k == 0:
+		return "…"
+	}
+	return list + ", …"
+}
+
+// AdviceTexts are the agent's texts that tell the operator what to run or
+// press (T7, T8a, T8b, T10, T11, T11b, T12, T13, T14, T15, T16, T17), each
+// with its values filled with examples, as the panel shows them: the
+// panel's tests check that its redaction leaves the advice whole.
+func AdviceTexts() []string {
+	const source, account = "10.0.0.5:3306", "'panel_admin'@'10.0.0.%'"
+	return []string{
+		errWritableSinceLoad.Error(),
+		(&errNotReplaced{source: source, absent: []string{"arsip_lama", "uji"}, present: []string{"simrs"}}).Error(),
+		(&errNotReplaced{source: source, absent: []string{"arsip_lama"}, named: true}).Error(),
+		(&loadAccountWeakError{account: account}).Error(),
+		errSecondListFailed.Error(),
+		errSecondListFailedReplaced.Error(),
+		ErrLiftHeldByCommand.Error(),
+		dedicatedQuarantinedText,
+		fmt.Sprintf(grantsQuarantinedText, "panel_admin@10.0.0.%"),
+		fmt.Sprintf(connectWeakQuarantinedText, "panel_admin@10.0.0.%"),
+		(&errListIncomplete{account: account}).Error(),
+		(&errListIncomplete{unsupported: true}).Error(),
+	}
 }
 
 // notCopied lists the server's non-system databases now (present) against
@@ -267,6 +346,21 @@ func (c loadCopy) notCopied(present []string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// notReplaced is the A6 refusal for the databases left that load c did
+// not copy from source: after a dump of every database split by whether
+// the source listed them (onSource), after any other dump all as one list.
+func notReplaced(source string, c loadCopy, left []string) *errNotReplaced {
+	e := &errNotReplaced{source: source, named: !c.full}
+	for _, name := range left {
+		if c.full && c.onSource(name) {
+			e.present = append(e.present, name)
+		} else {
+			e.absent = append(e.absent, name)
+		}
+	}
+	return e
 }
 
 // onSource reports whether the source listed name (without case) before
@@ -292,17 +386,21 @@ type errListIncomplete struct {
 
 func (e *errListIncomplete) Error() string {
 	if e.unsupported {
-		return "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat " +
-			"karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya " +
-			"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan \"Ulangi " +
-			"dari tahap ini\" pada pekerjaan di panel."
+		return listUnsupportedText
 	}
-	return fmt.Sprintf("daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent "+
-		"tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO %s; "+
-		"Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, bagian \"Memberi hak SHOW "+
-		"DATABASES di server yang dikarantina\". Sesudah itu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel.",
-		e.account, e.account)
+	return fmt.Sprintf(listIncompleteText, e.account)
 }
+
+// T16 and T17.
+const (
+	listIncompleteText = "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent " +
+		"tidak punya hak SHOW DATABASES. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan \"Ulangi " +
+		"dari tahap ini\" pada pekerjaan di panel."
+	listUnsupportedText = "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent " +
+		"memuat karakter yang tidak didukung pemeriksaan ini (yang didukung: huruf, angka, garis bawah, titik, tanda " +
+		"hubung, dan tanda dolar). Jalankan di server ini: sudo dbpanel agent reset-admin, lalu tekan \"Ulangi dari " +
+		"tahap ini\" pada pekerjaan di panel."
+)
 
 func (e *errListIncomplete) Unwrap() error { return e.cause }
 

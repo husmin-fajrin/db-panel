@@ -1,24 +1,126 @@
 package mysql
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
 
-// TestNotReplacedNamesAtMostTen: A6 names at most ten databases, then
-// ", …".
+// The texts of the A6 refusal (spec 5.8 T8a, T8b), as the brief gives them.
+const (
+	t8a = "server ini masih punya database yang tidak disalin dari sumber %s; karantina tidak diakhiri. Yang tidak ada di master baru (%s): jalankan di server ini sudo dbpanel agent drop-database <nama> untuk tiap nama, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel. Yang ada di master baru (%s): mulai lagi Bangun ulang sebagai replika dari panel; panel menghapus dan menyalinnya ulang."
+	t8b = "server ini masih punya database yang tidak disalin dari sumber %s; karantina tidak diakhiri. Bila database itu tidak ada di master baru: jalankan di server ini sudo dbpanel agent drop-database <nama> untuk tiap nama, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel. Bila ada di master baru: mulai lagi Bangun ulang sebagai replika dari panel; panel menghapus dan menyalinnya ulang. Database itu: %s."
+	// The two sentences of T8a.
+	t8aAbsent  = " Yang tidak ada di master baru ("
+	t8aPresent = " Yang ada di master baru ("
+)
+
+// TestNotReplacedNamesAtMostTen: A6 names at most ten databases in a
+// list, then ", …".
 func TestNotReplacedNamesAtMostTen(t *testing.T) {
 	var names []string
 	for _, c := range "abcdefghijkl" {
 		names = append(names, "db_"+string(c))
 	}
-	msg := (&errNotReplaced{source: "10.0.0.1:3306", names: names}).Error()
-	want := "(db_a, db_b, db_c, db_d, db_e, db_f, db_g, db_h, db_i, db_j, …); karantina tidak diakhiri."
+	msg := (&errNotReplaced{source: "10.0.0.1:3306", absent: names}).Error()
+	want := "(db_a, db_b, db_c, db_d, db_e, db_f, db_g, db_h, db_i, db_j, …):"
 	if !strings.Contains(msg, want) {
 		t.Errorf("message = %q, want it to hold %q", msg, want)
 	}
-	if one := (&errNotReplaced{source: "s:1", names: []string{"x"}}).Error(); !strings.Contains(one, "(x);") {
+	if one := (&errNotReplaced{source: "s:1", absent: []string{"x"}}).Error(); !strings.Contains(one, "(x):") {
 		t.Errorf("one name: %q", one)
+	}
+}
+
+// TestNotReplacedTextSplitsByNewMaster: after a full dump, the names the
+// new master listed go to the "Yang ada" sentence, the others to "Yang
+// tidak ada"; a group with no name has no sentence.
+func TestNotReplacedTextSplitsByNewMaster(t *testing.T) {
+	c := loadCopy{full: true, source: []string{"Simrs", "lab"}}
+	got := notReplaced("10.0.0.1:3306", c, []string{"arsip", "simrs", "uji"}).Error()
+	if want := fmt.Sprintf(t8a, "10.0.0.1:3306", "arsip, uji", "simrs"); got != want {
+		t.Errorf("both groups:\n got %q\nwant %q", got, want)
+	}
+	head, absent, present := splitT8a(t)
+	if got := notReplaced("s:1", c, []string{"arsip"}).Error(); got != fmt.Sprintf(head, "s:1")+fmt.Sprintf(absent, "arsip") {
+		t.Errorf("absent only: %q", got)
+	}
+	if got := notReplaced("s:1", c, []string{"lab"}).Error(); got != fmt.Sprintf(head, "s:1")+fmt.Sprintf(present, "lab") {
+		t.Errorf("present only: %q", got)
+	}
+}
+
+// splitT8a cuts T8a into its head and its two sentences.
+func splitT8a(t *testing.T) (head, absent, present string) {
+	t.Helper()
+	i, j := strings.Index(t8a, t8aAbsent), strings.Index(t8a, t8aPresent)
+	if i < 0 || j < i {
+		t.Fatal("T8a does not hold its two sentences")
+	}
+	return t8a[:i], t8a[i:j], t8a[j:]
+}
+
+// TestNotReplacedTextNamedDump: after a dump of named databases, T8b with
+// the names at the end, after the advice.
+func TestNotReplacedTextNamedDump(t *testing.T) {
+	c := loadCopy{named: []string{"toko"}, source: []string{"lama"}}
+	got := notReplaced("10.0.0.1:3306", c, []string{"kecil", "lama"}).Error()
+	if want := fmt.Sprintf(t8b, "10.0.0.1:3306", "kecil, lama"); got != want {
+		t.Errorf("text:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestNotReplacedTextAdviceSurvivesCap: twenty names of 64 characters
+// make a text of at most 800 bytes with both advices whole and the lists
+// cut, ending in ", …"; the same for T8b.
+func TestNotReplacedTextAdviceSurvivesCap(t *testing.T) {
+	var absent, present []string
+	for i := range 20 {
+		name := fmt.Sprintf("%02d", i) + strings.Repeat("x", 62)
+		if i%2 == 0 {
+			absent = append(absent, name)
+		} else {
+			present = append(present, name)
+		}
+	}
+	src := "old-master.rs.example:3306"
+	got := (&errNotReplaced{source: src, absent: absent, present: present}).Error()
+	if len(got) > 800 {
+		t.Errorf("T8a is %d bytes, want at most 800: %q", len(got), got)
+	}
+	head, a, p := splitT8a(t)
+	for _, part := range []string{fmt.Sprintf(head, src), a[strings.Index(a, "):"):], p[strings.Index(p, "):"):]} {
+		if !strings.Contains(got, part) {
+			t.Errorf("T8a lost %q: %q", part, got)
+		}
+	}
+	if n := strings.Count(got, ", …)"); n != 2 {
+		t.Errorf("T8a has %d lists cut with \", …\", want 2: %q", n, got)
+	}
+	if !strings.Contains(got, "("+absent[0]) || !strings.Contains(got, "("+present[0]) {
+		t.Errorf("T8a names no database of a group: %q", got)
+	}
+
+	got = (&errNotReplaced{source: src, absent: append(absent, present...), named: true}).Error()
+	if len(got) > 800 {
+		t.Errorf("T8b is %d bytes, want at most 800: %q", len(got), got)
+	}
+	advice := t8b[strings.Index(t8b, " Bila database"):strings.Index(t8b, "Database itu: ")]
+	if !strings.Contains(got, advice) || !strings.HasSuffix(got, ", ….") {
+		t.Errorf("T8b lost its advice or its cut: %q", got)
+	}
+}
+
+// TestAdviceTexts: every advice text is there, filled, and none is cut.
+func TestAdviceTexts(t *testing.T) {
+	texts := AdviceTexts()
+	if len(texts) != 12 {
+		t.Errorf("AdviceTexts has %d texts, want 12", len(texts))
+	}
+	for _, s := range texts {
+		if s == "" || strings.Contains(s, "%") && !strings.Contains(s, "10.0.0.%") || len(s) > 800 {
+			t.Errorf("advice text %q", s)
+		}
 	}
 }
 
@@ -176,14 +278,10 @@ func TestProofAccount(t *testing.T) {
 	}
 }
 
-// TestListUnsupportedAccountText: the E-1 refusal, character for
-// character.
+// TestListUnsupportedAccountText: T17, character for character.
 func TestListUnsupportedAccountText(t *testing.T) {
 	got := (&errListIncomplete{unsupported: true}).Error()
-	want := "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat " +
-		"karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya " +
-		"huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan \"Ulangi dari " +
-		"tahap ini\" pada pekerjaan di panel."
+	want := "daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat karakter yang tidak didukung pemeriksaan ini (yang didukung: huruf, angka, garis bawah, titik, tanda hubung, dan tanda dolar). Jalankan di server ini: sudo dbpanel agent reset-admin, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel."
 	if got != want {
 		t.Errorf("text = %q\nwant   %q", got, want)
 	}
@@ -208,14 +306,11 @@ func TestMissingGrantsCraftedRow(t *testing.T) {
 	}
 }
 
-// TestListIncompleteText: the C-1 refusal, character for character.
+// TestListIncompleteText: T16, character for character.
 func TestListIncompleteText(t *testing.T) {
 	got := (&errListIncomplete{account: quoteAccount("rs_scoped@localhost")}).Error()
-	want := "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'rs_scoped'@'localhost' yang dipakai " +
-		"agent tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* " +
-		"TO 'rs_scoped'@'localhost'; Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, " +
-		"bagian \"Memberi hak SHOW DATABASES di server yang dikarantina\". Sesudah itu tekan \"Ulangi dari tahap ini\" " +
-		"pada pekerjaan di panel."
+	want := fmt.Sprintf("daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent tidak punya hak SHOW DATABASES. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel.",
+		"'rs_scoped'@'localhost'")
 	if got != want {
 		t.Errorf("text = %q\nwant   %q", got, want)
 	}

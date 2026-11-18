@@ -803,3 +803,64 @@ func TestPreflightBadParams(t *testing.T) {
 		}
 	}
 }
+
+// The texts of the checks on a quarantined server (spec 5.8 T13, T14).
+const (
+	t13 = `Untuk tiap database itu jalankan di server ini: sudo dbpanel agent drop-database <nama> (perintah itu membuat cadangan dulu), lalu tekan "Ulangi dari tahap ini".`
+	t14 = `akun %s belum punya semua hak yang dibutuhkan. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
+)
+
+// preflightPinned runs mysql.preflight on h through a driver whose role pin
+// is role.
+func preflightPinned(t *testing.T, h mysql.Host, role string, p proto.PreflightParams) proto.PreflightResult {
+	t.Helper()
+	r := newPinRig(t, h, pinDir(t, role, "10.0.0.1:3306"))
+	resp := r.dispatch("mysql.preflight", p)
+	if !resp.OK {
+		t.Fatalf("mysql.preflight: %+v", resp.Error)
+	}
+	return decode[proto.PreflightResult](t, resp)
+}
+
+// TestDedicatedCheckPointsToCommandOnQuarantined: on a quarantined server
+// the dedicated check ends with T13; on any other role it reads as before.
+func TestDedicatedCheckPointsToCommandOnQuarantined(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	execAll(t, rootDB(t, inst), "CREATE DATABASE lain")
+	p := replicaParams(t, inst)
+	const before = "server ini masih berisi database lain (lain); versi ini hanya mendukung server replika khusus"
+	c := wantCheck(t, preflightPinned(t, inst.Host(), "quarantined", p), "dedicated", proto.CheckFail)
+	if want := before + ". " + t13; c.Detail != want {
+		t.Errorf("quarantined: detail = %q\nwant %q", c.Detail, want)
+	}
+	for _, role := range []string{"master", "replica", "unassigned"} {
+		c := wantCheck(t, preflightPinned(t, inst.Host(), role, p), "dedicated", proto.CheckFail)
+		if c.Detail != before {
+			t.Errorf("%s: detail = %q, want %q", role, c.Detail, before)
+		}
+	}
+}
+
+// TestGrantsCheckOnQuarantinedHasNoFixSQL: on a quarantined server an
+// account that lacks privileges gets T14 and no GRANT statements, for
+// either role; on another role the check reads as before, with them.
+func TestGrantsCheckOnQuarantinedHasNoFixSQL(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	execAll(t, rootDB(t, inst),
+		"CREATE USER 'limited'@'%' IDENTIFIED BY 'pw-1'", "GRANT SELECT ON *.* TO 'limited'@'%'")
+	h := inst.HostWith(&memCreds{proto.ConnectParams{User: "limited", Password: "pw-1", Host: "127.0.0.1", Port: inst.Port}})
+	for _, role := range []string{"master", "replica"} {
+		p := proto.PreflightParams{Role: role}
+		if role == "replica" {
+			p.PeerHost, p.PeerPort, p.PeerVersion = "127.0.0.1", inst.Port, "8.0.46"
+		}
+		c := wantCheck(t, preflightPinned(t, h, "quarantined", p), "grants", proto.CheckFail)
+		if want := fmt.Sprintf(t14, "limited@%"); c.Detail != want || len(c.FixSQL) != 0 {
+			t.Errorf("%s on a quarantined server: detail %q, FixSQL %q\nwant %q and none", role, c.Detail, c.FixSQL, want)
+		}
+		c = wantCheck(t, preflightPinned(t, h, "master", p), "grants", proto.CheckFail)
+		if len(c.FixSQL) == 0 || strings.Contains(c.Detail, "grant-admin") {
+			t.Errorf("%s on a master: detail %q, FixSQL %q; want the GRANT statements", role, c.Detail, c.FixSQL)
+		}
+	}
+}

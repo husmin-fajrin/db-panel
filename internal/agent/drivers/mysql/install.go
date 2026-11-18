@@ -538,22 +538,34 @@ func loadAuthSocket(ctx context.Context, db *sql.DB) error {
 }
 
 // createAdmin creates adminUser@localhost with a random password and every
-// privilege, and stores it in creds. A new server's root logs in over the
-// socket without a password (auth_socket), whatever creds held before.
+// privilege, and stores it in creds (ResetAdmin). A new server's root logs
+// in over the socket without a password (auth_socket), whatever creds held
+// before.
 func createAdmin(ctx context.Context, socket string, creds CredentialStore) error {
 	db, err := openWith(ctx, socket, proto.ConnectParams{User: "root"})
 	if err != nil {
 		return errors.New(loginFailure(err) + " (root lewat socket)")
 	}
 	defer db.Close()
-	// One session, so the sql_mode read is the one the statement runs in.
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	return ResetAdmin(ctx, conn, creds)
+}
+
+// ResetAdmin creates adminUser@localhost (dbpanel_admin) on c when it is
+// missing, gives it a new random password and every privilege WITH GRANT
+// OPTION, and only then stores it in creds as the agent's account: once
+// creds holds it, every statement has run. Every statement runs on c with
+// ctx. An account that exists keeps what else it has; no other account is
+// touched. The password reaches no error and no log: only the statements
+// and creds.
+func ResetAdmin(ctx context.Context, c *sql.Conn, creds CredentialStore) error {
+	// The sql_mode read is the one the statements run in (one session).
 	var mode string
-	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {
+	if err := c.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {
 		return fmt.Errorf("baca sql_mode: %w", err)
 	}
 	password, err := randomPassword(adminPasswordLen)
@@ -563,14 +575,14 @@ func createAdmin(ctx context.Context, socket string, creds CredentialStore) erro
 	// MySQL takes no placeholder in IDENTIFIED BY; the literal never reaches
 	// a log or an error.
 	literal := quotePassword(password, strings.Contains(mode, "NO_BACKSLASH_ESCAPES"))
-	account := quoteString(adminUser) + "@" + quoteString("localhost")
+	account := AdminAccount
 	// IF NOT EXISTS and ALTER: a retry after a half-created account works.
 	for _, stmt := range []string{"CREATE USER IF NOT EXISTS ", "ALTER USER "} {
-		if _, err := conn.ExecContext(ctx, stmt+account+" IDENTIFIED BY "+literal); err != nil {
+		if _, err := c.ExecContext(ctx, stmt+account+" IDENTIFIED BY "+literal); err != nil {
 			return fmt.Errorf("buat akun admin %s: %s", account, strings.ReplaceAll(err.Error(), password, "***"))
 		}
 	}
-	if _, err := conn.ExecContext(ctx, "GRANT ALL PRIVILEGES ON *.* TO "+account+" WITH GRANT OPTION"); err != nil {
+	if _, err := c.ExecContext(ctx, "GRANT ALL PRIVILEGES ON *.* TO "+account+" WITH GRANT OPTION"); err != nil {
 		return fmt.Errorf("beri hak akun admin %s: %w", account, err)
 	}
 	if err := creds.Save(proto.ConnectParams{User: adminUser, Password: password, Host: "localhost"}); err != nil {
@@ -578,6 +590,9 @@ func createAdmin(ctx context.Context, socket string, creds CredentialStore) erro
 	}
 	return nil
 }
+
+// AdminAccount is the account ResetAdmin makes, quoted for SQL.
+const AdminAccount = "'" + adminUser + "'@'localhost'"
 
 // Password alphabet. validate_password, on by default in Oracle's RPM
 // installs, wants an upper and lower case letter, a digit and a special

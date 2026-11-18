@@ -65,6 +65,13 @@ const usage = `Penggunaan:
                                                          /var/lib/dbpanel/dibuang), periksa, lalu hapus
                                                          database itu; --pengguna: akun administrator
                                                          MySQL selain root
+  dbpanel agent grant-admin [--pengguna NAMA] [--dir DIR]
+                                                         di server yang dikarantina (quarantined): beri
+                                                         akun MySQL agent hak yang masih kurang
+  dbpanel agent reset-admin [--pengguna NAMA] [--dir DIR]
+                                                         di server yang dikarantina (quarantined): buat
+                                                         ulang akun dbpanel_admin@localhost dan simpan
+                                                         sebagai akun MySQL agent
   dbpanel agent version                                  tampilkan versi
 `
 
@@ -150,6 +157,10 @@ func RunCLIWith(args []string, in io.Reader, stdout, stderr io.Writer, seams CLI
 			return mainApprove(args[1:], in, stdout, stderr, seams.Syslog)
 		case "drop-database":
 			return mainDropDatabase(args[1:], in, stdout, stderr, seams.Syslog)
+		case "grant-admin":
+			return mainGrantAdmin(args[1:], in, stdout, stderr, seams.Syslog)
+		case "reset-admin":
+			return mainResetAdmin(args[1:], in, stdout, stderr, seams.Syslog)
 		case "set-source":
 			return mainSetSource(args[1:], stdout, stderr)
 		case "lock-master":

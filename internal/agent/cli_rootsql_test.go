@@ -305,7 +305,8 @@ type helperSpec struct {
 }
 
 // TestDropDatabaseHelperProcess is the other process of the tests that
-// signal or kill a drop-database run; it does nothing otherwise.
+// signal or kill a drop-database (or admin command) run; it does nothing
+// otherwise.
 func TestDropDatabaseHelperProcess(t *testing.T) {
 	raw := os.Getenv(helperEnv)
 	if raw == "" {
@@ -317,6 +318,9 @@ func TestDropDatabaseHelperProcess(t *testing.T) {
 	}
 	cliLayoutHost = func(config.Config) (mysql.Host, error) {
 		return mysql.NewHost(mysql.Layout{Socket: spec.Socket}, nil, nil, probe.RealSystem(), nil), nil
+	}
+	cliStoredHost = func(_ config.Config, creds mysql.CredentialStore) (mysql.Host, error) {
+		return mysql.NewHost(mysql.Layout{Socket: spec.Socket}, nil, creds, probe.RealSystem(), nil), nil
 	}
 	cliLiftLock, cliBackupDir = spec.Lock, spec.Backups
 	if spec.Mysqldump != "" {
@@ -362,7 +366,13 @@ type process struct {
 // start runs drop-database args in a helper process.
 func (r *dropRig) start(spec helperSpec, args ...string) *process {
 	r.t.Helper()
-	spec.Args = append(append([]string{"drop-database"}, args...), "--dir", r.dir)
+	return r.startCommand(spec, "drop-database", args...)
+}
+
+// startCommand runs the agent command cmd with args in a helper process.
+func (r *dropRig) startCommand(spec helperSpec, cmd string, args ...string) *process {
+	r.t.Helper()
+	spec.Args = append(append([]string{cmd}, args...), "--dir", r.dir)
 	spec.Socket, spec.Lock = r.inst.Socket, r.lock
 	if spec.Backups == "" {
 		spec.Backups = r.backups

@@ -54,7 +54,14 @@ func (d *Driver) registerPreflight(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		return Preflight(ctx, h, p)
+		// Pins that cannot be read count as quarantined, as for
+		// mysql.connect.
+		quarantined := false
+		if d.pins != nil {
+			role, err := d.pins.roleErr()
+			quarantined = err != nil || role == roleQuarantined
+		}
+		return Preflight(ctx, h, p, quarantined)
 	})
 }
 
@@ -91,7 +98,9 @@ func validatePreflight(p *proto.PreflightParams) error {
 
 // Preflight checks whether this server can take p.Role. It logs in with the
 // stored admin account (Host.Open) and reads the server's state itself.
-func Preflight(ctx context.Context, h Host, p proto.PreflightParams) (proto.PreflightResult, error) {
+// quarantined is whether the server is a quarantined old master: its
+// remedies are the dbpanel agent commands run on it (T13, T14), not SQL.
+func Preflight(ctx context.Context, h Host, p proto.PreflightParams, quarantined bool) (proto.PreflightResult, error) {
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return proto.PreflightResult{}, err
@@ -101,6 +110,7 @@ func Preflight(ctx context.Context, h Host, p proto.PreflightParams) (proto.Pref
 	if err != nil {
 		return proto.PreflightResult{}, err
 	}
+	f.Quarantined = quarantined
 	return evaluatePreflight(p, f), nil
 }
 
@@ -126,6 +136,10 @@ type preflightFacts struct {
 	DiskPath    string
 	DiskFree    uint64
 	DiskErr     error
+
+	// Quarantined: the server is a quarantined old master (the handler
+	// reads the role pin).
+	Quarantined bool
 }
 
 func gatherPreflight(ctx context.Context, h Host, db *sql.DB, p proto.PreflightParams) (preflightFacts, error) {
@@ -273,6 +287,10 @@ func evaluatePreflight(p proto.PreflightParams, f preflightFacts) proto.Prefligh
 		v = replicaIdentityChecks(&l, p, f, local)
 	}
 
+	if len(f.MissingGrants) > 0 && f.Quarantined {
+		l.add("grants", proto.CheckFail, "Hak akses akun admin", fmt.Sprintf(grantsQuarantinedText, f.Account))
+		return finish()
+	}
 	if len(f.MissingGrants) > 0 {
 		c := l.add("grants", proto.CheckFail, "Hak akses akun admin", fmt.Sprintf(
 			"akun %s belum punya semua hak yang dibutuhkan; jalankan perintah GRANT berikut sebagai root lalu periksa ulang", f.Account))
@@ -300,6 +318,16 @@ func evaluatePreflight(p proto.PreflightParams, f preflightFacts) proto.Prefligh
 	}
 	return finish()
 }
+
+// Texts of the checks on a quarantined server: T14 for grants (no GRANT
+// statements: they could not run on a read-only server as they stand), T13
+// at the end of dedicated.
+const (
+	grantsQuarantinedText = "akun %s belum punya semua hak yang dibutuhkan. Jalankan di server ini: sudo dbpanel " +
+		"agent grant-admin, lalu tekan \"Ulangi dari tahap ini\" pada pekerjaan di panel."
+	dedicatedQuarantinedText = "Untuk tiap database itu jalankan di server ini: sudo dbpanel agent drop-database " +
+		"<nama> (perintah itu membuat cadangan dulu), lalu tekan \"Ulangi dari tahap ini\"."
+)
 
 // supportedVersion is ParseVersion that also refuses forks recognisable only
 // by @@version_comment: Percona Server, and MariaDB builds without
@@ -540,8 +568,12 @@ func replicaChecks(l *checkList, p proto.PreflightParams, f preflightFacts, v pe
 		}
 	}
 	if len(foreign) > 0 {
-		l.add("dedicated", proto.CheckFail, "Server replika khusus", fmt.Sprintf(
-			"server ini masih berisi database lain (%s); versi ini hanya mendukung server replika khusus", strings.Join(foreign, ", ")))
+		detail := fmt.Sprintf("server ini masih berisi database lain (%s); versi ini hanya mendukung server replika khusus",
+			strings.Join(foreign, ", "))
+		if f.Quarantined {
+			detail += ". " + dedicatedQuarantinedText
+		}
+		l.add("dedicated", proto.CheckFail, "Server replika khusus", detail)
 	} else {
 		l.add("dedicated", proto.CheckOK, "Server replika khusus", "tidak ada database lain di server ini")
 	}

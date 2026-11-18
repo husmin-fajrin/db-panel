@@ -147,9 +147,7 @@ func (d *Driver) registerConnect(reg *commands.Registry) {
 		// not put read-only back.
 		if len(res.MissingGrants) > 0 && d.pins != nil {
 			if role, err := d.pins.roleErr(); err != nil || role == roleQuarantined {
-				return nil, &commands.ParamError{Msg: fmt.Sprintf("server ini dikarantina (quarantined): akun %s belum punya "+
-					"semua hak yang dibutuhkan; jalankan perintah GRANT berikut sebagai root lalu periksa ulang: %s",
-					res.Account, strings.Join(res.MissingGrants, "; "))}
+				return nil, &commands.ParamError{Msg: fmt.Sprintf(connectWeakQuarantinedText, res.Account)}
 			}
 		}
 		if err := d.Creds.Save(p); err != nil {
@@ -187,6 +185,103 @@ func (d *Driver) registerConnect(reg *commands.Registry) {
 		}
 		return nil, &commands.ParamError{Msg: "MySQL belum dihubungkan"}
 	})
+}
+
+// connectWeakQuarantinedText is T15: on a quarantined server mysql.connect
+// does not store an account that lacks privileges; the account is not the
+// agent's, so the advice is reset-admin (grant-admin works on the stored
+// one).
+const connectWeakQuarantinedText = "server ini dikarantina (quarantined): akun %s belum punya semua hak yang " +
+	"dibutuhkan, jadi tidak disimpan. Jalankan di server ini: sudo dbpanel agent reset-admin (membuat akun " +
+	"dbpanel_admin dan menyimpannya sebagai akun agent), lalu klik Segarkan di halaman server ini. Hubungkan MySQL " +
+	"tidak perlu diulang."
+
+// ErrUnsupportedAccount is MissingAdminGrants' answer for an account whose
+// name the listing proof does not handle (proofAccount): no GRANT makes
+// its listing provably complete.
+var ErrUnsupportedAccount = errors.New("account name not supported by the listing proof")
+
+// MissingAdminGrants is what account (CURRENT_USER() of the agent's stored
+// account, user@host) lacks on a quarantined server, as GRANT statements
+// read on c (a session that may read every account's grants): the replica
+// privileges a rebuild checks (requiredGrants(replicaGrants) for the
+// server's version) and, when its listing of databases cannot be proved
+// complete (listingProof, partial_revokes), SHOW DATABASES on *.*. The
+// account's grants are read by name, so privileges it holds only through a
+// role count as missing, as they do for the proof. An account name the
+// proof does not handle is ErrUnsupportedAccount.
+func MissingAdminGrants(ctx context.Context, c *sql.Conn, account string) ([]string, error) {
+	user, host, ok := proofAccount(account)
+	if !ok {
+		return nil, ErrUnsupportedAccount
+	}
+	var version string
+	if err := c.QueryRowContext(ctx, "SELECT @@version").Scan(&version); err != nil {
+		return nil, fmt.Errorf("baca versi MySQL: %w", err)
+	}
+	rows, err := c.QueryContext(ctx, "SHOW GRANTS FOR "+quoteString(user)+"@"+quoteString(host))
+	if err != nil {
+		return nil, fmt.Errorf("baca hak akses MySQL: %w", err)
+	}
+	var grants []string
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("baca hak akses MySQL: %w", err)
+		}
+		grants = append(grants, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("baca hak akses MySQL: %w", err)
+	}
+	out := missingGrants(grants, account, requiredGrants(replicaGrants, version))
+	show, sel := listingProof(grants, user, host)
+	if !show && sel {
+		var partial bool
+		if err := c.QueryRowContext(ctx, "SELECT @@GLOBAL.partial_revokes").Scan(&partial); err != nil {
+			return nil, fmt.Errorf("baca partial_revokes: %w", err)
+		}
+		show = !partial
+	}
+	if !show {
+		out = append(out, "GRANT SHOW DATABASES ON *.* TO "+quoteAccount(account))
+	}
+	return out, nil
+}
+
+// StoredAccountName logs in once with the admin account h stores and reads
+// CURRENT_USER(): the account as MySQL knows it (user@host, the host as the
+// account was created, not the address stored). Without a stored account
+// it is ErrNotConnected; a refused login is an error LoginRefused
+// recognises. h must be a Host this package made (NewRealHost, NewHost).
+func StoredAccountName(ctx context.Context, h Host) (string, error) {
+	hh, ok := h.(*host)
+	if !ok || hh.creds == nil {
+		return "", ErrNotConnected
+	}
+	p, stored, err := hh.creds.Load()
+	if err != nil {
+		return "", fmt.Errorf("baca kredensial MySQL: %w", err)
+	}
+	if !stored {
+		return "", ErrNotConnected
+	}
+	// As OpenDB logs in with a stored account, without its fallback to root.
+	if p.Host, err = localMySQL(ctx, p.Host); err != nil {
+		return "", err
+	}
+	db, err := openWith(ctx, hh.l.Socket, p)
+	if err != nil {
+		return "", &LoginError{Err: err}
+	}
+	defer db.Close()
+	var account string
+	if err := db.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&account); err != nil {
+		return "", fmt.Errorf("baca akun MySQL: %w", err)
+	}
+	return account, nil
 }
 
 // localLookupTimeout bounds the name lookup of a host given to

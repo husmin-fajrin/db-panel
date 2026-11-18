@@ -3,6 +3,7 @@ package mysql_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -44,8 +45,11 @@ func newQuarantinedConnectRig(t *testing.T) *quarantinedConnectRig {
 func TestConnectWeakAccountOnQuarantinedServer(t *testing.T) {
 	r := newQuarantinedConnectRig(t)
 	weak := proto.ConnectParams{User: "lemah", Password: "Lemah-123", Host: "127.0.0.1", Port: r.inst.Port}
-	wantRefused(t, "connect with a weak account", r.dispatch("mysql.connect", weak),
-		"akun lemah@127.0.0.1 belum punya semua hak yang dibutuhkan")
+	resp := r.dispatch("mysql.connect", weak)
+	wantRefused(t, "connect with a weak account", resp)
+	if resp.Error != nil && resp.Error.Message != fmt.Sprintf(t15, "lemah@127.0.0.1") {
+		t.Errorf("message = %q\nwant      %q", resp.Error.Message, fmt.Sprintf(t15, "lemah@127.0.0.1"))
+	}
 	if r.creds.p.User != "root" {
 		t.Errorf("stored account = %+v, want root kept", r.creds.p)
 	}
@@ -57,6 +61,58 @@ func TestConnectWeakAccountOnQuarantinedServer(t *testing.T) {
 	}
 	if sro, ro := readOnly(t, rootDB(t, r.inst)); !sro || !ro {
 		t.Errorf("after the guard round: super_read_only=%v read_only=%v, want both ON", sro, ro)
+	}
+}
+
+// t15 is the refusal of a weak account on a quarantined server (spec 5.8
+// T15).
+const t15 = "server ini dikarantina (quarantined): akun %s belum punya semua hak yang dibutuhkan, jadi tidak disimpan. Jalankan di server ini: sudo dbpanel agent reset-admin (membuat akun dbpanel_admin dan menyimpannya sebagai akun agent), lalu klik Segarkan di halaman server ini. Hubungkan MySQL tidak perlu diulang."
+
+// TestConnectRefusalAdviceWorks: T15's advice does what it says. After the
+// refusal, what reset-admin runs (mysql.ResetAdmin, as root with
+// super_read_only lifted and sql_log_bin off) stores dbpanel_admin as the
+// agent's account, and mysql.inventory through it lacks nothing; the
+// server is locked again, its GTID set unchanged.
+func TestConnectRefusalAdviceWorks(t *testing.T) {
+	r := newQuarantinedConnectRig(t)
+	weak := proto.ConnectParams{User: "lemah", Password: "Lemah-123", Host: "127.0.0.1", Port: r.inst.Port}
+	wantRefused(t, "connect with a weak account", r.dispatch("mysql.connect", weak), "sudo dbpanel agent reset-admin")
+
+	ctx := context.Background()
+	root := rootDB(t, r.inst)
+	var gtid string
+	if err := root.QueryRow("SELECT @@GLOBAL.gtid_executed").Scan(&gtid); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := root.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, q := range []string{"SET SESSION sql_log_bin = 0", "SET GLOBAL super_read_only = OFF"} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mysql.ResetAdmin(ctx, conn, r.creds); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "SET GLOBAL super_read_only = ON"); err != nil {
+		t.Fatal(err)
+	}
+	if r.creds.p.User != "dbpanel_admin" || r.creds.p.Password == "" {
+		t.Fatalf("stored account = %q, want dbpanel_admin with a password", r.creds.p.User)
+	}
+	res := decode[proto.ConnectResult](t, r.dispatch("mysql.inventory", nil))
+	if res.Account != "dbpanel_admin@localhost" || len(res.MissingGrants) != 0 {
+		t.Errorf("inventory: account %q, missing %q; want dbpanel_admin@localhost lacking nothing", res.Account, res.MissingGrants)
+	}
+	var after string
+	if err := root.QueryRow("SELECT @@GLOBAL.gtid_executed").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if sro, ro := readOnly(t, root); !sro || !ro || after != gtid {
+		t.Errorf("after: super_read_only=%v read_only=%v gtid %q (before %q)", sro, ro, after, gtid)
 	}
 }
 
