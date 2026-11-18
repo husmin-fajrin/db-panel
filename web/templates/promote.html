@@ -87,7 +87,7 @@
 <div role="alert" class="banner banner-error" data-promote-blocked>{{template "banner-icon" "error"}}
   <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
   <p>{{.Blocked}}</p>
-  {{with .BlockedJob}}<a class="btn btn-sm" href="/jobs/{{.}}">Buka pekerjaan promote</a>{{end}}
+  {{if .BlockedJob}}<a class="btn btn-sm" href="/jobs/{{.BlockedJob}}">{{.BlockedJobLink}}</a>{{end}}
   </div>
 </div>
 {{end}}

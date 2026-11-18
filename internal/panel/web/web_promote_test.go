@@ -730,3 +730,47 @@ func TestPromoteScreenNamesQuarantinedCandidate(t *testing.T) {
 	}
 	wantNoBody(t, rec, `name="candidate" value="9"`, "Replika gagal", "Replika sedang dibuat")
 }
+
+// promoteJobBlockedLine is the promote screen's blocker for an unfinished
+// job of the topology (ruling D61).
+const promoteJobBlockedLine = "Topologi ini masih punya pekerjaan yang belum selesai. Buka pekerjaan itu dan tekan Batalkan, lalu kembali ke sini."
+
+// TestPromoteScreenNamesBlockingJob (ruling D61): an unfinished job of the
+// topology, which the promote's POST refuses on, is named on the screen
+// before anything is typed: the blocker, a link to that job ("Buka
+// pekerjaan", or "Buka pekerjaan promote" for a promote job) and no
+// candidate to choose. The earlier blockers keep their precedence.
+func TestPromoteScreenNamesBlockingJob(t *testing.T) {
+	for _, c := range []struct {
+		kind, link string
+	}{
+		{orchestrator.KindCreateReplica, ">Buka pekerjaan</a>"},
+		{orchestrator.KindPromoteEmergency, ">Buka pekerjaan promote</a>"},
+	} {
+		t.Run(c.kind, func(t *testing.T) {
+			e, f, _ := promoteEnv(t)
+			f.setView(emergencyView())
+			topo, err := e.st.GetTopologyByMaster(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const id = "77777777777777777777777777777777"
+			if err := e.st.CreateJob(store.Job{ID: id, Kind: c.kind, ServerID: 3, TopologyID: topo.ID, ParamsJSON: "{}",
+				CreatedAt: time.Now()}, []string{"Langkah"}); err != nil {
+				t.Fatal(err)
+			}
+			rec := e.do("GET", "/masters/1/promote", nil, e.cookie())
+			wantCode(t, rec, http.StatusOK)
+			wantBody(t, rec, "data-promote-blocked", promoteJobBlockedLine, `href="/jobs/`+id+`"`, c.link)
+			wantNoBody(t, rec, `name="candidate" value="2"`)
+
+			// A cutover still pending keeps its blocker first.
+			if err := e.st.SetCutoverPending(topo.ID, true); err != nil {
+				t.Fatal(err)
+			}
+			rec = e.do("GET", "/masters/1/promote", nil, e.cookie())
+			wantBody(t, rec, "Promote sebelumnya masih menunggu pengalihan aplikasi")
+			wantNoBody(t, rec, promoteJobBlockedLine)
+		})
+	}
+}

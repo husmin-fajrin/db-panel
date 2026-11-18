@@ -44,6 +44,9 @@ const (
 	msgPromoteNone       = "Tidak ada replika yang bisa dipilih saat ini; lihat kolom alasan di tabel."
 	msgPromoteCutover    = "Promote sebelumnya masih menunggu pengalihan aplikasi; tekan \"Sudah saya alihkan\" setelah semua aplikasi memakai master baru."
 	msgPromoteUnfinished = "Promote sebelumnya di topologi ini belum tuntas; buka pekerjaannya dan tekan Ulangi."
+	// msgPromoteJobOpen: a job of the topology is unfinished, which the
+	// promote's POST refuses on (ruling D61).
+	msgPromoteJobOpen = "Topologi ini masih punya pekerjaan yang belum selesai. Buka pekerjaan itu dan tekan Batalkan, lalu kembali ke sini."
 
 	reasonWritable = "Bisa ditulis (super_read_only mati); mungkin sudah menjadi master"
 	// reasonAgentOffline is the orchestrator's reason for a replica whose
@@ -193,8 +196,10 @@ type promotePage struct {
 	LostKnown bool
 	Lost      int
 	// Blocked says why the promotion cannot start now; BlockedJob links
-	// the unfinished earlier promotion.
+	// the job that blocks it (an unfinished earlier promotion, or another
+	// unfinished job of the topology), BlockedJobLink the link's words.
 	Blocked, BlockedJob string
+	BlockedJobLink      string
 	Local               bool
 	AcceptBranched      bool
 	// Selected is the checked candidate (0: none); its names and
@@ -489,6 +494,21 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		p.Blocked = fmt.Sprintf(msgPromoteWritable, writable)
 	case !slices.ContainsFunc(p.Rows, func(row promoteRow) bool { return row.Selectable }):
 		p.Blocked = msgPromoteNone
+	default:
+		// The job the POST refuses on (StartPromote's ActiveJobForTopology).
+		j, busy, err := a.Store.ActiveJobForTopology(topo.ID)
+		if err != nil {
+			return p, err
+		}
+		if busy {
+			p.Blocked, p.BlockedJob = msgPromoteJobOpen, j.ID
+			if j.Kind != orchestrator.KindPromotePlanned && j.Kind != orchestrator.KindPromoteEmergency {
+				p.BlockedJobLink = "Buka pekerjaan"
+			}
+		}
+	}
+	if p.BlockedJob != "" && p.BlockedJobLink == "" {
+		p.BlockedJobLink = "Buka pekerjaan promote"
 	}
 	return p, nil
 }
