@@ -952,20 +952,22 @@ func (r *Runner) refuseSuperseded(j store.Job) error {
 // A rebuild of an old master its agent has not ended the quarantine of
 // needs the role quarantined, any other job of a replica the role replica
 // (spec 5.1). Periksa and Amankan data tertinggal, which only read the old
-// master, are no newer job for a rebuild still pending (pendingRebuild).
+// master, are no newer job for an unsettled rebuild (unsettledRebuild),
+// whether it failed, runs or waits: both are refused while the rebuild
+// runs or waits (refuseBusy), so such a job ran while it was failed.
 func (r *Runner) supersededBy(j store.Job) (string, error) {
 	var st jobState
 	stErr := json.Unmarshal([]byte(j.ParamsJSON), &st)
-	pending := false
+	unsettled := false
 	if stErr == nil {
 		var err error
-		if pending, err = r.pendingRebuild(j, st); err != nil {
+		if unsettled, err = r.unsettledRebuild(j, st); err != nil {
 			return "", err
 		}
 	}
 	var newer bool
 	var err error
-	if pending {
+	if unsettled {
 		newer, err = r.d.Store.NewerJobExistsExcept(j.ID, j.ServerID, KindLeftover, KindSalvage)
 	} else {
 		newer, err = r.d.Store.NewerJobExists(j.ID, j.ServerID)
@@ -1037,21 +1039,15 @@ func (r *Runner) supersededBy(j store.Job) (string, error) {
 	return "", nil
 }
 
-// pendingRebuild reports whether j is a rebuild of an old master that
-// failed before its agent ended the quarantine (spec 5.1): a
-// create_replica job with RebuildOldMaster and without QuarantineEnded
-// (st is its params), the server's replica row failed, and the server
-// still the old master of the job's topology.
-func (r *Runner) pendingRebuild(j store.Job, st jobState) (bool, error) {
+// unsettledRebuild reports whether j is a rebuild of an old master whose
+// agent has not ended the quarantine yet: a create_replica job with
+// RebuildOldMaster and without QuarantineEnded (st is its params), whose
+// server is still the old master of the job's topology. The state of the
+// server's replica row does not matter: the job may have failed, or run
+// or wait again after a Retry.
+func (r *Runner) unsettledRebuild(j store.Job, st jobState) (bool, error) {
 	if j.Kind != KindCreateReplica || !st.RebuildOldMaster || st.QuarantineEnded {
 		return false, nil
-	}
-	rep, err := r.d.Store.GetReplicaByServer(j.ServerID)
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil || rep.State != store.ReplicaFailed {
-		return false, err
 	}
 	topo, err := r.d.Store.GetTopologyByOldMaster(j.ServerID)
 	if errors.Is(err, store.ErrNotFound) {

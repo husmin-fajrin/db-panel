@@ -414,11 +414,14 @@ func TestRetryStillRefusedWhenSuperseded(t *testing.T) {
 	}
 }
 
-// TestLeftoverDoesNotSupersedeFailedRebuild: after Periksa and Amankan data
-// tertinggal on an old master left by a failed rebuild, the rebuild is
-// still retried; a Periksa job does supersede a create_replica job that is
-// not a rebuild, or one whose agent ended the quarantine.
-func TestLeftoverDoesNotSupersedeFailedRebuild(t *testing.T) {
+// TestLeftoverJobDoesNotSupersedeFailedRebuild: after Periksa and Amankan
+// data tertinggal on an old master left by a failed rebuild, the rebuild is
+// still retried, and once retried it still waits for and takes its
+// approvals (its row creating); a Periksa job does supersede a
+// create_replica job that is not a rebuild, one whose agent ended the
+// quarantine, and a rebuild of a server that is no longer the old master
+// of the job's topology.
+func TestLeftoverJobDoesNotSupersedeFailedRebuild(t *testing.T) {
 	ctx := context.Background()
 	leftover := func(t *testing.T, g *promoteRig, salvage bool) {
 		t.Helper()
@@ -456,6 +459,60 @@ func TestLeftoverDoesNotSupersedeFailedRebuild(t *testing.T) {
 		}
 		e.waitJob(id, store.JobSucceeded)
 		e.waitIdle(id)
+	})
+	for _, salvage := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retried rebuild waits, salvage %v", salvage), func(t *testing.T) {
+			g := rebuildRig(t)
+			e := g.e
+			// Without ConfirmWipe the copy waits for the CLONE approval.
+			g.m.fail("mysql.preflight", "gagal")
+			id, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.c.id, TargetServerID: g.m.id,
+				RebuildOldMaster: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.waitJob(id, store.JobFailed)
+			e.waitIdle(id)
+			leftover(t, g, salvage)
+			scriptReplicaTarget(g.m, "db-master", "clone")
+			if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+				t.Fatalf("Retry: %v", err)
+			}
+			waiting := func(what string) {
+				t.Helper()
+				e.waitJob(id, store.JobWaiting)
+				e.waitIdle(id)
+				if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaCreating {
+					t.Fatalf("%s: row = %+v, %v; want creating", what, rep, err)
+				}
+				if got := e.r.Superseded(id); got != "" {
+					t.Fatalf("%s: Superseded = %q, want approvable", what, got)
+				}
+			}
+			waiting("after the Retry")
+			// The waiting job retried once more: it waits again.
+			if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+				t.Fatalf("Retry of the waiting job: %v", err)
+			}
+			waiting("after the second Retry")
+			if err := e.r.Approve(id, JobAck{Confirmed: true}); err != nil {
+				t.Fatalf("Approve: %v", err)
+			}
+			e.waitJob(id, store.JobSucceeded)
+			e.waitIdle(id)
+		})
+	}
+	t.Run("no longer the old master", func(t *testing.T) {
+		g := rebuildRig(t)
+		e := g.e
+		id := failedRebuild(t, g, "mysql.preflight")
+		leftover(t, g, false)
+		if err := e.st.ClearOldMaster(g.m.id); err != nil {
+			t.Fatal(err)
+		}
+		if got := e.r.Superseded(id); !strings.Contains(got, "lebih baru") {
+			t.Fatalf("Superseded = %q, want superseded by the newer Periksa job", got)
+		}
 	})
 	for name, params := range map[string]string{
 		"not a rebuild":    `{"master_server_id":%d}`,

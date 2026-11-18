@@ -727,3 +727,48 @@ func TestRetryDialogShowsLeftoverWarnings(t *testing.T) {
 		})
 	}
 }
+
+// TestWaitingRebuildApprovableAfterLeftover: a retried rebuild that waits
+// for its approval after Periksa data tertinggal ran is not superseded by
+// the Periksa job (the orchestrator's own verdict on the same store): its
+// job page offers Setujui.
+func TestWaitingRebuildApprovableAfterLeftover(t *testing.T) {
+	e, f, topo := failedRebuildEnv(t)
+	c := e.cookie()
+	const id, check = "8888888888888888888888888888888b", "8888888888888888888888888888888c"
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: orchestrator.KindCreateReplica, ServerID: 1, TopologyID: topo.ID,
+		ParamsJSON: `{"master_server_id":2,"rebuild_old_master":true}`, CreatedAt: time.Now()}, rebuildSteps); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobFailed, 1, "gagal", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Periksa data tertinggal ran on the failed rebuild.
+	storeJob(t, e.st, check, orchestrator.KindLeftover, 1, "{}", store.JobSucceeded, "Periksa data tertinggal")
+	// Ulangi: the job now waits for its approval at the copy, its row
+	// creating.
+	if err := e.st.ReopenJob(id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetJobParams(id, `{"master_server_id":2,"rebuild_old_master":true,"wait_reason":"wipe","wait_list":["toko"]}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetStep(id, 4, store.StepWaiting, "Database berikut dihapus: toko", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobWaiting, 4, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(1, store.ReplicaCreating, ""); err != nil {
+		t.Fatal(err)
+	}
+	verdict := orchestrator.New(orchestrator.Deps{Store: e.st}).Superseded(id)
+	f.mu.Lock()
+	f.superseded = map[string]string{id: verdict}
+	f.drops = map[string]bool{id: true}
+	f.mu.Unlock()
+	rec := e.do("GET", "/jobs/"+id, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, "tidak bisa diulang atau disetujui lagi")
+	wantBody(t, rec, `action="/jobs/`+id+`/approve"`)
+}
