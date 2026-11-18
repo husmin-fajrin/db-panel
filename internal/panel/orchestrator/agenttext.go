@@ -205,6 +205,17 @@ func agentList(items []string, sep string) string {
 	return strings.Join(out, sep)
 }
 
+// agentListQuote is an agent's list (agentList, "; ") labelled as
+// serverID's words (agentWords), one line, and at most room bytes, for the
+// end of a panel line whose own sentences come first (ruling D59): nothing
+// the agent says can then cut, censor or precede them.
+func (r *Runner) agentListQuote(serverID int64, items []string, room int) string {
+	if room <= 0 {
+		return ""
+	}
+	return truncate(r.agentWords(serverID, agentList(items, "; "), room), room)
+}
+
 // gtidValue is a GTID set an agent reports, as a panel line shows it: the
 // set when it reads as one (shownGTID); anything else made one line and
 // cut at maxShownValue characters; "" stays "".

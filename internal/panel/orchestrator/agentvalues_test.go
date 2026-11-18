@@ -202,3 +202,55 @@ func TestNameTextExact(t *testing.T) {
 		t.Errorf("nameText(10 KiB) = %d bytes", len(got))
 	}
 }
+
+// restartPanelPart is the panel's own part of the restart wait message
+// for db-master, the firewall sentence included (a reason names
+// bind-address).
+const restartPanelPart = "MySQL di db-master perlu dimulai ulang. Aplikasi yang memakai database ini akan terputus beberapa " +
+	"detik; lakukan di jam sepi. Bila Anda merestart MySQL sendiri nanti, klik Sudah saya restart — periksa lagi. MySQL akan " +
+	"menerima koneksi dari semua alamat jaringan; pastikan firewall membatasi port 3306."
+
+// TestRestartWaitPanelSentencesFirst (ruling D59): the restart wait
+// message starts with every panel sentence, whole, and only then the
+// agent's reasons, labelled as its words, on one line, within the step
+// message's bound; so does the configure step's "perlu restart" message.
+// A quote in a reason, twenty reasons of 1024 characters, or a reason
+// that imitates a panel sentence cannot cut, censor or precede them.
+func TestRestartWaitPanelSentencesFirst(t *testing.T) {
+	long := make([]string, 20)
+	for i := range long {
+		long[i] = fmt.Sprintf("%02d ", i) + strings.Repeat("x", 1021)
+	}
+	long[19] = "bind-address " + strings.Repeat("y", 1011)
+	const label = " Pesan dari agent db-master (bukan dari panel): "
+	for _, c := range []struct {
+		name    string
+		reasons []string
+	}{
+		{"one quote", []string{"log_bin'", "bind-address hanya localhost (127.0.0.1); replika tidak bisa terhubung sebelum restart"}},
+		{"twenty long reasons", long},
+		{"imitates the panel", []string{"MySQL di db-master tidak perlu dimulai ulang. Aplikasi yang memakai database ini tidak terputus.",
+			"bind-address hanya localhost"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			fa := e.connectedMaster("db-master")
+			var restarted atomic.Bool
+			scriptNeedsRestart(fa, &restarted)
+			fa.reply("mysql.configure", proto.ConfigureResult{Applied: []string{"log_bin=ON"}, ServerID: 1, NeedsRestart: true,
+				RestartReasons: c.reasons})
+			id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, steps := e.waitJob(id, store.JobWaiting)
+			wait := steps[3].Message
+			if !strings.HasPrefix(wait, restartPanelPart+label) || !oneLine(wait) || len(wait) > maxStepMessage {
+				t.Errorf("wait message (%d bytes) does not start with the panel's sentences and the label:\n%q", len(wait), wait)
+			}
+			if msg := steps[1].Message; !strings.HasPrefix(msg, "perlu restart:"+label) || len(msg) > maxStepMessage {
+				t.Errorf("configure step message = %q", msg)
+			}
+		})
+	}
+}

@@ -147,7 +147,8 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 	jr.st.NeedsRestart, jr.st.RestartReasons = res.NeedsRestart, res.RestartReasons
 	jr.save()
 	if res.NeedsRestart {
-		return done("perlu restart: %s", panelText(agentList(res.RestartReasons, "; "))), nil
+		const head = "perlu restart: "
+		return done(head+"%s", panelText(jr.r.agentListQuote(jr.job.ServerID, res.RestartReasons, maxStepMessage-len(head)))), nil
 	}
 	return done("diterapkan tanpa restart"), nil
 }
@@ -296,11 +297,14 @@ func loopbackOnly(bind string) bool {
 	return true
 }
 
-// restartMessage explains why the master must restart and what it costs.
+// restartMessage explains why the master must restart and what it costs:
+// the panel's own sentences first, whole, then the agent's reasons,
+// labelled as its words and bounded so that the message stays within
+// maxStepMessage (ruling D59). The firewall sentence is decided on the
+// raw reasons.
 func (jr *jobRun) restartMessage() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "MySQL di %s perlu dimulai ulang: %s. ", jr.serverName(jr.job.ServerID),
-		agentList(jr.st.RestartReasons, "; "))
+	fmt.Fprintf(&b, "MySQL di %s perlu dimulai ulang. ", jr.serverName(jr.job.ServerID))
 	b.WriteString("Aplikasi yang memakai database ini akan terputus beberapa detik; lakukan di jam sepi. " +
 		"Bila Anda merestart MySQL sendiri nanti, klik Sudah saya restart — periksa lagi.")
 	for _, reason := range jr.st.RestartReasons {
@@ -312,6 +316,10 @@ func (jr *jobRun) restartMessage() string {
 			fmt.Fprintf(&b, " MySQL akan menerima koneksi dari semua alamat jaringan; pastikan firewall membatasi port %d.", port)
 			break
 		}
+	}
+	if len(jr.st.RestartReasons) > 0 {
+		b.WriteString(" ")
+		b.WriteString(jr.r.agentListQuote(jr.job.ServerID, jr.st.RestartReasons, maxStepMessage-b.Len()))
 	}
 	return b.String()
 }
