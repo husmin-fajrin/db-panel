@@ -3,6 +3,8 @@ package redact
 import (
 	"strings"
 	"testing"
+
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 )
 
 // The agent's texts that quote the panel's own phrases and an advised
@@ -81,6 +83,9 @@ func TestQuotesPhrasesFixedPoint(t *testing.T) {
 	for _, c := range phraseCases {
 		ins = append(ins, c.in)
 	}
+	for _, text := range mysql.AdviceTexts() {
+		ins = append(ins, label+text)
+	}
 	for _, in := range ins {
 		for n := 0; n <= len(in); n++ {
 			once := Quotes(in[:n])
@@ -104,6 +109,12 @@ var adjacentInputs = []string{
 	`'dbpanel_repl'@'h.x'"Budi"`,
 	`'Paksa dump'"Budi`,
 	`'Paksa dump''Budi'`,
+	// Two censored literals side by side (also the account above, no longer
+	// anchored since N-H5).
+	`'x'"Budi"`,
+	`'x'"Budi`,
+	`Unknown column 'x'"Budi" y`,
+	`"x"'Budi'"Budi"`,
 }
 
 // TestQuotesAdjacentFixedPoint: Quotes(Quotes(s)) == Quotes(s) with
@@ -132,6 +143,21 @@ func TestQuotesAdvisedAccountAnchored(t *testing.T) {
 		"Deadlock found when trying to get lock; 'x' akun MySQL 'Budi_Santoso'@'rs.lokal'",
 		"xtidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal'",
 		"édi server ini: GRANT SHOW DATABASES ON *.* TO 'Budi_Santoso'@'rs.lokal'",
+		// N-H5: the agent's whole sentence, but not at the start of the
+		// message nor right after the panel's label.
+		"Unknown column 'x' daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal' y",
+		"Deadlock found; daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal'",
+		label + "Unknown column 'x' daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal'",
+		"xdaftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal'",
+		"(bukan dari panel)daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal'",
+		// The sentence without its start is not the agent's whole sentence.
+		"tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal'",
+		// The sentence's start without its own words after the account.
+		"daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal' tidak dikenal",
+		"akun MySQL 'Budi_Santoso'@'rs.lokal' yang dipakai agent tidak punya hak SHOW DATABASES. ",
+		label + "akun MySQL 'Budi_Santoso'@'rs.lokal' ditolak",
+		"daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'Budi_Santoso'@'rs.lokal' yang dipakai " +
+			"agent tidak punya hak CONNECTION_ADMIN maupun SUPER, ",
 	} {
 		got := Quotes(in)
 		for _, leak := range []string{"Budi_Santoso", "NIK3201234567890001", "budi.santoso", "1985.03.12"} {
@@ -140,5 +166,102 @@ func TestQuotesAdvisedAccountAnchored(t *testing.T) {
 			}
 		}
 	}
-	// The agent's texts still pass whole (TestQuotesKeepsPanelPhrases).
+	// The agent's texts still pass whole (TestQuotesKeepsPanelPhrases,
+	// TestQuotesKeepsNewAdvice), at the start of the message or after the
+	// label.
+	for _, prefix := range []string{"", label, "Salin data: " + label} {
+		in := prefix + listingT16("'Budi_Santoso'@'rs.lokal'")
+		if got := Quotes(in); got != in {
+			t.Errorf("Quotes(%q) = %q, want it whole", in, got)
+		}
+	}
+}
+
+// label is the panel's label before an agent's words (orchestrator
+// agentLabel), as a job's error carries it after the step title.
+const label = "Pesan dari agent db-lama (bukan dari panel): "
+
+// listingT16 is the agent's listing refusal now (T16) for account, the
+// shape of mysql.AdviceTexts' text with another account.
+func listingT16(account string) string {
+	return "daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL " + account + " yang dipakai agent " +
+		"tidak punya hak SHOW DATABASES. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan \"Ulangi " +
+		"dari tahap ini\" pada pekerjaan di panel."
+}
+
+// TestQuotesKeepsNewAdvice (SEC-228): every advice text of the agent,
+// read from its code (mysql.AdviceTexts), comes out of Quotes whole, bare
+// and after the panel's label: the advised account and the closing dot
+// included. (The orchestrator's TestAdviceWholeInFailLine checks the same
+// on the job's real error line, cut at maxLogLine.)
+func TestQuotesKeepsNewAdvice(t *testing.T) {
+	texts := mysql.AdviceTexts()
+	if len(texts) != 12 {
+		t.Fatalf("AdviceTexts has %d texts, want 12 (T7, T8a, T8b, T10, T11, T11b, T12-T17)", len(texts))
+	}
+	for _, text := range texts {
+		for _, prefix := range []string{"", label, "Sambungkan replikasi: " + label} {
+			in := prefix + text
+			if got := Quotes(in); got != in {
+				t.Errorf("Quotes changed\n %q\nto\n %q", in, got)
+			}
+		}
+	}
+	accounts := 0
+	for _, text := range texts {
+		if strings.Contains(text, "'panel_admin'@'10.0.0.%'") {
+			accounts++
+		}
+	}
+	if accounts == 0 {
+		t.Error("no advice text quotes the account: the anchor is not exercised")
+	}
+}
+
+// TestQuotesKeepsOldAgentPhrases (spec 5.9, one release): an agent from
+// before this release still quotes the two README section titles and
+// advises GRANT SHOW DATABASES; its texts pass whole, bare and labelled.
+func TestQuotesKeepsOldAgentPhrases(t *testing.T) {
+	for _, phrase := range []string{"Database yang tidak ada di master baru",
+		"Memberi hak SHOW DATABASES di server yang dikarantina"} {
+		if !panelPhrase(phrase) {
+			t.Errorf("%q is no longer a kept phrase", phrase)
+		}
+	}
+	for _, text := range []string{textA6, listingText("'panel_admin'@'10.0.0.5'"), listingText("'dbpanel_admin'@'localhost'")} {
+		for _, prefix := range []string{"", label, "Sambungkan replikasi: " + label} {
+			if got := Quotes(prefix + text); got != prefix+text {
+				t.Errorf("Quotes changed\n %q\nto\n %q", prefix+text, got)
+			}
+		}
+	}
+}
+
+// TestQuotesSecretNextToAnchor: a secret-looking literal right next to a
+// kept account, phrase or anchor is still censored.
+func TestQuotesSecretNextToAnchor(t *testing.T) {
+	const secret = "S3cret-Pw"
+	for _, in := range []string{
+		listingT16("'panel_admin'@'10.0.0.%'") + " GRANT ALL ON *.* TO 'panel_admin'@'10.0.0.%' IDENTIFIED BY '" + secret + "'",
+		label + listingT16("'panel_admin'@'10.0.0.%'") + " IDENTIFIED BY '" + secret + "'",
+		"daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'panel_admin'@'10.0.0.%' IDENTIFIED BY '" + secret + "'",
+		"daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL '" + secret + "'",
+		"daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL 'panel_admin'@'" + secret + " x'",
+		"di server ini: GRANT SHOW DATABASES ON *.* TO 'panel_admin'@'10.0.0.5' IDENTIFIED BY '" + secret + "'",
+		"di server ini: GRANT SHOW DATABASES ON *.* TO 'mysql://root:" + secret + "@10.0.0.5:3306/simrs'",
+		label + "akun MySQL 'mysql://root:" + secret + "@10.0.0.5:3306/simrs'@'h.x'",
+		"akun MySQL 'panel_admin'@'10.0.0.%' yang dipakai agent tidak punya hak CONNECTION_ADMIN maupun SUPER, " +
+			"IDENTIFIED BY '" + secret + "'",
+
+		`tekan "Ulangi dari tahap ini" 'mysql://root:` + secret + `@10.0.0.5:3306/simrs'`,
+		`"Memberi hak SHOW DATABASES di server yang dikarantina" IDENTIFIED BY '` + secret + `'`,
+		`"Database yang tidak ada di master baru"'` + secret + `'`,
+		`jalankan "Hubungkan MySQL" IDENTIFIED BY '` + secret + `'`,
+		`jalankan "Hubungkan MySQL"'mysql://root:` + secret + `@10.0.0.5/simrs'`,
+		`jalankan "Hubungkan MySQL ` + secret + `"`,
+	} {
+		if got := Quotes(in); strings.Contains(got, secret) {
+			t.Errorf("Quotes(%q) = %q keeps the secret", in, got)
+		}
+	}
 }

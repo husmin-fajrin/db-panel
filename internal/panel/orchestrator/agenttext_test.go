@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -261,5 +262,34 @@ func TestAgentLogLinesPrefixed(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the agent's log line is missing")
+	}
+}
+
+// TestAdviceWholeInFailLine (spec 5.6, SEC-228): every advice text of the
+// agent, read from its code (mysql.AdviceTexts), failing a step reaches
+// the job's error, the step's message, the replica's last error and the
+// log labelled and whole after the censoring (redact.Quotes), within
+// maxLogLine: label first, then censoring.
+func TestAdviceWholeInFailLine(t *testing.T) {
+	texts := mysql.AdviceTexts()
+	if len(texts) != 12 {
+		t.Fatalf("AdviceTexts has %d texts, want 12", len(texts))
+	}
+	for i, text := range texts {
+		j, title, stepMsg, lastErr, log := failedTargetCheck(t, func(json.RawMessage) (any, error) {
+			return nil, errors.New(text)
+		})
+		want := labelled(title, "replica1", text)
+		if len(want) > maxLogLine {
+			t.Errorf("text %d: the labelled line is %d bytes, over maxLogLine", i, len(want))
+		}
+		for what, got := range map[string]string{"job error": j.Error, "step message": stepMsg, "replica last error": lastErr} {
+			if got != want {
+				t.Errorf("text %d: %s = %q, want %q", i, what, got, want)
+			}
+		}
+		if !strings.Contains(log, want) {
+			t.Errorf("text %d: job log misses %q", i, want)
+		}
 	}
 }

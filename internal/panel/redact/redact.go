@@ -27,10 +27,14 @@ const Censored = "'…'"
 // and censoring them makes the advice unreadable:
 //   - a literal whose whole content is exactly one of panelPhrases (a
 //     button label or a README section name), case-sensitive;
-//   - the account the listing refusal names, 'user'@'host', when the user
+//   - the account an agent's advice names, 'user'@'host', when the user
 //     holds only the characters of the agent's proof (proofUser), the host
-//     passes host, and the pair directly follows "akun MySQL " or
-//     "GRANT SHOW DATABASES ON *.* TO " (accountLeads).
+//     passes host, and the pair directly follows the whole start of the
+//     agent's sentence (accountSentences) at the start of the message or
+//     right after the panel's label for an agent's words (labelEnd), with
+//     that sentence's next words right after it (N-H5); or, for
+//     an agent from before this release (one release, spec 5.9), directly
+//     follows "di server ini: GRANT SHOW DATABASES ON *.* TO " (oldGrantLead).
 //
 // MySQL's templates (below) still win: such a phrase or account as the
 // value of "Duplicate entry '…'" or "Query: '…'" is censored.
@@ -55,7 +59,16 @@ func Quotes(s string) string {
 	// the two quotes read as an escaped one on a second pass, and Quotes
 	// would not be a fixed point.
 	var kept byte
+	// censoredEnd is where the output ended after the last censored
+	// literal: one directly after it is merged into it, since '…''…'
+	// would read as one literal with an escaped quote on a second pass
+	// (fixed point).
+	censoredEnd := -1
 	censor := func(open bool) {
+		if b.Len() == censoredEnd {
+			return
+		}
+		defer func() { censoredEnd = b.Len() }()
 		token := Censored
 		if !open {
 			token = "'…"
@@ -117,12 +130,15 @@ func Quotes(s string) string {
 // panelPhrases are the panel's own phrases that operator texts quote and
 // that reach Quotes (inventory in the part G report): button labels and
 // README section names. The agent's texts in internal/agent quote them;
-// a text that quotes a new phrase needs it added here (and a copy of the
-// text in phrases_test.go).
+// a text that quotes a new phrase needs it added here (phrases_test.go
+// reads the agent's advice from its code, mysql.AdviceTexts).
 var panelPhrases = []string{
-	"Ulangi dari tahap ini",                                 // quarantine.go errNoLoadRecord; rebuild_load.go errListIncomplete
-	"Database yang tidak ada di master baru",                // rebuild_load.go errNotReplaced (A6)
-	"Memberi hak SHOW DATABASES di server yang dikarantina", // rebuild_load.go errListIncomplete
+	"Ulangi dari tahap ini", // the agent's advice (T7, T8a, T8b, T10-T14, T16, T17)
+	"Hubungkan MySQL",       // rebuild_load.go errSecondListFailedReplaced (T11b)
+	// An agent from before this release (one release, spec 5.9): its
+	// errNotReplaced (A6) and errListIncomplete quote README sections.
+	"Database yang tidak ada di master baru",
+	"Memberi hak SHOW DATABASES di server yang dikarantina",
 	"Paksa dump",         // clone.go cloneError
 	"Sudah saya alihkan", // orchestrator errRebuildCutoverPending, errCutoverStillPending, deletable (panel log)
 }
@@ -137,25 +153,50 @@ func panelPhrase(lit string) bool {
 	return false
 }
 
-// accountLeads are the agent's own sentence parts right before the
-// account the listing refusal advises (rebuild_load.go errListIncomplete
-// prints quoteAccount there), whole so that a value holding a shorter
-// lead is not taken for it (H-3, N-G5). A lead counts only at the start of
-// the message or after a non-word character.
-var accountLeads = []string{"tidak bisa dipastikan lengkap: akun MySQL ", "di server ini: GRANT SHOW DATABASES ON *.* TO "}
+// accountSentences are the whole starts of the agent's sentences that
+// name, right after them, the account its advice is about (quoteAccount
+// in internal/agent/drivers/mysql), each with the agent's words right
+// after the account: the listing refusal (T16, and the one before it)
+// and the load account refusal (T10). One counts only at the start of the
+// message or right after labelEnd, so that MySQL's text quoted inside an
+// agent's message can never hold one (N-H5), and only with its tail right
+// after the account.
+var accountSentences = []struct{ lead, tail string }{
+	// rebuild_load.go errListIncomplete (T16)
+	{"daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL ",
+		" yang dipakai agent tidak punya hak SHOW DATABASES. "},
+	// rebuild_load.go loadAccountWeakError (T10)
+	{"akun MySQL ", " yang dipakai agent tidak punya hak CONNECTION_ADMIN maupun SUPER, "},
+}
+
+// labelEnd ends the panel's label before an agent's words
+// (orchestrator agentLabel: "Pesan dari agent <server> (bukan dari
+// panel): "); the orchestrator's TestAdviceWholeInFailLine checks the two
+// together.
+const labelEnd = " (bukan dari panel): "
+
+// oldGrantLead is the part of the listing refusal of an agent from before
+// this release right before the account it advised a GRANT to (kept one
+// release, spec 5.9): whole, at the start of the message or after a
+// non-word character (H-3, N-G5).
+const oldGrantLead = "di server ini: GRANT SHOW DATABASES ON *.* TO "
 
 // advisedAccount reports where the account 'user'@'host' opened at
-// s[open] ends, when it directly follows one of accountLeads, its user
-// holds only proofUser characters and its host passes host.
+// s[open] ends, when it directly follows one of accountSentences (with
+// its tail after it) or oldGrantLead, its user holds only proofUser
+// characters and its host passes host.
 func advisedAccount(s string, open int) (int, bool) {
 	if s[open] != '\'' {
 		return 0, false
 	}
-	lead := false
-	for _, l := range accountLeads {
-		if p := open - len(l); strings.HasSuffix(s[:open], l) && (p == 0 || !word(s[p-1])) {
-			lead = true
+	lead, tail := false, ""
+	for _, l := range accountSentences {
+		if before, ok := strings.CutSuffix(s[:open], l.lead); ok && (before == "" || strings.HasSuffix(before, labelEnd)) {
+			lead, tail = true, l.tail
 		}
+	}
+	if p := open - len(oldGrantLead); !lead && strings.HasSuffix(s[:open], oldGrantLead) && (p == 0 || !word(s[p-1])) {
+		lead = true
 	}
 	if !lead {
 		return 0, false
@@ -171,6 +212,9 @@ func advisedAccount(s string, open int) (int, bool) {
 	hostOpen := userEnd + 2
 	hostEnd, ok := closing(s, hostOpen)
 	if !ok || !host(s[hostOpen+1:hostEnd]) {
+		return 0, false
+	}
+	if tail != "" && !strings.HasPrefix(s[hostEnd+1:], tail) {
 		return 0, false
 	}
 	return hostEnd, true
