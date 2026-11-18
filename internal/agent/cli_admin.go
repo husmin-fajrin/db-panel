@@ -271,9 +271,11 @@ func mainGrantAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 	if err != nil {
 		return a.fail(textCredsUnusable, err)
 	}
+	// Without agent.yaml (corrupt or missing) the MySQL its socket
+	// override names is not known: refused (ruling D57).
 	cfg, err := config.Load(dir)
 	if err != nil {
-		cfg = config.Config{} // only a socket override is read from it
+		return a.fail(textNoLayout, err)
 	}
 	h, err := cliStoredHost(cfg, creds)
 	if err != nil {
@@ -452,9 +454,11 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 	if err != nil {
 		return a.fail(textCredsUnusable, err)
 	}
+	// Without agent.yaml (corrupt or missing) the MySQL its socket
+	// override names is not known: refused (ruling D57).
 	cfg, err := config.Load(dir)
 	if err != nil {
-		cfg = config.Config{} // only a socket override is read from it
+		return a.fail(textNoLayout, err)
 	}
 	h, err := cliStoredHost(cfg, creds)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -657,5 +658,55 @@ func TestResetAdminLoginCheckFails(t *testing.T) {
 	lines := r.syslogLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "admin account reset") || !strings.Contains(lines[0], "outcome=login-failed") {
 		t.Errorf("system log %q", lines)
+	}
+}
+
+// TestRootCommandsRefuseUnreadableConfig (ruling D57): drop-database,
+// grant-admin and reset-admin end before MySQL is reached when agent.yaml
+// cannot be read (corrupt or missing): the MySQL its socket override names
+// is not known, so nothing is opened or changed.
+func TestRootCommandsRefuseUnreadableConfig(t *testing.T) {
+	r := newAdminRig(t)
+	r.makeDB("tetap", 1)
+	reached := func(config.Config) { t.Error("MySQL layout read with an unreadable agent.yaml") }
+	setVar(t, &cliLayoutHost, func(cfg config.Config) (mysql.Host, error) { reached(cfg); return r.inst.Host(), nil })
+	setVar(t, &cliStoredHost, func(cfg config.Config, creds mysql.CredentialStore) (mysql.Host, error) {
+		reached(cfg)
+		return r.inst.HostWith(creds), nil
+	})
+	path := filepath.Join(r.dir, config.FileName)
+	for _, c := range []struct {
+		name  string
+		setup func()
+	}{
+		{"corrupt", func() {
+			if err := os.WriteFile(path, []byte("panel_addr: [\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"missing", func() {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		c.setup()
+		for _, run := range []struct {
+			cmd  string
+			args []string
+			in   string
+		}{{"drop-database", []string{"tetap"}, "tetap\n"}, {"grant-admin", nil, "ya\n"}, {"reset-admin", nil, "ya\n"}} {
+			code, out, errOut := r.command(run.cmd, run.in, run.args...)
+			if code != 1 || !strings.HasPrefix(errOut, "letak MySQL di server ini tidak bisa dibaca (") ||
+				!strings.HasSuffix(errOut, "); tidak ada yang diubah.\n") || out != "" {
+				t.Errorf("%s, agent.yaml %s: %s = %d\nstdout %q\nstderr %q", run.cmd, c.name, run.cmd, code, out, errOut)
+			}
+		}
+	}
+	if !r.exists("tetap") {
+		t.Error("database dropped with an unreadable agent.yaml")
+	}
+	if lines := r.syslogLines(); len(lines) != 0 {
+		t.Errorf("system log lines %q", lines)
 	}
 }

@@ -195,9 +195,12 @@ func optionValue(v string) string {
 // when that is refused it asks for one (C5, or C5b naming the account
 // given) on stdout, reads one line from in, and tries once more.
 func openRootSession(ctx context.Context, dir, user string, in *promptReader, stdout io.Writer) (*rootSession, error) {
+	// Without agent.yaml (corrupt or missing: an agent dbpanel installed
+	// always has it) the MySQL its socket override names is not known:
+	// refused before anything is opened (ruling D57).
 	cfg, err := config.Load(dir)
 	if err != nil {
-		cfg = config.Config{} // only a socket override is read from it
+		return nil, fmt.Errorf(textNoLayout, err)
 	}
 	h, err := cliLayoutHost(cfg)
 	if err != nil {

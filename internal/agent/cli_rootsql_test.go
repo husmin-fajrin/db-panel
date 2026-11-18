@@ -87,6 +87,10 @@ func newDropRig(t *testing.T) *dropRig {
 	if err := p.SetSource("10.9.9.9", 3306); err != nil {
 		t.Fatal(err)
 	}
+	// A paired agent's configuration: the commands refuse without one.
+	if err := config.Save(r.dir, config.Config{PanelAddr: "127.0.0.1:1", ServerID: 1}); err != nil {
+		t.Fatal(err)
+	}
 	setVar(t, &cliLiftLock, r.lock)
 	setVar(t, &cliBackupDir, r.backups)
 	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { return r.inst.Host(), nil })
