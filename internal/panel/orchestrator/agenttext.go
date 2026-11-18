@@ -239,9 +239,11 @@ const maxShownName = 256
 // characters and plain spaces is shown as it is, and any other (a line
 // break, a control, format or bidirectional character, invalid UTF-8) is
 // shown between backticks, as MySQL quotes an identifier, with Go escapes
-// inside (a backtick as \x60): one line, and still exact. Backticks, not
-// double quotes, because redact.Quotes censors a quoted literal and keeps
-// an identifier. A longer name is cut, with "…".
+// inside (a backtick as \x60): one line, and still exact. A longer name is
+// cut, with "…". Neither the backticks nor nameText protect a name from
+// redact.Quotes, which censors the line it ends up in: a printable name is
+// shown raw, so a quote in it can open a literal that hides what follows
+// (x', simrs, lab shows as x'…).
 func nameText(s string) string {
 	cut := ""
 	if len(s) > maxShownName {
