@@ -2343,6 +2343,22 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    subtest Periksa, Periksa lalu Amankan, dan "bukan lagi master lama")
    dan `TestWaitingRebuildApprovableAfterLeftover` (web). Spek 5.1
    dibetulkan.
+20. Task 15 (2026-11-18). `<versi>` pada T27 tetap penanda, ditulis di
+   antara backtick supaya tidak hilang saat README ditampilkan; nomor
+   rilis diisi pemilik. Layar tiga perintah di README dan di daftar
+   teks dihasilkan lewat pintu masuk perintah itu sendiri
+   (`RunCLIWith`) terhadap mysqld coba, bukan lewat biner terpasang:
+   ketiganya memakai `/var/lib/dbpanel/agent/lift.lock` dan tata letak
+   MySQL mesin, yang tidak boleh disentuh di mesin kerja; folder
+   cadangan ditulis sebagai folder bawaan dan jawaban yang diketik
+   ditampilkan sesudah pertanyaannya. C8 tidak masuk daftar teks: teks
+   itu tidak pernah sampai ke operator (diganti P1/P1b, butir 10). Test
+   "gagal sesudah karantina berakhir" menunda pernyataan yang
+   berbenturan 5 detik di server yang dibangun ulang supaya galatnya
+   datang pada tahap Verifikasi, bukan pada Sambungkan replikasi.
+   Peringatan "dikunci lagi" terbuka satu putaran penjaga sesudah
+   server dikunci lagi (panel menunggu laporan agent berikutnya); test
+   memberi batas dua putaran = 2 × (5 detik + 1,5 detik kerja putaran).
 
 ## Teks baru untuk dibaca pemilik
 
