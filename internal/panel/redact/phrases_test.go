@@ -196,8 +196,9 @@ func listingT16(account string) string {
 // on the job's real error line, cut at maxLogLine.)
 func TestQuotesKeepsNewAdvice(t *testing.T) {
 	texts := mysql.AdviceTexts()
-	if len(texts) != 13 {
-		t.Fatalf("AdviceTexts has %d texts, want 13 (T7, T8a, T8b, T10, T11, T11b, T12-T17, the unopenable lift lock)", len(texts))
+	if len(texts) != 14 {
+		t.Fatalf("AdviceTexts has %d texts, want 14 (T7, T8a, T8b, T10, T11, T11b, T12-T17, the unopenable lift lock, "+
+			"the leftover result not stored)", len(texts))
 	}
 	for _, text := range texts {
 		for _, prefix := range []string{"", label, "Sambungkan replikasi: " + label} {

@@ -70,7 +70,9 @@ func (d *Driver) registerLeftover(reg *commands.Registry) {
 			return nil, err
 		}
 		// What mysql.salvage may extract from now on, in this quarantine
-		// and while the source pin stays the one compared against.
+		// and while the source pin stays the one compared against. A
+		// non-empty result that cannot be kept fails the command (ruling
+		// D56): mysql.salvage would only ask for Periksa again.
 		if qerr != nil || !inQuarantine {
 			if d.Logger != nil {
 				d.Logger.Warn("leftover set not saved: the quarantine id cannot be pinned; salvage needs a new mysql.leftover",
@@ -79,8 +81,11 @@ func (d *Driver) registerLeftover(reg *commands.Registry) {
 			if err := d.forgetLeftover(); err != nil && d.Logger != nil {
 				d.Logger.Error("earlier leftover set file not removed", "err", err)
 			}
-		} else {
-			d.recordLeftover(qid, peerKey(p.NewMaster), res.GTIDSet)
+			if qerr != nil && res.GTIDSet != "" {
+				return nil, leftoverUnsaved(d.pins.path(QuarantineIDFile), qerr)
+			}
+		} else if err := d.recordLeftover(qid, peerKey(p.NewMaster), res.GTIDSet); err != nil && res.GTIDSet != "" {
+			return nil, leftoverUnsaved(filepath.Join(d.salvageDir(), leftoverSetFile), err)
 		}
 		tables := make([]string, 0, len(res.Tables))
 		for _, t := range res.Tables {
@@ -90,6 +95,14 @@ func (d *Driver) registerLeftover(reg *commands.Registry) {
 			"tables", strings.Join(tables, ","), "binlogs", strings.Join(res.Binlogs, ","))
 		return res, nil
 	})
+}
+
+// leftoverUnsaved is mysql.leftover's answer when its non-empty result
+// could not be kept in file path for cause: an I/O failure reported, not
+// a refusal.
+func leftoverUnsaved(path string, cause error) error {
+	return fmt.Errorf("hasil Periksa data tertinggal tidak bisa disimpan di server ini (%s: %v), jadi Amankan data tertinggal "+
+		"belum bisa dijalankan; perbaiki sebabnya di server itu, lalu jalankan Periksa data tertinggal lagi", path, cause)
 }
 
 // pinnedNewMaster is nm as the agent reads it: when a source is pinned,

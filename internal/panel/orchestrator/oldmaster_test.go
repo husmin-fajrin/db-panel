@@ -2,12 +2,14 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -92,6 +94,33 @@ func TestLeftoverJobStoresResultAndSendsText(t *testing.T) {
 	g.m.params("mysql.salvage", &sp)
 	if sp.GTIDSet != masterUUID+":121-123" {
 		t.Fatalf("salvage params = %+v", sp)
+	}
+}
+
+// TestLeftoverUnsavedShownWhole: the agent's answer that Periksa's result
+// cannot be stored (mysql.AdviceTexts) fails the Periksa job, labelled as
+// the agent's words and whole.
+func TestLeftoverUnsavedShownWhole(t *testing.T) {
+	var text string
+	for _, a := range mysql.AdviceTexts() {
+		if strings.HasPrefix(a, "hasil Periksa data tertinggal tidak bisa disimpan") {
+			text = a
+		}
+	}
+	if text == "" {
+		t.Fatal("the leftover-not-stored text is not among mysql.AdviceTexts")
+	}
+	g := newPromoteRig(t)
+	g.promoted(t)
+	g.m.on("mysql.leftover", func(json.RawMessage) (any, error) { return nil, errors.New(text) })
+	id, err := g.e.r.StartLeftover(context.Background(), g.m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, steps := g.e.waitJob(id, store.JobFailed)
+	want := labelled(steps[j.CurrentStep].Name, "db-master", text)
+	if j.Error != want || steps[j.CurrentStep].Message != want {
+		t.Errorf("job error %q\nstep message %q\nwant %q", j.Error, steps[j.CurrentStep].Message, want)
 	}
 }
 

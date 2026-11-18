@@ -355,14 +355,14 @@ func salvageDirSize(root *os.Root) (int64, error) {
 // written to a temporary name and renamed over the old one). The file's
 // lines are "source <host:port>", "quarantine <id>", then the set. When it
 // cannot be written the old file is removed, so that no earlier record
-// stands in for this one; both failures are logged, and salvage then
-// answers that Periksa must run first.
-func (d *Driver) recordLeftover(qid, source, set string) {
+// stands in for this one; both failures are logged, and the write's is
+// returned (mysql.leftover fails on it when set is not empty).
+func (d *Driver) recordLeftover(qid, source, set string) error {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
 	err := d.writeLeftoverSet(leftoverSourcePrefix + source + "\n" + leftoverQuarantinePrefix + qid + "\n" + set + "\n")
 	if err == nil {
-		return
+		return nil
 	}
 	if d.Logger != nil {
 		d.Logger.Warn("leftover set not saved; salvage needs a new mysql.leftover", "err", err)
@@ -370,6 +370,7 @@ func (d *Driver) recordLeftover(qid, source, set string) {
 	if err := d.removeLeftoverSet(); err != nil && d.Logger != nil {
 		d.Logger.Error("earlier leftover set file not removed after a failed save", "err", err)
 	}
+	return err
 }
 
 // Prefixes of the first two lines of leftoverSetFile.

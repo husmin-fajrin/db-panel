@@ -653,3 +653,56 @@ func TestSalvageDirectoryCap(t *testing.T) {
 	}
 	decode[proto.SalvageFile](t, r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}))
 }
+
+// leftoverUnsaved is the start and end of mysql.leftover's answer when its
+// non-empty result cannot be kept in file path.
+func leftoverUnsaved(path string) (prefix, suffix string) {
+	return "hasil Periksa data tertinggal tidak bisa disimpan di server ini (" + path + ": ",
+		"), jadi Amankan data tertinggal belum bisa dijalankan; perbaiki sebabnya di server itu, lalu jalankan Periksa data tertinggal lagi"
+}
+
+// wantLeftoverUnsaved checks that resp failed (not as a refusal by role or
+// state) with the "result cannot be stored" text for path.
+func wantLeftoverUnsaved(t *testing.T, what string, resp proto.Response, path string) {
+	t.Helper()
+	prefix, suffix := leftoverUnsaved(path)
+	if resp.OK || resp.Error == nil || resp.Error.Code == proto.CodeBadParams ||
+		!strings.HasPrefix(resp.Error.Message, prefix) || !strings.HasSuffix(resp.Error.Message, suffix) {
+		t.Errorf("%s: mysql.leftover = %+v\nwant an error %q…%q", what, resp, prefix, suffix)
+	}
+}
+
+// TestLeftoverFailsWhenSetCannotBeSaved (ruling D56): a non-empty result
+// that cannot be kept, because the record file cannot be written or the
+// quarantine id cannot be read, fails mysql.leftover with the file and the
+// cause, instead of answering OK while mysql.salvage keeps asking for
+// Periksa. An empty result needs no record and stays OK.
+func TestLeftoverFailsWhenSetCannotBeSaved(t *testing.T) {
+	r := newLeftoverRig(t)
+	// The salvage directory cannot be made: a file stands at its path.
+	if err := os.WriteFile(r.d.SalvageDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.leftover() // in sync: nothing to keep, OK
+	execAll(t, rootDB(t, r.master), "INSERT INTO toko.t VALUES (10, 'sisa')")
+	resp := r.dispatch("mysql.leftover", proto.LeftoverParams{NewMaster: r.nm})
+	wantLeftoverUnsaved(t, "record file not writable", resp, filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile))
+	if err := os.Remove(r.d.SalvageDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// The quarantine id cannot be read: its file is writable by others.
+	idPath := filepath.Join(r.d.PinDir, mysql.QuarantineIDFile)
+	quarantineID(t, r.d.PinDir)
+	if err := os.Chmod(idPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	resp = r.dispatch("mysql.leftover", proto.LeftoverParams{NewMaster: r.nm})
+	wantLeftoverUnsaved(t, "quarantine id unreadable", resp, idPath)
+	if err := os.Chmod(idPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res := r.leftover(); res.GTIDSet == "" {
+		t.Errorf("leftover once the faults are gone = %+v, want a set", res)
+	}
+}

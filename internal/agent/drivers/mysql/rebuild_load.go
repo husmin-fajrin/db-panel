@@ -309,8 +309,9 @@ func shortList(names []string, k int) string {
 }
 
 // AdviceTexts are the agent's texts that tell the operator what to run or
-// press (T7, T8a, T8b, T10, T11, T11b, T12, T13, T14, T15, T16, T17, and
-// the settle's answer for a lift lock file it cannot open), each
+// press (T7, T8a, T8b, T10, T11, T11b, T12, T13, T14, T15, T16, T17, the
+// settle's answer for a lift lock file it cannot open, and mysql.leftover's
+// for a result it cannot store), each
 // with its values filled with examples, as the panel shows them: the
 // panel's tests check that its redaction leaves the advice whole.
 func AdviceTexts() []string {
@@ -324,6 +325,8 @@ func AdviceTexts() []string {
 		errSecondListFailedReplaced.Error(),
 		ErrLiftHeldByCommand.Error(),
 		errLiftLockUnopenable(DefaultLiftLock, errors.New("buat direktori kunci /var/lib/dbpanel/agent: mkdir /var/lib/dbpanel/agent: read-only file system")).Error(),
+		leftoverUnsaved(DefaultSalvageDir+"/"+leftoverSetFile, errors.New("tulis set data tertinggal: open "+
+			DefaultSalvageDir+"/"+leftoverSetFile+".tmp: no space left on device")).Error(),
 		dedicatedQuarantinedText,
 		fmt.Sprintf(grantsQuarantinedText, "panel_admin@10.0.0.%"),
 		fmt.Sprintf(connectWeakQuarantinedText, "panel_admin@10.0.0.%"),
