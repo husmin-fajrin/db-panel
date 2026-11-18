@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -348,20 +349,25 @@ func salvageDirSize(root *os.Root) (int64, error) {
 }
 
 // recordLeftover keeps set, what the last mysql.leftover found ("" for
-// nothing), as the bound of later salvages: in memory, and in
+// nothing) comparing this server with source (host:port, the pinned
+// source it read), as the bound of later salvages: in memory, and in
 // leftoverSetFile (0600, written to a temporary name and renamed) for
-// after an agent restart. A file that cannot be written is logged; the
-// memory still holds the set.
-func (d *Driver) recordLeftover(set string) {
+// after an agent restart. The file's first line is "source <host:port>",
+// the rest the set. A file that cannot be written is logged; the memory
+// still holds the set.
+func (d *Driver) recordLeftover(source, set string) {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
-	d.leftoverSet, d.leftoverKnown = set, true
-	if err := d.writeLeftoverSet(set); err != nil && d.Logger != nil {
+	d.leftoverSet, d.leftoverSource, d.leftoverKnown = set, source, true
+	if err := d.writeLeftoverSet(leftoverSourcePrefix + source + "\n" + set + "\n"); err != nil && d.Logger != nil {
 		d.Logger.Warn("leftover set not saved; salvage is bounded by it until the agent restarts", "err", err)
 	}
 }
 
-func (d *Driver) writeLeftoverSet(set string) error {
+// leftoverSourcePrefix starts the first line of leftoverSetFile.
+const leftoverSourcePrefix = "source "
+
+func (d *Driver) writeLeftoverSet(content string) error {
 	root, err := d.openSalvageDir()
 	if err != nil {
 		return err
@@ -372,7 +378,7 @@ func (d *Driver) writeLeftoverSet(set string) error {
 	if err != nil {
 		return fmt.Errorf("tulis set data tertinggal: %w", err)
 	}
-	_, werr := f.Write([]byte(set + "\n"))
+	_, werr := f.Write([]byte(content))
 	if werr == nil {
 		werr = f.Chmod(0o600)
 	}
@@ -394,55 +400,115 @@ func (d *Driver) writeLeftoverSet(set string) error {
 
 // lastLeftover is the set the last mysql.leftover found: from memory, or
 // after an agent restart from leftoverSetFile. ok is false when no
-// mysql.leftover result is known, or it found nothing.
+// mysql.leftover result is known, it found nothing, or it compared this
+// server with another source than the one pinned now (a set found against
+// an earlier new master bounds nothing once the pin changed).
 func (d *Driver) lastLeftover() (string, bool, error) {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
 	if !d.leftoverKnown {
-		set, ok, err := d.readLeftoverSet()
+		source, set, ok, err := d.readLeftoverSet()
 		if err != nil {
 			return "", false, err
 		}
 		if !ok {
 			return "", false, nil
 		}
-		d.leftoverSet, d.leftoverKnown = set, true
+		d.leftoverSet, d.leftoverSource, d.leftoverKnown = set, source, true
 	}
-	return d.leftoverSet, d.leftoverSet != "", nil
+	if d.leftoverSet == "" {
+		return "", false, nil
+	}
+	host, port, err := ParseSource(d.leftoverSource)
+	if err != nil || d.pins == nil || !d.pins.quarantinedUnder(host, port) {
+		if d.Logger != nil {
+			d.Logger.Warn("leftover set ignored: it was found against another source than the one pinned now",
+				"found_against", d.leftoverSource)
+		}
+		return "", false, nil
+	}
+	return d.leftoverSet, true, nil
 }
 
-// readLeftoverSet reads leftoverSetFile; ok is false when it is missing.
-// It must be a regular file (not a link) and hold a GTID set.
-func (d *Driver) readLeftoverSet() (string, bool, error) {
+// readLeftoverSet reads leftoverSetFile; ok is false when it is missing,
+// or is not a record: its first line is not exactly "source <host:port>"
+// (a file written before the source was recorded, or a damaged one), or
+// it is larger than maxLeftoverSetFile. It must be a regular file (not a
+// link), and after the source line hold a GTID set.
+func (d *Driver) readLeftoverSet() (source, set string, ok bool, err error) {
 	if _, err := os.Lstat(d.salvageDir()); errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	root, err := d.openSalvageDir()
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	defer root.Close()
 	f, err := root.OpenFile(leftoverSetFile, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("baca set data tertinggal: %w", err)
+		return "", "", false, fmt.Errorf("baca set data tertinggal: %w", err)
 	}
 	defer f.Close()
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return "", false, fmt.Errorf("set data tertinggal %s bukan berkas biasa", leftoverSetFile)
+		return "", "", false, fmt.Errorf("set data tertinggal %s bukan berkas biasa", leftoverSetFile)
 	}
-	b, err := io.ReadAll(io.LimitReader(f, maxLeftoverSetFile))
+	b, err := io.ReadAll(io.LimitReader(f, maxLeftoverSetFile+1))
 	if err != nil {
-		return "", false, fmt.Errorf("baca set data tertinggal: %w", err)
+		return "", "", false, fmt.Errorf("baca set data tertinggal: %w", err)
 	}
-	set := strings.TrimSpace(string(b))
-	g, err := parseGTIDSet(set)
+	noRecord := func(why string) (string, string, bool, error) {
+		if d.Logger != nil {
+			d.Logger.Warn("leftover set file is no record; salvage needs a new mysql.leftover", "file", leftoverSetFile, "why", why)
+		}
+		return "", "", false, nil
+	}
+	if len(b) > maxLeftoverSetFile {
+		return noRecord("larger than the most read")
+	}
+	head, rest, found := strings.Cut(string(b), "\n")
+	source, stamped := strings.CutPrefix(head, leftoverSourcePrefix)
+	if !found || !stamped || !canonicalSource(source) {
+		return noRecord("the first line is not the source it was found against")
+	}
+	g, err := parseGTIDSet(strings.TrimSpace(rest))
 	if err != nil {
-		return "", false, fmt.Errorf("set data tertinggal di %s tidak valid: %w", leftoverSetFile, err)
+		return "", "", false, fmt.Errorf("set data tertinggal di %s tidak valid: %w", leftoverSetFile, err)
 	}
-	return g.String(), true, nil
+	return source, g.String(), true, nil
+}
+
+// canonicalSource reports whether s is a source as recordLeftover writes
+// it: host:port that ParseSource accepts and that joins back to s exactly.
+func canonicalSource(s string) bool {
+	host, port, err := ParseSource(s)
+	return err == nil && net.JoinHostPort(host, strconv.Itoa(port)) == s
+}
+
+// forgetLeftover drops the leftover set, in memory and on disk: the
+// settle that ends the quarantine calls it, since what the old master held
+// was replaced. The memory is cleared whatever happens to the file.
+func (d *Driver) forgetLeftover() error {
+	d.leftoverMu.Lock()
+	defer d.leftoverMu.Unlock()
+	d.leftoverSet, d.leftoverSource, d.leftoverKnown = "", "", true
+	if _, err := os.Lstat(d.salvageDir()); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	root, err := d.openSalvageDir()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := root.Remove(leftoverSetFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("hapus set data tertinggal: %w", err)
+	}
+	return syncDir(d.salvageDir())
 }
 
 // publishSalvage renames tmp to name under salvageMu, unless taken says

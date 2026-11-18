@@ -65,8 +65,9 @@ func (d *Driver) registerLeftover(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
-		// What mysql.salvage may extract from now on.
-		d.recordLeftover(res.GTIDSet)
+		// What mysql.salvage may extract from now on, while the source
+		// pin stays the one compared against.
+		d.recordLeftover(peerKey(p.NewMaster), res.GTIDSet)
 		tables := make([]string, 0, len(res.Tables))
 		for _, t := range res.Tables {
 			tables = append(tables, t.Schema+"."+t.Table)

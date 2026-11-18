@@ -128,6 +128,9 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
+		if err := d.refuseForeignChannel(ctx, h, "mysql.startReplica"); err != nil {
+			return nil, err
+		}
 		rs, err := StartReplica(ctx, h)
 		if err != nil {
 			return nil, err
@@ -227,6 +230,9 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
+		if err := d.refuseForeignChannel(ctx, h, "mysql.startUntil"); err != nil {
+			return nil, err
+		}
 		rs, err := StartUntil(ctx, h, p)
 		if err != nil {
 			return nil, err
@@ -234,6 +240,64 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		d.log("mysql replica applied until gtid set", "timeout_sec", p.TimeoutSec)
 		return rs, nil
 	})
+}
+
+// refuseForeignChannel is the check of mysql.startReplica and
+// mysql.startUntil on a quarantined server (SEC-210), before either sends
+// anything: START REPLICA starts every channel, so each configured
+// channel's source (performance_schema.replication_connection_configuration)
+// must be the pinned source, matched as the pins match one (by name,
+// Pins.quarantinedUnder); the first that is not is refused with T18.
+// Without a source pin the command is refused as the strict gate refuses
+// it (unsourcedQuarantineRefusal). No channel at all is left to the
+// command, which answers that the server is no replica. Other roles are
+// not checked here.
+func (d *Driver) refuseForeignChannel(ctx context.Context, h Host, cmd string) error {
+	if d.pins == nil || d.pins.Role() != roleQuarantined {
+		return nil
+	}
+	pinned, ok := d.pins.pinnedSource()
+	if !ok {
+		return unsourcedQuarantineRefusal(cmd)
+	}
+	db, err := openAdmin(ctx, h)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, "SELECT HOST, PORT FROM performance_schema.replication_connection_configuration ORDER BY CHANNEL_NAME")
+	if err != nil {
+		return fmt.Errorf("baca sumber kanal replikasi: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var host string
+		var port int
+		if err := rows.Scan(&host, &port); err != nil {
+			return fmt.Errorf("baca sumber kanal replikasi: %w", err)
+		}
+		if !d.pins.quarantinedUnder(host, port) {
+			return &pinError{kind: ErrSourcePinned, pe: &commands.ParamError{Msg: fmt.Sprintf(
+				"sumber kanal replikasi di server ini (%s) bukan sumber yang dipin (%s); perintah %s ditolak",
+				channelSource(host, port), pinned, cmd)}}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("baca sumber kanal replikasi: %w", err)
+	}
+	return nil
+}
+
+// channelSource is a channel's source as MySQL holds it, for a refusal:
+// host:port when the host is one the agent accepts as a source
+// (validSourceHost), else quoted (%q), so that whatever a SOURCE_HOST
+// holds reads as one value in the text and the panel's log.
+func channelSource(host string, port int) string {
+	s := net.JoinHostPort(host, strconv.Itoa(port))
+	if validSourceHost(host) != nil {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 func (d *Driver) log(msg string, args ...any) {

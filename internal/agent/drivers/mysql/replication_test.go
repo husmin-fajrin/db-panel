@@ -639,3 +639,63 @@ func TestReplicationVerifiesSourceCert(t *testing.T) {
 		t.Errorf("start against a master with MySQL's own certificate = %+v", r)
 	}
 }
+
+// TestStartReplicaRefusesForeignChannelOnQuarantined (SEC-210): on a
+// quarantined server with root's approval, mysql.startReplica and
+// mysql.startUntil are refused (T18) while any replication channel's
+// source is not the pinned source, before anything starts; a source name
+// MySQL holds is shown quoted when it is not a plain host. With every
+// channel toward the pinned source the replica starts.
+func TestStartReplicaRefusesForeignChannelOnQuarantined(t *testing.T) {
+	r := newSettleRig(t)
+	tdb := rootDB(t, r.target)
+	t18 := func(channel, cmd string) string {
+		return "sumber kanal replikasi di server ini (" + channel + ") bukan sumber yang dipin (" + r.src + "); perintah " + cmd + " ditolak"
+	}
+	until := proto.StartUntilParams{GTIDSet: gtidExecuted(t, rootDB(t, r.master)), TimeoutSec: 30}
+	running := func(what string) {
+		t.Helper()
+		var n int
+		if err := tdb.QueryRow("SELECT COUNT(*) FROM performance_schema.replication_connection_status WHERE SERVICE_STATE <> 'OFF'").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		var m int
+		if err := tdb.QueryRow("SELECT COUNT(*) FROM performance_schema.replication_applier_status WHERE SERVICE_STATE <> 'OFF'").Scan(&m); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 || m != 0 {
+			t.Errorf("%s: %d receivers and %d appliers not OFF, want none started", what, n, m)
+		}
+	}
+	refused := func(what, channel string) {
+		t.Helper()
+		for _, c := range []struct {
+			cmd    string
+			params any
+		}{{"mysql.startReplica", nil}, {"mysql.startUntil", until}} {
+			resp := r.dispatch(c.cmd, c.params)
+			if resp.OK || resp.Error == nil || resp.Error.Message != t18(channel, c.cmd) {
+				t.Errorf("%s: %s = %+v\nwant the error %q", what, c.cmd, resp, t18(channel, c.cmd))
+			}
+		}
+		running(what)
+	}
+
+	execAll(t, tdb, "CHANGE REPLICATION SOURCE TO SOURCE_HOST = '10.0.0.9', SOURCE_PORT = 3306")
+	refused("default channel toward another source", "10.0.0.9:3306")
+
+	execAll(t, tdb, fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '127.0.0.1', SOURCE_PORT = %d", r.master.Port+1))
+	refused("default channel toward another port", fmt.Sprintf("127.0.0.1:%d", r.master.Port+1))
+
+	execAll(t, tdb, fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '127.0.0.1', SOURCE_PORT = %d, "+
+		"SOURCE_USER = 'dbpanel_repl', SOURCE_PASSWORD = %s, SOURCE_SSL = 1, SOURCE_AUTO_POSITION = 1",
+		r.master.Port, sqlLiteral(replPassword)),
+		"CHANGE REPLICATION SOURCE TO SOURCE_HOST = 'x) bukan; perintah', SOURCE_PORT = 3306 FOR CHANNEL 'lain'")
+	refused("a second channel toward a hostile name", `"x) bukan; perintah:3306"`)
+
+	execAll(t, tdb, "RESET REPLICA ALL FOR CHANNEL 'lain'")
+	rs := decode[proto.ReplicaStatus](t, r.dispatch("mysql.startReplica", nil))
+	if rs.SQLRunning != "Yes" {
+		t.Errorf("startReplica toward the pinned source = %+v, want started", rs)
+	}
+}

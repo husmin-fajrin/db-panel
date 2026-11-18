@@ -575,7 +575,7 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // flags, read under the lift lock right before the end, are not both on;
 // while a dbpanel agent command holds that lock it answers T12
 // (ErrLiftHeldByCommand). Once settled, the rebuild request and approval
-// are removed.
+// are removed, and so is the leftover set (forgetLeftover).
 func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error {
 	d.promoteMu.Lock()
 	defer d.promoteMu.Unlock()
@@ -649,6 +649,13 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 	// not its files go (a replica never asks for them).
 	if err := d.pins.ClearRebuild(); err != nil && d.Logger != nil {
 		d.Logger.Error("rebuild approval files not removed after the rebuild", "err", err)
+	}
+	// What the old master held was replaced: the leftover set bounds no
+	// salvage any more. A file left behind is logged, not a failure: a
+	// replica refuses mysql.salvage, and a later quarantine reads it only
+	// while its source stamp is the source pinned then (lastLeftover).
+	if err := d.forgetLeftover(); err != nil && d.Logger != nil {
+		d.Logger.Error("leftover set file not removed after the rebuild", "err", err)
 	}
 	return nil
 }

@@ -471,14 +471,32 @@ func listingComplete(ctx context.Context, conn *sql.Conn, user, host string) err
 }
 
 // accountGrants are the SHOW GRANTS rows of user@host, read by name (user
-// and host passed proofAccount, so they need no escaping).
-func accountGrants(ctx context.Context, conn *sql.Conn, user, host string) ([]string, error) {
+// and host passed proofAccount, so they need no escaping). They are read
+// under the proof's own session settings (plan evidence M4): with
+// sql_quote_show_create OFF the rows name the account without quotes, and
+// sql_mode's ANSI_QUOTES changes the quotes, either of which would make
+// listingProof miss a privilege the account holds. conn's previous values
+// are put back afterwards, since conn may run more statements (grant-admin
+// runs its GRANTs on it); a failure to put them back is an error.
+func accountGrants(ctx context.Context, conn *sql.Conn, user, host string) (grants []string, err error) {
+	var quote int
+	var mode string
+	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_quote_show_create, @@SESSION.sql_mode").Scan(&quote, &mode); err != nil {
+		return nil, fmt.Errorf("SHOW GRANTS: read session settings: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "SET SESSION sql_quote_show_create = ON, sql_mode = ''"); err != nil {
+		return nil, fmt.Errorf("SHOW GRANTS: session settings: %w", err)
+	}
+	defer func() {
+		if _, rerr := conn.ExecContext(ctx, "SET SESSION sql_quote_show_create = ?, sql_mode = ?", quote, mode); rerr != nil && err == nil {
+			grants, err = nil, fmt.Errorf("SHOW GRANTS: restore session settings: %w", rerr)
+		}
+	}()
 	rows, err := conn.QueryContext(ctx, "SHOW GRANTS FOR "+quoteString(user)+"@"+quoteString(host))
 	if err != nil {
 		return nil, fmt.Errorf("SHOW GRANTS: %w", err)
 	}
 	defer rows.Close()
-	var grants []string
 	for rows.Next() {
 		var g string
 		if err := rows.Scan(&g); err != nil {

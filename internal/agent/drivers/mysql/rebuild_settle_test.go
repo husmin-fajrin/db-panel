@@ -2,9 +2,11 @@ package mysql_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -125,6 +127,36 @@ func TestRebuildFullDumpSettles(t *testing.T) {
 	}
 	if got := pinFile(t, r.dir, mysql.RebuildApprovalFile); got != "" {
 		t.Errorf("approval after the settle = %q, want removed", got)
+	}
+}
+
+// TestSettleRemovesLeftoverSet (SEC-201): the leftover set file stays
+// while the quarantine does (a refused settle keeps it) and is removed when
+// the settle ends the quarantine.
+func TestSettleRemovesLeftoverSet(t *testing.T) {
+	r := newSettleRig(t)
+	r.d.SalvageDir = filepath.Join(t.TempDir(), "salvage")
+	if err := os.MkdirAll(r.d.SalvageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)
+	if err := os.WriteFile(path, []byte("source "+r.src+"\n3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No load yet: the settle is refused and the file stays.
+	if resp := r.dispatch("mysql.configureReplication", sourceParams(r.master)); resp.OK {
+		t.Fatalf("configureReplication before any load = %+v, want refused", resp)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("leftover set file after a refused settle: %v", err)
+	}
+	r.dump()
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master)))
+	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
+		t.Fatalf("role pin = %q, want replica", role)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("leftover set file after the settle: %v, want removed", err)
 	}
 }
 

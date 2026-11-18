@@ -250,3 +250,54 @@ func TestRebuildCraftedRoleNameCannotSettle(t *testing.T) {
 	r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil"))
 	r.assertStillQuarantined(t)
 }
+
+// TestListingProofSessionSettings (SEC-211, evidence M4): the proof reads
+// SHOW GRANTS under its own session settings (sql_quote_show_create = ON,
+// an empty sql_mode), so a server whose global sql_quote_show_create is OFF
+// still proves an account holding SHOW DATABASES: the settle ends the
+// quarantine, and grant-admin's reading (MissingAdminGrants) finds SHOW
+// DATABASES held. The session that read them keeps its own settings.
+func TestListingProofSessionSettings(t *testing.T) {
+	r := newSettleRig(t)
+	r.dump("kecil")
+	r.onTarget(t, "CREATE USER rs_show@localhost",
+		"GRANT SELECT, SHOW DATABASES, RELOAD, PROCESS, REPLICATION CLIENT, SUPER ON *.* TO rs_show@localhost",
+		"GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN ON *.* TO rs_show@localhost",
+		"SET GLOBAL sql_quote_show_create = OFF", "SET GLOBAL sql_mode = 'ANSI_QUOTES'")
+
+	// grant-admin's reading, on a root session that inherits the globals.
+	ctx := context.Background()
+	conn, err := rootDB(t, r.target).Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	session := func() (quote bool, mode string) {
+		if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_quote_show_create, @@SESSION.sql_mode").Scan(&quote, &mode); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if quote, mode := session(); quote || mode != "ANSI_QUOTES" {
+		t.Fatalf("root session before: sql_quote_show_create=%v sql_mode=%q, want OFF and ANSI_QUOTES", quote, mode)
+	}
+	stmts, err := mysql.MissingAdminGrants(ctx, conn, "rs_show@localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range stmts {
+		if strings.Contains(s, "SHOW DATABASES") {
+			t.Errorf("MissingAdminGrants = %q, want SHOW DATABASES held", stmts)
+		}
+	}
+	if quote, mode := session(); quote || mode != "ANSI_QUOTES" {
+		t.Errorf("root session after: sql_quote_show_create=%v sql_mode=%q, want OFF and ANSI_QUOTES kept", quote, mode)
+	}
+
+	// The settle, as the stored account.
+	r.useAccount("rs_show")
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil")))
+	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
+		t.Errorf("role pin = %q, want replica", role)
+	}
+}

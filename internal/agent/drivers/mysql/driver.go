@@ -182,10 +182,12 @@ type Driver struct {
 	// salvageRun is held by the one mysql.salvage that may run; another
 	// is refused (TryLock).
 	salvageRun sync.Mutex
-	// The set the last mysql.leftover found (salvage.go: recordLeftover).
-	leftoverMu    sync.Mutex
-	leftoverSet   string
-	leftoverKnown bool
+	// The set the last mysql.leftover found and the source it compared
+	// against (salvage.go: recordLeftover).
+	leftoverMu     sync.Mutex
+	leftoverSet    string
+	leftoverSource string
+	leftoverKnown  bool
 
 	// lift counts this agent's lifts of read-only (lift.go); one gate per
 	// driver, made by Register (or on first use).

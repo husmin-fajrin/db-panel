@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -57,11 +59,11 @@ func (r *salvageRig) put(name string, data []byte) {
 	}
 }
 
-// allow records set as what the last mysql.leftover found, the file an
-// agent reads it back from after a restart.
+// allow records set as what the last mysql.leftover found from the pinned
+// source, the file an agent reads it back from after a restart.
 func (r *salvageRig) allow(set string) {
 	r.t.Helper()
-	r.put(mysql.LeftoverSetFile, []byte(set+"\n"))
+	r.put(mysql.LeftoverSetFile, []byte("source 10.0.0.1:3306\n"+set+"\n"))
 }
 
 func fileName(at time.Time) string { return at.UTC().Format("20060102T150405Z") + "-42.sql" }
@@ -404,8 +406,8 @@ func TestSalvageBoundedByLeftover(t *testing.T) {
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("leftover set file: %v %v, want 0600", fi, err)
 	}
-	if b, _ := os.ReadFile(path); strings.TrimSpace(string(b)) != left {
-		t.Errorf("leftover set file = %q, want %q", b, left)
+	if b, _ := os.ReadFile(path); string(b) != "source 127.0.0.1:"+strconv.Itoa(r.replica.Port)+"\n"+left+"\n" {
+		t.Errorf("leftover set file = %q, want the source and %q", b, left)
 	}
 	// A new agent run reads the set back from the file.
 	again := &mysql.Driver{Host: r.master.Host(), PinDir: r.d.PinDir, SalvageDir: r.d.SalvageDir,
@@ -416,6 +418,93 @@ func TestSalvageBoundedByLeftover(t *testing.T) {
 	wantRefused(t, "salvage of the whole history after a restart", rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: all}),
 		"di luar hasil Periksa data tertinggal")
 	decode[proto.SalvageFile](t, rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}))
+}
+
+// TestLeftoverSetStampedWithSource (SEC-201): the leftover set file starts
+// with the source mysql.leftover compared against. Once the source pin is
+// another (set-source), the set is no record: mysql.salvage is refused
+// with the "run Periksa data tertinggal first" text, in this agent run and
+// in the next one, which reads the file.
+func TestLeftoverSetStampedWithSource(t *testing.T) {
+	r := newLeftoverRig(t)
+	mdb := rootDB(t, r.master)
+	before := gtidExecuted(t, mdb)
+	execAll(t, mdb, "INSERT INTO toko.t VALUES (10, 'sisa')")
+	var left string
+	if err := mdb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if res := r.leftover(); res.GTIDSet != left {
+		t.Fatalf("leftover set = %q, want %q", res.GTIDSet, left)
+	}
+	path := filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)
+	want := "source 127.0.0.1:" + strconv.Itoa(r.replica.Port) + "\n" + left + "\n"
+	if b, err := os.ReadFile(path); err != nil || string(b) != want {
+		t.Fatalf("leftover set file = %q, %v; want %q", b, err, want)
+	}
+
+	pins, err := mysql.LoadPins(r.d.PinDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pins.SetSource("10.9.9.9", 3306); err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(t, "salvage after the source pin changed", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}),
+		"Jalankan Periksa data tertinggal dulu")
+	again := &mysql.Driver{Host: r.master.Host(), PinDir: r.d.PinDir, SalvageDir: r.d.SalvageDir}
+	reg := commands.NewRegistry()
+	again.Register(reg)
+	rr := &pinRig{t: t, reg: reg, d: again}
+	wantRefused(t, "salvage after the source pin changed, next agent run", rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}),
+		"Jalankan Periksa data tertinggal dulu")
+
+	// Back to the source the set was found for: the record holds again.
+	if err := pins.SetSource("127.0.0.1", r.replica.Port); err != nil {
+		t.Fatal(err)
+	}
+	decode[proto.SalvageFile](t, rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}))
+}
+
+// TestLeftoverSetWithoutSourceIsNoRecord: a leftover set file written
+// before the source stamp (the set alone), or one whose first line is not
+// exactly "source <host:port>", is no record: mysql.salvage is refused
+// with the "run Periksa data tertinggal first" text, not an error about
+// the file. The same set stamped with the pinned source is extracted.
+func TestLeftoverSetWithoutSourceIsNoRecord(t *testing.T) {
+	old := testmysql.Start(t, testmysql.Options{})
+	odb := rootDB(t, old)
+	before := gtidExecuted(t, odb)
+	execAll(t, odb, "CREATE DATABASE toko")
+	var set string
+	if err := odb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&set); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+	for _, content := range []string{
+		set + "\n",
+		set,
+		"source\n" + set + "\n",
+		"source \n" + set + "\n",
+		"source 10.0.0.1\n" + set + "\n",
+		"source 10.0.0.1:0\n" + set + "\n",
+		"source  10.0.0.1:3306\n" + set + "\n",
+		"source 10.0.0.1:3306 \n" + set + "\n",
+		"Source 10.0.0.1:3306\n" + set + "\n",
+		"source 10.0.0.1:3306",
+		"source 'x':3306\n" + set + "\n",
+		"\nsource 10.0.0.1:3306\n" + set + "\n",
+		"source 10.0.0.1:3306\r\n" + set + "\n",
+		"",
+	} {
+		r := newSalvageRig(t, old.Host(), func() time.Time { return now })
+		r.put(mysql.LeftoverSetFile, []byte(content))
+		wantRefused(t, fmt.Sprintf("salvage with the leftover file %q", content),
+			r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}), "Jalankan Periksa data tertinggal dulu")
+	}
+	r := newSalvageRig(t, old.Host(), func() time.Time { return now })
+	r.allow(set)
+	decode[proto.SalvageFile](t, r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}))
 }
 
 // TestSalvageOneAtATime (SEC-70): a second mysql.salvage while one runs
