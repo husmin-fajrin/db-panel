@@ -2197,6 +2197,28 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    menghapus cadangan setengah jadi (teks sendiri). Semua teks baru
    masuk daftar Task 15. `internal/agent/system_test.go` ikut berubah
    (dua baris pengalih jalur untuk uji).
+13. Task 9, `reset-admin` dan `grant-admin` (2026-11-18).
+   `reset-admin` menyimpan akun baru hanya sesudah akun itu terbukti
+   bisa masuk (lewat pembungkus tempat simpan; tanda tangan
+   `ResetAdmin(ctx, c, creds)` tetap), dan `ALTER USER`-nya menjadi
+   `IDENTIFIED WITH caching_sha2_password BY … REQUIRE NONE ACCOUNT
+   UNLOCK` (enam keadaan akun yang terukur menghalangi login kini
+   diperbaiki; `TestResetAdminRepairsBlockedAccount`,
+   `TestResetAdminLoginCheckFails`). Pemasangan memakai pernyataan yang
+   sama. `grant-admin` menolak nama akun yang tidak didukung dan
+   menunjuk `reset-admin`. `listingComplete` dan `MissingAdminGrants`
+   memakai `accountGrants` + `listingProvable` yang sama. Dua test
+   daftar (`TestRebuildPartialRevokeAccount`,
+   `TestRebuildRoleOnlyAccountAtSettle`) memberi hak lewat
+   `MissingAdminGrants` dengan langkah jendela CLI, bukan CLI itu
+   sendiri (seam CLI tidak diekspor); CLI diuji ujung ke ujung di
+   `cli_admin_test.go`. Kedua perintah, sesudah akhir yang tidak biasa,
+   memeriksa keadaan dan mengatakan sudah / belum / tidak bisa
+   dipastikan, dengan baris syslog. `AdviceTexts()` mengembalikan 12
+   teks (termasuk T11b). Berkas test di luar daftar Files yang ikut
+   berubah: `rebuild_settle_test.go` (harapan teks),
+   `cli_rootsql_test.go` (pembantu). Semua teks baru masuk daftar
+   Task 15.
 
 ## Teks baru untuk dibaca pemilik
 

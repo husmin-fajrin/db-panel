@@ -747,12 +747,35 @@ Yang sama pada ketiganya:
   bukti daftar lengkap (`SHOW DATABASES`), menampilkan pernyataan
   `GRANT`-nya, meminta `ya`, menjalankannya. Akun dinamai seperti MySQL
   mengenalnya: perintah masuk sekali dengan akun tersimpan dan membaca
-  `CURRENT_USER()`; bila login itu ditolak, teks C17.
+  `CURRENT_USER()`; bila login itu ditolak, teks C17. Akun yang namanya
+  tidak didukung pemeriksaan daftar ditolak dan diarahkan ke
+  `reset-admin` (diubah selama pelaksanaan: tidak ada `GRANT` yang bisa
+  membuat daftarnya terbukti lengkap). Pemeriksaan daftar dan perintah
+  ini memakai satu aturan yang sama, supaya tidak bisa berbeda hasil.
 - **`sudo dbpanel agent reset-admin`** untuk akun yang namanya tidak
   didukung, yang rusak, atau yang belum pernah tersimpan: membuat atau
   menyetel ulang `dbpanel_admin@localhost` dengan kata sandi acak dan hak
   penuh, lalu menyimpannya sebagai akun agent (sama seperti pemasangan).
-  Operator tidak perlu "Hubungkan MySQL" lagi.
+  Operator tidak perlu "Hubungkan MySQL" lagi. Diubah selama pelaksanaan
+  (2026-11-18):
+  - Urutannya: pernyataan di MySQL, lalu **mencoba masuk** dengan akun
+    baru itu lewat soket yang dipakai agent (paling lama 30 detik), baru
+    **menyimpan**. Akun tersimpan yang masih bisa masuk tidak pernah
+    diganti akun yang tidak bisa masuk; C19 hanya dicetak bila masuk dan
+    simpan berhasil. Bila masuk gagal, akun tersimpan tidak berubah dan
+    operator diberi sebabnya.
+  - `ALTER USER`-nya kini `IDENTIFIED WITH caching_sha2_password BY …
+    REQUIRE NONE ACCOUNT UNLOCK`. Terukur di 8.0.46: akun
+    `dbpanel_admin` yang sudah ada dan dikunci, diwajibkan SSL/X509,
+    diblokir karena gagal login, atau diganti plugin-nya
+    (`mysql_no_login`, `auth_socket`) tidak bisa masuk sesudah pernyataan
+    lama; dengan pernyataan baru semuanya bisa. Pemasangan memakai
+    pernyataan yang sama, jadi akun admin buatannya selalu
+    `caching_sha2_password`.
+  - Layar sebelum konfirmasi menampilkan pernyataan seperti yang
+    dijalankan, kata sandi disamarkan. Terukur di 8.0.46: `SHOW
+    PROCESSLIST` menampilkan kedua pernyataan itu dengan `<secret>`,
+    bukan kata sandinya.
 - **Teks yang menunjuk README atau `GRANT` polos diganti** menunjuk
   perintah itu:
   - penolakan "masih punya database yang tidak disalin" (T8a untuk dump
