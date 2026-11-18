@@ -60,10 +60,26 @@ func (r *salvageRig) put(name string, data []byte) {
 }
 
 // allow records set as what the last mysql.leftover found from the pinned
-// source, the file an agent reads it back from after a restart.
+// source in the current quarantine (its id pinned now if there is none),
+// the file an agent reads it back from.
 func (r *salvageRig) allow(set string) {
 	r.t.Helper()
-	r.put(mysql.LeftoverSetFile, []byte("source 10.0.0.1:3306\n"+set+"\n"))
+	r.put(mysql.LeftoverSetFile, []byte("source 10.0.0.1:3306\nquarantine "+quarantineID(r.t, r.d.PinDir)+"\n"+set+"\n"))
+}
+
+// quarantineID is the id of the quarantine pinned in dir, made now when
+// there is none.
+func quarantineID(t *testing.T, dir string) string {
+	t.Helper()
+	pins, err := mysql.LoadPins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ok, err := pins.QuarantineID(true)
+	if err != nil || !ok {
+		t.Fatalf("QuarantineID = %q, %v, %v", id, ok, err)
+	}
+	return id
 }
 
 func fileName(at time.Time) string { return at.UTC().Format("20060102T150405Z") + "-42.sql" }
@@ -406,8 +422,8 @@ func TestSalvageBoundedByLeftover(t *testing.T) {
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("leftover set file: %v %v, want 0600", fi, err)
 	}
-	if b, _ := os.ReadFile(path); string(b) != "source 127.0.0.1:"+strconv.Itoa(r.replica.Port)+"\n"+left+"\n" {
-		t.Errorf("leftover set file = %q, want the source and %q", b, left)
+	if b, _ := os.ReadFile(path); string(b) != "source 127.0.0.1:"+strconv.Itoa(r.replica.Port)+"\nquarantine "+quarantineID(t, r.d.PinDir)+"\n"+left+"\n" {
+		t.Errorf("leftover set file = %q, want the source, the quarantine and %q", b, left)
 	}
 	// A new agent run reads the set back from the file.
 	again := &mysql.Driver{Host: r.master.Host(), PinDir: r.d.PinDir, SalvageDir: r.d.SalvageDir,
@@ -438,7 +454,7 @@ func TestLeftoverSetStampedWithSource(t *testing.T) {
 		t.Fatalf("leftover set = %q, want %q", res.GTIDSet, left)
 	}
 	path := filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)
-	want := "source 127.0.0.1:" + strconv.Itoa(r.replica.Port) + "\n" + left + "\n"
+	want := "source 127.0.0.1:" + strconv.Itoa(r.replica.Port) + "\nquarantine " + quarantineID(t, r.d.PinDir) + "\n" + left + "\n"
 	if b, err := os.ReadFile(path); err != nil || string(b) != want {
 		t.Fatalf("leftover set file = %q, %v; want %q", b, err, want)
 	}
@@ -481,7 +497,14 @@ func TestLeftoverSetWithoutSourceIsNoRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+	other := strings.Repeat("ab", 16)
 	for _, content := range []string{
+		"source 10.0.0.1:3306\n" + set + "\n",
+		"source 10.0.0.1:3306\nquarantine " + other + "\n" + set + "\n",
+		"source 10.0.0.1:3306\nquarantine\n" + set + "\n",
+		"source 10.0.0.1:3306\nquarantine " + strings.ToUpper(other) + "\n" + set + "\n",
+		"source 10.0.0.1:3306\nquarantine " + other + " \n" + set + "\n",
+		"source 10.0.0.1:3306\nquarantine " + other[:30] + "\n" + set + "\n",
 		set + "\n",
 		set,
 		"source\n" + set + "\n",
@@ -505,6 +528,53 @@ func TestLeftoverSetWithoutSourceIsNoRecord(t *testing.T) {
 	r := newSalvageRig(t, old.Host(), func() time.Time { return now })
 	r.allow(set)
 	decode[proto.SalvageFile](t, r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}))
+}
+
+// TestLeftoverRecordEndsWithQuarantine: a leftover record belongs to the
+// quarantine it was found in. Root ends the quarantine with set-role (the
+// CLI's own Pins, another process's view) and quarantines the server again
+// under the same source: mysql.salvage of the old set is refused, in the
+// same agent run and in the next one, though the file is still there.
+func TestLeftoverRecordEndsWithQuarantine(t *testing.T) {
+	r := newLeftoverRig(t)
+	mdb := rootDB(t, r.master)
+	before := gtidExecuted(t, mdb)
+	execAll(t, mdb, "INSERT INTO toko.t VALUES (10, 'sisa')")
+	var left string
+	if err := mdb.QueryRow("SELECT GTID_SUBTRACT(@@global.gtid_executed, ?)", before).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if res := r.leftover(); res.GTIDSet != left {
+		t.Fatalf("leftover set = %q, want %q", res.GTIDSet, left)
+	}
+	src := "127.0.0.1:" + strconv.Itoa(r.replica.Port)
+	cli, err := mysql.LoadPins(r.d.PinDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.SetRole("master"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.SetQuarantinedAt(src, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)); err != nil {
+		t.Fatalf("leftover set file: %v", err)
+	}
+	wantRefused(t, "salvage of the last quarantine's set", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}),
+		"Jalankan Periksa data tertinggal dulu")
+	again := &mysql.Driver{Host: r.master.Host(), PinDir: r.d.PinDir, SalvageDir: r.d.SalvageDir}
+	reg := commands.NewRegistry()
+	again.Register(reg)
+	rr := &pinRig{t: t, reg: reg, d: again}
+	wantRefused(t, "salvage of the last quarantine's set, next agent run", rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}),
+		"Jalankan Periksa data tertinggal dulu")
+
+	// Periksa in this quarantine records it again.
+	if res := decode[proto.LeftoverResult](t, rr.dispatch("mysql.leftover", proto.LeftoverParams{NewMaster: r.nm})); res.GTIDSet != left {
+		t.Fatalf("leftover set = %q, want %q", res.GTIDSet, left)
+	}
+	decode[proto.SalvageFile](t, rr.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: left}))
 }
 
 // TestSalvageOneAtATime (SEC-70): a second mysql.salvage while one runs

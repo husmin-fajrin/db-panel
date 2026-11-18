@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The rebuild of a quarantined old master loads the new master's data with
@@ -477,7 +479,10 @@ func listingComplete(ctx context.Context, conn *sql.Conn, user, host string) err
 // sql_mode's ANSI_QUOTES changes the quotes, either of which would make
 // listingProof miss a privilege the account holds. conn's previous values
 // are put back afterwards, since conn may run more statements (grant-admin
-// runs its GRANTs on it); a failure to put them back is an error.
+// runs its GRANTs on it), also when ctx has ended by then (under
+// proofRestoreTimeout). When they cannot be put back the read is an error and
+// conn's connection is discarded, so that neither conn nor the pool it
+// returns to runs anything under the proof's settings.
 func accountGrants(ctx context.Context, conn *sql.Conn, user, host string) (grants []string, err error) {
 	var quote int
 	var mode string
@@ -488,10 +493,18 @@ func accountGrants(ctx context.Context, conn *sql.Conn, user, host string) (gran
 		return nil, fmt.Errorf("SHOW GRANTS: session settings: %w", err)
 	}
 	defer func() {
-		if _, rerr := conn.ExecContext(ctx, "SET SESSION sql_quote_show_create = ?, sql_mode = ?", quote, mode); rerr != nil && err == nil {
-			grants, err = nil, fmt.Errorf("SHOW GRANTS: restore session settings: %w", rerr)
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proofRestoreTimeout)
+		defer cancel()
+		_, rerr := conn.ExecContext(rctx, "SET SESSION sql_quote_show_create = ?, sql_mode = ?", quote, mode)
+		if rerr == nil {
+			return
 		}
+		// driver.ErrBadConn from Raw closes the connection instead of
+		// returning it to the pool.
+		conn.Raw(func(any) error { return driver.ErrBadConn })
+		grants, err = nil, fmt.Errorf("SHOW GRANTS: restore session settings: %w", rerr)
 	}()
+	defer accountGrantsRead()
 	rows, err := conn.QueryContext(ctx, "SHOW GRANTS FOR "+quoteString(user)+"@"+quoteString(host))
 	if err != nil {
 		return nil, fmt.Errorf("SHOW GRANTS: %w", err)
@@ -509,6 +522,14 @@ func accountGrants(ctx context.Context, conn *sql.Conn, user, host string) (gran
 	}
 	return grants, nil
 }
+
+// proofRestoreTimeout bounds putting a session's settings back after the
+// proof's SHOW GRANTS (accountGrants).
+const proofRestoreTimeout = 10 * time.Second
+
+// accountGrantsRead runs once the grant rows are read, before the session
+// settings are put back; a test hook.
+var accountGrantsRead = func() {}
 
 // listingProvable is the proof's decision for user@host from its grants
 // (accountGrants): SHOW DATABASES held on *.* and not revoked

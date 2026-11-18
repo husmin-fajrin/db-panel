@@ -652,8 +652,9 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 	}
 	// What the old master held was replaced: the leftover set bounds no
 	// salvage any more. A file left behind is logged, not a failure: a
-	// replica refuses mysql.salvage, and a later quarantine reads it only
-	// while its source stamp is the source pinned then (lastLeftover).
+	// replica refuses mysql.salvage, and the role write above removed the
+	// quarantine id the file carries, so no later quarantine takes it
+	// (lastLeftover).
 	if err := d.forgetLeftover(); err != nil && d.Logger != nil {
 		d.Logger.Error("leftover set file not removed after the rebuild", "err", err)
 	}

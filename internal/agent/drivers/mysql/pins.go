@@ -1,6 +1,8 @@
 package mysql
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -49,6 +51,13 @@ const (
 	// quarantine): the agent's own reads of the pinned source dial it
 	// (Pins.SourceDial). Rebuild commands match the pin by name.
 	SourceAddrFile = "source-addr"
+	// QuarantineIDFile, beside a quarantined role pin, names the current
+	// quarantine: a random value the agent writes the first time it needs
+	// one (Pins.QuarantineID), removed by every role write that enters or
+	// leaves quarantine (writeRole, removePins). What the agent records for
+	// one quarantine (the leftover set) carries it and counts only while
+	// it is the one here.
+	QuarantineIDFile = "quarantine-id"
 )
 
 const (
@@ -464,6 +473,11 @@ func (p *Pins) SetRole(role string) error {
 		return err
 	}
 	p.settled = true
+	// Root's decision on the role ends whatever was recorded for the
+	// quarantine so far, also when it pins quarantined again.
+	if err := removeFile(p.path(QuarantineIDFile)); err != nil {
+		return err
+	}
 	if role == roleUnassigned {
 		return p.removePins()
 	}
@@ -475,7 +489,7 @@ func (p *Pins) SetRole(role string) error {
 			return err
 		}
 	}
-	return writePin(p.path(RoleFile), role)
+	return p.writeRole(role)
 }
 
 // SetSource writes the source pin, whatever is pinned now (the local CLI).
@@ -538,7 +552,7 @@ func (p *Pins) SetQuarantinedAt(newSource, addr string) error {
 	if err := writePin(p.path(SourceFile), net.JoinHostPort(host, strconv.Itoa(port))); err != nil {
 		return err
 	}
-	return writePin(p.path(RoleFile), roleQuarantined)
+	return p.writeRole(roleQuarantined)
 }
 
 // PromoteToMaster pins this server as master and removes its source pin:
@@ -548,7 +562,7 @@ func (p *Pins) PromoteToMaster() error {
 	defer p.mu.Unlock()
 	defer p.forget()
 	p.settled = true
-	if err := writePin(p.path(RoleFile), roleMaster); err != nil {
+	if err := p.writeRole(roleMaster); err != nil {
 		return err
 	}
 	for _, name := range []string{SourceFile, SourceAddrFile} {
@@ -609,7 +623,7 @@ func (p *Pins) Release() error {
 	}
 	defer p.forget()
 	p.settled = true
-	return writePin(p.path(RoleFile), roleUnassigned)
+	return p.writeRole(roleUnassigned)
 }
 
 // pinned reports whether a role other than unassigned, or a source, is
@@ -655,7 +669,7 @@ func (p *Pins) Bootstrap(hint string, snap proto.HealthSnapshot) error {
 		return nil
 	}
 	defer p.forget()
-	if err := writePin(p.path(RoleFile), role); err != nil {
+	if err := p.writeRole(role); err != nil {
 		return err
 	}
 	p.settled = true
@@ -688,7 +702,7 @@ func (p *Pins) claimRole(role string) error {
 		return roleRefusal(p.role, "mysql.configure")
 	}
 	defer p.forget()
-	if err := writePin(p.path(RoleFile), role); err != nil {
+	if err := p.writeRole(role); err != nil {
 		return err
 	}
 	if p.logger != nil {
@@ -719,7 +733,7 @@ func (p *Pins) settleRebuilt(host string, port int) (bool, error) {
 	}
 	defer p.forget()
 	p.settled = true
-	if err := writePin(p.path(RoleFile), roleReplica); err != nil {
+	if err := p.writeRole(roleReplica); err != nil {
 		return false, err
 	}
 	if p.logger != nil {
@@ -973,14 +987,67 @@ func (p *Pins) RoleIs(role string) bool {
 // forget makes the next check read the files again (after a write).
 func (p *Pins) forget() { p.loaded = false }
 
-// removePins removes the role and the source pin.
+// removePins removes the role and the source pin, and the quarantine id
+// first.
 func (p *Pins) removePins() error {
-	for _, name := range []string{RoleFile, SourceFile, SourceAddrFile} {
+	for _, name := range []string{QuarantineIDFile, RoleFile, SourceFile, SourceAddrFile} {
 		if err := os.Remove(p.path(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("hapus %s: %w", p.path(name), err)
 		}
 	}
 	return nil
+}
+
+// writeRole writes role to the role pin. Unless the role pin read now is
+// quarantined and role is quarantined too (a quarantine that goes on), the
+// quarantine id is removed first, so that no id outlives the quarantine it
+// names, also when the role write then fails. The caller holds mu.
+func (p *Pins) writeRole(role string) error {
+	cur, ok, err := readPinFile(p.path(RoleFile))
+	if err != nil || !ok || cur != roleQuarantined || role != roleQuarantined {
+		if err := removeFile(p.path(QuarantineIDFile)); err != nil {
+			return err
+		}
+	}
+	return writePin(p.path(RoleFile), role)
+}
+
+// quarantineIDRe is a quarantine id: 32 lowercase hexadecimal digits.
+var quarantineIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// QuarantineID is the id of the current quarantine (QuarantineIDFile): ok
+// is false when the role pin is not quarantined, or no valid id is there
+// and create is false. With create, a missing or malformed id is replaced
+// by a new random one (a quarantine pinned before ids existed, or one whose
+// id was removed). An unreadable file (wrong owner or mode) is an error.
+func (p *Pins) QuarantineID(create bool) (id string, ok bool, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.reload(); err != nil {
+		return "", false, err
+	}
+	if p.role != roleQuarantined {
+		return "", false, nil
+	}
+	id, has, err := readPinFile(p.path(QuarantineIDFile))
+	if err != nil {
+		return "", false, err
+	}
+	if has && quarantineIDRe.MatchString(id) {
+		return id, true, nil
+	}
+	if !create {
+		return "", false, nil
+	}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", false, err
+	}
+	id = hex.EncodeToString(b)
+	if err := writePin(p.path(QuarantineIDFile), id); err != nil {
+		return "", false, err
+	}
+	return id, true, nil
 }
 
 // writePin replaces path with value and a newline, atomically (temp file

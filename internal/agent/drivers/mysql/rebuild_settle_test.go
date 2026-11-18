@@ -140,7 +140,7 @@ func TestSettleRemovesLeftoverSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)
-	if err := os.WriteFile(path, []byte("source "+r.src+"\n3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("source "+r.src+"\nquarantine "+quarantineID(t, r.dir)+"\n3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// No load yet: the settle is refused and the file stays.
@@ -158,6 +158,46 @@ func TestSettleRemovesLeftoverSet(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("leftover set file after the settle: %v, want removed", err)
 	}
+}
+
+// TestLeftoverSetLeftBySettleIsNoRecord: the leftover set file survives
+// the settle (its removal failed; the test puts it back) and the server is
+// quarantined again under the same source: the old record bounds no
+// salvage there.
+func TestLeftoverSetLeftBySettleIsNoRecord(t *testing.T) {
+	r := newSettleRig(t)
+	r.d.SalvageDir = filepath.Join(t.TempDir(), "salvage")
+	if err := os.MkdirAll(r.d.SalvageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)
+	// A set this server never executed: a salvage that takes the record
+	// answers that, one that does not answers "Periksa first".
+	const set = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"
+	record := []byte("source " + r.src + "\nquarantine " + quarantineID(t, r.dir) + "\n" + set + "\n")
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(t, "salvage in the quarantine of the record", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}),
+		"tidak dijalankan server ini")
+
+	r.dump()
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master)))
+	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
+		t.Fatalf("role pin = %q, want replica", role)
+	}
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli, err := mysql.LoadPins(r.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.SetQuarantinedAt(r.src, ""); err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(t, "salvage in the next quarantine", r.dispatch("mysql.salvage", proto.SalvageParams{GTIDSet: set}),
+		"Jalankan Periksa data tertinggal dulu")
 }
 
 // TestRebuildFilteredDumpSettles: the legitimate flow with a replication

@@ -61,13 +61,27 @@ func (d *Driver) registerLeftover(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
+		// The quarantine this comparison belongs to, read before it: a
+		// role write that ends the quarantine meanwhile removes this id,
+		// so the record never counts in a later quarantine.
+		qid, inQuarantine, qerr := d.pins.QuarantineID(true)
 		res, err := leftover(ctx, h, dial, d.serviceWarn("mysql.leftover"))
 		if err != nil {
 			return nil, err
 		}
-		// What mysql.salvage may extract from now on, while the source
-		// pin stays the one compared against.
-		d.recordLeftover(peerKey(p.NewMaster), res.GTIDSet)
+		// What mysql.salvage may extract from now on, in this quarantine
+		// and while the source pin stays the one compared against.
+		if qerr != nil || !inQuarantine {
+			if d.Logger != nil {
+				d.Logger.Warn("leftover set not saved: the quarantine id cannot be pinned; salvage needs a new mysql.leftover",
+					"err", qerr)
+			}
+			if err := d.forgetLeftover(); err != nil && d.Logger != nil {
+				d.Logger.Error("earlier leftover set file not removed", "err", err)
+			}
+		} else {
+			d.recordLeftover(qid, peerKey(p.NewMaster), res.GTIDSet)
+		}
 		tables := make([]string, 0, len(res.Tables))
 		for _, t := range res.Tables {
 			tables = append(tables, t.Schema+"."+t.Table)

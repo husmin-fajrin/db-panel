@@ -31,8 +31,8 @@ import (
 // What a salvage may extract is bounded, so that a compromised panel
 // cannot read this server's binary log history through it: the set must
 // be a subset of the one the last mysql.leftover found (the transactions
-// the new master lacks), kept in memory and in leftoverSetFile under the
-// salvage directory (0600) across agent restarts. One salvage runs at a
+// the new master lacks), kept in leftoverSetFile under the salvage
+// directory (0600) for the quarantine it was found in (recordLeftover). One salvage runs at a
 // time, and the directory holds at most salvageDirMax bytes: a salvage is
 // refused before it writes once the directory is full, and stopped (its
 // file removed) when it would pass the cap.
@@ -348,24 +348,35 @@ func salvageDirSize(root *os.Root) (int64, error) {
 	return n, nil
 }
 
-// recordLeftover keeps set, what the last mysql.leftover found ("" for
-// nothing) comparing this server with source (host:port, the pinned
-// source it read), as the bound of later salvages: in memory, and in
-// leftoverSetFile (0600, written to a temporary name and renamed) for
-// after an agent restart. The file's first line is "source <host:port>",
-// the rest the set. A file that cannot be written is logged; the memory
-// still holds the set.
-func (d *Driver) recordLeftover(source, set string) {
+// recordLeftover keeps set, what mysql.leftover found ("" for nothing)
+// comparing this server with source (host:port, the pinned source it
+// read) in the quarantine named qid (Pins.QuarantineID, read before the
+// comparison), as the bound of later salvages: in leftoverSetFile (0600,
+// written to a temporary name and renamed over the old one). The file's
+// lines are "source <host:port>", "quarantine <id>", then the set. When it
+// cannot be written the old file is removed, so that no earlier record
+// stands in for this one; both failures are logged, and salvage then
+// answers that Periksa must run first.
+func (d *Driver) recordLeftover(qid, source, set string) {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
-	d.leftoverSet, d.leftoverSource, d.leftoverKnown = set, source, true
-	if err := d.writeLeftoverSet(leftoverSourcePrefix + source + "\n" + set + "\n"); err != nil && d.Logger != nil {
-		d.Logger.Warn("leftover set not saved; salvage is bounded by it until the agent restarts", "err", err)
+	err := d.writeLeftoverSet(leftoverSourcePrefix + source + "\n" + leftoverQuarantinePrefix + qid + "\n" + set + "\n")
+	if err == nil {
+		return
+	}
+	if d.Logger != nil {
+		d.Logger.Warn("leftover set not saved; salvage needs a new mysql.leftover", "err", err)
+	}
+	if err := d.removeLeftoverSet(); err != nil && d.Logger != nil {
+		d.Logger.Error("earlier leftover set file not removed after a failed save", "err", err)
 	}
 }
 
-// leftoverSourcePrefix starts the first line of leftoverSetFile.
-const leftoverSourcePrefix = "source "
+// Prefixes of the first two lines of leftoverSetFile.
+const (
+	leftoverSourcePrefix     = "source "
+	leftoverQuarantinePrefix = "quarantine "
+)
 
 func (d *Driver) writeLeftoverSet(content string) error {
 	root, err := d.openSalvageDir()
@@ -398,72 +409,79 @@ func (d *Driver) writeLeftoverSet(content string) error {
 	return syncDir(d.salvageDir())
 }
 
-// lastLeftover is the set the last mysql.leftover found: from memory, or
-// after an agent restart from leftoverSetFile. ok is false when no
-// mysql.leftover result is known, it found nothing, or it compared this
-// server with another source than the one pinned now (a set found against
-// an earlier new master bounds nothing once the pin changed).
+// lastLeftover is the set the last mysql.leftover found, read from
+// leftoverSetFile on every use. ok is false when there is no record, it
+// found nothing, or it does not belong to the quarantine and source now:
+// its quarantine id is not the one pinned now (Pins.QuarantineID; none, as
+// on a server quarantined before ids existed, matches nothing), or its
+// source is not the source pin.
 func (d *Driver) lastLeftover() (string, bool, error) {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
-	if !d.leftoverKnown {
-		source, set, ok, err := d.readLeftoverSet()
-		if err != nil {
-			return "", false, err
-		}
-		if !ok {
-			return "", false, nil
-		}
-		d.leftoverSet, d.leftoverSource, d.leftoverKnown = set, source, true
+	source, qid, set, ok, err := d.readLeftoverSet()
+	if err != nil || !ok || set == "" {
+		return "", false, err
 	}
-	if d.leftoverSet == "" {
-		return "", false, nil
-	}
-	host, port, err := ParseSource(d.leftoverSource)
-	if err != nil || d.pins == nil || !d.pins.quarantinedUnder(host, port) {
+	ignore := func(why string, args ...any) (string, bool, error) {
 		if d.Logger != nil {
-			d.Logger.Warn("leftover set ignored: it was found against another source than the one pinned now",
-				"found_against", d.leftoverSource)
+			d.Logger.Warn("leftover set ignored: "+why, append([]any{"found_against", source, "quarantine", qid}, args...)...)
 		}
 		return "", false, nil
 	}
-	return d.leftoverSet, true, nil
+	if d.pins == nil {
+		return ignore("this agent has no pins")
+	}
+	cur, has, err := d.pins.QuarantineID(false)
+	switch {
+	case err != nil:
+		return ignore("the quarantine id cannot be read", "err", err)
+	case !has:
+		return ignore("no quarantine id is pinned now")
+	case cur != qid:
+		return ignore("it was found in another quarantine", "quarantine_now", cur)
+	}
+	host, port, _ := ParseSource(source)
+	if !d.pins.quarantinedUnder(host, port) {
+		return ignore("its source is not the source pinned now")
+	}
+	return set, true, nil
 }
 
 // readLeftoverSet reads leftoverSetFile; ok is false when it is missing,
 // or is not a record: its first line is not exactly "source <host:port>"
-// (a file written before the source was recorded, or a damaged one), or
-// it is larger than maxLeftoverSetFile. It must be a regular file (not a
-// link), and after the source line hold a GTID set.
-func (d *Driver) readLeftoverSet() (source, set string, ok bool, err error) {
+// and its second exactly "quarantine <id>" (a file written before either
+// was recorded, or a damaged one), or it is larger than
+// maxLeftoverSetFile. It must be a regular file (not a link), and after
+// those lines hold a GTID set.
+func (d *Driver) readLeftoverSet() (source, qid, set string, ok bool, err error) {
 	if _, err := os.Lstat(d.salvageDir()); errors.Is(err, os.ErrNotExist) {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	root, err := d.openSalvageDir()
 	if err != nil {
-		return "", "", false, err
+		return "", "", "", false, err
 	}
 	defer root.Close()
 	f, err := root.OpenFile(leftoverSetFile, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("baca set data tertinggal: %w", err)
+		return "", "", "", false, fmt.Errorf("baca set data tertinggal: %w", err)
 	}
 	defer f.Close()
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return "", "", false, fmt.Errorf("set data tertinggal %s bukan berkas biasa", leftoverSetFile)
+		return "", "", "", false, fmt.Errorf("set data tertinggal %s bukan berkas biasa", leftoverSetFile)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxLeftoverSetFile+1))
 	if err != nil {
-		return "", "", false, fmt.Errorf("baca set data tertinggal: %w", err)
+		return "", "", "", false, fmt.Errorf("baca set data tertinggal: %w", err)
 	}
-	noRecord := func(why string) (string, string, bool, error) {
+	noRecord := func(why string) (string, string, string, bool, error) {
 		if d.Logger != nil {
 			d.Logger.Warn("leftover set file is no record; salvage needs a new mysql.leftover", "file", leftoverSetFile, "why", why)
 		}
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	if len(b) > maxLeftoverSetFile {
 		return noRecord("larger than the most read")
@@ -473,11 +491,16 @@ func (d *Driver) readLeftoverSet() (source, set string, ok bool, err error) {
 	if !found || !stamped || !canonicalSource(source) {
 		return noRecord("the first line is not the source it was found against")
 	}
+	head, rest, found = strings.Cut(rest, "\n")
+	qid, stamped = strings.CutPrefix(head, leftoverQuarantinePrefix)
+	if !found || !stamped || !quarantineIDRe.MatchString(qid) {
+		return noRecord("the second line is not the quarantine it was found in")
+	}
 	g, err := parseGTIDSet(strings.TrimSpace(rest))
 	if err != nil {
-		return "", "", false, fmt.Errorf("set data tertinggal di %s tidak valid: %w", leftoverSetFile, err)
+		return "", "", "", false, fmt.Errorf("set data tertinggal di %s tidak valid: %w", leftoverSetFile, err)
 	}
-	return source, g.String(), true, nil
+	return source, qid, g.String(), true, nil
 }
 
 // canonicalSource reports whether s is a source as recordLeftover writes
@@ -487,13 +510,19 @@ func canonicalSource(s string) bool {
 	return err == nil && net.JoinHostPort(host, strconv.Itoa(port)) == s
 }
 
-// forgetLeftover drops the leftover set, in memory and on disk: the
-// settle that ends the quarantine calls it, since what the old master held
-// was replaced. The memory is cleared whatever happens to the file.
+// forgetLeftover removes the leftover set: the settle that ends the
+// quarantine calls it, since what the old master held was replaced. A file
+// left behind belongs to the quarantine that ended; its id is removed with
+// the role write (Pins.writeRole), so it is no record later.
 func (d *Driver) forgetLeftover() error {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
-	d.leftoverSet, d.leftoverSource, d.leftoverKnown = "", "", true
+	return d.removeLeftoverSet()
+}
+
+// removeLeftoverSet removes leftoverSetFile; none is not an error. The
+// caller holds leftoverMu.
+func (d *Driver) removeLeftoverSet() error {
 	if _, err := os.Lstat(d.salvageDir()); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

@@ -713,3 +713,11 @@ func SetLstatOwner(f func(path string) (uid, gid uint32, err error)) (restore fu
 // ServiceWaitDelay bounds the wait for a command's output once it was
 // stopped or exited, for a command run as another account.
 const ServiceWaitDelay = serviceWaitDelay
+
+// SetAccountGrantsReadHook runs f once the listing proof has read the
+// grant rows, before it puts the session's settings back.
+func SetAccountGrantsReadHook(f func()) (restore func()) {
+	old := accountGrantsRead
+	accountGrantsRead = f
+	return func() { accountGrantsRead = old }
+}

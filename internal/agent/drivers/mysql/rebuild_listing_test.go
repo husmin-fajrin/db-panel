@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -299,5 +300,35 @@ func TestListingProofSessionSettings(t *testing.T) {
 	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master, "kecil")))
 	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
 		t.Errorf("role pin = %q, want replica", role)
+	}
+}
+
+// TestListingProofRestoresAfterEndedContext: the caller's context ends
+// right after the proof read the grants; the session settings it changed
+// are still put back on that connection, which goes on to the pool or to
+// grant-admin's GRANTs.
+func TestListingProofRestoresAfterEndedContext(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	conn, err := rootDB(t, inst).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "SET SESSION sql_quote_show_create = OFF, sql_mode = 'ANSI_QUOTES'"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer mysql.SetAccountGrantsReadHook(cancel)()
+	mysql.MissingAdminGrants(ctx, conn, "root@localhost")
+	if ctx.Err() == nil {
+		t.Fatal("the hook did not run")
+	}
+	var quote bool
+	var mode string
+	if err := conn.QueryRowContext(context.Background(), "SELECT @@SESSION.sql_quote_show_create, @@SESSION.sql_mode").Scan(&quote, &mode); err != nil {
+		t.Fatal(err)
+	}
+	if quote || mode != "ANSI_QUOTES" {
+		t.Errorf("session after an ended context: sql_quote_show_create=%v sql_mode=%q, want OFF and ANSI_QUOTES", quote, mode)
 	}
 }
