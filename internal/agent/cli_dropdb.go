@@ -79,6 +79,7 @@ Simpan juga salinannya di server lain, misalnya:
 const (
 	causeExit        = "mysqldump keluar dengan kode %d"
 	causeNoStart     = "mysqldump tidak bisa dijalankan: %v"
+	causeKilled      = "mysqldump dihentikan oleh sinyal (%v)"
 	causeNotComplete = `baris terakhir berkas bukan "-- Dump completed"`
 	causeNoDatabase  = "berkas tidak memuat baris CREATE DATABASE untuk database ini"
 	causeFewTables   = "berkas memuat %d baris CREATE TABLE untuk %d tabel"
@@ -613,6 +614,11 @@ func (b *backup) fill(ctx context.Context, s *rootSession, name string, tables i
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
+		// Killed from outside (the OOM killer, a person): not its own exit,
+		// so not a dump that failed.
+		if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return fmt.Errorf(causeKilled, ws.Signal())
+		}
 		cause := fmt.Sprintf(causeExit, exit.ExitCode())
 		if first, _, _ := strings.Cut(strings.TrimSpace(stderr.String()), "\n"); first != "" {
 			cause += ": " + first

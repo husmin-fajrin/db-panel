@@ -1131,6 +1131,15 @@ func TestDropDatabaseBackupRefusals(t *testing.T) {
 		}, fmt.Sprintf("berkas %s tidak bisa dibuat: open %s: permission denied", path, path)},
 		"mysqldump missing": {func(t *testing.T) { setVar(t, &cliMysqldump, missing) },
 			fmt.Sprintf("mysqldump tidak bisa dijalankan: fork/exec %s: no such file or directory", missing)},
+		"mysqldump killed": {func(t *testing.T) {
+			// Killed from outside (as by the OOM killer): it did not run to
+			// its own exit, so it is no failed dump.
+			script := filepath.Join(t.TempDir(), "mysqldump")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\necho '-- MySQL dump'\nkill -KILL $$\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			setVar(t, &cliMysqldump, script)
+		}, "mysqldump dihentikan oleh sinyal (killed)"},
 		"file sync fails": {func(t *testing.T) {
 			fsys := osBackupFS
 			fsys.Create = func(p string) (backupFile, error) {
