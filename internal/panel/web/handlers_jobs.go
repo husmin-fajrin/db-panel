@@ -171,6 +171,10 @@ type retryView struct {
 	Server      store.Server
 	Wipe        wipeGroups
 	AcceptLabel string
+	// Warnings: for a rebuild of an old master that has not settled (the
+	// server is still quarantined), the leftover warnings of its rebuild
+	// form (leftoverWarnings, R-16); the Setujui dialog shows them too.
+	Warnings []string
 	// Form is the id of the form the acknowledgement belongs to when it
 	// is not inside it ("" for the retry dialog).
 	Form string
@@ -335,6 +339,10 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 	}
 	if p.CanApprove && p.DropsData && params.RebuildOldMaster && job.Kind == orchestrator.KindCreateReplica {
 		p.ApproveConns = &retryView{Server: srv, AcceptLabel: acceptLabel(a.connectionsOf(r.Context(), srv)), Form: "form-setujui"}
+		if p.ApproveConns.Warnings, err = a.unsettledWarnings(srv); err != nil {
+			a.internalError(w, "leftover warnings", err)
+			return
+		}
 	}
 	if p.CanRetry && params.RebuildOldMaster && job.Kind == orchestrator.KindCreateReplica {
 		if p.RebuildURL, err = a.rebuildURL(srv); err != nil {
@@ -557,8 +565,24 @@ func (a *app) retryView(r *http.Request, srv store.Server, params jobParams) (*r
 	}
 	if params.RebuildOldMaster {
 		v.AcceptLabel = acceptLabel(a.connectionsOf(r.Context(), srv))
+		w, err := a.unsettledWarnings(srv)
+		if err != nil {
+			return nil, err
+		}
+		v.Warnings = w
 	}
 	return v, nil
+}
+
+// unsettledWarnings are the leftover warnings of a rebuild of srv while its
+// quarantine has not ended (role quarantined): what the rebuild form says
+// (leftoverWarnings). None once the settle made it a replica: its data was
+// replaced.
+func (a *app) unsettledWarnings(srv store.Server) ([]string, error) {
+	if srv.Role != store.RoleQuarantined {
+		return nil, nil
+	}
+	return a.leftoverWarnings(srv)
 }
 
 // prepareRetry reads the databases of the job's server and of its master

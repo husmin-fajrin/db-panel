@@ -596,7 +596,7 @@ func TestControlRefusalLogCensored(t *testing.T) {
 var snoozeKindLabels = []string{
 	"Kunci replika terlepas", "Master diduga tumbang", "Disk kritis", "Promote selesai sebagian",
 	"Batas waktu kunci promote", "Master lama dikarantina", "Master tidak dipin",
-	"Master lama belum terjamin terkunci saat menyala", "Master lama sempat bisa ditulis saat menyala",
+	"Master lama belum terjamin terkunci saat menyala", "Master lama sempat bisa ditulis",
 	"Kunci start master lama tidak dipakai MySQL", "MySQL master lama gagal menyala karena kunci start",
 	"Kunci promote master dipertahankan",
 }

@@ -338,7 +338,13 @@
       <span class="text-warning-text mt-0.5">{{template "icon" "warning"}}</span>
       <h2 class="min-w-0 flex-1">Master lama (dikarantina sejak <span class="mono">{{fmtDateTime (or .Promotion.FinishedAt .Promotion.StartedAt)}}</span>, promote {{if .Planned}}terencana{{else}}darurat{{end}} ke {{or .NewMaster.Name "master baru"}})</h2>
     </div>
+    {{if .RebuildJobID}}
+    {{/* A rebuild runs or waits for an approval: only T22 and its job
+         (spec 5.1); the job page offers what can be done now. */}}
+    <div role="status" class="banner banner-info mb-0">{{template "banner-icon" "info"}}<p class="flex-1">{{rebuildRunningText}}</p><a class="btn btn-sm" href="/jobs/{{.RebuildJobID}}">Lihat pekerjaan</a></div>
+    {{else}}
     <div data-status-for="{{$s.ID}}">{{template "status-full" .Status}}</div>
+    {{with .AgentRoleText}}<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<p class="flex-1">{{.}}</p></div>{{end}}
     {{if .CutoverPending}}
     <div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}
       <div class="flex flex-1 flex-col items-start gap-2">
@@ -381,8 +387,6 @@
       {{end}}
       {{if .CopyStarted}}
       <p class="text-sm">{{copyStartedText}}</p>
-      {{else if .RebuildFailed}}
-      <p class="text-sm">{{attemptPendingText}}</p>
       {{else}}
       {{if .CopyUncertain}}<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<p class="flex-1">{{copyUncertainText}}</p></div>{{end}}
       <div class="flex flex-wrap gap-2">
@@ -405,13 +409,12 @@
         {{else if .HasTopology}}
         <a class="btn btn-sm" href="/masters/{{.Topology.MasterServerID}}/replicas/new?bangun-ulang={{$s.ID}}">Bangun ulang sebagai replika</a>
         {{end}}
-        {{if and (not $p.Local) (not .RebuildFailed)}}{{template "server-delete-button" $p}}{{end}}
-        {{if .RebuildFailed}}{{template "cancel-rebuild-attempt" $s}}{{end}}
+        {{if not $p.Local}}{{template "server-delete-button" $p}}{{end}}
       </div>
-      {{if .RebuildFailed}}<p class="help">{{cancelAttemptText}}</p>{{end}}
       {{if .CutoverPending}}<p class="help">Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini.</p>{{end}}
       {{with $p.DeleteBlocked}}{{if not $p.Local}}<p class="help">{{.}}</p>{{end}}{{end}}
     </div>
+    {{end}}
   </div>
   <span hidden data-old-master-end></span>
 </section>

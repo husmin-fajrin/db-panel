@@ -10,6 +10,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -248,5 +249,51 @@ func TestIngestRedactsErrors(t *testing.T) {
 		if strings.Contains(a.Message, "Budi") {
 			t.Errorf("alert %s holds Budi: %s", a.Kind, a.Message)
 		}
+	}
+}
+
+// TestResolveQuarantinedWithRow (spec 5.1, "Monitor"): the role is read
+// before the replica row, so a quarantined server with a row (a rebuild
+// running, or failed before its settle) is judged as an old master: its
+// start lock is judged (master_start_unguarded opens from a report without
+// one), its status is DeriveQuarantined, and the replica rules close with
+// the reason of an old master.
+func TestResolveQuarantinedWithRow(t *testing.T) {
+	for _, state := range []string{store.ReplicaCreating, store.ReplicaFailed} {
+		t.Run(state, func(t *testing.T) {
+			r := newRig(t)
+			mID, topo := r.master("db-lama")
+			rID := r.replica("db-baru", topo)
+			r.promoted(topo, mID, rID, "done", "")
+			// The rebuild added db-lama's row; its role stays quarantined.
+			if _, err := r.st.AddReplica(topo.ID, mID, nil); err != nil {
+				t.Fatal(err)
+			}
+			if state == store.ReplicaFailed {
+				if err := r.st.SetReplicaState(mID, store.ReplicaFailed, "gagal"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if srv, err := r.st.GetServer(mID); err != nil || srv.Role != store.RoleQuarantined {
+				t.Fatalf("db-lama role = %q (%v), want quarantined", srv.Role, err)
+			}
+			if _, err := r.st.OpenAlert(store.Alert{Kind: KindReplicaStopped, ServerID: mID, TopologyID: topo.ID,
+				OpenedAt: r.clk.Now(), Message: "Replikasi berhenti."}); err != nil {
+				t.Fatal(err)
+			}
+			r.agent(mID, true, quarSnap(nil)).attach()
+			r.m.tick()
+			v := r.view(mID)
+			if v.Role != store.RoleQuarantined || v.Status.Code != StatusQuarantined {
+				t.Fatalf("view = role %q status %q, want quarantined and %q", v.Role, v.Status.Code, StatusQuarantined)
+			}
+			if !r.isOpen(mID, KindMasterStartUnguarded) {
+				t.Fatal("master_start_unguarded did not open from a report without a start lock")
+			}
+			as := r.alerts(mID, KindReplicaStopped)
+			if len(as) != 1 || as[0].ClosedAt == nil || !strings.Contains(as[0].CloseReason, "server menjadi master lama") {
+				t.Fatalf("replica_stopped = %+v, want closed as an old master", as)
+			}
+		})
 	}
 }

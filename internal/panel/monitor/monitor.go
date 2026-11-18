@@ -48,6 +48,11 @@ type Deps struct {
 	// Version is the panel's version: tls_verified follows the health
 	// reports only of agents of this version (syncTLSVerified); "" never.
 	Version string
+	// CopyStarted reports whether a rebuild of the old master serverID
+	// began to change its data (orchestrator.RebuildCopyState is
+	// CopyStarted): master_start_late then says the writes can no longer
+	// be checked and closes (spec 5.2). nil means never.
+	CopyStarted func(serverID int64) (bool, error)
 }
 
 // View is what the panel knows of one server's health.
@@ -118,6 +123,7 @@ type Monitor struct {
 	sendWeekly      func(ctx context.Context, text string) error
 	webCert         func() (int64, time.Time, bool)
 	version         string
+	copyStarted     func(serverID int64) (bool, error) // Deps.CopyStarted; nil never
 
 	sampleMu    sync.Mutex            // guards the two maps below; never held with mu
 	lastSample  map[int64]time.Time   // when each server's last sample was taken in
@@ -149,6 +155,7 @@ func New(d Deps) *Monitor {
 		sendWeekly:      d.SendWeekly,
 		webCert:         d.WebCert,
 		version:         d.Version,
+		copyStarted:     d.CopyStarted,
 		lastSample:      make(map[int64]time.Time),
 		sampleDrops:     make(map[int64]sampleDrops),
 	}

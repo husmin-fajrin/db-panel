@@ -37,3 +37,15 @@
 </div>
 {{end}}
 {{end}}
+
+{{define "leftover-warnings"}}
+{{/* Peringatan data tertinggal master lama yang belum settle (R-16):
+     baris yang sama dengan form Bangun ulang sebagai replika
+     (leftoverWarnings). Dipakai dialog Ulangi dan dialog Setujui. Data:
+     retryView. */}}
+{{if .Warnings}}
+<div role="alert" class="alert alert-warning flex-col items-start gap-2">
+  <ul class="list-disc ml-6">{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>
+</div>
+{{end}}
+{{end}}

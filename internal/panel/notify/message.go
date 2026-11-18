@@ -80,7 +80,7 @@ var kindNames = map[string]string{
 	monitor.KindMasterUnpinned:      "master tidak dipin",
 
 	monitor.KindMasterStartUnguarded: "master lama belum terjamin terkunci saat menyala",
-	monitor.KindMasterStartLate:      "master lama sempat bisa ditulis saat menyala",
+	monitor.KindMasterStartLate:      "master lama sempat bisa ditulis",
 	monitor.KindMasterStartBypassed:  "kunci start master lama tidak dipakai MySQL",
 	monitor.KindMasterStartBlocked:   "MySQL master lama gagal menyala karena kunci start",
 	monitor.KindMasterLockKept:       "kunci promote master dipertahankan",

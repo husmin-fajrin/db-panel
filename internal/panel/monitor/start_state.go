@@ -41,9 +41,10 @@ func startDecidedAt(at time.Time, ageSec int64) time.Time {
 }
 
 // startKindAlert maps a kind of the start state to its alert kind, the
-// text the alert opens with and the reason its end closes it with (the
-// reasons the start events have always used); ok is false for anything
-// unknown.
+// text the alert opens with (for late the text of a start; reconcileStart
+// picks the late message by lateMessage) and the reason its end closes it
+// with (the reasons the start events have always used); ok is false for
+// anything unknown.
 func startKindAlert(e proto.StartKindState) (kind, msg, overReason string, ok bool) {
 	switch e.Kind {
 	case proto.QuarantineStartLate:
@@ -110,13 +111,17 @@ func (m *Monitor) markStart(serverID int64, kind, startID string) {
 //  4. decided before the promotion's start minus startResultSlack (an
 //     earlier quarantine): nothing, no mark;
 //  5. an alert of the kind is open: it now stands for this start (a
-//     blocked one takes this entry's lock file); mark = id. A late alert
+//     blocked one takes this entry's lock file, a late one T1b when this
+//     entry is unverified); mark = id. A late alert
 //     that "Periksa data tertinggal" already answered (the check is later
 //     than its opening, as closeStartAlerts judges) is closed first and
 //     the entry goes on to 6 and 7: it is a newer start;
 //  6. late, and a "Periksa data tertinggal" result is later than decided:
 //     mark = id, nothing opens;
 //  7. the alert opens; only if it did, mark = id.
+//
+// A late alert's message follows lateMessage: the entry's remark, the
+// copy state and whether a topology still names the server.
 //
 // At most maxStartKinds entries are looked at. A failed mark write may
 // show a start twice; a start is never accounted without its alert. The
@@ -181,6 +186,9 @@ func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSna
 	case !errors.Is(err, store.ErrNotFound):
 		m.log.Warn("start state: promotion", "server_id", id, "err", err)
 	}
+	if kind == KindMasterStartLate {
+		msg = lateMessage(e.While, m.lateOpenFacts(id, s))
+	}
 	a, err := m.st.GetOpenAlert(kind, id)
 	switch {
 	case err == nil && kind == KindMasterStartLate && m.leftoverCheckedAfter(a):
@@ -192,7 +200,11 @@ func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSna
 		}
 		ups = append(ups, alertUpdate{a.ID, kind, id, false})
 	case err == nil:
-		if kind == KindMasterStartBlocked && a.Message != msg {
+		// A blocked alert takes this entry's lock file; a late alert takes
+		// T1b when this newer entry is unverified (spec 5.2).
+		rewrite := kind == KindMasterStartBlocked ||
+			(kind == KindMasterStartLate && e.While == proto.QuarantineWhileUnverified)
+		if rewrite && a.Message != msg {
 			if err := m.st.SetAlertMessage(a.ID, msg); err != nil {
 				m.log.Warn("update alert message", "server_id", id, "kind", kind, "err", err)
 			}
@@ -321,4 +333,96 @@ func (m *Monitor) closeStartAlertsLeftQuarantine(id int64, snap *proto.HealthSna
 		s.startPin = pin
 	}
 	return ups
+}
+
+// lateFacts are what the message and the close of master_start_late of a
+// quarantined server depend on (spec 5.2).
+type lateFacts struct {
+	// leftoverChecked: a "Periksa data tertinggal" result is later than
+	// the open alert (leftoverCheckedAfter).
+	leftoverChecked bool
+	// named: a topology still names the server as its old master; not
+	// once the topology promoted again.
+	named bool
+	// copyStarted: a rebuild of the server began to change its data
+	// (Deps.CopyStarted).
+	copyStarted bool
+	// unverified: the late entry of the server's latest report has the
+	// remark proto.QuarantineWhileUnverified.
+	unverified bool
+}
+
+// lateMessage is the message master_start_late opens with for a late
+// entry with the remark while (proto.StartKindState.While): unverified
+// always T1b; else, without a topology that names the server, T25; in the
+// state CopyStarted T2b; a relock (running) T1; a start (no remark) the
+// text of plan 5a. An open alert takes T1b too (reconcileStart).
+func lateMessage(while string, f lateFacts) string {
+	switch {
+	case while == proto.QuarantineWhileUnverified:
+		return startUnverifiedText
+	case !f.named:
+		return startLateNoTopologyText
+	case f.copyStarted:
+		return startLateCopiedText
+	case while == proto.QuarantineWhileRunning:
+		return startRelockedText
+	}
+	return startLateText
+}
+
+// lateCloseReason is why an open master_start_late of a quarantined server
+// closes, "" while it stays open: a later "Periksa data tertinggal"; else,
+// unless the latest late entry is unverified (the guard still cannot lock,
+// so the alert stays), no topology names the server (T26) or a rebuild
+// began its copy (T2). An alert opened in the state CopyStarted closes at
+// the next round: one critical and one close notification per event, on
+// purpose (R-27).
+func lateCloseReason(f lateFacts) string {
+	switch {
+	case f.leftoverChecked:
+		return leftoverCheckedReason
+	case f.unverified:
+		return ""
+	case !f.named:
+		return noTopologyCloseReason
+	case f.copyStarted:
+		return copyStartedCloseReason
+	}
+	return ""
+}
+
+// copyStartedOf asks Deps.CopyStarted about serverID; false when there is
+// none or it fails (nothing is closed on a guess, logged). The caller
+// holds mu.
+func (m *Monitor) copyStartedOf(serverID int64) bool {
+	if m.copyStarted == nil {
+		return false
+	}
+	ok, err := m.copyStarted(serverID)
+	if err != nil {
+		m.log.Warn("start alerts: copy state", "server_id", serverID, "err", err)
+		return false
+	}
+	return ok
+}
+
+// lateUnverified reports whether the late entry of snap (the agent keeps
+// one, its latest) has the remark unverified.
+func lateUnverified(snap *proto.HealthSnapshot) bool {
+	if snap == nil || snap.StartResult == nil {
+		return false
+	}
+	for _, e := range snap.StartResult.Kinds[:min(len(snap.StartResult.Kinds), maxStartKinds)] {
+		if e.Kind == proto.QuarantineStartLate {
+			return e.While == proto.QuarantineWhileUnverified
+		}
+	}
+	return false
+}
+
+// lateOpenFacts are the facts of a late entry about to open (or rewrite)
+// the alert of the quarantined server s; the caller holds mu.
+func (m *Monitor) lateOpenFacts(id int64, s *serverState) lateFacts {
+	return lateFacts{named: s.topoID != 0, copyStarted: m.copyStartedOf(id)}
 }

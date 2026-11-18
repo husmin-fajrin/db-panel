@@ -387,6 +387,23 @@ const (
 	startBlockedText   = "MySQL master lama gagal menyala karena berkas kunci tidak terbaca"
 )
 
+// Texts of master_start_late of plan 5b-2a (spec 5.2, 5.8), word for
+// word: T1, T1b, T2b, T25 open it; T2 and T26 close it.
+const (
+	startRelockedText = "MySQL master lama sempat tidak terkunci selagi berjalan; agent sudah menguncinya lagi. " +
+		"Tulisan yang masuk selama itu tidak ada di master baru: jalankan Periksa data tertinggal"
+	startUnverifiedText = "Agent tidak bisa memeriksa atau memasang lagi kunci baca-saja master lama ini (login atau hak akun " +
+		"MySQL agent ditolak, atau MySQL tidak menjawab perintahnya); master lama mungkin bisa ditulis. Jalankan di server " +
+		"itu: sudo dbpanel agent reset-admin. Sesudah itu jalankan Periksa data tertinggal"
+	startLateCopiedText = "master lama sempat bisa ditulis; bangun ulang sudah mulai mengganti data server ini, jadi tulisan " +
+		"itu tidak bisa diperiksa lagi. Bila agent lalu menolak mengakhiri karantina, mulai lagi Bangun ulang sebagai " +
+		"replika; atau hapus server ini"
+	startLateNoTopologyText = "master lama sempat bisa ditulis; topologi ini sudah promote lagi, jadi tulisan itu tidak bisa " +
+		"diperiksa lagi dari panel. Hapus server ini"
+	copyStartedCloseReason = "bangun ulang sudah mulai mengganti data server ini; tulisan itu tidak bisa diperiksa lagi"
+	noTopologyCloseReason  = "topologi ini sudah promote lagi; tulisan itu tidak bisa diperiksa lagi dari panel"
+)
+
 // Bounds on the agent's own words in an alert message (they end up in
 // Telegram texts too).
 const (

@@ -116,8 +116,6 @@ var notices = map[string]string{
 	"dihentikan": "Replikasi dihentikan. Lag membesar sampai Anda menjalankannya lagi dengan Start replika.",
 	"dijalankan": "Replikasi dijalankan lagi. Status terbaru tampil setelah laporan berikutnya dari agent.",
 	"dikunci":    "Replika dikunci hanya-baca lagi.",
-	"percobaan-dibatalkan": "Percobaan bangun ulang dibatalkan; server ini kembali tercatat sebagai master lama yang " +
-		"dikarantina.",
 	"dilepas": "Replika dilepas. MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; " +
 		"panel tidak lagi memantaunya.",
 	"dilepas-henti": "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca; " +
@@ -452,14 +450,19 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 		a.internalError(w, "get inventory", err)
 		return
 	}
-	reps, err := a.Store.ListReplicas(topo.ID)
-	if err != nil {
-		a.internalError(w, "list replicas", err)
-		return
-	}
-	names, err := a.serverNames()
+	servers, err := a.Store.ListServers()
 	if err != nil {
 		a.internalError(w, "list servers", err)
+		return
+	}
+	byID := make(map[int64]store.Server, len(servers))
+	names := make(map[int64]string, len(servers))
+	for _, s := range servers {
+		byID[s.ID], names[s.ID] = s, s.Name
+	}
+	reps, err := a.listedReplicas(topo.ID, byID)
+	if err != nil {
+		a.internalError(w, "list replicas", err)
 		return
 	}
 	p.Source = net.JoinHostPort(topo.SourceHost, strconv.Itoa(topo.SourcePort))
@@ -555,6 +558,16 @@ func (a *app) replicaForm(r *http.Request, master store.Server, checked map[stri
 		p.Databases = append(p.Databases, databaseChoice{DatabaseInfo: d, Checked: checked == nil || checked[d.Name]})
 	}
 	if rebuild != 0 {
+		// A target with an unfinished job (its rebuild runs or waits for
+		// an approval) is refused as the orchestrator refuses it; its box
+		// links that job (spec 5.1).
+		if _, busy, err := a.Store.ActiveJobForServer(rebuild); err != nil {
+			return p, err
+		} else if busy {
+			p.RebuildBad = true
+			p.Flash = "server tujuan " + orchestrator.ErrBusy.Error() // the orchestrator's refusal (refuseBusy)
+			return p, nil
+		}
 		if p.Rebuild, err = a.rebuildTarget(r.Context(), master, rebuild, askApproval(r)); err != nil {
 			return p, err
 		}
@@ -770,14 +783,11 @@ type replicaPage struct {
 	Busy bool
 	// The controls that make sense now.
 	CanStop, CanStart, CanRelock, CanResync, CanDetach bool
-	// RebuildURL is the rebuild form of an old master left by a failed
-	// rebuild (oldMasterAwaitingRebuild); Resync ulang and Lepas replika
-	// are not offered on it.
-	RebuildURL string
-	// CancelAttempt: the server is an old master left by a failed rebuild
-	// (role replica): "Batalkan percobaan bangun ulang" is offered in
-	// place of Lepas replika (G-2).
-	CancelAttempt bool
+	// Quarantined: the server is an old master whose quarantine has not
+	// ended (role quarantined, its rebuild running or failed before its
+	// settle): neither Resync ulang nor Lepas replika is offered, T23
+	// links the server page, where its actions are (spec 5.1).
+	Quarantined bool
 	// CanRepoint offers "Arahkan sekarang" (needs_repoint, spec 5.6);
 	// RepointInfo is why it just did not repoint (the replica must be
 	// rebuilt), shown as information.
@@ -922,18 +932,14 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 		rep.State == store.ReplicaNeedsRebuild)
 	p.CanRepoint = !p.Busy && rep.State == store.ReplicaNeedsRepoint
 	p.CanDetach = !p.Busy
-	// An old master left by a failed rebuild: its agent stays quarantined.
-	// Resync ulang is no rebuild (no approval check before it starts, no
-	// connections acknowledgement, the server stays the topology's old
-	// master), and Lepas replika would leave the panel treating it as an
-	// unassigned server: only the rebuild is offered.
-	if p.RebuildURL, err = a.rebuildURL(srv); err != nil {
-		a.internalError(w, "old master check", err)
-		return
-	}
-	if p.RebuildURL != "" {
+	// A quarantined old master (its rebuild running or failed before its
+	// settle; also once its topology promoted again): the orchestrator
+	// refuses Resync ulang (no rebuild: no approval check, no connections
+	// acknowledgement) and Lepas replika (the panel would treat it as an
+	// unassigned server); its actions are on the server page.
+	if srv.Role == store.RoleQuarantined {
+		p.Quarantined = true
 		p.CanResync, p.CanDetach = false, false
-		p.CancelAttempt = srv.Role == store.RoleReplica
 	}
 	a.render.renderStatus(w, status, "replica_detail", p)
 }

@@ -372,12 +372,17 @@ type oldMasterBox struct {
 	StartLate       bool
 	LeftoverSummary string
 	Online, Busy    bool
-	// RebuildFailed: the server is an old master left by a failed rebuild
-	// (oldMasterAwaitingRebuild, role replica): only Bangun ulang
-	// sebagai replika works on it, not Periksa or Amankan data tertinggal
-	// (they need the quarantined role) nor Hapus server (a registered
-	// replica).
-	RebuildFailed bool
+	// RebuildJobID: a rebuild of this old master runs or waits for an
+	// approval: the box shows only T22 and a link to this job (spec 5.1);
+	// "" otherwise.
+	RebuildJobID string
+	// HasRow: the server has a replica row (a rebuild failed before its
+	// settle).
+	HasRow bool
+	// AgentRole: the role pin the agent's last report gives, when it is a
+	// role name other than quarantined (agentRoleName); "" otherwise. The
+	// panel changes no role for it: the box says what is left (T3, T3b).
+	AgentRole string
 	// CopyStarted: evidence that a rebuild of this old master began to
 	// change its data (orchestrator.RebuildCopyState CopyStarted): Periksa
 	// and Amankan data tertinggal are not offered, the box says why (G-3).
@@ -393,14 +398,51 @@ type oldMasterBox struct {
 const (
 	msgCopyStartedForm = "Bangun ulang sebelumnya sudah mulai menyalin data ke server ini; transaksi yang tidak sampai ke " +
 		"master baru tidak bisa lagi diperiksa atau diamankan lewat panel."
-	msgAttemptPending = "Data tertinggal belum bisa diperiksa selama percobaan bangun ulang yang gagal masih tercatat. " +
-		"Untuk memeriksa atau mengamankannya, tekan dulu \"Batalkan percobaan bangun ulang\" di halaman server ini."
 	// msgCopyUncertain: the box warning and the form warning when a copy
 	// was sent but nothing shows it began (H-1d).
 	msgCopyUncertain = "Bangun ulang sebelumnya berhenti di tahap Salin data. Bila penyalinan sempat mulai, catatan " +
 		"transaksi lama di server ini sudah dihapus, dan hasil \"tidak ada data tertinggal\" dari pemeriksaan ini belum " +
 		"tentu benar."
 )
+
+// The box of a quarantined old master whose agent reports another role pin
+// (spec 5.1, T3 and T3b); %s is the pin.
+const (
+	msgAgentRoleNoRow = "Agent server ini melaporkan peran %s, bukan karantina. Mulai lagi Bangun ulang sebagai replika, " +
+		"atau hapus server ini."
+	msgAgentRoleWithRow = "Agent server ini melaporkan peran %s, bukan karantina. Mulai lagi Bangun ulang sebagai replika, " +
+		"hapus server ini, atau tekan \"Ulangi dari tahap ini\" pada pekerjaan bangun ulangnya."
+	// msgRebuildRunning is T22, followed by a link to the job.
+	msgRebuildRunning = "Bangun ulang sebagai replika sedang berjalan."
+	// msgQuarantinedReplica is T23, on the replica page of a quarantined
+	// server, followed by a link to its server page.
+	msgQuarantinedReplica = "Server ini master lama yang dikarantina. Tindakannya ada di halaman server."
+)
+
+// AgentRoleText is the box sentence for AgentRole (T3 without a replica
+// row, T3b with one); "" when the agent reports quarantined or nothing.
+func (b *oldMasterBox) AgentRoleText() string {
+	switch {
+	case b.AgentRole == "":
+		return ""
+	case b.HasRow:
+		return fmt.Sprintf(msgAgentRoleWithRow, b.AgentRole)
+	}
+	return fmt.Sprintf(msgAgentRoleNoRow, b.AgentRole)
+}
+
+// agentRoleName is the role pin of a report as the box may name it: one of
+// the role names an agent pins other than quarantined (spec 5.1: replica,
+// master, unassigned), as it is; "" for quarantined, none, and any other
+// value. The pin is the agent's (untrusted) text and nothing bounds it on
+// the way in: a value that is no role name is never printed.
+func agentRoleName(pin string) string {
+	switch pin {
+	case store.RoleReplica, store.RoleMaster, store.RoleUnassigned:
+		return pin
+	}
+	return ""
+}
 
 // copyStatusAdvice replaces, on a quarantined old master whose rebuild
 // began its copy, the monitor's advice to run Periksa data tertinggal
@@ -509,7 +551,19 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 	}
 	box := &oldMasterBox{Promotion: prom, Planned: prom.Mode == proto.PromotePlanned, Online: p.Online,
 		QuarantinePending: orchestrator.QuarantinePending(prom), Status: a.statusOf(srv.ID, srv.Role),
-		Busy: p.ActiveJob != nil, RebuildFailed: srv.Role != store.RoleQuarantined}
+		Busy: p.ActiveJob != nil}
+	if j := p.ActiveJob; j != nil && j.Kind == orchestrator.KindCreateReplica && paramsOf(*j).RebuildOldMaster {
+		box.RebuildJobID = j.ID
+	}
+	switch _, err := a.Store.GetReplicaByServer(srv.ID); {
+	case err == nil:
+		box.HasRow = true
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+	if v, ok := a.Monitor.View(srv.ID); ok && v.Snap != nil {
+		box.AgentRole = agentRoleName(v.Snap.RolePin)
+	}
 	if box.NewMaster, err = a.Store.GetServer(prom.NewMasterServerID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
@@ -631,12 +685,6 @@ func (a *app) oldMasterFromPath(w http.ResponseWriter, r *http.Request) (store.S
 	}
 	return srv, true
 }
-
-// msgCancelAttempt is the sentence next to "Batalkan percobaan bangun
-// ulang" and in its confirmation (G-2).
-const msgCancelAttempt = "Server ini kembali tercatat sebagai master lama yang dikarantina; data di server ini tidak diubah. " +
-	"Sesudah itu Hapus server dan Bangun ulang sebagai replika tersedia lagi, dan tombol \"Ulangi dari tahap ini\" pada " +
-	"pekerjaan yang gagal tidak bisa dipakai lagi."
 
 // startLeftover is "Periksa data tertinggal" (no token: it only reads).
 func (a *app) startLeftover(w http.ResponseWriter, r *http.Request) {
@@ -954,6 +1002,51 @@ func startLateWarning(srv store.Server) string {
 	return fmt.Sprintf("MySQL %s sempat bisa ditulis saat menyala setelah Periksa data tertinggal terakhir; tulisan itu belum diperiksa", srv.Name)
 }
 
+// leftoverWarnings are the warnings about the leftover data of the
+// quarantined old master srv that a rebuild drops (G-3, H-1d, SP-2): the
+// transactions the last "Periksa data tertinggal" found, or that it never
+// ran; that it was writable after that check (master_start_late open);
+// the copy state of its earlier rebuilds. The rebuild form, and the Ulangi
+// and Setujui dialogs of a rebuild that has not settled, show these same
+// lines (R-16).
+func (a *app) leftoverWarnings(srv store.Server) ([]string, error) {
+	prom, err := a.Store.PromotionByOldMaster(srv.ID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	check, checked := orchestrator.LeftoverOf(prom)
+	copyState, err := orchestrator.RebuildCopyState(a.Store, srv.ID)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	switch {
+	case copyState == orchestrator.CopyStarted:
+		// Periksa and Amankan cannot run: after a copy began the data is
+		// gone, which the last sentence says.
+		if a.startLateOpen(srv.ID) {
+			out = append(out, startLateWarning(srv)+".")
+		}
+		out = append(out, msgCopyStartedForm)
+		return out, nil
+	case a.startLateOpen(srv.ID):
+		out = append(out, startLateWarning(srv)+": transaksi yang tidak sampai ke master baru akan "+
+			"hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu.")
+	case !checked:
+		out = append(out, "Data tertinggal belum diperiksa: transaksi yang tidak sampai ke master baru "+
+			"akan hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu bila ragu.")
+	case check.Transactions > 0:
+		out = append(out, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
+			"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
+	}
+	// A copy sent with no evidence it began: Periksa stays offered, its
+	// result may be wrong (H-1d).
+	if copyState == orchestrator.CopyUncertain {
+		out = append(out, msgCopyUncertain)
+	}
+	return out, nil
+}
+
 // rebuildTarget checks that id is the quarantined old master of master's
 // topology and words what rebuilding it loses; with ask its agent is asked
 // for root's approval (see askApproval).
@@ -997,53 +1090,11 @@ func (a *app) rebuildTarget(ctx context.Context, master store.Server, id int64, 
 		}
 	}
 	info.AcceptLabel = acceptLabel(conns)
-	prom, err := a.Store.PromotionByOldMaster(id)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, err
-	}
-	check, checked := orchestrator.LeftoverOf(prom)
-	copyState, err := orchestrator.RebuildCopyState(a.Store, srv.ID)
+	leftover, err := a.leftoverWarnings(srv)
 	if err != nil {
 		return nil, err
 	}
-	copied := copyState == orchestrator.CopyStarted
-	// Periksa and Amankan cannot run: after a copy began the data is gone;
-	// while a failed attempt is recorded (role replica) they wait for
-	// "Batalkan percobaan bangun ulang" (G-3).
-	noCheck := ""
-	switch {
-	case copied:
-		noCheck = msgCopyStartedForm
-	case srv.Role != store.RoleQuarantined:
-		noCheck = msgAttemptPending
-	}
-	switch {
-	case noCheck != "":
-		if a.startLateOpen(srv.ID) {
-			info.Warnings = append(info.Warnings, startLateWarning(srv)+".")
-		}
-		// After the copy that data is already gone: the sentence below
-		// says so.
-		if check.Transactions > 0 && !copied {
-			info.Warnings = append(info.Warnings, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
-				"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
-		}
-		info.Warnings = append(info.Warnings, noCheck)
-	case a.startLateOpen(srv.ID):
-		info.Warnings = append(info.Warnings, startLateWarning(srv)+": transaksi yang tidak sampai ke master baru akan "+
-			"hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu.")
-	case !checked:
-		info.Warnings = append(info.Warnings, "Data tertinggal belum diperiksa: transaksi yang tidak sampai ke master baru "+
-			"akan hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu bila ragu.")
-	case check.Transactions > 0:
-		info.Warnings = append(info.Warnings, fmt.Sprintf("Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke "+
-			"master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.", check.Transactions))
-	}
-	// A copy sent with no evidence it began: Periksa stays offered, its
-	// result may be wrong (H-1d).
-	if noCheck == "" && copyState == orchestrator.CopyUncertain {
-		info.Warnings = append(info.Warnings, msgCopyUncertain)
-	}
+	info.Warnings = append(info.Warnings, leftover...)
 	if ask {
 		a.rebuildApproval(ctx, info)
 	} else {

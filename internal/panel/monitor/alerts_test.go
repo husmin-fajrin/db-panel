@@ -1792,11 +1792,13 @@ func TestStartLateClosesAfterLeftoverCheck(t *testing.T) {
 	}
 }
 
-// TestStartLateSurvivesRebuildUntilCopied (SP-2): the rebuild of the old
-// master makes it a replica in state creating at once; that does not
-// close master_start_late (its data is still there), nor does a cancel
-// that makes it an old master again. Once the rebuild finished (a replica
-// whose copy is made) the alert closes: the data it speaks of is gone.
+// TestStartLateSurvivesRebuildUntilCopied (SP-2, spec 5.1): the role of
+// an old master stays quarantined through its rebuild (a row creating,
+// failed, dropped for a new rebuild): master_start_late stays open, the
+// data it speaks of is still there. Once the settle ended the quarantine
+// (role replica), the monitor follows at its next round without being
+// told and the alert closes with the reason of a server that is no longer
+// an old master.
 func TestStartLateSurvivesRebuildUntilCopied(t *testing.T) {
 	r := newRig(t)
 	mID, _, _ := r.quarantined(quarSnap(&proto.StartLockState{Present: true, Locked: true}))
@@ -1805,33 +1807,51 @@ func TestStartLateSurvivesRebuildUntilCopied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stillOpen := func(when string) {
+		t.Helper()
+		r.m.tick()
+		if v := r.view(mID); v.Role != store.RoleQuarantined {
+			t.Fatalf("%s: role = %q, want quarantined", when, v.Role)
+		}
+		if !r.isOpen(mID, KindMasterStartLate) {
+			t.Fatalf("master_start_late closed %s", when)
+		}
+	}
 	if _, err := r.st.AddReplica(topo.ID, mID, nil); err != nil {
 		t.Fatal(err)
 	}
-	r.m.tick()
-	if !r.isOpen(mID, KindMasterStartLate) {
-		t.Fatal("master_start_late closed when a rebuild made the server a replica in state creating")
+	stillOpen("while the rebuild runs (row creating)")
+	if err := r.st.SetReplicaState(mID, store.ReplicaFailed, "gagal"); err != nil {
+		t.Fatal(err)
 	}
-	// The rebuild is cancelled: the old master is quarantined again.
+	stillOpen("after the rebuild failed before its settle")
+	// A new rebuild drops the failed row and adds its own.
 	if err := r.st.RemoveReplica(mID); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.st.SetServerRole(mID, store.RoleQuarantined); err != nil {
-		t.Fatal(err)
-	}
-	r.m.tick()
-	if !r.isOpen(mID, KindMasterStartLate) {
-		t.Fatal("master_start_late closed after a cancelled rebuild")
-	}
-	// A rebuild that finished: the copy replaced the data.
+	stillOpen("when the failed row was dropped")
 	if _, err := r.st.AddReplica(topo.ID, mID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.st.SetReplicaState(mID, store.ReplicaReady, ""); err != nil {
+	stillOpen("while the new rebuild runs")
+	// The settle: the role becomes replica in the store; nothing tells
+	// the monitor.
+	const jobID = "0123456789abcdef0123456789abcdef"
+	if err := r.st.CreateJob(store.Job{ID: jobID, Kind: "create_replica", ServerID: mID, ParamsJSON: `{}`,
+		CreatedAt: r.clk.Now()}, []string{"Sambungkan replikasi"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.SettleRebuild(jobID, `{"rebuild_old_master":true,"quarantine_ended":true}`, mID); err != nil {
 		t.Fatal(err)
 	}
 	r.m.tick()
-	closedWithReason(t, r.alerts(mID, KindMasterStartLate))
+	if v := r.view(mID); v.Role != store.RoleReplica {
+		t.Fatalf("after the settle: role = %q, want replica", v.Role)
+	}
+	as := r.alerts(mID, KindMasterStartLate)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != notQuarantinedReason {
+		t.Fatalf("master_start_late after the settle = %+v, want closed with %q", as, notQuarantinedReason)
+	}
 }
 
 // TestLockKeptOversizeStillAlerts (SP-9): a kept-lock event too large or
@@ -2907,5 +2927,270 @@ func TestStartStateR4MarkCacheDroppedWithServer(t *testing.T) {
 	}
 	if m, err := r.st.StartMarks(id); err != nil || len(m) != 0 {
 		t.Fatalf("marks after the delete = %v, %v", m, err)
+	}
+}
+
+// Plan 5b-2a: the texts of master_start_late (spec 5.8), letter for
+// letter.
+const (
+	wantStartRelockedText    = "MySQL master lama sempat tidak terkunci selagi berjalan; agent sudah menguncinya lagi. Tulisan yang masuk selama itu tidak ada di master baru: jalankan Periksa data tertinggal"
+	wantStartUnverifiedText  = "Agent tidak bisa memeriksa atau memasang lagi kunci baca-saja master lama ini (login atau hak akun MySQL agent ditolak, atau MySQL tidak menjawab perintahnya); master lama mungkin bisa ditulis. Jalankan di server itu: sudo dbpanel agent reset-admin. Sesudah itu jalankan Periksa data tertinggal"
+	wantCopyStartedReason    = "bangun ulang sudah mulai mengganti data server ini; tulisan itu tidak bisa diperiksa lagi"
+	wantStartLateCopiedText  = "master lama sempat bisa ditulis; bangun ulang sudah mulai mengganti data server ini, jadi tulisan itu tidak bisa diperiksa lagi. Bila agent lalu menolak mengakhiri karantina, mulai lagi Bangun ulang sebagai replika; atau hapus server ini"
+	wantStartLateNoTopoText  = "master lama sempat bisa ditulis; topologi ini sudah promote lagi, jadi tulisan itu tidak bisa diperiksa lagi dari panel. Hapus server ini"
+	wantNoTopologyCloseReson = "topologi ini sudah promote lagi; tulisan itu tidak bisa diperiksa lagi dari panel"
+)
+
+// lateWhile is a late entry of the start state with its remark (While).
+func lateWhile(id, while string) proto.StartKindState {
+	e := sk(late, id, 0, false)
+	e.While = while
+	return e
+}
+
+// copyState makes the monitor see the copy state of every rebuild as
+// state (orchestrator.CopyState by name; only "started" is CopyStarted).
+func (r *rig) copyState(state string) {
+	r.m.mu.Lock()
+	r.m.copyStarted = func(int64) (bool, error) { return state == "started", nil }
+	r.m.mu.Unlock()
+}
+
+// TestStartResultsJudgedWhileRebuildRunning (spec 5.1): the role stays
+// quarantined while the rebuild runs, so a late entry in its report is
+// judged then too.
+func TestStartResultsJudgedWhileRebuildRunning(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	topo, err := r.st.GetTopologyByOldMaster(mID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.st.AddReplica(topo.ID, mID, nil); err != nil {
+		t.Fatal(err)
+	}
+	const jobID = "0123456789abcdef0123456789abcdee"
+	if err := r.st.CreateJob(store.Job{ID: jobID, Kind: "create_replica", ServerID: mID,
+		ParamsJSON: `{"rebuild_old_master":true}`, CreatedAt: r.clk.Now()}, []string{"Salin data"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.UpdateJob(jobID, store.JobRunning, 0, "", r.clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	ma.state(lateWhile("L1", proto.QuarantineWhileRunning))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	if a := r.openAlert(mID, KindMasterStartLate); a.Message != wantStartRelockedText {
+		t.Fatalf("message = %q", a.Message)
+	}
+}
+
+// TestRelockedOpensLateAlertWithItsText: a late entry of a relock
+// (While running) opens with T1; a start (no While) with the old text.
+func TestRelockedOpensLateAlertWithItsText(t *testing.T) {
+	for _, tc := range []struct{ while, want string }{
+		{proto.QuarantineWhileRunning, wantStartRelockedText},
+		{"", wantStartLateText},
+	} {
+		r := newRig(t)
+		mID, _, ma := r.quarantined(plainQuar())
+		ma.state(lateWhile("L1", tc.while))
+		ma.send()
+		if a := r.openAlert(mID, KindMasterStartLate); a.Message != tc.want {
+			t.Fatalf("while %q: message = %q, want %q", tc.while, a.Message, tc.want)
+		}
+	}
+}
+
+// TestUnverifiedOpensLateAlert: a late entry the guard could not verify
+// opens with T1b.
+func TestUnverifiedOpensLateAlert(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.state(lateWhile("U1", proto.QuarantineWhileUnverified))
+	ma.send()
+	if a := r.openAlert(mID, KindMasterStartLate); a.Message != wantStartUnverifiedText {
+		t.Fatalf("message = %q", a.Message)
+	}
+}
+
+// TestUnverifiedReplacesOpenLateMessage: an open late alert with another
+// message takes T1b when a newer late entry is unverified; it is not
+// opened twice.
+func TestUnverifiedReplacesOpenLateMessage(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.state(lateWhile("L1", proto.QuarantineWhileRunning))
+	ma.send()
+	first := r.openAlert(mID, KindMasterStartLate)
+	if first.Message != wantStartRelockedText {
+		t.Fatalf("first message = %q", first.Message)
+	}
+	r.clk.Add(time.Minute)
+	ma.state(lateWhile("U2", proto.QuarantineWhileUnverified))
+	ma.send()
+	r.m.tick()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	if a := r.openAlert(mID, KindMasterStartLate); a.ID != first.ID || a.Message != wantStartUnverifiedText {
+		t.Fatalf("alert = %d %q, want %d with T1b", a.ID, a.Message, first.ID)
+	}
+	if got := r.mark(mID, KindMasterStartLate); got != "U2" {
+		t.Fatalf("mark = %q, want U2", got)
+	}
+}
+
+// TestUnverifiedNotClosedByCopyStarted: the remark unverified keeps T1b
+// in the state CopyStarted and the alert stays open: the guard still
+// cannot lock.
+func TestUnverifiedNotClosedByCopyStarted(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	r.copyState("started")
+	ma.state(lateWhile("U1", proto.QuarantineWhileUnverified))
+	ma.send()
+	r.m.tick()
+	r.m.tick()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	if a := r.openAlert(mID, KindMasterStartLate); a.Message != wantStartUnverifiedText {
+		t.Fatalf("message = %q", a.Message)
+	}
+}
+
+// TestLateAlertFollowsCopyState (SEC-226, R-27): in the state CopyStarted
+// a late alert opens with T2b and closes at the monitor's next round with
+// T2; an open alert closes with T2 once the copy started. An uncertain
+// copy, or none, closes nothing.
+func TestLateAlertFollowsCopyState(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	r.copyState("started")
+	ma.state(lateWhile("L1", proto.QuarantineWhileRunning))
+	ma.send()
+	if a := r.alerts(mID, KindMasterStartLate); len(a) != 1 || a[0].Message != wantStartLateCopiedText {
+		t.Fatalf("alerts = %+v, want one with T2b", a)
+	}
+	r.m.tick()
+	as := r.alerts(mID, KindMasterStartLate)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != wantCopyStartedReason {
+		t.Fatalf("alerts = %+v, want one closed with T2", as)
+	}
+	// The same entry again opens nothing (it is accounted for).
+	ma.send()
+	r.m.tick()
+	r.wantAlerts(mID, KindMasterStartLate, 1, false)
+
+	for _, state := range []string{"uncertain", "not started"} {
+		r := newRig(t)
+		mID, _, ma := r.quarantined(plainQuar())
+		ma.state(lateWhile("L1", ""))
+		ma.send()
+		r.copyState(state)
+		r.m.tick()
+		r.wantAlerts(mID, KindMasterStartLate, 1, true)
+		r.copyState("started")
+		r.m.tick()
+		as := r.alerts(mID, KindMasterStartLate)
+		if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != wantCopyStartedReason {
+			t.Fatalf("%s then started: alerts = %+v, want closed with T2", state, as)
+		}
+	}
+}
+
+// TestRelockAfterLeftoverCheckOpensAgain: a relock, then Periksa data
+// tertinggal closes its alert; a later relock (a new id) opens it again.
+func TestRelockAfterLeftoverCheckOpensAgain(t *testing.T) {
+	r := newRig(t)
+	mID, pid, ma := r.quarantined(plainQuar())
+	t0 := r.clk.Now()
+	ma.state(lateWhile(t0.UTC().Format(time.RFC3339Nano), proto.QuarantineWhileRunning))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	r.clk.Add(20 * time.Second)
+	r.checkLeftover(pid)
+	as := r.alerts(mID, KindMasterStartLate)
+	if len(as) != 1 || as[0].CloseReason != leftoverCheckedReason {
+		t.Fatalf("after the check: %+v, want closed by it", as)
+	}
+	r.clk.Add(20 * time.Second)
+	ma.state(lateWhile(r.clk.Now().UTC().Format(time.RFC3339Nano), proto.QuarantineWhileRunning))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartLate, 2, true)
+	if a := r.openAlert(mID, KindMasterStartLate); a.Message != wantStartRelockedText {
+		t.Fatalf("message = %q", a.Message)
+	}
+}
+
+// TestLateAlertAfterSecondPromote (R-20): once no topology names the
+// quarantined server as its old master (the topology promoted again), an
+// open late alert closes with T26 and a new late entry opens with T25.
+func TestLateAlertAfterSecondPromote(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.state(lateWhile("L1", proto.QuarantineWhileRunning))
+	ma.send()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	topo, err := r.st.GetTopologyByOldMaster(mID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := r.replica("db-ketiga", topo)
+	if err := r.st.SwapMaster(topo.ID, topo.MasterServerID, third, "10.0.0.3", 3306); err != nil {
+		t.Fatal(err)
+	}
+	r.m.tick()
+	as := r.alerts(mID, KindMasterStartLate)
+	if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != wantNoTopologyCloseReson {
+		t.Fatalf("alerts = %+v, want closed with T26", as)
+	}
+	r.clk.Add(time.Minute)
+	ma.state(lateWhile("L2", proto.QuarantineWhileRunning))
+	ma.send()
+	as = r.alerts(mID, KindMasterStartLate)
+	if len(as) != 2 || as[1].Message != wantStartLateNoTopoText {
+		t.Fatalf("alerts = %+v, want a second with T25", as)
+	}
+}
+
+// TestLateRuleDecisions: the message and close rules of master_start_late
+// for a quarantined server (spec 5.2), every combination of remark, copy
+// state and topology.
+func TestLateRuleDecisions(t *testing.T) {
+	for _, while := range []string{"", proto.QuarantineWhileRunning, proto.QuarantineWhileUnverified} {
+		for _, named := range []bool{true, false} {
+			for _, copied := range []bool{true, false} {
+				var wantMsg, wantClose string
+				switch {
+				case while == proto.QuarantineWhileUnverified:
+					wantMsg = wantStartUnverifiedText
+				case !named:
+					wantMsg = wantStartLateNoTopoText
+				case copied:
+					wantMsg = wantStartLateCopiedText
+				case while == proto.QuarantineWhileRunning:
+					wantMsg = wantStartRelockedText
+				default:
+					wantMsg = wantStartLateText
+				}
+				switch {
+				case while == proto.QuarantineWhileUnverified:
+				case !named:
+					wantClose = wantNoTopologyCloseReson
+				case copied:
+					wantClose = wantCopyStartedReason
+				}
+				f := lateFacts{named: named, copyStarted: copied, unverified: while == proto.QuarantineWhileUnverified}
+				if got := lateMessage(while, f); got != wantMsg {
+					t.Errorf("message(%q, named %v, copied %v) = %q, want %q", while, named, copied, got, wantMsg)
+				}
+				if got := lateCloseReason(f); got != wantClose {
+					t.Errorf("close(%q, named %v, copied %v) = %q, want %q", while, named, copied, got, wantClose)
+				}
+				f.leftoverChecked = true
+				if got := lateCloseReason(f); got != leftoverCheckedReason {
+					t.Errorf("close after a check (%q, named %v, copied %v) = %q", while, named, copied, got)
+				}
+			}
+		}
 	}
 }

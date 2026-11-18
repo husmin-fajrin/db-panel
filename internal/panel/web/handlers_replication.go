@@ -47,7 +47,7 @@ func (a *app) replication(w http.ResponseWriter, r *http.Request) {
 	for _, t := range topos {
 		master := byID[t.MasterServerID]
 		row := replicationRow{ID: t.ID, Master: masterCard{Server: master, Status: a.statusOf(master.ID, master.Role)}}
-		reps, err := a.Store.ListReplicas(t.ID)
+		reps, err := a.listedReplicas(t.ID, byID)
 		if err != nil {
 			a.internalError(w, "list replicas", err)
 			return

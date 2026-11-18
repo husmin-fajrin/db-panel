@@ -338,7 +338,7 @@ func (a *app) topologyPanels(servers []store.Server, topos []store.Topology, now
 			mc.DiskPct, mc.DiskFree = pct, v.Snap.DiskFree
 		}
 		panel := topologyPanel{ID: t.ID, Name: master.Name, Master: mc}
-		reps, err := a.Store.ListReplicas(t.ID)
+		reps, err := a.listedReplicas(t.ID, byID)
 		if err != nil {
 			return nil, err
 		}
@@ -357,6 +357,21 @@ func (a *app) topologyPanels(servers []store.Server, topos []store.Topology, now
 		panels = append(panels, panel)
 	}
 	return panels, nil
+}
+
+// listedReplicas are the replica rows of topology topoID that the replica
+// lists (dashboard, Replikasi, master page) show: a quarantined server (an
+// old master whose rebuild runs or failed before its settle) is shown by
+// its own Master lama box, not as a replica card (spec 5.1). byID holds
+// the servers.
+func (a *app) listedReplicas(topoID int64, byID map[int64]store.Server) ([]store.Replica, error) {
+	reps, err := a.Store.ListReplicas(topoID)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(reps, func(rep store.Replica) bool {
+		return byID[rep.ServerID].Role == store.RoleQuarantined
+	}), nil
 }
 
 // chartBuckets is how many buckets the dashboard's lag chart spans: 24

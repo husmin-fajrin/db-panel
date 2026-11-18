@@ -165,14 +165,16 @@ var templateFuncs = template.FuncMap{
 	"banner": func(tone, text string) Banner { return Banner{Tone: tone, Text: text} },
 	// bytesOf is a size in bytes from the agent (int64) for fmtBytes.
 	"bytesOf": func(n int64) uint64 { return uint64(max(n, 0)) },
-	// cancelAttemptText is the sentence of "Batalkan percobaan bangun
-	// ulang" (G-2).
-	"cancelAttemptText": func() string { return msgCancelAttempt },
-	// copyStartedText and attemptPendingText replace Periksa and Amankan
-	// data tertinggal in the Master lama box (G-3).
-	"copyStartedText":    func() string { return orchestrator.CopyStartedText },
-	"attemptPendingText": func() string { return msgAttemptPending },
-	"copyUncertainText":  func() string { return msgCopyUncertain },
+	// copyStartedText replaces Periksa and Amankan data tertinggal in the
+	// Master lama box once a copy began (G-3).
+	"copyStartedText":   func() string { return orchestrator.CopyStartedText },
+	"copyUncertainText": func() string { return msgCopyUncertain },
+	// rebuildRunningText is T22, the Master lama box while its rebuild
+	// runs or waits.
+	"rebuildRunningText": func() string { return msgRebuildRunning },
+	// quarantinedReplicaText is T23, the replica page of a quarantined
+	// server, followed by a link to its server page.
+	"quarantinedReplicaText": func() string { return msgQuarantinedReplica },
 }
 
 // partials are the templates shared by several pages and rendered on their

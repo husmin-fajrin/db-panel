@@ -256,9 +256,11 @@ func firstTime(cur, at time.Time) time.Time {
 }
 
 // resolve reads the server's role from the store: a master when a
-// topology names it, a replica when it has a replica row, an old master
-// when the server's role is quarantined, otherwise not monitored. On
-// error s keeps what it had. The caller holds mu.
+// topology names it, then an old master when the server's role is
+// quarantined (with a replica row or without: a rebuild running, or failed
+// before its settle, spec 5.1), a replica when it has a replica row,
+// otherwise not monitored. On error s keeps what it had. The caller holds
+// mu.
 //
 // When a replica already resolved changes how it is judged (its state
 // becomes ready or attention, or its paused flag flips: a job or a
@@ -271,24 +273,29 @@ func (m *Monitor) resolve(id int64, s *serverState, reportAt time.Time) error {
 	switch {
 	case err == nil:
 		s.role, s.topoID, s.masterID, s.repState, s.repPaused = store.RoleMaster, topo.ID, id, "", false
+		s.quarantinePending = false
 		s.resolvedOK, s.awaitFresh = true, time.Time{}
 		return nil
 	case !errors.Is(err, store.ErrNotFound):
 		return err
 	}
-	rep, err := m.st.GetReplicaByServer(id)
-	if errors.Is(err, store.ErrNotFound) {
-		srv, err := m.st.GetServer(id)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
+	srv, err := m.st.GetServer(id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if err == nil && srv.Role == store.RoleQuarantined {
 		s.role, s.topoID, s.masterID, s.repState, s.repPaused = "", 0, 0, "", false
 		s.quarantinePending = false
-		if err == nil && srv.Role == store.RoleQuarantined {
-			if err := m.resolveQuarantined(id, s); err != nil {
-				return err
-			}
+		if err := m.resolveQuarantined(id, s); err != nil {
+			return err
 		}
+		s.resolvedOK, s.awaitFresh = true, time.Time{}
+		return nil
+	}
+	rep, err := m.st.GetReplicaByServer(id)
+	if errors.Is(err, store.ErrNotFound) {
+		s.role, s.topoID, s.masterID, s.repState, s.repPaused = "", 0, 0, "", false
+		s.quarantinePending = false
 		s.resolvedOK, s.awaitFresh = true, time.Time{}
 		return nil
 	}
@@ -301,6 +308,7 @@ func (m *Monitor) resolve(id int64, s *serverState, reportAt time.Time) error {
 	}
 	changed := s.resolvedOK && s.role == store.RoleReplica && (rep.State != s.repState || rep.Paused != s.repPaused)
 	s.role, s.topoID, s.masterID, s.repState, s.repPaused = store.RoleReplica, topo.ID, topo.MasterServerID, rep.State, rep.Paused
+	s.quarantinePending = false
 	s.resolvedOK = true
 	switch {
 	case !judgedState(rep.State):
@@ -316,8 +324,9 @@ func (m *Monitor) resolve(id int64, s *serverState, reportAt time.Time) error {
 }
 
 // resolveQuarantined fills s for the old master id: its topology, if one
-// still names it as the previous master, and whether its latest promotion
-// still has its quarantine pending. The caller holds mu.
+// still names it as the previous master (topoID stays 0 when none does:
+// the topology promoted again), and whether its latest promotion still has
+// its quarantine pending. The caller holds mu.
 func (m *Monitor) resolveQuarantined(id int64, s *serverState) error {
 	s.role = store.RoleQuarantined
 	topo, err := m.st.GetTopologyByOldMaster(id)

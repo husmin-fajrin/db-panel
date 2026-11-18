@@ -679,7 +679,7 @@ func (m *Monitor) handleStartEvent(serverID int64, ev proto.Event) bool {
 		}
 	}
 	if qe.Result == proto.QuarantineStartLate {
-		ups = m.raiseLocked(serverID, KindMasterStartLate, startLateText, ups)
+		ups = m.raiseLocked(serverID, KindMasterStartLate, m.lateEventMessage(serverID), ups)
 	}
 	if bypassed {
 		ups = m.raiseLocked(serverID, KindMasterStartBypassed, startBypassedText, ups)
@@ -707,11 +707,29 @@ func (m *Monitor) raiseIfNone(serverID int64, kind, msg string) {
 	m.raise(serverID, kind, msg)
 }
 
+// lateEventMessage is the message of master_start_late opened by a start
+// event of an older agent (no remark): lateMessage for a quarantined
+// server, the text of a start otherwise. The caller holds mu.
+func (m *Monitor) lateEventMessage(serverID int64) string {
+	s := m.state(serverID)
+	if !s.resolvedOK {
+		if err := m.resolve(serverID, s, time.Time{}); err != nil {
+			m.log.Warn("start event: resolve role", "server_id", serverID, "err", err)
+		}
+	}
+	if !s.resolvedOK || s.role != store.RoleQuarantined {
+		return startLateText
+	}
+	return lateMessage("", m.lateOpenFacts(serverID, s))
+}
+
 // closeStartAlerts closes the event alerts of the start lock (late,
 // bypassed, blocked) that are over: the server is no longer quarantined
-// (for late: not while it is a replica whose rebuild has not copied yet),
-// or, for late, "Periksa data tertinggal" stored a result after the alert
-// opened. The caller holds mu.
+// (its quarantine ended: the settle made it a replica, or it was deleted
+// or reassigned); for late of a quarantined server, by lateCloseReason:
+// "Periksa data tertinggal" stored a result after the alert opened, no
+// topology names it any more, or a rebuild began its copy (the last two
+// not while its latest late entry is unverified). The caller holds mu.
 func (m *Monitor) closeStartAlerts(now time.Time) []alertUpdate {
 	open, err := m.st.ListOpenAlerts()
 	if err != nil {
@@ -729,14 +747,11 @@ func (m *Monitor) closeStartAlerts(now time.Time) []alertUpdate {
 		}
 		reason := ""
 		switch {
-		case a.Kind == KindMasterStartLate && s.role == store.RoleReplica && !judgedState(s.repState):
-			// A rebuild that has not copied yet (creating, failed): the
-			// writes the alert speaks of are still on the server, and a
-			// cancel makes it an old master again (SP-2).
 		case s.role != store.RoleQuarantined:
 			reason = notQuarantinedReason
-		case a.Kind == KindMasterStartLate && m.leftoverCheckedAfter(a):
-			reason = leftoverCheckedReason
+		case a.Kind == KindMasterStartLate:
+			reason = lateCloseReason(lateFacts{leftoverChecked: m.leftoverCheckedAfter(a), named: s.topoID != 0,
+				copyStarted: m.copyStartedOf(a.ServerID), unverified: lateUnverified(s.snap)})
 		}
 		if reason == "" {
 			continue

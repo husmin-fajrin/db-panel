@@ -221,6 +221,12 @@ func New(o Options) (*Panel, error) {
 		WebCert: func() (int64, time.Time, bool) {
 			return p.localID, p.certs.active().cert.Leaf.NotAfter, true
 		},
+		// master_start_late follows the copy state of the old master's
+		// rebuild (spec 5.2); the monitor reads it, nothing more.
+		CopyStarted: func(serverID int64) (bool, error) {
+			state, err := orchestrator.RebuildCopyState(st, serverID)
+			return state == orchestrator.CopyStarted, err
+		},
 	})
 	p.Orchestrator = orchestrator.New(orchestrator.Deps{
 		Store:   st,

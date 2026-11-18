@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
@@ -1428,5 +1429,85 @@ func TestRebuildRefusalRereadsApproval(t *testing.T) {
 	wantNoBody(t, rec, "Sudah disetujui di ")
 	if button := rebuildButton.FindString(rec.Body.String()); !strings.Contains(button, " disabled") {
 		t.Fatalf("button after the refusal: %s", button)
+	}
+}
+
+// TestBoxSaysAgentReportsOtherRole (spec 5.1, R-17/R-19/F-4): a quarantined
+// server whose agent reports another role pin gets one sentence in its box:
+// T3 without a replica row, T3b with one. The panel changes no role. A pin
+// quarantined, or none, says nothing; a value that is no role name is not
+// printed.
+func TestBoxSaysAgentReportsOtherRole(t *testing.T) {
+	const (
+		t3  = "Agent server ini melaporkan peran %s, bukan karantina. Mulai lagi Bangun ulang sebagai replika, atau hapus server ini."
+		t3b = "Agent server ini melaporkan peran %s, bukan karantina. Mulai lagi Bangun ulang sebagai replika, hapus server ini, " +
+			"atau tekan &#34;Ulangi dari tahap ini&#34; pada pekerjaan bangun ulangnya."
+		lead = "Agent server ini melaporkan peran"
+	)
+	for _, tc := range []struct {
+		name, pin string
+		row       bool
+		want      string
+	}{
+		{name: "replica, no row", pin: "replica", want: fmt.Sprintf(t3, "replica")},
+		{name: "replica, failed row", pin: "replica", row: true, want: fmt.Sprintf(t3b, "replica")},
+		{name: "master, no row", pin: "master", want: fmt.Sprintf(t3, "master")},
+		{name: "unassigned, no row", pin: "unassigned", want: fmt.Sprintf(t3, "unassigned")},
+		{name: "quarantined", pin: "quarantined"},
+		{name: "none", pin: ""},
+		{name: "not a role name", pin: "replica\n<b>" + strings.Repeat("x", 10<<10)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mon := &fakeMonitor{}
+			e, _, topo := promotedEnv(t, func(d *web.Deps) { d.Monitor = mon })
+			if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			if tc.row {
+				if _, err := e.st.AddReplica(topo.ID, 1, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.st.SetReplicaState(1, store.ReplicaFailed, "gagal"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snap := proto.HealthSnapshot{MySQLOK: true, RolePin: tc.pin}
+			mon.setView(monitor.View{ServerID: 1, Role: store.RoleQuarantined, ReceivedAt: time.Now(), Snap: &snap,
+				Status: monitor.DeriveQuarantined(false)})
+			rec := e.do("GET", "/servers/1", nil, e.cookie())
+			wantCode(t, rec, http.StatusOK)
+			if tc.want != "" {
+				wantBody(t, rec, tc.want)
+			} else {
+				wantNoBody(t, rec, lead)
+			}
+			if srv, _ := e.st.GetServer(1); srv.Role != store.RoleQuarantined {
+				t.Fatalf("role = %q, want quarantined", srv.Role)
+			}
+		})
+	}
+}
+
+// TestStartLateLabel (T20): master_start_late is labelled "Master lama
+// sempat bisa ditulis" on the alerts page and "master lama sempat bisa
+// ditulis" in the notifications that name its kind.
+func TestStartLateLabel(t *testing.T) {
+	e, _, _ := promotedEnv(t)
+	const msg = "MySQL master lama sempat tidak terkunci selagi berjalan; agent sudah menguncinya lagi. Tulisan yang masuk " +
+		"selama itu tidak ada di master baru: jalankan Periksa data tertinggal"
+	a := store.Alert{Kind: monitor.KindMasterStartLate, ServerID: 1, OpenedAt: time.Now(), Message: msg}
+	if _, err := e.st.OpenAlert(a); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("GET", "/alerts", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Master lama sempat bisa ditulis")
+	wantNoBody(t, rec, "ditulis saat menyala")
+	// The notification of its close names the kind (T2 closes it once a
+	// rebuild began its copy).
+	a.CloseReason = "bangun ulang sudah mulai mengganti data server ini; tulisan itu tidak bisa diperiksa lagi"
+	text := notify.FormatClosed(a, "db-master")
+	if !strings.Contains(text, "peringatan master lama sempat bisa ditulis ditutup: ") || strings.Contains(text, "saat menyala") {
+		t.Fatalf("notification:\n%s", text)
 	}
 }

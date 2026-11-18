@@ -42,7 +42,7 @@ var alertKindLabels = map[string]string{
 	monitor.KindMasterUnpinned:      "Master tidak dipin",
 
 	monitor.KindMasterStartUnguarded: "Master lama belum terjamin terkunci saat menyala",
-	monitor.KindMasterStartLate:      "Master lama sempat bisa ditulis saat menyala",
+	monitor.KindMasterStartLate:      "Master lama sempat bisa ditulis",
 	monitor.KindMasterStartBypassed:  "Kunci start master lama tidak dipakai MySQL",
 	monitor.KindMasterStartBlocked:   "MySQL master lama gagal menyala karena kunci start",
 	monitor.KindMasterLockKept:       "Kunci promote master dipertahankan",
