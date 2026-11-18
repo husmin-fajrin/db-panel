@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,9 +29,18 @@ import (
 )
 
 // recorder keeps every statement sent through a recording connection.
+// failAfter, when set, is a statement that is executed and then answered
+// with an error, as a cancel landing after MySQL applied it would be.
 type recorder struct {
-	mu    sync.Mutex
-	stmts []string
+	mu        sync.Mutex
+	stmts     []string
+	failAfter string
+}
+
+func (r *recorder) failsAfter(q string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.failAfter != "" && q == r.failAfter
 }
 
 func (r *recorder) add(q string) {
@@ -71,7 +81,11 @@ type recConn struct {
 
 func (c *recConn) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
 	c.rec.add(q)
-	return c.Conn.(driver.ExecerContext).ExecContext(ctx, q, args)
+	res, err := c.Conn.(driver.ExecerContext).ExecContext(ctx, q, args)
+	if err == nil && c.rec.failsAfter(q) {
+		return nil, errors.New("answer lost after the statement was applied (test)")
+	}
+	return res, err
 }
 
 func (c *recConn) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
@@ -191,6 +205,37 @@ func TestLiftCountsHolders(t *testing.T) {
 	}
 	if got := flags(t, db); got != "1 1" {
 		t.Errorf("after the last end = %s, want 1 1", got)
+	}
+}
+
+// TestLiftFailedOffPutsBack: the first opener's SET GLOBAL
+// super_read_only = OFF fails after MySQL applied it: begin puts
+// super_read_only back on (only SET GLOBAL super_read_only = ON; read_only
+// is never sent off), releases the lock, and answers the error.
+func TestLiftFailedOffPutsBack(t *testing.T) {
+	inst, db, g, _ := liftedServer(t, "1 1")
+	rdb, rec := recordingDB(t, inst)
+	rec.failAfter = "SET GLOBAL super_read_only = OFF"
+	if h, err := g.Begin(context.Background(), rdb, func(string, string, ...any) {}); err == nil {
+		h.End()
+		t.Fatal("begin succeeded with its OFF failing")
+	}
+	if got := flags(t, db); got != "1 1" {
+		t.Errorf("after the failed begin = %s, want 1 1", got)
+	}
+	var sets []string
+	for _, q := range rec.take() {
+		if strings.HasPrefix(q, "SET GLOBAL") {
+			sets = append(sets, q)
+		}
+	}
+	if want := []string{"SET GLOBAL super_read_only = OFF", "SET GLOBAL super_read_only = ON"}; !slices.Equal(sets, want) {
+		t.Errorf("statements = %q, want %q", sets, want)
+	}
+	release, free := g.TryGuard()
+	release()
+	if !free {
+		t.Error("the lock is still held after the failed begin")
 	}
 }
 

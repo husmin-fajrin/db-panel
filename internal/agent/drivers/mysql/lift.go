@@ -262,7 +262,9 @@ type liftHold struct {
 // session wait_timeout raised), takes the file lock as the first opener
 // (waiting up to liftLockWait, else ErrLiftHeldByCommand) and records
 // super_read_only, then sends SET GLOBAL super_read_only = OFF, the only
-// statement a lift sends. Nothing has changed when it fails.
+// statement a lift sends. Nothing has changed when it fails: a first
+// opener whose OFF failed (perhaps after it was applied) sends SET GLOBAL
+// super_read_only = ON when it was on.
 func (g *liftGate) begin(ctx context.Context, db *sql.DB, logf func(level, format string, args ...any)) (*liftHold, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -292,6 +294,17 @@ func (g *liftGate) begin(ctx context.Context, db *sql.DB, logf func(level, forma
 	// Sent by every opener: the first one's may have been put back since.
 	if _, err := conn.ExecContext(ctx, "SET GLOBAL super_read_only = OFF"); err != nil {
 		if first {
+			// The OFF may have been applied before it failed (a cancel
+			// landing on it): put back what the first opener read, under
+			// the lock, as liftHold.restore would; only = ON is sent.
+			if g.superOn {
+				rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+				const q = "SET GLOBAL super_read_only = ON"
+				if _, rerr := conn.ExecContext(rctx, q); rerr != nil {
+					logf("error", "%s after a failed lift failed: %v", q, rerr)
+				}
+				cancel()
+			}
 			g.lock.Close()
 			g.lock, g.superOn = nil, false
 		}
