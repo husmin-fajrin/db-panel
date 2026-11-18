@@ -508,9 +508,16 @@ Apa yang ditawarkan halaman, diterima orchestrator, dan dinilai monitor:
   dinilai" dihapus.
 - **Promote kedua.** Promote **terencana** ditolak selama topologi itu
   masih punya master lama yang belum dibangun ulang atau dihapus (teks
-  T4). Promote **darurat** tidak pernah ditolak; layarnya menampilkan
-  peringatan (T5), dan sesudahnya kotak master lama yang pertama
-  menampilkan kalimat T6 dengan Hapus sebagai satu-satunya tindakan.
+  T4). Promote **darurat** tidak ditolak karena master lama itu;
+  layarnya menampilkan peringatan (T5), dan sesudahnya kotak master lama
+  yang pertama menampilkan kalimat T6 dengan Hapus sebagai satu-satunya
+  tindakan. (Promote apa pun, juga yang darurat, tetap ditolak selama
+  topologi itu punya pekerjaan yang belum selesai; layar promote
+  menamai pekerjaan itu dan menyuruh Batalkan dulu. Lihat bagian 11.)
+  Master lama pertama yang karantinanya masih tertunda (agent-nya belum
+  tersambung saat promote) tetap dikirimi perintah karantina begitu
+  agent-nya tersambung, juga sesudah promote kedua; selama itu kotaknya
+  tetap berkata "belum dikarantina".
   Tiga tempat lain ikut berkata benar untuk server itu: halaman
   replikanya (T23, tanpa Resync dan Lepas); peringatan
   `master_start_late` yang terbuka ditutup dengan alasan T26, dan yang
@@ -1380,3 +1387,40 @@ Butir bagian 9 yang kini berbunyi lain:
   agent; nama selalu diketik (5.4).
 - 9.10 (kesegaran laporan pin): gugur; tidak ada pemulihan dari laporan
   (5.1).
+
+## 11. Perubahan sesudah tinjauan akhir
+
+Tinjauan akhir seluruh cabang (2026-11-18, dua peninjau: sisi agent dan
+sisi panel) tidak menemukan temuan kritis. Delapan temuan penting dan
+enam temuan kecil diperbaiki dalam satu gelombang; yang berikut mengubah
+bunyi bagian-bagian di atas.
+
+| Temuan | Yang berubah | Bagian |
+|---|---|---|
+| Penjaga diam bila berkas kunci tidak bisa dibuka | Tiga keadaan, bukan dua: bebas, dipegang, tidak bisa dibuka. Bila tidak bisa dibuka dan agent sendiri tidak sedang membuka, penjaga mengunci lagi seperti saat kunci bebas dan mencatat sebabnya; hitungan "tidak bisa memeriksa" tidak diulang dari nol. Settle menjawab teks baru yang menyebut berkasnya, bukan T12 | 5.2 |
+| P1 mencetak perintah untuk nama lain | Untuk nama database yang tampilannya diubah (baris baru, karakter kendali atau format), P1 tidak mencetak baris perintah; ia menyuruh menjalankan lagi perintah yang sama dengan `--tanpa-cadangan` | 5.4, 7 |
+| Periksa menjawab OK tanpa mencatat | `mysql.leftover` gagal dengan teks yang menyebut berkas dan sebabnya bila hasil yang tidak kosong tidak bisa disimpan; hasil kosong tetap OK. Ini kegagalan tulis yang dilaporkan, bukan aturan baru yang menolak penyelamatan | 5.7 |
+| Tiga perintah memakai pengaturan bawaan bila `agent.yaml` tidak terbaca | Ketiganya menolak dengan teks "letak MySQL … tidak bisa dibaca" sebelum membuka atau mengubah apa pun | 5.4 |
+| `mysql.setReplicationFilter` melewati pemeriksaan T18 | Pemeriksaan sumber kanal (T18) juga di perintah itu | 5.7 |
+| Direktori milik root yang bisa ditulis akun lain | Program tidak dijalankan sebagai root di sana; ditolak dengan T19c dan sebab baru | 5.5 |
+| Karantina tertunda hilang sesudah promote kedua | Lihat 5.1 "Promote kedua". Sumber yang dikirim adalah master topologi saat ini; bila agent menolaknya (master itu tidak pernah tercatat sebagai replika server ini), karantina tetap tertunda dan panel tetap berkata "belum dikarantina" | 5.1, 8 |
+| Alasan restart dari agent bisa menghapus kalimat panel | Pesan menunggu restart: kalimat panel dulu, alasan dari agent di akhir, berlabel dan dibatasi panjang totalnya. Sama untuk pesan langkah "perlu restart" | 5.6 |
+| Baris yatim master lama | Memulai bangun ulang untuk server `quarantined` yang tidak punya pekerjaan belum selesai menghapus baris replikanya apa pun keadaannya | 5.1 |
+| Promote darurat ditolak tanpa petunjuk | Layar promote menampilkan penghalangnya sebelum operator mengetik apa pun, dengan tautan ke pekerjaan itu. Penolakannya sendiri tetap; apakah promote darurat boleh membatalkan pekerjaan itu sendiri adalah keputusan pemilik | 5.1 |
+
+Teks baru gelombang ini (semuanya ada di daftar "Teks baru untuk dibaca
+pemilik" di rencana):
+
+- settle, berkas kunci tidak bisa dibuka: `berkas kunci baca-saja %s di server ini tidak bisa dibuka (%v); karantina tidak diakhiri. Perbaiki sebabnya di server itu, lalu tekan "Ulangi dari tahap ini"`
+- P1 untuk nama yang tampilannya diubah: `Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan lagi perintah yang sama dengan tambahan --tanpa-cadangan di akhir.`
+- Periksa data tertinggal, hasil tidak bisa disimpan: `hasil Periksa data tertinggal tidak bisa disimpan di server ini (%s: %v), jadi Amankan data tertinggal belum bisa dijalankan; perbaiki sebabnya di server itu, lalu jalankan Periksa data tertinggal lagi`
+- sebab baru di dalam T19c: `direktori milik root tetapi bisa ditulis akun lain`
+- layar promote, pekerjaan belum selesai: `Topologi ini masih punya pekerjaan yang belum selesai. Buka pekerjaan itu dan tekan Batalkan, lalu kembali ke sini.` dengan tombol `Buka pekerjaan`
+
+Risiko yang tersisa dari gelombang ini (menambah bagian 8): master lama
+pertama yang karantinanya tertunda dan yang agent-nya menolak perintah
+karantina sesudah promote kedua tetap tidak terkunci; panel
+menampilkannya sebagai "belum dikarantina" dan operator tidak boleh
+menghidupkan MySQL-nya. Judul kotaknya masih berbunyi "dikarantina
+sejak …" untuk server seperti itu, seperti sebelum rencana ini.
+
