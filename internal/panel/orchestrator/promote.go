@@ -840,7 +840,8 @@ func (jr *jobRun) promoteRepoint(ctx context.Context, _ bool) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
-	reps, err := jr.r.d.Store.ListReplicas(topo.ID)
+	// A quarantined old master with a row is no replica: not repointed.
+	reps, _, _, err := jr.r.promoteReplicas(topo.ID)
 	if err != nil {
 		return outcome{}, err
 	}

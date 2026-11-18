@@ -124,7 +124,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 	if err != nil {
 		return PromoteView{}, err
 	}
-	reps, err := r.d.Store.ListReplicas(topo.ID)
+	reps, srvs, oldMasters, err := r.promoteReplicas(topo.ID)
 	if err != nil {
 		return PromoteView{}, err
 	}
@@ -133,12 +133,6 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 		return PromoteView{}, err
 	} else if ok {
 		v.PendingOldMaster = old.Name
-	}
-	srvs := make([]store.Server, len(reps))
-	for i, rep := range reps {
-		if srvs[i], err = r.d.Store.GetServer(rep.ServerID); err != nil {
-			return PromoteView{}, err
-		}
 	}
 
 	// Fresh reports first (the Monitor's rate limit applies).
@@ -211,8 +205,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 	probes := make([]probe, len(reps))
 	var wg sync.WaitGroup
 	for i, rep := range reps {
-		// A quarantined old master follows no master: it is not asked.
-		if !r.d.Hub.IsOnline(rep.ServerID) || srvs[i].Role == store.RoleQuarantined {
+		if !r.d.Hub.IsOnline(rep.ServerID) {
 			continue
 		}
 		wg.Add(1)
@@ -285,8 +278,6 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 			c.Status = monitor.StatusAgentOffline
 		}
 		switch {
-		case srv.Role == store.RoleQuarantined:
-			c.Reason = reasonQuarantined
 		case !online:
 			c.Reason = reasonAgentOffline
 		case r.agentOutdated(srv):
@@ -352,8 +343,48 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 		}
 	}
 
+	// The quarantined old masters are listed, not judged (T24).
+	for _, srv := range oldMasters {
+		c := Candidate{ServerID: srv.ID, Name: srv.Name, Reason: reasonQuarantined}
+		if rv, ok := r.view(srv.ID); ok {
+			c.Status = rv.Status.Code
+			if !rv.ReceivedAt.IsZero() {
+				c.ReportAgo = max(now.Sub(rv.ReceivedAt), 0)
+				c.Fresh = c.ReportAgo <= fresh
+			}
+		}
+		v.Candidates = append(v.Candidates, c)
+	}
+
 	v.WritePause = r.writePause(v)
 	return v, nil
+}
+
+// promoteReplicas is the one decision of which replica rows of topology
+// topoID take part in a promotion: reps, each with its server in srvs, are
+// the replicas; oldMasters are the quarantined servers with a row (an old
+// master whose rebuild runs, waits or failed before its settle), which are
+// no replica for a promotion (spec 5.1). The consideration screen lists
+// them with T24; nothing judges them (writable, branched, unreachable,
+// gaps, most current), no report or probe is asked of them, and the
+// promotion's steps send them nothing and leave their rows as they are.
+func (r *Runner) promoteReplicas(topoID int64) (reps []store.Replica, srvs, oldMasters []store.Server, err error) {
+	rows, err := r.d.Store.ListReplicas(topoID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, rep := range rows {
+		srv, err := r.d.Store.GetServer(rep.ServerID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if srv.Role == store.RoleQuarantined {
+			oldMasters = append(oldMasters, srv)
+			continue
+		}
+		reps, srvs = append(reps, rep), append(srvs, srv)
+	}
+	return reps, srvs, oldMasters, nil
 }
 
 // pendingOldMaster is the server topo's old-master marker names while its

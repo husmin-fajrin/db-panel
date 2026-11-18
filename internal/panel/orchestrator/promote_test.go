@@ -1509,3 +1509,106 @@ func TestOldMasterAfterSecondPromote(t *testing.T) {
 		t.Fatalf("server after the delete: %v", err)
 	}
 }
+
+// quarantinedView is the report of a quarantined old master with
+// gtid_executed gtid and super_read_only as given.
+func quarantinedView(gtid string, superReadOnly bool) monitor.View {
+	return monitor.View{Role: store.RoleQuarantined, Status: monitor.Status{Code: monitor.StatusQuarantined},
+		ReceivedAt: time.Now(), Snap: &proto.HealthSnapshot{MySQLOK: true, GTIDExecuted: gtid, SuperReadOnly: superReadOnly}}
+}
+
+// TestEmergencyPromoteIgnoresWritableOldMaster (spec 5.1): an earlier old
+// master, quarantined with a failed row and writable in its last report
+// (a failed rebuild's load lifted read-only), does not hold back an
+// emergency promotion: it is accepted, the job sends that server nothing,
+// the promotion ends complete, and the server keeps its role and row while
+// the marker moves on. An ordinary writable replica still refuses a
+// promotion with the existing text.
+func TestEmergencyPromoteIgnoresWritableOldMaster(t *testing.T) {
+	g := secondPromoteRig(t)
+	e := g.e
+	failedRebuild(t, g, "mysql.preflight")
+	g.h.set(g.m.id, quarantinedView(masterGTID, false))
+	g.emergencyOnC()
+	ctx := context.Background()
+	mark, checks := g.m.mark(), len(g.h.checked())
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+		Mode: proto.PromoteEmergency})
+	if err != nil {
+		t.Fatalf("emergency promote with a writable quarantined old master: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if got := g.m.cmds(mark); len(got) > 0 {
+		t.Errorf("the quarantined server received %v", got)
+	}
+	if slices.Contains(g.h.checked()[checks:], g.m.id) {
+		t.Error("a report of the quarantined server was asked for")
+	}
+	if p := g.promotion(); p.Status != promotionDone || p.OldMasterServerID != g.c.id {
+		t.Fatalf("promotion = %+v, want done", p)
+	}
+	if got := roleNow(e, g.m.id); got != store.RoleQuarantined {
+		t.Fatalf("role = %s, want quarantined", got)
+	}
+	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
+		t.Fatalf("row = %+v, %v; want failed", rep, err)
+	}
+	if _, err := e.st.GetTopologyByOldMaster(g.m.id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("marker = %v, want gone", err)
+	}
+
+	// No pending old master, an ordinary writable replica: refused as before.
+	g2 := newPromoteRig(t)
+	v := replicaView(masterGTID, masterGTID)
+	v.Snap.SuperReadOnly = false
+	g2.h.set(g2.b.id, v)
+	_, err = g2.e.r.StartPromote(ctx, PromoteParams{MasterServerID: g2.m.id, CandidateServerID: g2.c.id, Mode: proto.PromotePlanned})
+	if want := "replika rep-b bisa ditulis (super_read_only mati) dan mungkin sudah menjadi master"; err == nil ||
+		!strings.Contains(err.Error(), want) {
+		t.Fatalf("planned promote with a writable replica = %v, want %q", err, want)
+	}
+}
+
+// TestOldMasterLeftoverNotBranched (spec 5.1): an earlier old master
+// holding transactions no replica has (its leftover data), quarantined
+// with a failed row, does not make the replicas branched, needs no
+// AcceptBranched, has no gaps of its own and is not the most current.
+func TestOldMasterLeftoverNotBranched(t *testing.T) {
+	g := secondPromoteRig(t)
+	e := g.e
+	failedRebuild(t, g, "mysql.preflight")
+	g.h.set(g.m.id, quarantinedView(masterUUID+":1-100,"+otherUUID+":1-5", true))
+	g.emergencyOnC()
+	// The master's last report is known: the gaps are counted against it.
+	g.h.set(g.c.id, monitor.View{Status: monitor.Status{Code: monitor.StatusAgentOffline}, ReceivedAt: time.Now(),
+		Snap: &proto.HealthSnapshot{MySQLOK: true, GTIDExecuted: masterGTID, ServerUUID: targetUUID}})
+	ctx := context.Background()
+	v, err := e.r.PromoteView(ctx, g.c.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Branched {
+		t.Fatal("view branched by the quarantined old master")
+	}
+	for _, c := range v.Candidates {
+		if c.ServerID == g.m.id {
+			if c.Eligible || c.Reason != quarantinedReason || c.MostCurrent || c.Branched || c.Writable ||
+				c.GapToMaster != 0 || c.GapToLastReport != 0 || c.ApplyBacklog != 0 || c.Partial {
+				t.Fatalf("quarantined candidate = %+v", c)
+			}
+			continue
+		}
+		if !c.Eligible || !c.MostCurrent || c.Branched || c.GapToMaster != 0 {
+			t.Fatalf("replica candidate = %+v", c)
+		}
+	}
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+		Mode: proto.PromoteEmergency})
+	if err != nil {
+		t.Fatalf("emergency promote without AcceptBranched: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || rep.State != store.ReplicaFailed {
+		t.Fatalf("row = %+v, %v; want failed", rep, err)
+	}
+}
