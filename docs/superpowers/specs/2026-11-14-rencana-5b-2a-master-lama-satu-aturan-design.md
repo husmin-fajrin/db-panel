@@ -432,11 +432,20 @@ Apa yang ditawarkan halaman, diterima orchestrator, dan dinilai monitor:
   `quarantined` (peran lain berarti "peran server ini sudah berubah");
   untuk job lain aturan peran `replica` tidak berubah. Job Periksa dan
   Amankan data tertinggal **tidak** dihitung sebagai "job yang lebih baru"
-  bila keempat syarat ini benar: jenis `create_replica` dengan
-  `RebuildOldMaster`; bendera belum terpasang; baris server itu gagal;
-  server itu masih master lama topologi job. Keduanya hanya membaca, dan
-  peringatan panel sendiri menyuruh operator menjalankannya. Pemeriksaan
-  lain (master berganti, job jenis lain yang lebih baru) tidak berubah.
+  bila ketiga syarat ini benar: jenis `create_replica` dengan
+  `RebuildOldMaster`; bendera belum terpasang; server itu masih master
+  lama topologi job. Keduanya hanya membaca, dan peringatan panel
+  sendiri menyuruh operator menjalankannya. Pemeriksaan lain (master
+  berganti, job jenis lain yang lebih baru) tidak berubah.
+  (diubah saat pelaksanaan, Task 15) Rancangan semula menambah syarat
+  keempat "baris server itu gagal". Test ujung-ke-ujung menunjukkan
+  akibatnya: sesudah Periksa lalu "Ulangi dari tahap ini", pekerjaan
+  menunggu persetujuan dengan baris `creating`, dan Setujui ditolak
+  "server ini sudah punya pekerjaan yang lebih baru". Syarat itu
+  dicabut. Selagi bangun ulang berjalan atau menunggu, Periksa dan
+  Amankan ditolak karena server sibuk, jadi pekerjaan Periksa/Amankan
+  yang lebih baru dari pekerjaan bangun ulang hanya bisa berasal dari
+  saat pekerjaan itu gagal.
 - **Dialog Ulangi dan Setujui** pada bangun ulang yang belum settle
   menampilkan peringatan data tertinggal yang sama dengan form Bangun
   ulang, dari fungsi yang sama: data tertinggal yang ditemukan dan belum

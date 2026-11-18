@@ -2332,6 +2332,17 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    daftar persetujuan hapus; `RestartReasons` belum berlabel; agent
    yang menjawab dengan kode `offline` diperlakukan seperti terputus di
    dua tempat promote.
+19. Task 15 menemukan cacat Task 11 lewat test ujung-ke-ujung
+   (2026-11-18). Sesudah Periksa data tertinggal lalu "Ulangi dari
+   tahap ini", bangun ulang yang menunggu persetujuan tidak bisa
+   disetujui: pengecualian Periksa/Amankan pada "sudah digantikan"
+   mensyaratkan baris gagal (Step 6 Task 11, spek 5.1), padahal sesudah
+   Ulangi barisnya `creating`. `pendingRebuild` menjadi
+   `unsettledRebuild` dengan tiga syarat (tanpa "baris gagal");
+   `TestLeftoverJobDoesNotSupersedeFailedRebuild` (nama brief, dengan
+   subtest Periksa, Periksa lalu Amankan, dan "bukan lagi master lama")
+   dan `TestWaitingRebuildApprovableAfterLeftover` (web). Spek 5.1
+   dibetulkan.
 
 ## Teks baru untuk dibaca pemilik
 
