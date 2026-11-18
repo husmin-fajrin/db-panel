@@ -2307,6 +2307,31 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    pekerjaan yang belum selesai, termasuk bangun ulang master lama yang
    berjalan atau menunggu persetujuan; operator menekan Batalkan pada
    pekerjaan itu dulu.
+18. Task 14, label teks agent (2026-11-18). Di luar daftar Files task:
+   setiap teks agent yang menjadi pesan langkah, alasan karantina,
+   pesan keadaan replika, galat pemeriksaan di layar promote
+   (`tls.go`, `promote.go`, `promote_view.go`, `prepare_master.go`)
+   ikut dilabeli; pesan progres, baris temuan "Periksa server tujuan"
+   dan peringatan akun dump di log pekerjaan diberi awalan `agent: `.
+   `jobRun.logf` dan `done` meratakan dan membatasi setiap argumen
+   string (kalimat panel sendiri, yaitu format-nya, tidak disentuh);
+   pesan tunggu memakai tipe `panelText` dan meratakan nilai agentnya
+   sendiri. Daftar dari agent (alasan restart, yang diterapkan) tampil
+   paling banyak 20 butir lalu `… dan N lagi`. Nilai GTID diperiksa
+   bentuknya (`shownGTID`, `gtidValue`); nama database, tabel dan hak
+   lewat `nameText` (nama yang tidak tercetak tampil di antara backtick
+   dengan escape Go). `agentTextError` punya medan ketiga yang memegang
+   `*proto.Error` agent supaya pemeriksaan kode tetap bekerja sesudah
+   dilabeli. Sensor mendapat frasa `Hubungkan MySQL` dan jangkar akun
+   untuk T10; dua literal tersensor yang berdampingan digabung. Kalimat
+   `… lalu klik Ulangi. Pesan agent: %v` menjadi `… lalu klik Ulangi.
+   %v` (satu label). `unverifiedText` dipotong pada panjang baris log.
+   Tidak ada halaman yang mencetak temuan preflight (`PreflightJSON`
+   disimpan, tidak dibaca). Dicatat untuk tinjauan akhir: nama database
+   yang memuat tanda kutip membuat sensor memotong sisa baris, juga di
+   daftar persetujuan hapus; `RestartReasons` belum berlabel; agent
+   yang menjawab dengan kode `offline` diperlakukan seperti terputus di
+   dua tempat promote.
 
 ## Teks baru untuk dibaca pemilik
 
