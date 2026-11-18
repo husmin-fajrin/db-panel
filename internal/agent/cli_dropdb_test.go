@@ -219,40 +219,62 @@ const (
 )
 
 // TestDropDatabaseTruncatedDumpStops: a dump that ended early, or that is
-// not plausible, stops with P1 (in place of C8) naming why; the incomplete file is removed
-// and nothing is dropped.
+// not plausible, stops naming why. Only a mysqldump that connected (its
+// output begins with its header) and exited 2 or 3 (a MySQL error, an error
+// while dumping a table) is a backup that cannot be made: P1 (in place of
+// C8). Every other failure is refused with P1b, with --tanpa-cadangan too:
+// exit 0 with a failed check (running again is the remedy), exit 5 (a
+// write error, the full-disk shape of X5: another folder is), exit 1 or 4,
+// and any exit without output (the client never connected). The incomplete
+// file is removed and nothing is dropped.
 func TestDropDatabaseTruncatedDumpStops(t *testing.T) {
 	r := newDropRig(t)
 	r.makeDB("potong", 2)
 	for name, c := range map[string]struct {
 		body  string
 		code  int
+		p1    bool // a backup that cannot be made
 		cause string
 	}{
-		"exit not 0":                   {dumpHead + dumpT1 + dumpT2 + dumpRoutine + dumpTail, 2, "mysqldump keluar dengan kode 2"},
-		"exit 0 without the last line": {dumpHead + dumpT1 + dumpT2 + dumpRoutine, 0, `baris terakhir berkas bukan "-- Dump completed"`},
-		"disk full":                    {dumpHead + dumpT1 + dumpT2 + "DELIMITER ;;\nCREATE DEFINER=`root`@`localhost` PROCEDURE `mk`()\nBEGIN\nCREATE T", 5, "mysqldump keluar dengan kode 5"},
-		"too few CREATE TABLE":         {dumpHead + dumpT1 + dumpRoutine + dumpTail, 0, "berkas memuat 1 baris CREATE TABLE untuk 2 tabel"},
-		"block left open":              {dumpHead + dumpT1 + dumpT2 + "DELIMITER ;;\nCREATE PROCEDURE `mk`()\n" + dumpTail, 0, "berkas berakhir di dalam blok DELIMITER"},
-		"no CREATE DATABASE":           {strings.Replace(dumpHead, "`potong`", "`lain`", 1) + dumpT1 + dumpT2 + dumpTail, 0, "berkas tidak memuat baris CREATE DATABASE untuk database ini"},
+		"exit 2 after the header":      {dumpHead + dumpT1 + dumpT2 + dumpRoutine + dumpTail, 2, true, "mysqldump keluar dengan kode 2"},
+		"exit 3 after the header":      {dumpHead + dumpT1, 3, true, "mysqldump keluar dengan kode 3"},
+		"exit 2 without output":        {"", 2, false, "mysqldump keluar dengan kode 2"},
+		"exit 1 after the header":      {dumpHead, 1, false, "mysqldump keluar dengan kode 1"},
+		"exit 0 without the last line": {dumpHead + dumpT1 + dumpT2 + dumpRoutine, 0, false, `baris terakhir berkas bukan "-- Dump completed"`},
+		"disk full":                    {dumpHead + dumpT1 + dumpT2 + "DELIMITER ;;\nCREATE DEFINER=`root`@`localhost` PROCEDURE `mk`()\nBEGIN\nCREATE T", 5, false, "mysqldump keluar dengan kode 5"},
+		"too few CREATE TABLE":         {dumpHead + dumpT1 + dumpRoutine + dumpTail, 0, false, "berkas memuat 1 baris CREATE TABLE untuk 2 tabel"},
+		"block left open":              {dumpHead + dumpT1 + dumpT2 + "DELIMITER ;;\nCREATE PROCEDURE `mk`()\n" + dumpTail, 0, false, "berkas berakhir di dalam blok DELIMITER"},
+		"no CREATE DATABASE":           {strings.Replace(dumpHead, "`potong`", "`lain`", 1) + dumpT1 + dumpT2 + dumpTail, 0, false, "berkas tidak memuat baris CREATE DATABASE untuk database ini"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			script, _ := fakeDump(t, c.body, c.code)
-			setVar(t, &cliMysqldump, script)
-			code, out, errOut := r.run(strings.NewReader("potong\n"), "potong")
-			if want := fmt.Sprintf(p1, "potong", c.cause, "potong") + "\n"; code == 0 || errOut != want {
-				t.Errorf("drop-database = %d\nstderr %q\nwant   %q\nstdout %q", code, errOut, want, out)
-			}
-			if strings.Contains(out, c10) {
-				t.Error("asked to confirm after a failed backup")
-			}
-			if !r.exists("potong") || r.flags() != "1 1" {
-				t.Errorf("exists %v, flags %s", r.exists("potong"), r.flags())
-			}
-			if files := backupFiles(t, r.backups); len(files) != 0 {
-				t.Errorf("backup files left: %v", files)
-			}
-		})
+		// P1 with --tanpa-cadangan asks P2 (TestDropDatabaseWithoutBackup);
+		// a refusal is the same with and without it.
+		variants := [][]string{nil, {"--tanpa-cadangan"}}
+		if c.p1 {
+			variants = variants[:1]
+		}
+		for _, extra := range variants {
+			t.Run(strings.TrimSpace(name+" "+strings.Join(extra, " ")), func(t *testing.T) {
+				script, _ := fakeDump(t, c.body, c.code)
+				setVar(t, &cliMysqldump, script)
+				code, out, errOut := r.run(strings.NewReader("potong\n"), append([]string{"potong"}, extra...)...)
+				want := fmt.Sprintf(p1b, "potong", c.cause) + "\n"
+				if c.p1 {
+					want = fmt.Sprintf(p1, "potong", c.cause, "potong") + "\n"
+				}
+				if code == 0 || errOut != want {
+					t.Errorf("drop-database %v = %d\nstderr %q\nwant   %q\nstdout %q", extra, code, errOut, want, out)
+				}
+				if strings.Contains(out, c10) || strings.Contains(out, "TANPA cadangan") {
+					t.Errorf("asked to confirm after a failed backup: %q", out)
+				}
+				if !r.exists("potong") || r.flags() != "1 1" || len(r.syslogLines()) != 0 {
+					t.Errorf("exists %v, flags %s, system log %q", r.exists("potong"), r.flags(), r.syslogLines())
+				}
+				if files := backupFiles(t, r.backups); len(files) != 0 {
+					t.Errorf("backup files left: %v", files)
+				}
+			})
+		}
 	}
 }
 
@@ -968,7 +990,7 @@ func TestDropDatabaseInterruptedBackupRemoved(t *testing.T) {
 func TestFailedBackupTextNamesOption(t *testing.T) {
 	r := newDropRig(t)
 	r.makeDB("gagal", 1)
-	script, _ := fakeDump(t, "", 2)
+	script, _ := fakeDump(t, dumpHead, 2) // connected, then a MySQL error
 	setVar(t, &cliMysqldump, script)
 	code, out, errOut := r.run(strings.NewReader("gagal\n"), "gagal")
 	want := fmt.Sprintf(p1, "gagal", "mysqldump keluar dengan kode 2", "gagal") + "\n"

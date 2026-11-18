@@ -543,11 +543,14 @@ type backupExistsError struct{ path string }
 
 func (e *backupExistsError) Error() string { return "exists: " + e.path }
 
-// dumpFailedError is a backup whose mysqldump ran to its own exit and
-// failed: it exited non-zero, or what it wrote failed a check of step 7.
-// Only this is "a backup that cannot be made" (P1, or P2 with
-// --tanpa-cadangan); every other failure of makeBackup is refused (P1b),
-// as the remedy (another folder, the client installed) keeps the backup.
+// dumpFailedError is a backup whose mysqldump connected (its output
+// begins with its header) and then exited 2 or 3: a MySQL error, such as a
+// name the client cannot "use" or a table it cannot read. Only this is "a
+// backup that cannot be made" (P1, or P2 with --tanpa-cadangan). Every
+// other failure of makeBackup is refused (P1b): a dump that exited 0 but
+// fails a check of step 7 (running again is the remedy), exit 5 (a write
+// error: another folder is), any other code, a dump with no output (the
+// client never connected), and the failures that are not the dump's own.
 type dumpFailedError struct{ cause string }
 
 func (e *dumpFailedError) Error() string { return e.cause }
@@ -623,7 +626,10 @@ func (b *backup) fill(ctx context.Context, s *rootSession, name string, tables i
 		if first, _, _ := strings.Cut(strings.TrimSpace(stderr.String()), "\n"); first != "" {
 			cause += ": " + first
 		}
-		return dumpFailed("%s", cause)
+		if code := exit.ExitCode(); (code == 2 || code == 3) && b.connected() {
+			return dumpFailed("%s", cause)
+		}
+		return errors.New(cause)
 	}
 	if err != nil {
 		return fmt.Errorf(causeNoStart, err)
@@ -638,19 +644,35 @@ func (b *backup) fill(ctx context.Context, s *rootSession, name string, tables i
 	}
 	switch {
 	case !strings.HasPrefix(st.last, "-- Dump completed"):
-		return dumpFailed(causeNotComplete)
+		return errors.New(causeNotComplete)
 	case !st.database:
-		return dumpFailed(causeNoDatabase)
+		return errors.New(causeNoDatabase)
 	case st.tables < tables:
-		return dumpFailed(causeFewTables, st.tables, tables)
+		return fmt.Errorf(causeFewTables, st.tables, tables)
 	case st.open:
-		return dumpFailed(causeOpenBlock)
+		return errors.New(causeOpenBlock)
 	}
 	if err := b.f.Sync(); err != nil {
 		return fmt.Errorf(causeSync, err)
 	}
 	b.size, b.sum = st.size, hex.EncodeToString(h.Sum(nil))
 	return nil
+}
+
+// dumpHeader begins every dump of a mysqldump that connected (measured on
+// 8.0.46: the header line names the server's version, so the client writes
+// it only once connected).
+const dumpHeader = "-- MySQL dump "
+
+// connected reports whether what mysqldump wrote to b begins with its
+// header, read through b's descriptor.
+func (b *backup) connected() bool {
+	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	head := make([]byte, len(dumpHeader))
+	n, _ := io.ReadFull(b.f, head)
+	return string(head[:n]) == dumpHeader
 }
 
 // discard removes the backup file, when the path still names it, and
