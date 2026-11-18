@@ -2286,6 +2286,27 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    kotak sesudah promote darurat kedua masih menawarkan Periksa dan
    Amankan. Untuk Task 15: README masih memuat "Batalkan percobaan
    bangun ulang".
+17. Task 13, promote kedua (2026-11-18). Untuk promote, server berperan
+   `quarantined` yang punya baris replika bukan replika: satu fungsi
+   `promoteReplicas(topoID)` memisah baris topologi menjadi replika dan
+   master lama yang dikarantina; layar promote dan langkah mengarahkan
+   replika hanya memakai replika. Server itu tampil dengan T24, tidak
+   bisa dipilih, tidak ikut penilaian apa pun (bisa-ditulis, bercabang,
+   tidak terjangkau, selisih), dan promote tidak mengirim perintah apa
+   pun kepadanya (`TestEmergencyPromoteIgnoresWritableOldMaster`,
+   `TestOldMasterLeftoverNotBranched`). Tanpa itu promote darurat
+   ditolak selagi master lama sebelumnya bisa ditulis (misalnya di
+   tengah muat data bangun ulang), dan data tertinggalnya membuat
+   kumpulan replika terbaca "bercabang". Penolakan T4 ada sebelum
+   `PromoteView` dan diulang di bawah `startMu` dengan mode yang sudah
+   ditentukan. `PromoteView.OldMasterRefusal()` ditambahkan supaya
+   halaman dan orchestrator memakai satu sumber teks T4. T6 hanya tampil
+   bila topologi promosinya masih ada; bila topologi itu sudah dihapus
+   kotak hanya menampilkan Hapus. Tidak diubah, dicatat untuk pemilik:
+   promote (juga darurat) ditolak selagi topologi itu masih punya
+   pekerjaan yang belum selesai, termasuk bangun ulang master lama yang
+   berjalan atau menunggu persetujuan; operator menekan Batalkan pada
+   pekerjaan itu dulu.
 
 ## Teks baru untuk dibaca pemilik
 
