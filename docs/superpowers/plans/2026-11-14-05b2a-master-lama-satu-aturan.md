@@ -2346,5 +2346,287 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
 
 ## Teks baru untuk dibaca pemilik
 
-(Diisi Task 15. Teks ber-id T1–T27 dan C1–C19 ada di spek 5.8 dan di
-task-nya; P1 dan P2 di blok bertanda spek bagian 7 dan Task 8.)
+Daftar setiap teks untuk operator yang baru, berubah, atau hilang antara
+`main` (8ce7fc5) dan akhir rencana ini, dikelompokkan menurut tempat
+tampilnya. Setiap teks ditulis seperti di kode, satu baris; `%s`, `%d` dan
+`<…>` adalah tempat nilai. Id (T…, C…, P…) mengikuti spek 5.8 dan bagian 7.
+"Kapan" menyebut keadaan yang memunculkannya.
+
+### 0. Yang belum diisi
+
+- T27: nomor versi rilis belum diisi. Kedua bagian README yang ditulis
+  ulang dibuka dengan `Perintah ini ada sejak versi <versi>; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).`,
+  dengan `<versi>` tertulis apa adanya sampai rilis pertama yang memuat
+  ketiga perintah diberi nomor.
+
+### 1. Halaman server (kotak "Master lama" dan spanduk)
+
+- T22, kotak, selagi bangun ulang server itu berjalan atau menunggu persetujuan, diikuti tombol yang sudah ada "Lihat pekerjaan": `Bangun ulang sebagai replika sedang berjalan.`
+- T3, kotak, panel mencatat server itu dikarantina tetapi agent-nya melaporkan peran lain (`replica`, `master`, `unassigned`), server tanpa baris replika: `Agent server ini melaporkan peran %s, bukan karantina. Mulai lagi Bangun ulang sebagai replika, atau hapus server ini.`
+- T3b, sama, server dengan baris replika (bangun ulang yang gagal): `Agent server ini melaporkan peran %s, bukan karantina. Mulai lagi Bangun ulang sebagai replika, hapus server ini, atau tekan "Ulangi dari tahap ini" pada pekerjaan bangun ulangnya.`
+- T6, kotak, sesudah topologinya promote darurat lagi selagi server ini dikarantina (dengan tombol Hapus server saja): `Topologi ini sudah promote lagi sejak server ini dikarantina. Data tertinggal dan Bangun ulang tidak tersedia lagi untuk server ini. Hapus server ini dari panel, lalu pasang lagi sebagai replika baru bila masih dipakai.`
+- T21, spanduk di server yang dikarantina yang akun admin MySQL-nya kurang hak (menggantikan perintah `GRANT` polos di sana): `Akun admin MySQL ini kurang hak. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu klik Segarkan.`
+
+### 2. Halaman replika
+
+- T23, server yang dikarantina yang punya baris replika (bangun ulang berjalan, menunggu, atau gagal), diikuti tautan bernama server itu ke halaman server; tanpa Resync ulang dan Lepas replika: `Server ini master lama yang dikarantina. Tindakannya ada di halaman server.`
+
+### 3. Layar promote
+
+- T4, spanduk merah dan penolakan, promote terencana selagi master lama dari promote sebelumnya belum dibangun ulang atau dihapus (kandidat tidak bisa dipilih): `master lama %s dari promote sebelumnya belum dibangun ulang atau dihapus; selesaikan itu dulu`
+- T5, spanduk kuning, layar promote darurat dalam keadaan yang sama: `Master lama %s dari promote sebelumnya belum dibangun ulang. Sesudah promote ini, server itu tidak bisa lagi diperiksa atau dibangun ulang dari panel; yang tersisa hanya Hapus server.`
+- T24, kolom alasan, untuk server dikarantina yang punya baris replika: `Master lama yang dikarantina`. Juga di dalam penolakan yang sudah ada bila server itu dikirim sebagai kandidat, contoh: `master-e2e tidak bisa dipromosikan: Master lama yang dikarantina`.
+
+### 4. Halaman pekerjaan: pesan menunggu, dialog, log
+
+- T9, pesan langkah "Periksa server tujuan" yang menunggu persetujuan pada bangun ulang master lama (menggantikan "database dari percobaan sebelumnya …" untuk master lama): `database berikut di master lama ini akan dihapus lalu disalin ulang dari master baru: %s`
+- Dialog **Ulangi dari tahap ini** dan **Setujui** pada bangun ulang yang belum mengakhiri karantina kini juga menampilkan peringatan data tertinggal (teksnya sudah ada di form Bangun ulang, tidak berubah):
+  - `MySQL %s sempat bisa ditulis saat menyala setelah Periksa data tertinggal terakhir; tulisan itu belum diperiksa: transaksi yang tidak sampai ke master baru akan hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu.`
+  - `Data tertinggal belum diperiksa: transaksi yang tidak sampai ke master baru akan hilang dari server ini. Jalankan Periksa data tertinggal (dan Amankan bila ada) di halaman server ini dulu bila ragu.`
+  - `Pemeriksaan terakhir menemukan %d transaksi yang tidak sampai ke master baru; data itu akan hilang dari server ini. Berkas yang sudah diamankan tidak ikut dihapus.`
+- Galat langkah dari panel, kata-kata berubah: `akun replikasi %s sudah ada di master ini dari persiapan sebelumnya, dan master yang dipin tidak mengizinkan panel mengganti sandinya. Bila tidak ada replika lain yang memakainya, hapus akun itu di server ini (%s) lalu klik Ulangi. %v` (sebelumnya `… lalu klik Ulangi. Pesan agent: %v`; `%v` kini membawa label di bawah).
+- Baris log promote, kata-kata berubah bila set transaksinya tidak terbaca: `Replika %s punya transaksi yang tidak ada di master baru: perlu dibangun ulang dengan Resync ulang.` (tanpa nilai dalam kurung).
+- Form Bangun ulang dikirim selagi bangun ulang server itu berjalan atau menunggu: jawaban 400 dengan teks yang sudah ada `server tujuan masih punya pekerjaan yang belum selesai` (tempat baru).
+
+### 5. Teks yang lahir dari aturan tampilan (satu contoh tiap aturan)
+
+- Label teks agent (spek 5.6) di galat langkah, pesan keadaan replika, alasan karantina, galat pemeriksaan di layar promote, form dan penolakan: `Pesan dari agent %s (bukan dari panel): %s`. Contoh: `Verifikasi: replika belum sinkron: SQL 1062 Pesan dari agent master-e2e (bukan dari panel): Coordinator stopped because there were error(s) in the worker(s). …`
+- Awalan baris log pekerjaan, pesan kemajuan langkah dan temuan "Periksa server tujuan" yang berasal dari agent: `agent: `. Contoh: `agent: dump loaded: 2811 bytes`.
+- Daftar dari agent (alasan restart, yang diterapkan) dipotong sesudah 20 butir: `… dan %d lagi`; di log: `Diterapkan: … dan %d lagi`. Contoh: `Diterapkan: … dan 3 lagi`.
+- Nama database, tabel atau hak yang memuat karakter tak tercetak tampil di antara backtick dengan escape: contoh `` `a\x00b` ``; nama sangat panjang dipotong dengan `…`.
+- Nilai GTID yang bentuknya tidak dikenali tidak ditampilkan (kalimatnya tanpa nilai).
+
+### 6. Peringatan dan Telegram
+
+- T20, label jenis peringatan `master_start_late` di halaman Peringatan (sebelumnya `Master lama sempat bisa ditulis saat menyala`): `Master lama sempat bisa ditulis`. Di Telegram nama jenisnya huruf kecil: `master lama sempat bisa ditulis` (sebelumnya `master lama sempat bisa ditulis saat menyala`).
+- T1, pesan, penjaga mendapati kunci baca-saja mati selagi MySQL berjalan dan memasangnya lagi: `MySQL master lama sempat tidak terkunci selagi berjalan; agent sudah menguncinya lagi. Tulisan yang masuk selama itu tidak ada di master baru: jalankan Periksa data tertinggal`
+- T1b, pesan, penjaga tidak bisa memeriksa atau memasang lagi kunci selama tiga putaran (juga menggantikan pesan peringatan yang sudah terbuka): `Agent tidak bisa memeriksa atau memasang lagi kunci baca-saja master lama ini (login atau hak akun MySQL agent ditolak, atau MySQL tidak menjawab perintahnya); master lama mungkin bisa ditulis. Jalankan di server itu: sudo dbpanel agent reset-admin. Sesudah itu jalankan Periksa data tertinggal`
+- T2b, pesan, bila bangun ulang sudah mulai mengganti data server itu: `master lama sempat bisa ditulis; bangun ulang sudah mulai mengganti data server ini, jadi tulisan itu tidak bisa diperiksa lagi. Bila agent lalu menolak mengakhiri karantina, mulai lagi Bangun ulang sebagai replika; atau hapus server ini`
+- T25, pesan, bila topologinya sudah promote lagi: `master lama sempat bisa ditulis; topologi ini sudah promote lagi, jadi tulisan itu tidak bisa diperiksa lagi dari panel. Hapus server ini`
+- T2, alasan tutup, salinan bangun ulang sudah mulai: `bangun ulang sudah mulai mengganti data server ini; tulisan itu tidak bisa diperiksa lagi`
+- T26, alasan tutup, topologinya sudah promote lagi: `topologi ini sudah promote lagi; tulisan itu tidak bisa diperiksa lagi dari panel`
+
+### 7. Teks agent yang tampil di panel (dengan label bagian 5)
+
+Galat langkah bangun ulang dan pemeriksaan:
+
+- T7, langkah "Sambungkan replikasi", server sempat tidak terkunci sejak pemuatan atau bendera tidak `1 1` saat agent membacanya: `server ini sempat tidak terkunci selama atau sesudah salinan data; karantina tidak diakhiri. Mulai lagi Bangun ulang sebagai replika dari panel; tombol "Ulangi dari tahap ini" tidak cukup, karena salinan data harus diulang.`
+- T8a, sama, masih ada database yang tidak disalin sesudah dump semua database (kalimat untuk kelompok kosong tidak ditulis): `server ini masih punya database yang tidak disalin dari sumber %s; karantina tidak diakhiri. Yang tidak ada di master baru (%s): jalankan di server ini sudo dbpanel agent drop-database <nama> untuk tiap nama, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel. Yang ada di master baru (%s): mulai lagi Bangun ulang sebagai replika dari panel; panel menghapus dan menyalinnya ulang.`
+- T8b, sama, sesudah dump sebagian database: `server ini masih punya database yang tidak disalin dari sumber %s; karantina tidak diakhiri. Bila database itu tidak ada di master baru: jalankan di server ini sudo dbpanel agent drop-database <nama> untuk tiap nama, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel. Bila ada di master baru: mulai lagi Bangun ulang sebagai replika dari panel; panel menghapus dan menyalinnya ulang. Database itu: %s.`
+- T10, langkah "Salin data", akun agent tidak bisa menulis selagi `read_only` menyala: `akun MySQL %s yang dipakai agent tidak punya hak CONNECTION_ADMIN maupun SUPER, jadi tidak bisa memuat data selagi server ini baca-saja (read_only); tidak ada yang diubah. Di server yang dikarantina jalankan: sudo dbpanel agent grant-admin; di server lain beri hak itu sebagai root MySQL. Sesudah itu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
+- Langkah "Salin data", daftar database master baru tidak terbaca sebelum memuat: `daftar database master baru tidak bisa dibaca; data di server ini belum diubah: %s`. Sebab yang bisa ada di dalamnya: `daftar database master lebih dari %d byte` (angkanya 1048576) dan `daftar database master berisi baris yang tidak dikenali: %q`.
+- T11, sama, daftar kedua tidak terbaca sesudah memuat: `salinan selesai dimuat, tetapi daftar database master baru tidak bisa dibaca sesudahnya, jadi salinan ini tidak dihitung; tekan "Ulangi dari tahap ini"`
+- T11b, sama, dan pemuatan itu sudah mengganti akun MySQL server ini: `salinan selesai dimuat, tetapi daftar database master baru tidak bisa dibaca sesudahnya, jadi salinan ini tidak dihitung; salinan itu juga mengganti akun MySQL server ini: jalankan "Hubungkan MySQL" untuk server ini dengan akun admin MySQL master, lalu tekan "Ulangi dari tahap ini"`
+- T12, pekerjaan agent mendapati kunci baca-saja sedang dibuka salah satu perintah di server: `kunci baca-saja server ini sedang dibuka sebuah perintah dbpanel agent yang dijalankan di server itu; tunggu sampai perintah itu selesai, lalu tekan "Ulangi dari tahap ini"`
+- T13, ditambahkan di akhir pemeriksaan "Server replika khusus" di server yang dikarantina: `Untuk tiap database itu jalankan di server ini: sudo dbpanel agent drop-database <nama> (perintah itu membuat cadangan dulu), lalu tekan "Ulangi dari tahap ini".` Contoh utuh: `server ini masih berisi database lain (lain); versi ini hanya mendukung server replika khusus. Untuk tiap database itu jalankan di server ini: sudo dbpanel agent drop-database <nama> (perintah itu membuat cadangan dulu), lalu tekan "Ulangi dari tahap ini".`
+- T14, pemeriksaan "Hak akses akun admin" di server yang dikarantina (tanpa pernyataan `GRANT`): `akun %s belum punya semua hak yang dibutuhkan. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
+- T16, daftar database tidak bisa dipastikan lengkap, akun kurang `SHOW DATABASES`: `daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent tidak punya hak SHOW DATABASES. Jalankan di server ini: sudo dbpanel agent grant-admin, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
+- T17, sama, nama akun memuat karakter yang tidak didukung: `daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat karakter yang tidak didukung pemeriksaan ini (yang didukung: huruf, angka, garis bawah, titik, tanda hubung, dan tanda dolar). Jalankan di server ini: sudo dbpanel agent reset-admin, lalu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
+- T18, `mysql.startReplica` atau `mysql.startUntil` di server yang dikarantina dengan kanal dari sumber lain: `sumber kanal replikasi di server ini (%s) bukan sumber yang dipin (%s); perintah %s ditolak`
+- T19b, Periksa/Amankan data tertinggal atau pembacaan log galat, akun layanan MySQL sudah mencapai batas prosesnya: `akun layanan MySQL sudah mencapai batas jumlah proses, jadi program ini tidak bisa dijalankan sebagai akun itu dan tidak dijalankan sebagai root; periksa proses milik akun itu di server ini, lalu ulangi`
+- T19c, sama, pemilik direktori tidak terbaca: `pemilik direktori <dir> tidak bisa dibaca (<sebab>), jadi program ini tidak dijalankan; periksa direktori itu di server ini, lalu ulangi`
+- Amankan data tertinggal kini juga menolak dengan teks yang sudah ada sesudah `set-role`, sesudah karantina baru, atau sesudah agent diperbarui selagi dikarantina (catatan Periksa milik satu karantina): `Periksa data tertinggal (mysql.leftover) belum menemukan transaksi di agent ini; salvage hanya mengambil transaksi yang ditemukan pemeriksaan terakhir. Jalankan Periksa data tertinggal dulu`
+
+Hubungkan MySQL:
+
+- T15, Hubungkan MySQL di server yang dikarantina dengan akun yang kurang hak (akun tidak disimpan): `server ini dikarantina (quarantined): akun %s belum punya semua hak yang dibutuhkan, jadi tidak disimpan. Jalankan di server ini: sudo dbpanel agent reset-admin (membuat akun dbpanel_admin dan menyimpannya sebagai akun agent), lalu klik Segarkan di halaman server ini. Hubungkan MySQL tidak perlu diulang.`
+
+Galat bagian dalam (muncul di dalam teks lain, misalnya sebagai `<sebab>`):
+
+- `program tidak bisa dimulai` (contoh: `mysqlbinlog gagal: program tidak bisa dimulai: …`)
+- `indeks binlog %s tidak terbaca dalam %v`; `baca indeks binlog %s: %w` (sebelumnya `baca indeks binlog: %w` pada salah satu jalannya)
+- `ekor log %s melebihi %d byte`; `ekor log %s tidak terbaca dalam %v`
+- `baca sumber kanal replikasi: %w`; `hapus set data tertinggal: %w`
+- `baca versi MySQL: %w`; `baca hak akses MySQL: %w`; `baca kredensial MySQL: %w`; `baca akun MySQL: %w`
+- `buka sambungan MySQL: %w`; `baca super_read_only: %w`; `pasang lagi read_only selagi baca-saja dibuka: %w`
+- Berkas kunci: `buat direktori kunci %s: %w`, `baca direktori kunci %s: %w`, `perbaiki mode direktori kunci %s: %w`, `buka direktori kunci %s: %w`, `direktori kunci %s berubah selagi dibuka`, `buka berkas kunci %s: %w`, `ganti berkas kunci %s: %w`, `berkas kunci %s terus berubah selagi dibuka`
+
+### 8. Log agent (journal) dan log sistem
+
+- T19, baris peringatan log agent (sekali tiap perintah; dari penjaga paling sering sekali semenit), program dijalankan root karena direktori milik root atau sebab lain: `tidak bisa menjalankan sebagai akun layanan MySQL; dijalankan sebagai root`
+- Baris log agent baru (bahasa Inggris), antara lain: `quarantined server was writable while MySQL ran; read-only put back on`, `quarantined server: read_only was off during a lift of read-only; put back on`, `quarantine guard could not check read-only for several rounds`, `relock not kept on disk; the report is still sent`, `quarantine kept: the server was writable or unchecked since the load`, `quarantine kept: read-only is not on as the settle reads it`, `quarantine kept: the database listing cannot be proved complete`, `quarantine kept: databases not copied from the pinned source remain`, `leftover set ignored: …`, `leftover set file not removed after the rebuild`.
+- Baris log pekerjaan dari agent (bahasa Inggris, di panel diawali `agent: `): `listing the source's databases after the load failed (try %d of %d): %v`; `reading super_read_only to put read-only back failed: %v`; `read_only lifted for the load` (kini hanya bila pembuka pertama mendapati `super_read_only` menyala).
+- Log sistem (syslog, tag `dbpanel-agent`), satu baris tiap perubahan oleh ketiga perintah:
+  - `database dropped: name=%q backup=%q sha256=%s size=%d tables=%d window=%s outcome=dropped mysql_user=%q <siapa>`; tanpa cadangan: `… backup=none backup_error=%q …`; hasil tak pasti: `database drop unconfirmed: … outcome=unknown statement=running` atau `… statement=ended`.
+  - `admin account grants: account=%q statements=%q window=%s outcome=%s mysql_user=%q <siapa>`; `outcome` salah satu dari `done`, `partial`, `unknown statement=running`, `unknown statement=ended`.
+  - `admin account reset: account=%q window=%s outcome=%s mysql_user=%q <siapa>`; `outcome` salah satu dari `done`, `login-failed`, `not-stored`, `unknown statement=running`, `unknown stored=unread`.
+  - `window` salah satu dari `closed`, `error`, `interrupted`, `cap`, `relock-failed`. `<siapa>` sama dengan baris `approve`: `user=%q sudo_uid=%s uid=%d` (tanpa `user` dan `sudo_uid` bila tidak lewat `sudo`).
+  - Bila log sistem gagal ditulis: `Peringatan: catatan ke log sistem gagal ditulis (%v).`
+
+### 9. Perintah di server: yang sama pada ketiganya
+
+Penolakan sebelum apa pun diubah (keluar dengan kode 1):
+
+- C1: `perintah ini hanya untuk server yang dikarantina (quarantined); peran server ini: <peran>`
+- C3: `kunci baca-saja server ini sedang dibuka pekerjaan lain (misalnya bangun ulang yang sedang menyalin data); coba lagi sesudah pekerjaan itu selesai`
+- C4 (sebab: `bukan berkas biasa`, `bukan milik root`, `bisa dibaca atau ditulis pengguna lain`, `punya lebih dari satu nama`): `berkas kunci <berkas> tidak aman dipakai (<sebab>); tidak ada yang diubah. Agent membuat ulang berkas itu saat membutuhkannya; bila pesan ini tetap muncul, mulai ulang agent lalu jalankan perintah ini lagi.`
+- C2: `kunci baca-saja server ini sedang tidak terpasang penuh; tunggu beberapa detik (agent memasangnya lagi) lalu ulangi`
+- `Pin server ini tidak bisa dibaca (%v); tidak ada yang diubah.`
+- `kunci baca-saja server ini tidak bisa diperiksa (%v); tidak ada yang diubah.`
+- `MySQL di server ini tidak bisa dibaca (%v); tidak ada yang diubah.`
+- `letak MySQL di server ini tidak bisa dibaca (%v); tidak ada yang diubah.`
+- `MySQL di server ini tidak bisa dihubungi lewat socket %s (%v); tidak ada yang diubah.`
+- `MySQL menolak login akun %s (%v); tidak ada yang diubah.`
+
+Permintaan kata sandi (bila masuk lewat socket tanpa kata sandi ditolak; yang diketik tidak tampil):
+
+- C5: `Kata sandi root MySQL: `
+- C5b, dengan `--pengguna <nama>`: `Kata sandi akun MySQL <nama>: `
+
+Sesudah konfirmasi dan di jendela terbuka:
+
+- C11: `Keadaan server ini berubah selama Anda membaca; tidak ada yang diubah. Jalankan perintah ini lagi.`
+- C13: `Perintah dihentikan (sinyal); kunci baca-saja server ini sudah terpasang lagi. Jalankan perintah ini lagi bila pekerjaannya belum selesai.`
+- C14: `Perintah ini sudah membuka kunci baca-saja selama 10 menit dan dihentikan; kunci baca-saja sudah terpasang lagi. Jalankan perintah ini lagi.`
+- `MySQL masih menyelesaikan atau membatalkan pernyataan perintah ini; perintah ini menunggu paling lama %d detik.`
+- `Kunci baca-saja server ini sudah terpasang lagi.`
+- `Kunci baca-saja server ini tidak terpasang penuh sesudah perintah ini; perintah ini sudah memasangnya lagi.`
+- `Kunci baca-saja server ini tidak bisa dipasang lagi (%v); agent memasangnya lagi dalam beberapa detik bila agent berjalan. Periksa dengan: sudo systemctl status dbpanel-agent`
+
+Bantuan (`dbpanel agent` dengan argumen salah, atau `-h`; keluar dengan kode 2), tiga baris baru di daftar penggunaan:
+
+```text
+  dbpanel agent drop-database <nama> [--ke FOLDER] [--pengguna NAMA] [--dir DIR]
+                                                         di server yang dikarantina (quarantined): buat
+                                                         cadangan satu database ke FOLDER (bawaan
+                                                         /var/lib/dbpanel/dibuang), periksa, lalu hapus
+                                                         database itu; --pengguna: akun administrator
+                                                         MySQL selain root
+  dbpanel agent grant-admin [--pengguna NAMA] [--dir DIR]
+                                                         di server yang dikarantina (quarantined): beri
+                                                         akun MySQL agent hak yang masih kurang
+  dbpanel agent reset-admin [--pengguna NAMA] [--dir DIR]
+                                                         di server yang dikarantina (quarantined): buat
+                                                         ulang akun dbpanel_admin@localhost dan simpan
+                                                         sebagai akun MySQL agent
+```
+
+Teks opsi: `folder cadangan (bawaan /var/lib/dbpanel/dibuang)`, `akun administrator MySQL selain root`, `direktori konfigurasi agent`. `--tanpa-cadangan` tidak ditulis di bantuan.
+
+### 10. `sudo dbpanel agent drop-database <nama>`
+
+Layar biasa (keluaran sungguhan terhadap mysqld coba; folder cadangan ditulis sebagai bawaannya, `rekam_lama` diketik operator):
+
+```text
+Cadangan database rekam_lama sudah dibuat dan diperiksa:
+  Database : rekam_lama
+  Tabel    : 2 tabel
+  Berkas   : /var/lib/dbpanel/dibuang/rekam_lama-20261118T183345Z.sql
+  Ukuran   : 2811 byte
+  SHA-256  : 0b076320348924c32f2ea13d71f9fa1e60960854490befcdcd721affd93c3269
+Simpan juga salinannya di server lain, misalnya:
+  scp /var/lib/dbpanel/dibuang/rekam_lama-20261118T183345Z.sql <pengguna>@<server-lain>:
+  lalu di server lain: sha256sum rekam_lama-20261118T183345Z.sql (hasilnya harus sama dengan SHA-256 di atas)
+
+Periksa dulu di master baru (hanya membaca): mysql -e 'SHOW DATABASES LIKE "rekam_lama"'. Jawabannya harus kosong.
+Agent tidak bisa memastikan database ini tidak ada di master baru. Bila database ini ada di master baru, menghapusnya di sini merusak replikasi server ini. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: rekam_lama
+Selesai. Tekan "Ulangi dari tahap ini" pada pekerjaan di panel, atau mulai lagi Bangun ulang sebagai replika.
+```
+
+Penolakan (contoh sungguhan): `Database rekam_lama tidak ada di server ini; tidak ada yang diubah.`
+
+Konfirmasi yang dibatalkan (contoh sungguhan): `… Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: Dibatalkan; tidak ada yang dihapus. Cadangan tadi tetap ada di /var/lib/dbpanel/dibuang/rekam_lama-20261118T183312Z.sql.`
+
+Semua teks perintah ini:
+
+- Ringkasan cadangan (blok `Cadangan database %s sudah dibuat dan diperiksa:` di atas, dengan baris `Database :`, `Tabel    : %d tabel`, `Berkas   :`, `Ukuran   : %d byte`, `SHA-256  :`, `Simpan juga salinannya di server lain, misalnya:`, `scp %s <pengguna>@<server-lain>:`, `lalu di server lain: sha256sum %s (hasilnya harus sama dengan SHA-256 di atas)`).
+- C9: `Periksa dulu di master baru (hanya membaca): mysql -e 'SHOW DATABASES LIKE "<nama>"'. Jawabannya harus kosong.`
+- C9b, nama dengan karakter di luar huruf, angka, garis bawah, titik, tanda hubung, tanda dolar (contoh sungguhan untuk `nama aneh`: `… HEX(schema_name) = "6E616D6120616E6568" …`): `Periksa dulu di master baru (hanya membaca): mysql -e 'SELECT schema_name FROM information_schema.schemata WHERE HEX(schema_name) = "<HEX nama>"'. Jawabannya harus kosong.`
+- C10, selalu: `Agent tidak bisa memastikan database ini tidak ada di master baru. Bila database ini ada di master baru, menghapusnya di sini merusak replikasi server ini. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: `
+- C15: `Selesai. Tekan "Ulangi dari tahap ini" pada pekerjaan di panel, atau mulai lagi Bangun ulang sebagai replika.`
+- `Dibatalkan; tidak ada yang dihapus. Cadangan tadi tetap ada di %s.`; tanpa cadangan: `Dibatalkan; tidak ada yang dihapus.`
+- `Database %s tidak ada di server ini; tidak ada yang diubah.`
+- `Database %s adalah skema sistem MySQL; perintah ini tidak menghapusnya.`
+- C7, folder `--ke` bukan milik root atau bisa ditulis orang lain (sebelum ringkasan): `Peringatan: folder <folder> bukan milik root atau bisa ditulis pengguna lain; cadangan di sana bisa diubah atau dihapus pengguna lain.`
+- `Folder cadangan %s tidak bisa dipakai (%v); tidak ada yang diubah.`
+- `Ruang kosong di folder %s (%d byte) tidak cukup untuk cadangan database %s (perkiraan %d byte); tidak ada yang diubah. Pilih folder lain dengan --ke <folder>.`
+- C6, nama berkas cadangan sudah ada (misalnya dua kali dalam detik yang sama): `berkas cadangan <berkas> sudah ada; tidak ada yang ditimpa dan tidak ada yang dihapus. Jalankan perintah ini lagi.`
+- P1, `mysqldump` tersambung lalu keluar dengan kode 2 atau 3, tanpa opsi (contoh sungguhan: `Cadangan database x tidak bisa dibuat (mysqldump keluar dengan kode 2); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database x --tanpa-cadangan`): `Cadangan database <nama> tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database <nama> --tanpa-cadangan`
+- P2, sama, dengan `--tanpa-cadangan` (sesudah C9): `Cadangan database <nama> tidak bisa dibuat (<sebab>). Dengan --tanpa-cadangan database itu dihapus TANPA cadangan dan tidak bisa dikembalikan. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: `
+- P1b, setiap kegagalan cadangan lain, dengan atau tanpa opsi (contoh sungguhan, `mysqldump` tidak pernah tersambung: `Cadangan database y tidak bisa dibuat (mysqldump keluar dengan kode 2); tidak ada yang dihapus. Perbaiki sebabnya atau pakai folder lain dengan --ke <folder>, lalu jalankan perintah ini lagi.`): `Cadangan database <nama> tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Perbaiki sebabnya atau pakai folder lain dengan --ke <folder>, lalu jalankan perintah ini lagi.`
+- Sebab di dalam P1, P1b, P2: `mysqldump keluar dengan kode %d` (ditambah `: <baris galat pertama>` bila ada), `mysqldump tidak bisa dijalankan: %v`, `mysqldump dihentikan oleh sinyal (%v)`, `baris terakhir berkas bukan "-- Dump completed"`, `berkas tidak memuat baris CREATE DATABASE untuk database ini`, `berkas memuat %d baris CREATE TABLE untuk %d tabel`, `berkas berakhir di dalam blok DELIMITER`, `berkas %s tidak bisa dibuat: %v`, `berkas tidak bisa dibaca lagi: %v`, `berkas tidak bisa disimpan ke disk: %v`.
+- `Perintah dihentikan (sinyal) selagi cadangan dibuat; berkas cadangan yang belum selesai dihapus dan tidak ada yang dihapus dari MySQL.`
+- C12 (contoh sungguhan dengan batas tunggu yang dipendekkan): `Database <nama> sedang dipakai sambungan lain, jadi belum dihapus. Kunci baca-saja sudah terpasang lagi. Hentikan aplikasi atau sesi yang masih memakai database itu, lalu jalankan perintah ini lagi. Cadangan tadi tetap ada di <berkas>.`; tanpa cadangan: `Database %s sedang dipakai sambungan lain, jadi belum dihapus. Kunci baca-saja sudah terpasang lagi. Hentikan aplikasi atau sesi yang masih memakai database itu, lalu jalankan perintah ini lagi.`
+- `Database %s tidak bisa dihapus (%s). Kunci baca-saja sudah terpasang lagi. Cadangan tadi tetap ada di %s.`; tanpa cadangan: `Database %s tidak bisa dihapus (%s). Kunci baca-saja sudah terpasang lagi.`
+- Sesudah akhir yang tidak biasa, sudah dihapus: `Database %s sudah dihapus. Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi.`; `Database %s sudah dihapus, walaupun MySQL melaporkan galat (%s). Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi.`; `Database %s sudah dihapus; perintah ini tidak perlu dijalankan lagi.`
+- Tidak bisa dipastikan: `Tidak bisa dipastikan apakah database %s sudah dihapus. Lihat dulu di server ini (hanya membaca): mysql -e 'SHOW DATABASES'. Bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi.`
+- MySQL mungkin masih menghapus: `MySQL mungkin masih menjalankan penghapusan database %s, jadi hasilnya belum bisa dipastikan. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris DROP DATABASE di sana, tunggu. Sesudah baris itu hilang, lihat mysql -e 'SHOW DATABASES': bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi.`
+
+### 11. `sudo dbpanel agent grant-admin`
+
+Layar biasa (keluaran sungguhan; `ya` diketik operator):
+
+```text
+Akun MySQL agent agen@localhost belum punya semua hak yang dibutuhkan. Pernyataan berikut dijalankan di MySQL server ini (tanpa masuk log biner), selagi kunci baca-saja dibuka sebentar:
+  GRANT BACKUP_ADMIN ON *.* TO 'agen'@'localhost' WITH GRANT OPTION
+  GRANT SHOW DATABASES ON *.* TO 'agen'@'localhost'
+Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: ya
+Hak akun agen@localhost sudah dilengkapi. Tekan "Ulangi dari tahap ini" pada pekerjaan di panel, atau klik Segarkan di halaman server ini.
+```
+
+Penolakan (contoh sungguhan): `nama akun MySQL yang disimpan agent (agen#2@localhost) memuat karakter yang tidak didukung pemeriksaan daftar database, jadi perintah ini tidak bisa melengkapinya; tidak ada yang diubah. Jalankan sudo dbpanel agent reset-admin`
+
+Konfirmasi yang dibatalkan (contoh sungguhan): `Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: Dibatalkan; tidak ada yang diubah.`
+
+Semua teks perintah ini (selain bagian 9):
+
+- `Akun MySQL agent %s belum punya semua hak yang dibutuhkan. Pernyataan berikut dijalankan di MySQL server ini (tanpa masuk log biner), selagi kunci baca-saja dibuka sebentar:` lalu satu baris `  <pernyataan>` per pernyataan.
+- `Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: ` (juga `reset-admin`)
+- `Dibatalkan; tidak ada yang diubah.` (juga `reset-admin`)
+- `Hak akun %s sudah dilengkapi. Tekan "Ulangi dari tahap ini" pada pekerjaan di panel, atau klik Segarkan di halaman server ini.`
+- C18: `Akun <akun> sudah punya semua hak yang dibutuhkan.`
+- C16: `agent belum punya akun MySQL tersimpan; jalankan sudo dbpanel agent reset-admin`
+- C17: `akun MySQL yang disimpan agent tidak bisa masuk; jalankan sudo dbpanel agent reset-admin`
+- `akun MySQL yang disimpan agent tidak bisa dibaca (%v); tidak ada yang diubah.` (juga `reset-admin`)
+- `tempat akun MySQL agent tidak bisa dibuka (%v); tidak ada yang diubah.` (juga `reset-admin`)
+- `nama akun MySQL yang disimpan agent (%s) memuat karakter yang tidak didukung pemeriksaan daftar database, jadi perintah ini tidak bisa melengkapinya; tidak ada yang diubah. Jalankan sudo dbpanel agent reset-admin`
+- `Hak akun %s tidak bisa diberikan (%s). Kunci baca-saja server ini sudah terpasang lagi.`
+- Sesudah akhir yang tidak biasa: `Hak akun %s sudah lengkap. Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi.`; `Hak akun %s sudah lengkap; perintah ini tidak perlu dijalankan lagi.`; lalu `Tekan "Ulangi dari tahap ini" pada pekerjaan di panel, atau klik Segarkan di halaman server ini.`; `Sebagian hak akun %s sudah diberikan, sebagian belum. Jalankan perintah ini lagi untuk memberi sisanya.`; `Tidak bisa dipastikan apakah hak akun %s sudah dilengkapi (%s). Lihat dengan menjalankan perintah ini lagi: sebelum mengubah apa pun, perintah ini menampilkan hak yang masih kurang, atau mengatakan tidak ada yang kurang.`; `MySQL mungkin masih menjalankan pernyataan GRANT perintah ini, jadi hasilnya belum bisa dipastikan. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris GRANT di sana, tunggu. Sesudah baris itu hilang, jalankan perintah ini lagi: sebelum mengubah apa pun, perintah ini menampilkan hak yang masih kurang, atau mengatakan tidak ada yang kurang.`
+
+### 12. `sudo dbpanel agent reset-admin`
+
+Layar biasa (keluaran sungguhan; `ya` diketik operator):
+
+```text
+Akun MySQL agent akan dibuat ulang: dbpanel_admin@localhost, dengan kata sandi acak baru dan semua hak. Pernyataan berikut dijalankan di MySQL server ini (tanpa masuk log biner), selagi kunci baca-saja dibuka sebentar:
+  CREATE USER IF NOT EXISTS 'dbpanel_admin'@'localhost' IDENTIFIED BY <kata sandi acak>
+  ALTER USER 'dbpanel_admin'@'localhost' IDENTIFIED WITH caching_sha2_password BY <kata sandi acak> REQUIRE NONE ACCOUNT UNLOCK
+  GRANT ALL PRIVILEGES ON *.* TO 'dbpanel_admin'@'localhost' WITH GRANT OPTION
+Sesudah itu perintah ini mencoba masuk ke MySQL dengan akun itu. Hanya bila berhasil, akun itu disimpan sebagai akun agent, menggantikan akun yang disimpan sekarang (akun itu tidak dihapus dari MySQL). Kata sandinya tidak ditampilkan.
+Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: ya
+Akun dbpanel_admin@localhost dibuat ulang dan disimpan sebagai akun agent. Di panel, klik Segarkan di halaman server ini.
+```
+
+Penolakan (contoh sungguhan): `perintah ini hanya untuk server yang dikarantina (quarantined); peran server ini: master`
+
+Konfirmasi yang dibatalkan (contoh sungguhan): `Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: Dibatalkan; tidak ada yang diubah.`
+
+Semua teks perintah ini (selain bagian 9 dan yang sama dengan `grant-admin`):
+
+- Layar rencana di atas (empat baris sebelum konfirmasi).
+- C19: `Akun dbpanel_admin@localhost dibuat ulang dan disimpan sebagai akun agent. Di panel, klik Segarkan di halaman server ini.`
+- `Akun dbpanel_admin@localhost tidak bisa dibuat ulang (%s). Kunci baca-saja server ini sudah terpasang lagi.`
+- Masuk dengan akun baru gagal (tidak disimpan): `Akun dbpanel_admin@localhost sudah dibuat ulang di MySQL, tetapi tidak bisa dipakai masuk (%s), jadi tidak disimpan; akun yang disimpan agent tidak diganti. Bila agent memakai akun dbpanel_admin@localhost, agent tidak bisa masuk sekarang. Jalankan perintah ini lagi; bila sebab yang sama muncul lagi, sebab itu ada di pengaturan MySQL server ini dan perintah ini tidak bisa mengubahnya: periksa sebab itu bersama administrator MySQL server ini.`
+- Sesudah akhir yang tidak biasa: `Perintah ini tidak selesai seperti biasa, tetapi akun dbpanel_admin@localhost sudah dibuat ulang dan disimpan sebagai akun agent; perintah ini tidak perlu dijalankan lagi.`; `Akun yang disimpan agent belum diganti. Akun dbpanel_admin@localhost di MySQL mungkin sudah dibuat atau kata sandinya sudah diganti; bila agent memakai akun itu, agent tidak bisa masuk sampai perintah ini selesai. Jalankan perintah ini lagi.`; `Tidak bisa dipastikan apakah akun dbpanel_admin@localhost sudah disimpan sebagai akun agent (%s). Jalankan perintah ini lagi.`; `MySQL mungkin masih menjalankan pernyataan perintah ini pada akun dbpanel_admin@localhost, jadi hasilnya belum bisa dipastikan; akun yang disimpan agent belum diganti. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris CREATE USER, ALTER USER atau GRANT di sana, tunggu. Sesudah baris itu hilang, jalankan perintah ini lagi.`
+
+### 13. README
+
+- Judul bagian yang dipertahankan (isinya ditulis ulang, dibuka dengan T27): `Database yang tidak ada di master baru`; `Memberi hak SHOW DATABASES di server yang dikarantina`. Tidak ada judul bagian baru.
+- Paragraf berjudul tebal yang baru: `Teks dari agent.` (di "Replikasi MySQL"), `Promote kedua selagi master lama sebelumnya masih dikarantina.` (di "Promote"), `Selama bangun ulang berjalan atau menunggu persetujuan` (di "Persetujuan di server untuk bangun ulang"), `grant-admin.` dan `reset-admin.` (di bagian SHOW DATABASES). `Setelah bangun ulang gagal.` ditulis ulang.
+
+### 14. Teks yang hilang
+
+- C8 (tidak pernah tampil; spek 5.8 masih memuatnya), digantikan P1 (cadangan gagal karena MySQL menolak sesudah tersambung) dan P1b (setiap kegagalan cadangan lain): `Cadangan database <nama> tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Bila cadangan tetap tidak bisa dibuat, jalan yang tersisa: Hapus server ini dari panel, lalu pasang lagi sebagai replika baru.`
+- T8 lama (agent, settle), digantikan T8a/T8b: `server ini masih punya database yang tidak disalin dari sumber %s (%s); karantina tidak diakhiri. Ulangi Bangun ulang sebagai replika dari panel. Bila panel lalu menolak karena database itu tidak ada di master baru, lihat README, bagian "Database yang tidak ada di master baru".`
+- Teks daftar lama (agent), digantikan T16: `daftar database di server ini tidak bisa dipastikan lengkap: akun MySQL %s yang dipakai agent tidak punya hak SHOW DATABASES. Beri hak itu sebagai root MySQL di server ini: GRANT SHOW DATABASES ON *.* TO %s; Server ini baca-saja, jadi perintah itu harus dijalankan dengan langkah di README, bagian "Memberi hak SHOW DATABASES di server yang dikarantina". Sesudah itu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
+- Teks nama akun lama (agent), digantikan T17: `daftar database di server ini tidak bisa dipastikan lengkap: nama akun MySQL yang dipakai agent memuat karakter yang tidak didukung pemeriksaan ini. Hubungkan MySQL di panel dengan akun lain yang namanya hanya huruf, angka, garis bawah, titik, atau tanda hubung (misalnya dbpanel_admin). Sesudah itu tekan "Ulangi dari tahap ini" pada pekerjaan di panel.`
+- Hubungkan MySQL di server dikarantina (agent), digantikan T15: `server ini dikarantina (quarantined): akun %s belum punya semua hak yang dibutuhkan; jalankan perintah GRANT berikut sebagai root lalu periksa ulang: %s`
+- Spanduk akun kurang hak di server yang dikarantina dengan pernyataan `GRANT` polos, digantikan T21.
+- Tombol `Batalkan percobaan bangun ulang` (kotak Master lama dan halaman replika), kalimatnya `Server ini kembali tercatat sebagai master lama yang dikarantina; data di server ini tidak diubah. Sesudah itu Hapus server dan Bangun ulang sebagai replika tersedia lagi, dan tombol "Ulangi dari tahap ini" pada pekerjaan yang gagal tidak bisa dipakai lagi.`, label konfirmasinya `Batalkan percobaan bangun ulang di <server>. …`, dan pesannya `Percobaan bangun ulang dibatalkan; server ini kembali tercatat sebagai master lama yang dikarantina.`. Label audit `Batalkan percobaan bangun ulang` tetap ada di halaman Audit untuk baris lama saja.
+- `Data tertinggal belum bisa diperiksa selama percobaan bangun ulang yang gagal masih tercatat. Untuk memeriksa atau mengamankannya, tekan dulu "Batalkan percobaan bangun ulang" di halaman server ini.`
+- `server ini bukan master lama dengan percobaan bangun ulang yang gagal`
+- `server tujuan adalah master lama yang dikarantina; pakai Bangun ulang sebagai replika` (Buat replika biasa ke master lama kini ditolak dengan teks yang sudah ada `server ini master lama yang masih dikarantina; pakai Bangun ulang sebagai replika`).
+- Halaman replika, digantikan T23: `Server ini master lama yang masih dikarantina. Pakai Bangun ulang sebagai replika.`
+- Label peringatan `Master lama sempat bisa ditulis saat menyala` dan nama Telegram `master lama sempat bisa ditulis saat menyala`, digantikan T20.
+- Di galat persiapan master: kata `Pesan agent:` sebelum teks agent (kini labelnya bagian 5).
+- README: blok SQL dengan tangan di kedua bagian yang ditulis ulang (membuat cadangan dengan `mysqldump`, `DROP DATABASE`, `GRANT` dan `CREATE USER` dengan `super_read_only` dibuka), paragraf "Hubungkan MySQL di server yang dikarantina", dan semua kalimat tentang "Batalkan percobaan bangun ulang".
