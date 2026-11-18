@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1085,5 +1087,77 @@ func TestCLIUsageHidesWithoutBackup(t *testing.T) {
 	RunCLI([]string{"help"}, strings.NewReader(""), &out, io.Discard)
 	if strings.Contains(out.String(), "tanpa-cadangan") {
 		t.Error("usage names --tanpa-cadangan")
+	}
+}
+
+// p1b refuses a backup that failed for a reason other than the dump
+// itself; it never offers the drop without a backup.
+const p1b = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Perbaiki sebabnya atau pakai folder lain dengan --ke <folder>, lalu jalankan perintah ini lagi."
+
+// failSyncFile is a backup file whose Sync fails.
+type failSyncFile struct{ *os.File }
+
+func (failSyncFile) Sync() error { return errors.New("input/output error") }
+
+// TestDropDatabaseBackupRefusals: a backup that fails without mysqldump
+// having run and failed (the file cannot be created, mysqldump cannot
+// start, a sync fails) is refused with P1b, with --tanpa-cadangan too:
+// P2 is never asked, nothing is dropped and nothing is left.
+func TestDropDatabaseBackupRefusals(t *testing.T) {
+	r := newDropRig(t)
+	setVar(t, &cliNow, func() time.Time { return fixedNow })
+	r.makeDB("tolak_cadangan", 1)
+	folder := filepath.Join(t.TempDir(), "ke")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(folder, "tolak_cadangan-"+fixedStamp+".sql")
+	missing := filepath.Join(t.TempDir(), "tidak-ada", "mysqldump")
+	for name, c := range map[string]struct {
+		set   func(t *testing.T)
+		cause string
+	}{
+		"file not created": {func(t *testing.T) {
+			fsys := osBackupFS
+			fsys.Create = func(p string) (backupFile, error) {
+				return nil, &fs.PathError{Op: "open", Path: p, Err: syscall.EACCES}
+			}
+			setVar(t, &cliBackupFS, fsys)
+		}, fmt.Sprintf("berkas %s tidak bisa dibuat: open %s: permission denied", path, path)},
+		"mysqldump missing": {func(t *testing.T) { setVar(t, &cliMysqldump, missing) },
+			fmt.Sprintf("mysqldump tidak bisa dijalankan: fork/exec %s: no such file or directory", missing)},
+		"file sync fails": {func(t *testing.T) {
+			fsys := osBackupFS
+			fsys.Create = func(p string) (backupFile, error) {
+				f, err := osBackupFS.Create(p)
+				if err != nil {
+					return nil, err
+				}
+				return failSyncFile{f.(*os.File)}, nil
+			}
+			setVar(t, &cliBackupFS, fsys)
+		}, "berkas tidak bisa disimpan ke disk: input/output error"},
+		"folder sync fails": {func(t *testing.T) {
+			fsys := osBackupFS
+			fsys.SyncDir = func(string) error { return errors.New("input/output error") }
+			setVar(t, &cliBackupFS, fsys)
+		}, "berkas tidak bisa disimpan ke disk: input/output error"},
+	} {
+		for _, extra := range [][]string{nil, {"--tanpa-cadangan"}} {
+			t.Run(strings.TrimSpace(name+" "+strings.Join(extra, " ")), func(t *testing.T) {
+				c.set(t)
+				args := append([]string{"tolak_cadangan", "--ke", folder}, extra...)
+				code, out, errOut := r.run(strings.NewReader("tolak_cadangan\ntolak_cadangan\n"), args...)
+				if want := fmt.Sprintf(p1b, "tolak_cadangan", c.cause) + "\n"; code == 0 || errOut != want {
+					t.Errorf("drop-database %v = %d\nstderr %q\nwant   %q\nstdout %q", extra, code, errOut, want, out)
+				}
+				if strings.Contains(out, "TANPA cadangan") || strings.Contains(out, c10) {
+					t.Errorf("asked to confirm: %q", out)
+				}
+				if files := backupFiles(t, folder); len(files) != 0 || !r.exists("tolak_cadangan") || r.flags() != "1 1" || len(r.syslogLines()) != 0 {
+					t.Errorf("files %v, exists %v, flags %s, system log %q", files, r.exists("tolak_cadangan"), r.flags(), r.syslogLines())
+				}
+			})
+		}
 	}
 }

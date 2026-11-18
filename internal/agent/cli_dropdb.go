@@ -34,6 +34,7 @@ const (
 	textBackupExists    = "berkas cadangan %s sudah ada; tidak ada yang ditimpa dan tidak ada yang dihapus. Jalankan perintah ini lagi."
 	textSharedFolder    = "Peringatan: folder %s bukan milik root atau bisa ditulis pengguna lain; cadangan di sana bisa diubah atau dihapus pengguna lain."
 	textBackupFailed    = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database %s --tanpa-cadangan"
+	textBackupRefused   = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Perbaiki sebabnya atau pakai folder lain dengan --ke <folder>, lalu jalankan perintah ini lagi."
 	textConfirmNoBackup = "Cadangan database %s tidak bisa dibuat (%s). Dengan --tanpa-cadangan database itu dihapus TANPA cadangan dan tidak bisa dikembalikan. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: "
 	textCheckNewMaster  = `Periksa dulu di master baru (hanya membaca): mysql -e 'SHOW DATABASES LIKE "%s"'. Jawabannya harus kosong.`
 	textCheckNewHex     = `Periksa dulu di master baru (hanya membaca): mysql -e 'SELECT schema_name FROM information_schema.schemata WHERE HEX(schema_name) = "%s"'. Jawabannya harus kosong.`
@@ -281,16 +282,21 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	var b *backup
 	var noBackup string
 	var exists *backupExistsError
+	var dumpErr *dumpFailedError
 	b, err = makeBackup(ctx, s, folder, name, tables)
 	switch {
 	case errors.As(err, &exists):
 		return fail(textBackupExists, printable(exists.path))
 	case errors.Is(err, errDumpInterrupted):
 		return fail(textDumpInterrupted)
-	case err != nil && !o.noBackup:
+	case errors.As(err, &dumpErr) && !o.noBackup:
 		return fail(textBackupFailed, pname, printable(err.Error()), shellArg(pname))
-	case err != nil:
+	case errors.As(err, &dumpErr):
 		noBackup = printable(err.Error())
+	case err != nil:
+		// Not the dump's own failure: the backup can be made once the
+		// cause is fixed, so the drop without one is never offered.
+		return fail(textBackupRefused, pname, printable(err.Error()))
 	}
 	var ppath string
 	if b != nil {
@@ -488,6 +494,20 @@ type backupExistsError struct{ path string }
 
 func (e *backupExistsError) Error() string { return "exists: " + e.path }
 
+// dumpFailedError is a backup whose mysqldump ran to its own exit and
+// failed: it exited non-zero, or what it wrote failed a check of step 7.
+// Only this is "a backup that cannot be made" (P1, or P2 with
+// --tanpa-cadangan); every other failure of makeBackup is refused (P1b),
+// as the remedy (another folder, the client installed) keeps the backup.
+type dumpFailedError struct{ cause string }
+
+func (e *dumpFailedError) Error() string { return e.cause }
+
+// dumpFailed is a dumpFailedError with the cause format and args give.
+func dumpFailed(format string, a ...any) error {
+	return &dumpFailedError{fmt.Sprintf(format, a...)}
+}
+
 // errDumpInterrupted is a backup a signal stopped.
 var errDumpInterrupted = errors.New("dump interrupted")
 
@@ -549,7 +569,7 @@ func (b *backup) fill(ctx context.Context, s *rootSession, name string, tables i
 		if first, _, _ := strings.Cut(strings.TrimSpace(stderr.String()), "\n"); first != "" {
 			cause += ": " + first
 		}
-		return errors.New(cause)
+		return dumpFailed("%s", cause)
 	}
 	if err != nil {
 		return fmt.Errorf(causeNoStart, err)
@@ -564,13 +584,13 @@ func (b *backup) fill(ctx context.Context, s *rootSession, name string, tables i
 	}
 	switch {
 	case !strings.HasPrefix(st.last, "-- Dump completed"):
-		return errors.New(causeNotComplete)
+		return dumpFailed(causeNotComplete)
 	case !st.database:
-		return errors.New(causeNoDatabase)
+		return dumpFailed(causeNoDatabase)
 	case st.tables < tables:
-		return fmt.Errorf(causeFewTables, st.tables, tables)
+		return dumpFailed(causeFewTables, st.tables, tables)
 	case st.open:
-		return errors.New(causeOpenBlock)
+		return dumpFailed(causeOpenBlock)
 	}
 	if err := b.f.Sync(); err != nil {
 		return fmt.Errorf(causeSync, err)
