@@ -641,8 +641,9 @@ func TestReplicationVerifiesSourceCert(t *testing.T) {
 }
 
 // TestStartReplicaRefusesForeignChannelOnQuarantined (SEC-210): on a
-// quarantined server with root's approval, mysql.startReplica and
-// mysql.startUntil are refused (T18) while any replication channel's
+// quarantined server with root's approval, mysql.startReplica,
+// mysql.startUntil and mysql.setReplicationFilter (which starts every
+// channel again) are refused (T18) while any replication channel's
 // source is not the pinned source, before anything starts; a source name
 // MySQL holds is shown quoted when it is not a plain host. With every
 // channel toward the pinned source the replica starts.
@@ -672,7 +673,8 @@ func TestStartReplicaRefusesForeignChannelOnQuarantined(t *testing.T) {
 		for _, c := range []struct {
 			cmd    string
 			params any
-		}{{"mysql.startReplica", nil}, {"mysql.startUntil", until}} {
+		}{{"mysql.startReplica", nil}, {"mysql.startUntil", until},
+			{"mysql.setReplicationFilter", proto.ReplicationFilterParams{Databases: []string{"toko"}}}} {
 			resp := r.dispatch(c.cmd, c.params)
 			if resp.OK || resp.Error == nil || resp.Error.Message != t18(channel, c.cmd) {
 				t.Errorf("%s: %s = %+v\nwant the error %q", what, c.cmd, resp, t18(channel, c.cmd))

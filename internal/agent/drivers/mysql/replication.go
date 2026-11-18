@@ -112,6 +112,10 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 		if err != nil {
 			return nil, err
 		}
+		// STOP REPLICA … START REPLICA starts every channel again (T18).
+		if err := d.refuseForeignChannel(ctx, h, "mysql.setReplicationFilter"); err != nil {
+			return nil, err
+		}
 		rs, err := SetReplicationFilter(ctx, h, p.Databases)
 		if err != nil {
 			return nil, err
@@ -242,9 +246,10 @@ func (d *Driver) registerReplication(reg *commands.Registry) {
 	})
 }
 
-// refuseForeignChannel is the check of mysql.startReplica and
-// mysql.startUntil on a quarantined server (SEC-210), before either sends
-// anything: START REPLICA starts every channel, so each configured
+// refuseForeignChannel is the check of mysql.startReplica,
+// mysql.startUntil and mysql.setReplicationFilter on a quarantined server
+// (SEC-210), before any of them sends anything: START REPLICA starts every
+// channel, so each configured
 // channel's source (performance_schema.replication_connection_configuration)
 // must be the pinned source, matched as the pins match one (by name,
 // Pins.quarantinedUnder); the first that is not is refused with T18.
