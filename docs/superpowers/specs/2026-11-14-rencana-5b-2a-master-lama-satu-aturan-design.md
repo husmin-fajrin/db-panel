@@ -4,7 +4,8 @@
 - Status: disetujui pemilik produk 2026-11-16; diubah sesudah tinjauan
   rancangan dan pengukuran putaran kedua (bagian 10). Yang masih menunggu
   pemilik: perubahan pada bagian 5 dan 7 yang disebut di 7.12–7.19, dan
-  blok bertanda di bagian 7.
+  jalan balik ke root yang dipersempit saat pelaksanaan (5.5). Opsi
+  `--tanpa-cadangan` di bagian 7 disetujui pemilik 2026-11-17.
 - Asal: daftar yang ditunda dari Rencana 5b-1 (rencana 5b-1, "Perubahan
   selama pelaksanaan" butir 18) dan tabel risiko terbuka audit Rencana
   5b-1 (`docs/superpowers/security/2026-11-14-audit-plan-5b1.md`, bagian
@@ -930,7 +931,7 @@ belum ada, atau berbunyi lain, saat pemilik menyetujui rancangan ini.
 Tata letak layar ketiga perintah CLI (ringkasan sebelum konfirmasi, baris
 "kunci dipasang lagi" di akhir) ditulis pelaksana menurut pola `approve`
 dan dikumpulkan di laporan untuk dibaca pemilik. Teks opsi
-`--tanpa-cadangan` hanya ada di blok bertanda di bagian 7.
+`--tanpa-cadangan` ada di bagian 7 (disetujui pemilik 2026-11-17).
 
 ### 5.9 Kompatibilitas
 
@@ -1095,16 +1096,11 @@ pemilik, dengan perubahan yang disebut di tiap butir.
     ini tidak disalin dari master baru", dan teks `mysql.connect` yang
     menunjuk `grant-admin`.
 
-<!-- MENUNGGU KEPUTUSAN PEMILIK: opsi --tanpa-cadangan. Bila opsi ini tidak
-     diambil, hapus blok ini seluruhnya (sampai penanda AKHIR); tidak ada
-     bagian lain spek ini yang perlu diubah. -->
-
-**MENUNGGU KEPUTUSAN PEMILIK — opsi `--tanpa-cadangan` untuk
-`drop-database`.** Tanpa opsi ini, database yang tidak bisa dicadangkan
+**Opsi `--tanpa-cadangan` untuk `drop-database` (disetujui pemilik
+2026-11-17).** Tanpa opsi ini, database yang tidak bisa dicadangkan
 (tabel yang tidak terbaca `mysqldump`, misalnya di master lama yang mati
 mendadak) tidak punya jalan lain selain Hapus server (teks C8), karena
-bangun ulang menolak selama database itu ada. Usul tinjauan rancangan:
-ya, dengan batas berikut.
+bangun ulang menolak selama database itu ada. Batasnya:
 
 - Opsi tidak ditulis di teks bantuan; ia hanya disebut di teks cadangan
   yang gagal, yang lalu berbunyi (menggantikan C8) — P1: `Cadangan database <nama> tidak bisa dibuat (<sebab>); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database <nama> --tanpa-cadangan`
@@ -1114,8 +1110,11 @@ ya, dengan batas berikut.
 - Selebihnya sama: cara melihat di master baru ditampilkan, keadaan
   diperiksa ulang sesudah konfirmasi, baris syslog mencatat "tanpa
   cadangan".
-
-<!-- AKHIR blok MENUNGGU KEPUTUSAN PEMILIK: opsi --tanpa-cadangan -->
+- Opsi ini hanya untuk cadangan yang sudah dicoba dan gagal. Yang masih
+  punya jalan yang menyimpan cadangan tetap ditolak juga dengan opsi
+  ini: ruang kosong folder cadangan tidak cukup (pakai `--ke`), nama
+  berkas cadangan sudah ada (jalankan lagi), folder tidak bisa dipakai,
+  dan perintah yang dihentikan sinyal selagi mencadangkan.
 
 ## 8. Risiko yang tersisa setelah 5b-2a
 
@@ -1270,7 +1269,7 @@ kini berbunyi lain disebut di akhir bagian ini.
 | R-8 | `lock_wait_timeout` 60 detik; sinyal ditangkap selagi kunci terbuka; batas 10 menit (C12, C13, C14) | 4, 5.4, 5.8, 7.16, 8 |
 | R-9 | Pemeriksaan ulang sesudah konfirmasi di bawah kunci; pemulihan memasang yang terbaca (C11) | 5.4, 5.8 |
 | R-10, F-3 | Tidak ada berkas "tidak disalin"; nama selalu diketik; cara melihat di master baru selalu ditampilkan (C9, C9b, C10); T8 menjadi T8a/T8b; pemeriksaan "Server replika khusus" menunjuk perintah (T13) | 3 (F20), 4, 5.3, 5.4, 5.8, 7.13 |
-| R-11 | Baris `CREATE TABLE` dihitung di luar blok `DELIMITER` dan "paling sedikit"; deskriptor disimpan, `fsync` sebelum bertanya; peringatan `--ke` (C7); teks cadangan gagal (C8); `--tanpa-cadangan` menunggu pemilik | 5.4, 5.8, 7 (blok bertanda) |
+| R-11 | Baris `CREATE TABLE` dihitung di luar blok `DELIMITER` dan "paling sedikit"; deskriptor disimpan, `fsync` sebelum bertanya; peringatan `--ke` (C7); teks cadangan gagal (C8, digantikan P1 sejak opsi `--tanpa-cadangan` disetujui pemilik 2026-11-17) | 5.4, 5.8, 7 (blok bertanda) |
 | R-12 | Penolakan `mysql.connect` menunjuk `reset-admin` (T15) | 3 (F21), 5.4, 5.8 |
 | R-13 | `grant-admin` memakai kumpulan hak replika dan nama akun dari `CURRENT_USER()` (C17); pemeriksaan "Hak akses akun admin" di server yang dikarantina tanpa `GRANT` (T14) | 3 (F21), 5.4, 5.8 |
 | R-14, F-2 | Uid = pemilik direktori yang dibaca; root = seperti sekarang dengan peringatan; jalan balik ke root hanya bila proses tidak bisa dimulai | 3 (F12), 4, 5.5, 7.17, 8 |

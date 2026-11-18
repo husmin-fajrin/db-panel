@@ -1032,13 +1032,11 @@ Teks (dipakai persis):
 - [ ] **Step 4:** Gerbang; commit
   `feat(agent): drop-database, a checked backup and drop on a quarantined server`.
 
-<!-- MENUNGGU KEPUTUSAN PEMILIK: opsi --tanpa-cadangan. Bila opsi ini tidak
-     diambil, hapus blok ini seluruhnya (sampai penanda AKHIR); tidak ada
-     bagian lain Task 8 yang perlu diubah. -->
-
-**MENUNGGU KEPUTUSAN PEMILIK — opsi `--tanpa-cadangan`** (spek bagian 7,
-blok bertanda). Dikerjakan hanya bila pemilik menyetujuinya; sampai itu
-Task 8 dibangun tanpa blok ini.
+**Opsi `--tanpa-cadangan`: disetujui pemilik 2026-11-17** (spek bagian 7).
+Dibangun bersama Task 8. Diputuskan saat pelaksanaan: ruang kosong yang
+tidak cukup untuk cadangan (langkah 5) tetap ditolak juga dengan opsi
+ini, dengan teks yang sama (menunjuk `--ke`); hanya cadangan yang sudah
+dicoba dan gagal di langkah 7 yang berujung ke pertanyaan P2.
 
 - Opsi `--tanpa-cadangan` diterima `mainDropDatabase` tetapi tidak
   ditulis di teks bantuan. Dengan blok ini, teks cadangan gagal (langkah
@@ -1057,7 +1055,6 @@ Task 8 dibangun tanpa blok ini.
   `TestFailedBackupTextNamesOption` (tanpa opsi, cadangan gagal → P1
   persis).
 
-<!-- AKHIR blok MENUNGGU KEPUTUSAN PEMILIK: opsi --tanpa-cadangan -->
 
 ### Task 9: `grant-admin`, `reset-admin`, dan teks agent yang menunjuk perintah
 
@@ -1742,7 +1739,8 @@ Teks (dipakai persis):
   selain yang disebut Task 10.
 - Butir yang menunggu keputusan pemilik: perubahan spek 7.12–7.19 (teks
   T1b untuk Task 4/5/12; F-1 untuk Task 11; F-3 untuk Task 8; F-4 untuk
-  Task 12) dan blok bertanda `--tanpa-cadangan` di Task 8. Task 3–7 tidak
+  Task 12). Blok `--tanpa-cadangan` di Task 8 sudah disetujui pemilik
+  (2026-11-17). Task 3–7 tidak
   bergantung pada jawaban itu kecuali teks T1b. Ditambah saat
   pelaksanaan: jalan balik ke root yang dipersempit di Task 7 (butir 8
   "Perubahan selama pelaksanaan", spek 5.5).
@@ -2050,7 +2048,7 @@ itu tidak dibangun sama sekali (R-4).
 | R-8 | Global Constraints, 8, 9 | `runLifted`: `lock_wait_timeout` 60 detik, sinyal ditangkap, batas 10 menit, pemulihan lewat sambungan kedua dengan `KILL QUERY`; teks C12, C13, C14; `TestDropDatabaseInterruptedRelocksItself`, `TestDropDatabaseBlockedByOpenTransaction`, `TestDropDatabaseGivesUpAfterCap` |
 | R-9 | 8, 9 | Pemeriksaan ulang sesudah konfirmasi di bawah kunci (`runLifted` langkah 2, teks C11); pemulihan memasang yang terbaca; `TestDropDatabaseRecheckAfterConfirmation`, `TestAdminCommandsRecheckAfterConfirmation` |
 | R-10, F-3 | Global Constraints, 8, 9 | Berkas daftar "tidak disalin" dan ketiga fungsinya tidak dibangun (Task 8 tidak lagi mengubah `rebuild_load.go`/`quarantine.go`); nama selalu diketik (C10) sesudah petunjuk C9/C9b; `errNotReplaced` menjadi T8a/T8b; pemeriksaan "dedicated" menunjuk perintah (T13); `TestNotReplacedTextSplitsByNewMaster`, `TestDedicatedCheckPointsToCommandOnQuarantined` |
-| R-11 | 8 | Pemeriksaan cadangan lewat deskriptor yang disimpan, `fsync` berkas dan folder sebelum bertanya, peringatan `--ke` (C7), teks cadangan gagal (C8), `TestDropDatabaseRoutineWithCreateTableLine`, `TestDropDatabaseSyncsBackupBeforeDrop`; opsi `--tanpa-cadangan` sebagai satu blok bertanda yang menunggu pemilik |
+| R-11 | 8 | Pemeriksaan cadangan lewat deskriptor yang disimpan, `fsync` berkas dan folder sebelum bertanya, peringatan `--ke` (C7), teks cadangan gagal (C8), `TestDropDatabaseRoutineWithCreateTableLine`, `TestDropDatabaseSyncsBackupBeforeDrop`; opsi `--tanpa-cadangan` (disetujui pemilik 2026-11-17) |
 | R-12 | 9 | Teks `mysql.connect` menjadi T15 (menunjuk `reset-admin`); `TestConnectRefusalAdviceWorks` |
 | R-13 | 9 | `MissingAdminGrants` memakai `replicaGrants` + `SHOW DATABASES`; `StoredAccountName` (`CURRENT_USER()`); teks C17; pemeriksaan "grants" di server yang dikarantina tanpa `FixSQL` (T14); `TestGrantAdminCoversReplicaPreflight` |
 | R-14, F-2 | Review Focus, 7 | `serviceCredential(dir)` = pemilik direktori lewat `lstat`; uid 0 = seperti sekarang dengan T19; `ErrNotStarted` membedakan "tidak bisa dimulai" dari "gagal", dan hanya yang pertama jatuh ke root; `TestServiceToolFailureIsNotRetriedAsRoot`, `TestServiceCredentialRootCountsAsMissing`; `TestServiceCredentialOtherUser` menjadi `TestServiceCredentialIsDirectoryOwner` |
