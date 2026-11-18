@@ -200,13 +200,14 @@ func (s *Store) ListJobs(limit int) ([]Job, error) {
 	return s.queryJobs(`ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
 }
 
-// ListJobsForServer returns a server's newest jobs first; limit <= 0 means
-// no limit.
+// ListJobsForServer returns a server's newest jobs first, in the order
+// they were stored (rowid, as NewerJobExists: created_at has one-second
+// precision and ids are random); limit <= 0 means no limit.
 func (s *Store) ListJobsForServer(serverID int64, limit int) ([]Job, error) {
 	if limit <= 0 {
 		limit = -1
 	}
-	return s.queryJobs(`WHERE server_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, serverID, limit)
+	return s.queryJobs(`WHERE server_id = ? ORDER BY rowid DESC LIMIT ?`, serverID, limit)
 }
 
 // RunningJobs returns the jobs that are running or waiting, oldest first.

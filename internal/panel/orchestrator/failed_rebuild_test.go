@@ -422,10 +422,13 @@ func TestNormalizeLegacyFailedRebuilds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Every job in the same second: created_at cannot order them, only
+	// the order they were stored in can, whatever their random ids.
+	created := time.Now().Truncate(time.Second)
 	job := func(t *testing.T, g *promoteRig, id, params string) {
 		t.Helper()
 		if err := g.e.st.CreateJob(store.Job{ID: id, Kind: KindCreateReplica, ServerID: g.m.id, TopologyID: g.topo.ID,
-			ParamsJSON: params, CreatedAt: time.Now()}, createReplicaStepNames()); err != nil {
+			ParamsJSON: params, CreatedAt: created}, createReplicaStepNames()); err != nil {
 			t.Fatal(err)
 		}
 		if err := g.e.st.UpdateJob(id, store.JobFailed, 6, "gagal", time.Now()); err != nil {
@@ -451,6 +454,7 @@ func TestNormalizeLegacyFailedRebuilds(t *testing.T) {
 		{"unreadable job", `{"rebuild_old_master":`, false},
 		{"flagged job", `{"rebuild_old_master":true,"quarantine_ended":true}`, true},
 		{"older flagged, newer unflagged", "older-flagged", false},
+		{"older flagged, newer unflagged, ids the other way", "older-flagged-reversed", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := rebuildRig(t)
@@ -461,6 +465,9 @@ func TestNormalizeLegacyFailedRebuilds(t *testing.T) {
 			case "older-flagged":
 				job(t, g, "99999999999999999999999999999990", `{"rebuild_old_master":true,"quarantine_ended":true}`)
 				job(t, g, "99999999999999999999999999999991", unsettled)
+			case "older-flagged-reversed":
+				job(t, g, "99999999999999999999999999999991", `{"rebuild_old_master":true,"quarantine_ended":true}`)
+				job(t, g, "99999999999999999999999999999990", unsettled)
 			default:
 				job(t, g, "99999999999999999999999999999991", tc.params)
 			}
