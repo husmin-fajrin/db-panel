@@ -128,9 +128,12 @@ type Driver struct {
 	qStartPending bool
 	// qUnverified counts the guard's rounds in a row that could not check
 	// the flags (guardQuarantined, step 6); qUnverifiedAt is when such a
-	// streak was last reported. The caller holds promoteMu.
+	// streak was last reported. qLockOpenAt: when the guard last logged
+	// that it could not open the lift lock file. The caller holds
+	// promoteMu.
 	qUnverified   int
 	qUnverifiedAt time.Time
+	qLockOpenAt   time.Time
 	// relocked reports that the guard found a quarantined server writable
 	// without a legitimate lift (while: proto.QuarantineWhileRunning) or
 	// could not check it (proto.QuarantineWhileUnverified); nil reports

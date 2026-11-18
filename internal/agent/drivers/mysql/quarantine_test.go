@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -960,6 +961,95 @@ func TestGuardSkipsWhenCLIHoldsLock(t *testing.T) {
 	}
 	r.wantFlags("while the command holds the lock", "1 0")
 	r.wantRelocks("while the command holds the lock", "")
+}
+
+// failingGuardOpener makes tryGuard's open of the lift lock file fail with
+// cause, for the rest of the test.
+func failingGuardOpener(t *testing.T, cause error) {
+	t.Cleanup(mysql.SetGuardLockOpener(func(string, bool) (*os.File, error) { return nil, cause }))
+}
+
+// lockedBuffer is a bytes.Buffer safe for a logger and a test to share.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestGuardRelocksWhenLockFileCannotBeOpened: a lift lock file the guard
+// cannot open, with no lift of this agent open, is no legitimate lift: the
+// guard puts super_read_only back as with the lock free, reports the
+// relock, and logs the open error at most once per ten minutes. With a lift
+// of this agent open the guard leaves the server alone as before.
+func TestGuardRelocksWhenLockFileCannotBeOpened(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	var logs lockedBuffer
+	r.d.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	r.mustTick()
+	failingGuardOpener(t, errors.New("no space left on device"))
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF")
+	r.mustTick()
+	r.wantFlags("after the round", "1 1")
+	r.wantRelocks("after the round", proto.QuarantineWhileRunning)
+	for range 3 {
+		execAll(t, r.root, "SET GLOBAL super_read_only = OFF")
+		r.mustTick()
+	}
+	r.wantFlags("three more rounds", "1 1")
+	const logged = "quarantine guard cannot open the lift lock file"
+	if n := strings.Count(logs.String(), logged); n != 1 {
+		t.Errorf("open error logged %d times in four rounds, want 1; log:\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "no space left on device") {
+		t.Errorf("the log does not carry the cause:\n%s", logs.String())
+	}
+	r.now = r.now.Add(10 * time.Minute)
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF")
+	r.mustTick()
+	if n := strings.Count(logs.String(), logged); n != 2 {
+		t.Errorf("open error logged %d times after ten minutes, want 2", n)
+	}
+
+	// A lift of this agent is open: left alone.
+	hold := r.lift()
+	r.mustTick()
+	r.mustTick()
+	r.wantFlags("during this agent's lift", "1 0")
+	if err := hold.End(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGuardOpenFailureKeepsUnverifiedStreak: a round that relocked without
+// being able to open the lift lock file does not end a streak of rounds
+// that could not check; the third such round is reported as unverified.
+func TestGuardOpenFailureKeepsUnverifiedStreak(t *testing.T) {
+	r := newFlagRig(t, nil, guardCandidateKey)
+	creds := r.guardAdmin()
+	r.mustTick()
+	failingGuardOpener(t, errors.New("too many open files"))
+	r.refuseLogin(true, creds)
+	r.mustTick()
+	r.mustTick()
+	r.refuseLogin(false, creds)
+	execAll(t, r.root, "SET GLOBAL super_read_only = OFF")
+	r.mustTick()
+	r.wantFlags("the round that logged in", "1 1")
+	r.wantRelocks("two refused rounds and one relock", "")
+	r.refuseLogin(true, creds)
+	r.mustTick()
+	r.wantRelocks("third round that could not check", proto.QuarantineWhileUnverified)
 }
 
 // TestGuardTransitionDuringUnmarkedLift: a lift without a load mark

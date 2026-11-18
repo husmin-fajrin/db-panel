@@ -442,6 +442,28 @@ func TestSettleWaitsForCLILift(t *testing.T) {
 	}
 }
 
+// TestSettleRefusedWhenLockFileCannotBeOpened: a lift lock file the settle
+// cannot open is no command's lift (not T12): the settle names the file and
+// the cause, records nothing, and once the fault is gone the same command
+// ends the quarantine.
+func TestSettleRefusedWhenLockFileCannotBeOpened(t *testing.T) {
+	r := newSettleRig(t)
+	r.dump("toko")
+	cause := errors.New("read-only file system")
+	restore := mysql.SetGuardLockOpener(func(string, bool) (*os.File, error) { return nil, cause })
+	want := `berkas kunci baca-saja ` + r.d.LiftLockPath() + ` di server ini tidak bisa dibuka (read-only file system); ` +
+		`karantina tidak diakhiri. Perbaiki sebabnya di server itu, lalu tekan "Ulangi dari tahap ini"`
+	r.wantSettleRefused("lock file cannot be opened", want)
+	restore()
+	if r.d.WritableAfterLoad() {
+		t.Error("an unopenable lock file recorded as writable since the load")
+	}
+	decode[proto.ReplicaStatus](t, r.dispatch("mysql.configureReplication", sourceParams(r.master)))
+	if role := pinFile(t, r.dir, mysql.RoleFile); role != "replica" {
+		t.Errorf("role pin after the fault was fixed = %q, want replica", role)
+	}
+}
+
 // TestFailedLoadDropsEarlierLoadRecord: a load that began changing local
 // data and failed leaves no load record: the earlier one no longer
 // describes the server. The second load fails in its load stream: the old

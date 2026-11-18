@@ -342,25 +342,42 @@ var openGuardLock = openLiftLock
 // tryGuard takes the lift lock for the quarantine guard through a
 // descriptor of its own, without waiting. free is true when it got the
 // lock and no lift of this process is open (or starting or ending);
-// release drops the lock and is never nil.
-func (g *liftGate) tryGuard() (release func(), free bool) {
+// release drops the lock and is never nil. Three states, not two: when no
+// lift of this process is open and the lock file cannot be opened or
+// locked, free is false and openErr says why. No lift of this agent can be
+// open then (begin needs the same file), so the caller treats the server
+// as not legitimately lifted (ruling D54).
+func (g *liftGate) tryGuard() (release func(), free bool, openErr error) {
 	none := func() {}
 	if !g.mu.TryLock() {
-		return none, false
+		return none, false, nil
 	}
 	defer g.mu.Unlock()
 	if g.holders > 0 {
-		return none, false
+		return none, false, nil
 	}
 	f, err := openGuardLock(g.path, true)
 	if err != nil {
-		return none, false
+		return none, false, err
 	}
-	if held, err := tryFlock(f); err != nil || held {
+	held, err := tryFlock(f)
+	if err != nil {
 		f.Close()
-		return none, false
+		return none, false, fmt.Errorf("kunci %s: %w", g.path, err)
 	}
-	return func() { f.Close() }, true
+	if held {
+		f.Close()
+		return none, false, nil
+	}
+	return func() { f.Close() }, true, nil
+}
+
+// errLiftLockUnopenable is the settle's answer when the lift lock file
+// cannot be opened: no command's lift (not T12), and nothing is recorded,
+// so "Ulangi dari tahap ini" works once the cause is fixed.
+func errLiftLockUnopenable(path string, cause error) error {
+	return fmt.Errorf(`berkas kunci baca-saja %s di server ini tidak bisa dibuka (%v); karantina tidak diakhiri. `+
+		`Perbaiki sebabnya di server itu, lalu tekan "Ulangi dari tahap ini"`, path, cause)
 }
 
 // superWasOn reports whether super_read_only was on when the first opener

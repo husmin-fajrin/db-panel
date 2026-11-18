@@ -251,6 +251,10 @@ const mysqlUptimeSlack = 2
 //  2. Both flags on and no transition: done, the lock file untouched.
 //  3. Otherwise it tries the lift lock without waiting and looks at the
 //     load mark.
+//     A lock file it cannot open, with no lift of this agent open, is no
+//     legitimate lift: the round goes on as with the lock free, the open
+//     error logged at most once per unverifiedRepeat, and it ends no
+//     streak of rounds that could not check (ruling D54).
 //  4. Lock held elsewhere or a load marked: a legitimate lift may be open,
 //     so super_read_only is left alone; read_only off is put back (SET
 //     GLOBAL read_only = ON leaves super_read_only as it is), reported and
@@ -342,7 +346,20 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host, now time.Time) er
 		return nil
 	}
 
-	release, free := d.liftGate().tryGuard()
+	release, free, openErr := d.liftGate().tryGuard()
+	if openErr != nil {
+		// No lift of this agent is open and the lock file cannot be
+		// opened: no legitimate lift is proved, so the round goes on as
+		// with the lock free; it ends no streak of rounds that could not
+		// check (checked).
+		d.guardLockUnopenable(now, openErr)
+		free = true
+	}
+	checked := func() {
+		if openErr == nil {
+			d.checkedRound()
+		}
+	}
 	loading := false
 	if src, first, ok := d.deferringToRebuild(); ok {
 		loading = true
@@ -354,7 +371,7 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host, now time.Time) er
 		// A legitimate lift may be open: super_read_only is its own;
 		// read_only stays on throughout any lift.
 		release()
-		d.checkedRound()
+		checked()
 		d.guard.up = false
 		if ro {
 			return nil
@@ -376,11 +393,11 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host, now time.Time) er
 			d.unverifiedRound(h, now)
 		} else {
 			// Both read on: retried next round, it costs nothing.
-			d.checkedRound()
+			checked()
 		}
 		return err
 	}
-	d.checkedRound()
+	checked()
 	d.startLockProved = true
 	d.guard.up = true
 	if off {
@@ -426,8 +443,14 @@ func (d *Driver) unverifiedRound(h Host, now time.Time) {
 	if !d.qUnverifiedAt.IsZero() && now.Sub(d.qUnverifiedAt) < unverifiedRepeat {
 		return
 	}
-	release, free := d.liftGate().tryGuard()
+	release, free, openErr := d.liftGate().tryGuard()
 	release()
+	if openErr != nil {
+		// No lift of this agent is open: an unopenable lock file proves
+		// no legitimate lift (ruling D54).
+		d.guardLockUnopenable(now, openErr)
+		free = true
+	}
 	if !free || d.rebuildMarked() || d.expectingRefusal() {
 		return
 	}
@@ -446,6 +469,20 @@ func (d *Driver) unverifiedRound(h Host, now time.Time) {
 func serverRefusedLogin(err error) bool {
 	var me *drv.MySQLError
 	return errors.As(err, &me)
+}
+
+// guardLockUnopenable logs that the guard could not open the lift lock
+// file, at most once per unverifiedRepeat so a broken disk does not flood
+// the journal. The caller holds promoteMu.
+func (d *Driver) guardLockUnopenable(now time.Time, err error) {
+	if !d.qLockOpenAt.IsZero() && now.Sub(d.qLockOpenAt) < unverifiedRepeat {
+		return
+	}
+	d.qLockOpenAt = now
+	if d.Logger != nil {
+		d.Logger.Error("quarantine guard cannot open the lift lock file; read-only is put back as if no lift were open",
+			"file", d.liftLockPath(), "err", err)
+	}
 }
 
 // checkedRound ends a streak of rounds that could not check the flags.
@@ -574,7 +611,8 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // not check it, since the load began (writableAfterLoad), or when the
 // flags, read under the lift lock right before the end, are not both on;
 // while a dbpanel agent command holds that lock it answers T12
-// (ErrLiftHeldByCommand). Once settled, the rebuild request and approval
+// (ErrLiftHeldByCommand), and when the lock file cannot be opened it names
+// the file and the cause (errLiftLockUnopenable). Once settled, the rebuild request and approval
 // are removed, and so is the leftover set (forgetLeftover).
 func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error {
 	d.promoteMu.Lock()
@@ -624,8 +662,14 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 	// Read the flags under the lift lock, right before the quarantine
 	// ends: a lift by a dbpanel agent command is waited for (T12, retried
 	// by the operator); anything but both on is T7.
-	release, free := d.liftGate().tryGuard()
+	release, free, openErr := d.liftGate().tryGuard()
 	defer release()
+	if openErr != nil {
+		if d.Logger != nil {
+			d.Logger.Warn("quarantine kept: the lift lock file cannot be opened", "source", source, "err", openErr)
+		}
+		return errLiftLockUnopenable(d.liftLockPath(), openErr)
+	}
 	if !free {
 		return ErrLiftHeldByCommand
 	}

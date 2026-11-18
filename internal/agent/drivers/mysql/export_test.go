@@ -598,7 +598,10 @@ func (g *liftGate) Begin(ctx context.Context, db *sql.DB, logf func(level, forma
 	return g.begin(ctx, db, logf)
 }
 
-func (g *liftGate) TryGuard() (release func(), free bool) { return g.tryGuard() }
+func (g *liftGate) TryGuard() (release func(), free bool) {
+	release, free, _ = g.tryGuard()
+	return release, free
+}
 
 func (h *liftHold) End() error       { return h.end() }
 func (h *liftHold) Abandon()         { h.abandon() }
