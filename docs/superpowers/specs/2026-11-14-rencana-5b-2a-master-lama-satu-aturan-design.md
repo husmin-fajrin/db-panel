@@ -864,6 +864,13 @@ Yang sama pada ketiganya:
 - `leftover-gtid` mencatat sumber yang dipakai menghitungnya. Amankan
   menolak bila sumber itu bukan pin sumber sekarang; berkas tanpa catatan
   sumber dihitung tidak ada. Berkas dihapus saat settle. (SEC-201)
+  Catatan itu milik satu karantina: ia juga memuat id karantina (berkas
+  pin `quarantine-id`, dibuat Periksa pertama, dihapus setiap penulisan
+  peran yang masuk atau keluar karantina dan setiap `set-role`), dan
+  Amankan menolak bila id itu bukan id yang dipin sekarang. Tanpa itu
+  catatan lama diterima lagi saat server dikarantina ulang di bawah
+  sumber yang sama. Agent tidak menyimpan salinan catatan di memori.
+  (ditambahkan saat pelaksanaan, Task 10)
 - Sesi bukti daftar lengkap menyetel `sql_quote_show_create` dan
   `sql_mode`-nya sendiri, sesuai M4. (SEC-211)
 - Teks nama akun yang tidak didukung menyebut karakter yang benar (T17).

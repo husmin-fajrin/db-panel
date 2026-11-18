@@ -2219,6 +2219,27 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    berubah: `rebuild_settle_test.go` (harapan teks),
    `cli_rootsql_test.go` (pembantu). Semua teks baru masuk daftar
    Task 15.
+14. Task 10, catatan data tertinggal milik satu karantina (2026-11-18).
+   Cap sumber saja tidak cukup: pada susunan dua server setiap
+   karantina memakai sumber yang sama, jadi catatan yang bertahan
+   melewati akhir karantina (`set-role`, penghapusan yang gagal saat
+   settle) diterima lagi di karantina berikutnya. Catatan kini memuat
+   baris kedua `quarantine <id>`; id itu berkas pin baru
+   `quarantine-id` (32 digit heksa acak) yang dibuat Periksa pertama
+   dan dihapus setiap penulisan peran yang masuk atau keluar karantina
+   (`Pins.writeRole`, dipakai ketujuh penulis peran) serta `set-role`
+   apa pun. Salinan di memori dihapus; berkas dibaca dan diperiksa pada
+   setiap pemakaian; penyimpanan yang gagal menghapus berkas lama.
+   Berkas bentuk lama (tanpa baris sumber, atau hanya baris sumber)
+   dihitung tidak ada, jadi server yang ditingkatkan selagi dikarantina
+   harus menjalankan Periksa sekali lagi. Pengaturan sesi bukti daftar
+   dipasang dan dikembalikan di `accountGrants` (dipakai settle, dump
+   dan `grant-admin`); pengembalian berjalan walau konteks pemanggil
+   sudah berakhir, dan sambungan dibuang bila gagal. T18 memeriksa
+   setiap kanal lewat `Pins.quarantinedUnder`; tanpa kanal perintah
+   berjalan seperti sekarang. Berkas di luar daftar Files: `pins.go`,
+   `driver.go`, `export_test.go`. README langkah 8 (keluar karantina
+   dengan tangan) perlu menyebut `quarantine-id` di Task 15.
 
 ## Teks baru untuk dibaca pemilik
 
