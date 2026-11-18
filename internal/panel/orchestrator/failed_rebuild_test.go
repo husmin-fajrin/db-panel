@@ -958,7 +958,7 @@ func TestListingRefusalReachesJobUnchanged(t *testing.T) {
 		return j.Error
 	}
 	got := scriptRetry()
-	if want := "Sambungkan replikasi: " + text; got != want {
+	if want := "Sambungkan replikasi: Pesan dari agent db-master (bukan dari panel): " + text; got != want {
 		t.Fatalf("job error = %q, want %q", got, want)
 	}
 	if rep, err := e.st.GetReplicaByServer(g.m.id); err != nil || !strings.Contains(rep.LastError, text) {

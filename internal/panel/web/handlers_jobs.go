@@ -602,7 +602,7 @@ func (a *app) prepareRetry(w http.ResponseWriter, r *http.Request) {
 		a.audit(r, "mysql_refresh", auditJob, job.ServerID, map[string]any{"reason": "retry", "job_id": job.ID}, outcomeOf(err))
 		if err != nil {
 			a.Logger.Warn("refresh inventories for retry", "job", job.ID, "err", logErr(err))
-			a.renderJob(w, r, http.StatusBadRequest, msgRetryRefresh+err.Error())
+			a.renderJob(w, r, http.StatusBadRequest, msgRetryRefresh+a.shownError(err))
 			return
 		}
 	}
@@ -632,11 +632,7 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, n
 		case errors.Is(err, orchestrator.ErrJobNeedsConfirm):
 			status = http.StatusForbidden
 		}
-		name := "#" + strconv.FormatInt(job.ServerID, 10)
-		if srv, serr := a.Store.GetServer(job.ServerID); serr == nil {
-			name = srv.Name
-		}
-		a.renderJob(w, r, status, shownError(err, name))
+		a.renderJob(w, r, status, a.shownError(err))
 		return
 	}
 	a.Logger.Info("job action", "action", name, "job", job.ID, "by", auth.UsernameFrom(r.Context()))

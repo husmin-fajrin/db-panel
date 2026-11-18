@@ -147,7 +147,8 @@ func (c fakeConn) Call(ctx context.Context, cmd string, params, result any) erro
 	}
 	if unknown {
 		c.fa.record(cmd, nil)
-		return &proto.Error{Code: proto.CodeUnknownCommand, Message: "perintah tidak dikenal: " + cmd}
+		// The agent's answer, as the hub hands it on (Hub.Call names the server).
+		return &hub.AgentError{Err: &proto.Error{Code: proto.CodeUnknownCommand, Message: "perintah tidak dikenal: " + cmd}}
 	}
 	return c.Conn.Call(ctx, cmd, params, result)
 }

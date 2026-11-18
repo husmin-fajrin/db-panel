@@ -253,7 +253,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	if msg == "" {
 		if id, err = a.Orchestrator.StartPromote(r.Context(), params); err != nil {
-			msg = err.Error()
+			msg = a.shownError(err)
 		}
 	}
 	detail := map[string]any{"candidate": choice.Candidate, "mode": view.Mode, "accept_partial": params.AcceptPartial,

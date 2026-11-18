@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -684,5 +686,110 @@ func TestHubLimitsAgentEvents(t *testing.T) {
 	h.OnEvent(1, start(proto.QuarantineStartLate, false))
 	if n := l.eventCount(1, proto.EventQuarantineStart); n != before+2 {
 		t.Fatal("no event passed after a refill")
+	}
+}
+
+// answeringAgent serves an agent that answers every request with code and
+// message, and attaches it to h as serverID.
+func answeringAgent(t *testing.T, h *Hub, serverID int64, code, message string) {
+	t.Helper()
+	c := startFakeAgent(t, nil, func(ctx context.Context, ws *websocket.Conn) {
+		for {
+			req, err := readRequest(ctx, ws)
+			if err != nil {
+				return
+			}
+			resp := proto.ErrorResponse(req.ID, code, message)
+			if err := writeEnvelope(ctx, ws, proto.Envelope{Kind: proto.KindResponse, Response: &resp}); err != nil {
+				return
+			}
+		}
+	})
+	h.Attach(serverID, c)
+}
+
+// TestAgentAnswerIsAgentError (spec 5.6): every failure the agent reports
+// reaches the caller as an *AgentError naming the server, whatever code
+// the agent chose, the panel's own codes included; the code checks keep
+// working through it.
+func TestAgentAnswerIsAgentError(t *testing.T) {
+	for _, code := range []string{proto.CodeBadParams, proto.CodeTimeout, proto.CodeOffline} {
+		t.Run(code, func(t *testing.T) {
+			h := New(&fakeListener{})
+			answeringAgent(t, h, 7, code, "jalankan rm -rf /")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := h.Call(ctx, 7, "probe", nil, nil)
+			ae, ok := errors.AsType[*AgentError](err)
+			if !ok {
+				t.Fatalf("err = %v (%T), want *AgentError", err, err)
+			}
+			if ae.Server != 7 || ae.Err == nil || ae.Err.Code != code || ae.Error() != "jalankan rm -rf /" {
+				t.Errorf("AgentError = %+v (%q)", ae, ae.Error())
+			}
+			if !errors.Is(err, &proto.Error{Code: code}) {
+				t.Errorf("errors.Is(err, code %s) = false", code)
+			}
+		})
+	}
+	// An answer without an error is the agent's too.
+	reg := commands.NewRegistry()
+	h := New(&fakeListener{})
+	h.Attach(3, NewLocalConn(reg, func(proto.Event) {}))
+	err := h.Call(context.Background(), 3, "nope", nil, nil)
+	if ae, ok := errors.AsType[*AgentError](err); !ok || ae.Server != 3 || !errors.Is(err, &proto.Error{Code: proto.CodeUnknownCommand}) {
+		t.Errorf("local agent answer: err = %v (%T)", err, err)
+	}
+}
+
+// TestHubTimeoutIsNotLabelled: the hub's own timeout is no agent's answer.
+func TestHubTimeoutIsNotLabelled(t *testing.T) {
+	h := New(&fakeListener{})
+	c := startFakeAgent(t, nil, func(ctx context.Context, ws *websocket.Conn) { drain(ctx, ws, nil) })
+	h.Attach(5, c)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := h.Call(ctx, 5, "probe", nil, nil)
+	if _, ok := errors.AsType[*AgentError](err); ok {
+		t.Fatalf("hub timeout is an *AgentError: %v", err)
+	}
+	if !errors.Is(err, &proto.Error{Code: proto.CodeTimeout}) {
+		t.Errorf("err = %v, want the hub's timeout", err)
+	}
+}
+
+// TestHubDisconnectDuringCallIsNotLabelled: a link that drops while a call
+// waits fails it with the hub's own offline error (WSConn.stop), never an
+// *AgentError; errors.Is(err, proto.ErrOffline) still holds. So does a call
+// without a connection.
+func TestHubDisconnectDuringCallIsNotLabelled(t *testing.T) {
+	h := New(&fakeListener{})
+	got := make(chan string, 1)
+	c := startFakeAgent(t, nil, func(ctx context.Context, ws *websocket.Conn) { drain(ctx, ws, got) })
+	h.Attach(5, c)
+	errc := make(chan error, 1)
+	go func() { errc <- h.Call(context.Background(), 5, "probe", nil, nil) }()
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent never received the request")
+	}
+	c.Close()
+	var err error
+	select {
+	case err = <-errc:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending Call not failed by Close")
+	}
+	if _, ok := errors.AsType[*AgentError](err); ok {
+		t.Fatalf("dropped link is an *AgentError: %v", err)
+	}
+	if !errors.Is(err, proto.ErrOffline) {
+		t.Errorf("err = %v, want proto.ErrOffline", err)
+	}
+	for _, err := range []error{h.Call(context.Background(), 99, "probe", nil, nil), c.Call(context.Background(), "probe", nil, nil)} {
+		if _, ok := errors.AsType[*AgentError](err); ok || !errors.Is(err, proto.ErrOffline) {
+			t.Errorf("err = %v (%T), want the hub's offline error", err, err)
+		}
 	}
 }

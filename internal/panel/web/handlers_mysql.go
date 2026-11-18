@@ -204,7 +204,7 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 	_, err := a.Orchestrator.Connect(r.Context(), srv.ID, proto.ConnectParams{User: form.User, Password: password, Host: form.Host})
 	if err != nil {
 		a.Logger.Warn("mysql connect failed", "server", srv.ID, "err", logErr(err))
-		fail(err.Error())
+		fail(a.shownError(err))
 		return
 	}
 	a.audit(r, "mysql_connect", auditServer, srv.ID, detail, auditOK)
@@ -221,7 +221,7 @@ func (a *app) refreshMySQL(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "mysql_refresh", auditServer, srv.ID, nil, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("mysql refresh failed", "server", srv.ID, "err", logErr(err))
-		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
 		return
 	}
 	http.Redirect(w, r, serverURL(srv.ID)+"?pesan=disegarkan", http.StatusSeeOther)
@@ -238,7 +238,7 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	if srv.Role == store.RoleQuarantined {
 		err := orchestrator.ErrPrepareQuarantined
 		a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{}, outcomeOf(err))
-		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
 		return
 	}
 	// Preparing a server that already is a master (it has a topology)
@@ -257,7 +257,7 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("prepare master refused", "server", srv.ID, "err", logErr(err))
-		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
 		return
 	}
 	a.Logger.Info("prepare master started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
@@ -286,7 +286,7 @@ func (a *app) installMySQLTLS(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "mysql_tls", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("mysql certificate refused", "server", srv.ID, "err", logErr(err))
-		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
 		return
 	}
 	a.Logger.Info("mysql certificate job started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
@@ -305,7 +305,7 @@ func (a *app) tightenTLS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.Logger.Warn("tighten replication refused", "master", srv.ID, "err", logErr(err))
 		p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
-		p.Flash = err.Error()
+		p.Flash = a.shownError(err)
 		a.renderMaster(w, r, http.StatusBadRequest, p)
 		return
 	}
@@ -758,7 +758,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, orchestrator.ErrRebuildNeedsApproval) && p.Rebuild != nil {
 			a.rebuildApproval(r.Context(), p.Rebuild)
 		}
-		fail(shownError(err, p.Targets[i].Name))
+		fail(a.shownError(err))
 		return
 	}
 	detail["job_id"] = id
@@ -1043,7 +1043,7 @@ func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 		}
 		id, err := a.Orchestrator.StartAddDatabases(r.Context(), p.Server.ID, selected)
 		if err != nil {
-			return "", err.Error()
+			return "", a.shownError(err)
 		}
 		return id, ""
 	})
@@ -1070,7 +1070,7 @@ func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 		}
 		id, err := a.Orchestrator.StartRemoveDatabases(r.Context(), p.Server.ID, selected, dropData)
 		if err != nil {
-			return "", err.Error()
+			return "", a.shownError(err)
 		}
 		return id, ""
 	})

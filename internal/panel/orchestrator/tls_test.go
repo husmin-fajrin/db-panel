@@ -562,7 +562,7 @@ func TestTightenStartFailureReverts(t *testing.T) {
 		t.Fatal(err)
 	}
 	j, _ := e.waitJob(id, store.JobFailed)
-	if !strings.Contains(j.Error, "verifikasi gagal: replika gagal tersambung") ||
+	if !strings.Contains(j.Error, "verifikasi gagal: Pesan dari agent replica1 (bukan dari panel): replika gagal tersambung") ||
 		!strings.HasSuffix(j.Error, "; replikasi dikembalikan tanpa verifikasi") {
 		t.Fatalf("job error = %q", j.Error)
 	}

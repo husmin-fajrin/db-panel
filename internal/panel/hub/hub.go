@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -27,8 +28,8 @@ var ErrOffline = proto.ErrOffline
 type Conn interface {
 	// Call runs cmd on the agent. params is marshalled as JSON (nil sends
 	// none); the result is unmarshalled into result unless result is nil.
-	// When the agent answers with a failure, or the connection times out or
-	// drops, the error is a *proto.Error.
+	// When the agent answers with a failure, the error is an *AgentError;
+	// when the connection times out or drops, a plain *proto.Error.
 	Call(ctx context.Context, cmd string, params any, result any) error
 	Close() error
 }
@@ -225,7 +226,8 @@ func (h *Hub) Detach(serverID int64, c Conn) {
 }
 
 // Call runs cmd on the agent of serverID, or returns ErrOffline when it has
-// no live connection.
+// no live connection. A failure the agent reported is an *AgentError
+// naming serverID.
 func (h *Hub) Call(ctx context.Context, serverID int64, cmd string, params any, result any) error {
 	h.mu.Lock()
 	c, ok := h.conns[serverID]
@@ -233,7 +235,11 @@ func (h *Hub) Call(ctx context.Context, serverID int64, cmd string, params any, 
 	if !ok {
 		return ErrOffline
 	}
-	return c.Call(ctx, cmd, params, result)
+	err := c.Call(ctx, cmd, params, result)
+	if ae, ok := errors.AsType[*AgentError](err); ok {
+		ae.Server = serverID
+	}
+	return err
 }
 
 // OnEvent is the single entry for events sent by agents, remote or embedded:
@@ -478,14 +484,16 @@ func newRequest(cmd string, params any) (proto.Request, error) {
 	return req, nil
 }
 
-// readResponse turns an agent response into Call's result: a *proto.Error
-// when the agent reported failure, otherwise Result unmarshalled into result.
+// readResponse turns an agent response into Call's result: an *AgentError
+// when the agent reported failure (whatever its code), otherwise Result
+// unmarshalled into result. Only an answer the agent sent comes here: the
+// hub's own failures never pass through it.
 func readResponse(resp proto.Response, result any) error {
 	if !resp.OK {
 		if resp.Error == nil {
-			return &proto.Error{Code: proto.CodeInternal, Message: "agent menolak perintah tanpa keterangan"}
+			return &AgentError{Err: &proto.Error{Code: proto.CodeInternal, Message: "agent menolak perintah tanpa keterangan"}}
 		}
-		return resp.Error
+		return &AgentError{Err: resp.Error}
 	}
 	if result == nil || len(resp.Result) == 0 {
 		return nil
@@ -506,3 +514,20 @@ func offlineError() *proto.Error {
 	e := *proto.ErrOffline
 	return &e
 }
+
+// AgentError is a failure an agent reported in its answer, whatever code
+// it chose (spec 5.6): its origin is this type, never its code. Server is
+// the agent's server (Hub.Call fills it in). The hub's own failures (a
+// timeout, no connection, a link that dropped during the call) are plain
+// *proto.Error values, never wrapped in it. Unwrap gives the agent's
+// *proto.Error, so errors.Is and errors.As on codes keep working.
+type AgentError struct {
+	Server int64
+	Err    *proto.Error
+}
+
+// Error is the agent's message as it sent it.
+func (e *AgentError) Error() string { return e.Err.Message }
+
+// Unwrap is the agent's *proto.Error.
+func (e *AgentError) Unwrap() error { return e.Err }

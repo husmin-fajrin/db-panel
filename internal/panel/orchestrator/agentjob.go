@@ -31,7 +31,7 @@ func (jr *jobRun) runAgentJob(ctx context.Context, serverID int64, cmd string, p
 			jr.logf("info", "Melanjutkan pekerjaan agent yang masih berjalan.")
 		case err == nil && s.State == "succeeded":
 			jr.agentStarted = true
-			return jr.agentJobEnded(proto.JobDone{JobID: s.ID, OK: true, Result: s.Result}, result)
+			return jr.agentJobEnded(serverID, proto.JobDone{JobID: s.ID, OK: true, Result: s.Result}, result)
 		}
 	}
 
@@ -77,7 +77,7 @@ func (jr *jobRun) waitAgentJob(ctx context.Context, serverID int64, agentID stri
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-jr.lj.notify:
-			if ended, err := jr.handleEvents(agentID, result); ended {
+			if ended, err := jr.handleEvents(serverID, agentID, result); ended {
 				return err
 			}
 		case <-tick.C:
@@ -116,17 +116,17 @@ func (jr *jobRun) waitAgentJob(ctx context.Context, serverID int64, agentID stri
 				continue
 			}
 			// Finished; take its last log lines from the queue first.
-			if ended, err := jr.handleEvents(agentID, result); ended {
+			if ended, err := jr.handleEvents(serverID, agentID, result); ended {
 				return err
 			}
-			return jr.agentJobEnded(proto.JobDone{JobID: agentID, OK: s.State == "succeeded", Error: s.Error, Result: s.Result}, result)
+			return jr.agentJobEnded(serverID, proto.JobDone{JobID: agentID, OK: s.State == "succeeded", Error: s.Error, Result: s.Result}, result)
 		}
 	}
 }
 
-// handleEvents applies the queued events of agentID and reports whether
-// one of them ended the job.
-func (jr *jobRun) handleEvents(agentID string, result any) (bool, error) {
+// handleEvents applies the queued events of agentID, a job of serverID's
+// agent, and reports whether one of them ended the job.
+func (jr *jobRun) handleEvents(serverID int64, agentID string, result any) (bool, error) {
 	for _, ev := range jr.lj.drain() {
 		if ev.JobID != agentID {
 			continue
@@ -147,14 +147,16 @@ func (jr *jobRun) handleEvents(agentID string, result any) (bool, error) {
 		case proto.EventJobLog:
 			var l proto.JobLog
 			if json.Unmarshal(ev.Payload, &l) == nil {
-				jr.logf(logLevel(l.Level), "%s", l.Message) // logf caps it
+				// The agent's own line: one line after "agent: " (spec
+				// 5.6); logf censors and caps it.
+				jr.logf(logLevel(l.Level), "%s", agentLogLine(l.Message))
 			}
 		case proto.EventJobDone:
 			var d proto.JobDone
 			if err := json.Unmarshal(ev.Payload, &d); err != nil {
 				return true, fmt.Errorf("hasil pekerjaan agent tidak terbaca: %w", err)
 			}
-			return true, jr.agentJobEnded(d, result)
+			return true, jr.agentJobEnded(serverID, d, result)
 		}
 	}
 	return false, nil
@@ -169,16 +171,17 @@ func logLevel(l string) string {
 	return "info"
 }
 
-// agentJobEnded forgets the finished agent job and turns its outcome into
-// the step's.
-func (jr *jobRun) agentJobEnded(d proto.JobDone, result any) error {
+// agentJobEnded forgets the finished agent job of serverID's agent and
+// turns its outcome into the step's: the agent's error labelled as its
+// words (agentTextError).
+func (jr *jobRun) agentJobEnded(serverID int64, d proto.JobDone, result any) error {
 	jr.st.AgentServerID, jr.st.AgentJobID, jr.st.AgentCmd = 0, "", ""
 	jr.save()
 	if !d.OK {
 		if d.Error == "" {
-			d.Error = "pekerjaan agent gagal tanpa keterangan"
+			return errors.New("pekerjaan agent gagal tanpa keterangan") // the panel's words
 		}
-		return errors.New(d.Error)
+		return agentTextError{server: jr.serverName(serverID), text: d.Error}
 	}
 	if len(d.Result) > maxAgentResult {
 		return fmt.Errorf("hasil pekerjaan agent terlalu besar (%d byte)", len(d.Result))

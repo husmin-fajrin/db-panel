@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
@@ -1254,7 +1255,8 @@ func TestRebuildFormWordsInvalidReason(t *testing.T) {
 // start or retry is shown as its quotation, after the label (P-2).
 func TestAgentRefusalLabelled(t *testing.T) {
 	const label = "Pesan dari agent db-master (bukan dari panel): "
-	agentErr := &proto.Error{Code: proto.CodeBadParams, Message: "pin peran/sumber agent tidak bisa dipakai,\nperintah ditolak"}
+	agentErr := &hub.AgentError{Server: 1, Err: &proto.Error{Code: proto.CodeBadParams,
+		Message: "pin peran/sumber agent tidak bisa dipakai,\nperintah ditolak"}}
 	e, f, topo := promotedEnv(t)
 	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
 		t.Fatal(err)

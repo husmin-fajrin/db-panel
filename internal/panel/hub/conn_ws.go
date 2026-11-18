@@ -43,12 +43,20 @@ type WSConn struct {
 	writeMu sync.Mutex
 
 	mu      sync.Mutex
-	pending map[string]chan proto.Response
+	pending map[string]chan answer
 	closed  bool
 
 	done     chan struct{}
 	stopOnce sync.Once
 	wsOnce   sync.Once
+}
+
+// answer is what a waiting Call receives: the agent's response, or the
+// hub's own failure (stop) when the link dropped first. Keeping them apart
+// keeps the hub's failure from being taken for the agent's (AgentError).
+type answer struct {
+	resp proto.Response
+	err  error
 }
 
 // NewWSConn wraps ws and starts its read and ping loops. onEvent may be nil;
@@ -58,7 +66,7 @@ func NewWSConn(ws *websocket.Conn, onEvent func(proto.Event)) *WSConn {
 	c := &WSConn{
 		ws:      ws,
 		onEvent: onEvent,
-		pending: make(map[string]chan proto.Response),
+		pending: make(map[string]chan answer),
 		done:    make(chan struct{}),
 	}
 	go c.readLoop()
@@ -83,7 +91,7 @@ func (c *WSConn) Call(ctx context.Context, cmd string, params any, result any) e
 		return err
 	}
 
-	ch := make(chan proto.Response, 1)
+	ch := make(chan answer, 1)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -103,8 +111,11 @@ func (c *WSConn) Call(ctx context.Context, cmd string, params any, result any) e
 	}
 
 	select {
-	case resp := <-ch:
-		return readResponse(resp, result)
+	case a := <-ch:
+		if a.err != nil {
+			return a.err
+		}
+		return readResponse(a.resp, result)
 	case <-ctx.Done():
 		return timeoutError()
 	}
@@ -197,7 +208,7 @@ func (c *WSConn) deliver(resp proto.Response) {
 	delete(c.pending, resp.ID)
 	c.mu.Unlock()
 	if ok {
-		ch <- resp
+		ch <- answer{resp: resp}
 	}
 }
 
@@ -213,10 +224,10 @@ func (c *WSConn) stop() {
 		c.mu.Lock()
 		c.closed = true
 		pending := c.pending
-		c.pending = make(map[string]chan proto.Response)
+		c.pending = make(map[string]chan answer)
 		c.mu.Unlock()
-		for id, ch := range pending {
-			ch <- proto.Response{ID: id, Error: offlineError()}
+		for _, ch := range pending {
+			ch <- answer{err: offlineError()} // the hub's, not an agent's answer
 		}
 		close(c.done)
 	})

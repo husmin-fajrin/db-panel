@@ -42,7 +42,7 @@ func TestAgentDataCapped(t *testing.T) {
 	}
 	found := false
 	for _, l := range lines {
-		if strings.HasPrefix(l.Message, "éé") {
+		if strings.HasPrefix(l.Message, "agent: éé") {
 			found = true
 			if len(l.Message) > maxLogLine || !utf8.ValidString(l.Message) || !strings.HasSuffix(l.Message, "(dipotong)") {
 				t.Errorf("job.log line kept %d bytes (valid %v)", len(l.Message), utf8.ValidString(l.Message))

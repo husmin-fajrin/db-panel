@@ -98,7 +98,7 @@ func (a *app) replicaControl(w http.ResponseWriter, r *http.Request, action, not
 	a.audit(r, action, auditReplica, srv.ID, nil, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("replica control refused", "action", action, "server", srv.ID, "err", logErr(err))
-		a.replicaError(w, r, srv, rep, err.Error())
+		a.replicaError(w, r, srv, rep, a.shownError(err))
 		return
 	}
 	a.Logger.Info("replica control", "action", action, "server", srv.ID, "by", auth.UsernameFrom(r.Context()))
@@ -128,7 +128,7 @@ func (a *app) prepareResync(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "mysql_refresh", auditReplica, srv.ID, map[string]any{"reason": "resync"}, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("refresh inventories for resync", "server", srv.ID, "master", master.ID, "err", logErr(err))
-		a.replicaError(w, r, srv, rep, msgWipeRefresh+err.Error())
+		a.replicaError(w, r, srv, rep, msgWipeRefresh+a.shownError(err))
 		return
 	}
 	http.Redirect(w, r, replicaURL(srv.ID)+"?buka=resync", http.StatusSeeOther)
@@ -232,7 +232,7 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "replica_resync", auditReplica, srv.ID, detail, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("resync refused", "server", srv.ID, "err", logErr(err))
-		a.replicaError(w, r, srv, rep, err.Error())
+		a.replicaError(w, r, srv, rep, a.shownError(err))
 		return
 	}
 	a.Logger.Info("resync started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
@@ -263,7 +263,7 @@ func (a *app) detachReplica(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "replica_detach", auditReplica, srv.ID, detail, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("detach refused", "server", srv.ID, "err", logErr(err))
-		a.replicaError(w, r, srv, rep, err.Error())
+		a.replicaError(w, r, srv, rep, a.shownError(err))
 		return
 	}
 	a.Logger.Info("replica detached", "server", srv.ID, "mode", mode, "by", auth.UsernameFrom(r.Context()))
@@ -289,7 +289,7 @@ func (a *app) unlockMaster(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.Logger.Warn("master unlock refused", "server", srv.ID, "err", logErr(err))
 		p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
-		p.Flash = err.Error()
+		p.Flash = a.shownError(err)
 		a.renderMaster(w, r, http.StatusBadRequest, p)
 		return
 	}
@@ -307,7 +307,7 @@ func (a *app) checkServer(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "server_check", auditServer, srv.ID, nil, outcomeOf(err))
 	if err != nil {
 		a.Logger.Info("check now refused", "server", srv.ID, "err", logErr(err))
-		a.controlError(w, r, srv, err.Error())
+		a.controlError(w, r, srv, a.shownError(err))
 		return
 	}
 	http.Redirect(w, r, homeURL(srv)+"?pesan=diperiksa", http.StatusSeeOther)

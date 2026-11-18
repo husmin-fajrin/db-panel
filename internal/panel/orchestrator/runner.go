@@ -1578,16 +1578,6 @@ type stepError string
 
 func (e stepError) Error() string { return string(e) }
 
-// agentQuoteError is an agent's refusal quoted as the agent's words
-// (AgentQuote); it still matches the agent's error.
-type agentQuoteError struct {
-	msg string
-	err error
-}
-
-func (e agentQuoteError) Error() string { return e.msg }
-func (e agentQuoteError) Unwrap() error { return e.err }
-
 // catchUpError is a verify that ran out of time while replication itself
 // works: the job fails, but replication keeps running (stopping it would
 // only make the replica fall further behind).
@@ -1754,7 +1744,11 @@ func (jr *jobRun) run(from int, approved bool) {
 
 // fail ends the job at the current step.
 func (jr *jobRun) fail(err error) {
-	msg := jr.steps[jr.idx].title + ": " + err.Error()
+	// An agent's words are labelled as its own (spec 5.6): already by
+	// callWithin or agentJobEnded, or here when they came straight from
+	// the hub (agentErrorText). The label comes first, the censoring after.
+	text := agentErrorText(err, jr.serverName)
+	msg := jr.steps[jr.idx].title + ": " + text
 	var se stepError
 	if errors.As(err, &se) {
 		msg = se.Error()
@@ -1779,7 +1773,7 @@ func (jr *jobRun) fail(err error) {
 		jr.setReplicaState(store.ReplicaFailed, msg)
 	case changesDatabases(jr.job.Kind):
 		jr.logChangeFailure()
-		jr.setReplicaState(store.ReplicaAttention, truncate(failedAt(jr.job.Kind, jr.idx, redact.Quotes(err.Error())), maxLogLine))
+		jr.setReplicaState(store.ReplicaAttention, truncate(failedAt(jr.job.Kind, jr.idx, redact.Quotes(text)), maxLogLine))
 	}
 	status := store.JobFailed
 	if isPromote(jr.job.Kind) {
@@ -1819,7 +1813,9 @@ func (jr *jobRun) setStep(status, message string) {
 // logf appends a line to the job log and publishes it, cut to maxLogLine
 // (args may hold agent text). String and error args are MySQL's text as
 // often as not: their quoted literals are censored (redact.Quotes), the
-// panel's own format is kept as written. Never log a password.
+// panel's own format is kept as written; an agent's failure in an error
+// arg is labelled as its words first (agentErrorText). Never log a
+// password.
 func (jr *jobRun) logf(level, format string, args ...any) {
 	safe := make([]any, len(args)) // not the caller's slice
 	for i, a := range args {
@@ -1827,7 +1823,7 @@ func (jr *jobRun) logf(level, format string, args ...any) {
 		case string:
 			safe[i] = redact.Quotes(v)
 		case error:
-			safe[i] = redact.Quotes(v.Error())
+			safe[i] = redact.Quotes(agentErrorText(v, jr.serverName))
 		default:
 			safe[i] = a
 		}
@@ -1870,20 +1866,22 @@ func (jr *jobRun) call(ctx context.Context, serverID int64, cmd string, params, 
 // callWithin runs cmd on serverID within d. A refusal by strict mode
 // (needs_local_approval) becomes localApprovalErr's words, except for
 // mysql.releaseRole, whose refusal names another local command: it is
-// kept in the agent's words, quoted as the agent's (AgentQuote).
+// kept in the agent's words. Any other failure the agent reported is
+// labelled as its words (agentTextError), whatever its code; only the
+// hub's own offline error is "terputus".
 func (jr *jobRun) callWithin(ctx context.Context, d time.Duration, serverID int64, cmd string, params, result any) error {
 	cctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	err := jr.r.d.Hub.Call(cctx, serverID, cmd, params, result)
 	jr.lastRefused = err != nil && promoteStartRefused(err)
+	if errors.Is(err, &proto.Error{Code: proto.CodeNeedsLocalApproval}) && cmd != "mysql.releaseRole" {
+		return jr.r.localApprovalErr(ctx, serverID, err)
+	}
+	if _, ok := fromAgent(err); ok {
+		return agentError(err, jr.serverName)
+	}
 	if errors.Is(err, proto.ErrOffline) {
 		return stepError(fmt.Sprintf("agent %s terputus saat %s", jr.serverName(serverID), jr.steps[jr.idx].title))
-	}
-	if errors.Is(err, &proto.Error{Code: proto.CodeNeedsLocalApproval}) {
-		if cmd == "mysql.releaseRole" {
-			return agentQuoteError{msg: AgentQuote(jr.serverName(serverID), err.Error()), err: err}
-		}
-		return jr.r.localApprovalErr(ctx, serverID, err)
 	}
 	return err
 }

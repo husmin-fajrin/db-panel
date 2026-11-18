@@ -338,7 +338,7 @@ func (a *app) cutoverDone(w http.ResponseWriter, r *http.Request) {
 		outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("cutover confirmation refused", "master", srv.ID, "err", logErr(err))
-		a.renderCutover(w, r, http.StatusConflict, srv, topo, err.Error())
+		a.renderCutover(w, r, http.StatusConflict, srv, topo, a.shownError(err))
 		return
 	}
 	a.Logger.Info("cutover confirmed", "master", srv.ID, "topology", topo.ID, "by", auth.UsernameFrom(r.Context()))
@@ -729,7 +729,7 @@ func (a *app) startOldMasterJob(w http.ResponseWriter, r *http.Request, action s
 	a.audit(r, action, auditServer, srv.ID, detail, outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("old master job refused", "action", action, "server", srv.ID, "err", logErr(err))
-		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: err.Error()})
+		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
 		return
 	}
 	a.Logger.Info("old master job started", "action", action, "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
@@ -985,14 +985,23 @@ func localApprovalDetail(seen *orchestrator.ApprovalSeen, detail map[string]any)
 	detail["local_approval_age_sec"] = seen.Result.AgeSec
 }
 
-// shownError is an orchestrator refusal as a page shows it: an agent's
-// own text (a *proto.Error from server) quoted as its words and bounded
-// (orchestrator.AgentQuote, SP-11), the panel's as it is.
-func shownError(err error, server string) string {
-	if _, ok := errors.AsType[*proto.Error](err); ok && !errors.Is(err, proto.ErrOffline) {
-		return orchestrator.AgentQuote(server, err.Error())
+// shownError is an error as a page's flash shows it (spec 5.6): the words
+// of a failure an agent reported (a *hub.AgentError: decided by type,
+// never by code) labelled as that agent's, with its server's name, one
+// line and bounded (orchestrator.ShownError); the panel's own text, and a
+// text already labelled, as they are.
+func (a *app) shownError(err error) string {
+	return orchestrator.ShownError(err, a.serverName)
+}
+
+// serverName is the name of serverID for a label, "#<id>" when it cannot
+// be read.
+func (a *app) serverName(serverID int64) string {
+	srv, err := a.Store.GetServer(serverID)
+	if err != nil {
+		return "#" + strconv.FormatInt(serverID, 10)
 	}
-	return err.Error()
+	return srv.Name
 }
 
 // maxAgentWords bounds an agent's sentence shown on a page (SP-11); a

@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -273,16 +272,6 @@ var hostRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,255}$`)
 func ValidHost(h string) bool {
 	return hostRe.MatchString(h) && (!strings.Contains(h, ":") || net.ParseIP(h) != nil)
 }
-
-// AgentQuote is an agent's own sentence as the panel shows it (P-2): after
-// a label saying whose words they are, made one line and cut by
-// monitor.AgentText, so it never reads as the panel's instruction.
-func AgentQuote(server, text string) string {
-	return fmt.Sprintf("Pesan dari agent %s (bukan dari panel): %s", server, monitor.AgentText(text, maxAgentQuote))
-}
-
-// maxAgentQuote bounds the agent's sentence in an AgentQuote.
-const maxAgentQuote = 300
 
 // invalidReasons word why an approval on file no longer holds, from the
 // agent's InvalidCode (P-2); the agent's own sentence is never shown.

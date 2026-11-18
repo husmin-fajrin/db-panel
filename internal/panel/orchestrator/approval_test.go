@@ -465,11 +465,13 @@ func TestCallWithinLocalApprovalMapping(t *testing.T) {
 		err.Error() != "Pesan dari agent db-old (bukan dari panel): "+release {
 		t.Fatalf("releaseRole refusal = %v, want the agent's own, quoted", err)
 	}
-	// Made one line and cut, whatever the agent sends.
-	fa.failCode("mysql.releaseRole", "baris satu\n\u202ebaris dua "+strings.Repeat("x", 400))
+	// Made one line and cut at the job log's line length (spec 5.6), not
+	// at 300, whatever the agent sends.
+	fa.failCode("mysql.releaseRole", "baris satu\n\u202ebaris dua "+strings.Repeat("x", 400)+strings.Repeat("y", maxLogLine))
 	err = jr.call(ctx, fa.id, "mysql.releaseRole", nil, nil)
-	if got := err.Error(); !strings.HasPrefix(got, "Pesan dari agent db-old (bukan dari panel): baris satu baris dua x") ||
-		strings.ContainsAny(got, "\n\u202e") || len(got) > 400 {
+	if got := err.Error(); !strings.HasPrefix(got, "Pesan dari agent db-old (bukan dari panel): baris satu baris dua "+
+		strings.Repeat("x", 400)+"y") || strings.ContainsAny(got, "\n\u202e") || !strings.HasSuffix(got, "y…") ||
+		len(got) > 2*maxLogLine {
 		t.Fatalf("hostile releaseRole refusal = %q", got)
 	}
 	if n := fa.count("mysql.rebuildApproval"); n != 0 {
@@ -496,9 +498,10 @@ func TestCallWithinLocalApprovalMapping(t *testing.T) {
 		}
 	}
 
-	// Other errors pass as they are.
+	// Other errors of the agent pass in its words, labelled (spec 5.6).
 	fa.fail("mysql.startReplica", "gagal")
-	if err := jr.call(ctx, fa.id, "mysql.startReplica", nil, nil); err == nil || err.Error() != "gagal" {
+	if err := jr.call(ctx, fa.id, "mysql.startReplica", nil, nil); err == nil ||
+		err.Error() != "Pesan dari agent db-old (bukan dari panel): gagal" {
 		t.Fatalf("other error = %v", err)
 	}
 }
