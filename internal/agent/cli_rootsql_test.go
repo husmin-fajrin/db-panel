@@ -718,3 +718,154 @@ func TestDumpIgnoresLoginFile(t *testing.T) {
 		t.Errorf("with a password: code %d, exists %v\nstdout %q\nstderr %q", code, r.exists("login_sandi"), out, errOut)
 	}
 }
+
+// generalLog turns MySQL's general query log on into a file and returns a
+// reader of it.
+func (r *dropRig) generalLog() func() string {
+	r.t.Helper()
+	path := filepath.Join(r.inst.Dir, "general.log")
+	r.exec("SET GLOBAL general_log_file = '"+path+"'", "SET GLOBAL general_log = ON")
+	return func() string {
+		b, _ := os.ReadFile(path)
+		return string(b)
+	}
+}
+
+// session opens the command's root session on the rig's server.
+func (r *dropRig) session() *rootSession {
+	r.t.Helper()
+	s, err := openRootSession(context.Background(), r.dir, "", newPromptReader(strings.NewReader("")), io.Discard)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	r.t.Cleanup(s.Close)
+	return s
+}
+
+func noRecheck(context.Context, *sql.Conn) error { return nil }
+
+// lifted runs runLifted with do in the background.
+func (r *dropRig) lifted(s *rootSession, do func(context.Context, *sql.Conn) error) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- runLifted(context.Background(), s, r.dir, r.lock, noRecheck, do) }()
+	return done
+}
+
+func waitLifted(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second):
+		t.Fatal("runLifted never returned")
+	}
+	return nil
+}
+
+// TestLiftedSignalStopsWork: a signal while do's first statement waits
+// ends the window, and do's next statement is never sent, although this
+// do ignores the first one's error; the outcome says do ran and how it
+// ended.
+func TestLiftedSignalStopsWork(t *testing.T) {
+	r := newDropRig(t)
+	r.makeDB("tahan", 1)
+	general := r.generalLog()
+	s := r.session()
+	release := r.holdRead("tahan.t1")
+	done := r.lifted(s, func(ctx context.Context, c *sql.Conn) error {
+		_, first := c.ExecContext(ctx, "DROP DATABASE tahan")
+		c.ExecContext(ctx, "CREATE DATABASE kedua_tidak_terkirim")
+		return first
+	})
+	r.waitDropWaiting()
+	start := time.Now()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	err := waitLifted(t, done)
+	if time.Since(start) > 15*time.Second {
+		t.Errorf("the window took %v to end after the signal", time.Since(start))
+	}
+	var le *liftedError
+	if !errors.Is(err, errInterrupted) || !errors.As(err, &le) || !le.Ran || le.DoErr == nil {
+		t.Fatalf("runLifted = %v (%+v), want an interrupted window whose do ran and failed", err, le)
+	}
+	release()
+	log := general()
+	if !strings.Contains(log, "DROP DATABASE tahan") {
+		t.Fatal("the general log does not show do's first statement")
+	}
+	if strings.Contains(log, "kedua_tidak_terkirim") || r.exists("kedua_tidak_terkirim") {
+		t.Error("do's second statement was sent after the signal")
+	}
+	if !r.exists("tahan") || r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("exists %v, flags %s, lock free %v", r.exists("tahan"), r.flags(), r.lockFree())
+	}
+}
+
+// TestLiftedKillBetweenStatements: a signal between two statements of do
+// (nothing running to kill) still keeps the next one from being sent.
+func TestLiftedKillBetweenStatements(t *testing.T) {
+	r := newDropRig(t)
+	general := r.generalLog()
+	s := r.session()
+	between, goOn := make(chan struct{}), make(chan struct{})
+	done := r.lifted(s, func(ctx context.Context, c *sql.Conn) error {
+		if _, err := c.ExecContext(ctx, "SELECT 'pertama_terkirim'"); err != nil {
+			return err
+		}
+		close(between)
+		<-goOn
+		_, err := c.ExecContext(ctx, "CREATE DATABASE sesudah_kill")
+		return err
+	})
+	<-between
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	close(goOn)
+	err := waitLifted(t, done)
+	var le *liftedError
+	if !errors.Is(err, errInterrupted) || !errors.As(err, &le) || !le.Ran || !errors.Is(le.DoErr, context.Canceled) {
+		t.Fatalf("runLifted = %v (%+v), want an interrupted window whose do ended cancelled", err, le)
+	}
+	log := general()
+	if !strings.Contains(log, "pertama_terkirim") {
+		t.Fatal("the general log does not show do's first statement")
+	}
+	if strings.Contains(log, "sesudah_kill") || r.exists("sesudah_kill") {
+		t.Error("do's statement after the signal was sent")
+	}
+	if r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("flags %s, lock free %v", r.flags(), r.lockFree())
+	}
+}
+
+// TestDropDatabaseDroppedBeforeSignal: a DROP that completed before a
+// signal ended the window is said and recorded as done: the system log
+// line (with how the window ended), the "dropped" line, no advice to run
+// again, a non-zero exit, 1 1 and the lock free.
+func TestDropDatabaseDroppedBeforeSignal(t *testing.T) {
+	r := newDropRig(t)
+	r.makeDB("habis", 1)
+	setVar(t, &liftedAfterDo, func() {
+		syscall.Kill(os.Getpid(), syscall.SIGINT)
+		time.Sleep(500 * time.Millisecond) // the watcher takes the signal before do's end is known
+	})
+	code, out, errOut := r.run(strings.NewReader("habis\n"), "habis")
+	if code == 0 || r.exists("habis") {
+		t.Fatalf("drop-database = %d, exists %v\nstdout %q\nstderr %q", code, r.exists("habis"), out, errOut)
+	}
+	want := "Database habis sudah dihapus sebelum perintah ini dihentikan (sinyal). Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi."
+	if !strings.Contains(errOut, want) || strings.Contains(out+errOut, "Jalankan perintah ini lagi") {
+		t.Errorf("stdout %q\nstderr %q\nwant %q and no advice to run again", out, errOut, want)
+	}
+	logged := r.syslogLines()
+	if len(logged) != 1 || !strings.Contains(logged[0], `name="habis"`) || !strings.Contains(logged[0], "window=interrupted") {
+		t.Errorf("system log %q", logged)
+	}
+	if r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("flags %s, lock free %v", r.flags(), r.lockFree())
+	}
+}

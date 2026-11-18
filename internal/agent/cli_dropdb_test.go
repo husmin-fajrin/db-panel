@@ -475,10 +475,15 @@ func TestDropDatabaseInterruptedRelocksItself(t *testing.T) {
 			p.waitOut(c10)
 			p.send(name)
 			r.waitDropWaiting()
+			start := time.Now()
 			if err := p.cmd.Process.Signal(sig); err != nil {
 				t.Fatal(err)
 			}
 			code, signaled := p.wait()
+			// Well under the 60 s lock wait: the kill ended the DROP's wait.
+			if d := time.Since(start); d > 15*time.Second {
+				t.Errorf("the command took %v to end after %v", d, sig)
+			}
 			if code == 0 || signaled != 0 || !strings.Contains(p.err.String(), c13+"\n") {
 				t.Errorf("after %v: code %d, signal %v, stderr %q", sig, code, signaled, p.err.String())
 			}

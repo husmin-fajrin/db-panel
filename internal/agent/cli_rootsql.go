@@ -327,10 +327,34 @@ const (
 // it turns super_read_only off on s.Conn, runs do there, and always puts it
 // back. It sends SET GLOBAL super_read_only = OFF and = ON only, never
 // read_only. SIGINT, SIGTERM and SIGHUP are caught from before the flag
-// goes off until the final check; a signal, or the window open for
-// cliWindowCap, makes a second connection of s.DB kill do's statement and
-// put the flag back (cancelling a context does not stop a statement on the
-// server: X4).
+// goes off until the final check.
+//
+// A signal, or the window open for cliWindowCap, ends the window: the
+// watcher cancels the context do runs with, then from a second connection
+// of s.DB sends KILL QUERY for s.Conn's statement, again every
+// killRepeat until do has returned (cancelling a context does not stop a
+// statement on the server: X4), and puts the flag back. do must stop
+// sending statements once its context is cancelled; database/sql does not
+// send one on a cancelled context, so a do that only runs statements on c
+// with that context needs nothing more. Steps 5 and 6 run only after do
+// has returned, on a context that is not cancelled. A signal that arrives
+// after do has returned (during steps 5 and 6) changes nothing: do's
+// outcome stands.
+//
+// What the caller learns:
+//   - nil: do ran and returned nil; the flags are back at 1 1.
+//   - mysql.ErrLiftBusy, *mysql.LiftLockError, errStateChanged, or an
+//     error reading the server before the window: do never ran and nothing
+//     changed.
+//   - an error wrapping errLockWait: do returned MySQL's lock wait timeout
+//     (1205); the flags are back.
+//   - *liftedError: the window ended abnormally. errors.Is answers
+//     errInterrupted or errWindowCap, errors.As a *relockError when the
+//     flags could not be put back (that wins over the other two). Its Ran
+//     says whether do was called and DoErr what do returned; do may have
+//     done its work all the same, so the caller checks the server.
+//   - any other error: do's own (the flags are back), or the error that
+//     kept the flag from going off (do never ran).
 func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, recheck, do func(ctx context.Context, c *sql.Conn) error) error {
 	// 1. The lift lock, without waiting.
 	release, err := mysql.AcquireLiftLock(lockPath)
@@ -374,14 +398,19 @@ func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, rechec
 		return errInterrupted // nothing lifted yet
 	}
 
-	// 4. The window, watched.
-	stop, fired := make(chan struct{}), make(chan error, 1)
-	go watchWindow(s.DB, id, sigs, stop, fired)
-	_, err = c.ExecContext(ctx, "SET GLOBAL super_read_only = OFF")
+	// 4. The window, watched; do's context is the watcher's to cancel.
+	dctx, cancelDo := context.WithCancel(ctx)
+	defer cancelDo()
+	returned, fired := make(chan struct{}), make(chan error, 1)
+	go watchWindow(s.DB, id, sigs, cancelDo, returned, fired)
+	ran := false
+	_, err = c.ExecContext(dctx, "SET GLOBAL super_read_only = OFF")
 	if err == nil {
-		err = do(ctx, c)
+		ran = true
+		err = do(dctx, c)
 	}
-	close(stop)
+	liftedAfterDo()
+	close(returned)
 	why := <-fired
 
 	// 5. Always put back what step 2 read (on), whatever happened.
@@ -389,29 +418,49 @@ func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, rechec
 
 	// 6. The final check; locked again here when it is still not 1 1.
 	if rerr := finalCheck(ctx, s, c); rerr != nil {
-		return rerr
+		why = rerr
 	}
 	switch {
 	case why != nil:
-		return why
-	case len(sigs) > 0:
-		return errInterrupted
+		return &liftedError{Why: why, Ran: ran, DoErr: err}
 	case isLockWait(err):
 		return fmt.Errorf("%w: %w", errLockWait, err)
 	}
 	return err
 }
 
-// watchWindow waits for a signal or the window's cap until stop closes. On
-// either it kills the statement running on connection id and puts
-// super_read_only back from a connection of its own, then sends why the
-// window ended on fired (nil when stop closed first).
-func watchWindow(db *sql.DB, id int64, sigs <-chan os.Signal, stop <-chan struct{}, fired chan<- error) {
+// liftedError is a window that ended abnormally (runLifted): Why is
+// errInterrupted, errWindowCap or a *relockError, and its text is the
+// error's; Ran is whether do was called, DoErr what it returned.
+type liftedError struct {
+	Why   error
+	Ran   bool
+	DoErr error
+}
+
+func (e *liftedError) Error() string { return e.Why.Error() }
+func (e *liftedError) Unwrap() error { return e.Why }
+
+// liftedAfterDo runs between do's return and the watcher learning of it;
+// tests use it to land a signal there.
+var liftedAfterDo = func() {}
+
+// killRepeat is how often the watcher sends KILL QUERY again until do has
+// returned.
+const killRepeat = 200 * time.Millisecond
+
+// watchWindow waits for a signal or the window's cap until returned
+// closes (do has returned). On either it cancels do's context, then from a
+// connection of its own kills the statement running on connection id,
+// again every killRepeat until do has returned (bounded by
+// relockTimeout), puts super_read_only back, and sends why the window
+// ended on fired (nil when do returned first).
+func watchWindow(db *sql.DB, id int64, sigs <-chan os.Signal, cancelDo func(), returned <-chan struct{}, fired chan<- error) {
 	timer := time.NewTimer(cliWindowCap)
 	defer timer.Stop()
 	var why error
 	select {
-	case <-stop:
+	case <-returned:
 		fired <- nil
 		return
 	case <-sigs:
@@ -419,14 +468,31 @@ func watchWindow(db *sql.DB, id int64, sigs <-chan os.Signal, stop <-chan struct
 	case <-timer.C:
 		why = errWindowCap
 	}
+	cancelDo()
 	ctx, cancel := context.WithTimeout(context.Background(), relockTimeout)
 	defer cancel()
-	if conn, err := db.Conn(ctx); err == nil {
-		for _, q := range []string{fmt.Sprintf("SET SESSION lock_wait_timeout = %d", relockLockWait),
-			fmt.Sprintf("KILL QUERY %d", id), "SET GLOBAL super_read_only = ON"} {
-			conn.ExecContext(ctx, q) // each tried; the final check reads the outcome
+	conn, err := db.Conn(ctx)
+	if err == nil {
+		defer conn.Close()
+		conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", relockLockWait))
+	}
+	for done := false; !done; {
+		if err == nil {
+			conn.ExecContext(ctx, fmt.Sprintf("KILL QUERY %d", id)) // "unknown thread" once it is gone
 		}
-		conn.Close()
+		select {
+		case <-returned:
+			done = true
+		case <-ctx.Done():
+			<-returned // step 5 waits for do in any case
+			done = true
+		case <-time.After(killRepeat):
+		}
+	}
+	if err == nil {
+		rctx, rcancel := context.WithTimeout(context.Background(), relockTimeout)
+		conn.ExecContext(rctx, "SET GLOBAL super_read_only = ON") // the final check reads the outcome
+		rcancel()
 	}
 	fired <- why
 }
