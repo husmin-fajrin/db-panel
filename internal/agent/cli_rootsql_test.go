@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -671,4 +673,48 @@ func lockState(t *testing.T, path string) string {
 		parts = append(parts, fmt.Sprintf("%s %v uid=%d nlink=%d ino=%d", p, fi.Mode(), st.Uid, st.Nlink, st.Ino))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// TestDumpIgnoresLoginFile: a login file (.mylogin.cnf) in root's home
+// that names another server and account changes neither where the backup's
+// mysqldump connects nor as whom, on either login path (measured on 8.0:
+// clients read it even with --no-defaults, and after --defaults-file).
+func TestDumpIgnoresLoginFile(t *testing.T) {
+	editor, err := exec.LookPath("mysql_config_editor")
+	if err != nil {
+		t.Skip("mysql_config_editor not installed")
+	}
+	r := newDropRig(t)
+	home := t.TempDir()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nobody := strconv.Itoa(l.Addr().(*net.TCPAddr).Port) // nothing listens there once closed
+	l.Close()
+	set := exec.Command(editor, "set", "--login-path=client", "--host=127.0.0.1", "--port="+nobody, "--user=evil")
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "MYSQL_") && !strings.HasPrefix(kv, "HOME=") {
+			set.Env = append(set.Env, kv)
+		}
+	}
+	set.Env = append(set.Env, "HOME="+home)
+	if out, err := set.CombinedOutput(); err != nil {
+		t.Fatalf("mysql_config_editor: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".mylogin.cnf")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	r.makeDB("login_tanpa_sandi", 1)
+	if code, out, errOut := r.run(strings.NewReader("login_tanpa_sandi\n"), "login_tanpa_sandi"); code != 0 || r.exists("login_tanpa_sandi") {
+		t.Errorf("without a password: code %d, exists %v\nstdout %q\nstderr %q", code, r.exists("login_tanpa_sandi"), out, errOut)
+	}
+	r.makeDB("login_sandi", 1)
+	r.setRootPassword("sandi-root")
+	t.Cleanup(func() { r.setRootPassword("") })
+	if code, out, errOut := r.run(strings.NewReader("sandi-root\nlogin_sandi\n"), "login_sandi"); code != 0 || r.exists("login_sandi") {
+		t.Errorf("with a password: code %d, exists %v\nstdout %q\nstderr %q", code, r.exists("login_sandi"), out, errOut)
+	}
 }

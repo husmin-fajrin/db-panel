@@ -140,14 +140,18 @@ type rootSession struct {
 // credentials: without a password they are arguments (--no-defaults, so no
 // option file is read at all); with one they come through an inherited
 // pipe the client reads as its only option file, --defaults-file=/dev/fd/3.
-// The environment is the command's own without the client's MYSQL_*
-// variables. The caller closes cmd.ExtraFiles once the program has
-// started.
+// The login file (.mylogin.cnf) is kept out too: 8.0 clients read it even
+// with --no-defaults and after --defaults-file, where a host, port or user
+// in it wins (measured), so MYSQL_TEST_LOGIN_FILE names /dev/null, which
+// reads as empty. --protocol=SOCKET makes the client fail rather than
+// connect anywhere but the socket. The environment is otherwise the
+// command's own without the client's MYSQL_* variables. The caller closes
+// cmd.ExtraFiles once the program has started.
 func (s *rootSession) dumpCommand(ctx context.Context, bin string, args ...string) (*exec.Cmd, error) {
 	var login []string
 	var extra []*os.File
 	if s.password == "" {
-		login = []string{"--no-defaults", "--socket=" + s.socket, "--user=" + s.User}
+		login = []string{"--no-defaults", "--protocol=SOCKET", "--socket=" + s.socket, "--user=" + s.User}
 	} else {
 		r, w, err := os.Pipe()
 		if err != nil {
@@ -162,7 +166,7 @@ func (s *rootSession) dumpCommand(ctx context.Context, bin string, args ...strin
 			r.Close()
 			return nil, err
 		}
-		login, extra = []string{"--defaults-file=/dev/fd/3"}, []*os.File{r}
+		login, extra = []string{"--defaults-file=/dev/fd/3", "--protocol=SOCKET"}, []*os.File{r}
 	}
 	cmd := exec.CommandContext(ctx, bin, append(login, args...)...)
 	cmd.ExtraFiles = extra
@@ -171,11 +175,12 @@ func (s *rootSession) dumpCommand(ctx context.Context, bin string, args ...strin
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
-	if cmd.Env == nil {
-		cmd.Env = []string{}
-	}
+	cmd.Env = append(cmd.Env, noLoginFile)
 	return cmd, nil
 }
+
+// noLoginFile points the client's login file at one that reads as empty.
+const noLoginFile = "MYSQL_TEST_LOGIN_FILE=/dev/null"
 
 // optionValue quotes v for a MySQL option file: in double quotes, with a
 // backslash before a backslash or a double quote (a # inside quotes is no
