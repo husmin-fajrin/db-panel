@@ -19,8 +19,9 @@ import (
 // tail of the error log, run as the owner of the directory read, so a
 // symlink planted there never gets a root process to read another file.
 // The account must never decide when root runs them:
-//   - a directory root owns: run as root (the tail: read here, readTail)
-//     with T19 once;
+//   - a directory root owns and only root may write: run as root (the
+//     tail: read here, readTail) with T19 once; one group or others may
+//     write is not root's own: not run at all, error T19c;
 //   - an owner that cannot be read (the account may have renamed the
 //     directory away for a moment): not run at all, error T19c;
 //   - under the owner's ids, a program that could not be started at all
@@ -50,33 +51,43 @@ const (
 // to run as.
 var errServiceRoot = errors.New("direktori milik root")
 
+// errRootShared: the directory is root's, but group or others may write
+// it, so another account can plant a symlink there: not root's own, and
+// nothing is run (T19c with this cause).
+var errRootShared = errors.New("direktori milik root tetapi bisa ditulis akun lain")
+
 // atProcessLimit: err is ExecEnvAs's for a start refused with EAGAIN.
 func atProcessLimit(err error) bool {
 	return errors.Is(err, ErrNotStarted) && errors.Is(err, syscall.EAGAIN)
 }
 
 // lstatOwner is the uid and gid owning path itself (a symlink is not
-// followed); tests replace it.
-var lstatOwner = func(path string) (uid, gid uint32, err error) {
+// followed) and its permission bits; tests replace it.
+var lstatOwner = func(path string) (uid, gid uint32, perm os.FileMode, err error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return 0, 0, errors.New("data stat tidak dikenali")
+		return 0, 0, 0, errors.New("data stat tidak dikenali")
 	}
-	return st.Uid, st.Gid, nil
+	return st.Uid, st.Gid, fi.Mode().Perm(), nil
 }
 
 // serviceCredential is the ids of dir's owner and group, without
-// supplementary groups: errServiceRoot when root owns it.
+// supplementary groups: errServiceRoot when root owns it and only root may
+// write it, errRootShared when root owns it and group or others may write
+// it.
 func serviceCredential(dir string) (*syscall.Credential, error) {
-	uid, gid, err := lstatOwner(dir)
+	uid, gid, perm, err := lstatOwner(dir)
 	if err != nil {
 		return nil, err
 	}
 	if uid == 0 {
+		if perm&0o022 != 0 {
+			return nil, errRootShared
+		}
 		return nil, errServiceRoot
 	}
 	return &syscall.Credential{Uid: uid, Gid: gid}, nil

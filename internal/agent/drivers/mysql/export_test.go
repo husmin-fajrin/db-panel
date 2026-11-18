@@ -709,9 +709,17 @@ var (
 	ErrServiceRoot    = errServiceRoot
 )
 
-// SetLstatOwner replaces how serviceCredential reads a directory's owner;
-// it returns the function that restores it.
+// SetLstatOwner replaces how serviceCredential reads a directory's owner
+// (its mode reads 0755); it returns the function that restores it.
 func SetLstatOwner(f func(path string) (uid, gid uint32, err error)) (restore func()) {
+	return SetLstatOwnerMode(func(path string) (uint32, uint32, os.FileMode, error) {
+		uid, gid, err := f(path)
+		return uid, gid, 0o755, err
+	})
+}
+
+// SetLstatOwnerMode is SetLstatOwner with the directory's permission bits.
+func SetLstatOwnerMode(f func(path string) (uid, gid uint32, perm os.FileMode, err error)) (restore func()) {
 	old := lstatOwner
 	lstatOwner = f
 	return func() { lstatOwner = old }

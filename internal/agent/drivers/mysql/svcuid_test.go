@@ -398,6 +398,46 @@ func TestServiceCredentialUnreadableIsNotRunAsRoot(t *testing.T) {
 	}
 }
 
+// TestServiceCredentialRootSharedIsNotRunAsRoot: a directory root owns
+// that group or others may write (the service account may plant a symlink
+// in a root:mysql 0770 binary log directory) is not root's own: nothing is
+// run, as root or as anyone, with T19c and its cause; root's own directory
+// without those bits still runs as root with T19.
+func TestServiceCredentialRootSharedIsNotRunAsRoot(t *testing.T) {
+	const cause = "direktori milik root tetapi bisa ditulis akun lain"
+	log := filepath.Join(t.TempDir(), "error.log")
+	if err := os.WriteFile(log, []byte("isi yang tidak boleh terbaca\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, perm := range []os.FileMode{0o770, 0o775, 0o757, 0o730, 0o1777} {
+		t.Cleanup(mysql.SetLstatOwnerMode(func(string) (uint32, uint32, os.FileMode, error) { return 0, 27, perm, nil }))
+		h := &fakeExecHost{out: "keluaran"}
+		var w warnings
+		var out bytes.Buffer
+		err := mysql.ExecAsService(context.Background(), h, "/var/lib/mysql", w.warn, nil, &out, "mysqlbinlog", "x")
+		wantUnreadable(t, fmt.Sprintf("execAsService, mode %04o", perm), err, "/var/lib/mysql", cause)
+		got, err := mysql.ReadBootLogTail(context.Background(), h, log, w.warn)
+		wantUnreadable(t, fmt.Sprintf("error log tail, mode %04o", perm), err, filepath.Dir(log), cause)
+		if len(got) != 0 || len(h.runs) != 0 || out.Len() != 0 || len(w.msgs) != 0 {
+			t.Errorf("mode %04o: read %q, runs %+v, out %q, warnings %q; want nothing run, read or warned",
+				perm, got, h.runs, out.String(), w.msgs)
+		}
+	}
+	for _, perm := range []os.FileMode{0o755, 0o750, 0o700, 0o751} {
+		t.Cleanup(mysql.SetLstatOwnerMode(func(string) (uint32, uint32, os.FileMode, error) { return 0, 0, perm, nil }))
+		h := &fakeExecHost{out: "keluaran"}
+		var w warnings
+		var out bytes.Buffer
+		if err := mysql.ExecAsService(context.Background(), h, "/var/lib/mysql", w.warn, nil, &out, "mysqlbinlog", "x"); err != nil {
+			t.Fatalf("mode %04o: %v", perm, err)
+		}
+		if len(h.runs) != 1 || h.runs[0].cred != nil {
+			t.Errorf("mode %04o: runs %+v, want one as root", perm, h.runs)
+		}
+		w.wantT19Once(t, fmt.Sprintf("root's directory, mode %04o", perm))
+	}
+}
+
 // binlogPathRe is a binary log file mysqlbinlog is given.
 var binlogPathRe = regexp.MustCompile(`/binlog\.[0-9]+$`)
 
