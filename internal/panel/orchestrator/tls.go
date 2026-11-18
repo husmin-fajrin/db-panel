@@ -77,7 +77,7 @@ func (r *Runner) StartMySQLTLS(ctx context.Context, serverID int64) (string, err
 	}
 	if len(inv.MissingGrants) > 0 {
 		return "", fmt.Errorf("akun MySQL admin kurang hak; jalankan GRANT berikut di server ini lalu Segarkan: %s",
-			strings.Join(inv.MissingGrants, "; "))
+			strings.Join(nameList(inv.MissingGrants), "; ")) // the agent's statements: one line each
 	}
 	if err := r.refuseBusy(serverID, "server ini"); err != nil {
 		return "", err
@@ -361,7 +361,7 @@ func unverifiedText(server string, rs *proto.ReplicaStatus) string {
 	case rs.LastIOErrno != 0:
 		// The receiver's error is the agent's (MySQL's) words (spec 5.6).
 		return fmt.Sprintf("thread IO %s, error %d: %s", agentPart(rs.IORunning, 32), rs.LastIOErrno,
-			AgentQuoteN(server, rs.LastIOError, 200))
+			AgentQuoteN(server, rs.LastIOError, maxLogLine))
 	default:
 		return "thread IO " + agentPart(rs.IORunning, 32)
 	}

@@ -595,7 +595,10 @@ func TestPreflightComparesNamesExactly(t *testing.T) {
 			// The master has a and b; name differs from them, so it is
 			// replica-only and refused unacknowledged.
 			got := failedResync(t, e, r, []string{"a", name}, nil)
-			if !strings.Contains(got, "database "+name+" hanya ada di replika") {
+			// A name with a character that does not print (the zero-width
+			// space) is shown quoted, so the difference stays visible
+			// (nameText).
+			if !strings.Contains(got, "database "+nameText(name)+" hanya ada di replika") {
 				t.Fatalf("job error = %q", got)
 			}
 		})

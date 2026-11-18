@@ -235,7 +235,7 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	if cand.Partial && !p.AcceptPartial {
 		missing := "sebagian database"
 		if len(cand.MissingDatabases) > 0 {
-			missing = strings.Join(cand.MissingDatabases, ", ")
+			missing = strings.Join(nameList(cand.MissingDatabases), ", ")
 		}
 		return "", fmt.Errorf("%s hanya mereplikasi sebagian database; %s tidak akan ada di master baru. "+
 			"Setujui itu dulu untuk melanjutkan", cand.Name, missing)

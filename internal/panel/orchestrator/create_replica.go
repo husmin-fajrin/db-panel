@@ -352,7 +352,7 @@ func (jr *jobRun) replicaCheckMaster(ctx context.Context, _ bool) (outcome, erro
 	for _, d := range selected {
 		size, ok := sizes[d]
 		if !ok {
-			return outcome{}, fmt.Errorf("database %s tidak ada lagi di master", d)
+			return outcome{}, fmt.Errorf("database %s tidak ada lagi di master", nameText(d))
 		}
 		bytes += size
 	}
@@ -377,7 +377,7 @@ func (jr *jobRun) replicaCheckMaster(ctx context.Context, _ bool) (outcome, erro
 	if !st.TLSAvailable && !jr.st.TLSVerify {
 		jr.logf("warn", "Master tidak menawarkan TLS: replikasi dan salinan data berjalan tanpa enkripsi.")
 	}
-	return done("master %s:%d siap (MySQL %s)", topo.SourceHost, topo.SourcePort, st.Version), nil
+	return done("master %s:%d siap (MySQL %s)", topo.SourceHost, topo.SourcePort, agentPart(st.Version, maxShownValue)), nil
 }
 
 // replicaCheckTarget probes the target; without MySQL the install step
@@ -477,14 +477,14 @@ func (jr *jobRun) replicaPreflight(ctx context.Context, approved bool) (outcome,
 				case len(list) > 0 && jr.st.Resync:
 					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
 					msg = append(msg, "database berikut tidak ada di daftar yang disetujui saat Resync ulang dimulai dan "+
-						"akan ikut dihapus lalu disalin ulang dari master: "+strings.Join(list, ", "))
+						"akan ikut dihapus lalu disalin ulang dari master: "+strings.Join(nameList(list), ", "))
 				case len(list) > 0 && jr.st.RebuildOldMaster:
 					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
-					msg = append(msg, fmt.Sprintf(wipeOldMasterText, strings.Join(list, ", ")))
+					msg = append(msg, fmt.Sprintf(wipeOldMasterText, strings.Join(nameList(list), ", ")))
 				case len(list) > 0:
 					jr.st.WaitReason, jr.st.WaitList = WaitWipe, list
 					msg = append(msg, "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: "+
-						strings.Join(list, ", "))
+						strings.Join(nameList(list), ", "))
 				default:
 					jr.st.WaitReason = WaitForeignSource
 				}
@@ -567,7 +567,7 @@ func foreignSource(rs *proto.ReplicaStatus, topo store.Topology) string {
 	if strings.EqualFold(rs.SourceHost, topo.SourceHost) && rs.SourcePort == topo.SourcePort {
 		return ""
 	}
-	return net.JoinHostPort(rs.SourceHost, strconv.Itoa(rs.SourcePort))
+	return net.JoinHostPort(agentPart(rs.SourceHost, 255), strconv.Itoa(rs.SourcePort)) // the agent's value: one line
 }
 
 func hasCheck(checks []proto.Check, id, status string) bool {
@@ -622,7 +622,7 @@ func (jr *jobRun) replicaInstall(ctx context.Context, approved bool) (outcome, e
 			proto.InstallParams{Series: jr.st.MasterSeries, ExactVersion: jr.st.MasterVersion}, &res); err != nil {
 			return outcome{}, err
 		}
-		jr.logf("info", "MySQL %s terpasang (%s).", res.Version, res.Source)
+		jr.logf("info", "MySQL %s terpasang (%s).", agentPart(res.Version, maxShownValue), agentPart(res.Source, 300))
 	}
 	// The installer stored the dbpanel_admin account on the agent.
 	if _, err := jr.r.RefreshInventory(ctx, jr.target()); err != nil {
@@ -649,9 +649,7 @@ func (jr *jobRun) replicaPrepare(ctx context.Context, _ bool) (outcome, error) {
 	}, &res); err != nil {
 		return outcome{}, err
 	}
-	for _, a := range res.Applied {
-		jr.logf("info", "Diterapkan: %s", a)
-	}
+	jr.logApplied(res.Applied)
 	if res.ServerID != 0 && res.ServerID == jr.st.MasterMySQLID {
 		return outcome{}, fmt.Errorf("server_id replika (%d) sama dengan master", res.ServerID)
 	}
@@ -663,7 +661,7 @@ func (jr *jobRun) replicaPrepare(ctx context.Context, _ bool) (outcome, error) {
 		// It restarts unasked: a new replica serves no application yet,
 		// and a resynced one may serve reads but is being rebuilt (the
 		// resync modal says MySQL on the replica may restart).
-		jr.logf("info", "Memulai ulang MySQL di %s: %s.", jr.serverName(jr.target()), strings.Join(res.RestartReasons, "; "))
+		jr.logf("info", "Memulai ulang MySQL di %s: %s.", jr.serverName(jr.target()), agentList(res.RestartReasons, "; "))
 		var rr proto.RestartResult
 		if err := jr.callWithin(ctx, restartTimeout, jr.target(), "mysql.restart", nil, &rr); err != nil {
 			return outcome{}, err
@@ -859,7 +857,8 @@ func (jr *jobRun) verifyCopyAfterReconnect(ctx context.Context) (outcome, error)
 		return outcome{}, err
 	}
 	if jr.st.Method == "clone" && (st.CloneState != "Completed" || st.CloneError != "") {
-		return outcome{}, fmt.Errorf("CLONE tidak selesai di server tujuan: status %q %s; ulangi Buat replika", st.CloneState, st.CloneError)
+		return outcome{}, fmt.Errorf("CLONE tidak selesai di server tujuan: status %q %s; ulangi Buat replika", st.CloneState,
+			agentPart(st.CloneError, maxLogLine))
 	}
 	if jr.st.SnapshotGTID == "" {
 		jr.st.SnapshotGTID = st.GTIDExecuted
@@ -877,7 +876,7 @@ func (jr *jobRun) verifyCopyAfterReconnect(ctx context.Context) (outcome, error)
 	}
 	jr.st.AdminReplaced = false
 	jr.save()
-	jr.logf("info", "Akun MySQL replika terhubung lagi; salinan diperiksa (GTID %s).", st.GTIDExecuted)
+	jr.logf("info", "Akun MySQL replika terhubung lagi; salinan diperiksa (GTID %s).", gtidValue(st.GTIDExecuted))
 	return done("%s selesai; akun MySQL replika terhubung ulang", jr.st.Method), nil
 }
 
@@ -1001,7 +1000,7 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 				topo.SourceHost, unverifiedText(jr.serverName(jr.target()), last))
 		}
 	}
-	return done("IO %s, SQL %s", rs.IORunning, rs.SQLRunning), nil
+	return done("IO %s, SQL %s", agentPart(rs.IORunning, 32), agentPart(rs.SQLRunning, 32)), nil
 }
 
 // settle stores the end of the old master's quarantine: the job's state
@@ -1096,7 +1095,7 @@ func (jr *jobRun) waitCaughtUp(ctx context.Context) (proto.WaitSyncedResult, err
 		if s.SecondsBehind != nil {
 			msg += fmt.Sprintf(" (tertinggal %d detik)", *s.SecondsBehind)
 		}
-		jr.logf("info", "%s; sudah dieksekusi: %s", strings.ToUpper(msg[:1])+msg[1:], truncate(w.Executed, 512))
+		jr.logf("info", "%s; sudah dieksekusi: %s", strings.ToUpper(msg[:1])+msg[1:], gtidValue(w.Executed))
 		jr.setStep(store.StepRunning, msg)
 	}
 }
@@ -1171,7 +1170,7 @@ func (jr *jobRun) enforceWipeOnly(ctx context.Context) error {
 	}
 	for _, d := range jr.st.WipeList {
 		if !slices.Contains(names, d) && !slices.Contains(jr.st.WipeOnly, d) {
-			return fmt.Errorf("database %s hanya ada di replika dan belum diakui akan dibuang; %s", d, advice)
+			return fmt.Errorf("database %s hanya ada di replika dan belum diakui akan dibuang; %s", nameText(d), advice)
 		}
 	}
 	jr.st.PeerDatabases = names

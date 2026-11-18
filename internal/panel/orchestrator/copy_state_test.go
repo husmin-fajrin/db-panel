@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -313,5 +314,37 @@ func TestWipeApprovalTextForOldMaster(t *testing.T) {
 	j, steps = e.waitJob(id, store.JobWaiting)
 	if want := "database dari percobaan sebelumnya akan dihapus lalu disalin ulang dari master: a, b"; steps[j.CurrentStep].Message != want {
 		t.Fatalf("waiting message = %q, want %q", steps[j.CurrentStep].Message, want)
+	}
+}
+
+// TestCopySentSaveFailureResetsFlag (N-H1): only the first save of
+// CopySent fails; the dump's account is dropped after it (a later save of
+// the state), and that save must not record a copy that was never sent.
+func TestCopySentSaveFailureResetsFlag(t *testing.T) {
+	g := rebuildRig(t)
+	scriptReplicaTarget(g.m, "db-master", "dump")
+	var failed atomic.Bool
+	g.e.r.paramsStore = func(jobID, paramsJSON string) error {
+		if strings.Contains(paramsJSON, `"copy_sent":true`) && failed.CompareAndSwap(false, true) {
+			return errors.New("database is locked")
+		}
+		return g.e.st.SetJobParams(jobID, paramsJSON)
+	}
+	id := failedRebuildNoScript(t, g)
+	if !failed.Load() {
+		t.Fatal("CopySent was never saved")
+	}
+	if n := g.m.count("mysql.dumpFrom"); n != 0 {
+		t.Fatalf("copy command sent %d times", n)
+	}
+	j, _, err := g.e.st.GetJob(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(j.ParamsJSON, "copy_sent") || strings.Contains(j.ParamsJSON, "dump_user") {
+		t.Fatalf("params after the failed step = %s, want no copy_sent and the dump account dropped", j.ParamsJSON)
+	}
+	if s := copyStateOf(t, g); s != CopyNotStarted {
+		t.Fatalf("state = %v, want not started", s)
 	}
 }

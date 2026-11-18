@@ -83,7 +83,8 @@ func LeftoverSummary(res proto.LeftoverResult) string {
 				names = append(names, fmt.Sprintf("dan %d tabel lain", len(res.Tables)-maxSummaryTables))
 				break
 			}
-			names = append(names, fmt.Sprintf("%s.%s (%d baris)", t.Schema, t.Table, t.Rows))
+			// The agent's names: one line each.
+			names = append(names, fmt.Sprintf("%s.%s (%d baris)", nameText(t.Schema), nameText(t.Table), t.Rows))
 		}
 		b.WriteString(", menyentuh " + strings.Join(names, ", "))
 	}

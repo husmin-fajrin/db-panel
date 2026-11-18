@@ -107,7 +107,7 @@ func (r *Runner) StartAddDatabases(ctx context.Context, replicaServerID int64, d
 			return "", fmt.Errorf("database %q tidak ada di master", d)
 		}
 		if slices.Contains(rep.Databases, d) {
-			return "", fmt.Errorf("database %s sudah diikuti replika ini", d)
+			return "", fmt.Errorf("database %s sudah diikuti replika ini", nameText(d))
 		}
 		bytes += inv.Databases[i].Bytes
 	}
@@ -138,7 +138,7 @@ func (r *Runner) StartRemoveDatabases(ctx context.Context, replicaServerID int64
 	}
 	for _, d := range remove {
 		if !slices.Contains(rep.Databases, d) {
-			return "", fmt.Errorf("database %s tidak diikuti replika ini", d)
+			return "", fmt.Errorf("database %s tidak diikuti replika ini", nameText(d))
 		}
 	}
 	if len(remove) == len(rep.Databases) {
@@ -344,7 +344,7 @@ func (jr *jobRun) addDump(ctx context.Context, approved bool) (outcome, error) {
 	}
 	jr.st.SnapshotGTID = res.GTIDExecuted
 	jr.save()
-	jr.logf("info", "Titik dump (GTID master): %s.", res.GTIDExecuted)
+	jr.logf("info", "Titik dump (GTID master): %s.", gtidValue(res.GTIDExecuted))
 	return done("dump selesai (%d byte)", res.Bytes), nil
 }
 
@@ -498,7 +498,7 @@ func (jr *jobRun) addExisting(ctx context.Context) ([]string, error) {
 		if slices.ContainsFunc(res.Databases, func(i proto.DatabaseInfo) bool { return strings.EqualFold(i.Name, d) }) {
 			if i := slices.IndexFunc(jr.st.Databases, func(f string) bool { return strings.EqualFold(f, d) }); i >= 0 {
 				return nil, fmt.Errorf("database %s sama dengan database %s yang sudah diikuti replika ini bila huruf besar-kecil "+
-					"tidak dibedakan; pekerjaan ditolak agar database itu tidak ikut dibuang", d, jr.st.Databases[i])
+					"tidak dibedakan; pekerjaan ditolak agar database itu tidak ikut dibuang", nameText(d), nameText(jr.st.Databases[i]))
 			}
 			out = append(out, d)
 		}
@@ -512,7 +512,7 @@ func (jr *jobRun) addExisting(ctx context.Context) ([]string, error) {
 func addExistingText(names []string) string {
 	paras := make([]string, 0, len(names))
 	for _, x := range names {
-		paras = append(paras, "Database "+x+" sudah ada di replika ini. Panel tidak bisa memastikan isinya sama dengan "+
+		paras = append(paras, "Database "+nameText(x)+" sudah ada di replika ini. Panel tidak bisa memastikan isinya sama dengan "+
 			"master. Isinya di replika akan dibuang permanen, lalu diganti salinan dari master.")
 	}
 	return strings.Join(paras, "\n\n")

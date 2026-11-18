@@ -82,6 +82,24 @@ func TestJobErrorLabelsAgentText(t *testing.T) {
 			}
 		})
 	}
+	t.Run("agent disconnected", func(t *testing.T) {
+		// The link drops while the call waits: the hub's own offline error.
+		e := newEnv(t)
+		m, _ := e.readyMaster("db-master")
+		r := e.replicaAgent("replica1", "dump")
+		e.hub.Attach(r.id, &nthConn{Conn: r.conn, cmd: "mysql.preflight", n: 1,
+			err: &proto.Error{Code: proto.CodeOffline, Message: "koneksi agent terputus"}})
+		id, err := e.r.StartCreateReplica(context.Background(), CreateReplicaParams{
+			MasterServerID: m.id, TargetServerID: r.id, Databases: []string{"a"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, steps := e.waitJob(id, store.JobFailed)
+		e.waitIdle(id)
+		if want := "agent replica1 terputus saat " + steps[j.CurrentStep].Name; j.Error != want {
+			t.Errorf("job error = %q, want %q", j.Error, want)
+		}
+	})
 	t.Run("hub timeout", func(t *testing.T) {
 		e := newEnv(t)
 		m, _ := e.readyMaster("db-master")

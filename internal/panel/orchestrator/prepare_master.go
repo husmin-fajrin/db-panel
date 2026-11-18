@@ -57,7 +57,7 @@ func (r *Runner) StartPrepareMaster(ctx context.Context, serverID int64) (string
 	}
 	if len(inv.MissingGrants) > 0 {
 		return "", fmt.Errorf("akun MySQL admin kurang hak; jalankan GRANT berikut di server ini lalu Segarkan: %s",
-			strings.Join(inv.MissingGrants, "; "))
+			strings.Join(nameList(inv.MissingGrants), "; ")) // the agent's statements: one line each
 	}
 	if err := r.refuseBusy(serverID, "server ini"); err != nil {
 		return "", err
@@ -92,7 +92,7 @@ func (jr *jobRun) masterPreflight(ctx context.Context, _ bool) (outcome, error) 
 	jr.st.MasterPort = res.Status.Port
 	jr.st.MasterTLS = res.Status.TLSAvailable
 	jr.save()
-	return done("MySQL %s; pemeriksaan terburuk: %s", res.Status.Version, res.Worst), nil
+	return done("MySQL %s; pemeriksaan terburuk: %s", agentPart(res.Status.Version, maxShownValue), agentPart(res.Worst, maxShownValue)), nil
 }
 
 func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) {
@@ -101,8 +101,12 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 		proto.ConfigureParams{Role: "master", EnableClone: true, GTID: true}, &res); err != nil {
 		return outcome{}, err
 	}
-	for _, a := range res.Applied {
-		jr.logf("info", "Diterapkan: %s", a)
+	for i, a := range res.Applied {
+		if i == maxAgentList {
+			jr.logf("info", "Diterapkan: … dan %d lagi", len(res.Applied)-maxAgentList)
+			break
+		}
+		jr.logf("info", "Diterapkan: %s", a) // one line (logf)
 		if a == "binlog_format=ROW" {
 			jr.logf("warn", "Format binlog sekarang ROW untuk koneksi baru. Koneksi aplikasi yang sudah terbuka tetap memakai "+
 				"format lama sampai tersambung ulang; restart aplikasi (atau MySQL) di jam sepi sebelum membuat replika.")
@@ -143,7 +147,7 @@ func (jr *jobRun) masterConfigure(ctx context.Context, _ bool) (outcome, error) 
 	jr.st.NeedsRestart, jr.st.RestartReasons = res.NeedsRestart, res.RestartReasons
 	jr.save()
 	if res.NeedsRestart {
-		return done("perlu restart: %s", strings.Join(res.RestartReasons, "; ")), nil
+		return done("perlu restart: %s", panelText(agentList(res.RestartReasons, "; "))), nil
 	}
 	return done("diterapkan tanpa restart"), nil
 }
@@ -270,7 +274,7 @@ func pendingRestart(st proto.MySQLStatus) []string {
 		out = append(out, "binary log masih OFF")
 	}
 	if loopbackOnly(st.BindAddress) {
-		out = append(out, "MySQL masih hanya mendengar di "+st.BindAddress)
+		out = append(out, "MySQL masih hanya mendengar di "+agentPart(st.BindAddress, maxShownValue))
 	}
 	return out
 }
@@ -296,7 +300,7 @@ func loopbackOnly(bind string) bool {
 func (jr *jobRun) restartMessage() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "MySQL di %s perlu dimulai ulang: %s. ", jr.serverName(jr.job.ServerID),
-		strings.Join(jr.st.RestartReasons, "; "))
+		agentList(jr.st.RestartReasons, "; "))
 	b.WriteString("Aplikasi yang memakai database ini akan terputus beberapa detik; lakukan di jam sepi. " +
 		"Bila Anda merestart MySQL sendiri nanti, klik Sudah saya restart — periksa lagi.")
 	for _, reason := range jr.st.RestartReasons {

@@ -1562,8 +1562,11 @@ type outcome struct {
 	message string
 }
 
+// done is a finished step's message: format is the panel's, and every
+// string argument is made one line and bounded (flatArgs), so an agent's
+// value cannot end the line; a panelText argument is kept as written.
 func done(format string, args ...any) outcome {
-	return outcome{store.StepDone, fmt.Sprintf(format, args...)}
+	return outcome{store.StepDone, fmt.Sprintf(format, flatArgs(args, maxLogLine)...)}
 }
 func skipped(msg string) outcome { return outcome{store.StepSkipped, msg} }
 func wait(msg string) outcome    { return outcome{store.StepWaiting, msg} }
@@ -1730,7 +1733,9 @@ func (jr *jobRun) run(from int, approved bool) {
 		}
 		jr.setStep(out.status, out.message)
 		if out.status == store.StepWaiting {
-			jr.logf("warn", "Menunggu persetujuan: %s", out.message)
+			// The panel's wait message, its agent values made one line where
+			// it is built: its own line breaks are kept.
+			jr.logf("warn", "Menunggu persetujuan: %s", panelText(out.message))
 			jr.setJob(store.JobWaiting, "")
 			return
 		}
@@ -1814,19 +1819,22 @@ func (jr *jobRun) setStep(status, message string) {
 }
 
 // logf appends a line to the job log and publishes it, cut to maxLogLine
-// (args may hold agent text). String and error args are MySQL's text as
-// often as not: their quoted literals are censored (redact.Quotes), the
-// panel's own format is kept as written; an agent's failure in an error
-// arg is labelled as its words first (agentErrorText). Never log a
-// password.
+// (args may hold agent text). The panel's own format is kept as written.
+// Every string and error arg is made one line and bounded (agentPart: an
+// agent's value cannot end the panel's line, spec 5.6), an agent's failure
+// in an error arg labelled as its words first (agentErrorText); then its
+// quoted literals are censored (redact.Quotes), each arg on its own. A
+// panelText arg is kept as written (censored only). Never log a password.
 func (jr *jobRun) logf(level, format string, args ...any) {
 	safe := make([]any, len(args)) // not the caller's slice
 	for i, a := range args {
 		switch v := a.(type) {
 		case string:
-			safe[i] = redact.Quotes(v)
+			safe[i] = redact.Quotes(agentPart(v, maxLogLine))
+		case panelText:
+			safe[i] = redact.Quotes(string(v))
 		case error:
-			safe[i] = redact.Quotes(agentErrorText(v, jr.serverName))
+			safe[i] = redact.Quotes(agentPart(agentErrorText(v, jr.serverName), maxLogLine))
 		default:
 			safe[i] = a
 		}
@@ -1846,6 +1854,19 @@ func (jr *jobRun) logLine(level, msg string) {
 		return
 	}
 	jr.r.d.Publish("job_log", map[string]any{"job_id": jr.job.ID, "id": id, "ts": now, "level": level, "message": msg})
+}
+
+// logApplied logs what a configure applied, one line per setting (each
+// made one line by logf), at most maxAgentList of them and the count of
+// the rest.
+func (jr *jobRun) logApplied(applied []string) {
+	for i, a := range applied {
+		if i == maxAgentList {
+			jr.logf("info", "Diterapkan: … dan %d lagi", len(applied)-maxAgentList)
+			return
+		}
+		jr.logf("info", "Diterapkan: %s", a)
+	}
 }
 
 // save stores the job's state in its ParamsJSON; an error is logged (the
