@@ -309,15 +309,30 @@ var (
 	cliLockWaitTimeout = 60
 	// cliWindowCap is how long the window may stay open.
 	cliWindowCap = 10 * time.Minute
+	// cliStatementWait bounds how long an abnormal end of the window waits
+	// for the server to end the statement of do's connection.
+	cliStatementWait = 60 * time.Second
+	// cliRelockWait is the lock_wait_timeout (seconds) of the statements
+	// that put the flags back on a connection of their own.
+	cliRelockWait = 10
+	// killStatement sends KILL QUERY for connection id on conn; tests make
+	// it a no-op to stand for a statement the kill does not stop.
+	killStatement = func(ctx context.Context, conn *sql.Conn, id int64) {
+		conn.ExecContext(ctx, fmt.Sprintf("KILL QUERY %d", id)) // "unknown thread" once it is gone
+	}
 )
+
+// statementNotice is how long the wait for the server's statement goes on
+// before the operator is told.
+const statementNotice = 2 * time.Second
+
+// textStatementWait is that line.
+const textStatementWait = "MySQL masih menyelesaikan atau membatalkan pernyataan perintah ini; perintah ini menunggu paling lama %d detik."
 
 const (
 	// relockTimeout bounds putting the flags back, whatever the command's
 	// context.
 	relockTimeout = 30 * time.Second
-	// relockLockWait is the lock_wait_timeout (seconds) of the statements
-	// that put the flags back on a connection of their own.
-	relockLockWait = 10
 	// errLockWaitTimeout is ER_LOCK_WAIT_TIMEOUT.
 	errLockWaitTimeout = 1205
 )
@@ -330,15 +345,20 @@ const (
 // goes off until the final check.
 //
 // A signal, or the window open for cliWindowCap, ends the window: the
-// watcher cancels the context do runs with, then from a second connection
-// of s.DB sends KILL QUERY for s.Conn's statement, again every
-// killRepeat until do has returned (cancelling a context does not stop a
-// statement on the server: X4), and puts the flag back. do must stop
-// sending statements once its context is cancelled; database/sql does not
-// send one on a cancelled context, so a do that only runs statements on c
-// with that context needs nothing more. Steps 5 and 6 run only after do
-// has returned, on a context that is not cancelled. A signal that arrives
-// after do has returned (during steps 5 and 6) changes nothing: do's
+// watcher cancels the context do runs with, so that do sends no further
+// statement (database/sql sends none on a cancelled context, so a do that
+// only runs statements on c with that context needs nothing more; any
+// other do must stop on it too). Cancelling does not end a statement in
+// flight: go-sql-driver closes the connection at once and do returns, but
+// the server thread goes on with the statement (measured). So the watcher
+// then decides from the server: from a second connection of s.DB it sends
+// KILL QUERY for s.Conn's connection id and reads that thread, again every
+// killRepeat, until the thread is idle or gone, for at most
+// cliStatementWait (it tells the operator on s.out once the wait passes
+// statementNotice). Only then, or when that bound runs out, does it put
+// the flag back, and steps 5 and 6 run, on a context that is not
+// cancelled. A signal that arrives after do has returned and the window
+// was not ended by one (during steps 5 and 6) changes nothing: do's
 // outcome stands.
 //
 // What the caller learns:
@@ -350,9 +370,13 @@ const (
 //     (1205); the flags are back.
 //   - *liftedError: the window ended abnormally. errors.Is answers
 //     errInterrupted or errWindowCap, errors.As a *relockError when the
-//     flags could not be put back (that wins over the other two). Its Ran
-//     says whether do was called and DoErr what do returned; do may have
-//     done its work all the same, so the caller checks the server.
+//     flags could not be put back (that wins over the other two). Ran says
+//     whether do was called and DoErr what do returned (context.Canceled
+//     once the watcher cancelled it); do may have done its work all the
+//     same, so the caller checks the server. Running says the server
+//     thread was still running do's statement when cliStatementWait ran
+//     out: its work may still happen after runLifted returns (and may have
+//     kept the flag from going back on).
 //   - any other error: do's own (the flags are back), or the error that
 //     kept the flag from going off (do never ran).
 func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, recheck, do func(ctx context.Context, c *sql.Conn) error) error {
@@ -401,8 +425,8 @@ func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, rechec
 	// 4. The window, watched; do's context is the watcher's to cancel.
 	dctx, cancelDo := context.WithCancel(ctx)
 	defer cancelDo()
-	returned, fired := make(chan struct{}), make(chan error, 1)
-	go watchWindow(s.DB, id, sigs, cancelDo, returned, fired)
+	returned, fired := make(chan struct{}), make(chan windowEnd, 1)
+	go watchWindow(s.DB, s.out, id, sigs, cancelDo, returned, fired)
 	ran := false
 	_, err = c.ExecContext(dctx, "SET GLOBAL super_read_only = OFF")
 	if err == nil {
@@ -411,7 +435,8 @@ func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, rechec
 	}
 	liftedAfterDo()
 	close(returned)
-	why := <-fired
+	end := <-fired
+	why := end.why
 
 	// 5. Always put back what step 2 read (on), whatever happened.
 	putBack(ctx, s, c)
@@ -422,7 +447,7 @@ func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, rechec
 	}
 	switch {
 	case why != nil:
-		return &liftedError{Why: why, Ran: ran, DoErr: err}
+		return &liftedError{Why: why, Ran: ran, DoErr: err, Running: end.running}
 	case isLockWait(err):
 		return fmt.Errorf("%w: %w", errLockWait, err)
 	}
@@ -431,11 +456,14 @@ func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, rechec
 
 // liftedError is a window that ended abnormally (runLifted): Why is
 // errInterrupted, errWindowCap or a *relockError, and its text is the
-// error's; Ran is whether do was called, DoErr what it returned.
+// error's; Ran is whether do was called, DoErr what it returned, Running
+// whether the server was still running do's statement when the wait for it
+// ran out.
 type liftedError struct {
-	Why   error
-	Ran   bool
-	DoErr error
+	Why     error
+	Ran     bool
+	DoErr   error
+	Running bool
 }
 
 func (e *liftedError) Error() string { return e.Why.Error() }
@@ -445,56 +473,93 @@ func (e *liftedError) Unwrap() error { return e.Why }
 // tests use it to land a signal there.
 var liftedAfterDo = func() {}
 
-// killRepeat is how often the watcher sends KILL QUERY again until do has
-// returned.
+// killRepeat is how often the watcher sends KILL QUERY again and reads the
+// thread while it waits for the server to end do's statement.
 const killRepeat = 200 * time.Millisecond
+
+// windowEnd is how the watcher saw the window end: why (nil when do
+// returned first) and whether the server still ran do's statement when the
+// wait for it ran out.
+type windowEnd struct {
+	why     error
+	running bool
+}
 
 // watchWindow waits for a signal or the window's cap until returned
 // closes (do has returned). On either it cancels do's context, then from a
-// connection of its own kills the statement running on connection id,
-// again every killRepeat until do has returned (bounded by
-// relockTimeout), puts super_read_only back, and sends why the window
-// ended on fired (nil when do returned first).
-func watchWindow(db *sql.DB, id int64, sigs <-chan os.Signal, cancelDo func(), returned <-chan struct{}, fired chan<- error) {
+// connection of its own kills the statement of connection id and reads its
+// thread, again every killRepeat, until the server shows it idle or gone or
+// cliStatementWait has passed, telling the operator on out once the wait
+// passes statementNotice. It waits for do to return, puts super_read_only
+// back, and sends how the window ended on fired.
+func watchWindow(db *sql.DB, out io.Writer, id int64, sigs <-chan os.Signal, cancelDo func(), returned <-chan struct{}, fired chan<- windowEnd) {
 	timer := time.NewTimer(cliWindowCap)
 	defer timer.Stop()
-	var why error
+	var end windowEnd
 	select {
 	case <-returned:
-		fired <- nil
+		fired <- end
 		return
 	case <-sigs:
-		why = errInterrupted
+		end.why = errInterrupted
 	case <-timer.C:
-		why = errWindowCap
+		end.why = errWindowCap
 	}
 	cancelDo()
-	ctx, cancel := context.WithTimeout(context.Background(), relockTimeout)
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), cliStatementWait+relockTimeout)
 	defer cancel()
-	conn, err := db.Conn(ctx)
-	if err == nil {
-		defer conn.Close()
-		conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", relockLockWait))
-	}
-	for done := false; !done; {
-		if err == nil {
-			conn.ExecContext(ctx, fmt.Sprintf("KILL QUERY %d", id)) // "unknown thread" once it is gone
+	var conn *sql.Conn
+	defer func() {
+		if conn != nil {
+			conn.Close()
 		}
-		select {
-		case <-returned:
-			done = true
-		case <-ctx.Done():
-			<-returned // step 5 waits for do in any case
-			done = true
-		case <-time.After(killRepeat):
+	}()
+	told := false
+	for {
+		if conn == nil {
+			if c, err := db.Conn(ctx); err == nil {
+				conn = c
+				conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", cliRelockWait))
+			}
 		}
+		if conn != nil {
+			killStatement(ctx, conn, id)
+			if ended, err := threadEnded(ctx, conn, id); err == nil && ended {
+				break
+			} else if err != nil {
+				conn.Close() // read again on a fresh connection
+				conn = nil
+			}
+		}
+		if time.Since(start) >= cliStatementWait {
+			end.running = true
+			break
+		}
+		if !told && time.Since(start) >= statementNotice {
+			fmt.Fprintf(out, textStatementWait+"\n", int(cliStatementWait/time.Second))
+			told = true
+		}
+		time.Sleep(killRepeat)
 	}
-	if err == nil {
+	<-returned // step 5 waits for do in any case; it returned on the cancel
+	if conn != nil {
 		rctx, rcancel := context.WithTimeout(context.Background(), relockTimeout)
 		conn.ExecContext(rctx, "SET GLOBAL super_read_only = ON") // the final check reads the outcome
 		rcancel()
 	}
-	fired <- why
+	fired <- end
+}
+
+// threadEnded reports whether the server thread of connection id runs no
+// statement: it is gone, or idle (Sleep).
+func threadEnded(ctx context.Context, conn *sql.Conn, id int64) (bool, error) {
+	var command string
+	err := conn.QueryRowContext(ctx, "SELECT COMMAND FROM information_schema.PROCESSLIST WHERE ID = ?", id).Scan(&command)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return err == nil && command == "Sleep", err
 }
 
 // putBack sends SET GLOBAL super_read_only = ON on c, or on a connection of
@@ -511,7 +576,7 @@ func putBack(ctx context.Context, s *rootSession, c *sql.Conn) error {
 		return err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(rctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", relockLockWait)); err != nil {
+	if _, err := conn.ExecContext(rctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", cliRelockWait)); err != nil {
 		return err
 	}
 	_, err = conn.ExecContext(rctx, q)

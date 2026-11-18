@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1195,5 +1196,90 @@ func TestDropDatabaseBackupRefusals(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// dropUnknown is said when a drop's outcome cannot be confirmed.
+const dropUnknown = "Tidak bisa dipastikan apakah database %s sudah dihapus. Lihat dulu di server ini (hanya membaca): mysql -e 'SHOW DATABASES'. Bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi."
+
+// TestDropDatabaseStillRunningIsUnknown: a DROP the kill does not stop,
+// still running when the bounded wait ends (and blocking the relock): the
+// command says it cannot tell whether the database went, writes a system
+// log line with outcome=unknown, and claims neither "not dropped" nor
+// "run again"; the DROP ends later on its own.
+func TestDropDatabaseStillRunningIsUnknown(t *testing.T) {
+	r := newDropRig(t)
+	setVar(t, &killStatement, func(context.Context, *sql.Conn, int64) {})
+	setVar(t, &cliStatementWait, time.Second)
+	setVar(t, &cliRelockWait, 1)
+	setVar(t, &cliWindowCap, 2*time.Second)
+	r.makeDB("berjalan", 1)
+	release := r.holdRead("berjalan.t1")
+	code, out, errOut := r.run(strings.NewReader("berjalan\n"), "berjalan")
+	release()
+	if code == 0 || !strings.Contains(errOut, fmt.Sprintf(dropUnknown, "berjalan")+"\n") {
+		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
+	}
+	for _, bad := range []string{"tidak bisa dihapus", "Jalankan perintah ini lagi", "Database berjalan sudah dihapus"} {
+		if strings.Contains(out+errOut, bad) {
+			t.Errorf("output claims %q: stdout %q, stderr %q", bad, out, errOut)
+		}
+	}
+	logged := r.syslogLines()
+	if len(logged) != 1 || !strings.Contains(logged[0], "outcome=unknown") || !strings.Contains(logged[0], `name="berjalan"`) || !strings.Contains(logged[0], "window=") {
+		t.Errorf("system log %q", logged)
+	}
+	waitFor(t, func() bool { return !r.exists("berjalan") }, func() string { return "the orphaned DROP never ended" })
+	r.exec("SET GLOBAL super_read_only = ON")
+}
+
+// TestDropDatabaseCheckFailsIsUnknown: when whether the database went
+// cannot be read after an abnormal end, the command says so (no "not
+// dropped" claim, no "run again") and the system log records the attempt
+// with outcome=unknown.
+func TestDropDatabaseCheckFailsIsUnknown(t *testing.T) {
+	r := newDropRig(t)
+	setVar(t, &cliWindowCap, 2*time.Second)
+	setVar(t, &cliDroppedNow, func(context.Context, *rootSession, string) (bool, error) {
+		return false, errors.New("koneksi terputus (test)")
+	})
+	r.makeDB("tak_tahu", 1)
+	r.holdRead("tak_tahu.t1")
+	code, out, errOut := r.run(strings.NewReader("tak_tahu\n"), "tak_tahu")
+	if code == 0 || !strings.Contains(errOut, fmt.Sprintf(dropUnknown, "tak_tahu")+"\n") || !strings.Contains(errOut, "Kunci baca-saja server ini sudah terpasang lagi.\n") {
+		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
+	}
+	if strings.Contains(out+errOut, "tidak bisa dihapus") || strings.Contains(out+errOut, "Jalankan perintah ini lagi") {
+		t.Errorf("output claims more than it knows: stdout %q, stderr %q", out, errOut)
+	}
+	logged := r.syslogLines()
+	if len(logged) != 1 || !strings.Contains(logged[0], "outcome=unknown") || !strings.Contains(logged[0], "window=cap") {
+		t.Errorf("system log %q", logged)
+	}
+	if r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("flags %s, lock free %v", r.flags(), r.lockFree())
+	}
+}
+
+// TestDropDatabaseSecondSignalKeepsAuditLine: a second Ctrl-C after the
+// window ended does not kill the command before the system log line of a
+// drop that happened is written.
+func TestDropDatabaseSecondSignalKeepsAuditLine(t *testing.T) {
+	r := newDropRig(t)
+	r.makeDB("dua_kali", 1)
+	syslogFile := filepath.Join(t.TempDir(), "syslog")
+	p := r.start(helperSpec{Syslog: syslogFile, SignalAfterDo: true, SignalAfterWindow: true}, "dua_kali")
+	p.waitOut(c10)
+	p.send("dua_kali")
+	code, sig := p.wait()
+	if sig != 0 || code != 1 {
+		t.Errorf("helper ended with code %d, signal %v\nstdout %q\nstderr %q", code, sig, p.out.String(), p.err.String())
+	}
+	logged, _ := os.ReadFile(syslogFile)
+	if strings.Count(string(logged), "\n") != 1 || !strings.Contains(string(logged), `database dropped: name="dua_kali"`) || !strings.Contains(string(logged), "outcome=dropped") {
+		t.Errorf("system log %q", logged)
+	}
+	if r.exists("dua_kali") || r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("exists %v, flags %s, lock free %v", r.exists("dua_kali"), r.flags(), r.lockFree())
 	}
 }

@@ -64,10 +64,12 @@ Simpan juga salinannya di server lain, misalnya:
 	textCancelled  = "Dibatalkan; tidak ada yang dihapus. Cadangan tadi tetap ada di %s."
 	textDropFailed = "Database %s tidak bisa dihapus (%s). Kunci baca-saja sudah terpasang lagi. Cadangan tadi tetap ada di %s."
 	// A drop that happened although the window ended abnormally.
-	textDroppedInterrupted  = "Database %s sudah dihapus sebelum perintah ini dihentikan (sinyal). Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi."
-	textDroppedCap          = "Database %s sudah dihapus sebelum batas 10 menit perintah ini habis. Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi."
+	textDroppedAbnormal     = "Database %s sudah dihapus. Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi."
 	textDroppedDespiteError = "Database %s sudah dihapus, walaupun MySQL melaporkan galat (%s). Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi."
 	textDroppedNotRelocked  = "Database %s sudah dihapus; perintah ini tidak perlu dijalankan lagi."
+	// A drop whose outcome cannot be confirmed, and the lock's state.
+	textDropUnknown = "Tidak bisa dipastikan apakah database %s sudah dihapus. Lihat dulu di server ini (hanya membaca): mysql -e 'SHOW DATABASES'. Bila database itu masih ada, jalankan perintah ini lagi; bila sudah tidak ada, perintah ini tidak perlu dijalankan lagi."
+	textLockBack    = "Kunci baca-saja server ini sudah terpasang lagi."
 	// The same three without a backup (--tanpa-cadangan): no sentence
 	// about a file that does not exist.
 	textDropWaitedNoBackup = "Database %s sedang dipakai sambungan lain, jadi belum dihapus. Kunci baca-saja sudah terpasang lagi. Hentikan aplikasi atau sesi yang masih memakai database itu, lalu jalankan perintah ini lagi."
@@ -356,23 +358,34 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 		}
 		return nil
 	}
+	// From the moment the DROP is sent until its system log line is
+	// written, signals are held here too: a second Ctrl-C after the window
+	// must not end the command before the audit line of a drop.
+	hold := make(chan os.Signal, 4)
+	defer signal.Stop(hold)
 	drop := func(ctx context.Context, c *sql.Conn) error {
+		signal.Notify(hold, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 		_, err := c.ExecContext(ctx, "DROP DATABASE "+quoteIdent(name))
 		return err
 	}
-	record := func(window string) {
+	record := func(window, outcome string) {
 		kept := "backup=none backup_error=" + strconv.Quote(noBackup)
 		if b != nil {
 			kept = fmt.Sprintf("backup=%s sha256=%s size=%d", strconv.Quote(b.path), b.sum, b.size)
 		}
-		line := fmt.Sprintf("database dropped: name=%s %s tables=%d window=%s mysql_user=%s %s",
-			strconv.Quote(name), kept, tables, window, strconv.Quote(s.User), syslogWho())
+		what := "database dropped"
+		if outcome != "dropped" {
+			what = "database drop unconfirmed"
+		}
+		line := fmt.Sprintf("%s: name=%s %s tables=%d window=%s outcome=%s mysql_user=%s %s", what,
+			strconv.Quote(name), kept, tables, window, outcome, strconv.Quote(s.User), syslogWho())
 		if err := writeSyslog(line); err != nil {
 			fmt.Fprintf(stderr, "Peringatan: catatan ke log sistem gagal ditulis (%v).\n", err)
 		}
 	}
-	var lifted *liftedError
-	switch err := runLifted(ctx, s, o.dir, cliLiftLock, recheck, drop); {
+	err = runLifted(ctx, s, o.dir, cliLiftLock, recheck, drop)
+	afterWindow()
+	switch {
 	case err == nil:
 	case errors.Is(err, errLockWait) && b == nil:
 		return fail(textDropWaitedNoBackup, pname)
@@ -381,43 +394,80 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	case errors.Is(err, errStateChanged), errors.Is(err, mysql.ErrLiftBusy), errors.As(err, &lockErr):
 		return fail("%s", err)
 	default:
-		// The window ended abnormally, or the DROP failed: whether the
-		// database went is the server's to say. A drop that happened is
-		// recorded and said as done, never as something to run again.
-		if gone, cerr := droppedNow(ctx, s, name); cerr != nil || !gone {
-			switch {
-			case errors.As(err, &lifted):
-				return fail("%s", err)
-			case b == nil:
-				return fail(textDropFailedNoBackup, pname, printable(err.Error()))
-			}
-			return fail(textDropFailed, pname, printable(err.Error()), ppath)
-		}
-		var relock *relockError
-		switch {
-		case errors.As(err, &relock):
-			record("relock-failed")
-			fmt.Fprintf(stderr, textDroppedNotRelocked+"\n", pname)
-			fmt.Fprintln(stderr, relock.Error())
-		case errors.Is(err, errInterrupted):
-			record("interrupted")
-			fmt.Fprintf(stderr, textDroppedInterrupted+"\n", pname)
-		case errors.Is(err, errWindowCap):
-			record("cap")
-			fmt.Fprintf(stderr, textDroppedCap+"\n", pname)
-		default:
-			record("error")
-			fmt.Fprintf(stderr, textDroppedDespiteError+"\n", pname, printable(err.Error()))
-		}
-		fmt.Fprintln(stdout, textDropDone)
-		return 1
+		return dropOutcome(ctx, s, err, name, b, stdout, stderr, record)
 	}
 
 	// 10. Recorded, and what comes next.
-	record("closed")
+	record("closed", "dropped")
 	fmt.Fprintln(stdout, textDropDone)
 	return 0
 }
+
+// dropOutcome ends drop-database after the window ended abnormally or the
+// DROP failed (err), claiming no more than the server shows: gone is
+// recorded and said as dropped; still there, with the server's statement
+// ended, gets the texts of what happened; anything else (the check failed,
+// or the statement may still be running) is said and recorded as not
+// known. It returns the exit code (never 0).
+func dropOutcome(ctx context.Context, s *rootSession, err error, name string, b *backup, stdout, stderr io.Writer,
+	record func(window, outcome string)) int {
+	pname := printable(name)
+	var lifted *liftedError
+	var relock *relockError
+	window := "error"
+	switch {
+	case errors.As(err, &relock):
+		window = "relock-failed"
+	case errors.Is(err, errInterrupted):
+		window = "interrupted"
+	case errors.Is(err, errWindowCap):
+		window = "cap"
+	}
+	running := errors.As(err, &lifted) && lifted.Running
+	lockLine := func() {
+		if relock != nil {
+			fmt.Fprintln(stderr, relock.Error())
+		} else {
+			fmt.Fprintln(stderr, textLockBack)
+		}
+	}
+	gone, cerr := cliDroppedNow(ctx, s, name)
+	switch {
+	case cerr == nil && gone:
+		record(window, "dropped")
+		switch window {
+		case "relock-failed":
+			fmt.Fprintf(stderr, textDroppedNotRelocked+"\n", pname)
+			lockLine()
+		case "error":
+			fmt.Fprintf(stderr, textDroppedDespiteError+"\n", pname, printable(err.Error()))
+		default:
+			fmt.Fprintf(stderr, textDroppedAbnormal+"\n", pname)
+		}
+		fmt.Fprintln(stdout, textDropDone)
+	case cerr == nil && !running:
+		switch {
+		case lifted != nil:
+			fmt.Fprintln(stderr, err)
+		case b == nil:
+			fmt.Fprintf(stderr, textDropFailedNoBackup+"\n", pname, printable(err.Error()))
+		default:
+			fmt.Fprintf(stderr, textDropFailed+"\n", pname, printable(err.Error()), printable(b.path))
+		}
+	default:
+		record(window, "unknown")
+		fmt.Fprintf(stderr, textDropUnknown+"\n", pname)
+		lockLine()
+	}
+	return 1
+}
+
+// Seams: tests replace the check of the database after the window, and
+// land a signal right after the window.
+var (
+	cliDroppedNow = droppedNow
+	afterWindow   = func() {}
+)
 
 // droppedNow reports whether database name is gone, read on a connection of
 // its own (the session's may have been cut when the window ended).

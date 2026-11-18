@@ -299,6 +299,9 @@ type helperSpec struct {
 	Syslog    string // file the system log lines are appended to
 	Mysqldump string
 	LockWait  int
+	// SignalAfterDo and SignalAfterWindow send the helper SIGINT right after
+	// the DROP returned and right after the window ended.
+	SignalAfterDo, SignalAfterWindow bool
 }
 
 // TestDropDatabaseHelperProcess is the other process of the tests that
@@ -321,6 +324,16 @@ func TestDropDatabaseHelperProcess(t *testing.T) {
 	}
 	if spec.LockWait > 0 {
 		cliLockWaitTimeout = spec.LockWait
+	}
+	interrupt := func() {
+		syscall.Kill(os.Getpid(), syscall.SIGINT)
+		time.Sleep(500 * time.Millisecond) // delivered before going on
+	}
+	if spec.SignalAfterDo {
+		liftedAfterDo = interrupt
+	}
+	if spec.SignalAfterWindow {
+		afterWindow = interrupt
 	}
 	logLine := func(line string) error {
 		f, err := os.OpenFile(spec.Syslog, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -732,9 +745,12 @@ func (r *dropRig) generalLog() func() string {
 }
 
 // session opens the command's root session on the rig's server.
-func (r *dropRig) session() *rootSession {
+func (r *dropRig) session() *rootSession { return r.sessionTo(io.Discard) }
+
+// sessionTo is session with its lines (runLifted's) written to out.
+func (r *dropRig) sessionTo(out io.Writer) *rootSession {
 	r.t.Helper()
-	s, err := openRootSession(context.Background(), r.dir, "", newPromptReader(strings.NewReader("")), io.Discard)
+	s, err := openRootSession(context.Background(), r.dir, "", newPromptReader(strings.NewReader("")), out)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -857,13 +873,90 @@ func TestDropDatabaseDroppedBeforeSignal(t *testing.T) {
 	if code == 0 || r.exists("habis") {
 		t.Fatalf("drop-database = %d, exists %v\nstdout %q\nstderr %q", code, r.exists("habis"), out, errOut)
 	}
-	want := "Database habis sudah dihapus sebelum perintah ini dihentikan (sinyal). Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi."
+	want := "Database habis sudah dihapus. Kunci baca-saja server ini sudah terpasang lagi; perintah ini tidak perlu dijalankan lagi."
 	if !strings.Contains(errOut, want) || strings.Contains(out+errOut, "Jalankan perintah ini lagi") {
 		t.Errorf("stdout %q\nstderr %q\nwant %q and no advice to run again", out, errOut, want)
 	}
 	logged := r.syslogLines()
-	if len(logged) != 1 || !strings.Contains(logged[0], `name="habis"`) || !strings.Contains(logged[0], "window=interrupted") {
+	if len(logged) != 1 || !strings.Contains(logged[0], `name="habis"`) || !strings.Contains(logged[0], "window=interrupted") || !strings.Contains(logged[0], "outcome=dropped") {
 		t.Errorf("system log %q", logged)
+	}
+	if r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("flags %s, lock free %v", r.flags(), r.lockFree())
+	}
+}
+
+// statementWaitLine is what the operator sees while the window waits for
+// the server to end its statement.
+const statementWaitLine = "MySQL masih menyelesaikan atau membatalkan pernyataan perintah ini; perintah ini menunggu paling lama %d detik."
+
+// waitStatement waits until a statement starting with prefix runs.
+func (r *dropRig) waitStatement(prefix string) {
+	r.t.Helper()
+	waitFor(r.t, func() bool {
+		var n int
+		if err := r.db().QueryRow("SELECT COUNT(*) FROM information_schema.processlist WHERE info LIKE ?", prefix+"%").Scan(&n); err != nil {
+			r.t.Fatal(err)
+		}
+		return n > 0
+	}, func() string { return "never saw " + prefix })
+}
+
+// TestLiftedWaitsForServerStatement: a statement the kill does not stop
+// (here the kill is made a no-op) keeps running on the server after do's
+// context was cancelled; runLifted neither relocks nor returns before the
+// server thread has ended, says it is waiting, and reports the real
+// outcome (the statement ended: not running).
+func TestLiftedWaitsForServerStatement(t *testing.T) {
+	r := newDropRig(t)
+	setVar(t, &killStatement, func(context.Context, *sql.Conn, int64) {})
+	out := &lockedBuffer{}
+	s := r.sessionTo(out)
+	done := r.lifted(s, func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, "SELECT SLEEP(4)")
+		return err
+	})
+	r.waitStatement("SELECT SLEEP(4)")
+	signalled := time.Now()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	err := waitLifted(t, done)
+	if d := time.Since(signalled); d < 2500*time.Millisecond {
+		t.Errorf("runLifted returned %v after the signal, before the server's statement could have ended", d)
+	}
+	var le *liftedError
+	if !errors.As(err, &le) || !errors.Is(err, errInterrupted) || le.Running || !le.Ran {
+		t.Fatalf("runLifted = %v (%+v), want interrupted, ran, not running", err, le)
+	}
+	if !strings.Contains(out.String(), fmt.Sprintf(statementWaitLine, 60)+"\n") || strings.Count(out.String(), "MySQL masih") != 1 {
+		t.Errorf("session output %q, want the waiting line once", out.String())
+	}
+	if r.flags() != "1 1" || !r.lockFree() {
+		t.Errorf("flags %s, lock free %v", r.flags(), r.lockFree())
+	}
+}
+
+// TestLiftedGivesUpWaitingForStatement: with the wait bounded below the
+// statement's length, the relock is attempted all the same and the error
+// says the work may still be running.
+func TestLiftedGivesUpWaitingForStatement(t *testing.T) {
+	r := newDropRig(t)
+	setVar(t, &killStatement, func(context.Context, *sql.Conn, int64) {})
+	setVar(t, &cliStatementWait, time.Second)
+	s := r.session()
+	done := r.lifted(s, func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, "SELECT SLEEP(5)")
+		return err
+	})
+	r.waitStatement("SELECT SLEEP(5)")
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	err := waitLifted(t, done)
+	var le *liftedError
+	if !errors.As(err, &le) || !errors.Is(err, errInterrupted) || !le.Running {
+		t.Fatalf("runLifted = %v (%+v), want interrupted and still running", err, le)
 	}
 	if r.flags() != "1 1" || !r.lockFree() {
 		t.Errorf("flags %s, lock free %v", r.flags(), r.lockFree())
