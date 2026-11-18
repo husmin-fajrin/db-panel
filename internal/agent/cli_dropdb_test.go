@@ -926,16 +926,42 @@ func TestCLIOutputEscapesNames(t *testing.T) {
 		t.Errorf("system log %q", logged)
 	}
 
-	// mysqldump cannot dump a name with a newline: P1, named cleanly.
+	// mysqldump cannot dump a name with a newline: P1, named cleanly. The
+	// name shown is not the name, so P1 prints no command line: one would
+	// name another database, here its twin "a b c", which exists too.
 	withNewline := "a\nb\x1bc"
 	r.makeDB(withNewline, 1)
+	r.makeDB("a b c", 1)
 	code, out, errOut = r.run(strings.NewReader(""), withNewline)
-	if code == 0 || !strings.HasPrefix(errOut, "Cadangan database a b c tidak bisa dibuat (") || !strings.HasSuffix(errOut, "drop-database 'a b c' --tanpa-cadangan\n") ||
+	const wantP1 = "Cadangan database a b c tidak bisa dibuat (%s); tidak ada yang dihapus. Bila database itu memang tidak diperlukan " +
+		"lagi, jalankan lagi perintah yang sama dengan tambahan --tanpa-cadangan di akhir.\n"
+	if code == 0 || !strings.HasPrefix(errOut, "Cadangan database a b c tidak bisa dibuat (") ||
+		!strings.HasSuffix(errOut, "); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan lagi perintah yang sama dengan tambahan --tanpa-cadangan di akhir.\n") ||
 		strings.Count(errOut, "\n") != 1 {
-		t.Errorf("drop-database = %d\nstderr %q\nstdout %q", code, errOut, out)
+		t.Errorf("drop-database = %d\nstderr %q\nstdout %q\nwant %q", code, errOut, out, wantP1)
+	}
+	for what, s := range map[string]string{"stdout": out, "stderr": errOut} {
+		if strings.Contains(s, "drop-database") || strings.Contains(s, "sudo ") {
+			t.Errorf("%s prints a command, which would name another database: %q", what, s)
+		}
 	}
 	clean("stdout", out)
 	clean("stderr", errOut)
+}
+
+// TestBackupFailedPlainNameKeepsCommand: for a name printable leaves as it
+// is, P1 still ends with the command to run, letter for letter.
+func TestBackupFailedPlainNameKeepsCommand(t *testing.T) {
+	got := backupFailedText("arsip lama", "mysqldump exit 2")
+	want := "Cadangan database arsip lama tidak bisa dibuat (mysqldump exit 2); tidak ada yang dihapus. Bila database itu memang " +
+		"tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database 'arsip lama' --tanpa-cadangan"
+	if got != want {
+		t.Errorf("P1 = %q\nwant %q", got, want)
+	}
+	odd := backupFailedText("a\nb", "mysqldump exit 2")
+	if strings.Contains(odd, "drop-database") {
+		t.Errorf("P1 for a name printable changes prints a command: %q", odd)
+	}
 }
 
 // TestCLIUsageNamesDropDatabase: the help names the command and its

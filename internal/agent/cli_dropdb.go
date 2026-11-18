@@ -34,6 +34,7 @@ const (
 	textBackupExists    = "berkas cadangan %s sudah ada; tidak ada yang ditimpa dan tidak ada yang dihapus. Jalankan perintah ini lagi."
 	textSharedFolder    = "Peringatan: folder %s bukan milik root atau bisa ditulis pengguna lain; cadangan di sana bisa diubah atau dihapus pengguna lain."
 	textBackupFailed    = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan: sudo dbpanel agent drop-database %s --tanpa-cadangan"
+	textBackupFailedOdd = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Bila database itu memang tidak diperlukan lagi, jalankan lagi perintah yang sama dengan tambahan --tanpa-cadangan di akhir."
 	textBackupRefused   = "Cadangan database %s tidak bisa dibuat (%s); tidak ada yang dihapus. Perbaiki sebabnya atau pakai folder lain dengan --ke <folder>, lalu jalankan perintah ini lagi."
 	textConfirmNoBackup = "Cadangan database %s tidak bisa dibuat (%s). Dengan --tanpa-cadangan database itu dihapus TANPA cadangan dan tidak bisa dikembalikan. Ketik nama database itu untuk melanjutkan, atau apa saja untuk membatalkan: "
 	textCheckNewMaster  = `Periksa dulu di master baru (hanya membaca): mysql -e 'SHOW DATABASES LIKE "%s"'. Jawabannya harus kosong.`
@@ -299,7 +300,7 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	case errors.Is(err, errDumpInterrupted):
 		return fail(textDumpInterrupted)
 	case errors.As(err, &dumpErr) && !o.noBackup:
-		return fail(textBackupFailed, pname, printable(err.Error()), shellArg(pname))
+		return fail("%s", backupFailedText(name, printable(err.Error())))
 	case errors.As(err, &dumpErr):
 		noBackup = printable(err.Error())
 	case err != nil:
@@ -510,6 +511,18 @@ var plainName = regexp.MustCompile(`^[A-Za-z0-9_.$-]+$`)
 
 // plainArg is a shell word that needs no quotes.
 var plainArg = regexp.MustCompile(`^[A-Za-z0-9_./:@=+-]+$`)
+
+// backupFailedText is P1 for database name (raw) and the printable cause.
+// When printable changes the name, a command built from what is shown
+// would name another database (ruling D55): P1 then prints no command and
+// says to run the same command again with --tanpa-cadangan added.
+func backupFailedText(name, cause string) string {
+	pname := printable(name)
+	if pname != name {
+		return fmt.Sprintf(textBackupFailedOdd, pname, cause)
+	}
+	return fmt.Sprintf(textBackupFailed, pname, cause, shellArg(pname))
+}
 
 // shellArg is s as one shell word: as is when it holds only safe
 // characters, else in single quotes.
