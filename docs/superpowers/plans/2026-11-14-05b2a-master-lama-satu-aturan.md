@@ -2359,6 +2359,31 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    Peringatan "dikunci lagi" terbuka satu putaran penjaga sesudah
    server dikunci lagi (panel menunggu laporan agent berikutnya); test
    memberi batas dua putaran = 2 × (5 detik + 1,5 detik kerja putaran).
+21. Tinjauan akhir seluruh cabang (2026-11-18): tidak ada temuan
+   kritis; delapan temuan penting dan enam temuan kecil diperbaiki
+   dalam satu gelombang, lalu diperiksa ulang sekali (semua tertutup).
+   Yang berubah dari rencana ini: penjaga mengunci lagi dan settle
+   menjawab teks sendiri bila berkas kunci tidak bisa dibuka (Task 4);
+   P1 tanpa baris perintah untuk nama yang tampilannya diubah (Task 8);
+   `mysql.leftover` gagal bila hasil yang tidak kosong tidak bisa
+   disimpan (Task 10); tiga perintah menolak bila `agent.yaml` tidak
+   terbaca (Task 8, 9); T18 juga di `mysql.setReplicationFilter`
+   (Task 10); direktori milik root yang bisa ditulis akun lain ditolak
+   dengan T19c (Task 7); pembukaan pertama yang gagal memasang kunci
+   lagi (Task 3); karantina yang tertunda tetap dikirim sesudah promote
+   kedua (Task 13); pesan menunggu restart: kalimat panel dulu, alasan
+   agent di akhir dan berlabel (Task 14); bangun ulang menghapus baris
+   yatim master lama (Task 11); layar promote menamai pekerjaan yang
+   menghalangi (Task 13); `ListJobsForServer` urut menurut urutan
+   simpan (Task 11). Rinciannya di spek bagian 11. Tidak diperbaiki dan
+   dibawa ke pemilik serta rencana 5b-2b: settle menjawab T7 pada gagal
+   baca sesaat; `drop-database` mencari `mysqldump` lewat `PATH`;
+   `reset-admin` menolak bila akun tersimpan tidak terbaca; teks
+   `reset-admin` sesudah login berhasil tetapi simpan gagal; nama
+   database bertanda kutip di baris yang disensor; judul kotak "Master
+   lama (dikarantina sejak …)" untuk server yang karantinanya tertunda;
+   apakah promote darurat boleh membatalkan sendiri pekerjaan yang
+   belum selesai.
 
 ## Teks baru untuk dibaca pemilik
 
@@ -2461,7 +2486,7 @@ Galat bagian dalam (muncul di dalam teks lain, misalnya sebagai `<sebab>`):
 - `baca sumber kanal replikasi: %w`; `hapus set data tertinggal: %w`
 - `baca versi MySQL: %w`; `baca hak akses MySQL: %w`; `baca kredensial MySQL: %w`; `baca akun MySQL: %w`
 - `buka sambungan MySQL: %w`; `baca super_read_only: %w`; `pasang lagi read_only selagi baca-saja dibuka: %w`
-- Berkas kunci: `buat direktori kunci %s: %w`, `baca direktori kunci %s: %w`, `perbaiki mode direktori kunci %s: %w`, `buka direktori kunci %s: %w`, `direktori kunci %s berubah selagi dibuka`, `buka berkas kunci %s: %w`, `ganti berkas kunci %s: %w`, `berkas kunci %s terus berubah selagi dibuka`
+- Berkas kunci: `buat direktori kunci %s: %w`, `baca direktori kunci %s: %w`, `perbaiki mode direktori kunci %s: %w`, `buka direktori kunci %s: %w`, `direktori kunci %s berubah selagi dibuka`, `buka berkas kunci %s: %w`, `ganti berkas kunci %s: %w`, `berkas kunci %s terus berubah selagi dibuka`, `kunci %s: %w`
 
 ### 8. Log agent (journal) dan log sistem
 
