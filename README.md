@@ -2176,7 +2176,7 @@ lengkap.
 
 #### Database yang tidak ada di master baru
 
-Perintah ini ada sejak versi `<versi>`; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
+Perintah ini ada sejak versi `0.1.0`; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
 
 Bagian ini untuk master lama yang bangun ulangnya berhenti karena database
 yang tidak ada di master baru. Itu terjadi bila:
@@ -2376,7 +2376,7 @@ Sesudah itu lanjutkan bangun ulangnya di panel:
 
 #### Memberi hak SHOW DATABASES di server yang dikarantina
 
-Perintah ini ada sejak versi `<versi>`; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
+Perintah ini ada sejak versi `0.1.0`; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).
 
 MySQL di server yang dikarantina baca-saja (`super_read_only`), jadi
 `GRANT` biasa ditolak dengan ERROR 1290. Dua perintah di server itu

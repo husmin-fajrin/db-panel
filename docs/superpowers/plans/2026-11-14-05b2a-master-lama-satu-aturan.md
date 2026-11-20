@@ -2384,6 +2384,15 @@ memperbarui harapan test panel yang menyimpan salinan teks agent lama;
    lama (dikarantina sejak …)" untuk server yang karantinanya tertunda;
    apakah promote darurat boleh membatalkan sendiri pekerjaan yang
    belum selesai.
+22. Nomor versi T27 (2026-11-20). Pemilik meminta nomornya diisi:
+   `0.1.0`, rilis pertama, karena repositori belum punya tag atau rilis
+   dan contoh di README (`DBPANEL_VERSION=v0.1.0`,
+   `make release VERSION=0.1.0`) sudah memakainya. Tag rilisnya belum
+   dibuat. Pengujian sesudah gelombang perbaikan: `make test` gagal
+   sekali di `TestCloneCancel` (pembersihan: satu mysqld coba tidak
+   berhenti dalam 1 menit saat tiga paket uji berjalan bersamaan),
+   lulus 8 dari 8 sendirian dan pada ulangan kedua; sebabnya diperiksa
+   di rencana 5b-2b.
 
 ## Teks baru untuk dibaca pemilik
 
@@ -2395,10 +2404,9 @@ tampilnya. Setiap teks ditulis seperti di kode, satu baris; `%s`, `%d` dan
 
 ### 0. Yang belum diisi
 
-- T27: nomor versi rilis belum diisi. Kedua bagian README yang ditulis
-  ulang dibuka dengan `Perintah ini ada sejak versi <versi>; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).`,
-  dengan `<versi>` tertulis apa adanya (di README di antara backtick) sampai
-  rilis pertama yang memuat ketiga perintah diberi nomor.
+- Tidak ada lagi. T27 sudah diisi (catatan 22): kedua bagian README yang
+  ditulis ulang dibuka dengan `Perintah ini ada sejak versi 0.1.0; bila agent menjawab perintah tidak dikenal, perbarui agent dulu (Pasang ulang agent di halaman server).`
+  (di README nomornya di antara backtick).
 
 ### 1. Halaman server (kotak "Master lama" dan spanduk)
 
