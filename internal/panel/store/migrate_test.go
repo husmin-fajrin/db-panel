@@ -49,18 +49,18 @@ func TestMigrateSkipsApplied(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 12 {
-		t.Fatalf("schema_migrations rows = %d, want 12", n)
+	if n != 13 {
+		t.Fatalf("schema_migrations rows = %d, want 13", n)
 	}
 }
 
 // TestMigrate0004Applies: the monitoring tables and columns exist (0004
-// to 0012) and the schema is at version 12.
+// to 0013) and the schema is at version 13.
 func TestMigrate0004Applies(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 12 {
-		t.Fatalf("schema version = %d, %v; want 12", v, err)
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 13 {
+		t.Fatalf("schema version = %d, %v; want 13", v, err)
 	}
 	for _, table := range []string{"server_health", "status_events", "alerts", "audit_log", "confirmations", "server_tls", "health_samples", "start_marks"} {
 		var n int
@@ -154,7 +154,7 @@ func TestMigrate0009BackfillsEmptyAndLarge(t *testing.T) {
 			t.Logf("migration 0009 over %d rows: %v", n, time.Since(start))
 			defer s.Close()
 			var v int
-			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 12 {
+			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 13 {
 				t.Fatalf("schema version = %d, %v", v, err)
 			}
 			lastOK, brokenAt, err := s.VerifyAuditChain()
@@ -342,6 +342,51 @@ func TestMigration0011AddsSnoozeFrom(t *testing.T) {
 		spans, err := s.EndedSnoozes(want.Add(time.Hour))
 		if err != nil || len(spans) != 0 {
 			t.Fatalf("EndedSnoozes for an old snooze = %+v, %v; want none (no digest owed)", spans, err)
+		}
+		s.Close()
+	}
+}
+
+// TestMigration0013Columns: 0013 adds servers.backup_dir (empty by
+// default), servers.backup_max_age_hours (48 by default) and
+// mysql_inventory.account (empty by default) to a schema-12 database whose rows keep working and take
+// the defaults.
+func TestMigration0013Columns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.db")
+	db := openAtVersion(t, path, 12)
+	if _, err := db.Exec(`INSERT INTO servers (name, created_at) VALUES ('db1', '2026-10-30T10:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO mysql_inventory (server_id, connected, version, series, databases_json,
+		missing_grants_json, master_ready, preflight_json, updated_at)
+		VALUES (1, 1, '8.0.36', '8.0', '[]', '[]', 0, '', '2026-10-30T10:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	for range 2 {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		for _, c := range []struct{ table, column string }{
+			{"servers", "backup_dir"}, {"servers", "backup_max_age_hours"}, {"mysql_inventory", "account"},
+		} {
+			var n int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column).Scan(&n); err != nil || n != 1 {
+				t.Fatalf("%s.%s after 0013: n=%d, err=%v", c.table, c.column, n, err)
+			}
+		}
+		srv, err := s.GetServer(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if srv.BackupDir != "" || srv.BackupMaxAgeHours != 48 {
+			t.Fatalf("old server after 0013: dir %q, max age %d; want \"\", 48", srv.BackupDir, srv.BackupMaxAgeHours)
+		}
+		inv, err := s.GetInventory(1)
+		if err != nil || inv.Account != "" || inv.Version != "8.0.36" {
+			t.Fatalf("old inventory after 0013 = %+v, %v", inv, err)
 		}
 		s.Close()
 	}

@@ -22,6 +22,9 @@ type Inventory struct {
 	MasterReady   bool
 	PreflightJSON string // opaque JSON, "" if none
 	UpdatedAt     time.Time
+	// Account is the MySQL account the agent works with, user@host as its
+	// last connect or inventory answered (one bounded line); "" if none.
+	Account string
 }
 
 func boolInt(b bool) int {
@@ -49,8 +52,9 @@ func (s *Store) SetInventory(inv Inventory) error {
 		grants = []byte("[]")
 	}
 	_, err = s.db.Exec(`INSERT INTO mysql_inventory
-		(server_id, connected, version, series, databases_json, missing_grants_json, master_ready, preflight_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(server_id, connected, version, series, databases_json, missing_grants_json, master_ready, preflight_json, updated_at,
+			account)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(server_id) DO UPDATE SET
 			connected = excluded.connected,
 			version = excluded.version,
@@ -59,9 +63,10 @@ func (s *Store) SetInventory(inv Inventory) error {
 			missing_grants_json = excluded.missing_grants_json,
 			master_ready = excluded.master_ready,
 			preflight_json = excluded.preflight_json,
-			updated_at = excluded.updated_at`,
+			updated_at = excluded.updated_at,
+			account = excluded.account`,
 		inv.ServerID, boolInt(inv.Connected), inv.Version, inv.Series, string(dbs), string(grants),
-		boolInt(inv.MasterReady), inv.PreflightJSON, formatTime(inv.UpdatedAt))
+		boolInt(inv.MasterReady), inv.PreflightJSON, formatTime(inv.UpdatedAt), inv.Account)
 	if err != nil {
 		return fmt.Errorf("set inventory: %w", err)
 	}
@@ -78,8 +83,9 @@ func (s *Store) GetInventory(serverID int64) (Inventory, error) {
 		updated             string
 	)
 	err := s.db.QueryRow(`SELECT server_id, connected, version, series, databases_json, missing_grants_json,
-		master_ready, preflight_json, updated_at FROM mysql_inventory WHERE server_id = ?`, serverID).
-		Scan(&inv.ServerID, &connected, &inv.Version, &inv.Series, &dbsJSON, &grantsJSON, &ready, &inv.PreflightJSON, &updated)
+		master_ready, preflight_json, updated_at, account FROM mysql_inventory WHERE server_id = ?`, serverID).
+		Scan(&inv.ServerID, &connected, &inv.Version, &inv.Series, &dbsJSON, &grantsJSON, &ready, &inv.PreflightJSON, &updated,
+			&inv.Account)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Inventory{}, ErrNotFound
 	}

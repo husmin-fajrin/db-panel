@@ -38,9 +38,16 @@ type Server struct {
 	// snooze has been sent (EndedSnoozes, ClearSnoozeFrom), nil otherwise.
 	SnoozeFrom *time.Time
 	CreatedAt  time.Time
+	// BackupDir is the folder the server's agent scans for the newest
+	// backup file; "" when none is set (the scan is off).
+	BackupDir string
+	// BackupMaxAgeHours: a newest backup file older than this many hours
+	// is stale (backup_stale); 48 unless set.
+	BackupMaxAgeHours int
 }
 
-const serverColumns = `id, name, address, role, paired, cert_serial, probe_json, agent_version, last_seen_at, snooze_until, snooze_from, created_at`
+const serverColumns = `id, name, address, role, paired, cert_serial, probe_json, agent_version, last_seen_at, snooze_until, snooze_from, created_at,
+	backup_dir, backup_max_age_hours`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -54,7 +61,7 @@ func scanServer(r rowScanner) (Server, error) {
 		created  string
 	)
 	if err := r.Scan(&srv.ID, &srv.Name, &srv.Address, &srv.Role, &paired, &srv.CertSerial,
-		&srv.ProbeJSON, &srv.AgentVersion, &lastSeen, &snooze, &from, &created); err != nil {
+		&srv.ProbeJSON, &srv.AgentVersion, &lastSeen, &snooze, &from, &created, &srv.BackupDir, &srv.BackupMaxAgeHours); err != nil {
 		return Server{}, err
 	}
 	srv.Paired = paired != 0

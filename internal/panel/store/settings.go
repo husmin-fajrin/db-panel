@@ -87,6 +87,16 @@ const (
 	SettingSamplesRetentionDays = "samples_retention_days"
 )
 
+// Setting keys of the reminder marks of plan 5b-2b: when (RFC 3339, UTC)
+// and by whom an admin marked the panel's key backed up, and the audit
+// log forwarded off the panel's host. "" means not marked yet.
+const (
+	SettingPanelKeyBackedUpAt = "panel_key_backed_up_at"
+	SettingPanelKeyBackedUpBy = "panel_key_backed_up_by"
+	SettingAuditForwardedAt   = "audit_forwarded_at"
+	SettingAuditForwardedBy   = "audit_forwarded_by"
+)
+
 // Setting keys of the panel's look (Pengaturan, Tampilan).
 const (
 	// SettingNamaInstansi is the organisation's name shown under the logo
