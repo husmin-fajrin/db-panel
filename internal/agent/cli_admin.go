@@ -459,7 +459,8 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 	}
 	ctx := context.Background()
 
-	// 3. The store the account goes to, readable before anything changes.
+	// 3. The store the account goes to, openable before anything changes
+	// (a stored account it cannot read is replaced: F3).
 	creds, err := cliAgentCreds(dir)
 	if err != nil {
 		return a.fail(textCredsUnusable, err)
