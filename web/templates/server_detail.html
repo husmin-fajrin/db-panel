@@ -340,7 +340,11 @@
   <div class="card-body gap-4 p-6">
     <div class="flex flex-wrap items-start gap-2">
       <span class="text-warning-text mt-0.5">{{template "icon" "warning"}}</span>
+      {{if .QuarantinePending}}
+      <h2 class="min-w-0 flex-1">Master lama (belum dikarantina; promote {{if .Planned}}terencana{{else}}darurat{{end}} ke {{or .NewMaster.Name "master baru"}} pada <span class="mono">{{fmtDateTime (or .Promotion.FinishedAt .Promotion.StartedAt)}}</span>)</h2>
+      {{else}}
       <h2 class="min-w-0 flex-1">Master lama (dikarantina sejak <span class="mono">{{fmtDateTime (or .Promotion.FinishedAt .Promotion.StartedAt)}}</span>, promote {{if .Planned}}terencana{{else}}darurat{{end}} ke {{or .NewMaster.Name "master baru"}})</h2>
+      {{end}}
     </div>
     {{if .RebuildJobID}}
     {{/* A rebuild runs or waits for an approval: only T22 and its job

@@ -1620,3 +1620,35 @@ func TestOldMasterAfterSecondPromote(t *testing.T) {
 		})
 	}
 }
+
+// TestOldMasterHeadingPendingQuarantine (F1): the box of an old master
+// whose quarantine is still pending says it is not quarantined yet, never
+// "dikarantina sejak"; a quarantined one keeps the old heading.
+func TestOldMasterHeadingPendingQuarantine(t *testing.T) {
+	e, _, topo := promotedEnv(t)
+	c := e.cookie()
+	if err := e.st.SetCutoverPending(topo.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	box := oldMasterBoxOf(t, e.do("GET", "/servers/1", nil, c).Body.String())
+	if !strings.Contains(box, "Master lama (dikarantina sejak") || strings.Contains(box, "belum dikarantina") {
+		t.Fatalf("heading of a quarantined old master:\n%s", box)
+	}
+	p, err := e.st.LatestPromotion(topo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, _ := json.Marshal([]orchestrator.PromotionServer{{ServerID: 1, Role: orchestrator.PromotionOldMaster,
+		State: orchestrator.QuarantineStatePending}})
+	p.ReplicasJSON = string(servers)
+	if err := e.st.UpdatePromotion(p); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	box = oldMasterBoxOf(t, rec.Body.String())
+	if !strings.Contains(box, "Master lama (belum dikarantina; promote terencana ke db-replika pada") ||
+		strings.Contains(box, "dikarantina sejak") {
+		t.Fatalf("heading of a pending quarantine:\n%s", box)
+	}
+}
