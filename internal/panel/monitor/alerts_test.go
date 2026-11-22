@@ -3364,9 +3364,40 @@ func TestBackupMessageTexts(t *testing.T) {
 			t.Errorf("BackupMessage(%+v) = %q, want %q", c.b, got, c.want)
 		}
 	}
-	if got, want := BackupMessage(BackupVerdict{Status: "stale", AgeSec: 30 * 60}, "db-master", 0),
-		fmt.Sprintf(wantG8a, "db-master", "30 menit", 0); got != want {
-		t.Errorf("stale under an hour = %q, want %q", got, want)
+	// Just past the limit (Ruling R18): the age rounded down to hours
+	// would read as the limit or below, so G8a says "lebih dari <limit>
+	// jam"; from a whole hour past the limit the age is written as usual.
+	// The text never shows an age that reads as at or below the limit.
+	past := []struct {
+		limit int
+		age   int64
+		words string
+	}{
+		{48, 48*h + 5, "lebih dari 48 jam"},
+		{48, 48*h + 59*60 + 59, "lebih dari 48 jam"},
+		{48, 49 * h, "49 jam"},
+		{1, h + 5, "lebih dari 1 jam"},
+		{1, 2 * h, "2 jam"},
+		{72, 72*h + 5, "lebih dari 72 jam"},
+		{72, 73 * h, "3 hari 1 jam"},
+		{100, 100*h + 30*60, "lebih dari 100 jam"},
+		{100, 101 * h, "4 hari 5 jam"},
+	}
+	for _, c := range past {
+		got := BackupMessage(BackupVerdict{Status: "stale", AgeSec: c.age, Size: 5}, "db-master", c.limit)
+		if want := fmt.Sprintf(wantG8a, "db-master", c.words, c.limit); got != want {
+			t.Errorf("limit %d h, age %d s: %q, want %q", c.limit, c.age, got, want)
+		}
+	}
+
+	// The plain age, for the backup card.
+	for sec, want := range map[int64]string{
+		-5: "0 menit", 0: "0 menit", 30 * 60: "30 menit", h: "1 jam", 48*h + 59*60: "48 jam",
+		71*h + 59*60: "71 jam", 72 * h: "3 hari", 75 * h: "3 hari 3 jam",
+	} {
+		if got := BackupAge(sec); got != want {
+			t.Errorf("BackupAge(%d) = %q, want %q", sec, got, want)
+		}
 	}
 	reasons := map[string]string{
 		proto.BackupReasonMissing: "folder itu tidak ada",
@@ -3454,10 +3485,15 @@ func TestBackupStaleAlertOpensAndCloses(t *testing.T) {
 	if r.isOpen(mID, KindBackupStale) {
 		t.Fatal("backup_stale open at 47 h")
 	}
-	r.clk.Add(2 * time.Hour)
+	r.clk.Add(time.Hour + 5*time.Second)
+	r.m.tick()
+	if a := r.openAlert(mID, KindBackupStale); a.Message != fmt.Sprintf(wantG8a, "db-master", "lebih dari 48 jam", 48) {
+		t.Fatalf("5 s past the limit: %q", a.Message)
+	}
+	r.clk.Add(time.Hour - 5*time.Second)
 	r.m.tick()
 	if a := r.openAlert(mID, KindBackupStale); a.Message != fmt.Sprintf(wantG8a, "db-master", "49 jam", 48) {
-		t.Fatalf("after two hours: %q", a.Message)
+		t.Fatalf("an hour past the limit: %q", a.Message)
 	}
 	// The folder cleared: closed.
 	if err := r.st.SetServerBackup(mID, "", 48); err != nil {

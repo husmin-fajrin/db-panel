@@ -1164,7 +1164,7 @@ const backupReasonOther = "galat lain; lihat log agent"
 func BackupMessage(b BackupVerdict, master string, maxAgeHours int) string {
 	switch b.Status {
 	case BackupStatusStale:
-		return fmt.Sprintf(backupStaleText, master, backupAge(b.AgeSec), maxAgeHours)
+		return fmt.Sprintf(backupStaleText, master, staleAge(b.AgeSec, maxAgeHours), maxAgeHours)
 	case BackupStatusEmptyFile:
 		return fmt.Sprintf(backupEmptyFileText, master)
 	case BackupStatusNone:
@@ -1179,10 +1179,23 @@ func BackupMessage(b BackupVerdict, master string, maxAgeHours int) string {
 	return ""
 }
 
-// backupAge words the age of a backup file in whole units, rounded down
+// staleAge is the age in G8a (Ruling R18): within the first hour past the
+// limit, BackupAge (rounded down) would read as the limit itself, so it
+// is "lebih dari <limit> jam"; otherwise BackupAge. Never rounded up (an
+// age the file does not have) and no minutes (the text of an open alert
+// would change every minute).
+func staleAge(sec int64, maxAgeHours int) string {
+	if sec/3600 <= int64(maxAgeHours) {
+		return fmt.Sprintf("lebih dari %d jam", maxAgeHours)
+	}
+	return BackupAge(sec)
+}
+
+// BackupAge words the age of a backup file in whole units, rounded down
 // so a message changes at most once an hour: minutes under an hour, hours
-// under three days, then days and hours ("3 hari 2 jam", "4 hari").
-func backupAge(sec int64) string {
+// under three days, then days and hours ("3 hari 2 jam", "4 hari"): the
+// plain age, as the backup card writes it.
+func BackupAge(sec int64) string {
 	sec = max(sec, 0)
 	hours := sec / 3600
 	switch {
