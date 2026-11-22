@@ -254,6 +254,7 @@ type liftHold struct {
 	conn    *sql.Conn
 	logf    func(level, format string, args ...any)
 	superOn bool
+	first   bool      // this hold's begin took the lock (first opener)
 	mark    *loadMark // cleared after the hold ends (liftReadOnly)
 	done    bool      // guarded by g.mu
 }
@@ -315,7 +316,7 @@ func (g *liftGate) begin(ctx context.Context, db *sql.DB, logf func(level, forma
 	if first && g.superOn {
 		logf("info", "read_only lifted for the load")
 	}
-	return &liftHold{g: g, ctx: ctx, conn: conn, logf: logf, superOn: g.superOn}, nil
+	return &liftHold{g: g, ctx: ctx, conn: conn, logf: logf, superOn: g.superOn, first: first}, nil
 }
 
 // acquire opens the lock file (replacing one that fails the checks) and
@@ -396,6 +397,11 @@ func errLiftLockUnopenable(path string, cause error) error {
 // superWasOn reports whether super_read_only was on when the first opener
 // of the lift read it.
 func (h *liftHold) superWasOn() bool { return h.superOn }
+
+// loadTrailer is loadTrailer for a load under h: only the first opener's
+// full load puts super_read_only back in its stream; under a later hold
+// the first still lifts it, and the last holder's end restores it.
+func (h *liftHold) loadTrailer(full bool) string { return loadTrailer(full, h.superWasOn() && h.first) }
 
 // end ends the hold. The last opener reads super_read_only on its kept
 // connection and, only when it is off and was on, sends SET GLOBAL

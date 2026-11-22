@@ -208,6 +208,35 @@ func TestLiftCountsHolders(t *testing.T) {
 	}
 }
 
+// TestSecondHoldDumpDoesNotWriteSuperOn (A-M8): of two stacked lifts,
+// only the first opener's full dump puts super_read_only back in its load
+// stream; a second holder's full dump does not, since the first still
+// lifts it, and the last holder's end restores it.
+func TestSecondHoldDumpDoesNotWriteSuperOn(t *testing.T) {
+	_, db, g, _ := liftedServer(t, "1 1")
+	h1 := begin(t, g, db, nil)
+	h2 := begin(t, g, db, nil)
+	const on = "SET GLOBAL super_read_only = ON"
+	if got := h1.LoadTrailer(true); !strings.Contains(got, on) {
+		t.Errorf("first holder's full trailer = %q, want %q in it", got, on)
+	}
+	if got := h2.LoadTrailer(true); strings.Contains(got, on) {
+		t.Errorf("second holder's full trailer = %q, want no %q", got, on)
+	}
+	if got := h2.LoadTrailer(false); got != "" {
+		t.Errorf("second holder's named trailer = %q, want none", got)
+	}
+	if err := h2.End(); err != nil {
+		t.Fatalf("second end: %v", err)
+	}
+	if err := h1.End(); err != nil {
+		t.Fatalf("first end: %v", err)
+	}
+	if got := flags(t, db); got != "1 1" {
+		t.Errorf("after the last end = %s, want 1 1", got)
+	}
+}
+
 // TestLiftFailedOffPutsBack: the first opener's SET GLOBAL
 // super_read_only = OFF fails after MySQL applied it: begin puts
 // super_read_only back on (only SET GLOBAL super_read_only = ON; read_only

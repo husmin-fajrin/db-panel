@@ -607,6 +607,9 @@ func (h *liftHold) End() error       { return h.end() }
 func (h *liftHold) Abandon()         { h.abandon() }
 func (h *liftHold) SuperWasOn() bool { return h.superWasOn() }
 
+// LoadTrailer is what a full or named dump under h appends to its load.
+func (h *liftHold) LoadTrailer(full bool) string { return h.loadTrailer(full) }
+
 // LiftGate is the driver's gate.
 func (d *Driver) LiftGate() *LiftGate { return d.liftGate() }
 

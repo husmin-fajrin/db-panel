@@ -179,7 +179,7 @@ func dumpFrom(j *jobs.Job, h Host, creds CredentialStore, p proto.SnapshotParams
 	j.Progress(0, "dump dimulai")
 	var dumpGTID string
 	var found bool
-	trailer := loadTrailer(len(p.Databases) == 0, hold.superWasOn())
+	trailer := hold.loadTrailer(len(p.Databases) == 0)
 	res.Bytes, dumpGTID, found, err = pipeDump(j, h, dumpBin, args, loadBin, loadArgs(localFile), trailer, p.EstimateBytes)
 	if err != nil {
 		return res, err
