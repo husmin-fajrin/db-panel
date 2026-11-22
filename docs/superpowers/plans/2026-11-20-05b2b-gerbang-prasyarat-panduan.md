@@ -807,6 +807,27 @@ README menambah:
    TLS" diberi tanda kutip di tempat ia berdiri tanpa tanda di tengah kalimat
    (nama lama satu kata, nama baru sebuah frasa kerja). Penyebutan pertama di
    README diberi `(TLS certificate verification)`.
+9. **2026-11-22 — cara membuka folder cadangan diperketat (Task 6).**
+   Rencana menulis `os.OpenRoot(folder)` lalu `fs.WalkDir(root.FS(), …)`.
+   Yang dibangun: folder dibuka dengan `O_DIRECTORY`, akar dibuka lewat
+   `/proc/self/fd/N`, dan tiap subdirektori dibuka satu komponen demi satu
+   komponen dari deskriptor folder itu dengan `O_NOFOLLOW`. Alasannya:
+   `root.FS()` membaca seluruh isi direktori ke memori tanpa batas, bisa
+   macet pada FIFO yang ditukar masuk, dan mengikuti symlink di dalam folder
+   bila sebuah direktori ditukar dengan symlink sesudah didaftar (temuan
+   peninjau). Aturan rencana tidak berubah: tidak ada symlink di dalam folder
+   yang diikuti, tidak ada berkas yang dibuka, semua batas tetap.
+10. **2026-11-22 — folder cadangan yang berupa symlink tetap dipindai
+    (Task 6).** Tidak diatur rencana. Bila path folder adalah, atau melewati,
+    sebuah symlink (misalnya `/backup` yang menunjuk ke disk lain), agent
+    memindai tempat yang dituju, asalkan tempat itu lolos aturan folder yang
+    sama: tujuan di `/proc`, `/sys`, `/dev` ditolak sebagai path tidak sah,
+    tujuan di `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp` sebagai tidak
+    terlihat. Tanpa ini operator membaca "itu bukan folder" untuk folder yang
+    sah. Biayanya: orang yang bisa menaruh symlink di path itu (perlu izin
+    tulis di folder induknya) membuat agent melaporkan umur dan ukuran berkas
+    terbaru di direktori lain; hanya dua angka, tanpa nama dan tanpa isi.
+    Untuk ditinjau di audit keamanan.
 
 ## Teks baru untuk dibaca pemilik
 
