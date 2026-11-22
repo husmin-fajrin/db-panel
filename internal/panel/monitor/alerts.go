@@ -402,6 +402,10 @@ const (
 		"diperiksa lagi dari panel. Hapus server ini"
 	copyStartedCloseReason = "bangun ulang sudah mulai mengganti data server ini; tulisan itu tidak bisa diperiksa lagi"
 	noTopologyCloseReason  = "topologi ini sudah promote lagi; tulisan itu tidak bisa diperiksa lagi dari panel"
+	// F7 replaces T25 and T26 when the topology itself was deleted.
+	startLateTopologyGoneText = "master lama sempat bisa ditulis; topologinya sudah dihapus dari panel, jadi tulisan itu " +
+		"tidak bisa diperiksa lagi dari panel. Hapus server ini"
+	topologyGoneCloseReason = "topologinya sudah dihapus dari panel; tulisan itu tidak bisa diperiksa lagi dari panel"
 )
 
 // Bounds on the agent's own words in an alert message (they end up in

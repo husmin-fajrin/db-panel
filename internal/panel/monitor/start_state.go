@@ -344,6 +344,9 @@ type lateFacts struct {
 	// named: a topology still names the server as its old master; not
 	// once the topology promoted again.
 	named bool
+	// topologyGone: not named, and the topology of the server's promotion
+	// is deleted from the panel (topologyGone), not promoted again.
+	topologyGone bool
 	// copyStarted: a rebuild of the server began to change its data
 	// (Deps.CopyStarted).
 	copyStarted bool
@@ -361,6 +364,8 @@ func lateMessage(while string, f lateFacts) string {
 	switch {
 	case while == proto.QuarantineWhileUnverified:
 		return startUnverifiedText
+	case !f.named && f.topologyGone:
+		return startLateTopologyGoneText
 	case !f.named:
 		return startLateNoTopologyText
 	case f.copyStarted:
@@ -384,6 +389,8 @@ func lateCloseReason(f lateFacts) string {
 		return leftoverCheckedReason
 	case f.unverified:
 		return ""
+	case !f.named && f.topologyGone:
+		return topologyGoneCloseReason
 	case !f.named:
 		return noTopologyCloseReason
 	case f.copyStarted:
@@ -424,5 +431,25 @@ func lateUnverified(snap *proto.HealthSnapshot) bool {
 // lateOpenFacts are the facts of a late entry about to open (or rewrite)
 // the alert of the quarantined server s; the caller holds mu.
 func (m *Monitor) lateOpenFacts(id int64, s *serverState) lateFacts {
-	return lateFacts{named: s.topoID != 0, copyStarted: m.copyStartedOf(id)}
+	return lateFacts{named: s.topoID != 0, topologyGone: s.topoID == 0 && m.topologyGone(id),
+		copyStarted: m.copyStartedOf(id)}
+}
+
+// topologyGone: the topology of the newest promotion that replaced
+// serverID no longer exists (deleted with its master), as the server page
+// tells it apart from one promoted again. A read that fails says nothing
+// (logged). The caller holds mu.
+func (m *Monitor) topologyGone(serverID int64) bool {
+	p, err := m.st.PromotionByOldMaster(serverID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			m.log.Warn("late alert: promotion", "server_id", serverID, "err", err)
+		}
+		return false
+	}
+	_, err = m.st.GetTopology(p.TopologyID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		m.log.Warn("late alert: topology", "server_id", serverID, "err", err)
+	}
+	return errors.Is(err, store.ErrNotFound)
 }

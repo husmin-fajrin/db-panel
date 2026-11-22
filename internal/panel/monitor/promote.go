@@ -751,7 +751,8 @@ func (m *Monitor) closeStartAlerts(now time.Time) []alertUpdate {
 			reason = notQuarantinedReason
 		case a.Kind == KindMasterStartLate:
 			reason = lateCloseReason(lateFacts{leftoverChecked: m.leftoverCheckedAfter(a), named: s.topoID != 0,
-				copyStarted: m.copyStartedOf(a.ServerID), unverified: lateUnverified(s.snap)})
+				topologyGone: s.topoID == 0 && m.topologyGone(a.ServerID),
+				copyStarted:  m.copyStartedOf(a.ServerID), unverified: lateUnverified(s.snap)})
 		}
 		if reason == "" {
 			continue

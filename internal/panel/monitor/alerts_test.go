@@ -3173,6 +3173,60 @@ func TestLateAlertAfterSecondPromote(t *testing.T) {
 	}
 }
 
+// F7: master_start_late of a quarantined server whose topology was deleted
+// from the panel, letter for letter.
+const (
+	wantStartLateTopoDeletedText = "master lama sempat bisa ditulis; topologinya sudah dihapus dari panel, jadi tulisan itu tidak bisa diperiksa lagi dari panel. Hapus server ini"
+	wantTopoDeletedCloseReason   = "topologinya sudah dihapus dari panel; tulisan itu tidak bisa diperiksa lagi dari panel"
+)
+
+// TestStartLateTextWhenTopologyDeleted (P-M5, F7): once the quarantined
+// server's topology is deleted (its new master deleted from the panel), an
+// open late alert closes with F7's reason and a new late entry opens with
+// F7's text; a topology that promoted again keeps T26 and T25.
+func TestStartLateTextWhenTopologyDeleted(t *testing.T) {
+	for _, deleted := range []bool{true, false} {
+		wantClose, wantMsg := wantNoTopologyCloseReson, wantStartLateNoTopoText
+		if deleted {
+			wantClose, wantMsg = wantTopoDeletedCloseReason, wantStartLateTopoDeletedText
+		}
+		r := newRig(t)
+		mID, _, ma := r.quarantined(plainQuar())
+		ma.state(lateWhile("L1", proto.QuarantineWhileRunning))
+		ma.send()
+		r.wantAlerts(mID, KindMasterStartLate, 1, true)
+		topo, err := r.st.GetTopologyByOldMaster(mID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if deleted {
+			if err := r.st.DeleteServer(topo.MasterServerID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.st.GetTopology(topo.ID); err == nil {
+				t.Fatal("topology kept after deleting its master")
+			}
+		} else {
+			third := r.replica("db-ketiga", topo)
+			if err := r.st.SwapMaster(topo.ID, topo.MasterServerID, third, "10.0.0.3", 3306); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.m.tick()
+		as := r.alerts(mID, KindMasterStartLate)
+		if len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != wantClose {
+			t.Fatalf("deleted %v: alerts = %+v, want closed with %q", deleted, as, wantClose)
+		}
+		r.clk.Add(time.Minute)
+		ma.state(lateWhile("L2", proto.QuarantineWhileRunning))
+		ma.send()
+		as = r.alerts(mID, KindMasterStartLate)
+		if len(as) != 2 || as[1].Message != wantMsg {
+			t.Fatalf("deleted %v: alerts = %+v, want a second with %q", deleted, as, wantMsg)
+		}
+	}
+}
+
 // TestLateRuleDecisions: the message and close rules of master_start_late
 // for a quarantined server (spec 5.2), every combination of remark, copy
 // state and topology.
