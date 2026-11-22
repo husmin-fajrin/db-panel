@@ -114,8 +114,8 @@ func TestNotReplacedTextAdviceSurvivesCap(t *testing.T) {
 // TestAdviceTexts: every advice text is there, filled, and none is cut.
 func TestAdviceTexts(t *testing.T) {
 	texts := AdviceTexts()
-	if len(texts) != 14 {
-		t.Errorf("AdviceTexts has %d texts, want 14", len(texts))
+	if len(texts) != 15 {
+		t.Errorf("AdviceTexts has %d texts, want 15", len(texts))
 	}
 	for _, s := range texts {
 		if s == "" || strings.Contains(s, "%") && !strings.Contains(s, "10.0.0.%") || len(s) > 800 {

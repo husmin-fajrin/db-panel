@@ -290,8 +290,8 @@ func TestAgentLogLinesPrefixed(t *testing.T) {
 // maxLogLine: label first, then censoring.
 func TestAdviceWholeInFailLine(t *testing.T) {
 	texts := mysql.AdviceTexts()
-	if len(texts) != 14 {
-		t.Fatalf("AdviceTexts has %d texts, want 14", len(texts))
+	if len(texts) != 15 {
+		t.Fatalf("AdviceTexts has %d texts, want 15", len(texts))
 	}
 	for i, text := range texts {
 		j, title, stepMsg, lastErr, log := failedTargetCheck(t, func(json.RawMessage) (any, error) {

@@ -609,7 +609,8 @@ func confirmedNames(ctx context.Context, ip net.IP) []string {
 // command answers errNotReplaced. The quarantine is kept with T7
 // (errWritableSinceLoad) when the guard found the server writable, or could
 // not check it, since the load began (writableAfterLoad), or when the
-// flags, read under the lift lock right before the end, are not both on;
+// flags, read under the lift lock right before the end, are not both on
+// (a read that could not be made answers errFlagsUnread instead);
 // while a dbpanel agent command holds that lock it answers T12
 // (ErrLiftHeldByCommand), and when the lock file cannot be opened it names
 // the file and the cause (errLiftLockUnopenable). Once settled, the rebuild request and approval
@@ -661,7 +662,8 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 	}
 	// Read the flags under the lift lock, right before the quarantine
 	// ends: a lift by a dbpanel agent command is waited for (T12, retried
-	// by the operator); anything but both on is T7.
+	// by the operator); flags read and not both on are T7, a read that
+	// could not be made is F2 (retried by the operator).
 	release, free, openErr := d.liftGate().tryGuard()
 	defer release()
 	if openErr != nil {
@@ -674,6 +676,14 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 		return ErrLiftHeldByCommand
 	}
 	if err := d.flagsOnNow(ctx); err != nil {
+		var unread *errFlagsUnread
+		if errors.As(err, &unread) {
+			if d.Logger != nil {
+				d.Logger.Warn("quarantine kept: the settle cannot read the read-only flags", "source", source,
+					"err", unread.cause)
+			}
+			return unread
+		}
 		if d.Logger != nil {
 			d.Logger.Warn("quarantine kept: read-only is not on as the settle reads it", "source", source, "err", err)
 		}
@@ -706,27 +716,39 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 }
 
 // flagsOnNow reads read_only and super_read_only; nil only when both are
-// on.
+// on. A read that could not be made (no host, no login, a failed query)
+// is an *errFlagsUnread: it says nothing about the flags.
 func (d *Driver) flagsOnNow(ctx context.Context) error {
 	h, err := d.host()
 	if err != nil {
-		return err
+		return &errFlagsUnread{cause: err}
 	}
 	ctx, cancel := context.WithTimeout(ctx, settleListTimeout)
 	defer cancel()
 	db, err := openAdmin(ctx, h)
 	if err != nil {
-		return err
+		return &errFlagsUnread{cause: err}
 	}
 	defer db.Close()
 	var sro, ro bool
 	if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only").Scan(&sro, &ro); err != nil {
-		return fmt.Errorf("baca super_read_only: %w", err)
+		return &errFlagsUnread{cause: fmt.Errorf("baca super_read_only: %w", err)}
 	}
 	if !sro || !ro {
 		return fmt.Errorf("read_only=%v super_read_only=%v", ro, sro)
 	}
 	return nil
+}
+
+// errFlagsUnread is the settle's answer (F2) when it could not read the
+// flags right before the end: unlike T7 it proves nothing about the
+// server, nothing is recorded, and "Ulangi dari tahap ini" works once
+// MySQL answers again.
+type errFlagsUnread struct{ cause error }
+
+func (e *errFlagsUnread) Error() string {
+	return fmt.Sprintf(`kunci baca-saja server ini tidak bisa diperiksa sebelum karantina diakhiri (%v); karantina `+
+		`tidak diakhiri dan tidak ada yang diubah. Tekan "Ulangi dari tahap ini"`, e.cause)
 }
 
 // databasesNotCopied lists the local MySQL's non-system databases and

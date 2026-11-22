@@ -1503,3 +1503,68 @@ func TestGuardQuietWhileAdminReplaced(t *testing.T) {
 	}
 	r.wantRelocks("three refused rounds after a login", proto.QuarantineWhileUnverified)
 }
+
+// openFailHost is a Host whose Open fails while fails is above zero, one
+// failure per call, then opens as h does.
+type openFailHost struct {
+	mysql.Host
+	fails atomic.Int32
+}
+
+func (h *openFailHost) Open(ctx context.Context) (*sql.DB, error) {
+	if h.fails.Add(-1) >= 0 {
+		return nil, errors.New("dial unix /var/run/mysqld/mysqld.sock: connect: connection refused")
+	}
+	return h.Host.Open(ctx)
+}
+
+// TestSettleTransientReadIsNotT7 (A-M3): the settle's own read of the
+// flags fails once (MySQL not answering): that proves nothing about the
+// flags, so the answer is F2 (retry), not T7, and nothing is recorded. The
+// next settle reads both flags on and ends the quarantine.
+func TestSettleTransientReadIsNotT7(t *testing.T) {
+	dir := pinDir(t, "quarantined", strictSource)
+	h := &openFailHost{Host: readOnlyHost(t)}
+	r := newPinRig(t, h, dir)
+	if !r.d.MarkRebuildLoaded("10.0.0.1", 3306) {
+		t.Fatal("no load mark toward the pinned source")
+	}
+	h.fails.Store(1)
+	err := r.d.SettleRebuilt("10.0.0.1", 3306)
+	const want = "kunci baca-saja server ini tidak bisa diperiksa sebelum karantina diakhiri ("
+	if err == nil || errors.Is(err, mysql.ErrWritableSinceLoad) || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("settle with a failed read = %v, want F2", err)
+	}
+	if !strings.HasSuffix(err.Error(), `); karantina tidak diakhiri dan tidak ada yang diubah. Tekan "Ulangi dari tahap ini"`) {
+		t.Errorf("settle with a failed read = %q, want F2's end", err)
+	}
+	if r.d.WritableAfterLoad() {
+		t.Error("a failed read recorded as writable since the load")
+	}
+	if got := pinFile(t, dir, mysql.RoleFile); got != "quarantined" {
+		t.Errorf("role pin after the failed read = %q, want quarantined", got)
+	}
+	if err := r.d.SettleRebuilt("10.0.0.1", 3306); err != nil {
+		t.Fatalf("second settle = %v, want the quarantine ended", err)
+	}
+	if got := pinFile(t, dir, mysql.RoleFile); got != "replica" {
+		t.Errorf("role pin after the second settle = %q, want replica", got)
+	}
+}
+
+// TestSettleFlagsOffIsStillT7: flags read and found off are still T7.
+func TestSettleFlagsOffIsStillT7(t *testing.T) {
+	dir := pinDir(t, "quarantined", strictSource)
+	inst := testmysql.Start(t, testmysql.Options{})
+	execAll(t, rootDB(t, inst), "SET GLOBAL super_read_only = ON", "SET GLOBAL read_only = OFF")
+	r := newPinRig(t, inst.Host(), dir)
+	if !r.d.MarkRebuildLoaded("10.0.0.1", 3306) {
+		t.Fatal("no load mark toward the pinned source")
+	}
+	if err := r.d.SettleRebuilt("10.0.0.1", 3306); !errors.Is(err, mysql.ErrWritableSinceLoad) {
+		t.Errorf("settle with read_only off = %v, want T7", err)
+	}
+	if got := pinFile(t, dir, mysql.RoleFile); got != "quarantined" {
+		t.Errorf("role pin = %q, want quarantined", got)
+	}
+}
