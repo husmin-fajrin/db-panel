@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -637,23 +638,29 @@ type pinFacts struct {
 	// Role is "master", "replica", "dikarantina", "belum ada"; "-" while
 	// unreadable; for any other value "tidak dikenal" and the agent's
 	// value, labelled (orchestrator.AgentQuoteN) and cut at maxShownPin.
-	Role   string
-	Source string // host:port, or "tidak ada"
+	Role string
+	// Source is "tidak ada" without a source pin, "-" while unreadable,
+	// a well-formed host:port as it is (hostPortPin), and for any other
+	// value "tidak dikenal" and the agent's value, labelled and cut at
+	// maxShownPin.
+	Source string
 	// Error is why the pin files cannot be read, as the agent words it:
 	// labelled, one line and cut at maxAgentWords; "" when they can.
 	Error string
 }
 
 // maxShownPin bounds the agent's value of a role pin the panel does not
-// know.
+// know, and of a source pin that is not host:port.
 const maxShownPin = 32
 
 // newPinFacts reads the pins of snap, an agent's report of the server
 // named server; nil without a report, or from an agent that reports none.
-// The pin error and an unknown role pin are the agent's text: neither is
-// MySQL's (redact.Quotes, which censors MySQL's row data in the report's
-// MySQL errors, has nothing to censor in them), and both are labelled as
-// the agent's words, one line and bounded.
+// The pin error, an unknown role pin and a source pin that is not
+// host:port are the agent's text: none is MySQL's (redact.Quotes, which
+// censors MySQL's row data in the report's MySQL errors, has nothing to
+// censor in them), and each is labelled as the agent's words, one line
+// and bounded. Only the page reads these words; the monitor reads the
+// report's own pins.
 func newPinFacts(server string, snap *proto.HealthSnapshot) *pinFacts {
 	if snap == nil || (snap.RolePin == "" && snap.PinError == "") {
 		return nil
@@ -675,8 +682,37 @@ func newPinFacts(server string, snap *proto.HealthSnapshot) *pinFacts {
 		f.Source = "-"
 	case f.Source == "":
 		f.Source = "tidak ada"
+	case !hostPortPin(f.Source):
+		f.Source = "tidak dikenal (" + orchestrator.AgentQuoteN(server, f.Source, maxShownPin) + ")"
 	}
 	return f
+}
+
+// maxSourcePin bounds a source pin shown as it is (ruling R9).
+const maxSourcePin = 261
+
+// hostPortPin reports whether a source pin reads as host:port (ruling R9):
+// at most maxSourcePin bytes, net.SplitHostPort accepts it, the port is a
+// number 1-65535 and the host is not empty and holds only ASCII letters,
+// digits, ".", "-" and ":" (an IPv6 literal). Such a pin is shown as it
+// is; any other is the agent's text.
+func hostPortPin(pin string) bool {
+	if len(pin) > maxSourcePin {
+		return false
+	}
+	host, port, err := net.SplitHostPort(pin)
+	if err != nil || host == "" {
+		return false
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return false
+	}
+	for _, r := range host {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == ':') {
+			return false
+		}
+	}
+	return true
 }
 
 // startLockFacts is the start lock of a quarantined server in words.
