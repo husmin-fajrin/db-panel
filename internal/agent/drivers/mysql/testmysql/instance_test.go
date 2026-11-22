@@ -132,7 +132,11 @@ func TestStopFailureNamesInstanceAndKeepsLogTail(t *testing.T) {
 	if err := os.WriteFile(i.ErrorLog, []byte("[Note] [MY-010067] Giving 3 client threads a chance to die gracefully\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done", "sh", "--defaults-file="+i.ConfigFile)
+	// The shell writes trapped once SIGTERM is ignored; the stop waits
+	// for that file, so the signal never lands before the trap.
+	trapped := filepath.Join(t.TempDir(), "trapped")
+	cmd := exec.Command("/bin/sh", "-c", `trap '' TERM; : > "$1"; while :; do sleep 1; done`, "sh", trapped,
+		"--defaults-file="+i.ConfigFile)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +147,14 @@ func TestStopFailureNamesInstanceAndKeepsLogTail(t *testing.T) {
 	if err := os.WriteFile(i.PIDFile, []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond) // the trap is set
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(trapped); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the fake mysqld never wrote %s: its SIGTERM trap is not known to be set", trapped)
+		}
+	}
 
 	rec := &recordingTB{TB: t}
 	i.Teardown(rec, time.Second)
