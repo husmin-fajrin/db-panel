@@ -368,7 +368,7 @@ func TestCreateDumpUserNoReloadOnSupportedSeries(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dump, err := mysql.FindClientTool(inst.Layout().MysqldPath, "mysqldump")
+	dump, err := mysql.FindClientToolErr(inst.Layout().MysqldPath, "mysqldump")
 	if err != nil {
 		t.Fatal(err)
 	}

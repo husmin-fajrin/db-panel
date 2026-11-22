@@ -43,11 +43,11 @@ const FlushTablesMinVersion = flushTablesMinVersion
 
 // Snapshot helpers, testable without a server.
 var (
-	DumpGrantsFor  = dumpGrantsFor
-	LoadArgs       = loadArgs
-	DumpGTIDMode   = dumpGTIDMode
-	ClientDefaults = clientDefaults
-	FindClientTool = findClientTool
+	DumpGrantsFor     = dumpGrantsFor
+	LoadArgs          = loadArgs
+	DumpGTIDMode      = dumpGTIDMode
+	ClientDefaults    = clientDefaults
+	FindClientToolErr = findClientTool
 )
 
 // DumpArgs and ProbeArgs are the dump's arguments without TLS options;

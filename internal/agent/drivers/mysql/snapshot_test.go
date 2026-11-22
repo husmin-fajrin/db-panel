@@ -873,7 +873,7 @@ func TestClientDefaultsAcceptedByMysql(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := mysql.FindClientTool(inst.Layout().MysqldPath, "mysql")
+	client, err := mysql.FindClientToolErr(inst.Layout().MysqldPath, "mysql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -888,7 +888,7 @@ func TestClientDefaultsAcceptedByMysql(t *testing.T) {
 	// The trial run leaves no transaction on the master; the real dump's
 	// FLUSH TABLES does, which shows the check would see one.
 	execAll(t, root, "CREATE DATABASE a", "CREATE TABLE a.t (id INT)")
-	dump, err := mysql.FindClientTool(inst.Layout().MysqldPath, "mysqldump")
+	dump, err := mysql.FindClientToolErr(inst.Layout().MysqldPath, "mysqldump")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,13 +913,23 @@ func TestFindClientTool(t *testing.T) {
 	if err := os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := mysql.FindClientTool(filepath.Join(dir, "mysqld"), "mysqldump"); err != nil || got != tool {
+	if got, err := mysql.FindClientToolErr(filepath.Join(dir, "mysqld"), "mysqldump"); err != nil || got != tool {
 		t.Errorf("next to mysqld: %q, %v", got, err)
 	}
 	t.Setenv("PATH", t.TempDir())
-	_, err := mysql.FindClientTool("/nonexistent/sbin/mysqld", "mysqldump")
+	_, err := mysql.FindClientToolErr("/nonexistent/sbin/mysqld", "mysqldump")
 	if err == nil || err.Error() != "mysqldump tidak ditemukan; pasang paket mysql-client" {
 		t.Errorf("missing mysqldump: %v", err)
+	}
+	// The exported form: the path found, else the name as given.
+	if got := mysql.FindClientTool(filepath.Join(dir, "mysqld"), "mysqldump"); got != tool {
+		t.Errorf("FindClientTool next to mysqld = %q, want %q", got, tool)
+	}
+	if got := mysql.FindClientTool("/nonexistent/sbin/mysqld", "mysqldump"); got != "mysqldump" {
+		t.Errorf("FindClientTool of a missing mysqldump = %q, want the name", got)
+	}
+	if got := mysql.FindClientTool(filepath.Join(dir, "mysqld"), "/opt/x/mysqldump"); got != "/opt/x/mysqldump" {
+		t.Errorf("FindClientTool of a path = %q, want it as given", got)
 	}
 }
 
@@ -1176,7 +1186,7 @@ func TestDumpAllDatabasesReplacesAdminAccount(t *testing.T) {
 func TestLoadIgnoresClientCommands(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	h := inst.Host()
-	loadBin, err := mysql.FindClientTool(inst.Layout().MysqldPath, "mysql")
+	loadBin, err := mysql.FindClientToolErr(inst.Layout().MysqldPath, "mysql")
 	if err != nil {
 		t.Skip(err)
 	}
