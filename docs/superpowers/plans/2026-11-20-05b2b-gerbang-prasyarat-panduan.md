@@ -764,6 +764,35 @@ README menambah:
 
 (Diisi selama pelaksanaan, bernomor, dengan tanggal dan alasan.)
 
+1. **2026-11-22 — batas waktu `make test` naik dari 60 ke 120 menit (Task 1).**
+   Paket driver MySQL sisi agent sudah memakan 59 dari 60 menit di mesin
+   pengembangan, sehingga satu putaran lambat akan menggagalkan pohon yang
+   benar. `Makefile` dan baris README-nya diubah; gerbang 1 dan 2 dijalankan
+   dengan `-timeout 120m`.
+2. **2026-11-22 — pengujian penghenti paksa di harness menunggu berkas penanda,
+   bukan jeda tetap (Task 1).** Temuan kecil peninjau; diperbaiki langsung
+   karena kegagalan akibat waktu di rangkaian ini memakan hingga satu jam.
+3. **2026-11-22 — P-M4 berubah: master baru tetap tidak bisa dihapus selama
+   baris master lamanya masih ada, tetapi dengan pesannya sendiri (Task 2).**
+   Rencana semula membolehkan penghapusan itu. Pelaksana membuktikan dua
+   akibatnya: peran master lama di panel berubah dari `quarantined` menjadi
+   `unassigned` (kotak master lama dan peringatan start-nya hilang, server itu
+   ditawarkan sebagai target replika), dan topologi bisa terhapus saat bangun
+   ulang master lama masih berjalan. Gantinya: galat baru
+   `ErrMasterHasOldMaster` dengan teks **F8** `server ini masih menjadi master
+   dan master lamanya masih tercatat di topologi ini; selesaikan bangun ulang
+   master lama itu atau hapus master lama itu dari panel dulu`. Pengujiannya
+   bernama `TestDeleteNewMasterRefusedNamesOldMasterRow`.
+4. **2026-11-22 — `promoteStartRefused` tidak diubah (Task 2).** Jawaban agent
+   berkode `timeout` atau `offline` atas perintah mulai promote tetap dibaca
+   "tidak ada jawaban" (sisi hati-hati: perintah itu mungkin sudah membuka
+   penulisan). Hanya langkah karantina dan arahkan-ulang yang membedakan
+   `offline` kiriman agent dari sambungan yang benar-benar putus.
+5. **2026-11-22 — arti "karantina tidak dicatat tertunda" di pengujian terakhir
+   Task 2.** Langkah karantina gagal (bukan dilewati sebagai tertunda);
+   karantina promote itu tetap tercatat tertunda supaya dikirim lagi saat agent
+   tersambung.
+
 ## Teks baru untuk dibaca pemilik
 
 Diisi Task 14: setiap teks operator yang baru, berubah atau hilang antara
