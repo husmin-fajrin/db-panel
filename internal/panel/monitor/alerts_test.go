@@ -3526,3 +3526,31 @@ func TestBackupStaleAlertOpensAndCloses(t *testing.T) {
 		t.Fatalf("quarantined old master got backup_stale: %+v", as)
 	}
 }
+
+// On the backup card of a server that is not a master, the G8 texts name
+// it "server" (Ruling R19); the master's words are unchanged.
+func TestBackupMessageAsServer(t *testing.T) {
+	h := int64(3600)
+	cases := []struct {
+		b    BackupVerdict
+		want string
+	}{
+		{BackupVerdict{Status: "stale", AgeSec: 50 * h, Size: 5},
+			"Berkas terbaru di folder cadangan server db2 berumur 50 jam (batas 48 jam)."},
+		{BackupVerdict{Status: "empty_file", AgeSec: h}, "Berkas terbaru di folder cadangan server db2 kosong (0 byte)."},
+		{BackupVerdict{Status: "none"}, "Folder cadangan server db2 tidak berisi berkas."},
+		{BackupVerdict{Status: "unreadable", Reason: proto.BackupReasonDenied},
+			"Folder cadangan server db2 tidak bisa dibaca agent: izin ditolak."},
+		{BackupVerdict{Status: "unset"}, ""},
+		{BackupVerdict{Status: "unknown"}, ""},
+		{BackupVerdict{Status: "ok", AgeSec: h, Size: 5}, ""},
+	}
+	for _, c := range cases {
+		if got := BackupMessageAs(c.b, "server db2", 48); got != c.want {
+			t.Errorf("BackupMessageAs(%+v) = %q, want %q", c.b, got, c.want)
+		}
+		if got, want := BackupMessageAs(c.b, "master db1", 48), BackupMessage(c.b, "db1", 48); got != want {
+			t.Errorf("BackupMessageAs master %+v = %q, BackupMessage = %q", c.b, got, want)
+		}
+	}
+}

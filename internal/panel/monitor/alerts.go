@@ -1135,13 +1135,14 @@ func backupMaxAgeHours(srv store.Server) int {
 	return srv.BackupMaxAgeHours
 }
 
-// Backup texts of plan 5b-2b (G8a-G8d), word for word; the first %s is
-// the master's name.
+// Backup texts of plan 5b-2b (G8a-G8d), word for word once the first %s
+// is "master <name>" (or, on a server that is not a master, "server
+// <name>": Ruling R19).
 const (
-	backupStaleText      = "Berkas terbaru di folder cadangan master %s berumur %s (batas %d jam)."
-	backupEmptyFileText  = "Berkas terbaru di folder cadangan master %s kosong (0 byte)."
-	backupNoneText       = "Folder cadangan master %s tidak berisi berkas."
-	backupUnreadableText = "Folder cadangan master %s tidak bisa dibaca agent: %s."
+	backupStaleText      = "Berkas terbaru di folder cadangan %s berumur %s (batas %d jam)."
+	backupEmptyFileText  = "Berkas terbaru di folder cadangan %s kosong (0 byte)."
+	backupNoneText       = "Folder cadangan %s tidak berisi berkas."
+	backupUnreadableText = "Folder cadangan %s tidak bisa dibaca agent: %s."
 )
 
 // backupReasonWords words why the agent cannot read a backup folder (G8d);
@@ -1162,19 +1163,26 @@ const backupReasonOther = "galat lain; lihat log agent"
 // limit is maxAgeHours (G8a-G8d): for backup_stale, the backup card and
 // the gate's row. "" for unset, unknown and ok, which need no words.
 func BackupMessage(b BackupVerdict, master string, maxAgeHours int) string {
+	return BackupMessageAs(b, "master "+master, maxAgeHours)
+}
+
+// BackupMessageAs is BackupMessage with subject, the words that name the
+// server ("master db1", or "server db2" on the backup card of a server
+// that is not a master), in place of "master <name>".
+func BackupMessageAs(b BackupVerdict, subject string, maxAgeHours int) string {
 	switch b.Status {
 	case BackupStatusStale:
-		return fmt.Sprintf(backupStaleText, master, staleAge(b.AgeSec, maxAgeHours), maxAgeHours)
+		return fmt.Sprintf(backupStaleText, subject, staleAge(b.AgeSec, maxAgeHours), maxAgeHours)
 	case BackupStatusEmptyFile:
-		return fmt.Sprintf(backupEmptyFileText, master)
+		return fmt.Sprintf(backupEmptyFileText, subject)
 	case BackupStatusNone:
-		return fmt.Sprintf(backupNoneText, master)
+		return fmt.Sprintf(backupNoneText, subject)
 	case BackupStatusUnreadable:
 		words, ok := backupReasonWords[b.Reason]
 		if !ok {
 			words = backupReasonOther
 		}
-		return fmt.Sprintf(backupUnreadableText, master, words)
+		return fmt.Sprintf(backupUnreadableText, subject, words)
 	}
 	return ""
 }
