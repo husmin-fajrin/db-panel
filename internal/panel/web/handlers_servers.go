@@ -890,7 +890,8 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, msgServerNotFound, http.StatusNotFound)
 		return
-	case errors.Is(err, orchestrator.ErrServerIsMaster), errors.Is(err, orchestrator.ErrServerIsReplica),
+	case errors.Is(err, orchestrator.ErrServerIsMaster), errors.Is(err, orchestrator.ErrMasterHasOldMaster),
+		errors.Is(err, orchestrator.ErrServerIsReplica),
 		errors.Is(err, orchestrator.ErrLocalServer), errors.Is(err, orchestrator.ErrBusy),
 		errors.Is(err, orchestrator.ErrCutoverPending), errors.Is(err, orchestrator.ErrQuarantinePending),
 		errors.Is(err, orchestrator.ErrNotQuarantinePending):

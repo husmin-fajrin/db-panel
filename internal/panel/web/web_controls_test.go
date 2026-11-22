@@ -654,3 +654,19 @@ func TestSnoozeDialogListsKinds(t *testing.T) {
 		t.Errorf("confirmSnooze components before the cancel form = %d, want 1", n)
 	}
 }
+
+// TestDeleteNewMasterRefusedNamesOldMasterRow (P-M4): the orchestrator's
+// refusal F8 is shown on the server page with 400, as ErrServerIsMaster.
+func TestDeleteNewMasterRefusedNamesOldMasterRow(t *testing.T) {
+	const f8 = "server ini masih menjadi master dan master lamanya masih tercatat di topologi ini; selesaikan bangun ulang " +
+		"master lama itu atau hapus master lama itu dari panel dulu"
+	e, f, _ := controlEnv(t)
+	f.err = orchestrator.ErrMasterHasOldMaster
+	rec := e.do("POST", "/servers/1/delete", withToken(t, e, url.Values{"confirm_name": {"db-master"}}, web.ActDeleteServer, "server", 1),
+		e.cookie())
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, template.HTMLEscapeString(f8))
+	if _, err := e.st.GetServer(1); err != nil {
+		t.Fatalf("server gone after a refused delete: %v", err)
+	}
+}

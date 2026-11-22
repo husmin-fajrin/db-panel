@@ -222,8 +222,13 @@ func (r *Runner) deleteServer(ctx context.Context, serverID int64, unquarantined
 // DeleteServer's refusals; their texts are shown to the user as they are.
 // A busy server is refused with an error that wraps ErrBusy.
 var (
-	ErrLocalServer     = errors.New("server panel sendiri tidak bisa dihapus")
-	ErrServerIsMaster  = errors.New("server ini masih menjadi master; lepas atau hapus semua replikanya dulu")
+	ErrLocalServer    = errors.New("server panel sendiri tidak bisa dihapus")
+	ErrServerIsMaster = errors.New("server ini masih menjadi master; lepas atau hapus semua replikanya dulu")
+	// ErrMasterHasOldMaster: every replica row of the master's topology is
+	// a quarantined old master's (its rebuild runs, waits or failed). A
+	// delete would cascade that row away and unassign its server (F8).
+	ErrMasterHasOldMaster = errors.New("server ini masih menjadi master dan master lamanya masih tercatat di topologi ini; " +
+		"selesaikan bangun ulang master lama itu atau hapus master lama itu dari panel dulu")
 	ErrServerIsReplica = errors.New("server ini masih terdaftar sebagai replika; lepas replika dulu")
 	// ErrCutoverPending: the quarantined old master of a promotion whose
 	// applications are not confirmed on the new master yet. Releasing its
@@ -291,6 +296,13 @@ func (r *Runner) deletableLocked(serverID int64, unquarantined bool) error {
 			return err
 		}
 		if len(reps) > 0 {
+			reps, _, _, err := r.promoteReplicas(topo.ID)
+			if err != nil {
+				return err
+			}
+			if len(reps) == 0 {
+				return ErrMasterHasOldMaster
+			}
 			return ErrServerIsMaster
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {

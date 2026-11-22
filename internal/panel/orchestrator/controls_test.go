@@ -434,3 +434,50 @@ func TestQuarantinedWithRowRefusesResyncDetachCreate(t *testing.T) {
 		})
 	}
 }
+
+// f8 is the refusal to delete a master whose only replica rows are its
+// quarantined old master's (F8).
+const f8 = "server ini masih menjadi master dan master lamanya masih tercatat di topologi ini; selesaikan bangun ulang " +
+	"master lama itu atau hapus master lama itu dari panel dulu"
+
+// TestDeleteNewMasterRefusedNamesOldMasterRow (P-M4): a master whose only
+// replica row is a quarantined old master's is refused in its own words
+// (F8), and nothing changes: the master, its topology, the old master's
+// role and row stay. With an ordinary replica row too, the refusal is the
+// old one.
+func TestDeleteNewMasterRefusedNamesOldMasterRow(t *testing.T) {
+	e := newEnv(t)
+	m, topo := e.readyMaster("db-new")
+	q := e.agent("db-old", "10.0.0.9")
+	if _, err := e.st.AddReplica(topo.ID, q.id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(q.id, store.ReplicaFailed, "gagal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetServerRole(q.id, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := e.r.DeleteServer(ctx, m.id); err == nil || err.Error() != f8 {
+		t.Fatalf("DeleteServer with only the old master's row = %v, want F8", err)
+	}
+	if _, err := e.st.GetServer(m.id); err != nil {
+		t.Fatalf("master after the refusal: %v", err)
+	}
+	if _, err := e.st.GetTopology(topo.ID); err != nil {
+		t.Fatalf("topology after the refusal: %v", err)
+	}
+	if got := roleNow(e, q.id); got != store.RoleQuarantined {
+		t.Fatalf("old master role = %s, want quarantined", got)
+	}
+	if _, err := e.st.GetReplicaByServer(q.id); err != nil {
+		t.Fatalf("old master row after the refusal: %v", err)
+	}
+
+	e.followingReplica(topo, "a")
+	if err := e.r.DeleteServer(ctx, m.id); !errors.Is(err, ErrServerIsMaster) ||
+		err.Error() != "server ini masih menjadi master; lepas atau hapus semua replikanya dulu" {
+		t.Fatalf("DeleteServer with an ordinary replica too = %v, want ErrServerIsMaster", err)
+	}
+}
