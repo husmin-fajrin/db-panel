@@ -3040,6 +3040,27 @@ func TestUnverifiedReplacesOpenLateMessage(t *testing.T) {
 	}
 }
 
+// TestLateAlertLeavesUnverifiedText (P-M6): an open late alert that took
+// T1b takes the text of a newer entry the guard could verify again.
+func TestLateAlertLeavesUnverifiedText(t *testing.T) {
+	r := newRig(t)
+	mID, _, ma := r.quarantined(plainQuar())
+	ma.state(lateWhile("U1", proto.QuarantineWhileUnverified))
+	ma.send()
+	first := r.openAlert(mID, KindMasterStartLate)
+	if first.Message != wantStartUnverifiedText {
+		t.Fatalf("first message = %q", first.Message)
+	}
+	r.clk.Add(time.Minute)
+	ma.state(lateWhile("L2", proto.QuarantineWhileRunning))
+	ma.send()
+	r.m.tick()
+	r.wantAlerts(mID, KindMasterStartLate, 1, true)
+	if a := r.openAlert(mID, KindMasterStartLate); a.ID != first.ID || a.Message != wantStartRelockedText {
+		t.Fatalf("alert = %d %q, want %d with T1", a.ID, a.Message, first.ID)
+	}
+}
+
 // TestUnverifiedNotClosedByCopyStarted: the remark unverified keeps T1b
 // in the state CopyStarted and the alert stays open: the guard still
 // cannot lock.

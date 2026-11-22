@@ -201,9 +201,9 @@ func (m *Monitor) reconcileStart(id int64, s *serverState, snap *proto.HealthSna
 		ups = append(ups, alertUpdate{a.ID, kind, id, false})
 	case err == nil:
 		// A blocked alert takes this entry's lock file; a late alert takes
-		// T1b when this newer entry is unverified (spec 5.2).
-		rewrite := kind == KindMasterStartBlocked ||
-			(kind == KindMasterStartLate && e.While == proto.QuarantineWhileUnverified)
+		// this newer entry's text (lateMessage): T1b when it is unverified,
+		// and back from T1b once the guard can verify again (spec 5.2).
+		rewrite := kind == KindMasterStartBlocked || kind == KindMasterStartLate
 		if rewrite && a.Message != msg {
 			if err := m.st.SetAlertMessage(a.ID, msg); err != nil {
 				m.log.Warn("update alert message", "server_id", id, "kind", kind, "err", err)
