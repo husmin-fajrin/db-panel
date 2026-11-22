@@ -568,6 +568,18 @@ func (a *app) replicaForm(r *http.Request, master store.Server, checked map[stri
 			p.Flash = "server tujuan " + orchestrator.ErrBusy.Error() // the orchestrator's refusal (refuseBusy)
 			return p, nil
 		}
+		if topo, err := a.Store.GetTopologyByMaster(master.ID); err == nil {
+			if _, busy, err := a.Store.ActiveJobForTopology(topo.ID, orchestrator.KindPromotePlanned,
+				orchestrator.KindPromoteEmergency); err != nil {
+				return p, err
+			} else if busy {
+				p.RebuildBad = true
+				p.Flash = "server tujuan " + orchestrator.ErrBusy.Error() + " (promote sedang berjalan di topologinya)"
+				return p, nil
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return p, err
+		}
 		if p.Rebuild, err = a.rebuildTarget(r.Context(), master, rebuild, askApproval(r)); err != nil {
 			return p, err
 		}

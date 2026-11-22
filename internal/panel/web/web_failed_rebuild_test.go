@@ -772,3 +772,22 @@ func TestWaitingRebuildApprovableAfterLeftover(t *testing.T) {
 	wantNoBody(t, rec, "tidak bisa diulang atau disetujui lagi")
 	wantBody(t, rec, `action="/jobs/`+id+`/approve"`)
 }
+
+// TestRebuildFormBusyDuringTopologyPromote: the rebuild form marks the
+// target busy while a promote of its topology runs, as the orchestrator's
+// refuseBusy refuses it.
+func TestRebuildFormBusyDuringTopologyPromote(t *testing.T) {
+	e, _, topo := failedRebuildEnv(t)
+	c := e.cookie()
+	form := e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantCode(t, form, http.StatusOK)
+	wantBody(t, form, rebuildButtonAction)
+	if err := e.st.CreateJob(store.Job{ID: "5555555555555555555555555555555a", Kind: orchestrator.KindPromoteEmergency,
+		ServerID: 3, TopologyID: topo.ID, ParamsJSON: "{}", CreatedAt: time.Now()}, []string{"Jadikan master baru"}); err != nil {
+		t.Fatal(err)
+	}
+	form = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantCode(t, form, http.StatusBadRequest)
+	wantBody(t, form, "server tujuan masih punya pekerjaan yang belum selesai (promote sedang berjalan di topologinya)")
+	wantNoBody(t, form, rebuildButtonAction)
+}
