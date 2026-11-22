@@ -82,6 +82,7 @@ func TestSaveServerBackup(t *testing.T) {
 		{"/home/x", "24", fmt.Sprintf(wantB4, "/home")},
 		{"/run/user/1000", "24", fmt.Sprintf(wantB4, "/run/user")},
 		{"/var/tmp/", "24", fmt.Sprintf(wantB4, "/var/tmp")},
+		{"/var/backups/my\u0085sql", "24", wantB3},
 		{"/", "24", fmt.Sprintf(wantB5, "/")},
 		{"/proc/1", "24", fmt.Sprintf(wantB5, "/proc")},
 		{"/srv/b", "0", wantB6},
@@ -98,6 +99,7 @@ func TestSaveServerBackup(t *testing.T) {
 			if kept != "/" {
 				kept = strings.TrimSuffix(kept, "/")
 			}
+			kept = strings.ReplaceAll(kept, "\u0085", "\uFFFD") // shown without the control character
 			wantBody(t, rec, `name="backup_dir" value="`+kept+`"`)
 		}
 		wantBackupStored(t, e, srv.ID, "/var/backups/mysql", 24)

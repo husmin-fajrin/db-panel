@@ -26,8 +26,9 @@ const (
 )
 
 // The folder rule, the same as the agent's ValidBackupFolder
-// (internal/agent/monitor): TestBackupFolderRulesMatchAgent holds the two
-// to the same table.
+// (internal/agent/monitor) except that it also refuses C1 controls and
+// invalid UTF-8: TestBackupFolderRulesMatchAgent holds the two to the
+// same table.
 const (
 	maxBackupFolderLen = 1024
 	minBackupMaxAge    = 1
@@ -47,7 +48,8 @@ var (
 // operator: B5 for "/" and a folder at or under /proc, /sys or /dev, B4
 // for one at or under a tree the agent's service does not see, B3 for
 // anything else refused (not absolute or not clean, over 1024 bytes, a
-// control byte). The empty folder ("no backup here") is refused like the
+// control character, C1 included, or not valid UTF-8: the last two
+// stricter than the agent, Ruling R23). The empty folder ("no backup here") is refused like the
 // agent refuses it: the form handles it before the rule. The texts never
 // hold p.
 func validBackupFolder(p string) (text string, ok bool) {
@@ -57,10 +59,11 @@ func validBackupFolder(p string) (text string, ok bool) {
 	if !filepath.IsAbs(p) || filepath.Clean(p) != p || len(p) > maxBackupFolderLen {
 		return msgBackupFolderInvalid, false
 	}
-	for i := 0; i < len(p); i++ {
-		if p[i] < 0x20 || p[i] == 0x7f {
-			return msgBackupFolderInvalid, false
-		}
+	// Stricter than the agent on purpose (Ruling R23): every Unicode
+	// control character (C0, DEL, C1) and any byte that is not UTF-8, so
+	// a stored folder can always be shown back unchanged.
+	if !utf8.ValidString(p) || strings.ContainsFunc(p, unicode.IsControl) {
+		return msgBackupFolderInvalid, false
 	}
 	under := func(root string) bool { return p == root || strings.HasPrefix(p, root+"/") }
 	for _, root := range refusedBackupRoots {

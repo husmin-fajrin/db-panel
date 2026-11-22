@@ -48,7 +48,23 @@ var backupFolderCases = []struct {
 	{"/dev/sda", fmt.Sprintf(wantB5, "/dev")},
 }
 
+// panelOnlyFolderCases are refused by the panel and accepted by the
+// agent, on purpose (Ruling R23): a folder with a Unicode control
+// character (C1) or not valid UTF-8 could not be shown back on a page
+// unchanged. They are left out of the table shared with the agent.
+var panelOnlyFolderCases = []string{
+	"/var/backups/my\u0085sql",
+	"/var/backups/my\u009fsql",
+	"/var/backups/my\xffsql",
+	"/var/backups/\xc3",
+}
+
 func TestBackupFolderRules(t *testing.T) {
+	for _, p := range panelOnlyFolderCases {
+		if text, ok := validBackupFolder(p); ok || text != wantB3 {
+			t.Errorf("validBackupFolder(%q) = %q, %v; want B3", p, text, ok)
+		}
+	}
 	if n := len("/" + strings.Repeat("a", 1024)); n != 1025 {
 		t.Fatalf("long case is %d bytes", n)
 	}
@@ -69,7 +85,10 @@ func TestBackupFolderRules(t *testing.T) {
 	}
 }
 
-// The panel refuses what the agent refuses, and nothing else.
+// The panel refuses what the agent refuses, and nothing else, over the
+// shared table. The two rules differ by design on panelOnlyFolderCases
+// (C1 controls, invalid UTF-8), which the panel alone refuses; those are
+// not part of this table.
 func TestBackupFolderRulesMatchAgent(t *testing.T) {
 	for _, c := range backupFolderCases {
 		_, panelOK := validBackupFolder(c.path)
