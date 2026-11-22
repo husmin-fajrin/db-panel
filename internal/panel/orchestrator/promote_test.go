@@ -1687,3 +1687,22 @@ func TestOldMasterLeftoverNotBranched(t *testing.T) {
 		t.Fatalf("row = %+v, %v; want failed", rep, err)
 	}
 }
+
+// TestBusyLabelForQuarantinedOldMaster: a promote refused because the
+// quarantined old master's row has an unfinished job names it "master
+// lama", not "replika".
+func TestBusyLabelForQuarantinedOldMaster(t *testing.T) {
+	g := secondPromoteRig(t)
+	e := g.e
+	failedRebuild(t, g, "mysql.preflight")
+	g.emergencyOnC()
+	if err := e.st.CreateJob(store.Job{ID: "6666666666666666666666666666666a", Kind: KindMySQLTLS, ServerID: g.m.id,
+		ParamsJSON: "{}", CreatedAt: time.Now()}, mysqlTLSStepNames()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+		Mode: proto.PromoteEmergency})
+	if !errors.Is(err, ErrBusy) || !strings.HasPrefix(err.Error(), "master lama db-master ") {
+		t.Fatalf("StartPromote with the old master busy = %v, want busy naming master lama db-master", err)
+	}
+}

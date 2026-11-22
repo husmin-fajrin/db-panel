@@ -263,7 +263,11 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		return "", err
 	}
 	for _, x := range reps {
-		if err := r.refuseBusy(x.ServerID, "replika "+r.nameOf(x.ServerID)); err != nil {
+		who := "replika "
+		if srv, err := r.d.Store.GetServer(x.ServerID); err == nil && srv.Role == store.RoleQuarantined {
+			who = "master lama " // an old master's row (its rebuild), no replica (promoteReplicas)
+		}
+		if err := r.refuseBusy(x.ServerID, who+r.nameOf(x.ServerID)); err != nil {
 			return "", err
 		}
 	}
