@@ -417,6 +417,10 @@ const (
 		"atau hapus server ini."
 	msgAgentRoleWithRow = "Agent server ini melaporkan peran %s, bukan karantina. Mulai lagi Bangun ulang sebagai replika, " +
 		"hapus server ini, atau tekan \"Ulangi dari tahap ini\" pada pekerjaan bangun ulangnya."
+	// msgDeleteAgentRole is the delete dialog's sentence for the same
+	// server (F6).
+	msgDeleteAgentRole = "Agent server ini melaporkan peran %s, bukan karantina. Menghapusnya dari panel tidak mengubah apa " +
+		"pun di server itu; periksa dulu peran itu di halaman server."
 	// msgRebuildRunning is T22, followed by a link to the job.
 	msgRebuildRunning = "Bangun ulang sebagai replika sedang berjalan."
 	// msgOldMasterSuperseded is T6, the box of a quarantined old master
@@ -642,9 +646,12 @@ func deleteWarnings(srv store.Server, box *oldMasterBox, sf *salvageFiles, lockH
 		}
 	}
 	// The panel does not ask the agent to release a quarantined server's
-	// role at the delete, so it stays quarantined whatever the agent is.
+	// role at the delete, so it stays as the agent pins it: quarantined,
+	// unless the agent reports another role (box.AgentRole).
 	switch {
 	case srv.Role != store.RoleQuarantined:
+	case box != nil && box.AgentRole != "":
+		out = append(out, fmt.Sprintf(msgDeleteAgentRole, box.AgentRole))
 	case lockHolds:
 		out = append(out, "Server ini tetap dikarantina (quarantined) setelah dihapus dari panel: MySQL-nya tetap baca-saja "+
 			"(read-only) dan kunci start (start lock) tetap terpasang. Untuk memakai server ini lagi, jalankan di server itu: "+
