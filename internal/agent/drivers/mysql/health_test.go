@@ -450,3 +450,57 @@ func TestSnapshotReportsStartLock(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthReportsPerfSchema: the snapshot carries
+// @@global.performance_schema, on by default and off when mysqld was
+// started with performance_schema=OFF.
+func TestHealthReportsPerfSchema(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"default", nil, true},
+		{"off", []string{"performance_schema=OFF"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inst := testmysql.Start(t, testmysql.Options{ExtraArgs: c.args})
+			d, _ := healthDriver(inst)
+			s := d.Snapshot(context.Background())
+			if !s.MySQLOK {
+				t.Fatalf("MySQLError=%q", s.MySQLError)
+			}
+			if s.PerfSchema == nil || *s.PerfSchema != c.want {
+				t.Fatalf("PerfSchema = %v, want %v", s.PerfSchema, c.want)
+			}
+		})
+	}
+}
+
+// TestHealthPerfSchemaNilWhenMySQLDown: a reading MySQL did not answer
+// carries no performance_schema value, not a guessed one.
+func TestHealthPerfSchemaNilWhenMySQLDown(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	d, _ := healthDriver(inst)
+	ctx := context.Background()
+	if s := d.Snapshot(ctx); !s.MySQLOK || s.PerfSchema == nil {
+		t.Fatalf("before the stop: MySQLOK=%v MySQLError=%q PerfSchema=%v", s.MySQLOK, s.MySQLError, s.PerfSchema)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := inst.Service().Stop(sctx); err != nil {
+		t.Fatal(err)
+	}
+	s := d.Snapshot(ctx)
+	if s.MySQLOK {
+		t.Fatal("MySQLOK after the stop")
+	}
+	if s.PerfSchema != nil {
+		t.Fatalf("PerfSchema = %v while MySQL is down, want nil", *s.PerfSchema)
+	}
+
+	// No stored account: not watched, no value either.
+	if s := (&mysql.Driver{Creds: noCreds{}}).Snapshot(ctx); s.MySQLOK || s.PerfSchema != nil {
+		t.Fatalf("without an account: MySQLOK=%v PerfSchema=%v", s.MySQLOK, s.PerfSchema)
+	}
+}

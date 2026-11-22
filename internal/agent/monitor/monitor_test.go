@@ -1267,3 +1267,65 @@ func TestSnapshotCommandRunsNoGuard(t *testing.T) {
 		t.Fatalf("guards ran for a command: %d/%d/%d, was %d/%d/%d", k, tk, c, k0, t0, c0)
 	}
 }
+
+// TestReportCarriesAgentClock: a report from the scheduled check and one
+// from monitor.snapshot carry the agent's clock at the reading, in Unix
+// milliseconds.
+func TestReportCarriesAgentClock(t *testing.T) {
+	r := newRig(t, base())
+	first := r.clock.Now()
+	got := r.wantReports(1)
+	if got[0].Snapshot.ClockUnixMS != first.UnixMilli() {
+		t.Fatalf("first tick ClockUnixMS = %d, want %d", got[0].Snapshot.ClockUnixMS, first.UnixMilli())
+	}
+
+	r.src.set(func(s *proto.HealthSnapshot) { s.ReadOnly = false })
+	r.tick(15*time.Second + 250*time.Millisecond)
+	got = r.wantReports(2)
+	if want := r.clock.Now().UnixMilli(); got[1].Snapshot.ClockUnixMS != want {
+		t.Fatalf("tick ClockUnixMS = %d, want %d", got[1].Snapshot.ClockUnixMS, want)
+	}
+
+	r.clock.advance(3*time.Second + 7*time.Millisecond)
+	ev := resultEvent(t, r.dispatch("monitor.snapshot", nil))
+	if want := r.clock.Now().UnixMilli(); ev.Snapshot.ClockUnixMS != want {
+		t.Fatalf("forced check ClockUnixMS = %d, want %d", ev.Snapshot.ClockUnixMS, want)
+	}
+}
+
+// TestChangedOnRolePinAndPerfSchema: a role pin change and any
+// performance_schema change (nil, false, true) is reported at once; the
+// same value behind another pointer is not, nor is a clock that moved.
+func TestChangedOnRolePinAndPerfSchema(t *testing.T) {
+	ch := func(prev, cur proto.HealthSnapshot) bool {
+		return changed(prev, cur, 60*time.Second, diskWarnPct, diskCritPct, connWarnPct)
+	}
+	b := func(v bool) *bool { return &v }
+
+	prev, cur := base(), base()
+	prev.RolePin, cur.RolePin = "replica", "master"
+	if !ch(prev, cur) {
+		t.Error("RolePin replica to master: not changed")
+	}
+
+	vals := map[string]*bool{"nil": nil, "false": b(false), "true": b(true)}
+	for pn, pv := range vals {
+		for cn, cv := range vals {
+			prev, cur := base(), base()
+			prev.PerfSchema, cur.PerfSchema = pv, cv
+			if got, want := ch(prev, cur), pn != cn; got != want {
+				t.Errorf("PerfSchema %s to %s: changed = %v, want %v", pn, cn, got, want)
+			}
+		}
+	}
+
+	prev, cur = base(), base()
+	prev.PerfSchema, cur.PerfSchema = b(true), b(true)
+	if ch(prev, cur) {
+		t.Error("PerfSchema true behind a fresh pointer: changed")
+	}
+	prev.ClockUnixMS, cur.ClockUnixMS = 1_000, 61_000
+	if ch(prev, cur) {
+		t.Error("ClockUnixMS alone: changed")
+	}
+}

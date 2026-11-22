@@ -150,7 +150,7 @@ func readHealth(ctx context.Context, db *sql.DB) (proto.HealthSnapshot, error) {
 	var s proto.HealthSnapshot
 	vars, err := nameValues(ctx, db, `SHOW GLOBAL VARIABLES WHERE Variable_name IN
 		('version', 'server_uuid', 'max_connections', 'read_only', 'super_read_only', 'log_bin',
-		 'log_bin_basename', 'binlog_expire_logs_seconds', 'gtid_executed')`)
+		 'log_bin_basename', 'binlog_expire_logs_seconds', 'gtid_executed', 'performance_schema')`)
 	if err != nil {
 		return s, fmt.Errorf("baca variabel MySQL: %w", err)
 	}
@@ -162,6 +162,10 @@ func readHealth(ctx context.Context, db *sql.DB) (proto.HealthSnapshot, error) {
 	s.LogBin = on(vars["log_bin"])
 	s.BinlogExpireSec, _ = strconv.ParseInt(vars["binlog_expire_logs_seconds"], 10, 64)
 	s.GTIDExecuted = strings.ReplaceAll(vars["gtid_executed"], "\n", "")
+	if v, ok := vars["performance_schema"]; ok {
+		ps := on(v)
+		s.PerfSchema = &ps
+	}
 
 	stat, err := nameValues(ctx, db, `SHOW GLOBAL STATUS WHERE Variable_name IN
 		('Uptime', 'Threads_connected', 'Threads_running')`)

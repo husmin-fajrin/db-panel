@@ -22,7 +22,9 @@ const (
 // diskWarn or diskCrit percent, connections crossing connPct percent of
 // max_connections, a restart (uptime went down), the start lock's state
 // (startLockChanged) and the state of the quarantine's starts
-// (startResultChanged). An empty prev is always a change.
+// (startResultChanged) and performance_schema (by value, not pointer).
+// The agent's clock (ClockUnixMS) moves on every reading and is not a
+// change. An empty prev is always a change.
 func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWarn, diskCrit, connPct int) bool {
 	if prev == (proto.HealthSnapshot{}) {
 		return true
@@ -39,10 +41,20 @@ func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWar
 		connHigh(prev, connPct) != connHigh(cur, connPct),
 		prev.MySQLOK && cur.MySQLOK && cur.UptimeSec < prev.UptimeSec,
 		startLockChanged(prev.StartLock, cur.StartLock),
-		startResultChanged(prev.StartResult, cur.StartResult):
+		startResultChanged(prev.StartResult, cur.StartResult),
+		boolPtrChanged(prev.PerfSchema, cur.PerfSchema):
 		return true
 	}
 	return replicaChanged(prev.Replica, cur.Replica, lagThreshold)
+}
+
+// boolPtrChanged: the value appeared, went, or changed; two pointers to
+// the same value are not a change.
+func boolPtrChanged(prev, cur *bool) bool {
+	if (prev == nil) != (cur == nil) {
+		return true
+	}
+	return prev != nil && *prev != *cur
 }
 
 // startLockChanged: the start lock appeared or went, or its Present,

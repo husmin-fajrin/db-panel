@@ -53,6 +53,13 @@ type HealthSnapshot struct {
 
 	// StartResult is set while the role pin is quarantined and a start was judged; nil otherwise and from an older agent.
 	StartResult *StartResultState `json:"start_result,omitempty"`
+
+	// ClockUnixMS is the agent's wall clock when the snapshot was taken,
+	// in Unix milliseconds; 0 from an agent before this field.
+	ClockUnixMS int64 `json:"clock_unix_ms,omitempty"`
+	// PerfSchema is @@global.performance_schema; nil while MySQL does
+	// not answer and from an agent before this field.
+	PerfSchema *bool `json:"performance_schema,omitempty"`
 }
 
 // EventHealth is the event an agent's monitor sends with a HealthEvent

@@ -497,6 +497,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	}
 	m.bootstrap(snap)
 	takenAt := m.now()
+	m.stamp(&snap, takenAt)
 	m.emitSample(snap, takenAt)
 	change := changed(m.prev, snap, o.LagThreshold, diskWarnPct, diskCritPct, connWarnPct)
 	if !change && takenAt.Sub(m.lastSent) < o.SummaryEvery {
@@ -528,9 +529,17 @@ func (m *Monitor) forcedCheck(ctx context.Context) (proto.HealthEvent, error) {
 	}
 	m.bootstrap(snap)
 	takenAt := m.now()
+	m.stamp(&snap, takenAt)
 	m.seq++
 	m.prev, m.lastSent = snap, takenAt
 	return proto.HealthEvent{Seq: m.seq, TakenAgoMS: m.now().Sub(takenAt).Milliseconds(), Snapshot: snap}, nil
+}
+
+// stamp adds to a reading what the monitor knows rather than the source:
+// the agent's clock at takenAt. tick and forcedCheck call it right after
+// taking takenAt.
+func (m *Monitor) stamp(s *proto.HealthSnapshot, takenAt time.Time) {
+	s.ClockUnixMS = takenAt.UnixMilli()
 }
 
 // bootstrap hands a reading MySQL answered to the pins with the panel's
