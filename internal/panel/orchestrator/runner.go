@@ -271,12 +271,31 @@ func (r *Runner) inventoryCallCut(ctx context.Context, serverID int64, cmd strin
 		inv.Connected = true
 		inv.Version, inv.Series = res.Status.Version, res.Status.Series
 		inv.Databases, inv.MissingGrants = res.Databases, res.MissingGrants
+		inv.Account = storedAccount(res.Account)
 	})
 	if err != nil {
 		return res, cut, err
 	}
 	r.d.Publish("mysql_inventory", map[string]any{"id": serverID})
 	return res, cut, nil
+}
+
+// maxAccount bounds the MySQL account an agent reports, in bytes.
+const maxAccount = 255
+
+// storedAccount is the MySQL account an agent reported (user@host), as the
+// inventory keeps it: one line without control or format characters
+// (agentPart) and at most maxAccount bytes, cut on a UTF-8 boundary.
+func storedAccount(s string) string {
+	s = agentPart(s, maxAccount)
+	if len(s) <= maxAccount {
+		return s
+	}
+	cut := maxAccount
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // updateInventory applies change to the server's inventory (a new one when
