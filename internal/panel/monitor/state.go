@@ -630,19 +630,50 @@ func (m *Monitor) commit(id int64, s *serverState, ups []healthUpdate) []healthU
 		return ups
 	}
 	s.dirty = false
-	if s.snap != nil || s.status.Code != "" {
-		h := store.Health{ServerID: id, ReceivedAt: s.receivedAt, Status: s.status.Code,
-			StatusSince: s.since, LockOK: !s.lockLost}
-		if s.snap != nil {
-			b, err := json.Marshal(s.snap)
-			if err == nil {
-				h.SnapshotJSON = string(b)
-			}
-			h.AgentVersion = s.snap.AgentVersion
-		}
-		if err := m.st.SetHealth(h); err != nil {
-			m.log.Warn("store server health", "server_id", id, "err", err)
-		}
-	}
+	m.storeHealth(id, s)
 	return append(ups, healthUpdate{id: id, status: s.status.Code, severity: s.status.Severity})
+}
+
+// storeHealth writes s as the server's health row (when it holds a report
+// or a status); a failure is logged. The caller holds mu.
+func (m *Monitor) storeHealth(id int64, s *serverState) {
+	if s.snap == nil && s.status.Code == "" {
+		return
+	}
+	h := store.Health{ServerID: id, ReceivedAt: s.receivedAt, Status: s.status.Code,
+		StatusSince: s.since, LockOK: !s.lockLost}
+	if s.snap != nil {
+		b, err := json.Marshal(s.snap)
+		if err == nil {
+			h.SnapshotJSON = string(b)
+		}
+		h.AgentVersion = s.snap.AgentVersion
+	}
+	if err := m.st.SetHealth(h); err != nil {
+		m.log.Warn("store server health", "server_id", id, "err", err)
+	}
+}
+
+// forgetBackup drops the backup state from the server's last report: the
+// snapshot is replaced by a copy without it (a stored snapshot is never
+// modified: views handed out may hold it), and the stored health row is
+// rewritten so a panel restart does not bring it back. Nothing else
+// changes; alerts are not judged here (unknown neither opens nor closes
+// backup_stale).
+func (m *Monitor) forgetBackup(id int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.servers[id]
+	if !ok || s.snap == nil || s.snap.Backup == nil {
+		return
+	}
+	snap := *s.snap
+	snap.Backup = nil
+	s.snap = &snap
+	// A state not yet committed (a backlog batch) is written whole at its
+	// commit, which now carries the copy; the row is rewritten here only
+	// for a committed state.
+	if !s.dirty {
+		m.storeHealth(id, s)
+	}
 }

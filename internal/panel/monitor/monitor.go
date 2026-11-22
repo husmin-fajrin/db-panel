@@ -357,7 +357,16 @@ func (m *Monitor) Reconfigure() {
 // which may end with its request, does not bound the call (the Monitor's
 // own does); an agent that is offline gets the folder with the
 // monitor.configure of its next connect.
+//
+// First, at once and online or not, it forgets the server's last backup
+// report (Ruling R22), which described the folder before the change: the
+// view's snapshot loses its backup state, every other field kept, in
+// memory and in the stored health row, so the backup card, JudgeBackup
+// and backup_stale read unknown (an open alert stays open) until the
+// agent's next report: the answer to this monitor.configure, or for an
+// offline agent the one of its next connect.
 func (m *Monitor) ConfigureServer(_ context.Context, id int64) {
+	m.forgetBackup(id)
 	if !m.hub.IsOnline(id) {
 		return
 	}

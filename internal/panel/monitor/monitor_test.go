@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
@@ -201,6 +202,9 @@ type fakeAgent struct {
 	attached bool
 	// gate, when set, holds monitor.snapshot answers until it is closed.
 	gate chan struct{}
+	// configGate, when set, holds monitor.configure answers until it is
+	// closed.
+	configGate chan struct{}
 }
 
 func (r *rig) agent(id int64, modern bool, snap proto.HealthSnapshot) *fakeAgent {
@@ -218,7 +222,11 @@ func (r *rig) agent(id int64, modern bool, snap proto.HealthSnapshot) *fakeAgent
 			a.configs = append(a.configs, p)
 			backlog := a.backlog
 			a.backlog = nil
+			configGate := a.configGate
 			a.mu.Unlock()
+			if configGate != nil {
+				<-configGate
+			}
 			for _, he := range backlog {
 				a.emit(he)
 			}
@@ -266,6 +274,26 @@ func (a *fakeAgent) holdSnapshots() (release func()) {
 		once.Do(func() {
 			a.mu.Lock()
 			a.gate = nil
+			a.mu.Unlock()
+			close(gate)
+		})
+	}
+	a.r.t.Cleanup(release)
+	return release
+}
+
+// holdConfigures makes monitor.configure wait until the returned
+// function is called (also at the end of the test).
+func (a *fakeAgent) holdConfigures() (release func()) {
+	gate := make(chan struct{})
+	a.mu.Lock()
+	a.configGate = gate
+	a.mu.Unlock()
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			a.mu.Lock()
+			a.configGate = nil
 			a.mu.Unlock()
 			close(gate)
 		})
@@ -1388,6 +1416,92 @@ func TestConfigureSendsBackupFolder(t *testing.T) {
 	if got := ra.lastConfig().BackupFolder; got != "/srv/other" {
 		t.Fatalf("next OnOnline sent backup_folder %q", got)
 	}
+}
+
+// TestConfigureServerForgetsBackup (Ruling R22): ConfigureServer forgets
+// the server's last backup report at once, online or not, so the report
+// of the previous folder never describes the new one: the view keeps
+// every other field, the verdict is unknown, the stored health row does
+// not bring the state back after a restart, an open backup_stale stays
+// open, and the agent's next report fills the state again.
+func TestConfigureServerForgetsBackup(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	if err := r.st.SetServerBackup(mID, "/srv/backup", 48); err != nil {
+		t.Fatal(err)
+	}
+	h := int64(3600)
+	snap := masterSnap(srcUUID + ":1-100")
+	snap.Backup = &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 100}
+	ma := r.agent(mID, true, snap).attach()
+	stale := r.openAlert(mID, KindBackupStale)
+
+	wantForgotten := func(before View, what string) {
+		t.Helper()
+		after := r.view(mID)
+		if after.Snap == nil || after.Snap.Backup != nil {
+			t.Fatalf("%s: backup state kept: %+v", what, after.Snap)
+		}
+		if before.Snap.Backup == nil {
+			t.Fatalf("%s: the snapshot held before was changed", what)
+		}
+		want := *before.Snap
+		want.Backup = nil
+		if *after.Snap != want || after.ReceivedAt != before.ReceivedAt || after.Backlog != before.Backlog ||
+			after.Status != before.Status || after.Role != before.Role {
+			t.Fatalf("%s: view changed beyond the backup state:\n%+v\n%+v", what, before, after)
+		}
+		srv, err := r.st.GetServer(mID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b := JudgeBackup(after, srv, r.clk.Now()); b.Status != BackupStatusUnknown {
+			t.Fatalf("%s: verdict %+v, want unknown", what, b)
+		}
+		r.m.tick()
+		if got := r.openAlert(mID, KindBackupStale); got.ID != stale.ID || got.Message != stale.Message {
+			t.Fatalf("%s: backup_stale %+v, want %+v kept", what, got, stale)
+		}
+	}
+
+	// Offline.
+	ma.detach()
+	before := r.view(mID)
+	r.m.ConfigureServer(context.Background(), mID)
+	wantForgotten(before, "offline")
+	r.settle()
+	// A panel restart reads the stored row: no backup state from it.
+	m2 := New(Deps{Store: r.st, Hub: r.hub, Publish: r.publish,
+		Logger: slog.New(slog.NewTextHandler(r.logs, nil)), Now: r.clk.Now, TickEvery: time.Hour})
+	t.Cleanup(m2.Close)
+	if v, ok := m2.View(mID); !ok || v.Snap == nil || v.Snap.Backup != nil {
+		t.Fatalf("after a restart: %+v", v.Snap)
+	}
+
+	// Online: forgotten before the agent answers; its answer fills it.
+	ma.attach()
+	if r.view(mID).Snap.Backup == nil {
+		t.Fatal("the connect's report did not fill the backup state")
+	}
+	release := ma.holdConfigures()
+	ma.setSnap(func(s *proto.HealthSnapshot) { s.Backup = &proto.BackupState{Status: proto.BackupNone} })
+	before = r.view(mID)
+	r.m.ConfigureServer(context.Background(), mID)
+	wantForgotten(before, "online")
+	release()
+	r.settle()
+	if b := r.view(mID).Snap.Backup; b == nil || b.Status != proto.BackupNone {
+		t.Fatalf("after the configure answer: %+v", b)
+	}
+	if got := r.openAlert(mID, KindBackupStale); got.ID != stale.ID ||
+		got.Message != fmt.Sprintf(wantG8c, "db-master") {
+		t.Fatalf("after the next report: %+v", got)
+	}
+
+	// A server the monitor holds no backup state for: nothing happens.
+	other := r.server("db-lain")
+	r.m.ConfigureServer(context.Background(), other)
+	r.settle()
 }
 
 // TestClockSkew: the agent's clock against the panel's at the moment the

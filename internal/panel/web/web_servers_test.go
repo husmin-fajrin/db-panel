@@ -274,3 +274,25 @@ func (m *fakeMonitor) configured() []int64 {
 	defer m.mu.Unlock()
 	return append([]int64(nil), m.configures...)
 }
+
+// After a save the monitor has forgotten the previous folder's report
+// (Ruling R22): the card says no report yet, not the old folder's state.
+func TestBackupCardAfterSaveForgetsOldReport(t *testing.T) {
+	e, mon, srv := backupEnv(t)
+	c := e.cookie()
+	if err := e.st.SetServerBackup(srv.ID, "/var/backups/lama", 24); err != nil {
+		t.Fatal(err)
+	}
+	mon.setView(monitor.View{ServerID: srv.ID, ReceivedAt: time.Now(), Snap: &proto.HealthSnapshot{
+		MySQLOK: true, Backup: &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 3600, NewestSize: 4096}}})
+	wantBody(t, e.do("GET", "/servers/1", nil, c), "Berkas terbaru: 1 jam lalu, 4 KB.")
+
+	wantCode(t, e.do("POST", "/servers/1/backup", backupForm("/var/backups/baru", "24"), c), http.StatusSeeOther)
+	card := backupCardOf(t, e.do("GET", "/servers/1?pesan=cadangan", nil, c).Body.String())
+	if !strings.Contains(card, "Belum ada laporan dari agent.") || strings.Contains(card, "Berkas terbaru") {
+		t.Errorf("card after the save:\n%s", card)
+	}
+	if v, _ := mon.View(srv.ID); v.Snap == nil || !v.Snap.MySQLOK {
+		t.Errorf("the rest of the view was dropped: %+v", v.Snap)
+	}
+}

@@ -71,10 +71,19 @@ func (m *fakeMonitor) Snooze(id int64, until *time.Time) error {
 	return m.err
 }
 
+// ConfigureServer records the call and, like the Monitor (Ruling R22),
+// forgets the server's last backup report: its view's snapshot is
+// replaced by a copy without it.
 func (m *fakeMonitor) ConfigureServer(_ context.Context, id int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.configures = append(m.configures, id)
+	if v, ok := m.views[id]; ok && v.Snap != nil && v.Snap.Backup != nil {
+		snap := *v.Snap
+		snap.Backup = nil
+		v.Snap = &snap
+		m.views[id] = v
+	}
 }
 
 func (m *fakeMonitor) setView(v monitor.View) {
