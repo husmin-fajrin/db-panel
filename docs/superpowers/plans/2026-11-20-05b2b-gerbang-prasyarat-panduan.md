@@ -828,6 +828,49 @@ README menambah:
     tulis di folder induknya) membuat agent melaporkan umur dan ukuran berkas
     terbaru di direktori lain; hanya dua angka, tanpa nama dan tanpa isi.
     Untuk ditinjau di audit keamanan.
+11. **2026-11-22 — urutan penilaian cadangan dan bunyi umur di G8a
+    (Task 7).** Rencana tidak mengaturnya. Berkas terbaru yang sekaligus
+    lebih tua dari batas dan 0 byte dinilai `stale` (umur dinilai sebelum
+    ukuran). Umur di G8a ditulis dalam menit di bawah 1 jam, jam bulat di
+    bawah 72 jam, lalu hari dan jam, selalu dibulatkan ke bawah. Selama jam
+    pertama sesudah batas terlewati, umur ditulis `lebih dari <batas> jam`,
+    supaya teksnya tidak berbunyi "berumur 48 jam (batas 48 jam)" (temuan
+    peninjau).
+12. **2026-11-22 — nama peringatan di Telegram huruf kecil (Task 7).**
+    Rencana memberi satu ejaan `Cadangan master usang` untuk halaman
+    peringatan dan Telegram. Di Telegram ditulis `cadangan master usang`,
+    seperti semua nama jenis peringatan lain di sana, yang berdiri di tengah
+    kalimat.
+13. **2026-11-22 — kartu cadangan di halaman server yang bukan master
+    (Task 8).** Rencana mengisi kartu dari `monitor.BackupMessage`, yang
+    teksnya menyebut "master %s", padahal kartu tampil di semua server. Di
+    halaman server yang bukan master, teks G8a–G8d memakai kata `server`
+    (misalnya `Folder cadangan server db2 tidak berisi berkas.`), lewat
+    `monitor.BackupMessageAs`. Teks untuk master tidak berubah.
+14. **2026-11-22 — isian folder dirapikan sebelum diperiksa (Task 8).**
+    Spasi di awal dan akhir serta garis miring di akhir dibuang sebelum
+    aturan folder dijalankan, dan nilai yang sudah dirapikan itulah yang
+    disimpan. Selain itu tidak ada yang diubah: `/a//b` tetap ditolak.
+15. **2026-11-22 — aturan folder di panel lebih ketat dari agent (Task 8).**
+    Panel juga menolak, dengan teks B3, folder yang memuat karakter kendali
+    Unicode apa pun (termasuk U+0080–U+009F) atau bukan UTF-8 yang sah.
+    Path seperti itu tidak bisa ditampilkan kembali apa adanya, sehingga
+    menyimpan formulir sekali lagi akan menyimpan path yang berbeda.
+16. **2026-11-22 — laporan cadangan lama dilupakan saat folder disimpan
+    (Task 8).** Tidak ada di rencana; kekhawatiran pelaksana. Begitu folder
+    cadangan disimpan, panel membuang laporan cadangan terakhir server itu,
+    juga yang tersimpan di basis data panel, sehingga kartu, peringatan dan
+    gerbang membaca "belum diketahui" sampai agent melapor lagi. Tanpa ini
+    laporan tentang folder lama dipakai untuk menilai folder baru, dan pada
+    agent yang offline hal itu berlangsung sampai agent tersambung lagi.
+17. **2026-11-22 — label halaman audit dan teks tambahan (Task 8).** Rencana
+    tidak memberi label untuk tiga aksi baru: `server_backup` → `Atur folder
+    cadangan`, `panel_key_marked` → `Tanda cadangan panel.key`,
+    `audit_forward_marked` → `Tanda penerusan log audit`. Teks lain yang
+    ditambahkan pelaksana (pemberitahuan sesudah menyimpan, judul kartu
+    `Cadangan (backup) panel dan log audit`) masuk daftar Task 14 dengan
+    tanda "tidak ada di rencana". `handlers_confirm.go` tidak disentuh:
+    ketiga rute baru tidak memakai token konfirmasi.
 
 ## Teks baru untuk dibaca pemilik
 
