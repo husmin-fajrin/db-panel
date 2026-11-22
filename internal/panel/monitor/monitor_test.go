@@ -1319,3 +1319,73 @@ func TestReplicasDisconnectedSkipsQuarantined(t *testing.T) {
 		t.Fatalf("master = %q (%s), want Diduga tumbang with 1 replica", v.Status.Code, v.Status.Detail)
 	}
 }
+
+// TestConfigureSendsBackupFolder: monitor.configure carries the server
+// row's backup folder whether OnOnline, Reconfigure or ConfigureServer
+// sends it; a server without one sends the field empty, and
+// ConfigureServer sends nothing to an offline agent (it gets the folder
+// at its next connect).
+func TestConfigureSendsBackupFolder(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	if err := r.st.SetServerBackup(mID, "/srv/backup/mysql", 48); err != nil {
+		t.Fatal(err)
+	}
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	if got := ma.lastConfig().BackupFolder; got != "/srv/backup/mysql" {
+		t.Fatalf("OnOnline sent backup_folder %q", got)
+	}
+	if got := ra.lastConfig().BackupFolder; got != "" {
+		t.Fatalf("server without a folder: OnOnline sent backup_folder %q", got)
+	}
+
+	// ConfigureServer: one call, to that server only, with the new folder.
+	if err := r.st.SetServerBackup(mID, "/data/backup", 24); err != nil {
+		t.Fatal(err)
+	}
+	r.m.ConfigureServer(context.Background(), mID)
+	r.settle()
+	if n := ma.count("monitor.configure"); n != 2 {
+		t.Fatalf("master got monitor.configure %d times, want 2", n)
+	}
+	if n := ra.count("monitor.configure"); n != 1 {
+		t.Fatalf("replica got monitor.configure %d times, want 1", n)
+	}
+	if p := ma.lastConfig(); p.BackupFolder != "/data/backup" || p.CheckEverySec != 15 || p.RoleHint != "master" {
+		t.Fatalf("ConfigureServer sent %+v", p)
+	}
+
+	// Reconfigure sends it as well; a folder cleared is sent empty.
+	if err := r.st.SetServerBackup(rID, "/var/backups/db", 48); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.SetServerBackup(mID, "", 48); err != nil {
+		t.Fatal(err)
+	}
+	r.m.Reconfigure()
+	r.settle()
+	if got := ma.lastConfig().BackupFolder; got != "" {
+		t.Fatalf("Reconfigure sent the cleared folder as %q", got)
+	}
+	if got := ra.lastConfig().BackupFolder; got != "/var/backups/db" {
+		t.Fatalf("Reconfigure sent backup_folder %q", got)
+	}
+
+	// Offline: nothing is sent, and the next connect carries the folder.
+	ra.detach()
+	if err := r.st.SetServerBackup(rID, "/srv/other", 48); err != nil {
+		t.Fatal(err)
+	}
+	before := ra.count("monitor.configure")
+	r.m.ConfigureServer(context.Background(), rID)
+	r.settle()
+	if n := ra.count("monitor.configure"); n != before {
+		t.Fatalf("offline agent got monitor.configure (%d, was %d)", n, before)
+	}
+	ra.attach()
+	if got := ra.lastConfig().BackupFolder; got != "/srv/other" {
+		t.Fatalf("next OnOnline sent backup_folder %q", got)
+	}
+}

@@ -338,6 +338,20 @@ func (m *Monitor) Reconfigure() {
 	}
 }
 
+// ConfigureServer sends monitor.configure to the agent of id alone, with
+// the folder and settings stored now (call it after the server's backup
+// folder changed). Like OnOnline it sends in the background, so a slow or
+// offline agent never holds up the caller, and the caller's context,
+// which may end with its request, does not bound the call (the Monitor's
+// own does); an agent that is offline gets the folder with the
+// monitor.configure of its next connect.
+func (m *Monitor) ConfigureServer(_ context.Context, id int64) {
+	if !m.hub.IsOnline(id) {
+		return
+	}
+	m.goBg(func(ctx context.Context) { m.configure(ctx, id) })
+}
+
 // CheckNow asks the agent for a fresh report and takes it; at most once
 // per 10 s per server.
 func (m *Monitor) CheckNow(ctx context.Context, serverID int64) error {
@@ -362,8 +376,9 @@ func (m *Monitor) CheckNow(ctx context.Context, serverID int64) error {
 	return nil
 }
 
-// configure sends the settings to the agent of id and takes its answer as
-// a report. An agent that does not know the command needs an upgrade.
+// configure sends the settings, and the server's backup folder ("" turns
+// the agent's scan off), to the agent of id and takes its answer as a
+// report. An agent that does not know the command needs an upgrade.
 func (m *Monitor) configure(ctx context.Context, id int64) {
 	ctx, cancel := context.WithTimeout(ctx, configureTimeout)
 	defer cancel()
@@ -387,6 +402,7 @@ func (m *Monitor) configure(ctx context.Context, id int64) {
 		SummaryEverySec: int(set.SummaryEvery / time.Second),
 		LagThresholdSec: int(set.Lag / time.Second),
 		RoleHint:        hint,
+		BackupFolder:    srv.BackupDir,
 	}
 	var he proto.HealthEvent
 	err = m.hub.Call(ctx, id, "monitor.configure", params, &he)
