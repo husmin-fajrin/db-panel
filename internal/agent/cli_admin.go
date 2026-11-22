@@ -63,6 +63,9 @@ Sesudah itu perintah ini mencoba masuk ke MySQL dengan akun itu. Hanya bila berh
 	textResetAbnormal    = "Perintah ini tidak selesai seperti biasa, tetapi akun dbpanel_admin@localhost sudah dibuat ulang dan disimpan sebagai akun agent; perintah ini tidak perlu dijalankan lagi."
 	textResetLoginFailed = "Akun dbpanel_admin@localhost sudah dibuat ulang di MySQL, tetapi tidak bisa dipakai masuk (%s), jadi tidak disimpan; akun yang disimpan agent tidak diganti. Bila agent memakai akun dbpanel_admin@localhost, agent tidak bisa masuk sekarang. Jalankan perintah ini lagi; bila sebab yang sama muncul lagi, sebab itu ada di pengaturan MySQL server ini dan perintah ini tidak bisa mengubahnya: periksa sebab itu bersama administrator MySQL server ini."
 	textResetUnknown     = "Tidak bisa dipastikan apakah akun dbpanel_admin@localhost sudah disimpan sebagai akun agent (%s). Jalankan perintah ini lagi."
+	textResetSaveFailed  = "Akun dbpanel_admin@localhost sudah dibuat ulang dan bisa masuk, tetapi tidak bisa disimpan agent (%s). Kunci baca-saja server ini sudah terpasang lagi."
+	textResetOldInUse    = "Agent masih memakai akun lama dan mungkin tidak bisa masuk ke MySQL. Perbaiki sebabnya, lalu jalankan perintah ini lagi."
+	textStoredReplaced   = "Akun MySQL yang disimpan agent tidak bisa dibaca (%v); akun itu akan diganti dengan yang baru."
 	textResetRunning     = "MySQL mungkin masih menjalankan pernyataan perintah ini pada akun dbpanel_admin@localhost, jadi hasilnya belum bisa dipastikan; akun yang disimpan agent belum diganti. Jangan jalankan perintah ini lagi sekarang. Lihat di server ini (hanya membaca): mysql -e 'SHOW PROCESSLIST'. Selama masih ada baris CREATE USER, ALTER USER atau GRANT di sana, tunggu. Sesudah baris itu hilang, jalankan perintah ini lagi."
 	textSyslogFailed     = "Peringatan: catatan ke log sistem gagal ditulis (%v).\n"
 )
@@ -99,10 +102,18 @@ type loginCheckError struct{ err error }
 func (e *loginCheckError) Error() string { return e.err.Error() }
 func (e *loginCheckError) Unwrap() error { return e.err }
 
+// storeWriteError is a new account whose login worked but which the
+// agent's store could not keep.
+type storeWriteError struct{ err error }
+
+func (e *storeWriteError) Error() string { return e.err.Error() }
+func (e *storeWriteError) Unwrap() error { return e.err }
+
 // verifyingStore is the agent's store, whose Save first logs in with the
 // account (on h, bounded by ctx and adminLoginWait) and stores it only when
 // that login worked as dbpanel_admin@localhost; otherwise Save is a
-// *loginCheckError and the store is untouched.
+// *loginCheckError and the store is untouched. A store that fails to
+// write after a good login is a *storeWriteError.
 type verifyingStore struct {
 	mysql.CredentialStore
 	ctx context.Context
@@ -119,7 +130,10 @@ func (v *verifyingStore) Save(p proto.ConnectParams) error {
 	if err != nil {
 		return &loginCheckError{err}
 	}
-	return v.CredentialStore.Save(p)
+	if err := v.CredentialStore.Save(p); err != nil {
+		return &storeWriteError{err}
+	}
+	return nil
 }
 
 // parseAdminArgs parses "[--pengguna NAMA] [--dir DIR]".
@@ -450,9 +464,12 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 	if err != nil {
 		return a.fail(textCredsUnusable, err)
 	}
+	// A stored account that cannot be read is replaced (the store is
+	// rewritten at the end); before is then empty.
 	before, _, err := creds.Load()
 	if err != nil {
-		return a.fail(textCredsUnusable, err)
+		fmt.Fprintf(stdout, textStoredReplaced+"\n", printable(err.Error()))
+		before = proto.ConnectParams{}
 	}
 	// Without agent.yaml (corrupt or missing) the MySQL its socket
 	// override names is not known: refused (ruling D57).
@@ -534,6 +551,7 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 		doErr, running = lifted.DoErr, lifted.Running
 	}
 	var loginErr *loginCheckError
+	var storeErr *storeWriteError
 	now, stored, lerr := creds.Load()
 	saved := lerr == nil && stored && now.User == "dbpanel_admin" && now.Password != before.Password
 	switch {
@@ -554,6 +572,10 @@ func mainResetAdmin(args []string, in io.Reader, stdout, stderr io.Writer, write
 		record(window, "login-failed")
 		fmt.Fprintf(stderr, textResetLoginFailed+"\n", printable(loginErr.Error()))
 		a.lockLine(err)
+	case !abnormal(err) && errors.As(doErr, &storeErr):
+		record(window, "not-stored")
+		fmt.Fprintf(stderr, textResetSaveFailed+"\n", printable(storeErr.Error()))
+		fmt.Fprintln(stderr, textResetOldInUse)
 	default:
 		record(window, "not-stored")
 		failed()

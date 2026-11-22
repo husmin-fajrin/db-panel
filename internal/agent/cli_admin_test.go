@@ -710,3 +710,95 @@ func TestRootCommandsRefuseUnreadableConfig(t *testing.T) {
 		t.Errorf("system log lines %q", lines)
 	}
 }
+
+// TestResetAdminReplacesUnreadableStoredAccount (A-M7): a stored account
+// that cannot be read (here its file is not sealed with the agent's key)
+// does not stop reset-admin: F3 says it will be replaced, before the
+// question, and the command goes on and stores the new account. A
+// credential store that cannot be opened at all (no sealing key) is still
+// refused.
+func TestResetAdminReplacesUnreadableStoredAccount(t *testing.T) {
+	r := newAdminRig(t)
+	r.creds() // the sealing key exists
+	if err := os.WriteFile(filepath.Join(r.dir, credFile), []byte("bukan kredensial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, lerr := r.creds().Load()
+	if lerr == nil {
+		t.Fatal("the stored account reads")
+	}
+	f3 := fmt.Sprintf("Akun MySQL yang disimpan agent tidak bisa dibaca (%v); akun itu akan diganti dengan yang baru.", lerr)
+	code, out, errOut := r.command("reset-admin", "ya\n")
+	if code != 0 || !strings.HasPrefix(out, f3+"\n") || !strings.HasSuffix(out, textConfirmYa+c19+"\n") || errOut != "" {
+		t.Fatalf("reset-admin = %d\nstdout %q\nstderr %q\nwant stdout from %q", code, out, errOut, f3)
+	}
+	if strings.Index(out, f3) > strings.Index(out, textConfirmYa) {
+		t.Errorf("F3 after the question: %q", out)
+	}
+	if p := r.stored(); p.User != "dbpanel_admin" || len(p.Password) < 16 {
+		t.Errorf("stored account %q (password %d characters)", p.User, len(p.Password))
+	}
+	if name, err := mysql.StoredAccountName(context.Background(), r.inst.HostWith(r.creds())); err != nil || name != "dbpanel_admin@localhost" {
+		t.Errorf("StoredAccountName = %q, %v", name, err)
+	}
+
+	cause := errors.New("buka kunci rahasia: permission denied")
+	setVar(t, &cliAgentCreds, func(string) (mysql.CredentialStore, error) { return nil, cause })
+	code, out, errOut = r.command("reset-admin", "ya\n")
+	if want := fmt.Sprintf(textCredsUnusable, cause) + "\n"; code != 1 || errOut != want {
+		t.Errorf("reset-admin without a store = %d\nstderr %q\nwant   %q\nstdout %q", code, errOut, want, out)
+	}
+}
+
+// failSaveStore is a credential store whose Save fails with err.
+type failSaveStore struct {
+	mysql.CredentialStore
+	err error
+}
+
+func (s failSaveStore) Save(proto.ConnectParams) error { return s.err }
+
+// TestResetAdminSaveFailedAfterGoodLogin: the new account was made and
+// logs in, but the agent's store cannot be written: F4's two lines, not
+// the generic failure, and the system log says not-stored.
+func TestResetAdminSaveFailedAfterGoodLogin(t *testing.T) {
+	r := newAdminRig(t)
+	r.account("'agen'@'localhost'", "Agen-123", "SHOW DATABASES")
+	r.store(proto.ConnectParams{User: "agen", Password: "Agen-123"})
+	cause := errors.New("tulis /etc/dbpanel/mysql.cred.tmp: no space left on device")
+	real := cliAgentCreds
+	setVar(t, &cliAgentCreds, func(dir string) (mysql.CredentialStore, error) {
+		c, err := real(dir)
+		if err != nil {
+			return nil, err
+		}
+		return failSaveStore{CredentialStore: c, err: cause}, nil
+	})
+	loggedIn := false
+	login := cliAdminLogin
+	setVar(t, &cliAdminLogin, func(ctx context.Context, h mysql.Host, p proto.ConnectParams) (string, error) {
+		account, err := login(ctx, h, p)
+		loggedIn = err == nil && account == "dbpanel_admin@localhost"
+		return account, err
+	})
+	code, out, errOut := r.command("reset-admin", "ya\n")
+	if !loggedIn {
+		t.Error("the new account did not log in")
+	}
+	want := fmt.Sprintf("Akun dbpanel_admin@localhost sudah dibuat ulang dan bisa masuk, tetapi tidak bisa disimpan agent (%s). "+
+		"Kunci baca-saja server ini sudah terpasang lagi.", cause) + "\n" +
+		"Agent masih memakai akun lama dan mungkin tidak bisa masuk ke MySQL. Perbaiki sebabnya, lalu jalankan perintah ini lagi.\n"
+	if code != 1 || errOut != want || strings.Contains(out, c19) {
+		t.Errorf("reset-admin = %d\nstderr %q\nwant   %q\nstdout %q", code, errOut, want, out)
+	}
+	if p := r.stored(); p.User != "agen" {
+		t.Errorf("stored account %q, want the earlier one", p.User)
+	}
+	if f := r.flags(); f != "1 1" || !r.lockFree() {
+		t.Errorf("flags %s, lock free %v", f, r.lockFree())
+	}
+	lines := r.syslogLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "outcome=not-stored") {
+		t.Errorf("system log %q", lines)
+	}
+}
