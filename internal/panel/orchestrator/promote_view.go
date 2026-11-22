@@ -15,8 +15,12 @@ import (
 
 // Health is what the Runner needs of the panel's Monitor.
 type Health interface {
-	// CheckNow asks the agent for a fresh report (rate limited).
+	// CheckNow asks the agent for a fresh report (rate limited). Gate never
+	// calls it: the gate judges the reports the panel already holds.
 	CheckNow(ctx context.Context, serverID int64) error
+	// View is the server's last report as the Monitor holds it, with its
+	// clock (monitor.ClockSkew), performance_schema and backup state that
+	// Gate reads; false when the Monitor knows nothing of the server.
 	View(serverID int64) (monitor.View, bool)
 }
 

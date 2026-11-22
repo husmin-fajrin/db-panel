@@ -133,6 +133,10 @@ type Deps struct {
 	// (the result of "Periksa data tertinggal", spec 5.4); nil sends
 	// nothing.
 	SendText func(ctx context.Context, text string) error
+	// PortProbe reports whether hostPort accepts a TCP connection from the
+	// panel host within ctx (the gate's master_port row, gate_port.go);
+	// nil dials with net.Dialer and a one-second timeout.
+	PortProbe func(ctx context.Context, hostPort string) bool
 }
 
 // Alerts is told when a job fails (step is the title of the step that
@@ -186,6 +190,9 @@ type Runner struct {
 	// repointMu serialises mysql.repoint and mysql.quarantine sent outside
 	// a job step (OnOnline, RepointNow) with each other and with the job.
 	repointMu sync.Mutex
+
+	// ports keeps the gate's probes of the masters' MySQL ports.
+	ports portProbes
 
 	mu     sync.Mutex
 	live   map[string]*liveJob // jobs with a goroutine
