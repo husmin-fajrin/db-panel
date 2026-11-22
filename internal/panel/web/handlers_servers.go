@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -688,31 +689,24 @@ func newPinFacts(server string, snap *proto.HealthSnapshot) *pinFacts {
 	return f
 }
 
-// maxSourcePin bounds a source pin shown as it is (ruling R9).
-const maxSourcePin = 261
+// sourceHostRe is the agent's rule for a source host (sourceHostRe and
+// validSourceHost in internal/agent/drivers/mysql): an IPv4/IPv6 literal
+// or a host name of at most 255 characters, with no quote, space, comma
+// or zone. A host holding ":" must also be an IP (net.ParseIP).
+var sourceHostRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,255}$`)
 
-// hostPortPin reports whether a source pin reads as host:port (ruling R9):
-// at most maxSourcePin bytes, net.SplitHostPort accepts it, the port is a
-// number 1-65535 and the host is not empty and holds only ASCII letters,
-// digits, ".", "-" and ":" (an IPv6 literal). Such a pin is shown as it
-// is; any other is the agent's text.
+// hostPortPin reports whether a source pin reads as host:port: it splits
+// (net.SplitHostPort), its host passes the agent's rule for a source host
+// (sourceHostRe; with ":" only as an IP) and its port is a number 1-65535
+// written without sign or leading zeros. Such a pin is shown as it is; any
+// other is the agent's text.
 func hostPortPin(pin string) bool {
-	if len(pin) > maxSourcePin {
-		return false
-	}
 	host, port, err := net.SplitHostPort(pin)
-	if err != nil || host == "" {
+	if err != nil || !sourceHostRe.MatchString(host) || (strings.Contains(host, ":") && net.ParseIP(host) == nil) {
 		return false
 	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
-		return false
-	}
-	for _, r := range host {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == ':') {
-			return false
-		}
-	}
-	return true
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535 && strconv.Itoa(n) == port
 }
 
 // startLockFacts is the start lock of a quarantined server in words.

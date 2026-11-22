@@ -114,10 +114,12 @@ func TestHealthFieldsBoundedAndLabelled(t *testing.T) {
 	}
 }
 
-// TestSourcePinBoundedWhenMalformed (ruling R9): a source pin that is a
-// well-formed host:port is shown as it is; any other value is the agent's
-// text, shown as "tidak dikenal" with its labelled value one line and cut
-// at 32 characters.
+// TestSourcePinBoundedWhenMalformed: a source pin whose host passes the
+// agent's rule for a source host (a host name with "_", an IPv6 literal)
+// and whose port is a number is shown as it is; any other value (a zone,
+// a colon in a host that is no IP) is the agent's text, shown as
+// "tidak dikenal" with its labelled value one line and cut at 32
+// characters.
 func TestSourcePinBoundedWhenMalformed(t *testing.T) {
 	e, mon, _ := monitorEnv(t)
 	c := e.cookie()
@@ -130,7 +132,7 @@ func TestSourcePinBoundedWhenMalformed(t *testing.T) {
 		wantCode(t, rec, http.StatusOK)
 		return rec.Body.String()
 	}
-	for _, pin := range []string{"10.0.0.5:3306", "db-master.example:3306"} {
+	for _, pin := range []string{"10.0.0.5:3306", "db-master.example:3306", "db_master:3306", "[2001:db8::1]:3306"} {
 		body := show(pin)
 		if !strings.Contains(body, "Sumber dipin: "+pin+"</p>") {
 			t.Errorf("well-formed source pin %q is not shown as it is:\n%s", pin, between(body, "Detail teknis", "</details>"))
@@ -143,7 +145,7 @@ func TestSourcePinBoundedWhenMalformed(t *testing.T) {
 		t.Errorf("long source pin is not shown as tidak dikenal:\n%s", between(body, "Detail teknis", "</details>"))
 	}
 	wantBoundedLine(t, "long source pin", strings.TrimSuffix(labelledValue(t, body, "db-master", "SRCPIN"), ")"), 32)
-	for _, pin := range []string{"host:notaport", "db master:3306"} {
+	for _, pin := range []string{"host:notaport", "db master:3306", "[fe80::1%eth0]:3306", "a:b:3306"} {
 		body := show(pin)
 		if want := unknown + pin + ")</p>"; !strings.Contains(body, want) {
 			t.Errorf("malformed source pin %q is not shown as %q:\n%s", pin, want, between(body, "Detail teknis", "</details>"))
