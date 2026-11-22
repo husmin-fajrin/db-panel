@@ -52,6 +52,10 @@ const (
 	defaultEventsRetention  = 180 // days
 	defaultSamplesRetention = 7   // days
 
+	// DefaultBackupMaxAgeHours: a newest backup file older than this many
+	// hours is stale, for a server without a limit of its own.
+	DefaultBackupMaxAgeHours = 48
+
 	// Bounds of both retentions, in days.
 	MinRetentionDays = 1
 	MaxRetentionDays = 3650

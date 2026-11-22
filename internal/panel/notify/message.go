@@ -84,6 +84,8 @@ var kindNames = map[string]string{
 	monitor.KindMasterStartBypassed:  "kunci start master lama tidak dipakai MySQL",
 	monitor.KindMasterStartBlocked:   "MySQL master lama gagal menyala karena kunci start",
 	monitor.KindMasterLockKept:       "kunci promote master dipertahankan",
+
+	monitor.KindBackupStale: "cadangan master usang",
 }
 
 // masterKinds and replicaKinds link to the master's or the replica's page;
@@ -91,7 +93,7 @@ var kindNames = map[string]string{
 // other kinds link to the server's page.
 var (
 	masterKinds = map[string]bool{monitor.KindMasterLocked: true, monitor.KindMasterDown: true,
-		monitor.KindMasterLockExpired: true, monitor.KindMasterLockKept: true}
+		monitor.KindMasterLockExpired: true, monitor.KindMasterLockKept: true, monitor.KindBackupStale: true}
 	replicaKinds = map[string]bool{
 		monitor.KindReplicaStopped: true, monitor.KindReplicaDisconnected: true, monitor.KindReplicaLagging: true,
 		monitor.KindReplicaUnlocked: true, monitor.KindMySQLUnreachable: true, monitor.KindBinlogDeadline: true,

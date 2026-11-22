@@ -90,7 +90,7 @@ func TestAllKinds(t *testing.T) {
 	want := "replica_stopped replica_disconnected replica_lagging replica_unlocked master_locked master_down " +
 		"mysql_unreachable agent_offline disk_warn disk_crit connections_high binlog_deadline job_failed tls_expiring web_tls_expiring " +
 		"promote_cutover promote_partial replica_needs_repoint replica_needs_rebuild master_quarantined master_lock_expired master_unpinned " +
-		"master_start_unguarded master_start_late master_start_bypassed master_start_blocked master_lock_kept"
+		"master_start_unguarded master_start_late master_start_bypassed master_start_blocked master_lock_kept backup_stale"
 	if got := strings.Join(AllKinds(), " "); got != want {
 		t.Fatalf("AllKinds = %s", got)
 	}
@@ -3267,5 +3267,226 @@ func TestLateRuleDecisions(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The backup texts of plan 5b-2b (G8a-G8d), letter for letter.
+const (
+	wantG8a = "Berkas terbaru di folder cadangan master %s berumur %s (batas %d jam)."
+	wantG8b = "Berkas terbaru di folder cadangan master %s kosong (0 byte)."
+	wantG8c = "Folder cadangan master %s tidak berisi berkas."
+	wantG8d = "Folder cadangan master %s tidak bisa dibaca agent: %s."
+)
+
+// backupView is a master's view whose last report, received at, carries
+// the backup state b (nil: none).
+func backupView(at time.Time, b *proto.BackupState) View {
+	snap := masterSnap(srcUUID + ":1-100")
+	snap.Backup = b
+	return View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: at, Snap: &snap}
+}
+
+// TestJudgeBackupTable: every status JudgeBackup gives, in the order it
+// judges (Ruling R15): no folder on the row, then nothing known, then
+// what the agent read; the age judged is the reported age plus the time
+// since the report, and age is judged before size.
+func TestJudgeBackupTable(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	srv := store.Server{ID: 1, Name: "db-master", BackupDir: "/srv/backup", BackupMaxAgeHours: 48}
+	noDir := srv
+	noDir.BackupDir = ""
+	h := int64(3600)
+	cases := []struct {
+		name string
+		v    View
+		srv  store.Server
+		want BackupVerdict
+	}{
+		{"no folder, report ok", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 60, NewestSize: 10}), noDir,
+			BackupVerdict{Status: "unset"}},
+		{"no folder, no report", View{Role: store.RoleMaster}, noDir, BackupVerdict{Status: "unset"}},
+		{"no report", View{Role: store.RoleMaster}, srv, BackupVerdict{Status: "unknown"}},
+		{"old agent or scan off", backupView(now, nil), srv, BackupVerdict{Status: "unknown"}},
+		{"pending", backupView(now, &proto.BackupState{Status: proto.BackupPending}), srv, BackupVerdict{Status: "unknown"}},
+		{"status unknown to the panel", backupView(now, &proto.BackupState{Status: "weird"}), srv, BackupVerdict{Status: "unknown"}},
+		{"unreadable", backupView(now, &proto.BackupState{Status: proto.BackupUnreadable, Reason: proto.BackupReasonDenied}), srv,
+			BackupVerdict{Status: "unreadable", Reason: "denied"}},
+		{"none", backupView(now, &proto.BackupState{Status: proto.BackupNone}), srv, BackupVerdict{Status: "none"}},
+		{"ok", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 3 * h, NewestSize: 1 << 20}), srv,
+			BackupVerdict{Status: "ok", AgeSec: 3 * h, Size: 1 << 20}},
+		{"ok at exactly the limit", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 48 * h, NewestSize: 5}), srv,
+			BackupVerdict{Status: "ok", AgeSec: 48 * h, Size: 5}},
+		{"ok but truncated", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: h, NewestSize: 5, Truncated: true}), srv,
+			BackupVerdict{Status: "ok", AgeSec: h, Size: 5}},
+		{"stale", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 5}), srv,
+			BackupVerdict{Status: "stale", AgeSec: 50 * h, Size: 5}},
+		{"stale only by the time since the report", backupView(now.Add(-2*time.Hour),
+			&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 47 * h, NewestSize: 5}), srv,
+			BackupVerdict{Status: "stale", AgeSec: 49 * h, Size: 5}},
+		{"empty file", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: h}), srv,
+			BackupVerdict{Status: "empty_file", AgeSec: h}},
+		{"stale and empty: stale (R15)", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 100 * h}), srv,
+			BackupVerdict{Status: "stale", AgeSec: 100 * h}},
+	}
+	for _, c := range cases {
+		if got := JudgeBackup(c.v, c.srv, now); got != c.want {
+			t.Errorf("%s: JudgeBackup = %+v, want %+v", c.name, got, c.want)
+		}
+	}
+	// The limit is the row's.
+	short := srv
+	short.BackupMaxAgeHours = 2
+	if got := JudgeBackup(backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 3 * h, NewestSize: 5}), short, now); got.Status != "stale" {
+		t.Errorf("3 h old with a limit of 2 h: %+v, want stale", got)
+	}
+}
+
+// TestBackupMessageTexts: G8a-G8d letter for letter, each reason of an
+// unreadable folder in its words, and no text for unset, unknown and ok.
+func TestBackupMessageTexts(t *testing.T) {
+	h := int64(3600)
+	cases := []struct {
+		b    BackupVerdict
+		want string
+	}{
+		{BackupVerdict{Status: "stale", AgeSec: 50 * h, Size: 5}, fmt.Sprintf(wantG8a, "db-master", "50 jam", 48)},
+		{BackupVerdict{Status: "stale", AgeSec: 49*h + 59*60, Size: 5}, fmt.Sprintf(wantG8a, "db-master", "49 jam", 48)},
+		{BackupVerdict{Status: "stale", AgeSec: 75 * h}, fmt.Sprintf(wantG8a, "db-master", "3 hari 3 jam", 48)},
+		{BackupVerdict{Status: "stale", AgeSec: 96 * h}, fmt.Sprintf(wantG8a, "db-master", "4 hari", 48)},
+		{BackupVerdict{Status: "empty_file", AgeSec: h}, fmt.Sprintf(wantG8b, "db-master")},
+		{BackupVerdict{Status: "none"}, fmt.Sprintf(wantG8c, "db-master")},
+		{BackupVerdict{Status: "unset"}, ""},
+		{BackupVerdict{Status: "unknown"}, ""},
+		{BackupVerdict{Status: "ok", AgeSec: h, Size: 5}, ""},
+	}
+	for _, c := range cases {
+		if got := BackupMessage(c.b, "db-master", 48); got != c.want {
+			t.Errorf("BackupMessage(%+v) = %q, want %q", c.b, got, c.want)
+		}
+	}
+	if got, want := BackupMessage(BackupVerdict{Status: "stale", AgeSec: 30 * 60}, "db-master", 0),
+		fmt.Sprintf(wantG8a, "db-master", "30 menit", 0); got != want {
+		t.Errorf("stale under an hour = %q, want %q", got, want)
+	}
+	reasons := map[string]string{
+		proto.BackupReasonMissing: "folder itu tidak ada",
+		proto.BackupReasonNotDir:  "itu bukan folder",
+		proto.BackupReasonDenied:  "izin ditolak",
+		proto.BackupReasonHidden:  "folder itu tidak terlihat oleh layanan agent",
+		proto.BackupReasonInvalid: "path-nya tidak sah",
+		proto.BackupReasonTimeout: "pemindaian tidak selesai dalam 10 detik",
+		proto.BackupReasonLimit:   "lebih dari 10.000 entri dan belum ada berkas yang ditemukan",
+		proto.BackupReasonError:   "galat lain; lihat log agent",
+		"":                        "galat lain; lihat log agent",
+		"<b>hostile</b>\n":        "galat lain; lihat log agent",
+	}
+	for reason, words := range reasons {
+		got := BackupMessage(BackupVerdict{Status: "unreadable", Reason: reason}, "db-master", 48)
+		if want := fmt.Sprintf(wantG8d, "db-master", words); got != want {
+			t.Errorf("reason %q: %q, want %q", reason, got, want)
+		}
+	}
+}
+
+// TestBackupStaleAlertOpensAndCloses: backup_stale opens on a master whose
+// backup is stale, with G8a; stays open while nothing is known (a folder
+// change pending); follows the message as the verdict changes; closes
+// when the backup is fresh or the folder is cleared. A replica and a
+// quarantined old master never get it.
+func TestBackupStaleAlertOpensAndCloses(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	for _, id := range []int64{mID, rID} {
+		if err := r.st.SetServerBackup(id, "/srv/backup", 48); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := int64(3600)
+	withBackup := func(b *proto.BackupState) func(s *proto.HealthSnapshot) {
+		return func(s *proto.HealthSnapshot) { s.Backup = b }
+	}
+	msnap := masterSnap(srcUUID + ":1-100")
+	msnap.Backup = &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 2 * h, NewestSize: 100}
+	ma := r.agent(mID, true, msnap).attach()
+	rsnap := replicaSnap(srcUUID + ":1-100")
+	rsnap.Backup = &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 100 * h, NewestSize: 100}
+	ra := r.agent(rID, true, rsnap).attach()
+	if r.isOpen(mID, KindBackupStale) {
+		t.Fatal("backup_stale open for a fresh backup")
+	}
+
+	ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 100}))
+	ma.send()
+	a := r.openAlert(mID, KindBackupStale)
+	if want := fmt.Sprintf(wantG8a, "db-master", "50 jam", 48); a.Message != want {
+		t.Fatalf("message %q, want %q", a.Message, want)
+	}
+	if a.TopologyID != topo.ID {
+		t.Errorf("alert topology = %d, want %d", a.TopologyID, topo.ID)
+	}
+
+	// A folder change pending: nothing known, the alert stays as it is.
+	for _, b := range []*proto.BackupState{{Status: proto.BackupPending}, nil} {
+		ma.setSnap(withBackup(b))
+		ma.send()
+		if got := r.openAlert(mID, KindBackupStale); got.ID != a.ID || got.Message != a.Message {
+			t.Fatalf("on unknown (%+v): %+v, want the alert kept", b, got)
+		}
+	}
+
+	// The message follows the verdict.
+	ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupUnreadable, Reason: proto.BackupReasonMissing}))
+	ma.send()
+	if got := r.openAlert(mID, KindBackupStale); got.ID != a.ID || got.Message != fmt.Sprintf(wantG8d, "db-master", "folder itu tidak ada") {
+		t.Fatalf("on unreadable: %+v", got)
+	}
+
+	ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: h, NewestSize: 100}))
+	ma.send()
+	if as := r.alerts(mID, KindBackupStale); len(as) != 1 || as[0].ClosedAt == nil || as[0].CloseReason != "" {
+		t.Fatalf("after a fresh backup: %+v, want the alert closed as recovered", as)
+	}
+
+	// Stale only by the time passing since the report: the tick opens it.
+	ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 47 * h, NewestSize: 100}))
+	ma.send()
+	if r.isOpen(mID, KindBackupStale) {
+		t.Fatal("backup_stale open at 47 h")
+	}
+	r.clk.Add(2 * time.Hour)
+	r.m.tick()
+	if a := r.openAlert(mID, KindBackupStale); a.Message != fmt.Sprintf(wantG8a, "db-master", "49 jam", 48) {
+		t.Fatalf("after two hours: %q", a.Message)
+	}
+	// The folder cleared: closed.
+	if err := r.st.SetServerBackup(mID, "", 48); err != nil {
+		t.Fatal(err)
+	}
+	ma.setSnap(withBackup(nil))
+	ma.send()
+	if r.isOpen(mID, KindBackupStale) {
+		t.Fatal("backup_stale open after the folder was cleared")
+	}
+
+	// A replica, whatever its backup: never.
+	ra.send()
+	r.m.tick()
+	if as := r.alerts(rID, KindBackupStale); len(as) != 0 {
+		t.Fatalf("replica got backup_stale: %+v", as)
+	}
+
+	// A quarantined old master, whatever its backup: never.
+	r2 := newRig(t)
+	snap := quarSnap(&proto.StartLockState{Locked: true})
+	snap.Backup = &proto.BackupState{Status: proto.BackupNone}
+	qID, _, qa := r2.quarantined(snap)
+	if err := r2.st.SetServerBackup(qID, "/srv/backup", 48); err != nil {
+		t.Fatal(err)
+	}
+	qa.send()
+	r2.m.tick()
+	if as := r2.alerts(qID, KindBackupStale); len(as) != 0 {
+		t.Fatalf("quarantined old master got backup_stale: %+v", as)
 	}
 }

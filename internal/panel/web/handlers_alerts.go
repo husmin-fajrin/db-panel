@@ -46,6 +46,8 @@ var alertKindLabels = map[string]string{
 	monitor.KindMasterStartBypassed:  "Kunci start master lama tidak dipakai MySQL",
 	monitor.KindMasterStartBlocked:   "MySQL master lama gagal menyala karena kunci start",
 	monitor.KindMasterLockKept:       "Kunci promote master dipertahankan",
+
+	monitor.KindBackupStale: "Cadangan master usang",
 }
 
 func alertKindLabel(kind string) string {

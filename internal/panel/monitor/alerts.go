@@ -61,6 +61,11 @@ const (
 	KindMasterStartBypassed  = "master_start_bypassed"
 	KindMasterStartBlocked   = "master_start_blocked"
 	KindMasterLockKept       = "master_lock_kept"
+
+	// KindBackupStale: the newest file in a master's backup folder is
+	// older than its limit or empty, or the folder holds no file or cannot
+	// be read (plan 5b-2b); follows the agent's report (rules).
+	KindBackupStale = "backup_stale"
 )
 
 // AllKinds returns every alert kind, in the order of spec 5.3.
@@ -71,7 +76,7 @@ func AllKinds() []string {
 		KindPromoteCutover, KindPromotePartial, KindReplicaNeedsRepoint, KindReplicaNeedsRebuild,
 		KindMasterQuarantined, KindMasterLockExpired, KindMasterUnpinned,
 		KindMasterStartUnguarded, KindMasterStartLate, KindMasterStartBypassed, KindMasterStartBlocked,
-		KindMasterLockKept}
+		KindMasterLockKept, KindBackupStale}
 }
 
 // Fixed delays and hysteresis of the rules (plan 3, Global Constraints);
@@ -106,6 +111,9 @@ type ruleCtx struct {
 	// unpinnedReports: reports in a row whose role pin is not master
 	// (serverState.unpinnedReports).
 	unpinnedReports int
+	// server is a master's row in the store (its name, backup folder and
+	// limit); nil for any other server, or when it could not be read.
+	server *store.Server
 }
 
 // alertRule opens an alert of kind when open holds (with its message) and
@@ -367,6 +375,33 @@ var alertRules = []alertRule{
 			return ""
 		},
 		judgedWhile: func(View, ruleCtx) bool { return true },
+	},
+	{
+		// A master's backup (plan 5b-2b): open on a stale or empty newest
+		// file, an empty folder or one the agent cannot read; closed when
+		// the backup is fresh or no folder is set; nothing known (no
+		// report, a scan pending) leaves it as it is.
+		kind: KindBackupStale,
+		open: func(v View, ctx ruleCtx) (bool, string) {
+			if !isMaster(v) || ctx.server == nil {
+				return false, ""
+			}
+			b := JudgeBackup(v, *ctx.server, ctx.now)
+			if !backupAlerting(b.Status) {
+				return false, ""
+			}
+			return true, BackupMessage(b, ctx.server.Name, backupMaxAgeHours(*ctx.server))
+		},
+		close: func(v View, ctx ruleCtx) bool {
+			if !isMaster(v) {
+				return true
+			}
+			if ctx.server == nil {
+				return false
+			}
+			st := JudgeBackup(v, *ctx.server, ctx.now).Status
+			return st == BackupStatusOK || st == BackupStatusUnset
+		},
 	},
 }
 
@@ -778,6 +813,13 @@ func (m *Monitor) ruleCtx(id int64, s *serverState, v View, now time.Time) ruleC
 	ctx := ruleCtx{now: now, set: m.settings,
 		connHighSince: s.connHighSince, syncedSince: s.syncedSince, outSince: s.outSince, repState: s.repState,
 		unpinnedReports: s.unpinnedReports}
+	if v.Role == store.RoleMaster {
+		if srv, err := m.st.GetServer(id); err == nil {
+			ctx.server = &srv
+		} else {
+			m.log.Warn("evaluate alerts: read server", "server_id", id, "err", err)
+		}
+	}
 	if v.Role == store.RoleReplica {
 		if ms, ok := m.servers[s.masterID]; ok && s.masterID != id {
 			mv := ms.view(s.masterID)
@@ -1019,3 +1061,137 @@ func tlsExpiringMessage(server string, left time.Duration) string {
 // opened only by root on the master itself.
 const masterLockedAdvice = "Bila master dikunci untuk promosi dan kandidatnya hilang, atau dikunci dengan lock-master, " +
 	"buka kuncinya dengan menjalankan di server master: sudo dbpanel agent unlock-master"
+
+// Statuses of a BackupVerdict.
+const (
+	BackupStatusUnset      = "unset"      // no backup folder set for the server
+	BackupStatusUnknown    = "unknown"    // nothing known of the folder yet
+	BackupStatusOK         = "ok"         // the newest file is fresh and not empty
+	BackupStatusStale      = "stale"      // the newest file is older than the limit
+	BackupStatusEmptyFile  = "empty_file" // the newest file has 0 bytes
+	BackupStatusNone       = "none"       // the folder holds no file
+	BackupStatusUnreadable = "unreadable" // the agent cannot read the folder (Reason)
+)
+
+// BackupVerdict is the panel's judgement of a server's backup folder:
+// Status (BackupStatus...), the newest file's age now and its size (with
+// ok, stale and empty_file), and the agent's reason (with unreadable).
+type BackupVerdict struct {
+	Status       string
+	AgeSec, Size int64
+	Reason       string
+}
+
+// JudgeBackup judges the backup folder of srv from the last report in v,
+// at now, in this order (Ruling R15): no folder on the row is unset; no
+// report, no backup state (an agent before it, or its scan off) or a scan
+// pending is unknown; then the agent's status: unreadable, none, or, for
+// ok, stale when the newest file's age (its age when the report was taken
+// plus the time since) is over the row's limit, else empty_file when it
+// has 0 bytes, else ok. A status the panel does not know is unknown.
+func JudgeBackup(v View, srv store.Server, now time.Time) BackupVerdict {
+	if srv.BackupDir == "" {
+		return BackupVerdict{Status: BackupStatusUnset}
+	}
+	if v.Snap == nil || v.Snap.Backup == nil {
+		return BackupVerdict{Status: BackupStatusUnknown}
+	}
+	b := v.Snap.Backup
+	switch b.Status {
+	case proto.BackupUnreadable:
+		return BackupVerdict{Status: BackupStatusUnreadable, Reason: b.Reason}
+	case proto.BackupNone:
+		return BackupVerdict{Status: BackupStatusNone}
+	case proto.BackupOK:
+	default: // pending, or a status the panel does not know
+		return BackupVerdict{Status: BackupStatusUnknown}
+	}
+	age := b.NewestAgeSec + int64(max(now.Sub(v.ReceivedAt), 0)/time.Second)
+	out := BackupVerdict{Status: BackupStatusOK, AgeSec: age, Size: b.NewestSize}
+	switch {
+	case age > int64(backupMaxAgeHours(srv))*3600:
+		out.Status = BackupStatusStale
+	case b.NewestSize == 0:
+		out.Status = BackupStatusEmptyFile
+	}
+	return out
+}
+
+// backupAlerting: a verdict that opens backup_stale.
+func backupAlerting(status string) bool {
+	switch status {
+	case BackupStatusStale, BackupStatusEmptyFile, BackupStatusNone, BackupStatusUnreadable:
+		return true
+	}
+	return false
+}
+
+// backupMaxAgeHours is the limit of srv's newest backup file, in hours;
+// DefaultBackupMaxAgeHours for a row without one.
+func backupMaxAgeHours(srv store.Server) int {
+	if srv.BackupMaxAgeHours <= 0 {
+		return DefaultBackupMaxAgeHours
+	}
+	return srv.BackupMaxAgeHours
+}
+
+// Backup texts of plan 5b-2b (G8a-G8d), word for word; the first %s is
+// the master's name.
+const (
+	backupStaleText      = "Berkas terbaru di folder cadangan master %s berumur %s (batas %d jam)."
+	backupEmptyFileText  = "Berkas terbaru di folder cadangan master %s kosong (0 byte)."
+	backupNoneText       = "Folder cadangan master %s tidak berisi berkas."
+	backupUnreadableText = "Folder cadangan master %s tidak bisa dibaca agent: %s."
+)
+
+// backupReasonWords words why the agent cannot read a backup folder (G8d);
+// any reason not listed reads as backupReasonOther.
+var backupReasonWords = map[string]string{
+	proto.BackupReasonMissing: "folder itu tidak ada",
+	proto.BackupReasonNotDir:  "itu bukan folder",
+	proto.BackupReasonDenied:  "izin ditolak",
+	proto.BackupReasonHidden:  "folder itu tidak terlihat oleh layanan agent",
+	proto.BackupReasonInvalid: "path-nya tidak sah",
+	proto.BackupReasonTimeout: "pemindaian tidak selesai dalam 10 detik",
+	proto.BackupReasonLimit:   "lebih dari 10.000 entri dan belum ada berkas yang ditemukan",
+}
+
+const backupReasonOther = "galat lain; lihat log agent"
+
+// BackupMessage words a backup verdict of the master named master, whose
+// limit is maxAgeHours (G8a-G8d): for backup_stale, the backup card and
+// the gate's row. "" for unset, unknown and ok, which need no words.
+func BackupMessage(b BackupVerdict, master string, maxAgeHours int) string {
+	switch b.Status {
+	case BackupStatusStale:
+		return fmt.Sprintf(backupStaleText, master, backupAge(b.AgeSec), maxAgeHours)
+	case BackupStatusEmptyFile:
+		return fmt.Sprintf(backupEmptyFileText, master)
+	case BackupStatusNone:
+		return fmt.Sprintf(backupNoneText, master)
+	case BackupStatusUnreadable:
+		words, ok := backupReasonWords[b.Reason]
+		if !ok {
+			words = backupReasonOther
+		}
+		return fmt.Sprintf(backupUnreadableText, master, words)
+	}
+	return ""
+}
+
+// backupAge words the age of a backup file in whole units, rounded down
+// so a message changes at most once an hour: minutes under an hour, hours
+// under three days, then days and hours ("3 hari 2 jam", "4 hari").
+func backupAge(sec int64) string {
+	sec = max(sec, 0)
+	hours := sec / 3600
+	switch {
+	case hours < 1:
+		return fmt.Sprintf("%d menit", sec/60)
+	case hours < 72:
+		return fmt.Sprintf("%d jam", hours)
+	case hours%24 == 0:
+		return fmt.Sprintf("%d hari", hours/24)
+	}
+	return fmt.Sprintf("%d hari %d jam", hours/24, hours%24)
+}
