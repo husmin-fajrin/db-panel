@@ -293,8 +293,8 @@ func (a *app) installMySQLTLS(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
 }
 
-// tightenTLS starts the tighten_tls job on the master {id} ("Perketat
-// sambungan replikasi"), with the password confirmed.
+// tightenTLS starts the tighten_tls job on the master {id} ("Wajibkan
+// pemeriksaan sertifikat TLS"), with the password confirmed.
 func (a *app) tightenTLS(w http.ResponseWriter, r *http.Request) {
 	srv, topo, ok := a.masterFromPath(w, r)
 	if !ok || !a.requireConfirm(w, r, ActTightenTLS, auditServer, srv.ID) {
@@ -342,7 +342,7 @@ type masterPage struct {
 	Facts    masterFacts
 	Timeline timelineView
 	// NoCert: the master has no MySQL certificate from the panel. The
-	// "Perketat sambungan replikasi" box shows when it has none or a
+	// "Wajibkan pemeriksaan sertifikat TLS" box shows when it has none or a
 	// replica is Unverified (Tighten).
 	NoCert  bool
 	Tighten bool

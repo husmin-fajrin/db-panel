@@ -55,11 +55,11 @@
 {{if .Tighten}}
 <div role="status" class="banner banner-warning" data-tighten>{{template "banner-icon" "warning"}}
   <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
-    <h3 class="font-semibold">Perketat sambungan replikasi</h3>
+    <h3 class="font-semibold">Wajibkan pemeriksaan sertifikat TLS (TLS certificate verification)</h3>
     <p class="text-sm">{{if .NoCert}}MySQL master ini belum memakai sertifikat dari panel{{else}}Sebagian replika belum memeriksa sertifikat MySQL master{{end}}, jadi replika belum bisa memastikan bahwa yang dihubunginya benar-benar master ini.</p>
     <p class="text-sm">Panel memasang sertifikat MySQL di master dan di tiap replika, lalu menyambungkan ulang replikasi tiap replika dengan pemeriksaan sertifikat. Replikasi tiap replika berhenti beberapa detik; MySQL tidak dimulai ulang. Replika yang sedang tidak terjangkau dilewati; jalankan lagi nanti.</p>
     <form method="post" action="/masters/{{.Server.ID}}/tighten-tls">
-      <button type="submit" class="btn btn-primary btn-sm" data-confirm-action="tighten_tls" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="Perketat sambungan replikasi master {{.Server.Name}} dan replikanya.">Perketat sambungan replikasi</button>
+      <button type="submit" class="btn btn-primary btn-sm" data-confirm-action="tighten_tls" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="Wajibkan pemeriksaan sertifikat TLS untuk replikasi master {{.Server.Name}} dan replikanya.">Wajibkan pemeriksaan sertifikat TLS</button>
     </form>
   </div>
 </div>

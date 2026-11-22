@@ -25,7 +25,7 @@ import (
 // daily renewal) runs those three steps; "Siapkan master", "Buat replika"
 // and "Resync ulang" run them as one step. A replica verifies its master's
 // certificate (replication, dump, CLONE) when the master has one
-// (server_tls). tighten_tls ("Perketat sambungan replikasi") gives a
+// (server_tls). tighten_tls ("Wajibkan pemeriksaan sertifikat TLS") gives a
 // topology made before that its certificates and points every replica at
 // its master again with verification.
 
@@ -192,7 +192,7 @@ func isOldAgent(err error) bool {
 // master has none): an agent too old for it skips the step with a warning
 // in the job log; the topology then has no certificate on that server,
 // which the panel already handles ("Sambungan replikasi belum
-// diverifikasi", Perketat).
+// diverifikasi", "Wajibkan pemeriksaan sertifikat TLS").
 func (jr *jobRun) installCertOrSkip(serverID int64, install func(ctx context.Context, approved bool) (outcome, error)) func(ctx context.Context, approved bool) (outcome, error) {
 	return func(ctx context.Context, approved bool) (outcome, error) {
 		out, err := install(ctx, approved)
@@ -676,7 +676,7 @@ func (jr *jobRun) tightenRepoint(serverID int64) func(ctx context.Context, appro
 			// Nothing connects while the operator's stop holds, so nothing
 			// proves the verification yet (SEC-63c).
 			jr.logf("warn", "Replikasi %s diarahkan dengan verifikasi sertifikat master %s, tetapi tetap dihentikan seperti "+
-				"sebelumnya; tanda terverifikasi diberikan setelah replikasi dijalankan lagi dan Perketat diulang.",
+				"sebelumnya; tanda terverifikasi diberikan setelah replikasi dijalankan lagi dan Wajibkan pemeriksaan sertifikat TLS diulang.",
 				jr.serverName(serverID), topo.SourceHost)
 			return done("verifikasi diatur; replikasi tetap dihentikan, tanda terverifikasi menunggu replikasi berjalan"), nil
 		}

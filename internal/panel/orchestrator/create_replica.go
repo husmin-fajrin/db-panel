@@ -947,7 +947,8 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 	// SOURCE_SSL=1 when the master offers TLS. When the master has the
 	// panel's certificate the replica also verifies it against the CA
 	// file and the master's address; otherwise the link is encrypted
-	// but not verified (a topology from before, until Perketat).
+	// but not verified (a topology from before, until
+	// "Wajibkan pemeriksaan sertifikat TLS").
 	src := proto.ReplicationSourceParams{
 		Host: topo.SourceHost, Port: topo.SourcePort, User: topo.ReplUser, Password: password, SSL: jr.st.MasterTLS,
 		Databases: jr.st.Databases,
@@ -985,7 +986,7 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 		}
 	}
 	if !jr.st.TLSVerify {
-		jr.logf("warn", "%s. Jalankan Perketat sambungan replikasi di halaman master.", msgUnverified)
+		jr.logf("warn", "%s. Jalankan Wajibkan pemeriksaan sertifikat TLS di halaman master.", msgUnverified)
 	}
 	if err := jr.call(ctx, jr.target(), "mysql.startReplica", nil, &rs); err != nil {
 		return outcome{}, err
@@ -1003,7 +1004,7 @@ func (jr *jobRun) replicaConnect(ctx context.Context, _ bool) (outcome, error) {
 			jr.logf("info", "Replikasi memverifikasi sertifikat master %s (thread IO tersambung).", topo.SourceHost)
 		} else {
 			jr.logf("warn", "Replikasi diatur memverifikasi sertifikat master %s, tetapi belum terbukti tersambung (%s); "+
-				"tanda terverifikasi belum diberikan. Jalankan Perketat sambungan replikasi di halaman master setelah replika tersambung.",
+				"tanda terverifikasi belum diberikan. Jalankan Wajibkan pemeriksaan sertifikat TLS di halaman master setelah replika tersambung.",
 				topo.SourceHost, unverifiedText(jr.serverName(jr.target()), last))
 		}
 	}

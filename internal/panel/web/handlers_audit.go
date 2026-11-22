@@ -86,7 +86,7 @@ var auditActionLabels = map[string]string{
 	"mysql_refresh":          "Segarkan data MySQL",
 	"prepare_master":         "Siapkan sebagai master",
 	"mysql_tls":              "Pasang sertifikat MySQL",
-	"tighten_tls":            "Perketat sambungan replikasi",
+	"tighten_tls":            "Wajibkan pemeriksaan sertifikat TLS",
 	"master_source":          "Ubah alamat untuk replika",
 	"master_unlock":          "Buka kunci master",
 	"promote":                "Promote replika",

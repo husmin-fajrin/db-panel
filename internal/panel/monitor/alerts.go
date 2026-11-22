@@ -624,7 +624,7 @@ var jobKindNames = map[string]string{
 	"remove_databases":  "Lepas database",
 	"resync_replica":    "Resync ulang",
 	"mysql_tls":         "Pasang sertifikat MySQL",
-	"tighten_tls":       "Perketat sambungan replikasi",
+	"tighten_tls":       "Wajibkan pemeriksaan sertifikat TLS",
 	"promote_planned":   "Promote terencana",
 	"promote_emergency": "Promote darurat",
 	"leftover":          "Periksa data tertinggal",

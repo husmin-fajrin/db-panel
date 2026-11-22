@@ -43,7 +43,7 @@ Gelombang perbaikan diuji dengan `make test` (exit 0, 36m27s), `make test-e2e` (
 
 1. **SEC-85 (SA-1), Tinggi, kelas B.** Panel yang dibobol bisa membuka kembali master lama yang dikarantina. Caranya: `mysql.releaseRole` (diizinkan pada peran `quarantined`) membuat peran `unassigned`; penjaga lalu melepas kunci start, dan `mysql.setReadOnly{on:false}` membuka tulis secara PERSIST. **Kasus terburuk:** dua master yang sama-sama bisa ditulis, bertahan melewati restart, dan semua aplikasi yang masih menunjuk alamat lama menulis ke master lama. Penutupnya ("mode ketat": agent menolak pelepasan server yang dikarantina tanpa persetujuan root lokal) mengubah cara "Hapus server" bekerja, jadi dijadwalkan Rencana 5b. Sementara itu tidak ada yang menutupnya selain menjaga host panel.
 2. **SEC-86 (SA-2), Tinggi, kelas B.** Panel yang memegang sandi replikasi (panel memang menyimpannya) bisa membuat master **sehat** mengarantina dirinya sendiri di bawah server milik penyerang, lalu membuang datanya lewat `mysql.dropDatabases` atau menimpanya dengan `mysql.cloneFrom` dari server itu. **Kasus terburuk:** produksi berhenti menulis sampai root turun tangan, lalu data master produksi hilang atau diganti salinan penyerang. Bila tidak ada replika yang sinkron, tidak ada salinan yang tersisa. Dijadwalkan Rencana 5b (persetujuan root lokal sebelum bangun ulang yang menyusul karantina). Sementara itu, sama dengan SEC-85, satu-satunya pertahanan adalah menjaga host panel.
-3. **SEC-87 (SA-3), Tinggi (dinaikkan dari Sedang, lihat §4).** Pada setiap promote terencana, agent master mengirim sandi akun replikasi, tanpa verifikasi sertifikat, ke setiap host di daftar replika dalam setahun terakhir di setiap port di daftar port replika. Rencana 5a melebarkan ini dari satu port ke semua port di daftar port replika. **Kasus terburuk:** perangkat yang mengambil alamat bekas replika menerima sandi `dbpanel_repl` (REPLICATION SLAVE, BACKUP_ADMIN), lalu menyalin atau meng-CLONE seluruh basis data pasien dari master. Penyerang tidak perlu posisi on-path. Penutup tuntasnya adalah akun baca per replika di Rencana 5c (R-038, R-108). Sementara itu: jalankan "Perketat" (verifikasi sertifikat) di topologi, dan jalankan `sudo dbpanel agent forget-replica <host>` di master setiap kali replika dipensiunkan.
+3. **SEC-87 (SA-3), Tinggi (dinaikkan dari Sedang, lihat §4).** Pada setiap promote terencana, agent master mengirim sandi akun replikasi, tanpa verifikasi sertifikat, ke setiap host di daftar replika dalam setahun terakhir di setiap port di daftar port replika. Rencana 5a melebarkan ini dari satu port ke semua port di daftar port replika. **Kasus terburuk:** perangkat yang mengambil alamat bekas replika menerima sandi `dbpanel_repl` (REPLICATION SLAVE, BACKUP_ADMIN), lalu menyalin atau meng-CLONE seluruh basis data pasien dari master. Penyerang tidak perlu posisi on-path. Penutup tuntasnya adalah akun baca per replika di Rencana 5c (R-038, R-108). Sementara itu: jalankan "Wajibkan pemeriksaan sertifikat TLS" (verifikasi sertifikat) di topologi, dan jalankan `sudo dbpanel agent forget-replica <host>` di master setiap kali replika dipensiunkan.
 
 Butir terbuka lain, semuanya dengan baris inventaris dan rencana penyerapnya, ada di §7. Ringkasnya:
 - Rencana 5b: SA-9 (kunci terlihat terpasang padahal berkas opsi milik pengguna `mysql` mengalahkannya), laporan start yang hilang bila agent restart sebelum terkirim, dan `set-role master` yang butuh kunci rahasia agent. Juga R-117: urutan kirim-laporan sebelum penegakan baca-saja ditemukan pemeriksaan ulang dan sudah diperbaiki di dalam satu putaran setelah audit (`bb54853`, `ef453b6`); yang tersisa, pengiriman yang memblok memperpanjang jeda sebelum putaran berikutnya, tetap di Rencana 5b.
@@ -104,7 +104,7 @@ Model ancaman Rencana 1–4 tetap berlaku (audit Rencana 4a §3 butir 18–24). 
   - Loop penjaga 5 detik yang terpisah dari interval pemeriksaan. Ia menjalankan kunci start, penjaga karantina, penjaga kunci promosi, pemutus FTWRL, dan pencatatan replika dalam satu loop, sehingga satu operasi yang macet di dalamnya mematikan semuanya (SEC-90).
   - Daftar replika dan daftar port replika (host × port) berasal dari koneksi yang dilihat master sendiri, tidak pernah dari panel. Namun port dipilih replika (`report_port`), dan host bisa diisi siapa pun yang login dengan hak REPLICATION SLAVE (SEC-86, SEC-88).
   - Kunci promosi dipertahankan selama replika di daftar replika tidak terbaca. Arah gagal ini aman bagi data tetapi bisa menahan tulis (R-098).
-  - Pembacaan replika di daftar replika memakai akun replikasi kandidat, tanpa verifikasi sertifikat kecuali topologi sudah "Perketat" (SEC-87).
+  - Pembacaan replika di daftar replika memakai akun replikasi kandidat, tanpa verifikasi sertifikat kecuali "Wajibkan pemeriksaan sertifikat TLS" sudah dijalankan di topologi (SEC-87).
   - Daftar koneksi mencakup semua thread klien. Yang disembunyikan hanya akun replikasi dan dump buatan agent serta sesi agent dari server itu sendiri yang bertanda `program_name=dbpanel-agent`. Daftar ini menjadi syarat bangun ulang master lama, juga saat Setujui (SEC-91).
   - Ulangi dan Setujui job pembuang memakai token baru yang terikat pada job, dengan batas 24 jam. Setujui terikat pada hash daftar yang ditampilkan (SEC-102, SEC-103).
   - Jenis peringatan yang tidak pernah dibungkam "Jangan ganggu" ditentukan daftar izin (SEC-122), dengan ringkasan saat senyap berakhir.
@@ -214,9 +214,9 @@ Putusan pemeriksaan ulang gelombang perbaikan: semua butir yang diperbaiki dinil
   - Perilaku driver yang menjadi dasarnya dicek pemeriksa di `go-sql-driver/mysql@v1.9.3/auth.go:400-406`: pada "perform full authentication" `caching_sha2_password` di atas TLS (terverifikasi atau tidak), sandi dikirim polos di dalam sesi TLS itu.
 - **Skenario:** penyerang mendengarkan di alamat bekas replika dengan program yang berbicara protokol jabat tangan MySQL, menawarkan TLS dengan sertifikat apa pun, dan meminta autentikasi penuh. Pada promote terencana berikutnya, agent master mengirim sandi `dbpanel_repl`.
 - **Dampak:** dengan REPLICATION SLAVE dan BACKUP_ADMIN, penyerang bisa mereplikasi atau meng-CLONE seluruh basis data. Sandi yang sama juga menjadi titik awal SEC-86 dan SEC-88.
-- **Yang baru di 5a:** sebelumnya akun ini hanya dipakai penjaga setelah promote terencana gagal, dan hanya di port kandidat. Topologi yang sudah "Perketat" tidak terkena: `ReadPeer` (`peer.go:75-88`) memeriksa rantai dan nama sebelum autentikasi.
-- **Yang dikerjakan gelombang perbaikan:** catatan README (2fc63a4): jalankan `forget-replica` saat replika dipensiunkan, dan "Perketat" menutup paparan ini. Pemeriksaan ulang menilai catatan itu sesuai kode.
-- **Status: Terbuka.** Masuk Rencana 5c (akun baca per replika berhak rendah; R-038, R-108). Baris inventaris R-111 (kelas C, Tinggi); R-039 ditulis ulang karena SEC-87 memperburuknya (tidak perlu posisi on-path). **Saran sementara:** jalankan "Perketat" di topologi, dan `sudo dbpanel agent forget-replica <host>` di master saat replika dipensiunkan. Usul jangka pendek pemeriksa (sematkan kunci publik TLS per host saat dicatat) belum dikerjakan.
+- **Yang baru di 5a:** sebelumnya akun ini hanya dipakai penjaga setelah promote terencana gagal, dan hanya di port kandidat. Topologi yang sudah menjalankan "Wajibkan pemeriksaan sertifikat TLS" tidak terkena: `ReadPeer` (`peer.go:75-88`) memeriksa rantai dan nama sebelum autentikasi.
+- **Yang dikerjakan gelombang perbaikan:** catatan README (2fc63a4): jalankan `forget-replica` saat replika dipensiunkan, dan "Wajibkan pemeriksaan sertifikat TLS" menutup paparan ini. Pemeriksaan ulang menilai catatan itu sesuai kode.
+- **Status: Terbuka.** Masuk Rencana 5c (akun baca per replika berhak rendah; R-038, R-108). Baris inventaris R-111 (kelas C, Tinggi); R-039 ditulis ulang karena SEC-87 memperburuknya (tidak perlu posisi on-path). **Saran sementara:** jalankan "Wajibkan pemeriksaan sertifikat TLS" di topologi, dan `sudo dbpanel agent forget-replica <host>` di master saat replika dipensiunkan. Usul jangka pendek pemeriksa (sematkan kunci publik TLS per host saat dicatat) belum dikerjakan.
 
 ### SEC-88 — Port dari replika masuk daftar port replika tanpa batas (SA-4)
 - **Tingkat:** Sedang.
@@ -710,7 +710,7 @@ Semuanya membawa set penuh dengan `no-store`. 404 statis kehilangan `Cache-Contr
 | V2 Authentication | 2.10.x kredensial layanan: satu akun replikasi bersama dikirim ke alamat di daftar replika | SEC-87 | Sandi tidak di argv atau log |
 | V4 Access Control | 4.3.1 aksi administratif dengan konfirmasi: persetujuan yang mengantre | SEC-103 | Token per job dan per aksi; batas 24 jam |
 | V7 Error Handling and Logging | 7.1.x apa yang diakui tidak diaudit; 7.2.x peringatan tidak terikat peran | SEC-105, SEC-107 | Batas laju kejadian; kejadian tak terbaca tetap membuka peringatan |
-| V9 Communications | 9.2.1 verifikasi sertifikat ke server lain bersifat opsional | SEC-87 | Dengan "Perketat", rantai dan nama diperiksa sebelum autentikasi |
+| V9 Communications | 9.2.1 verifikasi sertifikat ke server lain bersifat opsional | SEC-87 | Dengan "Wajibkan pemeriksaan sertifikat TLS", rantai dan nama diperiksa sebelum autentikasi |
 | V12 Files and Resources | 12.3.x operasi berkas di direktori yang mungkin milik pengguna lain | SEC-96, SEC-97 | `O_NOFOLLOW` + `fstat` untuk log error dan berkas kunci |
 | V14 Configuration | 14.4.x header (dibaca dari kode, tidak diamati) | SEC-124 | Set header lengkap (§4B) |
 
@@ -718,7 +718,7 @@ Semuanya membawa set penuh dengan `no-store`. 404 statis kehilangan `Cache-Contr
 
 1. **Keputusan pemilik sebelum merge:**
    - SEC-85, SEC-86: terima sebagai kelas B sampai Rencana 5b, atau minta perbaikan kecil yang diusulkan pemeriksa (tolak `releaseRole` pada `quarantined`; tolak pembuangan setelah karantina yang tidak didahului kunci promosi agent itu sendiri) lebih dulu.
-   - SEC-87: terima sampai Rencana 5c dengan saran operator ("Perketat"; `forget-replica` saat replika dipensiunkan).
+   - SEC-87: terima sampai Rencana 5c dengan saran operator ("Wajibkan pemeriksaan sertifikat TLS"; `forget-replica` saat replika dipensiunkan).
    - R-117: perbaikan satu baris (pindahkan `flushStartEvents` ke akhir `GuardTick`), bisa dikerjakan sebelum atau sesudah merge. **Dikerjakan sebelum merge di `bb54853` untuk urutan di dalam satu putaran; sisanya (jeda sebelum putaran berikutnya) tetap terbuka di Rencana 5b.**
 2. **Rencana 5b (mode ketat, prasyarat, runbook):**
    - SEC-85 (R-109) dan SEC-86 (R-110): persetujuan root lokal.
@@ -728,10 +728,10 @@ Semuanya membawa set penuh dengan `no-store`. 404 statis kehilangan `Cache-Contr
    - R-117: keluarkan pengiriman penjaga dari jalur kritis penjaga (urutan dalam putaran sudah diperbaiki di `bb54853`).
    - SEC-120 (R-121): `set-role master` tanpa memuat kunci rahasia.
    - **Sementara:** jalankan "Periksa data tertinggal" sebelum setiap bangun ulang master lama; jaga host panel; jangan taruh opsi MySQL di home akun `mysql`.
-3. **Rencana 5c (akun per replika, "Perketat" wajib):**
+3. **Rencana 5c (akun per replika, "Wajibkan pemeriksaan sertifikat TLS" wajib):**
    - SEC-87 (R-111) bersama R-038, R-039, R-108.
    - Tanda "port penuh" (R-118, bagian akun bersama).
-   - **Sementara:** "Perketat"; `forget-replica` dan `forget-replica-port` sesuai pesan penolakan.
+   - **Sementara:** "Wajibkan pemeriksaan sertifikat TLS"; `forget-replica` dan `forget-replica-port` sesuai pesan penolakan.
 4. **Rencana 5d:** `leftoverDatabases` dengan tanda potong (R-130).
 5. **Rencana 5e (butir Sedang/Rendah):**
    - SEC-97 (R-112), SEC-96 sisa (R-115), SEC-103 (R-124), SEC-105 (R-125), SEC-107 dan sisa SEC-92 (R-126), SEC-108 sisa (R-127), SEC-109 (R-128), SEC-122 (R-129);

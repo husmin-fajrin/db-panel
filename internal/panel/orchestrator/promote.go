@@ -1302,7 +1302,7 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 	}
 	// SEC-63c: verified only when the agent saw the receiver connected
 	// with SOURCE_SSL_VERIFY_SERVER_CERT=1; a receiver still connecting
-	// stays unverified until Perketat.
+	// stays unverified until "Wajibkan pemeriksaan sertifikat TLS".
 	if err := r.d.Store.SetReplicaTLSVerified(rep.ServerID, verify && res.IORunning && res.SSLVerifyServerCert); err != nil {
 		r.log.Warn("tls_verified after repoint", "server_id", rep.ServerID, "err", err)
 	}

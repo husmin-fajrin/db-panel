@@ -50,7 +50,7 @@ const (
 	KindRemoveDatabases = "remove_databases"
 	KindResyncReplica   = "resync_replica"
 	KindMySQLTLS        = "mysql_tls"   // "Pasang sertifikat MySQL"
-	KindTightenTLS      = "tighten_tls" // "Perketat sambungan replikasi"
+	KindTightenTLS      = "tighten_tls" // "Wajibkan pemeriksaan sertifikat TLS"
 	// The promotion of a replica to master (promote.go).
 	KindPromotePlanned   = "promote_planned"
 	KindPromoteEmergency = "promote_emergency"

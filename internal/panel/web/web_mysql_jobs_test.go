@@ -6,14 +6,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"html/template"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1272,7 +1279,7 @@ func TestTightenTLSBoxShownByCondition(t *testing.T) {
 	if err := e.st.SetReplicaState(replica.ID, store.ReplicaReady, ""); err != nil {
 		t.Fatal(err)
 	}
-	const box = "Perketat sambungan replikasi"
+	const box = "Wajibkan pemeriksaan sertifikat TLS"
 	const warn = "Sambungan replikasi belum diverifikasi"
 
 	// The master has no certificate from the panel, the replica is not
@@ -1319,6 +1326,109 @@ func TestTightenTLSBoxShownByCondition(t *testing.T) {
 	rec = e.do("POST", "/masters/1/tighten-tls", withToken(t, e, url.Values{}, web.ActTightenTLS, "server", 1), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "replika db-replika masih punya pekerjaan yang belum selesai")
+}
+
+// TestNoOperatorTextSaysPerketat: the tighten_tls action is named
+// "Wajibkan pemeriksaan sertifikat TLS" wherever an operator reads it. No
+// template, no string literal in the panel's non-test Go code (comments
+// do not count; a "+"-joined chain of literals is checked as a whole),
+// and no line of README.md says the old name "Perketat".
+func TestNoOperatorTextSaysPerketat(t *testing.T) {
+	const old = "perketat"
+	has := func(s string) bool { return strings.Contains(strings.ToLower(s), old) }
+	var found []string
+
+	err := filepath.WalkDir("../../../web/templates", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if has(line) {
+				found = append(found, fmt.Sprintf("%s:%d: %s", p, i+1, strings.TrimSpace(line)))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readme, err := os.ReadFile("../../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range strings.Split(string(readme), "\n") {
+		if has(line) {
+			found = append(found, fmt.Sprintf("README.md:%d: %s", i+1, strings.TrimSpace(line)))
+		}
+	}
+
+	// literalChain returns the joined value of e when e is a string
+	// literal or a "+" chain made only of string literals.
+	var literalChain func(e ast.Expr) (string, bool)
+	literalChain = func(e ast.Expr) (string, bool) {
+		switch x := e.(type) {
+		case *ast.BasicLit:
+			if x.Kind != token.STRING {
+				return "", false
+			}
+			s, err := strconv.Unquote(x.Value)
+			return s, err == nil
+		case *ast.ParenExpr:
+			return literalChain(x.X)
+		case *ast.BinaryExpr:
+			if x.Op != token.ADD {
+				return "", false
+			}
+			l, ok := literalChain(x.X)
+			if !ok {
+				return "", false
+			}
+			r, ok := literalChain(x.Y)
+			return l + r, ok
+		}
+		return "", false
+	}
+	fset := token.NewFileSet()
+	goFiles := 0
+	err = filepath.WalkDir("..", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		goFiles++
+		f, err := parser.ParseFile(fset, p, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.BasicLit:
+				if x.Kind == token.STRING && has(x.Value) {
+					found = append(found, fmt.Sprintf("%s: %s", fset.Position(x.Pos()), x.Value))
+				}
+			case *ast.BinaryExpr:
+				if s, ok := literalChain(x); ok && has(s) {
+					found = append(found, fmt.Sprintf("%s: %q", fset.Position(x.Pos()), s))
+					return false // the chain's own literals would repeat it
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if goFiles < 50 {
+		t.Fatalf("walked only %d Go files under internal/panel", goFiles)
+	}
+	if len(found) > 0 {
+		t.Errorf("operator text still says %q:\n%s", "Perketat", strings.Join(found, "\n"))
+	}
 }
 
 // TestRemoveDatabasesDropNeedsTypedName (spec 5.6): dropping the data of

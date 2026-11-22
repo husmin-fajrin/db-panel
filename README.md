@@ -450,7 +450,7 @@ dan masa simpan binary log yang sudah ada dipertahankan.
   lama), replikasi tetap terenkripsi tanpa verifikasi, log pekerjaan
   menulis "Sambungan replikasi belum diverifikasi: master belum punya
   sertifikat panel", dan halaman master menampilkan peringatan itu sampai
-  **Perketat sambungan replikasi** dijalankan.
+  **Wajibkan pemeriksaan sertifikat TLS** dijalankan.
 
 ### Sertifikat MySQL
 
@@ -477,7 +477,7 @@ tidak, pekerjaan gagal tanpa mencatat apa pun).
 - **Pasang sertifikat MySQL** di halaman server (dengan konfirmasi kata
   sandi) memasang atau memperbarui sertifikat server yang sudah ada.
   Halaman server menampilkan nomor seri dan masa berlakunya.
-- **Perketat sambungan replikasi** di halaman master (dengan konfirmasi
+- **Wajibkan pemeriksaan sertifikat TLS** di halaman master (dengan konfirmasi
   kata sandi) untuk topologi yang dibuat sebelum versi ini, atau bila ada
   replika yang belum memverifikasi master: panel memasang sertifikat di
   master, lalu untuk tiap replika memasang sertifikatnya dan menyambungkan
@@ -684,8 +684,8 @@ mungkin dikarantina.
 
 Karena memasang sertifikat butuh persetujuan, panel tidak memasang
 sertifikat MySQL baru di server yang dikarantina. Perpanjangan sertifikat
-harian dan **Perketat** melewatinya; selama bangun ulangnya masih
-berjalan, **Perketat** ditolak seperti untuk
+harian dan **Wajibkan pemeriksaan sertifikat TLS** melewatinya; selama bangun ulangnya masih
+berjalan, **Wajibkan pemeriksaan sertifikat TLS** ditolak seperti untuk
 replika lain yang sibuk ("replika <server> masih punya pekerjaan yang
 belum selesai"). Memasang sertifikat MySQL di sana, atau
 mengulang pekerjaan sertifikatnya, ditolak dengan "Server ini dikarantina
@@ -922,9 +922,9 @@ tidak menunggunya.
 server master.** Daftar replika disimpan setahun, dan pada setiap promote
 terencana agent master membaca setiap host di daftar replika pada setiap port
 di daftar port replika dengan akun replikasi. Pada topologi tanpa verifikasi sertifikat
-("Perketat" belum dijalankan) sandi akun itu dikirim ke siapa pun yang
+("Wajibkan pemeriksaan sertifikat TLS" belum dijalankan) sandi akun itu dikirim ke siapa pun yang
 menjawab di alamat dan port itu, termasuk perangkat yang kemudian memakai
-alamat replika lama. "Perketat" menutup ini: tanpa sertifikat yang cocok
+alamat replika lama. "Wajibkan pemeriksaan sertifikat TLS" menutup ini: tanpa sertifikat yang cocok
 sandi tidak dikirim.
 
 Agent membacanya ulang pada perintah berikutnya, tanpa restart. Bila alamat
@@ -1258,7 +1258,7 @@ dicatat di **Audit**.
 Tombol yang merusak atau sulit dibatalkan (Resync ulang, Lepas replika,
 Hapus server, Lepas database, Buka kunci master, Siapkan sebagai master
 untuk server yang sudah menjadi master, Pasang sertifikat MySQL, dan
-Perketat sambungan replikasi; juga unggah sertifikat HTTPS, Kembali ke
+Wajibkan pemeriksaan sertifikat TLS; juga unggah sertifikat HTTPS, Kembali ke
 sertifikat panel, dan Nama dan alamat tambahan di Pengaturan) meminta kata
 sandi panel Anda lagi, dan nama server bila disebut di bawah. Konfirmasi
 itu berlaku 2 menit untuk satu tindakan saja; salah kata sandi dicatat di
@@ -2814,9 +2814,8 @@ lama tetap terhubung dan dipantau, tetapi tidak mengenal perintah
 sertifikat MySQL. Panel lalu menandainya **perlu dimutakhirkan**.
 **Siapkan master**, dan tahap sertifikat replika yang masternya belum punya
 sertifikat, melewati tahap sertifikat dengan peringatan di log pekerjaan
-(replikasinya belum diverifikasi; jalankan **Perketat sambungan
-replikasi** setelah agent diperbarui). **Pasang sertifikat MySQL**,
-**Perketat sambungan replikasi**, dan **Buat replika**/**Resync ulang**
+(replikasinya belum diverifikasi; jalankan **Wajibkan pemeriksaan sertifikat TLS** setelah agent diperbarui). **Pasang sertifikat MySQL**,
+**Wajibkan pemeriksaan sertifikat TLS**, dan **Buat replika**/**Resync ulang**
 dari master yang sudah bersertifikat gagal dengan "Agent di <server> versi
 lama dan belum mengenal sertifikat MySQL. Klik Pasang ulang agent di
 halaman server itu, jalankan perintahnya, lalu Ulangi." Perintah pemasangan baru memakai HTTPS
@@ -3061,7 +3060,7 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   8 GiB untuk direktorinya, jadi panel yang disusupi tidak bisa mengambil
   riwayat binlog lain lewat salvage.
 - Agent membaca server lain (kandidat, master lama, replika) dengan TLS
-  wajib; tanpa verifikasi sertifikat ("Perketat" belum dijalankan)
+  wajib; tanpa verifikasi sertifikat ("Wajibkan pemeriksaan sertifikat TLS" belum dijalankan)
   sertifikatnya tidak diperiksa, tetapi koneksi tanpa TLS ditolak.
 - Penjaga kunci promosi membaca replika di berkas replika yang pernah
   tersambung, pada port kandidat dan setiap port di daftar port replika.
@@ -3114,7 +3113,7 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   master. Pertahanan ini melindungi dari salah klik dan konfirmasi basi,
   bukan dari panel yang disusupi: panel seperti itu tetap bisa
   memerintahkan pembuangan.
-- Topologi tanpa verifikasi sertifikat ("Perketat" belum dijalankan) tetap
+- Topologi tanpa verifikasi sertifikat ("Wajibkan pemeriksaan sertifikat TLS" belum dijalankan) tetap
   rentan terhadap pemalsuan DNS nama sumber yang dipin bila panel disusupi:
   pin sumber menyimpan nama, dan pembangunan ulang menyambung ke nama itu.
   Dengan verifikasi, sertifikat master yang menjaga identitasnya.

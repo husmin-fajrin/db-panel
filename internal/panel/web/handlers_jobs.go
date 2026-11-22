@@ -92,7 +92,7 @@ func kindLabel(kind string) string {
 	case orchestrator.KindMySQLTLS:
 		return "Pasang sertifikat MySQL"
 	case orchestrator.KindTightenTLS:
-		return "Perketat sambungan replikasi"
+		return "Wajibkan pemeriksaan sertifikat TLS"
 	case orchestrator.KindPromotePlanned:
 		return "Promote terencana"
 	case orchestrator.KindPromoteEmergency:
