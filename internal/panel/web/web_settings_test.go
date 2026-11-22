@@ -656,7 +656,7 @@ func TestSettingsMarks(t *testing.T) {
 
 	rec := rig.do("GET", "/settings", nil, budi)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "panel.key sudah dicadangkan", "Log audit diteruskan ke server lain",
+	wantBody(t, rec, "<h2>Cadangan (backup) panel dan log audit</h2>", "panel.key sudah dicadangkan", "Log audit diteruskan ke server lain",
 		`action="/settings/panel-key-backed-up"`, `action="/settings/audit-forwarded"`)
 	if n := strings.Count(rec.Body.String(), ">Tandai sudah<"); n != 2 {
 		t.Errorf("%d Tandai sudah buttons, want 2", n)
