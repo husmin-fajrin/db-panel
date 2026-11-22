@@ -450,7 +450,7 @@ dan masa simpan binary log yang sudah ada dipertahankan.
   lama), replikasi tetap terenkripsi tanpa verifikasi, log pekerjaan
   menulis "Sambungan replikasi belum diverifikasi: master belum punya
   sertifikat panel", dan halaman master menampilkan peringatan itu sampai
-  **Wajibkan pemeriksaan sertifikat TLS** dijalankan.
+  **Wajibkan pemeriksaan sertifikat TLS** (TLS certificate verification) dijalankan.
 
 ### Sertifikat MySQL
 
