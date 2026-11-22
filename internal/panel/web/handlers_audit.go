@@ -113,6 +113,9 @@ var auditActionLabels = map[string]string{
 	"salvage_download":       "Unduh data tertinggal",
 	"salvage_delete":         "Hapus berkas data tertinggal",
 	"cutover_confirmed":      "Sudah saya alihkan",
+	"server_backup":          "Atur folder cadangan",
+	"panel_key_marked":       "Tanda cadangan panel.key",
+	"audit_forward_marked":   "Tanda penerusan log audit",
 }
 
 // auditActionLabel is action's label, or action itself when it has none.

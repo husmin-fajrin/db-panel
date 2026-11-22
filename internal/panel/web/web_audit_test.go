@@ -635,6 +635,7 @@ func TestOutcomeOfRedactsAgentErrors(t *testing.T) {
 var auditActionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\.(?:replicaControl|confirmedJobAction|startOldMasterJob|changeReplicaDatabases)\(\s*\w+,\s*\w+,\s*"([a-z_]+)"`),
 	regexp.MustCompile(`\.jobAction\(\s*\w+,\s*\w+,\s*\w+,\s*"([a-z_]+)"`),
+	regexp.MustCompile(`\.setMark\(\s*\w+,\s*\w+,\s*"([a-z_]+)"`),
 }
 
 // auditCallStart finds every place that writes to the audit log: a call
@@ -664,6 +665,7 @@ var auditVariableActionsKnown = map[string]bool{
 	"handlers_controls.go:action":  true, // replicaControl
 	"handlers_mysql.go:action":     true, // changeReplicaDatabases
 	"handlers_oldmaster.go:action": true, // startOldMasterJob
+	"handlers_settings.go:action":  true, // setMark
 }
 
 // TestAuditActionLabelsComplete (design spec 5.6, 5.8 #5): every action

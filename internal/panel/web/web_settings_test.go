@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/notify"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -639,4 +640,107 @@ func TestSettingsFormRejectsCheckEveryAbove300(t *testing.T) {
 		`name="summary_every" value="120" min="10" max="3600"`)
 	form := with(with(validSettings(), "check_every", "300"), "summary_every", "3600")
 	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+}
+
+// The two marks of the settings page (B8): who set each and when is
+// stored and shown, marked=0 clears it, anything else is refused; each
+// change is audited with the user's name.
+func TestSettingsMarks(t *testing.T) {
+	at := time.Date(2026, 11, 20, 8, 15, 0, 0, time.UTC)
+	rig := settingsEnv(t, func(d *web.Deps) { d.Now = func() time.Time { return at } })
+	if err := rig.st.CreateUser("budi", adminHash()); err != nil {
+		t.Fatal(err)
+	}
+	budi := &http.Cookie{Name: auth.SecureCookieName, Value: rig.sessions.Create("budi")}
+	shown := "Ditandai oleh budi pada " + at.Local().Format("02-01-2006 15:04") + "."
+
+	rec := rig.do("GET", "/settings", nil, budi)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "panel.key sudah dicadangkan", "Log audit diteruskan ke server lain",
+		`action="/settings/panel-key-backed-up"`, `action="/settings/audit-forwarded"`)
+	if n := strings.Count(rec.Body.String(), ">Tandai sudah<"); n != 2 {
+		t.Errorf("%d Tandai sudah buttons, want 2", n)
+	}
+	wantNoBody(t, rec, "Ditandai oleh", ">Batalkan tanda<")
+
+	marks := []struct {
+		path, action, atKey, byKey, label string
+	}{
+		{"/settings/panel-key-backed-up", "panel_key_marked", store.SettingPanelKeyBackedUpAt,
+			store.SettingPanelKeyBackedUpBy, "panel.key sudah dicadangkan"},
+		{"/settings/audit-forwarded", "audit_forward_marked", store.SettingAuditForwardedAt,
+			store.SettingAuditForwardedBy, "Log audit diteruskan ke server lain"},
+	}
+	stored := func(m struct{ path, action, atKey, byKey, label string }) (string, string) {
+		t.Helper()
+		kv, err := rig.st.GetSettings(m.atKey, m.byKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return kv[m.atKey], kv[m.byKey]
+	}
+	lastAudit := func() store.AuditEntry {
+		entries := auditEntries(t, rig.st)
+		return entries[len(entries)-1]
+	}
+	for i, m := range marks {
+		rec := rig.do("POST", m.path, url.Values{"marked": {"1"}}, budi)
+		wantCode(t, rec, http.StatusSeeOther)
+		wantLocation(t, rec, "/settings?pesan=ditandai")
+		if gotAt, gotBy := stored(m); gotAt != "2026-11-20T08:15:00Z" || gotBy != "budi" {
+			t.Errorf("%s: stored %q by %q", m.path, gotAt, gotBy)
+		}
+		a := lastAudit()
+		if a.Action != m.action || a.Username != "budi" || a.Outcome != "ok" || a.DetailJSON != `{"marked":true}` {
+			t.Errorf("%s: audit %+v", m.path, a)
+		}
+		body := rig.do("GET", "/settings?pesan=ditandai", nil, rig.cookie()).Body.String()
+		if n := strings.Count(body, shown); n != i+1 {
+			t.Errorf("after marking %s: %q shown %d times, want %d", m.path, shown, n, i+1)
+		}
+		if !strings.Contains(body, "Tanda disimpan.") {
+			t.Errorf("no notice after marking %s", m.path)
+		}
+	}
+	// Each row with its own mark: Batalkan tanda on both now.
+	body := rig.do("GET", "/settings", nil, budi).Body.String()
+	if n := strings.Count(body, ">Batalkan tanda<"); n != 2 {
+		t.Errorf("%d Batalkan tanda buttons, want 2", n)
+	}
+
+	// Anything but 0 or 1 is refused and changes nothing.
+	for _, v := range []string{"", "2", "yes", " 1"} {
+		rec := rig.do("POST", marks[0].path, url.Values{"marked": {v}}, budi)
+		wantCode(t, rec, http.StatusBadRequest)
+		if gotAt, gotBy := stored(marks[0]); gotAt == "" || gotBy != "budi" {
+			t.Errorf("marked=%q changed the mark: %q by %q", v, gotAt, gotBy)
+		}
+		if a := lastAudit(); a.Action != marks[0].action || a.Outcome == "ok" {
+			t.Errorf("marked=%q: audit %+v", v, a)
+		}
+	}
+
+	// marked=0 clears both keys of that mark only.
+	rec = rig.do("POST", marks[0].path, url.Values{"marked": {"0"}}, rig.cookie())
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/settings?pesan=tanda-batal")
+	if gotAt, gotBy := stored(marks[0]); gotAt != "" || gotBy != "" {
+		t.Errorf("cleared mark stored %q by %q", gotAt, gotBy)
+	}
+	if gotAt, _ := stored(marks[1]); gotAt == "" {
+		t.Error("clearing one mark cleared the other")
+	}
+	if a := lastAudit(); a.Action != marks[0].action || a.Username != "admin" || a.DetailJSON != `{"marked":false}` {
+		t.Errorf("clear: audit %+v", a)
+	}
+	body = rig.do("GET", "/settings?pesan=tanda-batal", nil, budi).Body.String()
+	if n := strings.Count(body, shown); n != 1 {
+		t.Errorf("after clearing: %q shown %d times, want 1", shown, n)
+	}
+	if !strings.Contains(body, "Tanda dibatalkan.") {
+		t.Error("no notice after clearing")
+	}
+
+	// The audit page names the actions.
+	wantBody(t, rig.do("GET", "/audit", nil, budi), "Tanda cadangan panel.key", "Tanda penerusan log audit")
 }

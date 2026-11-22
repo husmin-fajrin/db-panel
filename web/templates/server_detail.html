@@ -62,6 +62,7 @@
 </section>
 {{end}}
 <div class="mb-4 grid items-start gap-4 lg:grid-cols-2">
+  <div class="flex min-w-0 flex-col gap-4">
   <section class="card bg-base-100 min-w-0">
     <div class="card-body p-6">
       {{template "card-head" (cardHead "MySQL" "" "")}}
@@ -84,6 +85,8 @@
       {{if .ShowMySQL}}{{template "mysql-account" .}}{{end}}
     </div>
   </section>
+  {{with .Backup}}{{template "backup-card" $}}{{end}}
+  </div>
   <div class="flex min-w-0 flex-col gap-4">
     <section class="card bg-base-100 min-w-0">
       <div class="card-body p-6">
@@ -312,6 +315,30 @@
 {{template "mysql-connect-form" .}}
 {{end}}
 {{end}}
+
+{{/* Kartu "Cadangan (backup)" (plan 5b-2b, B1-B7): folder cadangan server
+     ini dan umur paling lama berkas terbarunya, dengan keadaan folder
+     sekarang. Data: serverDetailPage dengan Backup terisi. */}}
+{{define "backup-card"}}{{with .Backup}}
+<section class="card bg-base-100 min-w-0" data-backup-card>
+  <div class="card-body gap-3 p-6">
+    {{template "card-head" (cardHead "Cadangan (backup)" "" "")}}
+    {{with .State}}<p data-backup-state{{if $.Backup.Problem}} class="text-warning-text font-semibold"{{end}}>{{.}}</p>{{end}}
+    <form method="post" action="/servers/{{$.Server.ID}}/backup" class="flex flex-col gap-2">
+      <fieldset class="fieldset min-w-0">
+        <label class="label" for="backup_dir">Folder cadangan</label>
+        <input class="input input-sm w-full mono" type="text" id="backup_dir" name="backup_dir" value="{{.Dir}}" placeholder="/var/backups/mysql" autocomplete="off">
+      </fieldset>
+      <fieldset class="fieldset min-w-0">
+        <label class="label" for="backup_max_age_hours">Umur paling lama (jam)</label>
+        <input class="input input-sm w-36" type="number" id="backup_max_age_hours" name="backup_max_age_hours" value="{{.MaxAgeHours}}" min="1" max="8760" required>
+      </fieldset>
+      <p class="help">Panel hanya melihat umur dan ukuran berkas terbaru di folder ini (paling dalam tiga tingkat), bukan apakah cadangan itu bisa dipulihkan. Nama dan isi berkas tidak pernah dikirim ke panel. Kosongkan folder bila server ini tidak menyimpan cadangan.</p>
+      <div><button type="submit" class="btn btn-primary btn-sm">Simpan</button></div>
+    </form>
+  </div>
+</section>
+{{end}}{{end}}
 
 {{define "mysql-connect-form"}}
 <form method="post" action="/servers/{{.Server.ID}}/mysql/connect" class="mt-2 flex flex-col gap-2">

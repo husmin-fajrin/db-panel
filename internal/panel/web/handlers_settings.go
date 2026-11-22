@@ -255,6 +255,9 @@ type kindOption struct {
 
 type settingsPage struct {
 	Page
+	// Marks are the two marks (B8): panel.key backed up, audit log
+	// forwarded.
+	Marks      []markRow
 	Form       settingsForm
 	TokenSaved bool
 	PublicURL  string
@@ -275,6 +278,15 @@ func (a *app) renderSettings(w http.ResponseWriter, r *http.Request, status int,
 		a.Logger.Warn("read extra certificate names", "err", err)
 	}
 	p.ExtraNames = strings.ReplaceAll(extra, ",", ", ")
+	// The page still renders without them.
+	if panelKey, auditForward, err := a.storedMarks(); err != nil {
+		a.Logger.Warn("read settings marks", "err", err)
+	} else {
+		p.Marks = []markRow{
+			{Label: "panel.key sudah dicadangkan", Action: "/settings/panel-key-backed-up", Mark: panelKey},
+			{Label: "Log audit diteruskan ke server lain", Action: "/settings/audit-forwarded", Mark: auditForward},
+		}
+	}
 	p.Flash = flash
 	p.Notice = notices[r.URL.Query().Get("pesan")]
 	for _, k := range monitor.AllKinds() {
@@ -494,4 +506,102 @@ func (a *app) testTelegram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/settings?pesan=tes-terkirim", http.StatusSeeOther)
+}
+
+// settingsMark is one mark of the settings page (B8): set when an operator
+// marked it, by whom and when.
+type settingsMark struct {
+	Marked bool
+	By     string
+	At     time.Time // zero when the stored time cannot be read
+}
+
+// markRow is one mark's row on the settings page: its label, the form's
+// action and the mark as stored.
+type markRow struct {
+	Label, Action string
+	Mark          settingsMark
+}
+
+// markKeys are the two setting keys of a mark: when (RFC 3339, UTC; empty
+// when not marked) and by whom.
+type markKeys struct{ at, by string }
+
+var (
+	panelKeyMarkKeys     = markKeys{store.SettingPanelKeyBackedUpAt, store.SettingPanelKeyBackedUpBy}
+	auditForwardMarkKeys = markKeys{store.SettingAuditForwardedAt, store.SettingAuditForwardedBy}
+)
+
+// storedMarks reads the two marks.
+func (a *app) storedMarks() (panelKey, auditForward settingsMark, err error) {
+	kv, err := a.Store.GetSettings(panelKeyMarkKeys.at, panelKeyMarkKeys.by, auditForwardMarkKeys.at, auditForwardMarkKeys.by)
+	if err != nil {
+		return settingsMark{}, settingsMark{}, err
+	}
+	read := func(k markKeys) settingsMark {
+		raw := kv[k.at]
+		if raw == "" {
+			return settingsMark{}
+		}
+		m := settingsMark{Marked: true, By: kv[k.by]}
+		if at, err := time.Parse(time.RFC3339, raw); err == nil {
+			m.At = at
+		} else {
+			a.Logger.Warn("stored mark time unreadable", "key", k.at, "err", err)
+		}
+		return m
+	}
+	return read(panelKeyMarkKeys), read(auditForwardMarkKeys), nil
+}
+
+func (a *app) markPanelKeyBackedUp(w http.ResponseWriter, r *http.Request) {
+	a.setMark(w, r, "panel_key_marked", panelKeyMarkKeys)
+}
+
+func (a *app) markAuditForwarded(w http.ResponseWriter, r *http.Request) {
+	a.setMark(w, r, "audit_forward_marked", auditForwardMarkKeys)
+}
+
+// msgBadRequest answers a form no page of the panel posts.
+const msgBadRequest = "permintaan tidak valid"
+
+// setMark sets (marked=1: the logged-in user, now) or clears (marked=0)
+// one mark of the settings page; any other value is refused.
+func (a *app) setMark(w http.ResponseWriter, r *http.Request, action string, k markKeys) {
+	var marked bool
+	switch r.PostFormValue("marked") {
+	case "1":
+		marked = true
+	case "0":
+	default:
+		a.audit(r, action, auditSettings, 0, nil, msgBadRequest)
+		http.Error(w, msgBadRequest, http.StatusBadRequest)
+		return
+	}
+	at, by := "", ""
+	if marked {
+		at, by = a.Now().UTC().Format(time.RFC3339), auth.UsernameFrom(r.Context())
+	}
+	// The time says whether it is marked: written last when marking,
+	// first when clearing.
+	writes := [2][2]string{{k.by, by}, {k.at, at}}
+	if !marked {
+		writes[0], writes[1] = writes[1], writes[0]
+	}
+	var err error
+	for _, kv := range writes {
+		if err = a.Store.SetSetting(kv[0], kv[1]); err != nil {
+			break
+		}
+	}
+	a.audit(r, action, auditSettings, 0, map[string]any{"marked": marked}, a.outcomeOf(err))
+	if err != nil {
+		a.internalError(w, "save settings mark", err)
+		return
+	}
+	notice := "ditandai"
+	if !marked {
+		notice = "tanda-batal"
+	}
+	http.Redirect(w, r, "/settings?pesan="+notice, http.StatusSeeOther)
 }

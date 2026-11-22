@@ -182,6 +182,9 @@ type serverDetailPage struct {
 	// report that says whether MySQL answers (none yet, or no MySQL
 	// account connected), when the row shows the unit alone.
 	ServiceLine *serviceLine
+	// Backup is the backup card (paired servers): the folder form and the
+	// folder's state; nil on an unpaired server.
+	Backup *backupCard
 }
 
 // dashboardListLen is how many alerts and jobs the dashboard lists.
@@ -746,6 +749,13 @@ func newStartLockFacts(snap *proto.HealthSnapshot) *startLockFacts {
 
 // renderServer renders the server page with v's status and messages.
 func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView) {
+	a.renderServerWith(w, r, srv, v, nil)
+}
+
+// renderServerWith is renderServer with the backup form as posted
+// (backupForm's Dir and MaxAgeHours) in place of the stored values; nil
+// shows the stored ones.
+func (a *app) renderServerWith(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView, backupForm *backupCard) {
 	p := serverDetailPage{Page: a.page(r), Server: srv, Local: a.isLocal(srv), Connect: v.Form}
 	p.Flash, p.Notice = v.Flash, v.Notice
 	now := a.Now()
@@ -809,6 +819,12 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 				p.ServiceLine = &sl
 			}
 		}
+		mv, _ := a.Monitor.View(srv.ID) // none yet: the zero view, no report
+		backup := a.newBackupCard(srv, mv)
+		if backupForm != nil {
+			backup.Dir, backup.MaxAgeHours = backupForm.Dir, backupForm.MaxAgeHours
+		}
+		p.Backup = &backup
 		if err := a.oldMasterViews(r.Context(), srv, &p); err != nil {
 			a.internalError(w, "old master", err)
 			return

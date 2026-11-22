@@ -30,7 +30,9 @@ type fakeMonitor struct {
 	views   map[int64]monitor.View
 	checks  []int64
 	snoozes []snoozeCall
-	err     error // returned by CheckNow and Snooze when set
+	// configures lists the servers ConfigureServer was called for.
+	configures []int64
+	err        error // returned by CheckNow and Snooze when set
 }
 
 type snoozeCall struct {
@@ -67,6 +69,12 @@ func (m *fakeMonitor) Snooze(id int64, until *time.Time) error {
 	defer m.mu.Unlock()
 	m.snoozes = append(m.snoozes, snoozeCall{id, until})
 	return m.err
+}
+
+func (m *fakeMonitor) ConfigureServer(_ context.Context, id int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configures = append(m.configures, id)
 }
 
 func (m *fakeMonitor) setView(v monitor.View) {

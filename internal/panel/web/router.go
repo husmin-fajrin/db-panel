@@ -122,6 +122,10 @@ type MonitorView interface {
 	// Snooze mutes the server's alert notifications until until; nil
 	// clears it.
 	Snooze(serverID int64, until *time.Time) error
+	// ConfigureServer sends the server's agent its stored backup folder
+	// (with the monitoring settings), in the background; an offline agent
+	// gets it when it connects.
+	ConfigureServer(ctx context.Context, serverID int64)
 }
 
 // The bundled fonts (static/fonts) are served as font/woff2 everywhere: Go's
@@ -203,6 +207,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /servers/{id}/mysql-tls", authedPost(a.installMySQLTLS))
 	mux.Handle("POST /servers/{id}/check", authedPost(a.checkServer))
 	mux.Handle("POST /servers/{id}/snooze", authedPost(a.snoozeServer))
+	mux.Handle("POST /servers/{id}/backup", authedPost(a.saveServerBackup))
 	mux.Handle("GET /servers/{id}/status-fragment", authed(a.statusFragment))
 	mux.Handle("GET /servers/{id}/connections-fragment", authed(a.connectionsFragment))
 	mux.Handle("POST /servers/{id}/leftover", authedPost(a.startLeftover))
@@ -243,6 +248,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /settings", authed(a.showSettings))
 	mux.Handle("POST /settings", authedPost(a.saveSettings))
 	mux.Handle("POST /settings/telegram-test", authedPost(a.testTelegram))
+	mux.Handle("POST /settings/panel-key-backed-up", authedPost(a.markPanelKeyBackedUp))
+	mux.Handle("POST /settings/audit-forwarded", authedPost(a.markAuditForwarded))
 	mux.Handle("POST /settings/cert", authedPost(a.uploadCert))
 	mux.Handle("POST /settings/cert-panel", authedPost(a.usePanelCert))
 	mux.Handle("POST /settings/cert-names", authedPost(a.saveCertNames))
