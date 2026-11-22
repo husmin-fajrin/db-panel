@@ -50,8 +50,9 @@ func scanWithin(t *testing.T, dir string) backupResult {
 }
 
 // visibleTempDir is a new empty directory that ValidBackupFolder accepts
-// (t.TempDir is under /tmp, a hidden tree, on most machines). It skips the
-// test when no such place is writable.
+// (t.TempDir is under /tmp, a hidden tree, on most machines). It skips t
+// when no such place is writable, so call it only from the (sub)test that
+// needs the place.
 func visibleTempDir(t *testing.T) string {
 	t.Helper()
 	for _, base := range []string{os.TempDir(), "/var/lib", "/srv", "/opt", "/mnt", "/run"} {
@@ -67,7 +68,8 @@ func visibleTempDir(t *testing.T) string {
 			return dir
 		}
 	}
-	t.Skip("no writable directory outside the hidden trees")
+	t.Skip("needs a writable directory outside the hidden trees (/home, /root, /run/user, /tmp, /var/tmp) " +
+		"for a symlink target; the temp directory and /var/lib, /srv, /opt, /mnt, /run are not")
 	return ""
 }
 
@@ -257,29 +259,34 @@ func TestBackupScanUnreadableReasons(t *testing.T) {
 		t.Fatal(err)
 	}
 	links := map[string]string{
-		"proc":      "/proc",
-		"to-file":   file,
-		"to-fifo":   fifo,
-		"to-proc1":  "/proc/1",
-		"to-tmp":    "/tmp", // hidden wherever the test's own temp directory is
-		"dangling":  filepath.Join(dir, "nowhere"),
-		"to-folder": "", // set below
+		"proc":     "/proc",
+		"to-file":  file,
+		"to-fifo":  fifo,
+		"to-proc1": "/proc/1",
+		"to-tmp":   "/tmp", // hidden wherever the test's own temp directory is
+		"dangling": filepath.Join(dir, "nowhere"),
 	}
-	// A symlinked folder is scanned where it leads, when that place passes
-	// the folder rule: the target must not be under a hidden tree, and
-	// the test's temp directory may be one (/tmp here).
-	target := visibleTempDir(t)
-	mkfile(t, filepath.Join(target, "x.bak"), 9, scanNow.Add(-time.Hour))
-	links["to-folder"] = target
 	for name, to := range links {
 		if err := os.Symlink(to, filepath.Join(dir, name)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	got := *scanWithin(t, filepath.Join(dir, "to-folder")).state(scanNow)
-	if want := (proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 3600, NewestSize: 9}); got != want {
-		t.Errorf("scan of a symlinked folder = %+v, want its target's %+v", got, want)
-	}
+	// A symlinked folder is scanned where it leads, when that place passes
+	// the folder rule: the target must not be under a hidden tree, and
+	// the test's temp directory may be one (/tmp here). Only this case
+	// needs such a place, so only it may skip.
+	t.Run("symlinked folder is scanned", func(t *testing.T) {
+		target := visibleTempDir(t)
+		mkfile(t, filepath.Join(target, "x.bak"), 9, scanNow.Add(-time.Hour))
+		link := filepath.Join(dir, "to-folder")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		got := *scanWithin(t, link).state(scanNow)
+		if want := (proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 3600, NewestSize: 9}); got != want {
+			t.Errorf("scan of a symlinked folder = %+v, want its target's %+v", got, want)
+		}
+	})
 	// scanBackup takes the folder as given; these are paths the folder
 	// rule lets through but the file system refuses, or that lead where
 	// the rule refuses.
