@@ -218,7 +218,7 @@ func (a *app) refreshMySQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, err := a.Orchestrator.RefreshInventory(r.Context(), srv.ID)
-	a.audit(r, "mysql_refresh", auditServer, srv.ID, nil, outcomeOf(err))
+	a.audit(r, "mysql_refresh", auditServer, srv.ID, nil, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("mysql refresh failed", "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
@@ -237,7 +237,7 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	// refuses it too; refused here before any confirmation is asked.
 	if srv.Role == store.RoleQuarantined {
 		err := orchestrator.ErrPrepareQuarantined
-		a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{}, outcomeOf(err))
+		a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{}, a.outcomeOf(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
 		return
 	}
@@ -254,7 +254,7 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := a.Orchestrator.StartPrepareMaster(r.Context(), srv.ID)
-	a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
+	a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{"job_id": id}, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("prepare master refused", "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
@@ -283,7 +283,7 @@ func (a *app) installMySQLTLS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := a.Orchestrator.StartMySQLTLS(r.Context(), srv.ID)
-	a.audit(r, "mysql_tls", auditServer, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
+	a.audit(r, "mysql_tls", auditServer, srv.ID, map[string]any{"job_id": id}, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("mysql certificate refused", "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
@@ -301,7 +301,7 @@ func (a *app) tightenTLS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := a.Orchestrator.StartTightenTLS(r.Context(), srv.ID)
-	a.audit(r, "tighten_tls", auditMaster, srv.ID, map[string]any{"job_id": id}, outcomeOf(err))
+	a.audit(r, "tighten_tls", auditMaster, srv.ID, map[string]any{"job_id": id}, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("tighten replication refused", "master", srv.ID, "err", logErr(err))
 		p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
@@ -420,7 +420,7 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = a.Store.SetTopologySource(topo.ID, host, port)
-	a.audit(r, "master_source", auditMaster, srv.ID, detail, outcomeOf(err))
+	a.audit(r, "master_source", auditMaster, srv.ID, detail, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "set topology source", err)
 		return
@@ -494,6 +494,7 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 		p.Tree.Replicas = append(p.Tree.Replicas, replicaCard{Server: store.Server{ID: row.ServerID, Name: row.ServerName}, Status: row.Status})
 	}
 	p.Facts = newMasterFacts(v, monitored, len(reps))
+	p.Facts.Snap = shownSnap(srv.Name, p.Facts.Snap)
 	if p.Timeline, err = a.timeline(r, srv.ID); err != nil {
 		a.internalError(w, "timeline", err)
 		return
@@ -877,6 +878,36 @@ func (a *app) replicaDetail(w http.ResponseWriter, r *http.Request) {
 	a.renderReplica(w, r, http.StatusOK, p)
 }
 
+// shownSnap is snap, a report of the server named server, as a page shows
+// it: a copy (the monitor's own is not changed) whose MySQL error messages
+// are the agent's words (agentLine). The monitor has censored MySQL's row
+// data in them already (redact.Quotes, before it keeps the report); the
+// bound comes after the censor. nil stays nil.
+func shownSnap(server string, snap *proto.HealthSnapshot) *proto.HealthSnapshot {
+	if snap == nil {
+		return nil
+	}
+	s := *snap
+	s.MySQLError = agentLine(server, s.MySQLError)
+	if s.Replica != nil {
+		r := *s.Replica
+		r.LastSQLError = agentLine(server, r.LastSQLError)
+		r.LastIOError = agentLine(server, r.LastIOError)
+		s.Replica = &r
+	}
+	return &s
+}
+
+// agentLine is text an agent's report holds, as a page shows it: labelled
+// as the words of its server, one line and cut at maxAgentWords
+// (orchestrator.AgentQuoteN); "" stays "".
+func agentLine(server, text string) string {
+	if text == "" {
+		return ""
+	}
+	return orchestrator.AgentQuoteN(server, text, maxAgentWords)
+}
+
 // renderReplica fills p from p.Server and p.Replica and renders it.
 func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, p replicaPage) {
 	srv, rep := p.Server, p.Replica
@@ -902,7 +933,9 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 	}
 	v, monitored := a.Monitor.View(srv.ID)
 	if monitored {
-		p.Health = &v
+		shown := v
+		shown.Snap = shownSnap(srv.Name, v.Snap)
+		p.Health = &shown
 	}
 	p.Status = newStatusView(srv.ID, srv.Role, v, monitored, a.Now())
 	if p.Timeline, err = a.timeline(r, srv.ID); err != nil {

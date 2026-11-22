@@ -599,7 +599,7 @@ func (a *app) prepareRetry(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			_, err = a.Orchestrator.RefreshInventory(r.Context(), params.MasterServerID)
 		}
-		a.audit(r, "mysql_refresh", auditJob, job.ServerID, map[string]any{"reason": "retry", "job_id": job.ID}, outcomeOf(err))
+		a.audit(r, "mysql_refresh", auditJob, job.ServerID, map[string]any{"reason": "retry", "job_id": job.ID}, a.outcomeOf(err))
 		if err != nil {
 			a.Logger.Warn("refresh inventories for retry", "job", job.ID, "err", logErr(err))
 			a.renderJob(w, r, http.StatusBadRequest, msgRetryRefresh+a.shownError(err))
@@ -622,7 +622,7 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, n
 	if seen != nil && job.Kind == orchestrator.KindCreateReplica && paramsOf(job).RebuildOldMaster {
 		localApprovalDetail(seen, detail)
 	}
-	a.audit(r, name, auditJob, job.ServerID, detail, outcomeOf(err))
+	a.audit(r, name, auditJob, job.ServerID, detail, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("job action refused", "action", name, "job", job.ID, "err", logErr(err))
 		status := http.StatusConflict

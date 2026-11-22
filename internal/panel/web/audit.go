@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
+	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -119,13 +121,25 @@ func oneLine(s string) string {
 	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
 }
 
-// outcomeOf is auditOK for nil, else the error's text. An agent's answer
+// outcomeOf is the audit outcome of err (outcomeText), a failure an agent
+// sent labelled with the name of the server that sent it.
+func (a *app) outcomeOf(err error) string { return outcomeText(err, a.serverName) }
+
+// outcomeText is auditOK for nil, else the error's text. An agent's answer
 // (a *proto.Error in the chain) may quote MySQL's row data: its quoted
 // literals are censored (spec 5.12); the panel's own refusals are kept as
-// written.
-func outcomeOf(err error) string {
+// written. A failure the agent sent (hub.SentByAgent: a *hub.AgentError in
+// the chain, whatever its code) is, after the censor, labelled as the
+// words of its server (named by name), made one line and cut at
+// maxAgentWords (orchestrator.AgentQuoteN), so it never reads as the
+// panel's. Rows stored before the label existed keep their outcome: the
+// audit hash chain covers it.
+func outcomeText(err error, name func(serverID int64) string) string {
 	if err == nil {
 		return auditOK
+	}
+	if ae, ok := errors.AsType[*hub.AgentError](err); ok {
+		return orchestrator.AgentQuoteN(name(ae.Server), redact.Quotes(err.Error()), maxAgentWords)
 	}
 	if _, ok := errors.AsType[*proto.Error](err); ok {
 		return redact.Quotes(err.Error())

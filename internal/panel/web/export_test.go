@@ -1,6 +1,7 @@
 package web
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
@@ -45,8 +46,10 @@ func StatusExplain(id int64, role string, v monitor.View) *monitor.Explanation {
 	return newStatusView(id, role, v, true, time.Time{}).Explain
 }
 
-// OutcomeOf exposes outcomeOf to web_test.
-var OutcomeOf = outcomeOf
+// OutcomeOf exposes outcomeText to web_test, a server named by its id.
+func OutcomeOf(err error) string {
+	return outcomeText(err, func(id int64) string { return "#" + strconv.FormatInt(id, 10) })
+}
 
 // StatusLabelOf is the label newStatusView gives a view.
 func StatusLabelOf(id int64, role string, v monitor.View) string {

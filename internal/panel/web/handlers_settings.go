@@ -482,7 +482,7 @@ func changedSettings(prev, cur monitor.Settings) []string {
 // per 10 s, enforced by the notifier).
 func (a *app) testTelegram(w http.ResponseWriter, r *http.Request) {
 	err := a.Telegram.SendTest(r.Context())
-	a.audit(r, "telegram_test", auditSettings, 0, nil, outcomeOf(err))
+	a.audit(r, "telegram_test", auditSettings, 0, nil, a.outcomeOf(err))
 	if err != nil {
 		// The notifier's errors never hold the bot token.
 		a.Logger.Warn("telegram test failed", "err", err)

@@ -611,7 +611,7 @@ func (a *app) newServerForm(w http.ResponseWriter, r *http.Request) {
 func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 	name := r.PostFormValue("name")
 	srv, err := a.Store.CreateServer(name)
-	a.audit(r, "server_create", auditServer, srv.ID, map[string]any{"name": name}, outcomeOf(err))
+	a.audit(r, "server_create", auditServer, srv.ID, map[string]any{"name": name}, a.outcomeOf(err))
 	if err != nil {
 		// The store returns unwrapped, user-facing errors for validation
 		// (empty or duplicate name) and wrapped ones for database failures.
@@ -634,25 +634,41 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 
 // pinFacts are the agent's pins in words (spec 5.12).
 type pinFacts struct {
-	Role   string // "master", "replica", "dikarantina", "belum ada"; "-" while unreadable
+	// Role is "master", "replica", "dikarantina", "belum ada"; "-" while
+	// unreadable; for any other value "tidak dikenal" and the agent's
+	// value, labelled (orchestrator.AgentQuoteN) and cut at maxShownPin.
+	Role   string
 	Source string // host:port, or "tidak ada"
-	Error  string // why the pin files cannot be read; "" when they can
+	// Error is why the pin files cannot be read, as the agent words it:
+	// labelled, one line and cut at maxAgentWords; "" when they can.
+	Error string
 }
 
-// newPinFacts reads the pins of snap; nil without a report, or from an
-// agent that reports none.
-func newPinFacts(snap *proto.HealthSnapshot) *pinFacts {
+// maxShownPin bounds the agent's value of a role pin the panel does not
+// know.
+const maxShownPin = 32
+
+// newPinFacts reads the pins of snap, an agent's report of the server
+// named server; nil without a report, or from an agent that reports none.
+// The pin error and an unknown role pin are the agent's text: neither is
+// MySQL's (redact.Quotes, which censors MySQL's row data in the report's
+// MySQL errors, has nothing to censor in them), and both are labelled as
+// the agent's words, one line and bounded.
+func newPinFacts(server string, snap *proto.HealthSnapshot) *pinFacts {
 	if snap == nil || (snap.RolePin == "" && snap.PinError == "") {
 		return nil
 	}
-	f := &pinFacts{Role: snap.RolePin, Source: snap.SourcePin, Error: snap.PinError}
+	f := &pinFacts{Role: snap.RolePin, Source: snap.SourcePin, Error: agentLine(server, snap.PinError)}
 	switch f.Role {
 	case "":
 		f.Role = "-"
+	case store.RoleMaster, store.RoleReplica:
 	case "quarantined":
 		f.Role = "dikarantina"
 	case "unassigned":
 		f.Role = "belum ada"
+	default:
+		f.Role = "tidak dikenal (" + orchestrator.AgentQuoteN(server, f.Role, maxShownPin) + ")"
 	}
 	switch {
 	case f.Source == "" && f.Error != "":
@@ -755,7 +771,7 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 			return
 		}
 		if v, ok := a.Monitor.View(srv.ID); ok {
-			p.Pins = newPinFacts(v.Snap)
+			p.Pins = newPinFacts(srv.Name, v.Snap)
 			p.StartLock = newStartLockFacts(v.Snap)
 			p.ReportsDropped = reportsDroppedText(v.ReportsDropped)
 			if p.Probe != nil && v.Snap != nil && v.Snap.MySQLError != mysqlNotConnected {
@@ -833,7 +849,7 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 	}
 	// The token itself never goes into the audit log.
 	_, err := a.Store.CreatePairToken(srv.ID, a.Now(), pairTokenTTL)
-	a.audit(r, "server_token", auditServer, srv.ID, map[string]any{"repair": srv.Paired}, outcomeOf(err))
+	a.audit(r, "server_token", auditServer, srv.ID, map[string]any{"repair": srv.Paired}, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "create pair token", err)
 		return
@@ -885,7 +901,7 @@ func (a *app) deleteServer(w http.ResponseWriter, r *http.Request) {
 		del = a.Orchestrator.DeleteUnquarantined
 	}
 	err := del(r.Context(), srv.ID)
-	a.audit(r, "server_delete", auditServer, srv.ID, detail, outcomeOf(err))
+	a.audit(r, "server_delete", auditServer, srv.ID, detail, a.outcomeOf(err))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, msgServerNotFound, http.StatusNotFound)

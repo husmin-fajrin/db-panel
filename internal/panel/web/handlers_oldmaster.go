@@ -335,7 +335,7 @@ func (a *app) cutoverDone(w http.ResponseWriter, r *http.Request) {
 	warning, err := a.Orchestrator.ConfirmCutover(topo.ID)
 	a.audit(r, "cutover_confirmed", auditMaster, srv.ID,
 		map[string]any{"topology_id": topo.ID, "old_master_server_id": topo.OldMasterServerID, "warning": warning != ""},
-		outcomeOf(err))
+		a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("cutover confirmation refused", "master", srv.ID, "err", logErr(err))
 		a.renderCutover(w, r, http.StatusConflict, srv, topo, a.shownError(err))
@@ -733,7 +733,7 @@ func (a *app) startOldMasterJob(w http.ResponseWriter, r *http.Request, action s
 	if err == nil {
 		detail["job_id"] = id
 	}
-	a.audit(r, action, auditServer, srv.ID, detail, outcomeOf(err))
+	a.audit(r, action, auditServer, srv.ID, detail, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("old master job refused", "action", action, "server", srv.ID, "err", logErr(err))
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})

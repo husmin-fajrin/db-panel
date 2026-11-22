@@ -95,7 +95,7 @@ func (a *app) replicaControl(w http.ResponseWriter, r *http.Request, action, not
 		return
 	}
 	err := do(r.Context(), srv.ID)
-	a.audit(r, action, auditReplica, srv.ID, nil, outcomeOf(err))
+	a.audit(r, action, auditReplica, srv.ID, nil, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("replica control refused", "action", action, "server", srv.ID, "err", logErr(err))
 		a.replicaError(w, r, srv, rep, a.shownError(err))
@@ -125,7 +125,7 @@ func (a *app) prepareResync(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_, err = a.Orchestrator.RefreshInventory(r.Context(), master.ID)
 	}
-	a.audit(r, "mysql_refresh", auditReplica, srv.ID, map[string]any{"reason": "resync"}, outcomeOf(err))
+	a.audit(r, "mysql_refresh", auditReplica, srv.ID, map[string]any{"reason": "resync"}, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("refresh inventories for resync", "server", srv.ID, "master", master.ID, "err", logErr(err))
 		a.replicaError(w, r, srv, rep, msgWipeRefresh+a.shownError(err))
@@ -229,7 +229,7 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		detail["job_id"] = id
 	}
-	a.audit(r, "replica_resync", auditReplica, srv.ID, detail, outcomeOf(err))
+	a.audit(r, "replica_resync", auditReplica, srv.ID, detail, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("resync refused", "server", srv.ID, "err", logErr(err))
 		a.replicaError(w, r, srv, rep, a.shownError(err))
@@ -260,7 +260,7 @@ func (a *app) detachReplica(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := a.Orchestrator.DetachReplica(r.Context(), srv.ID, mode == "stop")
-	a.audit(r, "replica_detach", auditReplica, srv.ID, detail, outcomeOf(err))
+	a.audit(r, "replica_detach", auditReplica, srv.ID, detail, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("detach refused", "server", srv.ID, "err", logErr(err))
 		a.replicaError(w, r, srv, rep, a.shownError(err))
@@ -285,7 +285,7 @@ func (a *app) unlockMaster(w http.ResponseWriter, r *http.Request) {
 	} else {
 		err = a.Orchestrator.UnlockMaster(r.Context(), srv.ID)
 	}
-	a.audit(r, "master_unlock", auditMaster, srv.ID, nil, outcomeOf(err))
+	a.audit(r, "master_unlock", auditMaster, srv.ID, nil, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("master unlock refused", "server", srv.ID, "err", logErr(err))
 		p := masterPage{Page: a.page(r), Server: srv, Topology: topo}
@@ -304,7 +304,7 @@ func (a *app) checkServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := a.Monitor.CheckNow(r.Context(), srv.ID)
-	a.audit(r, "server_check", auditServer, srv.ID, nil, outcomeOf(err))
+	a.audit(r, "server_check", auditServer, srv.ID, nil, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Info("check now refused", "server", srv.ID, "err", logErr(err))
 		a.controlError(w, r, srv, a.shownError(err))
@@ -332,7 +332,7 @@ func (a *app) snoozeServer(w http.ResponseWriter, r *http.Request) {
 		until = &t
 	}
 	err = a.Monitor.Snooze(srv.ID, until)
-	a.audit(r, "server_snooze", auditServer, srv.ID, map[string]any{"hours": hours, "until": until}, outcomeOf(err))
+	a.audit(r, "server_snooze", auditServer, srv.ID, map[string]any{"hours": hours, "until": until}, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "snooze", err)
 		return

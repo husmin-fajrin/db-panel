@@ -204,7 +204,7 @@ func (a *app) usePanelCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := a.Certs.UsePanel()
-	a.audit(r, "https_cert_panel", auditSettings, 0, nil, outcomeOf(err))
+	a.audit(r, "https_cert_panel", auditSettings, 0, nil, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "use panel certificate", err)
 		return
@@ -225,7 +225,7 @@ func (a *app) saveCertNames(w http.ResponseWriter, r *http.Request) {
 		a.renderStoredSettings(w, r, http.StatusBadRequest, problem)
 		return
 	}
-	a.audit(r, "https_cert_names", auditSettings, 0, map[string]any{"extra_names": raw}, outcomeOf(err))
+	a.audit(r, "https_cert_names", auditSettings, 0, map[string]any{"extra_names": raw}, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "save extra certificate names", err)
 		return
@@ -270,7 +270,7 @@ func (a *app) baseURLToHTTPS(w http.ResponseWriter, r *http.Request) {
 	err = a.Settings.Save(next)
 	a.audit(r, "settings_update", auditSettings, 0, map[string]any{
 		"changed": []string{store.SettingPanelBaseURL}, store.SettingPanelBaseURL: next.PanelBaseURL,
-	}, outcomeOf(err))
+	}, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "save settings", err)
 		return
