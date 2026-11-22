@@ -65,6 +65,7 @@ type View struct {
 	Since        time.Time             // when Status.Code took its current value
 	ReceivedAt   time.Time             // when the last report was taken, by the panel's clock
 	Snap         *proto.HealthSnapshot // shared with the Monitor: read only
+	Backlog      bool                  // Snap came from the agent's backlog, not a live report
 	NeedsUpgrade bool                  // the agent does not know monitor.*
 	SnoozeUntil  *time.Time
 	// QuarantinePending: an old master (Role store.RoleQuarantined) whose
@@ -80,6 +81,17 @@ type View struct {
 // away, or connected again and awaiting its first report.
 func (v View) AgentAway() bool {
 	return offlineStatus(v.Status) || v.Status.Code == StatusAwaitingReport
+}
+
+// ClockSkew is how far the agent's clock was ahead of the panel's (behind
+// when negative) when its last report was taken: the agent's clock
+// against ReceivedAt. false when unknown: no report, an agent that does
+// not send its clock, or a last report from the agent's backlog.
+func ClockSkew(v View) (time.Duration, bool) {
+	if v.Snap == nil || v.Snap.ClockUnixMS == 0 || v.Backlog {
+		return 0, false
+	}
+	return time.UnixMilli(v.Snap.ClockUnixMS).Sub(v.ReceivedAt), true
 }
 
 // Monitor ingests the agents' health reports, derives each server's status,

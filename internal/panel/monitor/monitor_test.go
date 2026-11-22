@@ -1389,3 +1389,56 @@ func TestConfigureSendsBackupFolder(t *testing.T) {
 		t.Fatalf("next OnOnline sent backup_folder %q", got)
 	}
 }
+
+// TestClockSkew: the agent's clock against the panel's at the moment the
+// report was taken; unknown without a report, from an agent that does not
+// send its clock, and when the last report taken came from the agent's
+// backlog (its clock was read long before the panel placed it).
+func TestClockSkew(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	snap := masterSnap(srcUUID + ":1-100")
+	snap.ClockUnixMS = r.clk.Now().Add(45 * time.Second).UnixMilli()
+	a := r.agent(mID, true, snap).attach()
+
+	v := r.view(mID)
+	if v.Backlog {
+		t.Fatal("a live report marked as backlog")
+	}
+	if d, ok := ClockSkew(v); !ok || d != 45*time.Second {
+		t.Fatalf("ClockSkew = %v, %v; want 45s, true", d, ok)
+	}
+
+	// Behind the panel: negative.
+	r.clk.Add(time.Minute)
+	a.setSnap(func(s *proto.HealthSnapshot) { s.ClockUnixMS = r.clk.Now().Add(-90 * time.Second).UnixMilli() })
+	a.send()
+	if d, ok := ClockSkew(r.view(mID)); !ok || d != -90*time.Second {
+		t.Fatalf("ClockSkew behind = %v, %v; want -90s, true", d, ok)
+	}
+
+	// A backlog report: not known.
+	back := snap
+	back.ClockUnixMS = r.clk.Now().UnixMilli()
+	a.emit(proto.HealthEvent{Seq: 100, TakenAgoMS: 60_000, Backlog: true, Snapshot: back})
+	v = r.view(mID)
+	if !v.Backlog {
+		t.Fatal("a backlog report not marked as backlog")
+	}
+	if d, ok := ClockSkew(v); ok {
+		t.Fatalf("ClockSkew of a backlog report = %v, true; want false", d)
+	}
+
+	// An agent that predates the clock: not known.
+	old := snap
+	old.ClockUnixMS = 0
+	a.emit(proto.HealthEvent{Seq: 101, Snapshot: old})
+	if d, ok := ClockSkew(r.view(mID)); ok {
+		t.Fatalf("ClockSkew of an old agent = %v, true; want false", d)
+	}
+
+	// No report at all.
+	if d, ok := ClockSkew(View{ServerID: mID, ReceivedAt: r.clk.Now()}); ok {
+		t.Fatalf("ClockSkew without a report = %v, true; want false", d)
+	}
+}
