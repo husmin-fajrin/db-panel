@@ -158,10 +158,21 @@ type Monitor struct {
 	warns  warnLimiter
 	reconf chan struct{} // wakes the loop to pause again with new options
 
-	mu       sync.Mutex // guards opts and roleHint
+	mu       sync.Mutex // guards opts, roleHint and the backup folder settings
 	opts     Options
 	roleHint string
 	clamped  bool // the clamp of check_every_sec was logged already
+	// backupFolder is the folder monitor.configure named, stored whether
+	// or not ValidBackupFolder accepts it; "" when none. backupGen rises
+	// whenever it changes. scan and scanAfter are scanBackup and
+	// time.After; tests replace them.
+	backupFolder string
+	backupGen    uint64
+	scan         func(folder string, now func() time.Time) backupResult
+	scanAfter    func(d time.Duration) <-chan time.Time
+
+	bmu sync.Mutex // guards bk
+	bk  backupScan
 
 	checkMu  sync.Mutex // held for a whole check; guards the fields below
 	seq      uint64
@@ -201,7 +212,7 @@ func New(src Source, em Emitter, logger *slog.Logger, o Options) *Monitor {
 	}
 	return &Monitor{
 		src: src, em: em, pins: o.Pins, logger: logger, now: o.Now, after: o.After, gafter: o.GuardAfter,
-		reconf: make(chan struct{}, 1), opts: o,
+		reconf: make(chan struct{}, 1), opts: o, scan: scanBackup, scanAfter: time.After,
 	}
 }
 
@@ -232,7 +243,9 @@ func (m *Monitor) Register(reg *commands.Registry) {
 }
 
 // Configure validates and applies the panel's settings; the loop's next
-// pause uses the new check interval.
+// pause uses the new check interval. Any backup folder is accepted: one
+// ValidBackupFolder refuses is kept unscanned and reported unreadable, and
+// a new folder drops the old folder's result.
 func (m *Monitor) Configure(p proto.MonitorConfigureParams) error {
 	if !validInterval(p.CheckEverySec) {
 		return rangeError("check_every_sec", maxCheckEverySec)
@@ -265,6 +278,10 @@ func (m *Monitor) Configure(p proto.MonitorConfigureParams) error {
 		m.opts.LagThreshold = time.Duration(p.LagThresholdSec) * time.Second
 	}
 	m.roleHint = p.RoleHint
+	if p.BackupFolder != m.backupFolder {
+		m.backupFolder = p.BackupFolder
+		m.backupGen++
+	}
 	m.mu.Unlock()
 	if logClamp {
 		m.logger.Info("check_every_sec above the maximum applied as the maximum",
@@ -299,7 +316,8 @@ func (m *Monitor) options() Options {
 // Run runs two loops until ctx is done and returns when both have. The
 // check loop checks at once, then every CheckEvery, sweeping the dump
 // accounts when SweepEvery has passed since the last sweep and the salvage
-// files when SalvageSweepEvery has (the first sweeps at once). The guard
+// files when SalvageSweepEvery has (the first sweeps at once), then
+// scanning the backup folder when a scan is due (scanBackupFolder). The guard
 // loop (guardLoop) runs the safety guards every GuardEvery, whatever
 // CheckEvery is. When the Source is an EventSender its sender runs beside
 // them, and Run waits for it too.
@@ -321,6 +339,7 @@ func (m *Monitor) Run(ctx context.Context) {
 		m.tick(ctx)
 		m.sweep(ctx)
 		m.sweepSalvage(ctx)
+		m.scanBackupFolder(ctx)
 		if !m.pause(ctx) {
 			break
 		}
@@ -536,10 +555,11 @@ func (m *Monitor) forcedCheck(ctx context.Context) (proto.HealthEvent, error) {
 }
 
 // stamp adds to a reading what the monitor knows rather than the source:
-// the agent's clock at takenAt. tick and forcedCheck call it right after
-// taking takenAt.
+// the agent's clock at takenAt and the backup folder's state. tick and
+// forcedCheck call it right after taking takenAt.
 func (m *Monitor) stamp(s *proto.HealthSnapshot, takenAt time.Time) {
 	s.ClockUnixMS = takenAt.UnixMilli()
+	s.Backup = m.backupState(takenAt)
 }
 
 // bootstrap hands a reading MySQL answered to the pins with the panel's

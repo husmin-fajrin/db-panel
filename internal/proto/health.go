@@ -60,7 +60,38 @@ type HealthSnapshot struct {
 	// PerfSchema is @@global.performance_schema; nil while MySQL does
 	// not answer and from an agent before this field.
 	PerfSchema *bool `json:"performance_schema,omitempty"`
+	// Backup is the backup folder's state; nil when no folder is set and
+	// from an agent before this field.
+	Backup *BackupState `json:"backup,omitempty"`
 }
+
+// BackupState is what the agent read of the backup folder: the age and
+// size of its newest regular file, never a file name.
+type BackupState struct {
+	Status       string `json:"status"`                   // BackupOK | BackupNone | BackupUnreadable | BackupPending
+	Reason       string `json:"reason,omitempty"`         // set with BackupUnreadable
+	NewestAgeSec int64  `json:"newest_age_sec,omitempty"` // age of the newest regular file when the snapshot was taken
+	NewestSize   int64  `json:"newest_size,omitempty"`
+	Truncated    bool   `json:"truncated,omitempty"` // the entry limit ended the scan early
+	ScanAgoSec   int64  `json:"scan_ago_sec,omitempty"`
+}
+
+// BackupState statuses and the reasons of BackupUnreadable.
+const (
+	BackupOK         = "ok"
+	BackupNone       = "none"
+	BackupUnreadable = "unreadable"
+	BackupPending    = "pending"
+
+	BackupReasonMissing = "missing"
+	BackupReasonNotDir  = "not_dir"
+	BackupReasonDenied  = "denied"
+	BackupReasonHidden  = "hidden"
+	BackupReasonInvalid = "invalid"
+	BackupReasonTimeout = "timeout"
+	BackupReasonLimit   = "limit"
+	BackupReasonError   = "error"
+)
 
 // EventHealth is the event an agent's monitor sends with a HealthEvent
 // payload. The monitor.configure and monitor.snapshot commands answer with
@@ -108,4 +139,7 @@ type MonitorConfigureParams struct {
 	// RoleHint is the role the panel records for the server: "master",
 	// "replica" or "" when it has none; an agent takes "quarantined" as "".
 	RoleHint string `json:"role_hint,omitempty"`
+	// BackupFolder is the folder whose newest file the agent reports;
+	// "" turns the scan off. An agent before this field ignores it.
+	BackupFolder string `json:"backup_folder,omitempty"`
 }

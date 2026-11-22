@@ -22,9 +22,10 @@ const (
 // diskWarn or diskCrit percent, connections crossing connPct percent of
 // max_connections, a restart (uptime went down), the start lock's state
 // (startLockChanged) and the state of the quarantine's starts
-// (startResultChanged) and performance_schema (by value, not pointer).
-// The agent's clock (ClockUnixMS) moves on every reading and is not a
-// change. An empty prev is always a change.
+// (startResultChanged), performance_schema (by value, not pointer) and
+// the backup folder's state (backupChanged). The agent's clock
+// (ClockUnixMS) moves on every reading and is not a change. An empty prev
+// is always a change.
 func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWarn, diskCrit, connPct int) bool {
 	if prev == (proto.HealthSnapshot{}) {
 		return true
@@ -42,7 +43,8 @@ func changed(prev, cur proto.HealthSnapshot, lagThreshold time.Duration, diskWar
 		prev.MySQLOK && cur.MySQLOK && cur.UptimeSec < prev.UptimeSec,
 		startLockChanged(prev.StartLock, cur.StartLock),
 		startResultChanged(prev.StartResult, cur.StartResult),
-		boolPtrChanged(prev.PerfSchema, cur.PerfSchema):
+		boolPtrChanged(prev.PerfSchema, cur.PerfSchema),
+		backupChanged(prev.Backup, cur.Backup):
 		return true
 	}
 	return replicaChanged(prev.Replica, cur.Replica, lagThreshold)
@@ -55,6 +57,16 @@ func boolPtrChanged(prev, cur *bool) bool {
 		return true
 	}
 	return prev != nil && *prev != *cur
+}
+
+// backupChanged: the backup state appeared or went, or its Status or
+// Reason changed. The age, size, Truncated and ScanAgoSec alone are not a
+// change, or every reading would be one.
+func backupChanged(prev, cur *proto.BackupState) bool {
+	if (prev == nil) != (cur == nil) {
+		return true
+	}
+	return prev != nil && (prev.Status != cur.Status || prev.Reason != cur.Reason)
 }
 
 // startLockChanged: the start lock appeared or went, or its Present,
