@@ -523,6 +523,9 @@ func (m *Monitor) replicasDisconnected(topoID int64, now time.Time) int {
 		if rs == nil || !rs.online || rs.snap == nil || now.Sub(m.staleBase(rs, now)) > m.settings.StaleAfter {
 			continue
 		}
+		if rs.role == store.RoleQuarantined {
+			continue // an old master's row (its rebuild) is no replica that lost the master
+		}
 		if rs.snap.MySQLOK && rs.snap.Replica != nil && rs.snap.Replica.IORunning != "Yes" {
 			n++
 		}

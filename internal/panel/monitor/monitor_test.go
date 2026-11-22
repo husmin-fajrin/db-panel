@@ -1290,3 +1290,32 @@ func TestReportAgeBounded(t *testing.T) {
 		t.Fatalf("at = %v is in the future (now %v)", at, now)
 	}
 }
+
+// TestReplicasDisconnectedSkipsQuarantined (P-M7): a master presumed down
+// counts the replicas that lost it, not a quarantined server's row.
+func TestReplicasDisconnectedSkipsQuarantined(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	live := r.replica("db-live", topo)
+	q := r.replica("db-lama", topo)
+	if err := r.st.SetServerRole(q, store.RoleQuarantined); err != nil {
+		t.Fatal(err)
+	}
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	connecting := replicaSnap(srcUUID + ":1-100")
+	connecting.Replica.IORunning = "Connecting"
+	r.agent(live, true, connecting).attach()
+	r.agent(q, true, connecting).attach()
+	r.m.tick()
+	if got := r.view(q).Role; got != store.RoleQuarantined {
+		t.Fatalf("db-lama role = %q, want quarantined", got)
+	}
+
+	ma.detach()
+	r.clk.Add(31 * time.Second)
+	r.m.tick()
+	v := r.view(mID)
+	if v.Status.Code != StatusDown || !strings.Contains(v.Status.Detail, "dan 1 replika kehilangan koneksi") {
+		t.Fatalf("master = %q (%s), want Diduga tumbang with 1 replica", v.Status.Code, v.Status.Detail)
+	}
+}
