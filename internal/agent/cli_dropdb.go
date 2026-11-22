@@ -142,6 +142,8 @@ var osBackupFS = backupFS{
 var (
 	// cliBackupDir is drop-database's backup folder without --ke.
 	cliBackupDir = "/var/lib/dbpanel/dibuang"
+	// cliMysqldump is found as the agent finds its own clients: beside
+	// the layout's mysqld, else on PATH (mysql.FindClientTool).
 	cliMysqldump = "mysqldump"
 	cliStatfs    = func(path string) (free uint64, err error) {
 		var st syscall.Statfs_t
@@ -682,7 +684,7 @@ func (b *backup) fill(ctx context.Context, s *rootSession, name string, tables i
 	// A signal while mysqldump runs stops it; the incomplete file goes.
 	sctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
-	cmd, err := s.dumpCommand(sctx, cliMysqldump, "--single-transaction", "--routines", "--triggers", "--events",
+	cmd, err := s.dumpCommand(sctx, mysql.FindClientTool(s.mysqldPath, cliMysqldump), "--single-transaction", "--routines", "--triggers", "--events",
 		"--set-gtid-purged=OFF", "--databases", "--", name)
 	if err != nil {
 		return fmt.Errorf(causeNoStart, err)

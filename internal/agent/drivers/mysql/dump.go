@@ -410,6 +410,19 @@ func findClientTool(mysqldPath, name string) (string, error) {
 	return "", fmt.Errorf("%s tidak ditemukan; pasang paket mysql-client", name)
 }
 
+// FindClientTool is the MySQL client program name as the agent runs it:
+// beside mysqldPath first, else on PATH; name itself when neither has it
+// (or it is a path already), so starting it reports what is missing.
+func FindClientTool(mysqldPath, name string) string {
+	if strings.ContainsRune(name, '/') {
+		return name
+	}
+	if p, err := findClientTool(mysqldPath, name); err == nil {
+		return p
+	}
+	return name
+}
+
 // errNotConnected refuses a dump on a server without a stored admin
 // account: the local client must log in as the account Host.Open uses.
 var errNotConnected = errors.New("akun MySQL belum terhubung; jalankan Hubungkan MySQL dulu")

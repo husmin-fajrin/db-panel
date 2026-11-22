@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/config"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -1352,5 +1353,46 @@ func TestDropDatabaseNotSentIsNoAttempt(t *testing.T) {
 	}
 	if !r.exists("tak_terkirim") || r.flags() != "1 1" || !r.lockFree() {
 		t.Errorf("exists %v, flags %s, lock free %v", r.exists("tak_terkirim"), r.flags(), r.lockFree())
+	}
+}
+
+// layoutHost is h with its layout replaced by layout.
+type layoutHost struct {
+	mysql.Host
+	layout mysql.Layout
+}
+
+func (h layoutHost) Layout() mysql.Layout { return h.layout }
+
+// TestDropDatabaseFindsMysqldumpBesideMysqld (A-M6): the backup's
+// mysqldump is found as the agent finds its own clients, beside the
+// layout's mysqld first, not only on root's PATH: with PATH empty the
+// program beside mysqld runs (here it exits 2, so the backup is refused
+// naming its exit code, not a program that cannot be started).
+func TestDropDatabaseFindsMysqldumpBesideMysqld(t *testing.T) {
+	r := newDropRig(t)
+	r.makeDB("samping", 1)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "mysqld"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mark := filepath.Join(bin, "ran")
+	if err := os.WriteFile(filepath.Join(bin, "mysqldump"), []byte("#!/bin/sh\necho ran >> "+mark+"\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	layout := r.inst.Host().Layout()
+	layout.MysqldPath = filepath.Join(bin, "mysqld")
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { return layoutHost{Host: r.inst.Host(), layout: layout}, nil })
+	setVar(t, &cliMysqldump, "mysqldump")
+	t.Setenv("PATH", "")
+	code, out, errOut := r.run(strings.NewReader("samping\n"), "samping")
+	if want := fmt.Sprintf(p1b, "samping", "mysqldump keluar dengan kode 2") + "\n"; code == 0 || errOut != want {
+		t.Errorf("drop-database = %d\nstderr %q\nwant   %q\nstdout %q", code, errOut, want, out)
+	}
+	if _, err := os.Stat(mark); err != nil {
+		t.Errorf("the mysqldump beside mysqld did not run: %v", err)
+	}
+	if !r.exists("samping") || r.flags() != "1 1" {
+		t.Errorf("exists %v, flags %s", r.exists("samping"), r.flags())
 	}
 }

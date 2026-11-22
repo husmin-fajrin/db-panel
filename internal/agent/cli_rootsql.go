@@ -130,9 +130,10 @@ type rootSession struct {
 	User  string
 	Close func()
 
-	socket   string
-	password string
-	out      io.Writer // where runLifted says it locked again
+	socket     string
+	mysqldPath string // the layout's mysqld: its client programs are beside it
+	password   string
+	out        io.Writer // where runLifted says it locked again
 }
 
 // dumpCommand is the client program bin (mysqldump) logged in as the
@@ -206,12 +207,13 @@ func openRootSession(ctx context.Context, dir, user string, in *promptReader, st
 	if err != nil {
 		return nil, fmt.Errorf(textNoLayout, err)
 	}
-	socket := h.Layout().Socket
+	layout := h.Layout()
+	socket := layout.Socket
 	prompt := fmt.Sprintf(textUserPassword, user)
 	if user == "" {
 		user, prompt = "root", textRootPassword
 	}
-	s := &rootSession{User: user, socket: socket, out: stdout}
+	s := &rootSession{User: user, socket: socket, mysqldPath: layout.MysqldPath, out: stdout}
 	err = s.open(ctx, "")
 	if mysql.LoginRefused(err) {
 		fmt.Fprint(stdout, prompt)
