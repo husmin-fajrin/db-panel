@@ -1726,8 +1726,9 @@ func (c agentAnswerConn) Call(ctx context.Context, cmd string, params, result an
 
 // TestAgentSentOfflineIsNotDisconnect: an agent answering mysql.quarantine
 // or mysql.repoint with the code offline answered: the quarantine step
-// fails (it is not skipped as deferred) and the replica records the
-// failure; a link that really dropped still defers both.
+// fails (it is not skipped as deferred) while the quarantine stays pending
+// for the resend, and the replica records the failure; a link that really
+// dropped still defers both.
 func TestAgentSentOfflineIsNotDisconnect(t *testing.T) {
 	for _, sent := range []bool{true, false} {
 		name := "hub"
@@ -1743,9 +1744,6 @@ func TestAgentSentOfflineIsNotDisconnect(t *testing.T) {
 			}
 			e.hub.Attach(g.m.id, agentAnswerConn{Conn: g.m.conn, cmd: "mysql.quarantine", err: err})
 			e.hub.Attach(g.b.id, agentAnswerConn{Conn: g.b.conn, cmd: "mysql.repoint", err: err})
-			if got := promoteStartRefused(err); got != sent {
-				t.Errorf("promoteStartRefused = %v, want %v", got, sent)
-			}
 			id, perr := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
 			if perr != nil {
 				t.Fatalf("StartPromote: %v", perr)
@@ -1755,6 +1753,9 @@ func TestAgentSentOfflineIsNotDisconnect(t *testing.T) {
 				e.waitIdle(id)
 				if steps[4].Status != store.StepFailed || strings.HasPrefix(steps[4].Message, "tertunda: agent master lama terputus") {
 					t.Errorf("quarantine step = %s %q, want failed", steps[4].Status, steps[4].Message)
+				}
+				if !QuarantinePending(g.promotion()) {
+					t.Error("quarantine not pending after the failure: it would not be resent")
 				}
 				if rep := e.replica(g.b.id); rep.State != store.ReplicaNeedsRepoint ||
 					!strings.HasPrefix(rep.LastError, "Arahkan ulang gagal: ") {

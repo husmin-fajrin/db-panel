@@ -747,14 +747,15 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 // is an answer from the agent (a refusal), as opposed to no answer at all.
 // The hub synthesizes CodeTimeout (the call's deadline passed) and
 // CodeOffline (the link was closed or the write failed) locally without a
-// reply, so those say nothing about whether the agent started the job;
-// the same codes sent by the agent (hub.SentByAgent) are its answer.
+// reply, so those say nothing about whether the agent started the job.
+// The same codes sent by the agent are deliberately read as no answer as
+// well: the start may already have opened writes.
 func promoteStartRefused(err error) bool {
 	var pe *proto.Error
 	if !errors.As(err, &pe) {
 		return false
 	}
-	return hub.SentByAgent(err) || (pe.Code != proto.CodeTimeout && pe.Code != proto.CodeOffline)
+	return pe.Code != proto.CodeTimeout && pe.Code != proto.CodeOffline
 }
 
 // promoteQuarantine quarantines the old master under the new one. An
