@@ -49,6 +49,87 @@ func scanWithin(t *testing.T, dir string) backupResult {
 	}
 }
 
+// visibleTempDir is a new empty directory that ValidBackupFolder accepts
+// (t.TempDir is under /tmp, a hidden tree, on most machines). It skips the
+// test when no such place is writable.
+func visibleTempDir(t *testing.T) string {
+	t.Helper()
+	for _, base := range []string{os.TempDir(), "/var/lib", "/srv", "/opt", "/mnt", "/run"} {
+		if _, ok := ValidBackupFolder(base); !ok {
+			continue
+		}
+		dir, err := os.MkdirTemp(base, "dbpanel-backup-test-")
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved == dir {
+			return dir
+		}
+	}
+	t.Skip("no writable directory outside the hidden trees")
+	return ""
+}
+
+// TestBackupScanFollowsNoSwappedSymlink: a directory listed as one and
+// then swapped for a symlink inside the folder, at any component of the
+// path, is not listed through the link, so no file below level 3 and no
+// directory twice can count. The listing is called directly, as WalkDir
+// would after the swap.
+func TestBackupScanFollowsNoSwappedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, filepath.Join(dir, "a", "b", "old.bak"), 1, scanNow.Add(-time.Hour))
+	mkfile(t, filepath.Join(dir, "c", "old.bak"), 1, scanNow.Add(-time.Hour))
+	mkfile(t, filepath.Join(dir, "deep", "x", "y", "new.bak"), 2, scanNow)
+	mkfile(t, filepath.Join(dir, "deep", "b", "new.bak"), 2, scanNow)
+	root, top, res, ok := openBackupRoot(dir, func() time.Time { return scanNow })
+	if !ok {
+		t.Fatalf("open: %+v", res)
+	}
+	defer root.Close()
+	defer top.Close()
+	b := backupFS{root: root, top: top, w: &backupWalk{}}
+	if l, err := b.ReadDir("a/b"); err != nil || len(l) != 1 {
+		t.Fatalf("ReadDir(a/b) before the swap = %v, %v", l, err)
+	}
+	swap := func(old, moved, link string) {
+		t.Helper()
+		if err := os.Rename(filepath.Join(dir, old), filepath.Join(dir, moved)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(link, filepath.Join(dir, old)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names := func(l []fs.DirEntry) (n []string) {
+		for _, e := range l {
+			n = append(n, e.Name())
+		}
+		return n
+	}
+	// The last component: a/b -> ../deep/x/y (level-4 files at level 2).
+	swap("a/b", "a/b-moved", "../deep/x/y")
+	if l, err := b.ReadDir("a/b"); err == nil {
+		t.Errorf("ReadDir(a/b) followed a swapped last component: %q", names(l))
+	}
+	// A component higher up: a -> deep, so a/b is deep/b.
+	swap("a", "a-moved", "deep")
+	if l, err := b.ReadDir("a/b"); err == nil {
+		t.Errorf("ReadDir(a/b) followed a swapped higher component: %q", names(l))
+	}
+	// A directory moved deeper and linked back to its old place: the same
+	// directory, now at level 4.
+	if err := os.Rename(filepath.Join(dir, "c"), filepath.Join(dir, "deep", "x", "y", "c")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("deep/x/y/c", filepath.Join(dir, "c")); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := b.ReadDir("c"); err == nil {
+		t.Errorf("ReadDir(c) followed a directory moved deeper and linked back: %q", names(l))
+	}
+}
+
 func TestBackupScanFindsNewestWithinThreeLevels(t *testing.T) {
 	dir := t.TempDir()
 	mkfile(t, filepath.Join(dir, "l1.bak"), 1, scanNow.Add(-4*time.Hour))
@@ -171,24 +252,49 @@ func TestBackupScanUnreadableReasons(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "file")
 	mkfile(t, file, 1, scanNow)
-	real := filepath.Join(dir, "real")
-	mkfile(t, filepath.Join(real, "x.bak"), 1, scanNow)
-	link := filepath.Join(dir, "link")
-	if err := os.Symlink(real, link); err != nil {
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	proc := filepath.Join(dir, "proc")
-	if err := os.Symlink("/proc", proc); err != nil {
-		t.Fatal(err)
+	links := map[string]string{
+		"proc":      "/proc",
+		"to-file":   file,
+		"to-fifo":   fifo,
+		"to-proc1":  "/proc/1",
+		"to-tmp":    "/tmp", // hidden wherever the test's own temp directory is
+		"dangling":  filepath.Join(dir, "nowhere"),
+		"to-folder": "", // set below
+	}
+	// A symlinked folder is scanned where it leads, when that place passes
+	// the folder rule: the target must not be under a hidden tree, and
+	// the test's temp directory may be one (/tmp here).
+	target := visibleTempDir(t)
+	mkfile(t, filepath.Join(target, "x.bak"), 9, scanNow.Add(-time.Hour))
+	links["to-folder"] = target
+	for name, to := range links {
+		if err := os.Symlink(to, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := *scanWithin(t, filepath.Join(dir, "to-folder")).state(scanNow)
+	if want := (proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 3600, NewestSize: 9}); got != want {
+		t.Errorf("scan of a symlinked folder = %+v, want its target's %+v", got, want)
 	}
 	// scanBackup takes the folder as given; these are paths the folder
-	// rule lets through but the file system refuses.
+	// rule lets through but the file system refuses, or that lead where
+	// the rule refuses.
 	for folder, reason := range map[string]string{
-		filepath.Join(dir, "missing"): proto.BackupReasonMissing,
-		file:                          proto.BackupReasonNotDir,
-		filepath.Join(file, "x"):      proto.BackupReasonNotDir,
-		link:                          proto.BackupReasonNotDir, // a symlink as the folder is not scanned
-		filepath.Join(proc, "1"):      proto.BackupReasonInvalid,
+		filepath.Join(dir, "missing"):       proto.BackupReasonMissing,
+		file:                                proto.BackupReasonNotDir,
+		filepath.Join(file, "x"):            proto.BackupReasonNotDir,
+		fifo:                                proto.BackupReasonNotDir,
+		filepath.Join(dir, "to-file"):       proto.BackupReasonNotDir,
+		filepath.Join(dir, "to-fifo"):       proto.BackupReasonNotDir, // without blocking
+		filepath.Join(dir, "proc", "1"):     proto.BackupReasonInvalid,
+		filepath.Join(dir, "to-proc1"):      proto.BackupReasonInvalid,
+		filepath.Join(dir, "to-tmp"):        proto.BackupReasonHidden,
+		filepath.Join(dir, "dangling"):      proto.BackupReasonMissing,
+		filepath.Join(dir, "dangling", "x"): proto.BackupReasonMissing,
 	} {
 		got := *scanWithin(t, folder).state(scanNow)
 		if want := (proto.BackupState{Status: proto.BackupUnreadable, Reason: reason}); got != want {

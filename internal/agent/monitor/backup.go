@@ -124,20 +124,23 @@ func errnoText(err error) string {
 }
 
 // scanBackup finds the newest regular file in folder, at most
-// backupMaxDepth levels down and within maxBackupEntries entries. It
-// never opens a file and never follows a symlink: a folder that is a
-// symlink is BackupReasonNotDir; inside it, only directory listings are
-// read and each entry is lstat'ed from its directory; symlinks, FIFOs,
-// sockets and devices are skipped. now stamps the result. It can block
-// on a hung file system; the caller bounds the wait.
+// backupMaxDepth levels down and within maxBackupEntries entries. The
+// folder's own path is resolved as the kernel does, symlinks included
+// (openBackupRoot). Below it no symlink is followed and no file is
+// opened: only directories are opened, one path component at a time with
+// O_NOFOLLOW from the folder's descriptor, to be listed, and each entry
+// is lstat'ed from its directory; symlinks, FIFOs, sockets and devices
+// are skipped. now stamps the result. It can block on a hung file
+// system; the caller bounds the wait.
 func scanBackup(folder string, now func() time.Time) backupResult {
-	root, res, ok := openBackupRoot(folder, now)
+	root, top, res, ok := openBackupRoot(folder, now)
 	if !ok {
 		return res
 	}
 	defer root.Close()
+	defer top.Close()
 	w := &backupWalk{}
-	err := fs.WalkDir(backupFS{root: root, w: w}, ".", w.visit)
+	err := fs.WalkDir(backupFS{root: root, top: top, w: w}, ".", w.visit)
 	switch {
 	case err != nil:
 		return unreadable(backupReason(err), err, now())
@@ -152,55 +155,54 @@ func scanBackup(folder string, now func() time.Time) backupResult {
 	}
 }
 
-// openBackupRoot opens folder as an os.Root without following a symlink
-// as its last component and without blocking on a FIFO swapped in for it
-// (O_DIRECTORY|O_NOFOLLOW; os.OpenRoot alone does neither), then checks
-// the path the kernel resolved against ValidBackupFolder, since a symlink
-// higher up may lead under a refused tree.
-func openBackupRoot(folder string, now func() time.Time) (*os.Root, backupResult, bool) {
-	fi, err := os.Lstat(folder)
-	if err != nil {
-		return nil, unreadable(backupReason(err), err, now()), false
-	}
-	if !fi.IsDir() {
-		return nil, unreadable(proto.BackupReasonNotDir, nil, now()), false
-	}
-	var fd int
+// openBackupRoot opens folder, following symlinks in its path as the
+// kernel does, with O_DIRECTORY so that a FIFO, device or file there (also
+// through a link) fails at once with ENOTDIR instead of blocking
+// (os.OpenRoot opens without it). The path the kernel resolved must pass
+// ValidBackupFolder: a link may lead under a refused or hidden tree. It
+// returns the folder as an os.Root, opened through the descriptor rather
+// than the path again, and that descriptor, top, which backupFS descends
+// from; the caller closes both.
+func openBackupRoot(folder string, now func() time.Time) (*os.Root, *os.File, backupResult, bool) {
+	var (
+		fd  int
+		err error
+	)
 	for {
-		fd, err = syscall.Open(folder, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		fd, err = syscall.Open(folder, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 		if err != syscall.EINTR {
 			break
 		}
 	}
-	if err == syscall.ELOOP || err == syscall.ENOTDIR {
-		return nil, unreadable(proto.BackupReasonNotDir, err, now()), false // swapped since the Lstat
-	}
 	if err != nil {
-		return nil, unreadable(backupReason(err), err, now()), false
+		return nil, nil, unreadable(backupReason(err), err, now()), false
 	}
-	dir := os.NewFile(uintptr(fd), folder)
-	defer dir.Close()
+	top := os.NewFile(uintptr(fd), folder)
+	fail := func(reason string, err error) (*os.Root, *os.File, backupResult, bool) {
+		top.Close()
+		return nil, nil, unreadable(reason, err, now()), false
+	}
 	self := "/proc/self/fd/" + strconv.Itoa(fd)
 	resolved, err := os.Readlink(self)
 	if err != nil {
-		return nil, unreadable(proto.BackupReasonError, err, now()), false
+		return fail(proto.BackupReasonError, err)
 	}
 	if resolved != folder {
 		if reason, ok := ValidBackupFolder(resolved); !ok {
-			return nil, unreadable(reason, nil, now()), false
+			return fail(reason, nil)
 		}
 	}
-	root, err := os.OpenRoot(self) // the directory dir holds, not a path again
+	root, err := os.OpenRoot(self) // the directory top holds, not a path again
 	if err != nil {
-		return nil, unreadable(backupReason(err), err, now()), false
+		return fail(backupReason(err), err)
 	}
-	a, err1 := dir.Stat()
+	a, err1 := top.Stat()
 	b, err2 := root.Lstat(".")
 	if err := errors.Join(err1, err2); err != nil || !os.SameFile(a, b) {
 		root.Close()
-		return nil, unreadable(proto.BackupReasonError, err, now()), false
+		return fail(proto.BackupReasonError, err)
 	}
-	return root, backupResult{}, true
+	return root, top, backupResult{}, true
 }
 
 // backupWalk is the state of one scan.
@@ -250,13 +252,20 @@ func (w *backupWalk) visit(p string, d fs.DirEntry, err error) error {
 	return nil
 }
 
-// backupFS is the file system fs.WalkDir walks: the folder's os.Root,
-// listing each directory opened with O_DIRECTORY (a FIFO swapped in for a
-// subdirectory fails at once instead of blocking) and reading no more
-// entries than the scan may still see, plus one to notice the limit.
-// Open is refused: the scan opens no entry.
+// backupFS is the file system fs.WalkDir walks. ReadDir(".") lists the
+// folder's os.Root; ReadDir of a subdirectory opens it one component at a
+// time from top with openat(O_DIRECTORY|O_NOFOLLOW), so a directory listed
+// as one and swapped for a symlink before it is listed (at any component)
+// fails with ELOOP and is skipped: the path WalkDir gives is the real
+// place, and its depth the real depth. Each directory is listed through
+// an os.Root on its descriptor, so its entries are lstat'ed from it, and
+// no more entries are read than the scan may still see, plus one to
+// notice the limit. A FIFO swapped in for a directory fails with ENOTDIR
+// instead of blocking. Open is refused, and Stat answers for the folder
+// only: the scan opens no entry.
 type backupFS struct {
 	root *os.Root
+	top  *os.File // the folder's descriptor
 	w    *backupWalk
 }
 
@@ -264,10 +273,24 @@ func (b backupFS) Open(name string) (fs.File, error) {
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
 }
 
-func (b backupFS) Stat(name string) (fs.FileInfo, error) { return b.root.Lstat(name) }
+func (b backupFS) Stat(name string) (fs.FileInfo, error) {
+	if name != "." {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
+	}
+	return b.root.Lstat(".")
+}
 
 func (b backupFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	f, err := b.root.OpenFile(name, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	r := b.root
+	if name != "." {
+		sub, err := b.openSub(name)
+		if err != nil {
+			return nil, err
+		}
+		defer sub.Close()
+		r = sub
+	}
+	f, err := r.OpenFile(".", os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -278,6 +301,41 @@ func (b backupFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 	slices.SortFunc(list, func(x, y fs.DirEntry) int { return strings.Compare(x.Name(), y.Name()) })
 	return list, err
+}
+
+// openSub opens the directory name (slash-separated, below the folder)
+// from top one component at a time, none followed if it is a symlink, and
+// returns it as an os.Root.
+func (b backupFS) openSub(name string) (*os.Root, error) {
+	fd, owned := int(b.top.Fd()), -1
+	defer func() {
+		if owned >= 0 {
+			syscall.Close(owned)
+		}
+	}()
+	for _, c := range strings.Split(name, "/") {
+		if c == "" || c == "." || c == ".." {
+			return nil, &fs.PathError{Op: "openat", Path: name, Err: fs.ErrInvalid}
+		}
+		var (
+			next int
+			err  error
+		)
+		for {
+			next, err = syscall.Openat(fd, c, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+			if err != syscall.EINTR {
+				break
+			}
+		}
+		if err != nil {
+			return nil, &fs.PathError{Op: "openat", Path: name, Err: err}
+		}
+		if owned >= 0 {
+			syscall.Close(owned)
+		}
+		fd, owned = next, next
+	}
+	return os.OpenRoot("/proc/self/fd/" + strconv.Itoa(fd)) // the directory fd holds
 }
 
 // backupScan is the state of the backup folder scans, guarded by bmu.
