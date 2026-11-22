@@ -672,6 +672,62 @@ func wantLeftoverUnsaved(t *testing.T, what string, resp proto.Response, path st
 	}
 }
 
+// TestLeftoverEmptyResultFailsWhenStaleRecordRemains: an earlier
+// non-empty record stands, then a comparison finds nothing left over but
+// cannot write its record, and the removal of the earlier one fails too:
+// that record would still bound a salvage, so mysql.leftover fails with
+// the record file and the write's cause. When the removal fails only after
+// the file is gone (its directory sync), no record remains and the empty
+// result is OK.
+func TestLeftoverEmptyResultFailsWhenStaleRecordRemains(t *testing.T) {
+	r := newLeftoverRig(t)
+	execAll(t, rootDB(t, r.master), "INSERT INTO toko.t VALUES (10, 'sisa')")
+	if res := r.leftover(); res.GTIDSet == "" {
+		t.Fatalf("leftover with a transaction left = %+v, want a set", res)
+	}
+	record := filepath.Join(r.d.SalvageDir, mysql.LeftoverSetFile)
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("no record after a non-empty result: %v", err)
+	}
+	// The new master takes the transaction: nothing is left over now.
+	rdb := rootDB(t, r.replica)
+	execAll(t, rdb, "START REPLICA")
+	want := gtidExecuted(t, rootDB(t, r.master))
+	for deadline := time.Now().Add(time.Minute); gtidExecuted(t, rdb) != want; time.Sleep(200 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("new master never caught up with %s", want)
+		}
+	}
+	execAll(t, rdb, "STOP REPLICA")
+	// The write fails: a directory stands at its temporary name.
+	tmp := record + ".tmp"
+	if err := os.Mkdir(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The removal fails with the file still there.
+	restore := mysql.SetLeftoverRemover(func(*os.Root, string) error { return errors.New("hapus set data tertinggal: input/output error") })
+	resp := r.dispatch("mysql.leftover", proto.LeftoverParams{NewMaster: r.nm})
+	wantLeftoverUnsaved(t, "empty result, stale record kept", resp, record)
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("the stale record is gone (%v); the test's removal failure did not hold", err)
+	}
+	restore()
+	// The removal fails after the file is gone: nothing stale remains.
+	restore = mysql.SetLeftoverRemover(func(root *os.Root, _ string) error {
+		if err := root.Remove(mysql.LeftoverSetFile); err != nil {
+			return err
+		}
+		return errors.New("sinkronkan direktori: input/output error")
+	})
+	defer restore()
+	if res := r.leftover(); res.GTIDSet != "" {
+		t.Errorf("leftover once the record is gone = %+v, want nothing", res)
+	}
+	if _, err := os.Stat(record); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("record after the second comparison: %v, want none", err)
+	}
+}
+
 // TestLeftoverFailsWhenSetCannotBeSaved (ruling D56): a non-empty result
 // that cannot be kept, because the record file cannot be written or the
 // quarantine id cannot be read, fails mysql.leftover with the file and the

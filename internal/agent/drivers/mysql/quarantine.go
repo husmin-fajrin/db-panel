@@ -709,7 +709,7 @@ func (d *Driver) settleRebuilt(ctx context.Context, host string, port int) error
 	// replica refuses mysql.salvage, and the role write above removed the
 	// quarantine id the file carries, so no later quarantine takes it
 	// (lastLeftover).
-	if err := d.forgetLeftover(); err != nil && d.Logger != nil {
+	if _, err := d.forgetLeftover(); err != nil && d.Logger != nil {
 		d.Logger.Error("leftover set file not removed after the rebuild", "err", err)
 	}
 	return nil

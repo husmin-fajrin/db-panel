@@ -78,13 +78,23 @@ func (d *Driver) registerLeftover(reg *commands.Registry) {
 				d.Logger.Warn("leftover set not saved: the quarantine id cannot be pinned; salvage needs a new mysql.leftover",
 					"err", qerr)
 			}
-			if err := d.forgetLeftover(); err != nil && d.Logger != nil {
-				d.Logger.Error("earlier leftover set file not removed", "err", err)
+			stale, ferr := d.forgetLeftover()
+			if ferr != nil && d.Logger != nil {
+				d.Logger.Error("earlier leftover set file not removed", "err", ferr)
 			}
 			if qerr != nil && res.GTIDSet != "" {
 				return nil, leftoverUnsaved(d.pins.path(QuarantineIDFile), qerr)
 			}
-		} else if err := d.recordLeftover(qid, peerKey(p.NewMaster), res.GTIDSet); err != nil && res.GTIDSet != "" {
+			// An earlier record that may still stand in for this
+			// comparison, with the quarantine id unknown, fails it
+			// whatever it found.
+			if qerr != nil && stale {
+				return nil, leftoverUnsaved(filepath.Join(d.salvageDir(), leftoverSetFile), ferr)
+			}
+		} else if stale, err := d.recordLeftover(qid, peerKey(p.NewMaster), res.GTIDSet); err != nil &&
+			(res.GTIDSet != "" || stale) {
+			// Not kept, or kept nothing while an earlier record of this
+			// quarantine may still bound mysql.salvage.
 			return nil, leftoverUnsaved(filepath.Join(d.salvageDir(), leftoverSetFile), err)
 		}
 		tables := make([]string, 0, len(res.Tables))

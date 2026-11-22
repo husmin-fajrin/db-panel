@@ -357,20 +357,25 @@ func salvageDirSize(root *os.Root) (int64, error) {
 // cannot be written the old file is removed, so that no earlier record
 // stands in for this one; both failures are logged, and the write's is
 // returned (mysql.leftover fails on it when set is not empty).
-func (d *Driver) recordLeftover(qid, source, set string) error {
+// staleMayRemain is true when that removal failed too and the old file
+// may still be there (mysql.leftover then fails whatever set is).
+func (d *Driver) recordLeftover(qid, source, set string) (staleMayRemain bool, err error) {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
-	err := d.writeLeftoverSet(leftoverSourcePrefix + source + "\n" + leftoverQuarantinePrefix + qid + "\n" + set + "\n")
+	err = d.writeLeftoverSet(leftoverSourcePrefix + source + "\n" + leftoverQuarantinePrefix + qid + "\n" + set + "\n")
 	if err == nil {
-		return nil
+		return false, nil
 	}
 	if d.Logger != nil {
 		d.Logger.Warn("leftover set not saved; salvage needs a new mysql.leftover", "err", err)
 	}
-	if err := d.removeLeftoverSet(); err != nil && d.Logger != nil {
-		d.Logger.Error("earlier leftover set file not removed after a failed save", "err", err)
+	if rerr := d.removeLeftoverSet(); rerr != nil {
+		if d.Logger != nil {
+			d.Logger.Error("earlier leftover set file not removed after a failed save", "err", rerr)
+		}
+		staleMayRemain = d.leftoverSetMayRemain()
 	}
-	return err
+	return staleMayRemain, err
 }
 
 // Prefixes of the first two lines of leftoverSetFile.
@@ -515,10 +520,24 @@ func canonicalSource(s string) bool {
 // quarantine calls it, since what the old master held was replaced. A file
 // left behind belongs to the quarantine that ended; its id is removed with
 // the role write (Pins.writeRole), so it is no record later.
-func (d *Driver) forgetLeftover() error {
+// staleMayRemain is true when the removal failed and the file may still be
+// there.
+func (d *Driver) forgetLeftover() (staleMayRemain bool, err error) {
 	d.leftoverMu.Lock()
 	defer d.leftoverMu.Unlock()
-	return d.removeLeftoverSet()
+	if err := d.removeLeftoverSet(); err != nil {
+		return d.leftoverSetMayRemain(), err
+	}
+	return false, nil
+}
+
+// leftoverSetMayRemain reports, after a failed removal, whether
+// leftoverSetFile may still be there: false only when it is known not to
+// be (gone before the directory sync failed, or no directory holds it).
+// The caller holds leftoverMu.
+func (d *Driver) leftoverSetMayRemain() bool {
+	_, err := os.Lstat(filepath.Join(d.salvageDir(), leftoverSetFile))
+	return !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)
 }
 
 // removeLeftoverSet removes leftoverSetFile; none is not an error. The
@@ -532,13 +551,19 @@ func (d *Driver) removeLeftoverSet() error {
 		return err
 	}
 	defer root.Close()
+	return removeLeftoverFile(root, d.salvageDir())
+}
+
+// removeLeftoverFile removes leftoverSetFile under root, the salvage
+// directory dir, and syncs dir; none is not an error. Tests replace it.
+var removeLeftoverFile = func(root *os.Root, dir string) error {
 	if err := root.Remove(leftoverSetFile); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("hapus set data tertinggal: %w", err)
 	}
-	return syncDir(d.salvageDir())
+	return syncDir(dir)
 }
 
 // publishSalvage renames tmp to name under salvageMu, unless taken says

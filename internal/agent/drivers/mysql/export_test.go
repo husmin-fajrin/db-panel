@@ -343,6 +343,14 @@ func (d *Driver) HoldPromoteMu() (release func()) {
 // last mysql.leftover set.
 const LeftoverSetFile = leftoverSetFile
 
+// SetLeftoverRemover replaces how the leftover set file is removed (under
+// the salvage directory root dir) until restore is called.
+func SetLeftoverRemover(f func(root *os.Root, dir string) error) (restore func()) {
+	old := removeLeftoverFile
+	removeLeftoverFile = f
+	return func() { removeLeftoverFile = old }
+}
+
 // The start lock (startlock.go).
 var (
 	WithStartLockLine    = withStartLockLine
