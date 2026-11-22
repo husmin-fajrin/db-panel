@@ -531,3 +531,11 @@ func (e *AgentError) Error() string { return e.Err.Message }
 
 // Unwrap is the agent's *proto.Error.
 func (e *AgentError) Unwrap() error { return e.Err }
+
+// SentByAgent reports whether err's chain holds an *AgentError: the agent
+// answered with it, whatever its code (a code such as offline does not
+// make it the hub's own failure).
+func SentByAgent(err error) bool {
+	_, ok := errors.AsType[*AgentError](err)
+	return ok
+}

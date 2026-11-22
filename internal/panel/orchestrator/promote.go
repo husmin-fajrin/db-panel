@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -746,13 +747,14 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 // is an answer from the agent (a refusal), as opposed to no answer at all.
 // The hub synthesizes CodeTimeout (the call's deadline passed) and
 // CodeOffline (the link was closed or the write failed) locally without a
-// reply, so those say nothing about whether the agent started the job.
+// reply, so those say nothing about whether the agent started the job;
+// the same codes sent by the agent (hub.SentByAgent) are its answer.
 func promoteStartRefused(err error) bool {
 	var pe *proto.Error
 	if !errors.As(err, &pe) {
 		return false
 	}
-	return pe.Code != proto.CodeTimeout && pe.Code != proto.CodeOffline
+	return hub.SentByAgent(err) || (pe.Code != proto.CodeTimeout && pe.Code != proto.CodeOffline)
 }
 
 // promoteQuarantine quarantines the old master under the new one. An
@@ -778,7 +780,7 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 	jr.r.repointMu.Lock()
 	qres, err := jr.r.sendQuarantine(ctx, jr.st.PromotionID, old, jr.candidate(), host, port, topo.ReplUser, password)
 	jr.r.repointMu.Unlock()
-	if errors.Is(err, proto.ErrOffline) {
+	if errors.Is(err, proto.ErrOffline) && !hub.SentByAgent(err) {
 		jr.logf("warn", "Agent master lama %s terputus: karantina tertunda dan dikirim saat agent tersambung lagi.", jr.serverName(old))
 		return skipped("tertunda: agent master lama terputus; dikirim saat tersambung lagi"), nil
 	}
@@ -1284,7 +1286,7 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 		return res, cred.Verify, err
 	}()
 	switch {
-	case errors.Is(err, proto.ErrOffline):
+	case errors.Is(err, proto.ErrOffline) && !hub.SentByAgent(err):
 		return set(repointOutcome{state: store.ReplicaNeedsRepoint, offline: true}, waitMsg)
 	case err != nil:
 		return set(repointOutcome{state: store.ReplicaNeedsRepoint, err: err}, truncate("Arahkan ulang gagal: "+r.agentErrText(err), maxLogLine))

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
+	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -1704,5 +1705,71 @@ func TestBusyLabelForQuarantinedOldMaster(t *testing.T) {
 		Mode: proto.PromoteEmergency})
 	if !errors.Is(err, ErrBusy) || !strings.HasPrefix(err.Error(), "master lama db-master ") {
 		t.Fatalf("StartPromote with the old master busy = %v, want busy naming master lama db-master", err)
+	}
+}
+
+// agentAnswerConn answers cmd with err as the agent's answer (an
+// *hub.AgentError, as the hub hands an agent's error on) or, for a plain
+// *proto.Error, as the hub's own failure; other commands go to Conn.
+type agentAnswerConn struct {
+	hub.Conn
+	cmd string
+	err error
+}
+
+func (c agentAnswerConn) Call(ctx context.Context, cmd string, params, result any) error {
+	if cmd == c.cmd {
+		return c.err
+	}
+	return c.Conn.Call(ctx, cmd, params, result)
+}
+
+// TestAgentSentOfflineIsNotDisconnect: an agent answering mysql.quarantine
+// or mysql.repoint with the code offline answered: the quarantine step
+// fails (it is not skipped as deferred) and the replica records the
+// failure; a link that really dropped still defers both.
+func TestAgentSentOfflineIsNotDisconnect(t *testing.T) {
+	for _, sent := range []bool{true, false} {
+		name := "hub"
+		if sent {
+			name = "agent"
+		}
+		t.Run(name, func(t *testing.T) {
+			g := newPromoteRig(t)
+			e := g.e
+			var err error = &proto.Error{Code: proto.CodeOffline, Message: "koneksi agent terputus"}
+			if sent {
+				err = &hub.AgentError{Err: &proto.Error{Code: proto.CodeOffline, Message: "koneksi agent terputus"}}
+			}
+			e.hub.Attach(g.m.id, agentAnswerConn{Conn: g.m.conn, cmd: "mysql.quarantine", err: err})
+			e.hub.Attach(g.b.id, agentAnswerConn{Conn: g.b.conn, cmd: "mysql.repoint", err: err})
+			if got := promoteStartRefused(err); got != sent {
+				t.Errorf("promoteStartRefused = %v, want %v", got, sent)
+			}
+			id, perr := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+			if perr != nil {
+				t.Fatalf("StartPromote: %v", perr)
+			}
+			if sent {
+				_, steps := e.waitJob(id, store.JobPartial)
+				e.waitIdle(id)
+				if steps[4].Status != store.StepFailed || strings.HasPrefix(steps[4].Message, "tertunda: agent master lama terputus") {
+					t.Errorf("quarantine step = %s %q, want failed", steps[4].Status, steps[4].Message)
+				}
+				if rep := e.replica(g.b.id); rep.State != store.ReplicaNeedsRepoint ||
+					!strings.HasPrefix(rep.LastError, "Arahkan ulang gagal: ") {
+					t.Errorf("b = %s %q, want needs_repoint with the failure", rep.State, rep.LastError)
+				}
+				return
+			}
+			_, steps := e.waitJob(id, store.JobSucceeded)
+			e.waitIdle(id)
+			if steps[4].Status != store.StepSkipped || !strings.HasPrefix(steps[4].Message, "tertunda: agent master lama terputus") {
+				t.Errorf("quarantine step = %s %q, want skipped as deferred", steps[4].Status, steps[4].Message)
+			}
+			if rep := e.replica(g.b.id); rep.State != store.ReplicaNeedsRepoint || strings.HasPrefix(rep.LastError, "Arahkan ulang gagal") {
+				t.Errorf("b = %s %q, want needs_repoint waiting", rep.State, rep.LastError)
+			}
+		})
 	}
 }
