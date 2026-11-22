@@ -264,12 +264,14 @@ const (
 	wantG5f = "Kosongkan ruang di server itu, klik Periksa sekarang di halaman server, lalu muat ulang halaman ini."
 	wantG6f = "Buat akun MySQL khusus panel lalu hubungkan lagi (Panduan, \"Memperbaiki baris merah\"). Bila akunnya " +
 		"sudah diganti di server, klik Segarkan di kartu MySQL halaman server itu."
-	wantG7f  = "Hapus performance_schema=OFF dari konfigurasi MySQL master, lalu restart MySQL master di jam sepi."
-	wantG8f  = "Jalankan cadangan master, atau betulkan folder cadangan di halaman server master."
-	wantG9f  = "Jalankan perintah di kotak Persetujuan di server pada halaman ini, lalu klik Periksa lagi."
-	wantG11f = "Batasi port itu di firewall master hanya untuk alamat replika."
-	wantG12f = "Teruskan journal host panel ke server lain (systemd-journal-upload), lalu tandai di Pengaturan."
-	wantG13f = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
+	wantG7f   = "Hapus performance_schema=OFF dari konfigurasi MySQL master, lalu restart MySQL master di jam sepi."
+	wantG8f   = "Jalankan cadangan master, atau betulkan folder cadangan di halaman server master."
+	wantG9f   = "Jalankan perintah di kotak Persetujuan di server pada halaman ini, lalu klik Periksa lagi."
+	wantG11f  = "Batasi port itu di firewall master hanya untuk alamat replika."
+	wantG12f  = "Teruskan journal host panel ke server lain (systemd-journal-upload), lalu tandai di Pengaturan."
+	wantG8uf  = "Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru."
+	wantG10af = "Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."
+	wantG13f  = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
 )
 
 func TestGateAgentVersion(t *testing.T) {
@@ -565,7 +567,7 @@ func TestGateBackup(t *testing.T) {
 	// would grow by extrapolation alone.
 	g.m.detach()
 	wantRow(t, g.row(GatePromotePlanned, "backup"), GateYellow,
-		"Cadangan (backup) belum diketahui: agent db-master sedang tidak tersambung.", "")
+		"Cadangan (backup) belum diketahui: agent db-master sedang tidak tersambung.", wantG10af)
 	g.m.attach()
 
 	// Unset.
@@ -574,7 +576,7 @@ func TestGateBackup(t *testing.T) {
 	}
 	got := g.row(GatePromotePlanned, "backup")
 	wantRow(t, got, GateYellow,
-		"Folder cadangan master db-master belum diisi, jadi panel tidak bisa melihat umur cadangan.", "")
+		"Folder cadangan master db-master belum diisi, jadi panel tidak bisa melihat umur cadangan.", wantG8uf)
 	if !got.NeedsAck {
 		t.Fatal("unset backup folder on a planned promote needs no ack")
 	}
@@ -606,7 +608,7 @@ func TestGateNeedsBackupAck(t *testing.T) {
 		}
 	}
 	wantRow(t, g.row(GatePromoteEmergency, "backup"), GateYellow,
-		"Folder cadangan master db-master belum diisi, jadi panel tidak bisa melihat umur cadangan.", "")
+		"Folder cadangan master db-master belum diisi, jadi panel tidak bisa melihat umur cadangan.", wantG8uf)
 }
 
 func TestGateApproval(t *testing.T) {
@@ -643,17 +645,17 @@ func TestGateUnknownIsYellow(t *testing.T) {
 	g := newGateRig(t)
 	// The target's agent is away: its live rows are not known.
 	g.tgt.detach()
-	wantRow(t, g.row(GateCreateReplica, "disk"), GateYellow, "Ruang disk belum diketahui: agent db-target sedang tidak tersambung.", "")
+	wantRow(t, g.row(GateCreateReplica, "disk"), GateYellow, "Ruang disk belum diketahui: agent db-target sedang tidak tersambung.", wantG10af)
 	g.rep.detach()
 	wantRow(t, g.row(GatePromotePlanned, "clock"), GateYellow,
-		"Jam (clock) belum diketahui: agent db-replica sedang tidak tersambung.", "")
+		"Jam (clock) belum diketahui: agent db-replica sedang tidak tersambung.", wantG10af)
 	// Connected, but its report lacks the value.
 	g.snap(g.m, func(s *proto.HealthSnapshot) { s.PerfSchema = nil; s.ClockUnixMS = 0 })
 	wantRow(t, g.row(GateResync, "perf_schema"), GateYellow,
 		"performance_schema belum diketahui: agent db-master belum melaporkannya.", "")
 	wantRow(t, g.row(GatePromotePlanned, "clock"), GateYellow,
 		"Jam (clock) belum diketahui: agent db-master belum melaporkannya. "+
-			"Jam (clock) belum diketahui: agent db-replica sedang tidak tersambung.", "")
+			"Jam (clock) belum diketahui: agent db-replica sedang tidak tersambung.", wantG10af)
 
 	// Nothing known of any server at all: only the version and the pin are
 	// red.
@@ -673,7 +675,7 @@ func TestGateUnknownIsYellow(t *testing.T) {
 	}
 	wantRow(t, g.row(GateRebuildOldMaster, "disk"), GateYellow,
 		"Ruang disk belum diketahui: agent db-master sedang tidak tersambung. "+
-			"Ruang disk belum diketahui: agent db-old sedang tidak tersambung.", "")
+			"Ruang disk belum diketahui: agent db-old sedang tidak tersambung.", wantG10af)
 }
 
 func TestGateResultAndError(t *testing.T) {
@@ -738,4 +740,55 @@ func TestGateMakesNoAgentCall(t *testing.T) {
 	if len(after) != len(jobs) {
 		t.Fatalf("Gate created jobs: %d, was %d", len(after), len(jobs))
 	}
+}
+
+// Ruling R26: no folder set is judged from the store first, whether or not
+// the master's agent is connected; R25 (G10a) only when a folder is set.
+func TestGateBackupUnsetWhileMasterOffline(t *testing.T) {
+	g := newGateRig(t)
+	if err := g.e.st.SetServerBackup(g.m.id, "", 0); err != nil {
+		t.Fatal(err)
+	}
+	g.m.detach()
+	for _, a := range allGateActions {
+		res := g.gate(g.input(a))
+		want := a == GatePromotePlanned || a == GateRebuildOldMaster
+		if res.NeedsBackupAck() != want {
+			t.Errorf("%s: NeedsBackupAck = %v, want %v", a, res.NeedsBackupAck(), want)
+		}
+	}
+	for _, a := range []GateAction{GatePromotePlanned, GatePromoteEmergency, GateRebuildOldMaster} {
+		wantRow(t, g.row(a, "backup"), GateYellow,
+			"Folder cadangan master db-master belum diisi, jadi panel tidak bisa melihat umur cadangan.", wantG8uf)
+	}
+
+	if err := g.e.st.SetServerBackup(g.m.id, "/srv/backup", 0); err != nil {
+		t.Fatal(err)
+	}
+	got := g.row(GatePromotePlanned, "backup")
+	wantRow(t, got, GateYellow, "Cadangan (backup) belum diketahui: agent db-master sedang tidak tersambung.", wantG10af)
+	if got.NeedsAck {
+		t.Fatal("a set folder on an offline master asks for the tick")
+	}
+}
+
+// Ruling R28: a yellow multi-server row names the G10a fix when one of its
+// servers is away, and none when every unknown is only unreported (G10b).
+func TestGateUnknownFix(t *testing.T) {
+	g := newGateRig(t)
+	g.snap(g.m, func(s *proto.HealthSnapshot) { s.DiskTotal = 0 })
+	wantRow(t, g.row(GateResync, "disk"), GateYellow, "Ruang disk belum diketahui: agent db-master belum melaporkannya.", "")
+	g.rep.detach()
+	wantRow(t, g.row(GateResync, "disk"), GateYellow,
+		"Ruang disk belum diketahui: agent db-master belum melaporkannya. "+
+			"Ruang disk belum diketahui: agent db-replica sedang tidak tersambung.", wantG10af)
+	// A red server keeps the red fix.
+	g.snap(g.m, func(s *proto.HealthSnapshot) { s.DiskTotal, s.DiskFree = 100, 0 })
+	wantRow(t, g.row(GateResync, "disk"), GateRed,
+		"Disk db-master terpakai 100% (ambang kritis 95%). "+
+			"Ruang disk belum diketahui: agent db-replica sedang tidak tersambung.", wantG5f)
+	// Single-server rows too.
+	g.m.detach()
+	wantRow(t, g.row(GateResync, "perf_schema"), GateYellow,
+		"performance_schema belum diketahui: agent db-master sedang tidak tersambung.", wantG10af)
 }

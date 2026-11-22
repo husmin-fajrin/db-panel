@@ -190,12 +190,15 @@ const (
 	textG9f  = "Jalankan perintah di kotak Persetujuan di server pada halaman ini, lalu klik Periksa lagi."
 	textG10a = "%s belum diketahui: agent %s sedang tidak tersambung." // %s: the row's label, then the server
 	textG10b = "%s belum diketahui: agent %s belum melaporkannya."     // %s: the row's label, then the server
-	textG11a = "Port MySQL master %s bisa dijangkau dari host panel; sebaiknya hanya terbuka untuk replika."
-	textG11f = "Batasi port itu di firewall master hanya untuk alamat replika."
-	textG12a = "Log audit belum ditandai diteruskan ke server lain."
-	textG12f = "Teruskan journal host panel ke server lain (systemd-journal-upload), lalu tandai di Pengaturan."
-	textG13a = "panel.key belum ditandai sudah dicadangkan."
-	textG13f = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
+	// Fixes of two yellow rows (Ruling R28): G8u, and G10a. G10b has none.
+	textG8uf  = "Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru."
+	textG10af = "Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."
+	textG11a  = "Port MySQL master %s bisa dijangkau dari host panel; sebaiknya hanya terbuka untuk replika."
+	textG11f  = "Batasi port itu di firewall master hanya untuk alamat replika."
+	textG12a  = "Log audit belum ditandai diteruskan ke server lain."
+	textG12f  = "Teruskan journal host panel ke server lain (systemd-journal-upload), lalu tandai di Pengaturan."
+	textG13a  = "panel.key belum ditandai sudah dicadangkan."
+	textG13f  = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
 )
 
 // refreshButton is the label of the MySQL card's button that posts
@@ -319,39 +322,49 @@ func (r *Runner) gateServer(id int64) (*gateServer, error) {
 type verdict struct {
 	status GateStatus
 	text   string
+	away   bool // G10a: the server's agent is not connected
 }
 
-func red(format string, args ...any) verdict { return verdict{GateRed, fmt.Sprintf(format, args...)} }
+func red(format string, args ...any) verdict {
+	return verdict{status: GateRed, text: fmt.Sprintf(format, args...)}
+}
 func yellow(format string, args ...any) verdict {
-	return verdict{GateYellow, fmt.Sprintf(format, args...)}
+	return verdict{status: GateYellow, text: fmt.Sprintf(format, args...)}
 }
 
 // unknown is G10a for a server whose agent is away, else G10b.
 func unknown(label string, s *gateServer) verdict {
 	if !s.online {
-		return yellow(textG10a, label, s.srv.Name)
+		v := yellow(textG10a, label, s.srv.Name)
+		v.away = true
+		return v
 	}
 	return yellow(textG10b, label, s.srv.Name)
 }
 
 // combine makes one row of the verdicts of its servers: the worst status,
 // the sentences of the red ones and then of the yellow ones joined by a
-// space, and fix when red (a yellow row of unknowns has no fix of its
-// own).
+// space; fix when red, and when yellow the G10a fix if one of its servers'
+// agent is away, else none (Ruling R28).
 func combine(key, label string, vs []verdict, fix string) GateRow {
 	row := GateRow{Key: key, Label: label}
 	var texts []string
+	away := false
 	for _, want := range []GateStatus{GateRed, GateYellow} {
 		for _, v := range vs {
 			if v.status == want {
 				row.Status = max(row.Status, want)
 				texts = append(texts, v.text)
+				away = away || v.away
 			}
 		}
 	}
 	row.Detail = strings.Join(texts, " ")
-	if row.Status == GateRed {
+	switch {
+	case row.Status == GateRed:
 		row.Fix = fix
+	case row.Status == GateYellow && away:
+		row.Fix = textG10af
 	}
 	return row
 }
@@ -531,11 +544,19 @@ func (c *gateCtx) perfSchemaRow() (GateRow, error) {
 }
 
 // backupRow: the topology master's backup folder holds a fresh file (G8,
-// monitor.JudgeBackup). Its agent away, the last report is not judged
-// (Ruling R25). No folder set is yellow, and asks for the operator's tick
-// on a planned promote and a rebuild.
+// monitor.JudgeBackup). No folder set is judged first, from the store,
+// whether or not the agent is connected (Ruling R26): yellow, with its own
+// fix, and it asks for the operator's tick on a planned promote and a
+// rebuild. With a folder set and the agent away, the last report is not
+// judged (Ruling R25).
 func (c *gateCtx) backupRow() (GateRow, error) {
 	m := c.master
+	if m.srv.BackupDir == "" {
+		row := combine(keyBackup, labelBackup, []verdict{yellow(textG8u, m.srv.Name)}, textG8f)
+		row.Fix = textG8uf
+		row.NeedsAck = c.in.Action == GatePromotePlanned || c.in.Action == GateRebuildOldMaster
+		return row, nil
+	}
 	if !m.online {
 		return combine(keyBackup, labelBackup, []verdict{unknown(labelBackup, m)}, textG8f), nil
 	}
@@ -543,16 +564,12 @@ func (c *gateCtx) backupRow() (GateRow, error) {
 	switch b.Status {
 	case monitor.BackupStatusOK:
 		return combine(keyBackup, labelBackup, nil, ""), nil
-	case monitor.BackupStatusUnset:
-		row := combine(keyBackup, labelBackup, []verdict{yellow(textG8u, m.srv.Name)}, textG8f)
-		row.NeedsAck = c.in.Action == GatePromotePlanned || c.in.Action == GateRebuildOldMaster
-		return row, nil
 	case monitor.BackupStatusStale, monitor.BackupStatusEmptyFile, monitor.BackupStatusNone, monitor.BackupStatusUnreadable:
 		maxAge := m.srv.BackupMaxAgeHours
 		if maxAge <= 0 {
 			maxAge = monitor.DefaultBackupMaxAgeHours
 		}
-		return combine(keyBackup, labelBackup, []verdict{{GateRed, monitor.BackupMessage(b, m.srv.Name, maxAge)}}, textG8f), nil
+		return combine(keyBackup, labelBackup, []verdict{{status: GateRed, text: monitor.BackupMessage(b, m.srv.Name, maxAge)}}, textG8f), nil
 	}
 	return combine(keyBackup, labelBackup, []verdict{unknown(labelBackup, m)}, textG8f), nil
 }
@@ -584,7 +601,8 @@ func (c *gateCtx) markRow(key, label, setting, detail, fix string) (GateRow, err
 }
 
 // masterPortRow (yellow only): the master's MySQL port answers the panel
-// host, which is neither the master nor one of its replicas (G11).
+// host, which is neither the master, the action's target nor one of its
+// replicas (G11).
 func (c *gateCtx) masterPortRow() (GateRow, error) {
 	row := GateRow{Key: keyMasterPort, Label: labelMasterPort}
 	if c.topo.SourceHost == "" || c.topo.SourcePort == 0 {
@@ -592,7 +610,9 @@ func (c *gateCtx) masterPortRow() (GateRow, error) {
 	}
 	local := c.r.d.LocalServerID
 	if local != 0 {
-		if local == c.master.srv.ID {
+		// The master, or the action's target (Ruling R27: the old master of
+		// a rebuild is about to become a replica).
+		if local == c.master.srv.ID || local == c.in.TargetID {
 			return row, nil
 		}
 		reps, err := c.r.d.Store.ListReplicas(c.topo.ID)

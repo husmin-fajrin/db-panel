@@ -129,3 +129,19 @@ func TestGateDefaultPortProbe(t *testing.T) {
 		t.Fatalf("probe deadline in %v", deadline)
 	}
 }
+
+// Ruling R27: the panel host that is the action's target (the old master
+// of a rebuild, about to become a replica) does not probe.
+func TestGatePortProbeSkipsPanelHostAsTarget(t *testing.T) {
+	g := newGateRig(t)
+	g.probeOpen = true
+	g.e.r.d.LocalServerID = g.old.id
+	wantGreen(t, g.row(GateRebuildOldMaster, "master_port"))
+	g.e.r.d.LocalServerID = g.rep.id
+	in := g.input(GatePromotePlanned)
+	in.TargetID = g.rep.id
+	wantGreen(t, gateRow(t, g.gate(in), "master_port"))
+	if got := g.probed(); len(got) != 0 {
+		t.Fatalf("probes = %v", got)
+	}
+}
