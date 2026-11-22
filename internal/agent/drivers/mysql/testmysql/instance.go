@@ -5,6 +5,7 @@ package testmysql
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net"
 	"os"
@@ -98,16 +99,7 @@ func Start(t testing.TB, o Options) *Instance {
 
 	i.Dir = makeDir(t, n)
 	i.svc = &supervisor{inst: i}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
-		defer cancel()
-		if err := i.svc.Stop(ctx); err != nil {
-			t.Errorf("testmysql: stop: %v", err)
-		}
-		if err := os.RemoveAll(i.Dir); err != nil {
-			t.Errorf("testmysql: remove %s: %v", i.Dir, err)
-		}
-	})
+	t.Cleanup(func() { i.teardown(t, stopTimeout) })
 
 	i.DataDir = filepath.Join(i.Dir, "data")
 	i.ConfigFile = filepath.Join(i.Dir, "my.cnf")
@@ -175,6 +167,87 @@ func Start(t testing.TB, o Options) *Instance {
 		t.Fatalf("testmysql: %v\n%s", err, i.logTail())
 	}
 	return i
+}
+
+// teardown stops the server, waiting at most timeout for a clean
+// shutdown, and removes its directory. What the server was running is
+// read first (after SIGTERM it takes no new connection); when the stop
+// fails, that and the end of the error log are logged before the
+// directory, error log included, goes.
+func (i *Instance) teardown(t testing.TB, timeout time.Duration) {
+	processes, clone := i.serverState()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := i.svc.Stop(ctx); err != nil {
+		t.Errorf("testmysql: stop: %v", err)
+		t.Logf("testmysql: instance %s before the stop\ninformation_schema.processlist:\n%s\n"+
+			"performance_schema.clone_status:\n%s\nerror log (end):\n%s", i.Dir, processes, clone, i.logTail())
+	}
+	if err := os.RemoveAll(i.Dir); err != nil {
+		t.Errorf("testmysql: remove %s: %v", i.Dir, err)
+	}
+}
+
+// stateWait bounds serverState.
+const stateWait = 2 * time.Second
+
+// serverState reads, as root over the socket within stateWait, the
+// server's threads (information_schema.processlist) and its clone state
+// (performance_schema.clone_status), one row per line. A read that fails
+// says so in its text; nothing here fails the test.
+func (i *Instance) serverState() (processes, clone string) {
+	ctx, cancel := context.WithTimeout(context.Background(), stateWait)
+	defer cancel()
+	db, err := sql.Open("mysql", i.DSN())
+	if err != nil {
+		return "(" + err.Error() + ")", "(" + err.Error() + ")"
+	}
+	defer db.Close()
+	return queryText(ctx, db, "SELECT ID, USER, COMMAND, TIME, STATE, LEFT(INFO, 200) AS INFO FROM information_schema.processlist"),
+		queryText(ctx, db, "SELECT * FROM performance_schema.clone_status")
+}
+
+// queryText is the rows of q as "column=value" lines, or the error in
+// parentheses.
+func queryText(ctx context.Context, db *sql.DB, q string) string {
+	rows, err := db.QueryContext(ctx, q)
+	if err != nil {
+		return "(" + err.Error() + ")"
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "(" + err.Error() + ")"
+	}
+	var b strings.Builder
+	vals := make([]sql.NullString, len(cols))
+	ptrs := make([]any, len(cols))
+	for k := range vals {
+		ptrs[k] = &vals[k]
+	}
+	for rows.Next() {
+		if err := rows.Scan(ptrs...); err != nil {
+			return b.String() + "(" + err.Error() + ")"
+		}
+		for k, c := range cols {
+			if k > 0 {
+				b.WriteByte(' ')
+			}
+			v := "NULL"
+			if vals[k].Valid {
+				v = strconv.Quote(vals[k].String)
+			}
+			b.WriteString(c + "=" + v)
+		}
+		b.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		return b.String() + "(" + err.Error() + ")"
+	}
+	if b.Len() == 0 {
+		return "(no rows)"
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // makeDir creates a directory every parent of which the unprivileged mysqld

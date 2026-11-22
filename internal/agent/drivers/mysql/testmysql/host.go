@@ -102,7 +102,8 @@ func (s *supervisor) stop(ctx context.Context) error {
 	if !s.waitExit(kctx, pid) {
 		return fmt.Errorf("mysqld %d did not exit", pid)
 	}
-	return fmt.Errorf("mysqld %d killed after shutdown timeout", pid)
+	i := s.inst
+	return fmt.Errorf("mysqld %d (dir %s, port %d, server id %d) killed after shutdown timeout", pid, i.Dir, i.Port, i.ServerID)
 }
 
 func (s *supervisor) waitExit(ctx context.Context, pid int) bool {
