@@ -479,9 +479,7 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 	p.Tighten = p.NoCert
 	for _, rep := range reps {
 		row := replicaRow{Replica: rep, ServerName: names[rep.ServerID], Status: a.statusOf(rep.ServerID, store.RoleReplica)}
-		// A replica being created, resynced or failed is set when its
-		// replication is connected.
-		row.Unverified = !rep.TLSVerified && (rep.State == store.ReplicaReady || rep.State == store.ReplicaAttention)
+		row.Unverified = orchestrator.ReplicaUnverified(rep)
 		p.Tighten = p.Tighten || row.Unverified
 		p.Replicas = append(p.Replicas, row)
 		following := ""
