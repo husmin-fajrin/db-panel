@@ -792,6 +792,21 @@ README menambah:
    Task 2.** Langkah karantina gagal (bukan dilewati sebagai tertunda);
    karantina promote itu tetap tercatat tertunda supaya dikirim lagi saat agent
    tersambung.
+6. **2026-11-22 — arti "paling panjang 300 karakter" (Task 3).** Batasnya
+   batas `monitor.AgentText(s, 300)` yang sudah dipakai di tempat lain: 300
+   karakter bukan-spasi, tiap deret spasi menjadi satu spasi, jadi paling
+   banyak sekitar 600 karakter dan satu baris. Satu aturan untuk semua halaman
+   dan Telegram.
+7. **2026-11-22 — "Sumber dipin" di halaman server ikut dibatasi (Task 3).**
+   Tidak ada di rencana; temuan peninjau. Nilai yang berbentuk host:port
+   menurut aturan agent sendiri (`^[A-Za-z0-9_.:-]{1,255}$`, `:` hanya di
+   alamat IP, port 1-65535) tampil apa adanya; nilai lain tampil sebagai
+   `tidak dikenal (` + label agent + nilai yang dipotong 32 karakter + `)`.
+8. **2026-11-22 — tanda kutip untuk nama baru di dokumen keamanan (Task 4).**
+   Di inventaris risiko dan audit 5a, nama "Wajibkan pemeriksaan sertifikat
+   TLS" diberi tanda kutip di tempat ia berdiri tanpa tanda di tengah kalimat
+   (nama lama satu kata, nama baru sebuah frasa kerja). Penyebutan pertama di
+   README diberi `(TLS certificate verification)`.
 
 ## Teks baru untuk dibaca pemilik
 
