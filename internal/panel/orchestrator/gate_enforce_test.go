@@ -439,3 +439,146 @@ func TestGateActionForJob(t *testing.T) {
 		}
 	}
 }
+
+// errGateFault is the store failure TestStartRefusesWhenGateCannotJudge
+// makes the gate meet.
+var errGateFault = errors.New("prasyarat: pengaturan: database terkunci")
+
+// gateCannotJudge makes every Gate call of e fail with errGateFault.
+func gateCannotJudge(e *env) {
+	e.r.gateFault = func(GateInput) error { return errGateFault }
+}
+
+// wantGateFault fails unless err is the gate's own failure (not a red row).
+func wantGateFault(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, errGateFault) || errors.Is(err, ErrGateRed) {
+		t.Fatalf("err = %v, want the gate's failure %v", err, errGateFault)
+	}
+}
+
+// A gate that cannot judge (Gate fails) refuses each gated start, and a
+// Retry of a data-dropping job, before anything is written; an emergency
+// promote, which no row refuses, still starts.
+func TestStartRefusesWhenGateCannotJudge(t *testing.T) {
+	ctx := context.Background()
+	t.Run("prepare_master", func(t *testing.T) {
+		e := newEnv(t)
+		m := e.connectedMaster("db-master")
+		gateCannotJudge(e)
+		marks := markAll(e)
+		_, err := e.r.StartPrepareMaster(ctx, m.id)
+		wantGateFault(t, err)
+		noJob(t, e, m.id)
+		onlyCmds(t, marks)
+	})
+	t.Run("create_replica", func(t *testing.T) {
+		e := newEnv(t)
+		m, _ := e.readyMaster("db-master")
+		tgt := e.replicaAgent("db-target", "clone")
+		gateCannotJudge(e)
+		marks := markAll(e)
+		_, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: m.id, TargetServerID: tgt.id, ConfirmWipe: true})
+		wantGateFault(t, err)
+		if _, err := e.st.GetReplicaByServer(tgt.id); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("refused start registered a replica: %v", err)
+		}
+		noJob(t, e, tgt.id)
+		onlyCmds(t, marks)
+	})
+	t.Run("resync", func(t *testing.T) {
+		e := newEnv(t)
+		_, topo := e.readyMaster("db-master")
+		rep := e.resyncReplica(topo, nil)
+		gateCannotJudge(e)
+		marks := markAll(e)
+		_, err := e.r.StartResync(ctx, ResyncParams{ServerID: rep.id})
+		wantGateFault(t, err)
+		if got := e.replica(rep.id).State; got != store.ReplicaReady {
+			t.Fatalf("replica state after a refused resync = %s", got)
+		}
+		noJob(t, e, rep.id)
+		onlyCmds(t, marks)
+	})
+	t.Run("add_databases", func(t *testing.T) {
+		e := newEnv(t)
+		_, topo := e.readyMaster("db-master")
+		rep := e.followingReplica(topo, "a")
+		gateCannotJudge(e)
+		marks := markAll(e)
+		_, err := e.r.StartAddDatabases(ctx, rep.id, []string{"b"})
+		wantGateFault(t, err)
+		noJob(t, e, rep.id)
+		onlyCmds(t, marks)
+	})
+	t.Run("remove_databases_drop", func(t *testing.T) {
+		e := newEnv(t)
+		_, topo := e.readyMaster("db-master")
+		rep := e.followingReplica(topo, "a", "b")
+		gateCannotJudge(e)
+		marks := markAll(e)
+		_, err := e.r.StartRemoveDatabases(ctx, rep.id, []string{"b"}, true)
+		wantGateFault(t, err)
+		noJob(t, e, rep.id)
+		onlyCmds(t, marks)
+	})
+	t.Run("promote_planned", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		gateCannotJudge(e)
+		marks := markAll(e)
+		_, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+		wantGateFault(t, err)
+		if _, err := e.st.LatestPromotion(g.topo.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("refused promote recorded a promotion: %v", err)
+		}
+		noJob(t, e, g.m.id)
+		onlyCmds(t, marks, "mysql.binlogTail", "mysql.probeSource")
+	})
+	t.Run("rebuild_old_master", func(t *testing.T) {
+		g := rebuildRig(t)
+		e := g.e
+		gateCannotJudge(e)
+		marks := markAll(e)
+		_, err := g.startRebuild()
+		wantGateFault(t, err)
+		noRebuildStarted(t, g)
+		onlyCmds(t, marks, "mysql.connections", "mysql.rebuildApproval", "job.cancel")
+	})
+	t.Run("retry_resync", func(t *testing.T) {
+		e := newEnv(t)
+		m, topo := e.readyMaster("db-master")
+		rep := e.resyncReplica(topo, nil)
+		m.fail("mysql.status", "MySQL master tidak menjawab")
+		id, err := e.r.StartResync(ctx, ResyncParams{ServerID: rep.id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.waitJob(id, store.JobFailed)
+		e.waitIdle(id)
+		m.reply("mysql.status", masterStatus())
+		gateCannotJudge(e)
+		marks := markAll(e)
+		wantGateFault(t, e.r.Retry(id, JobAck{Confirmed: true}))
+		if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+			t.Fatalf("job after a refused retry = %+v", j)
+		}
+		onlyCmds(t, marks)
+	})
+	t.Run("promote_emergency", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		g.offline(g.m)
+		g.offline(g.d)
+		for _, fa := range []*fakeAgent{g.c, g.b} {
+			fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
+		}
+		gateCannotJudge(e)
+		id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.c.id,
+			Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}})
+		if err != nil {
+			t.Fatalf("emergency promote while the gate cannot judge: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+	})
+}

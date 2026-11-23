@@ -179,6 +179,9 @@ type Runner struct {
 	// paramsStore, when set (tests), replaces Store.SetJobParams in
 	// jobRun.save and jobRun.saveState.
 	paramsStore func(jobID, paramsJSON string) error
+	// gateFault, when set (tests), makes Gate fail with its error for in
+	// (a gate that cannot judge, as on a store failure).
+	gateFault func(in GateInput) error
 
 	base context.Context // parent of every job context; ended by Close
 	stop context.CancelFunc

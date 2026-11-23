@@ -255,6 +255,11 @@ func (r *Runner) Gate(in GateInput) (GateResult, error) {
 	if !ok {
 		return GateResult{}, fmt.Errorf("prasyarat: tindakan %q tidak dikenal", in.Action)
 	}
+	if r.gateFault != nil {
+		if err := r.gateFault(in); err != nil {
+			return GateResult{}, err
+		}
+	}
 	c := &gateCtx{r: r, in: in}
 	if in.Action != GateRemoveWithDrop {
 		m, err := r.gateServer(in.MasterID)
