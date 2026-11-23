@@ -3303,8 +3303,12 @@ Langkah membuat akun khusus panel `panel_admin` (hak yang sama dengan
 akun buatan `sudo dbpanel agent reset-admin`). Jangan memakai nama yang
 diawali `dbpanel_`: awalan itu dipakai akun buatan panel.
 
-Lihat dulu di halaman **Replikasi** di mana langkahnya dikerjakan:
+Lihat dulu halaman server itu dan halaman **Replikasi** untuk menentukan di
+mana langkahnya dikerjakan:
 
+- Halaman server itu menampilkan kotak **Master lama (dikarantina sejak
+  …)**: server itu master lama yang dikarantina. Server seperti ini tidak
+  tampil di halaman **Replikasi**. Lihat akhir sub-bagian ini.
 - Server itu bertanda **replika**: jangan jalankan pernyataan di bawah di
   replika itu, dan jangan pernah mematikan baca-saja (read-only) di
   replika. Replika yang ditulis langsung menjadi berbeda dari masternya dan
@@ -3314,9 +3318,8 @@ Lihat dulu di halaman **Replikasi** di mana langkahnya dikerjakan:
   database (replika sebagian), akun dari master tidak sampai ke replika
   ini: panggil admin MySQL.
 - Server itu bertanda **master**, atau tidak tampil di halaman
-  **Replikasi**: kerjakan langkah 1 sampai 5 di server itu, lalu langkah 6
-  bila server itu master.
-- Server itu master lama yang dikarantina: lihat akhir sub-bagian ini.
+  **Replikasi** dan bukan master lama yang dikarantina: kerjakan langkah 1
+  sampai 5 di server itu, lalu langkah 6 bila server itu master.
 
 1. Masuk ke server itu, lalu masuk ke MySQL sebagai root:
 
