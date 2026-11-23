@@ -32,7 +32,11 @@ const (
 	testPassword  = "rahasia-panel"
 	testPublicURL = "https://192.168.1.10:8080"
 	testWebPin    = "sha256//q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA="
-	testOrigin    = "http://example.com" // httptest.NewRequest uses Host example.com
+	testOrigin    = "https://example.com" // httptest.NewRequest uses Host example.com
+	// tlsTarget makes httptest.NewRequest a request over TLS to the same
+	// host; plainOrigin is that host over plain http.
+	tlsTarget   = "https://example.com"
+	plainOrigin = "http://example.com"
 )
 
 // fakeScriptSHA256 stands in for the hash of the install script the panel
@@ -415,10 +419,14 @@ func TestPostRejectsCrossOrigin(t *testing.T) {
 		{"/servers/1/delete", url.Values{}},
 	}
 	for _, p := range posts {
-		for _, origin := range []string{"", "http://evil.example", "null"} {
-			req := httptest.NewRequest("POST", p.path, strings.NewReader(p.form.Encode()))
+		// The UI is HTTPS only: the panel's own host over plain http is
+		// another origin (an attacker on the network path can answer it).
+		for _, origin := range []string{"", "http://evil.example", "null", plainOrigin, "Referer " + plainOrigin + "/servers/1"} {
+			req := httptest.NewRequest("POST", tlsTarget+p.path, strings.NewReader(p.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			if origin != "" {
+			if ref, ok := strings.CutPrefix(origin, "Referer "); ok {
+				req.Header.Set("Referer", ref)
+			} else if origin != "" {
 				req.Header.Set("Origin", origin)
 			}
 			req.AddCookie(e.cookie())

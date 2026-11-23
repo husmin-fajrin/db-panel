@@ -160,8 +160,12 @@ func safeNext(next string) string {
 }
 
 // sameOrigin rejects state-changing requests whose Origin (or, without one,
-// Referer) is not this host. It complements the SameSite=Lax session cookie
-// as CSRF protection; a request carrying neither header is rejected.
+// Referer) is not this host over HTTPS. It complements the SameSite=Lax
+// session cookie as CSRF protection; a request carrying neither header is
+// rejected. The UI is served over HTTPS only (the plain-HTTP side of the
+// port answers the certificate page and redirects), so http://<this host>
+// is another origin: a page an attacker on the network path serves there
+// must not post here.
 func sameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		src := r.Header.Get("Origin")
@@ -169,7 +173,7 @@ func sameOrigin(next http.Handler) http.Handler {
 			src = r.Header.Get("Referer")
 		}
 		u, err := url.Parse(src)
-		if src == "" || err != nil || u.Host == "" || u.Host != r.Host {
+		if src == "" || err != nil || u.Scheme != "https" || u.Host == "" || u.Host != r.Host {
 			http.Error(w, msgForbidden, http.StatusForbidden)
 			return
 		}

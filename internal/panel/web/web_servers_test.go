@@ -149,8 +149,8 @@ func TestBackupRoutesNeedLoginAndSameOrigin(t *testing.T) {
 		if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/login") {
 			t.Errorf("%s without login: Location %q", path, loc)
 		}
-		for _, origin := range []string{"", "http://evil.example", "null"} {
-			req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
+		for _, origin := range []string{"", "http://evil.example", "null", plainOrigin} {
+			req := httptest.NewRequest("POST", tlsTarget+path, strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			if origin != "" {
 				req.Header.Set("Origin", origin)

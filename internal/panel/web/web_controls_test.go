@@ -547,8 +547,8 @@ var newRoutes = []struct {
 func TestCSRFOnNewRoutes(t *testing.T) {
 	e, f, mon := controlEnv(t)
 	for _, p := range newRoutes {
-		for _, origin := range []string{"", "http://evil.example"} {
-			req := httptest.NewRequest("POST", p.path, strings.NewReader(p.form.Encode()))
+		for _, origin := range []string{"", "http://evil.example", plainOrigin} {
+			req := httptest.NewRequest("POST", tlsTarget+p.path, strings.NewReader(p.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			if origin != "" {
 				req.Header.Set("Origin", origin)
