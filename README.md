@@ -1161,6 +1161,82 @@ sampel; grafiknya hanya memakai laporan kesehatan sehingga jarang. Sampel
 yang lebih tua dari 7 hari dihapus sekali sehari; angkanya bisa diubah di
 **Pengaturan > Retensi** (1 sampai 90 hari).
 
+### Cadangan (backup)
+
+Panel bisa memeriksa umur cadangan (backup) database di setiap server.
+Panel tidak membuat cadangan. Jadwal dan alat cadangan tetap milik Anda.
+
+Di halaman server ada kartu **Cadangan (backup)** dengan dua isian:
+
+- **Folder cadangan**: folder tempat alat cadangan Anda menulis berkasnya,
+  misalnya `/var/backups/mysql`. Kosongkan bila server ini tidak menyimpan
+  cadangan.
+- **Umur paling lama (jam)**: batas umur berkas terbaru. Bawaan 48 jam,
+  boleh 1 sampai 8760.
+
+Tekan **Simpan**. Panel mengirim folder itu ke agent server tersebut.
+Mengubah folder tidak meminta kata sandi panel, tetapi tercatat di
+**Audit** ("Atur folder cadangan"). Sampai agent melapor, kartu menulis
+"Belum ada laporan dari agent." Sesudah itu kartu menulis umur dan ukuran
+berkas terbaru, misalnya "Berkas terbaru: 3 jam lalu, 1.2 GB.", atau
+masalahnya.
+
+Yang dilihat agent:
+
+- berkas biasa di folder itu, di subfolder, dan di sub-subfolder (paling
+  dalam tiga tingkat);
+- dari berkas yang waktu ubahnya (modification time) paling baru: umur dan
+  ukurannya. Hanya dua angka itu yang dikirim ke panel.
+
+Agent memindai (scan) folder paling sering sekali tiap 5 menit, satu
+pemindaian pada satu waktu, paling banyak 10.000 entri, paling lama 10
+detik. Folder yang baru disimpan dipindai pada pemeriksaan agent berikutnya
+(interval pemeriksaan di **Pengaturan > Ambang dan interval**).
+
+Yang tidak dilihat agent:
+
+- isi berkas: agent tidak membuka satu berkas pun di folder itu;
+- nama berkas: tidak pernah dikirim ke panel;
+- symlink di dalam folder: tidak diikuti. Folder itu sendiri boleh berupa
+  symlink: agent memeriksa tempat tujuannya, bila tempat itu lolos aturan
+  folder di bawah;
+- apakah cadangan itu bisa dipulihkan. Menguji pemulihan tetap tugas Anda.
+
+Folder yang ditolak, dan sebabnya:
+
+- Bukan path absolut, tidak rapi (misalnya memuat `..` atau `//`), lebih
+  dari 1024 byte, atau memuat karakter kendali. Tertulis: "Folder cadangan
+  harus path absolut tanpa "..", misalnya /var/backups/mysql." Spasi di awal
+  dan akhir serta garis miring di akhir dibuang sebelum diperiksa.
+- `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, dan semua folder di
+  bawahnya. Layanan agent tidak melihat folder itu seperti yang terlihat di
+  server (layanannya berjalan dengan ProtectHome dan PrivateTmp). Tertulis:
+  "Folder di bawah <folder> tidak terlihat oleh layanan agent; pakai folder
+  lain, misalnya /var/backups/mysql."
+- `/`, `/proc`, `/sys`, `/dev`, dan semua folder di bawahnya. Di sana tidak
+  ada cadangan, dan agent tidak boleh menyentuh berkas khusus. Tertulis:
+  "Folder <folder> tidak boleh dipakai sebagai folder cadangan."
+
+Masalah yang bisa ditulis kartu (di server yang bukan master, kata
+"master" diganti "server"):
+
+- "Berkas terbaru di folder cadangan master <server> berumur <umur> (batas
+  <jam> jam)."
+- "Berkas terbaru di folder cadangan master <server> kosong (0 byte)."
+- "Folder cadangan master <server> tidak berisi berkas."
+- "Folder cadangan master <server> tidak bisa dibaca agent: <sebab>."
+  Sebabnya satu dari: "folder itu tidak ada", "itu bukan folder", "izin
+  ditolak", "folder itu tidak terlihat oleh layanan agent", "path-nya tidak
+  sah", "pemindaian tidak selesai dalam 10 detik", "lebih dari 10.000 entri
+  dan belum ada berkas yang ditemukan", atau "galat lain; lihat log agent".
+
+Bila server itu master dan salah satu masalah di atas terjadi, panel
+membuka peringatan **Cadangan master usang** dengan teks yang sama (di
+Telegram: "cadangan master usang"). Peringatan ditutup saat berkas terbaru
+kembali segar, atau saat folder master dikosongkan. Baris **Cadangan
+(backup)** di daftar **Prasyarat** memakai penilaian yang sama (lihat
+"Prasyarat" di "Promote").
+
 ## Notifikasi Telegram
 
 Panel mengirim peringatan ke grup Telegram lewat bot milik Anda sendiri.
@@ -1407,6 +1483,88 @@ punya pekerjaan yang belum selesai. Buka pekerjaan itu dan tekan
 Batalkan, lalu kembali ke sini." dengan tombol **Buka pekerjaan** (untuk
 pekerjaan promote: **Buka pekerjaan promote**). Buka pekerjaan itu dan
 tekan **Batalkan** dulu, lalu jalankan promote lagi.
+
+### Prasyarat
+
+Sebelum tindakan yang mengubah server dijalankan, panel memeriksa daftar
+**Prasyarat** (gerbang prasyarat). Panel menilai daftar itu dari data yang
+sudah ia pegang: laporan terakhir agent, catatan di panel, dan pengaturan.
+Panel tidak memanggil agent untuk itu. Satu-satunya yang diperiksa langsung
+adalah port MySQL master dari host panel (lihat baris **Port MySQL master**).
+
+Daftar lengkap tampil di layar **Promote…**, di form **Buat replika**, dan
+di form **Bangun ulang sebagai replika**. Di dialog **Resync ulang**, di
+**Tambah database** dan **Lepas database** (dengan **Hapus datanya juga di
+replika**), dan di **Siapkan sebagai master**, daftar hanya tampil bila ada
+baris yang belum terpenuhi, dan hanya baris itu.
+
+Tiap baris punya satu dari tiga tanda:
+
+- **Terpenuhi** (hijau): tidak ada masalah.
+- **Perlu perhatian** (kuning): ada yang perlu Anda lihat, tetapi tindakan
+  boleh jalan. Baris yang belum diketahui (agent belum melapor, atau tidak
+  tersambung) juga kuning, kecuali **Versi agent** dan **Pin master**.
+- **Belum terpenuhi** (merah): tindakan terencana ditolak.
+
+Selama ada baris "Belum terpenuhi", tombol tindakannya mati (pada **Lepas
+database**, centang **Hapus datanya juga di replika** yang mati), dan di
+bawahnya tertulis "Tombol ini mati selama ada prasyarat yang belum terpenuhi.
+Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini."
+Kiriman yang tetap sampai ke panel ditolak dengan "Tindakan ini ditolak
+karena ada prasyarat yang belum terpenuhi: <baris>. Cara memperbaikinya ada
+di daftar Prasyarat di halaman ini." Panel menilai lagi tepat sebelum
+pekerjaan dimulai, dan lagi pada **Ulangi** dan **Setujui** pekerjaan yang
+membuang data. Tidak ada tombol untuk melewati gerbang. Cara memperbaiki
+tiap baris ada di panduan "Memperbaiki baris merah".
+
+Baris yang diperiksa:
+
+| Baris | Merah bila | Dipakai untuk |
+|---|---|---|
+| Versi agent | agent di salah satu server yang terlibat berbeda versi dari panel, atau versinya belum diketahui | semua tindakan di atas |
+| Pin master | agent master tidak melaporkan pin peran `master` (juga bila belum ada laporan) | promote, Buat replika, Resync ulang, Tambah database |
+| Jam (clock) | jam server berbeda lebih dari 30 detik dari jam host panel | promote |
+| Pemeriksaan sertifikat TLS | master belum punya sertifikat MySQL dari panel; pada promote juga bila ada replika yang belum memeriksa sertifikat master | promote, Bangun ulang |
+| Ruang disk | disk server mencapai ambang kritis di Pengaturan | Buat replika, Bangun ulang, Resync ulang, Tambah database |
+| Akun panel | agent masuk ke MySQL sebagai `root` | semua tindakan di atas |
+| performance_schema | `performance_schema` mati di master | Buat replika, Bangun ulang, Resync ulang, Tambah database |
+| Cadangan (backup) | berkas terbaru di folder cadangan master terlalu tua, kosong, tidak ada, atau folder tidak bisa dibaca agent (lihat "Cadangan (backup)" di "Pemantauan") | promote, Bangun ulang |
+| Persetujuan di server | root di master lama belum menyetujui bangun ulang | Bangun ulang |
+| Port MySQL master | tidak pernah merah; kuning bila port MySQL master bisa dijangkau dari host panel | promote, Bangun ulang |
+| Log audit | tidak pernah merah; kuning sampai ditandai di Pengaturan | promote, Bangun ulang |
+| Cadangan panel.key | tidak pernah merah; kuning sampai ditandai di Pengaturan | promote, Bangun ulang |
+
+"Promote" di tabel berarti promote terencana dan darurat. **Siapkan
+sebagai master** dan **Lepas database** dengan hapus data hanya memeriksa
+**Versi agent** dan **Akun panel**.
+
+Baris **Cadangan (backup)** kuning bila folder cadangan master belum diisi:
+"Folder cadangan master <server> belum diisi, jadi panel tidak bisa melihat
+umur cadangan." Pada promote terencana dan bangun ulang, layar lalu meminta
+centang "Saya sudah memastikan ada cadangan (backup) terbaru". Tanpa
+centang itu, kiriman ditolak dengan "Centang "Saya sudah memastikan ada
+cadangan (backup) terbaru" untuk melanjutkan." Di bawah baris itu tertulis
+"Panel hanya melihat umur dan ukuran berkas, bukan apakah cadangan itu bisa
+dipulihkan."
+
+Tanda **Log audit** dan **Cadangan panel.key** ada di **Pengaturan**, kartu
+**Cadangan (backup) panel dan log audit**: tekan **Tandai sudah** sesudah
+Anda meneruskan journal host panel ke server lain, atau mencadangkan
+`panel.key` (lihat "Cadangkan kunci panel"). Panel tidak memeriksa sendiri
+bahwa keduanya benar dilakukan.
+
+**Promote darurat tidak pernah ditolak oleh sebuah baris.** Layarnya
+menampilkan daftar yang sama dengan kalimat "Baris yang belum terpenuhi
+tidak menghalangi promote darurat.", dan tombolnya tetap hidup. Sebagai
+gantinya, promote darurat meminta centang "Saya sudah memastikan master
+lama mati atau terputus dari aplikasi". Tanpa centang itu, kiriman ditolak
+dengan "Centang "Saya sudah memastikan master lama mati atau terputus dari
+aplikasi" untuk melanjutkan promote darurat." Catatan **Audit** promote
+darurat menyimpan centang itu, kapan panel terakhir menerima laporan
+master, dan baris yang merah saat promote dimulai (nama barisnya saja).
+Dua aturan lama tetap berlaku untuk promote darurat: replika yang agent-nya
+berbeda versi dari panel tidak bisa dipilih, dan promote ditolak selama
+topologi punya pekerjaan yang belum selesai (lihat di atas).
 
 ### Layar pertimbangan
 
@@ -1784,6 +1942,20 @@ Halaman server master lama memuat kotak **Master lama** dengan:
   terjamin (lihat "Memakai lagi server yang dihapus saat masih
   dikarantina" di bawah). Seperti bangun
   ulang, baru tersedia setelah **Sudah saya alihkan**.
+
+**Prasyarat bangun ulang.** Form **Bangun ulang sebagai replika**
+menampilkan daftar **Prasyarat** (lihat "Prasyarat" di "Promote").
+Barisnya: Versi agent, Pemeriksaan sertifikat TLS, Ruang disk, Akun panel,
+performance_schema, Cadangan (backup), Persetujuan di server, Port MySQL
+master, Log audit, dan Cadangan panel.key. Baris **Cadangan (backup)**
+menilai folder cadangan master baru, sumber salinannya. Bila folder itu
+belum diisi, form meminta centang "Saya sudah memastikan ada cadangan
+(backup) terbaru". Baris **Persetujuan di server** kuning ("Persetujuan di
+server <server> belum diperiksa.") sampai panel menanyai agent master lama,
+merah ("Belum disetujui di server <server>.") bila root belum menyetujui,
+dan "Terpenuhi" sesudah root menyetujuinya (lihat di bawah). Selama ada
+baris "Belum terpenuhi", tombol **Bangun ulang sebagai replika** mati.
+**Setujui** dan **Ulangi** pekerjaan bangun ulang menilai daftar itu lagi.
 
 #### Persetujuan di server untuk bangun ulang
 
@@ -3645,6 +3817,33 @@ menulis berkas peran (dengan petunjuk peran dari panel); pin sumber replika
 baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
 "Peran dan sumber yang dipin").
 
+**Sesudah memperbarui ke versi dengan daftar Prasyarat.** Versi ini
+memeriksa daftar **Prasyarat** sebelum tindakan terencana (lihat
+"Prasyarat" di "Promote"). Sampai langkah di bawah selesai, banyak baris
+bisa "Belum terpenuhi", dan promote terencana, **Buat replika**, **Resync
+ulang**, **Tambah database** serta bangun ulang ditolak. Promote darurat
+tidak ditolak oleh baris, tetapi replika yang agent-nya belum diperbarui
+tidak bisa dipilih sebagai master baru. Kerjakan langkah ini berurutan,
+sebelum promote terencana berikutnya:
+
+1. Perbarui agent di setiap server database (langkah **Pasang ulang
+   agent** di atas). Panel menolak agent yang versinya berbeda dari panel
+   (baris **Versi agent**), dan agent lama tidak melaporkan jam dan folder
+   cadangan yang dibaca baris lain.
+2. Bila agent di sebuah server masih masuk ke MySQL sebagai `root`, buat
+   akun MySQL khusus panel dan hubungkan lagi (baris **Akun panel**;
+   langkahnya di panduan "Memperbaiki baris merah").
+3. Di halaman setiap master, pastikan master punya sertifikat MySQL dari
+   panel (**Pasang sertifikat MySQL** di halaman servernya bila belum),
+   lalu jalankan **Wajibkan pemeriksaan sertifikat TLS** (baris
+   **Pemeriksaan sertifikat TLS**).
+4. Isi **Folder cadangan** di halaman setiap master (lihat "Cadangan
+   (backup)" di "Pemantauan"), dan tekan **Tandai sudah** di **Pengaturan**
+   untuk `panel.key` dan log audit bila keduanya memang sudah dikerjakan.
+5. Buka layar **Promote…** setiap master hanya untuk melihat daftarnya.
+   Perbaiki setiap baris "Belum terpenuhi" dengan panduan "Memperbaiki
+   baris merah". Baca juga setiap baris "Perlu perhatian".
+
 ## Keamanan
 
 - **HTTPS.** UI panel, unduhan agent, dan pairing hanya dilayani lewat
@@ -3992,6 +4191,36 @@ baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
   setelah Rencana 2); sampai saat itu, pasang ulang agent sebelum
   sertifikatnya habis. Listener panel membuat sertifikat baru setiap kali
   panel dimulai.
+- **Folder cadangan.** Agent hanya membaca umur dan ukuran berkas terbaru
+  di folder cadangan; ia tidak membuka berkas, tidak mengirim nama berkas,
+  dan tidak mengikuti symlink di dalam folder. Risiko yang tersisa: panel
+  yang disusupi bisa menunjuk agent ke folder lain, dan dengan begitu
+  mengetahui umur dan ukuran berkas terbaru di sana (paling dalam tiga
+  tingkat), di luar folder yang ditolak (lihat "Cadangan (backup)" di
+  "Pemantauan"). Hal yang sama bisa dilakukan siapa pun yang bisa memasang
+  symlink di path folder cadangan. Mengubah folder tidak meminta kata
+  sandi panel; perubahan itu tercatat di **Audit**.
+- **Gerbang prasyarat menahan salah langkah, bukan panel yang disusupi.**
+  Daftar **Prasyarat** mencegah operator menjalankan tindakan terencana
+  pada keadaan yang salah. Panel yang disusupi tetap bisa memerintahkan
+  agent langsung, tanpa gerbang. Baris yang dibaca dari laporan agent (jam,
+  pin master, ruang disk, performance_schema, cadangan) bisa dibuat hijau
+  oleh agent yang disusupi.
+- **Baris yang salah merah menahan pekerjaan terencana.** Bila sebuah baris
+  merah padahal keadaannya baik (misalnya laporan yang salah), tindakan
+  terencana tetap ditolak sampai baris itu diperbaiki. Tidak ada tombol
+  untuk melewatinya. Promote darurat tetap bisa dijalankan.
+- **Penerusan log audit hanya ditandai dengan tangan.** Panel tidak
+  memeriksa apakah journal host panel benar diteruskan ke server lain. Tanda
+  di **Pengaturan** hanya menyatakan bahwa seseorang mengaku sudah
+  mengerjakannya. Barisnya tidak pernah merah. Hal yang sama berlaku untuk
+  tanda cadangan `panel.key`.
+- **Dua aturan yang tetap berlaku pada promote darurat.** Replika yang
+  agent-nya berbeda versi dari panel tidak bisa dipilih: agent seperti itu
+  bisa gagal di tengah promote. Bila satu-satunya replika ber-agent lama,
+  perbarui agent-nya dulu (beberapa menit). Promote darurat juga ditolak
+  selama topologi punya pekerjaan yang belum selesai; panel tidak
+  membatalkannya sendiri. Buka pekerjaan itu dan tekan **Batalkan**.
 
 ### Keamanan rilis
 
@@ -4119,7 +4348,24 @@ agent dan `mysqld` sungguhan, lalu lewat UI:
   dalam dua putaran penjaga bendera itu menyala lagi dan panel membuka
   peringatan **Master lama sempat bisa ditulis** dengan pesan "MySQL master
   lama sempat tidak terkunci selagi berjalan; …"; **Periksa data
-  tertinggal** menutupnya.
+  tertinggal** menutupnya;
+- `TestE2EGateRefusesPlannedPromoteThenAllows`: folder cadangan master yang
+  tidak ada: agent melaporkannya tidak terbaca, layar promote menampilkan
+  baris **Cadangan (backup)** merah dan tombolnya mati, promote terencana
+  dengan token sah ditolak (409) tanpa memakai token, dan peringatan
+  **Cadangan master usang** terbuka; folder dikosongkan: baris kuning,
+  promote tanpa centang cadangan ditolak, dengan centang (token yang sama)
+  selesai, dan audit memuat `backup_ack`;
+- `TestE2EEmergencyPromoteSkipsRedRows`: baris cadangan merah dan MySQL
+  master dimatikan: promote darurat tanpa centang "Saya sudah memastikan
+  master lama mati atau terputus dari aplikasi" ditolak, dengan centang
+  selesai, dan audit memuat `skipped_red` berisi `backup`;
+- `TestE2EBackupFolderReported`: folder cadangan sungguhan di `/var/lib`
+  (dihapus saat selesai) berisi satu berkas: halaman master menulis
+  "Berkas terbaru: …"; berkas dijadikan 0 byte dan folder disimpan lagi
+  (dikosongkan, lalu diisi): halaman menulis "… kosong (0 byte)." dan
+  peringatan terbuka. Pemindaian terjadwal tiap 5 menit untuk folder yang
+  tidak berubah tidak ditunggu test ini.
 
 Test ini dilewati dengan `-short`.
 
