@@ -3503,17 +3503,21 @@ func TestBackupStaleAlertOpensAndCloses(t *testing.T) {
 	}
 
 	// Stale only by the time passing since the report: the tick opens it.
-	ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 47 * h, NewestSize: 100}))
+	// The step stays within StaleAfter, inside which a connected agent
+	// reports again; a report older than that is not judged (R41).
+	ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 48*h - 60, NewestSize: 100}))
 	ma.send()
 	if r.isOpen(mID, KindBackupStale) {
-		t.Fatal("backup_stale open at 47 h")
+		t.Fatal("backup_stale open at 47 h 59 min")
 	}
-	r.clk.Add(time.Hour + 5*time.Second)
+	r.clk.Add(65 * time.Second)
 	r.m.tick()
 	if a := r.openAlert(mID, KindBackupStale); a.Message != fmt.Sprintf(wantG8a, "db-master", "lebih dari 48 jam", 48) {
 		t.Fatalf("5 s past the limit: %q", a.Message)
 	}
-	r.clk.Add(time.Hour - 5*time.Second)
+	ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 49*h - 60, NewestSize: 100}))
+	ma.send()
+	r.clk.Add(65 * time.Second)
 	r.m.tick()
 	if a := r.openAlert(mID, KindBackupStale); a.Message != fmt.Sprintf(wantG8a, "db-master", "49 jam", 48) {
 		t.Fatalf("an hour past the limit: %q", a.Message)
@@ -3597,4 +3601,90 @@ func TestBackupStaleAlertTruncated(t *testing.T) {
 	if len(a.Message) > 1024 {
 		t.Fatalf("message of %d bytes", len(a.Message))
 	}
+}
+
+// TestBackupStaleNotFromExtrapolation (C-2, Ruling R41): while the
+// master's agent is away, or its last report is older than StaleAfter,
+// backup_stale neither opens nor closes from the age extrapolated from
+// that report; a fresh report judges again, and a panel restart after a
+// long stop opens nothing on its first tick.
+func TestBackupStaleNotFromExtrapolation(t *testing.T) {
+	h := int64(3600)
+	withBackup := func(b *proto.BackupState) func(s *proto.HealthSnapshot) {
+		return func(s *proto.HealthSnapshot) { s.Backup = b }
+	}
+	setup := func(t *testing.T) (*rig, int64, *fakeAgent) {
+		r := newRig(t)
+		mID, _ := r.master("db-master")
+		if err := r.st.SetServerBackup(mID, "/srv/backup", 48); err != nil {
+			t.Fatal(err)
+		}
+		snap := masterSnap(srcUUID + ":1-100")
+		snap.Backup = &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 17 * h, NewestSize: 100}
+		return r, mID, r.agent(mID, true, snap).attach()
+	}
+
+	t.Run("agent away", func(t *testing.T) {
+		r, mID, ma := setup(t)
+		ma.detach()
+		r.clk.Add(62 * time.Hour)
+		r.m.tick()
+		if r.isOpen(mID, KindBackupStale) {
+			t.Fatal("backup_stale opened from an old report while the agent is away")
+		}
+		// Back with a fresh report that is stale: it opens.
+		ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 100}))
+		ma.attach()
+		ma.send()
+		if a := r.openAlert(mID, KindBackupStale); a.Message != fmt.Sprintf(wantG8a, "db-master", "50 jam", 48) {
+			t.Fatalf("after a fresh stale report: %q", a.Message)
+		}
+	})
+
+	t.Run("open alert kept", func(t *testing.T) {
+		r, mID, ma := setup(t)
+		ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 100}))
+		ma.send()
+		a := r.openAlert(mID, KindBackupStale)
+		ma.detach()
+		r.clk.Add(30 * time.Hour)
+		r.m.tick()
+		if got := r.openAlert(mID, KindBackupStale); got.ID != a.ID || got.Message != a.Message {
+			t.Fatalf("while the agent is away: %+v, want %+v kept as it was", got, a)
+		}
+		// A report older than StaleAfter (the agent connected, silent) is
+		// not judged either.
+		ma.attach()
+		ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 100}))
+		ma.send()
+		r.clk.Add(10 * time.Hour)
+		r.m.tick()
+		if got := r.openAlert(mID, KindBackupStale); got.ID != a.ID || got.Message != a.Message {
+			t.Fatalf("on a silent agent: %+v, want %+v kept as it was", got, a)
+		}
+		// A fresh report that is fine closes it.
+		ma.setSnap(withBackup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: h, NewestSize: 100}))
+		ma.send()
+		if r.isOpen(mID, KindBackupStale) {
+			t.Fatal("backup_stale open after a fresh backup")
+		}
+	})
+
+	t.Run("panel restart after a long stop", func(t *testing.T) {
+		r, mID, ma := setup(t)
+		r.m.tick()
+		ma.detach()
+		r.settle()
+		r.clk.Add(62 * time.Hour)
+		m2 := New(Deps{Store: r.st, Hub: r.hub, Publish: r.publish,
+			Logger: slog.New(slog.NewTextHandler(r.logs, nil)), Now: r.clk.Now, TickEvery: time.Hour})
+		t.Cleanup(m2.Close)
+		if v, ok := m2.View(mID); !ok || v.Snap == nil || v.Snap.Backup == nil {
+			t.Fatalf("the stored report was not loaded: %+v", v.Snap)
+		}
+		m2.tick()
+		if r.isOpen(mID, KindBackupStale) {
+			t.Fatal("backup_stale opened on the first tick after a restart, from extrapolation alone")
+		}
+	})
 }

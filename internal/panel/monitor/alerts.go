@@ -115,6 +115,8 @@ type ruleCtx struct {
 	// server is a master's row in the store (its name, backup folder and
 	// limit); nil for any other server, or when it could not be read.
 	server *store.Server
+	// online: the server's agent is connected now.
+	online bool
 }
 
 // alertRule opens an alert of kind when open holds (with its message) and
@@ -381,10 +383,12 @@ var alertRules = []alertRule{
 		// A master's backup (plan 5b-2b): open on a stale or empty newest
 		// file, an empty folder or one the agent cannot read; closed when
 		// the backup is fresh or no folder is set; nothing known (no
-		// report, a scan pending) leaves it as it is.
+		// report, a scan pending, or a report that is not current: the
+		// agent away or silent longer than StaleAfter, Ruling R41) leaves
+		// it as it is.
 		kind: KindBackupStale,
 		open: func(v View, ctx ruleCtx) (bool, string) {
-			if !isMaster(v) || ctx.server == nil {
+			if !isMaster(v) || ctx.server == nil || !backupReportCurrent(v, ctx) {
 				return false, ""
 			}
 			b := JudgeBackup(v, *ctx.server, ctx.now)
@@ -401,9 +405,20 @@ var alertRules = []alertRule{
 				return false
 			}
 			st := JudgeBackup(v, *ctx.server, ctx.now).Status
-			return st == BackupStatusOK || st == BackupStatusUnset
+			if st == BackupStatusUnset {
+				return true
+			}
+			return st == BackupStatusOK && backupReportCurrent(v, ctx)
 		},
 	},
+}
+
+// backupReportCurrent: the master's last report may be judged as now (its
+// newest file's age extrapolated from it): the agent is connected and the
+// report is at most StaleAfter old, within which a connected agent
+// reports again. Otherwise the age the panel would add is a guess.
+func backupReportCurrent(v View, ctx ruleCtx) bool {
+	return ctx.online && ctx.now.Sub(v.ReceivedAt) <= ctx.set.StaleAfter
 }
 
 // notQuarantinedReason closes the start alerts of a server that is no
@@ -813,7 +828,7 @@ func (m *Monitor) ruleCtx(id int64, s *serverState, v View, now time.Time) ruleC
 
 	ctx := ruleCtx{now: now, set: m.settings,
 		connHighSince: s.connHighSince, syncedSince: s.syncedSince, outSince: s.outSince, repState: s.repState,
-		unpinnedReports: s.unpinnedReports}
+		unpinnedReports: s.unpinnedReports, online: s.online}
 	if v.Role == store.RoleMaster {
 		if srv, err := m.st.GetServer(id); err == nil {
 			ctx.server = &srv
