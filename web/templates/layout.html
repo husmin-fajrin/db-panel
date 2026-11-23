@@ -36,6 +36,7 @@
         <li><a href="/alerts" data-menu="alerts" {{.MenuAttr "alerts"}} x-data="alertCount">{{template "icon" "alerts"}}<span class="flex-1">Peringatan</span><span class="lencana lencana-warning mono{{if not .AlertCount}} hidden{{end}}" data-alert-count>{{.AlertCount}}</span></a></li>
         <li><a href="/audit" data-menu="audit" {{.MenuAttr "audit"}}>{{template "icon" "audit"}}Audit</a></li>
         <li><a href="/settings" data-menu="settings" {{.MenuAttr "settings"}}>{{template "icon" "settings"}}Pengaturan</a></li>
+        <li><a href="/panduan" data-menu="panduan" {{.MenuAttr "panduan"}}>{{template "icon" "panduan"}}Panduan</a></li>
       </ul>
     </nav>
     <div class="m-3 flex flex-col gap-2 rounded-lg border border-base-300 bg-base-200 p-3" data-status-box>

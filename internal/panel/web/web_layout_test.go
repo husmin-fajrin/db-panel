@@ -50,6 +50,7 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 	want := map[string]string{
 		"dashboard": `href="/"`, "servers": `href="/servers"`, "replikasi": `href="/replikasi"`, "jobs": `href="/jobs"`,
 		"alerts": `href="/alerts"`, "audit": `href="/audit"`, "settings": `href="/settings"`,
+		"panduan": `href="/panduan"`,
 	}
 	if len(links) != len(want) {
 		t.Errorf("menu entries = %v, want %d", links, len(want))
@@ -58,6 +59,11 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 		if !strings.Contains(links[k], href) {
 			t.Errorf("menu %s = %q, want %s", k, links[k], href)
 		}
+	}
+	// Panduan is the eighth entry, after Pengaturan.
+	if i, j := strings.Index(nav, `data-menu="settings"`), strings.Index(nav, `data-menu="panduan"`); j < i ||
+		!strings.Contains(nav[j:], "Panduan</a>") {
+		t.Errorf("Panduan is not the entry after Pengaturan:\n%s", nav)
 	}
 	if !strings.Contains(nav, "data-alert-count") || !strings.Contains(nav, `x-data="alertCount"`) {
 		t.Error("Peringatan has no live count badge")
@@ -84,6 +90,7 @@ func TestLayoutSidebarAndActiveMenu(t *testing.T) {
 	active("/alerts", "alerts")
 	active("/audit", "audit")
 	active("/replikasi", "replikasi")
+	active("/panduan", "panduan")
 	srv, err := e.st.CreateServer("db-a")
 	if err != nil {
 		t.Fatal(err)

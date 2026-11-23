@@ -261,6 +261,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /sertifikat", a.certPage)
 	mux.HandleFunc("GET /sertifikat/dbpanel-panel.crt", a.certDownload)
 	mux.Handle("GET /audit", authed(a.auditLog))
+	mux.Handle("GET /panduan", authed(a.guidePage))
 	mux.Handle("GET /events", login(d.Events))
 	return SecurityHeaders(mux)
 }

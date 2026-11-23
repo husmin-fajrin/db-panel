@@ -60,6 +60,7 @@ const (
 	menuAlerts    = "alerts"
 	menuAudit     = "audit"
 	menuSettings  = "settings"
+	menuPanduan   = "panduan"
 )
 
 // Themes a browser can start with (setting tema_bawaan); temaSistem
@@ -91,6 +92,8 @@ func activeMenu(path string) string {
 		return menuAudit
 	case under("/settings"):
 		return menuSettings
+	case under("/panduan"):
+		return menuPanduan
 	}
 	return ""
 }
@@ -134,7 +137,7 @@ const (
 // "title" and "content".
 var pageNames = []string{"login", "dashboard", "servers", "server_new", "server_detail",
 	"master_detail", "replication", "replica_new", "replica_detail", "replica_databases", "jobs", "job_detail",
-	"alerts", "settings", "audit", "cert", "promote", "cutover"}
+	"alerts", "settings", "audit", "cert", "promote", "cutover", "panduan"}
 
 // Renderer renders a page inside the shared layout.
 type Renderer struct {

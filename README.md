@@ -2706,6 +2706,764 @@ tidak membatalkannya (tidak ada jalan mundur yang aman dari dua master).
 Pekerjaan berhenti dengan status selesai sebagian; buka pekerjaannya dan
 tekan **Ulangi dari tahap ini**.
 
+## Panduan
+
+Panduan langkah demi langkah untuk keadaan yang jarang terjadi. Isinya sama
+di dua tempat: bagian "Panduan" di README, dan halaman **Panduan** di
+panel (menu **Panduan**, butuh login).
+Kerjakan langkahnya berurutan. Sebelum menjalankan sebuah perintah, baca
+dulu syarat yang tertulis tepat di atasnya.
+
+1. Promote darurat
+2. Bangun ulang master lama
+3. Memindahkan jadwal cadangan sesudah promote
+4. Memperpanjang sertifikat
+5. Melepas kunci master lama dengan tangan
+6. Master terkunci padahal tidak ada promote
+7. Memakai lagi server yang dihapus saat masih dikarantina
+8. Memperbaiki baris merah
+9. Replika yang tersambung di luar alur panel
+
+### Promote darurat
+
+Kapan dipakai: master tidak terjangkau (status Diduga tumbang, Tidak
+terjangkau, atau agent-nya offline) dan aplikasi harus bisa menulis lagi
+lewat salah satu replika.
+
+Transaksi yang belum sampai ke replika terpilih akan hilang dari master
+baru. Bila master lama hidup kembali, panel bisa memeriksa dan
+mengamankannya.
+
+1. Pastikan master lama benar-benar mati atau tidak lagi dipakai aplikasi.
+   Promote darurat membuktikan bahwa master tidak terjangkau dari replika,
+   bukan bahwa master mati. Bila master hidup di jaringan lain, tulisan di
+   sana akan tertinggal.
+2. Buka halaman master, lalu tekan **Promote…**.
+3. Baca judul kotak mode. Lanjutkan hanya bila tertulis "Mode: Darurat
+   (master tidak terjangkau)". Ragu master benar-benar tidak terjangkau?
+   Tekan **Periksa sekarang**.
+4. Bila layar menulis "Master menjawab dari replika …", jangan jalankan
+   promote darurat: agent replika akan menolaknya. Pulihkan agent master
+   dengan perintah ini di server master, lalu jalankan promote terencana:
+
+   ```sh
+   systemctl restart dbpanel-agent
+   ```
+
+5. Di kotak **Pilih replika yang dijadikan master baru**, pilih replikanya.
+   Pilihan bawaan adalah replika lengkap yang paling mutakhir (tanda
+   **Paling mutakhir**).
+6. Baca daftar **Prasyarat** replika itu. Baris yang belum terpenuhi tidak
+   menghalangi promote darurat. Catat baris bertanda "Belum terpenuhi", lalu
+   perbaiki sesudah promote (panduan "Memperbaiki baris merah").
+7. Isi centang yang tampil. Artinya:
+   - "Saya setuju … menjadi master baru tanpa database tersebut.": replika
+     itu hanya mengikuti sebagian database. Database lainnya tidak ada di
+     master baru; datanya tetap utuh di master lama yang dikarantina dan
+     bisa diamankan dari sana.
+   - "Saya setuju … diarahkan ulang ke master baru saat tersambung lagi.":
+     replika lain yang tidak terjangkau ditandai **Perlu diarahkan ulang**
+     dan diarahkan ke master baru saat tersambung lagi.
+   - "Saya setuju: replika lain yang bercabang dibangun ulang dari master
+     baru.": transaksi yang hanya ada di replika lain itu tidak masuk ke
+     master baru.
+   - "Saya sudah memastikan master lama mati atau terputus dari aplikasi":
+     wajib. Centang hanya bila langkah 1 sudah Anda pastikan sendiri.
+8. Tekan **Promote**. Ketik kata sandi panel dan nama master lama (dan nama
+   replika bila diminta).
+9. Tunggu sampai pekerjaan promote selesai. Promote tidak bisa dibatalkan
+   setelah dikirim ke kandidat (langkah "Jadikan master baru").
+10. Panel membuka layar pengalihan. Arahkan semua aplikasi yang menulis ke
+    database ke **Alamat master baru**, restart aplikasinya, lalu tekan
+    **Sudah saya alihkan**.
+11. Pindahkan jadwal cadangan ke master baru (panduan
+    "Memindahkan jadwal cadangan sesudah promote").
+12. Jangan nyalakan MySQL master lama sebelum agent-nya tersambung ke panel.
+    Sesudah itu ikuti panduan "Bangun ulang master lama".
+13. Bila judul kotak di halaman server master lama tetap "Master lama
+    (belum dikarantina; …)" padahal agent-nya sudah tersambung, ikuti
+    panduan "Replika yang tersambung di luar alur panel".
+
+### Bangun ulang master lama
+
+Kapan dipakai: sesudah promote, untuk menjadikan master lama yang
+dikarantina (quarantined) replika master baru. Bangun ulang (rebuild)
+membuang semua data MySQL di master lama dan menggantinya dengan salinan
+dari master baru.
+
+1. Buka halaman server master lama. Di sana ada kotak **Master lama**.
+2. Tekan **Periksa data tertinggal**. Hasilnya "Tidak ada data tertinggal",
+   atau jumlah transaksi yang tidak sampai ke master baru.
+3. Bila ada data tertinggal, tekan **Amankan data tertinggal**. Agent
+   menulis transaksi itu sebagai berkas SQL di master lama.
+4. Tekan **Unduh** pada berkas itu dan simpan di tempat yang aman. Di server,
+   berkas itu hanya disimpan 7 hari. Panel tidak memasukkan isinya ke master
+   baru; isinya dijalankan ulang secara manual.
+5. Pastikan semua aplikasi sudah memakai alamat master baru. Bila belum, buka
+   layar pengalihan, alihkan aplikasinya, lalu tekan **Sudah saya alihkan**.
+   Bangun ulang baru tersedia sesudah itu.
+6. Di kotak **Master lama**, tekan **Bangun ulang sebagai replika**.
+7. Di form yang terbuka, kotak **Persetujuan di server** menampilkan
+   perintah dengan kode enam angka. Kode itu berlaku 30 menit.
+8. Masuk ke master lama sebagai root. Jalankan perintah ini hanya sesudah
+   langkah 2 sampai 5 selesai: bila disetujui, SEMUA data MySQL di server
+   itu dibuang. Ganti `<kode>` dengan kode dari form:
+
+   ```sh
+   sudo dbpanel agent approve <kode>
+   ```
+
+9. Layar menampilkan nama server, sumber data dan alamat IP-nya. Pastikan
+   nama dan alamat IP itu memang master baru yang sekarang dipakai aplikasi.
+   Bila benar, ketik `ya` lalu Enter. Bila tidak, tekan Enter saja.
+10. Kembali ke form dan klik **Periksa lagi**. Kotak itu kini menulis "Sudah
+    disetujui …".
+11. Baca daftar **Prasyarat**. Perbaiki baris bertanda "Belum terpenuhi"
+    (panduan "Memperbaiki baris merah"), lalu muat ulang halaman.
+12. Isi centang yang diminta form (koneksi yang masih ada, cadangan).
+13. Tekan **Bangun ulang sebagai replika**. Ketik kata sandi panel dan nama
+    server.
+14. Selama bangun ulang berjalan, jangan memakai root MySQL atau akun admin
+    panel di server itu. Tunggu sampai pekerjaannya selesai.
+
+Persetujuan berlaku 24 jam. Untuk membatalkannya sebelum bangun ulang
+dimulai, jalankan di master lama:
+
+```sh
+sudo dbpanel agent approve batal
+```
+
+### Memindahkan jadwal cadangan sesudah promote
+
+Kapan dipakai: sesudah promote. Master baru sekarang satu-satunya sumber
+data, jadi cadangan (backup) yang terjadwal harus dibuat di sana, bukan di
+master lama.
+
+1. Cari jadwal cadangan database di master lama, misalnya tugas terjadwal
+   yang menjalankan alat cadangan Anda. Catat perintahnya, jamnya, dan
+   folder tempat cadangan ditulis.
+2. Pasang jadwal yang sama di master baru, dengan alat cadangan yang sama.
+3. Hentikan jadwal itu di master lama, supaya tidak ada cadangan baru dari
+   data lama. Jangan hapus berkas cadangan lama: bangun ulang tidak
+   menyentuhnya.
+4. Jalankan cadangan sekali di master baru dan tunggu sampai selesai.
+5. Di panel, buka halaman server master baru. Di kartu **Cadangan
+   (backup)**, isi **Folder cadangan** dengan folder tempat cadangan
+   ditulis, misalnya `/var/backups/mysql`. Folder harus path absolut. Folder
+   di bawah `/home`, `/root`, `/run/user`, `/tmp` atau `/var/tmp` ditolak,
+   karena tidak terlihat oleh layanan agent.
+6. Biarkan **Umur paling lama (jam)** 48, atau isi batas lain (1 sampai 8760
+   jam) yang sesuai dengan jadwal cadangan. Tekan **Simpan**.
+7. Tunggu sampai kartu itu menulis "Berkas terbaru: … lalu, …". Agent
+   memeriksa folder itu paling sering sekali tiap 5 menit.
+8. Lihat daftar **Prasyarat** di form **Bangun ulang sebagai replika**
+   master lama, atau di layar **Promote…** master baru (hanya untuk
+   melihat). Baris **Cadangan (backup)** harus bertanda "Terpenuhi".
+9. Bila baris itu belum "Terpenuhi", baca keterangannya, lalu ikuti
+   sub-bagian **Cadangan (backup)** di panduan "Memperbaiki baris merah".
+
+Panel hanya melihat umur dan ukuran berkas, bukan apakah cadangan itu bisa
+dipulihkan.
+
+### Memperpanjang sertifikat
+
+Kapan dipakai: peringatan **Sertifikat MySQL hampir kedaluwarsa** terbuka
+("Sertifikat MySQL … kedaluwarsa dalam … hari."). Biasanya panel
+memperpanjang sertifikat MySQL sendiri, 30 hari sebelum habis masa
+berlakunya; peringatan itu berarti perpanjangan otomatis belum berhasil.
+
+1. Buka halaman server yang disebut peringatan.
+2. Pastikan agent server itu tersambung, dan server itu tidak sedang
+   menjalankan pekerjaan lain (lihat **Pekerjaan**). Perpanjangan otomatis
+   melewati server seperti itu.
+3. Di bagian **Sertifikat MySQL**, tekan **Perbarui sertifikat MySQL**.
+4. Ketik kata sandi panel. MySQL tidak dimulai ulang.
+5. Tunggu sampai pekerjaannya selesai. Bila gagal, sertifikat lama
+   dikembalikan; baca log pekerjaannya.
+6. Periksa tanggal "berlaku sampai" di bagian **Sertifikat MySQL**.
+   Peringatan tertutup sendiri setelah sertifikatnya diperpanjang.
+
+Master lama yang dikarantina tidak bisa diberi sertifikat baru: sertifikat
+MySQL-nya dipasang lagi saat dibangun ulang sebagai replika. Sertifikat
+HTTPS panel lain hal: lihat bagian "Keamanan" di README.
+
+### Melepas kunci master lama dengan tangan
+
+Cara ini melepas kunci start (start lock) master lama tanpa agent. Pakai
+hanya bila `set-role master` menulis "kunci start tidak bisa diperiksa",
+atau agent tidak bisa dijalankan sama sekali. Kerjakan sebagai root: masuk
+dulu dengan `sudo -i`; perintah di bawah ditulis untuk shell root itu,
+tanpa `sudo`. Kerjakan berurutan, dan jangan melompati langkah.
+
+Perhatian sebelum mulai: dalam keadaan ini tidak ada yang tahu pasti apakah
+MySQL memakai kunci start saat menyala. Panel sendiri memperingatkan
+"master lama belum terjamin terkunci saat MySQL menyala; jangan nyalakan
+MySQL-nya sebelum agent tersambung", dan cara ini justru bekerja tanpa
+agent. Jadi MySQL server ini bisa menyala dalam keadaan bisa ditulis. Dua
+master yang sama-sama ditulis aplikasi membuat data keduanya berbeda dan
+sebagian hilang. Karena itu langkah 2 wajib, sebelum apa pun yang bisa
+membuat server ini menerima tulisan.
+
+1. Hentikan agent:
+
+   ```sh
+   systemctl stop dbpanel-agent
+   ```
+
+   Selama perannya `quarantined`, agent yang berjalan menulis kunci itu lagi
+   dalam beberapa detik.
+2. Pastikan tidak ada aplikasi yang bisa menulis ke server ini. Tulisan yang
+   masuk ke server ini tidak pernah sampai ke master baru. Hentikan semua
+   aplikasi yang memakai MySQL ini, termasuk yang berjalan di server ini
+   sendiri, atau ubah pengaturannya supaya tidak lagi mengarah ke server
+   ini lalu mulai ulang aplikasi itu. Menutup port MySQL (biasanya 3306) di
+   firewall hanya tambahan, bukan pengganti: aplikasi di server ini sendiri
+   tersambung lewat socket atau `localhost` tanpa melewati firewall, dan
+   sambungan yang sudah terbuka biasanya tetap jalan. Bila MySQL sedang
+   menyala, periksa sebelum lanjut:
+
+   ```sh
+   mysql -e 'SELECT ID, USER, HOST, DB, COMMAND, TIME FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID();'
+   ```
+
+   Yang boleh tampil hanya `event_scheduler` (COMMAND `Daemon`), thread
+   replikasi (USER `system user`), dan akun yang dipakai agent (agent sudah
+   dihentikan di langkah 1, jadi biasanya tidak ada lagi). Baris lain
+   berarti masih ada aplikasi atau orang yang tersambung: hentikan dulu,
+   lalu periksa lagi. Periksa juga event terjadwal:
+
+   ```sh
+   mysql -e 'SELECT EVENT_SCHEMA, EVENT_NAME FROM information_schema.EVENTS WHERE STATUS="ENABLED";'
+   ```
+
+   Event yang tampil bisa menulis seperti aplikasi begitu MySQL bisa
+   ditulis; langkah 5 membuatnya baca-saja. Bila MySQL mati, tidak ada yang
+   bisa diperiksa selain aplikasinya sendiri; langkah 4 mematikan event
+   terjadwal sebelum MySQL dinyalakan. Biarkan aplikasi tetap terputus
+   sampai langkah 9; sambungkan lagi hanya bila server ini dibuka sebagai
+   master di sana. Bila Anda berhenti di sini, jalankan lagi agent:
+
+   ```sh
+   systemctl start dbpanel-agent
+   ```
+
+3. Cari baris kunci di konfigurasi MySQL. Perintah pertama menampilkan
+   berkas opsi yang dibaca mysqld (agent mengelola berkas pertama yang
+   ada, atau `zz-dbpanel.cnf` di direktori `!includedir` terakhirnya);
+   yang kedua mencari barisnya di tempat yang biasa:
+
+   ```sh
+   mysqld --verbose --help 2>/dev/null | grep -A1 '^Default options are read'
+   grep -rn 'dbpanel-start-lock.sql' /etc/my.cnf /etc/my.cnf.d /etc/mysql /usr/etc/my.cnf 2>/dev/null
+   ```
+
+   Bila perintah pertama tidak menampilkan apa pun, ganti `mysqld` dengan
+   path lengkapnya: `/usr/sbin/mysqld`, `/usr/libexec/mysqld`,
+   `/www/server/mysql/bin/mysqld` atau `/usr/local/mysql/bin/mysqld`. Bila
+   `grep` tidak menemukan apa pun, jalankan lagi dengan berkas dari
+   perintah pertama dan direktori `!includedir`-nya. Berkas itu
+   `<direktori include>/zz-dbpanel.cnf` bila konfigurasi MySQL punya
+   direktori include; selain itu blok antara `# BEGIN dbpanel` dan
+   `# END dbpanel` di berkas konfigurasi utama. Barisnya berbentuk
+   `init_file=<…>/dbpanel-start-lock.sql`; path setelah `init_file=` adalah
+   berkas kunci. Bila baris `init_file=` itu tidak ditemukan, berhenti di sini
+   dan jangan nyalakan MySQL. Jalankan lagi agent bila bisa:
+
+   ```sh
+   systemctl start dbpanel-agent
+   ```
+
+   Bila MySQL sudah menyala, jalankan juga pemeriksaan langkah 5 sebelum
+   meninggalkan server ini.
+4. Bila MySQL mati, jangan langsung menyalakannya. Tambahkan dulu dua baris
+   tepat di bawah baris `init_file=` yang ditemukan di langkah 3:
+   `super_read_only=ON` dan `event_scheduler=OFF` (event terjadwal tidak
+   jalan selama baris kedua ada, kecuali `event_scheduler` pernah disimpan
+   `ON` dengan `SET PERSIST`: nilai tersimpan itu yang dipakai). Kedua
+   baris itu bukan jaminan: nilai yang pernah disimpan dengan `SET PERSIST`
+   (misalnya `read_only` atau `super_read_only` yang disimpan `OFF`)
+   mengalahkannya, dan berkas kunci hanya dijalankan bila mysqld memang
+   memakainya. Perlindungan yang pasti hanya langkah 2. Lalu nyalakan
+   MySQL, misalnya:
+
+   ```sh
+   systemctl start mysql
+   ```
+
+   atau:
+
+   ```sh
+   systemctl start mysqld
+   ```
+
+   Bila MySQL menolak menyala karena berkas kuncinya hilang atau tidak
+   terbaca ("Failed to open the bootstrap file"), tulis lagi berkas itu
+   dengan isi kunci start, milik root, mode 0644 (ganti `<berkas kunci>`
+   dengan path dari langkah 3), lalu nyalakan lagi:
+
+   ```sh
+   printf 'SET GLOBAL super_read_only=ON;\nSET PERSIST read_only=ON;\nSET PERSIST super_read_only=ON;\n' > <berkas kunci>
+   chown root:root <berkas kunci>
+   chmod 0644 <berkas kunci>
+   ```
+
+   Bila MySQL tetap tidak mau menyala, berhenti di sini: jangan hapus
+   baris `init_file=` atau berkas kunci; perbaiki dulu sebab yang tertulis di
+   log error MySQL. Bila Anda menghentikan cara ini di tengah jalan (di
+   langkah ini atau sesudahnya, sebelum langkah 6), hapus lagi baris
+   `super_read_only=ON` dan `event_scheduler=OFF` yang Anda tambahkan, lalu
+   jalankan lagi agent:
+
+   ```sh
+   systemctl start dbpanel-agent
+   ```
+
+   Bila baris itu tertinggal, MySQL menyala baca-saja setiap kali tidak ada
+   nilai lain yang tersimpan dengan `SET PERSIST`, juga setelah server ini
+   kelak dibuka sebagai master.
+5. Segera setelah MySQL menyala (juga bila MySQL tadi sudah menyala), ulangi
+   pemeriksaan sambungan dari langkah 2, lalu masuk sebagai root MySQL
+   (`mysql`, atau `mysql -u root -p` bila root MySQL memakai kata sandi) dan
+   jalankan:
+
+   ```sql
+   SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;
+   SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.persisted_variables
+     WHERE VARIABLE_NAME IN ('read_only', 'super_read_only');
+   ```
+
+   Lanjutkan hanya bila yang pertama menjawab `1 1` dan yang kedua
+   menunjukkan `ON` untuk kedua nama. Bila tidak, simpan keduanya saat itu
+   juga, lalu periksa lagi dengan dua perintah di atas:
+
+   ```sql
+   SET PERSIST read_only=ON;
+   SET PERSIST super_read_only=ON;
+   ```
+
+   Bila salah satu angka pada jawaban pertama `0`, MySQL bisa ditulis sejak
+   menyala sampai saat itu. Tulisan yang masuk selama itu (bila langkah 2
+   tidak memutus semua aplikasi) tidak ada di master baru; tulisan itu hanya
+   ada di server ini. Catat hal itu dan beri tahu penanggung jawab aplikasi
+   sebelum memakai server ini lagi.
+6. Di berkas dari langkah 3, hapus baris `init_file=<…>/dbpanel-start-lock.sql`,
+   dan baris `super_read_only=ON` serta `event_scheduler=OFF` bila Anda
+   menambahkannya di langkah 4.
+7. Baru sesudah itu hapus berkas `dbpanel-start-lock.sql` yang disebut
+   baris tadi. Urutan ini wajib: mysqld menolak menyala bila konfigurasinya
+   menyebut berkas yang tidak ada.
+8. Hapus id karantina, ubah peran, lalu hapus pin sumber serta berkas
+   persetujuan (ganti `master` dengan `unassigned` bila server ini akan
+   disiapkan ulang lewat panel):
+
+   ```sh
+   rm -f /etc/dbpanel/quarantine-id
+   echo master > /etc/dbpanel/role
+   rm -f /etc/dbpanel/source /etc/dbpanel/source-addr /etc/dbpanel/rebuild-request /etc/dbpanel/rebuild-approval
+   ```
+
+   Id karantina (`quarantine-id`) dihapus lebih dulu, seperti agent
+   melakukannya: hasil **Periksa data tertinggal** yang tercatat untuk
+   karantina ini tidak boleh berlaku untuk karantina berikutnya.
+
+   Berkas peran harus tetap milik root dan tidak bisa ditulis grup atau
+   pengguna lain.
+9. Karena langkah 5 memastikan `read_only` dan `super_read_only` tersimpan
+   ON, MySQL tetap baca-saja, juga setelah menyala ulang (agent memakai
+   syarat yang sama, tersimpan ON, sebelum melepas kunci sendiri). Buka
+   hanya bila server ini akan menjadi master yang dipakai aplikasi (bukan
+   bila Anda memilih `unassigned`), dan seperti kata `set-role master`:
+   "bila MySQL di server ini masih baca-saja (read-only) dan server ini
+   memang akan dipakai aplikasi sebagai master, pastikan master lain tidak
+   lagi dipakai". Baru sesudah itu buka sebagai root MySQL, lalu sambungkan
+   lagi aplikasinya:
+
+   ```sql
+   SET PERSIST super_read_only=OFF;
+   SET PERSIST read_only=OFF;
+   ```
+
+   Bila Anda memilih `unassigned`, biarkan baca-saja dan jangan arahkan
+   aplikasi ke server ini; siapkan ulang lewat panel.
+
+Sesudahnya agent boleh dijalankan lagi:
+
+```sh
+systemctl start dbpanel-agent
+```
+
+Dengan peran `master` atau `unassigned`, agent tidak menulis kunci start.
+
+### Master terkunci padahal tidak ada promote
+
+Kapan dipakai: master yang dipakai aplikasi menjadi baca-saja (read-only),
+misalnya berstatus **Terkunci** atau dengan peringatan **Master terkunci**,
+padahal tidak ada promote yang berjalan atau baru selesai.
+
+1. Pastikan memang tidak ada promote: di halaman **Pekerjaan** tidak ada
+   pekerjaan promote yang berjalan atau baru selesai, dan tidak ada master
+   lain yang dipakai aplikasi.
+2. Di halaman server master itu, buka **Detail teknis** dan baca baris
+   "Peran dipin: …".
+3. Bila tertulis `quarantined`, server itu dikarantina. Karantina hanya
+   berakhir lewat bangun ulang yang selesai, atau dengan `set-role` di
+   server itu sendiri. Jalankan perintah ini di server itu hanya bila
+   master lain tidak lagi dipakai: bila master lain masih dipakai aplikasi,
+   Anda akan punya dua master yang bisa ditulis.
+
+   ```sh
+   sudo dbpanel agent set-role master
+   ```
+
+4. Perintah menampilkan keadaan server itu dan apa yang berubah setelahnya.
+   Ketik `ya` lalu Enter. Jawaban lain, atau input kosong, membatalkan.
+5. Baca hasil langkah pertamanya: "Kunci start dilepas: …", "Kunci start
+   tidak ditemukan; …" atau "MySQL tidak ditemukan di server ini; …". Bila
+   perintah menulis "kunci start tidak bisa diperiksa …", ikuti panduan
+   "Melepas kunci master lama dengan tangan". Bila perintah meminta "Jalankan
+   perintah ini lagi", jalankan `set-role master` sekali lagi.
+6. Bila "Peran dipin" `master` tetapi MySQL masih baca-saja (misalnya
+   dikunci dengan `lock-master`, atau sesudah langkah 3 sampai 5), buka
+   hanya bila server ini memang dipakai aplikasi sebagai master dan master
+   lain tidak lagi dipakai:
+
+   ```sh
+   sudo dbpanel agent unlock-master
+   ```
+
+   Sesudah karantina, `unlock-master` tidak menghapus `read_only` yang
+   disimpan karantina, jadi MySQL baca-saja lagi setelah restart; lihat
+   langkah "Menjadi master lagi" di panduan
+   "Memakai lagi server yang dihapus saat masih dikarantina".
+
+Peringatan **Kunci promote master dipertahankan** bukan untuk panduan ini:
+kunci itu dipasang promote terencana. Lihat "Peran dan sumber yang dipin"
+di README.
+
+### Memakai lagi server yang dihapus saat masih dikarantina
+
+Kapan dipakai: master lama dihapus dari panel selagi masih dikarantina, dan
+sekarang akan dipakai lagi.
+
+**Hapus server** pada master lama yang dikarantina tidak mengubah apa pun
+di server itu. Bila laporan terakhir server itu menyebut kunci start
+"Terkunci", dialog hapus menulis: "Server ini tetap dikarantina
+(quarantined) setelah dihapus dari panel: MySQL-nya tetap baca-saja
+(read-only) dan kunci start (start lock) tetap terpasang. Untuk memakai
+server ini lagi, jalankan di server itu: sudo dbpanel agent set-role
+unassigned, atau sudo dbpanel agent set-role master bila server ini akan
+menjadi master lagi." Selain itu (belum ada laporan, laporan tanpa keadaan
+kunci start, atau kunci "belum terjamin") dialog menulis: "Server ini tetap
+dikarantina (quarantined) setelah dihapus dari panel, tetapi kunci start
+(start lock)-nya tidak terjamin, jadi MySQL-nya belum tentu baca-saja
+(read-only) setelah menyala ulang. Untuk memakai server ini lagi, jalankan
+di server itu: sudo dbpanel agent set-role unassigned, atau sudo dbpanel
+agent set-role master bila server ini akan menjadi master lagi."
+
+Pilih salah satu, lalu kerjakan di server itu.
+
+**Disiapkan ulang lewat panel:**
+
+1. Jalankan perintah ini, lalu ketik `ya`:
+
+   ```sh
+   sudo dbpanel agent set-role unassigned
+   ```
+
+   Peran dan pin sumbernya dihapus. Agent yang berjalan melepas kunci start
+   setelah MySQL menyala dengan baca-saja tersimpan. Perintah menulis
+   langkah berikutnya: "Langkah berikutnya: bila server ini sudah dihapus
+   dari panel, tambahkan lagi lewat Tambah server, lalu jalankan Siapkan
+   master atau Buat replika. Perhatian: server ini tidak lagi dikarantina;
+   agent tidak lagi menjaga MySQL-nya tetap baca-saja (read-only)." (juga
+   bila berkas pin tidak bisa dibaca). Baca-saja yang tersimpan tetap
+   sampai seseorang mematikannya.
+
+**Menjadi master lagi:**
+
+1. Bila bangun ulang pernah gagal atau dibatalkan di server ini, data
+   MySQL-nya bisa sudah sebagian dihapus atau diganti salinan master baru
+   (lihat "Data tertinggal sesudah bangun ulang" di README). Daftar database
+   saja (`mysql -e 'SHOW DATABASES;'`) tidak membuktikan isinya utuh: bila
+   panel pernah menulis "Bangun ulang sebelumnya sudah mulai menyalin data
+   ke server ini" atau "… berhenti di tahap Salin data …" untuk server ini,
+   jangan jadikan server ini master lagi tanpa admin MySQL.
+2. Jalankan perintah ini, lalu ketik `ya`. Kunci start dilepas saat itu
+   juga dan server dipin sebagai master.
+
+   ```sh
+   sudo dbpanel agent set-role master
+   ```
+
+3. Perintah menulis: "Langkah berikutnya: bila MySQL di server ini masih
+   baca-saja (read-only) dan server ini memang akan dipakai aplikasi sebagai
+   master, pastikan master lain tidak lagi dipakai, lalu buka dengan: sudo
+   dbpanel agent unlock-master". Hanya bila begitu, jalankan:
+
+   ```sh
+   sudo dbpanel agent unlock-master
+   ```
+
+4. Syarat langkah 3 berlaku juga di sini. `unlock-master` tidak menghapus
+   `read_only` yang disimpan karantina dengan `SET PERSIST`, jadi setelah
+   MySQL restart `read_only` menyala lagi. Matikan dengan pernyataan ini
+   sebagai root MySQL (misalnya lewat `sudo mysql`, atau `mysql -u root -p`
+   bila root MySQL memakai kata sandi):
+
+   ```sql
+   SET PERSIST read_only=OFF;
+   ```
+
+Setiap `set-role` juga menghapus id karantina (`/etc/dbpanel/quarantine-id`),
+jadi hasil **Periksa data tertinggal** sebelumnya tidak berlaku lagi untuk
+**Amankan**.
+
+### Memperbaiki baris merah
+
+Kapan dipakai: daftar **Prasyarat** di sebuah layar tindakan menampilkan
+baris bertanda "Belum terpenuhi" (merah; tombolnya mati) atau "Perlu
+perhatian" (kuning).
+
+1. Cari sub-bagian di bawah yang judulnya sama dengan nama baris itu.
+2. Kerjakan perbaikannya.
+3. Muat ulang layar tindakan. Baris itu harus bertanda "Terpenuhi".
+
+Tidak ada tombol untuk melewati baris merah. Promote darurat tidak pernah
+ditolak oleh sebuah baris.
+
+Baris yang belum diketahui berwarna kuning: "<baris> belum diketahui: agent
+<server> sedang tidak tersambung." (perbaikannya: "Pastikan agent di server
+itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."), atau
+"<baris> belum diketahui: agent <server> belum melaporkannya." (tunggu
+laporan berikutnya, lalu muat ulang).
+
+#### Versi agent
+
+Tertulis: "Agent di <server> versi <versi>, panel versi <versi>." atau
+"Versi agent di <server> belum diketahui."
+
+Perbaikan: "Perbarui agent di server itu (Pasang ulang agent di halaman
+server), lalu muat ulang halaman ini."
+
+#### Pin master
+
+Tertulis: "Agent master <server> tidak melaporkan pin master (yang
+dilaporkan: <pin>)."
+
+Perbaikan: "Jalankan Siapkan master di halaman server itu. Bila baru saja
+dijalankan, klik Periksa sekarang di halaman server, lalu muat ulang halaman
+ini."
+
+#### Jam (clock)
+
+Tertulis: "Jam server <server> berbeda <selisih> dari jam host panel (batas
+30 detik)."
+
+Perbaikan: "Selaraskan jam server itu dan host panel dengan NTP (di server:
+timedatectl set-ntp true), klik Periksa sekarang di halaman server, lalu
+muat ulang halaman ini."
+
+Perintahnya, sebagai root, di server itu dan di host panel:
+
+```sh
+timedatectl set-ntp true
+```
+
+#### Pemeriksaan sertifikat TLS
+
+Tertulis: "Master <server> belum punya sertifikat MySQL dari panel."
+
+Perbaikan: "Pasang sertifikat MySQL di halaman server master, lalu jalankan
+Wajibkan pemeriksaan sertifikat TLS di halaman master."
+
+Atau tertulis: "Replika <server> belum memeriksa sertifikat master."
+
+Perbaikan: "Jalankan Wajibkan pemeriksaan sertifikat TLS di halaman master."
+
+#### Ruang disk
+
+Tertulis: "Disk <server> terpakai <angka>% (ambang kritis <angka>%)."
+
+Perbaikan: "Kosongkan ruang di server itu, klik Periksa sekarang di halaman
+server, lalu muat ulang halaman ini."
+
+#### Akun panel
+
+Tertulis: "Agent di <server> masuk ke MySQL sebagai root."
+
+Perbaikan: "Buat akun MySQL khusus panel lalu hubungkan lagi (Panduan,
+"Memperbaiki baris merah"). Bila akunnya sudah diganti di server, klik
+Segarkan di kartu MySQL halaman server itu."
+
+Langkah membuat akun khusus panel `dbpanel_admin` (hak yang sama dengan
+akun buatan `sudo dbpanel agent reset-admin`):
+
+1. Masuk ke server yang disebut baris itu, lalu masuk ke MySQL sebagai
+   root:
+
+   ```sh
+   sudo mysql
+   ```
+
+   Bila root MySQL memakai kata sandi:
+
+   ```sh
+   mysql -u root -p
+   ```
+
+2. Siapkan sandi acak yang panjang (paling sedikit 24 karakter), misalnya
+   dari perintah ini di terminal lain. Jangan pakai sandi yang dipakai di
+   tempat lain.
+
+   ```sh
+   openssl rand -base64 24
+   ```
+
+3. Jalankan tiga pernyataan ini. Ganti kedua `<sandi-acak-panjang>` dengan
+   sandi dari langkah 2. Bila akun itu sudah ada, sandinya diganti.
+
+   ```sql
+   CREATE USER IF NOT EXISTS 'dbpanel_admin'@'localhost' IDENTIFIED BY '<sandi-acak-panjang>';
+   ALTER USER 'dbpanel_admin'@'localhost' IDENTIFIED WITH caching_sha2_password BY '<sandi-acak-panjang>' REQUIRE NONE ACCOUNT UNLOCK;
+   GRANT ALL PRIVILEGES ON *.* TO 'dbpanel_admin'@'localhost' WITH GRANT OPTION;
+   ```
+
+4. Di panel, buka halaman server itu. Di kartu MySQL, buka **Hubungkan
+   ulang**. Isi **Pengguna MySQL** dengan `dbpanel_admin` dan **Kata sandi**
+   dengan sandi dari langkah 2. Kosongkan **Host (opsional)**. Tekan
+   **Hubungkan MySQL**.
+5. Muat ulang layar tindakan. Baris **Akun panel** harus bertanda
+   "Terpenuhi".
+
+Di server yang dikarantina (master lama), MySQL baca-saja menolak
+pernyataan di langkah 3. Di sana jalankan perintah ini, lalu klik
+**Segarkan** di halaman server itu:
+
+```sh
+sudo dbpanel agent reset-admin
+```
+
+#### performance_schema
+
+Tertulis: "performance_schema mati di master <server>."
+
+Perbaikan: "Hapus performance_schema=OFF dari konfigurasi MySQL master, lalu
+restart MySQL master di jam sepi."
+
+#### Cadangan (backup)
+
+Tertulis (kuning): "Folder cadangan master <server> belum diisi, jadi panel
+tidak bisa melihat umur cadangan."
+
+Perbaikan: "Isi folder cadangan di halaman server master, atau pastikan
+sendiri ada cadangan terbaru." Caranya ada di panduan
+"Memindahkan jadwal cadangan sesudah promote".
+
+Tertulis (merah), salah satu dari:
+
+- "Berkas terbaru di folder cadangan master <server> berumur <umur> (batas
+  <jam> jam)."
+- "Berkas terbaru di folder cadangan master <server> kosong (0 byte)."
+- "Folder cadangan master <server> tidak berisi berkas."
+- "Folder cadangan master <server> tidak bisa dibaca agent: <sebab>."
+
+Perbaikan: "Jalankan cadangan master, atau betulkan folder cadangan di
+halaman server master."
+
+#### Persetujuan di server
+
+Tertulis: "Persetujuan di server <server> belum diperiksa." atau "Belum
+disetujui di server <server>."
+
+Perbaikan: "Jalankan perintah di kotak Persetujuan di server pada halaman
+ini, lalu klik Periksa lagi." Langkahnya ada di panduan
+"Bangun ulang master lama".
+
+#### Port MySQL master
+
+Tertulis (kuning): "Port MySQL master <server> bisa dijangkau dari host
+panel; sebaiknya hanya terbuka untuk replika."
+
+Perbaikan: "Batasi port itu di firewall master hanya untuk alamat replika."
+
+#### Log audit
+
+Tertulis (kuning): "Log audit belum ditandai diteruskan ke server lain."
+
+Perbaikan: "Teruskan journal host panel ke server lain
+(systemd-journal-upload), lalu tandai di Pengaturan."
+
+#### Cadangan panel.key
+
+Tertulis (kuning): "panel.key belum ditandai sudah dicadangkan."
+
+Perbaikan: "Cadangkan panel.key (README, "Cadangkan kunci panel"), lalu
+tandai di Pengaturan."
+
+### Replika yang tersambung di luar alur panel
+
+Kapan dipakai: sesudah promote darurat ke replika yang belum pernah
+tercatat di master lama (replika itu tersambung di luar alur panel kurang
+dari 5 detik sebelum master mati), sehingga agent master lama menolak
+karantina.
+
+Yang terlihat: agent master lama sudah tersambung lagi, tetapi judul kotak
+di halaman servernya tetap "Master lama (belum dikarantina; …)". Setiap kali
+agent itu tersambung, panel mengirim karantina, dan agent menolaknya karena
+master baru "tidak pernah tercatat sebagai replika server ini". Selama itu
+MySQL master lama tidak dibuat baca-saja (read-only).
+
+1. Pastikan tidak ada aplikasi yang bisa menulis ke master lama sebelum ia
+   dinyalakan atau disambungkan lagi ke jaringan. Semua aplikasi harus sudah
+   memakai **Alamat master baru** dari layar pengalihan. Bila MySQL master
+   lama mati, biarkan mati sampai langkah 7.
+2. Di halaman server master lama, buka **Detail teknis**. Lanjutkan hanya
+   bila tertulis "Peran dipin: master".
+3. Di master lama, lihat daftar replika yang pernah tersambung ke server itu:
+
+   ```sh
+   sudo cat /var/lib/dbpanel/replicas-seen
+   ```
+
+   Lanjutkan hanya bila host master baru tidak ada di daftar itu.
+4. Di master lama, pin server itu sebagai dikarantina. Perintah ini tidak
+   bertanya. Agent yang berjalan lalu menulis kunci start dalam beberapa
+   detik dan membuat MySQL-nya baca-saja bila MySQL menyala.
+
+   ```sh
+   sudo dbpanel agent set-role quarantined
+   ```
+
+5. Pin master baru sebagai sumbernya. Ganti `<host:port>` dengan **Alamat
+   master baru** di layar pengalihan, persis seperti tertulis di sana.
+
+   ```sh
+   sudo dbpanel agent set-source <host:port>
+   ```
+
+6. Mulai ulang agent master lama. Begitu agent tersambung lagi, panel
+   mengirim karantina sekali lagi, dan kali ini agent menerimanya.
+
+   ```sh
+   sudo systemctl restart dbpanel-agent
+   ```
+
+7. Di panel, muat ulang halaman server master lama. Judul kotaknya kini
+   "Master lama (dikarantina sejak …)".
+8. Bila MySQL master lama menyala, periksa di sana bahwa ia baca-saja.
+   Jawabannya harus `1 1`.
+
+   ```sh
+   mysql -e 'SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;'
+   ```
+
+9. Lanjutkan dengan panduan "Bangun ulang master lama", mulai dari
+   **Periksa data tertinggal**: tulisan yang masuk ke master lama sebelum
+   langkah 4 ditemukan di sana.
+
+Bila salah satu pemeriksaan di atas tidak cocok, atau sebuah langkah gagal:
+jangan sambungkan master lama ke aplikasi, dan panggil admin MySQL.
+
 ## Catatan audit
 
 Menu **Audit** mencatat setiap tindakan yang mengubah sesuatu: login
