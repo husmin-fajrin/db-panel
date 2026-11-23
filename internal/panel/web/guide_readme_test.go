@@ -227,12 +227,57 @@ func TestGuideMatchesREADME(t *testing.T) {
 			}
 		}
 	}
+	// The text around the commands too: each guide reads the same on both
+	// sides once tags and Markdown are gone, so a condition written above a
+	// command cannot drift.
+	for i, g := range guideTable {
+		if pp, rp := pageProse(page[i].body), readmeProse(readme[i].body); pp != rp {
+			a, b := firstDiff(pp, rp)
+			t.Errorf("%s: text differs:\npage   …%s…\nREADME …%s…", g.title, a, b)
+		}
+	}
 	// Every command block of the page is a perintah block (none is missed
 	// by the comparison).
 	all := readFile(t, guideTemplatePath)
 	if n, m := strings.Count(all, "<pre"), strings.Count(all, `<pre class="perintah">`); n != m {
 		t.Errorf("page has %d <pre>, of them %d perintah blocks", n, m)
 	}
+}
+
+var (
+	inlineTagRe  = regexp.MustCompile(`</?(a|strong|code)\b[^>]*>`)
+	listMarkRe   = regexp.MustCompile(`(?m)^[ \t]*(\d+\.|-)[ \t]`)
+	fenceRe      = regexp.MustCompile("(?m)^[ \t]*```[a-z]*[ \t]*$")
+	subHeadingRe = regexp.MustCompile(`(?m)^#### `)
+	actionRe     = regexp.MustCompile(`\{\{.*?\}\}`)
+)
+
+// pageProse is the text of a guide on the page: inline tags dropped, other
+// tags a space, entities unescaped, white space folded.
+func pageProse(body string) string {
+	s := inlineTagRe.ReplaceAllString(actionRe.ReplaceAllString(body, ""), "")
+	s = anyTagRe.ReplaceAllString(s, " ")
+	return strings.TrimSpace(spacesRe.ReplaceAllString(html.UnescapeString(s), " "))
+}
+
+// readmeProse is the text of a guide in the README: list markers, fences,
+// sub-heading marks, bold and code marks dropped, white space folded.
+func readmeProse(body string) string {
+	s := fenceRe.ReplaceAllString(body, " ")
+	s = listMarkRe.ReplaceAllString(s, " ")
+	s = subHeadingRe.ReplaceAllString(s, " ")
+	s = strings.NewReplacer("**", "", "`", "").Replace(s)
+	return strings.TrimSpace(spacesRe.ReplaceAllString(s, " "))
+}
+
+// firstDiff is a and b around the first byte where they differ.
+func firstDiff(a, b string) (string, string) {
+	i := 0
+	for i < len(a) && i < len(b) && a[i] == b[i] {
+		i++
+	}
+	from := max(0, i-40)
+	return a[from:min(len(a), i+40)], b[from:min(len(b), i+40)]
 }
 
 // goConsts is the string constants of the Go file at path, by name, and
