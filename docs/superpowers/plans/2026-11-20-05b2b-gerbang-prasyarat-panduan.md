@@ -901,6 +901,29 @@ README menambah:
     paling lama 1 detik. Agar pemeriksaan yang gagal di tengah jalan tidak
     menahan semua `Start*`, penanda selesainya ditutup lewat `defer`.
 
+24. **2026-11-23 — tambahan di luar daftar berkas Task 10 sampai 12.**
+    Task 10 menambah `orchestrator.JobGateInput` (dipakai halaman
+    pekerjaan untuk tahu apa yang dinilai). Task 11 mengubah
+    `web/static/app.js`: pada layar promote dan Buat replika, daftar
+    prasyarat dan keadaan tombol mengikuti server yang dipilih di halaman;
+    tanpa JavaScript, penolakan di server tetap berlaku. Task 12 menambah
+    `Runner.PromoteMode` (tanpa panggilan ke agent) agar mode yang sudah
+    berubah ditolak sebelum token konfirmasi terpakai.
+25. **2026-11-23 — teks saat prasyarat tidak bisa dibaca (Task 11).** Tidak
+    ada di rencana: `Prasyarat tidak bisa dibaca: %s`. Daftar diganti satu
+    baris itu dan tombolnya dimatikan. Masuk daftar Task 14 dengan tanda
+    "tidak ada di rencana".
+26. **2026-11-23 — letak centang D5 dan isi audit promote darurat
+    (Task 12).** Centang D5 ada di kaki formulir, di samping D3, karena
+    kartu mode berada di luar formulir. `skipped_red` berisi kunci baris
+    saja; `null` bila prasyarat tidak bisa dinilai, dan promote darurat
+    tetap berjalan. `master_last_report` adalah waktu panel menerima
+    laporan terakhir master, bukan waktu yang disebut agent.
+27. **2026-11-23 — butir kecil dari tinjauan yang ikut dibangun
+    (Task 12).** Penolakan gerbang yang datang dari `Start*` diaudit dengan
+    teks G0 di semua layar; kotak "Tindakan lanjutan" terbuka sendiri
+    selama "Siapkan ulang" dimatikan baris merah.
+
 ## Teks baru untuk dibaca pemilik
 
 Diisi Task 14: setiap teks operator yang baru, berubah atau hilang antara
