@@ -74,8 +74,8 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = rc.SetWriteDeadline(time.Time{})
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("X-Accel-Buffering", "no") // stop nginx from buffering the stream
+	h.Set("Cache-Control", "no-store") // it carries job log lines (WB-9)
+	h.Set("X-Accel-Buffering", "no")   // stop nginx from buffering the stream
 	w.WriteHeader(http.StatusOK)
 	if err := rc.Flush(); err != nil {
 		return

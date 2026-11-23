@@ -19,6 +19,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -35,6 +36,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 )
 
 // trusted holds the web CAs of every panel the tests built (newPanel), for
@@ -927,5 +929,34 @@ func TestCAFingerprintMatchesOpenSSL(t *testing.T) {
 	}
 	if body := readAll(t, resp); !strings.Contains(body, fp) {
 		t.Fatal("settings page lacks the fingerprint")
+	}
+}
+
+// TestPlainHTTPRedirectHeaders (WB-8): the 301 the plain-HTTP side of the
+// UI port answers carries the same security headers as the certificate
+// page it serves there, and no-store.
+func TestPlainHTTPRedirectHeaders(t *testing.T) {
+	ui := web.SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	h := httpHelperHandler(ui, func(string) bool { return true })
+	page := httptest.NewRecorder()
+	h.ServeHTTP(page, httptest.NewRequest("GET", "http://panel.local/sertifikat", nil))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://panel.local/servers", nil))
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("GET /servers over plain HTTP = %d, want 301", rec.Code)
+	}
+	for _, k := range []string{"Content-Security-Policy", "X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy",
+		"Permissions-Policy", "Cross-Origin-Opener-Policy", "Cross-Origin-Resource-Policy", "Cross-Origin-Embedder-Policy"} {
+		if got, want := rec.Header().Get(k), page.Header().Get(k); got == "" || got != want {
+			t.Errorf("301: %s = %q, want %q", k, got, want)
+		}
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("301: Cache-Control = %q, want no-store", got)
+	}
+	if !strings.Contains(rec.Header().Get("Permissions-Policy"), "fullscreen=()") {
+		t.Errorf("301: Permissions-Policy = %q", rec.Header().Get("Permissions-Policy"))
 	}
 }

@@ -274,15 +274,20 @@ const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 
 	"img-src 'self' data:; connect-src 'self'; object-src 'none'; " +
 	"frame-ancestors 'none'; base-uri 'none'; form-action 'self'; worker-src 'none'; manifest-src 'self'"
 
-// permissionsPolicy turns off browser features the panel never uses.
-// clipboard-write stays allowed: the copy buttons need it.
+// permissionsPolicy turns off browser features the panel never uses
+// (app.js and Alpine.js use none of them: no full screen, media, sensors,
+// credentials or fonts API). clipboard-write stays allowed: the copy
+// buttons need it.
 const permissionsPolicy = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), " +
-	"bluetooth=(), display-capture=(), clipboard-read=()"
+	"bluetooth=(), display-capture=(), clipboard-read=(), accelerometer=(), gyroscope=(), magnetometer=(), " +
+	"midi=(), fullscreen=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), " +
+	"xr-spatial-tracking=(), autoplay=(), encrypted-media=(), idle-detection=(), local-fonts=(), " +
+	"window-management=(), browsing-topics=()"
 
 // SecurityHeaders sets the baseline security headers on every UI and
 // agent-bootstrap response. Cache-Control defaults to no-store (pages
 // behind the login and anything carrying a pairing token); static assets
-// and the SSE stream replace it.
+// replace it.
 func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -435,10 +440,24 @@ func (a *app) internalError(w http.ResponseWriter, what string, err error) {
 	http.Error(w, msgInternal, http.StatusInternalServerError)
 }
 
+// cacheFor lets h's successful answers be cached for d. An error answer
+// (a file the panel does not have) is no-store: Go's file server drops
+// Cache-Control on its errors, and none must be left without one (WB-8).
 func cacheFor(d time.Duration, h http.Handler) http.Handler {
 	v := "public, max-age=" + strconv.Itoa(int(d.Seconds()))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", v)
-		h.ServeHTTP(w, r)
+		h.ServeHTTP(noStoreOnError{w}, r)
 	})
+}
+
+// noStoreOnError sets Cache-Control: no-store on an answer of status 400
+// or above, as its header is written.
+type noStoreOnError struct{ http.ResponseWriter }
+
+func (w noStoreOnError) WriteHeader(code int) {
+	if code >= http.StatusBadRequest {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	w.ResponseWriter.WriteHeader(code)
 }

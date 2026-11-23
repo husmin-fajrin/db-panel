@@ -739,7 +739,10 @@ var baseHeaders = map[string]string{
 	"Referrer-Policy":        "same-origin",
 	// clipboard-write is not listed: the copy buttons need it.
 	"Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), " +
-		"bluetooth=(), display-capture=(), clipboard-read=()",
+		"bluetooth=(), display-capture=(), clipboard-read=(), accelerometer=(), gyroscope=(), magnetometer=(), " +
+		"midi=(), fullscreen=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), " +
+		"xr-spatial-tracking=(), autoplay=(), encrypted-media=(), idle-detection=(), local-fonts=(), " +
+		"window-management=(), browsing-topics=()",
 	"Cross-Origin-Opener-Policy":   "same-origin",
 	"Cross-Origin-Resource-Policy": "same-origin",
 	"Cross-Origin-Embedder-Policy": "require-corp",
@@ -809,7 +812,8 @@ func TestSecurityHeaders(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /events = %d", resp.StatusCode)
 	}
-	wantHeaders(t, "GET /events", resp.Header, "no-cache")
+	// The stream carries job log lines: never stored (WB-9).
+	wantHeaders(t, "GET /events", resp.Header, "no-store")
 }
 
 // TestPagesHaveNoInlineScript: the CSP allows scripts from the panel only,
@@ -903,7 +907,7 @@ func TestSSEStreamsStatus(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	for h, want := range map[string]string{
-		"Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+		"Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no",
 	} {
 		if got := resp.Header.Get(h); got != want {
 			t.Errorf("%s = %q, want %q", h, got, want)
