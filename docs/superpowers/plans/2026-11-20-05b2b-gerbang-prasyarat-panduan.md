@@ -872,6 +872,35 @@ README menambah:
     tanda "tidak ada di rencana". `handlers_confirm.go` tidak disentuh:
     ketiga rute baru tidak memakai token konfirmasi.
 
+18. **2026-11-22 — bunyi selisih jam di G3a (Task 9).** Rencana tidak
+    menyebut bentuk `%s` kedua. Di bawah 2 menit: detik utuh, dibulatkan ke
+    atas. Di bawah 2 jam: menit utuh, dibulatkan ke bawah. Sesudah itu: jam
+    utuh.
+19. **2026-11-22 — baris Cadangan saat agent master tidak tersambung
+    (Task 9).** Folder yang belum diisi dinilai lebih dulu, dari data panel
+    sendiri: kuning G8u dan centang tetap diminta pada promote terencana
+    dan bangun ulang, walau agent master sedang tidak tersambung. Bila
+    folder sudah diisi dan agent master tidak tersambung, barisnya kuning
+    G10a, apa pun isi laporan terakhir yang tersimpan.
+20. **2026-11-22 — baris Port MySQL master juga dilewati untuk host panel
+    yang menjadi tujuan tindakan (Task 9).** Master lama pada bangun ulang
+    akan menjadi replika dan memang harus menjangkau port itu.
+21. **2026-11-22 — dua baris kuning diberi cara memperbaiki (Task 9).**
+    Tidak ada di rencana. G8u: `Isi folder cadangan di halaman server
+    master, atau pastikan sendiri ada cadangan terbaru.` G10a: `Pastikan
+    agent di server itu berjalan dan tersambung ke panel, lalu muat ulang
+    halaman ini.` G10b tetap tanpa cara memperbaiki. Keduanya masuk daftar
+    Task 14 dengan tanda "tidak ada di rencana".
+22. **2026-11-23 — baris Akun panel untuk inventaris yang tidak tersambung
+    (Task 9, dibangun di Task 10).** Hanya tujuan Buat replika yang
+    dilewati. Untuk server lain yang dinilai, inventaris yang tidak
+    tersambung berarti kuning G10b.
+23. **2026-11-23 — pemeriksaan port tidak boleh menggantung (Task 9,
+    dibangun di Task 10).** `Gate` dipanggil di bawah kunci `startMu`
+    seperti di rencana; pemeriksaan port pertama boleh menahan kunci itu
+    paling lama 1 detik. Agar pemeriksaan yang gagal di tengah jalan tidak
+    menahan semua `Start*`, penanda selesainya ditutup lewat `defer`.
+
 ## Teks baru untuk dibaca pemilik
 
 Diisi Task 14: setiap teks operator yang baru, berubah atau hilang antara
