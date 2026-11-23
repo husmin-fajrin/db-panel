@@ -42,9 +42,10 @@ var (
 // /home, /root, /run/user, /tmp or /var/tmp, proto.BackupReasonInvalid for
 // any other refusal (not absolute or not clean, over 1024 bytes, a control
 // byte, "/", or at or under /proc, /sys or /dev). It reads p only, never
-// the file system.
+// the file system. The length comes first: an over-long folder is refused
+// before filepath.Clean copies it.
 func ValidBackupFolder(p string) (reason string, ok bool) {
-	if !filepath.IsAbs(p) || filepath.Clean(p) != p || len(p) > maxBackupFolderLen || p == "/" {
+	if len(p) > maxBackupFolderLen || !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" {
 		return proto.BackupReasonInvalid, false
 	}
 	for i := 0; i < len(p); i++ {

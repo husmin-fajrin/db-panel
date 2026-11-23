@@ -595,6 +595,66 @@ func TestConfigureKeepsSettingsWithBadFolder(t *testing.T) {
 	}
 }
 
+// TestConfigureRefusesOverlongFolder (AG-1): a backup_folder over 1024
+// bytes is refused before it is stored: the monitor keeps at most 1025
+// bytes of it (still over the limit, so reported unreadable like any
+// refused folder, never scanned), and the call's other settings apply.
+func TestConfigureRefusesOverlongFolder(t *testing.T) {
+	r, fsc, _ := newBackupRig(t)
+	long := "/srv/" + strings.Repeat("a", 1<<20)
+	resp := r.dispatch("monitor.configure", proto.MonitorConfigureParams{CheckEverySec: 30, SummaryEverySec: 600, BackupFolder: long})
+	ev := resultEvent(t, resp)
+	wantBackup(t, "configure", ev.Snapshot.Backup, proto.BackupState{Status: proto.BackupUnreadable, Reason: proto.BackupReasonInvalid})
+	r.idle()
+	if r.cur.d != 30*time.Second {
+		t.Fatalf("loop pauses %v, want the 30s asked for", r.cur.d)
+	}
+	if o := r.m.options(); o.SummaryEvery != 600*time.Second {
+		t.Fatalf("options = %+v, want summaries every 600s", o)
+	}
+	r.m.mu.Lock()
+	kept, gen := len(r.m.backupFolder), r.m.backupGen
+	r.m.mu.Unlock()
+	if kept > maxBackupFolderLen+1 {
+		t.Fatalf("monitor keeps %d bytes of the folder, want at most %d", kept, maxBackupFolderLen+1)
+	}
+	// The same folder again is no change.
+	resultEvent(t, r.dispatch("monitor.configure", proto.MonitorConfigureParams{CheckEverySec: 30, SummaryEverySec: 600, BackupFolder: long}))
+	r.idle()
+	r.m.mu.Lock()
+	again := r.m.backupGen
+	r.m.mu.Unlock()
+	if again != gen {
+		t.Fatalf("backup generation %d after the same folder, want %d", again, gen)
+	}
+	r.tick(30 * time.Second)
+	r.tick(30 * time.Second)
+	if got := fsc.folders(); len(got) != 0 {
+		t.Fatalf("scans = %d, want none of a refused folder", len(got))
+	}
+	// A folder of exactly 1024 bytes is kept whole and scanned.
+	limit := "/srv/" + strings.Repeat("a", 1019)
+	wantBackup(t, "configure 1024", r.configureBackup(limit), proto.BackupState{Status: proto.BackupPending})
+	r.m.mu.Lock()
+	kept = len(r.m.backupFolder)
+	r.m.mu.Unlock()
+	if kept != 1024 {
+		t.Fatalf("monitor keeps %d bytes of a 1024-byte folder", kept)
+	}
+}
+
+// TestValidBackupFolderLengthFirst (AG-1): the length check comes before
+// filepath.Clean, so an over-long folder costs no copy of it.
+func TestValidBackupFolderLengthFirst(t *testing.T) {
+	long := "/" + strings.Repeat("a//", 1<<16)
+	if reason, ok := ValidBackupFolder(long); ok || reason != proto.BackupReasonInvalid {
+		t.Fatalf("ValidBackupFolder(long) = %q, %v", reason, ok)
+	}
+	if n := testing.AllocsPerRun(10, func() { ValidBackupFolder(long) }); n != 0 {
+		t.Fatalf("ValidBackupFolder of an over-long folder allocates %v times, want 0 (length first)", n)
+	}
+}
+
 func TestOldParamsWithoutFolderTurnScanOff(t *testing.T) {
 	r, _, _ := newBackupRig(t)
 	wantBackup(t, "configure", r.configureBackup("/srv/a"), proto.BackupState{Status: proto.BackupPending})

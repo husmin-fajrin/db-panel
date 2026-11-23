@@ -163,7 +163,8 @@ type Monitor struct {
 	roleHint string
 	clamped  bool // the clamp of check_every_sec was logged already
 	// backupFolder is the folder monitor.configure named, stored whether
-	// or not ValidBackupFolder accepts it; "" when none. backupGen rises
+	// or not ValidBackupFolder accepts it (cut to maxBackupFolderLen+1
+	// bytes when longer); "" when none. backupGen rises
 	// whenever it changes. scan and scanAfter are scanBackup and
 	// time.After; tests replace them.
 	backupFolder string
@@ -245,7 +246,10 @@ func (m *Monitor) Register(reg *commands.Registry) {
 // Configure validates and applies the panel's settings; the loop's next
 // pause uses the new check interval. Any backup folder is accepted: one
 // ValidBackupFolder refuses is kept unscanned and reported unreadable, and
-// a new folder drops the old folder's result.
+// a new folder drops the old folder's result. A folder over
+// maxBackupFolderLen bytes is refused before it is stored: only its first
+// maxBackupFolderLen+1 bytes are kept, still over the limit and so
+// reported unreadable (invalid) like any other refused folder (AG-1).
 func (m *Monitor) Configure(p proto.MonitorConfigureParams) error {
 	if !validInterval(p.CheckEverySec) {
 		return rangeError("check_every_sec", maxCheckEverySec)
@@ -278,8 +282,12 @@ func (m *Monitor) Configure(p proto.MonitorConfigureParams) error {
 		m.opts.LagThreshold = time.Duration(p.LagThresholdSec) * time.Second
 	}
 	m.roleHint = p.RoleHint
-	if p.BackupFolder != m.backupFolder {
-		m.backupFolder = p.BackupFolder
+	folder := p.BackupFolder
+	if len(folder) > maxBackupFolderLen {
+		folder = strings.Clone(folder[:maxBackupFolderLen+1])
+	}
+	if folder != m.backupFolder {
+		m.backupFolder = folder
 		m.backupGen++
 	}
 	m.mu.Unlock()

@@ -33,6 +33,9 @@ var backupFolderCases = []struct {
 	{"/a/./b", wantB3},
 	{"/var/backups/", wantB3},
 	{"/" + strings.Repeat("a", 1024), wantB3}, // 1025 bytes
+	{"/srv/" + strings.Repeat("a", 1019), ""}, // 1024 bytes: the agent's limit too
+	{"/srv/" + strings.Repeat("a", 1<<20), wantB3},
+	{"/" + strings.Repeat("a//", 1<<10), wantB3}, // over 1024 bytes and not clean
 	{"/var/backups/my\nsql", wantB3},
 	{"/var/backups/my\x7fsql", wantB3},
 	{"/var/backups/my\x00sql", wantB3},
