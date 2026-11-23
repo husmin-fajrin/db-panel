@@ -935,6 +935,12 @@ ini; teks yang ditambahkan pelaksana di luar daftar itu diberi tanda
 `%s` dan `%d` adalah tempat nilai; `<…>` di judul kotak adalah nilai dari
 halaman. "diubah" menulis teks lama lalu teks baru.
 
+Bagian README yang baru atau diperluas rencana ini juga teks untuk
+operator dan perlu dibaca utuh: "Prasyarat" (di "Promote"), "Cadangan
+(backup)" (di "Pemantauan"), "Pembaruan" dan "Keamanan". Perubahan
+gelombang perbaikan akhir di bagian-bagian itu ada di "README dan Panduan:
+gelombang perbaikan akhir" di bawah.
+
 ### Menu dan halaman Panduan
 
 - Menu: `Panduan` — tidak ada di rencana
@@ -960,6 +966,7 @@ halaman. "diubah" menulis teks lama lalu teks baru.
 - **D1** `Perlu perhatian`
 - **D1** `Belum terpenuhi`
 - **D2** `Tombol ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini.`
+- **D2** (di bawah centang `Hapus datanya juga di replika` yang mati, halaman Database replika; tombol `Lepas database` tetap hidup) `Pilihan ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini.` — tidak ada di rencana
 - **D3** `Saya sudah memastikan ada cadangan (backup) terbaru`
 - **D4** `Panel hanya melihat umur dan ukuran berkas, bukan apakah cadangan itu bisa dipulihkan.`
 - `Panduan: Memperbaiki baris merah` (tautan di bawah baris Akun panel yang merah) — tidak ada di rencana
@@ -994,6 +1001,8 @@ halaman. "diubah" menulis teks lama lalu teks baru.
 - **G10a** `%s belum diketahui: agent %s sedang tidak tersambung.`
 - **G10a** (perbaikan) `Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini.` — tidak ada di rencana
 - **G10b** `%s belum diketahui: agent %s belum melaporkannya.`
+- **G10b** (perbaikan, hanya baris Akun panel bila MySQL server itu terhubung tetapi akunnya belum diketahui) `Klik %s di kartu MySQL halaman server itu, lalu muat ulang halaman ini.` (`%s` = `Segarkan`) — tidak ada di rencana
+- Baris Cadangan (backup) yang merah karena berkas terlalu tua atau kosong, bila pemindaian berhenti di batas 10.000 entri: teks G8a/G8b diikuti `Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas.` — tidak ada di rencana
 - **G11a** `Port MySQL master %s bisa dijangkau dari host panel; sebaiknya hanya terbuka untuk replika.`
 - **G11f** `Batasi port itu di firewall master hanya untuk alamat replika.`
 - **G12a** `Log audit belum ditandai diteruskan ke server lain.`
@@ -1012,7 +1021,8 @@ halaman. "diubah" menulis teks lama lalu teks baru.
 
 - **G14** `Tindakan ini ditolak karena ada prasyarat yang belum terpenuhi: %s. Cara memperbaikinya ada di daftar Prasyarat di halaman ini.`
 - **G15** `Centang "Saya sudah memastikan ada cadangan (backup) terbaru" untuk melanjutkan.`
-- `master lama %s masih punya pekerjaan yang belum selesai` (penolakan sibuk; sebelumnya `replika %s masih punya pekerjaan yang belum selesai` untuk baris yang sama)
+- `master lama %s masih punya pekerjaan yang belum selesai` (penolakan sibuk; sebelumnya `replika %s masih punya pekerjaan yang belum selesai` untuk baris yang sama) — tidak ada di rencana
+- Halaman pekerjaan: pekerjaan yang membuang data kini menampilkan daftar **Prasyarat** (hanya baris merah, teks D1, G1–G13 di atas), mematikan `Ulangi dari tahap ini`, `Ya, ulangi` dan tombol Setujui selama ada baris merah, dan menulis D2 di bawahnya (teks yang sudah ada, kini juga di sini) — tidak ada di rencana
 - `server tujuan masih punya pekerjaan yang belum selesai (promote sedang berjalan di topologinya)` — tidak ada di rencana
 
 ### Layar Promote…
@@ -1047,6 +1057,7 @@ halaman. "diubah" menulis teks lama lalu teks baru.
 - **B7** `Berkas terbaru: %s lalu, %s.`
 - **B7** (umur) `%d menit`, `%d jam`, `%d hari`, `%d hari %d jam` — tidak ada di rencana
 - **B7** di server yang bukan master: teks G8a–G8d dengan `server %s` di tempat `master %s` — tidak ada di rencana
+- **B7**, G8a dan G8b di kartu, bila pemindaian berhenti di batas 10.000 entri: diikuti `Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas.` — tidak ada di rencana
 - `Pengaturan cadangan disimpan. Keadaan folder tampil setelah laporan berikutnya dari agent.` — tidak ada di rencana
 - `Folder cadangan dikosongkan; panel tidak memeriksa cadangan server ini.` — tidak ada di rencana
 - **F1** `Master lama (belum dikarantina; promote terencana ke <master baru> pada <waktu>)` dan `Master lama (belum dikarantina; promote darurat ke <master baru> pada <waktu>)`
@@ -1072,6 +1083,7 @@ halaman. "diubah" menulis teks lama lalu teks baru.
 - **B8** `Ditandai oleh %s pada %s.`
 - `Tanda disimpan.` — tidak ada di rencana
 - `Tanda dibatalkan.` — tidak ada di rencana
+- `permintaan tidak valid` (jawaban untuk kiriman tanda yang tidak dibuat oleh halaman panel) — tidak ada di rencana
 
 ### Peringatan dan Telegram
 
@@ -1084,6 +1096,7 @@ halaman. "diubah" menulis teks lama lalu teks baru.
 - **G8d** `Folder cadangan master %s tidak bisa dibaca agent: %s.`
 - **G8d** (sebab) `folder itu tidak ada`, `itu bukan folder`, `izin ditolak`, `folder itu tidak terlihat oleh layanan agent`, `path-nya tidak sah`, `pemindaian tidak selesai dalam 10 detik`, `lebih dari 10.000 entri dan belum ada berkas yang ditemukan`
 - **G8d** (sebab lain) `galat lain; lihat log agent`
+- G8a dan G8b di peringatan `Cadangan master usang` dan di Telegram, bila pemindaian berhenti di batas 10.000 entri: diikuti `Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas.` — tidak ada di rencana
 - **F7** `master lama sempat bisa ditulis; topologinya sudah dihapus dari panel, jadi tulisan itu tidak bisa diperiksa lagi dari panel. Hapus server ini`
 - **F7** (alasan tutup) `topologinya sudah dihapus dari panel; tulisan itu tidak bisa diperiksa lagi dari panel`
 
@@ -1112,3 +1125,30 @@ halaman. "diubah" menulis teks lama lalu teks baru.
 - **F3** `Akun MySQL yang disimpan agent tidak bisa dibaca (%v); akun itu akan diganti dengan yang baru.`
 - **F4** `Akun dbpanel_admin@localhost sudah dibuat ulang dan bisa masuk, tetapi tidak bisa disimpan agent (%s). Kunci baca-saja server ini sudah terpasang lagi.`
 - **F4** `Agent masih memakai akun lama dan mungkin tidak bisa masuk ke MySQL. Perbaiki sebabnya, lalu jalankan perintah ini lagi.`
+
+### README dan Panduan: gelombang perbaikan akhir
+
+Semua kalimat di bawah tidak ada di rencana. Panduan ditulis sama di
+halaman Panduan dan di README "Panduan".
+
+- Panduan 1, langkah 4: perintahnya kini `sudo systemctl restart dbpanel-agent` (sebelumnya tanpa `sudo`; teks layar Promote tidak diubah).
+- Panduan 2, langkah 9 — diubah: `Layar menampilkan nama server, sumber data dan alamat IP-nya. Pastikan nama dan alamat IP itu memang master baru yang sekarang dipakai aplikasi.` → `Layar menampilkan nama server ini, sumber data dan alamat IP-nya. Pastikan Sumber data dan Alamat IP itu memang master baru yang sekarang dipakai aplikasi.`
+- Panduan 3, langkah 1 — diubah: `Cari jadwal cadangan database di master lama, …` → `Cari jadwal cadangan database yang dulu berjalan di master lama, …`, ditambah `Bila master lama mati atau tidak bisa dimasuki (misalnya sesudah promote darurat), ambil keterangan itu dari catatan Anda atau dari orang yang memasang jadwalnya.`
+- Panduan 6, langkah 3 — diubah: `Bila tertulis quarantined` → `Bila tertulis dikarantina`.
+- Panduan 6, langkah 5 — ditambah: `Bila perintah menulis "kunci start tidak bisa dilepas (…); peran tidak diubah", server itu tetap dikarantina dan kuncinya tetap terpasang: perbaiki sebab di dalam kurung bila Anda bisa lalu jalankan set-role master sekali lagi, atau ikuti panduan "Melepas kunci master lama dengan tangan".`
+- Panduan 8, pembuka — diubah: `(tunggu laporan berikutnya, lalu muat ulang)` → `(tunggu laporan berikutnya, lalu muat ulang; untuk baris Akun panel, lihat sub-bagiannya)`.
+- Panduan 8, Akun panel — ditambah: `Atau tertulis (kuning): "Akun panel belum diketahui: agent <server> belum melaporkannya."` dan `Perbaikan: "Klik Segarkan di kartu MySQL halaman server itu, lalu muat ulang halaman ini." Laporan berkala agent tidak membawa akun itu, jadi menunggu tidak menolong.`
+- Panduan 8, Akun panel, langkah 6 — diubah: `kerjakan langkah 5 di halaman replika itu` → `kerjakan langkah 5 di halaman server replika itu`.
+- Panduan 8, Akun panel, server dikarantina — diubah: `Di sana jalankan perintah ini, lalu klik Segarkan di halaman server itu:` → `Di sana jalankan perintah ini. Perintah itu menampilkan apa yang akan dikerjakannya lalu meminta Anda mengetik ya. Sesudah selesai, klik Segarkan di halaman server itu:`
+- Panduan 8, Cadangan (backup) — ditambah: `Di belakang teks pertama atau kedua bisa tertulis: "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas." Bila begitu, kerjakan saran itu dulu: berkas terbaru mungkin ada tetapi tidak terlihat oleh agent.`
+- Panduan 9, langkah 3 — diubah: `Di master lama, lihat daftar replika …` → `Masuk ke master lama. Pastikan dulu Anda memang di master lama, karena perintah langkah 4 tidak bertanya. Jalankan perintah ini; jawabannya harus sama dengan Hostname di halaman server master lama. Bila berbeda, berhenti: Anda berada di server lain.` (perintah `hostname`), lalu `Di server yang sama, lihat daftar replika yang pernah tersambung ke server itu:`.
+- Panduan 9, langkah 4 — diubah: `Di master lama, pin server itu …` → `Di server yang sama (master lama), pin server itu …`.
+- Panduan 9, langkah 5 — ditambah: `Bila layar itu sudah tidak ada, alamat yang sama tertulis sebagai Alamat untuk replika di halaman master baru. Alamat yang ditulis lain (misalnya alamat IP untuk nama host) membuat agent menolak karantina lagi.`
+- Panduan 9, penutup — ditambah: `Langkah 6 dan 7 sudah dicocokkan dengan kode panel dan agent, tetapi belum pernah dijalankan dari awal sampai akhir dengan panel dan dua agent. Bila yang Anda lihat berbeda dari yang tertulis di sini, berhenti dan panggil admin MySQL.`
+- README "Pembaruan", langkah baru 2: `Di halaman setiap server, klik Segarkan di kartu MySQL. Versi panel sebelumnya tidak menyimpan akun MySQL yang dipakai agent; Segarkan membacanya, sehingga baris Akun panel bisa dinilai.` (langkah sesudahnya bergeser satu nomor).
+- README "Pembaruan", langkah 1 — diubah: `Panel menolak agent yang versinya berbeda dari panel (baris Versi agent), dan agent lama …` → `Selama agent sebuah server berbeda versi dari panel, tindakan terencana yang melibatkan server itu ditolak (baris Versi agent); agent itu tetap tersambung dan dipantau. Agent lama juga …`
+- README "Cadangan (backup)" — ditambah: `Agent versi sebelumnya tidak memindai folder, jadi kartunya tetap menulis kalimat itu sampai agent tersebut diperbarui.` dan `Bila folder berisi lebih dari 10.000 entri, agent hanya memeriksa sebagian, sehingga berkas yang lebih baru bisa terlewat; kartu (dan teks masalahnya di peringatan dan di baris Cadangan (backup)) lalu ditambah kalimat "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas."`
+- README "Prasyarat" — ditambah: `(di bawah centang itu: "Pilihan ini mati …"; tombol Lepas database tetap hidup untuk melepas tanpa hapus data)` dan `Bila host panel adalah master itu sendiri, server tujuan tindakan, atau replika di topologi master itu, panel tidak memeriksa port MySQL master dan baris Port MySQL master selalu bertanda "Terpenuhi".`
+- README "Keamanan", folder cadangan — diubah: risiko yang tersisa kini menyebut `apakah path itu ada, apakah itu folder, apakah di dalamnya ada berkas biasa (paling dalam tiga tingkat), dan apakah isinya lebih dari 10.000 entri, serta umur dan ukuran berkas terbarunya`, dan `Mengubah folder tidak meminta kata sandi panel: sesi yang sudah masuk, tanpa kata sandi, bisa mengganti folder, mengubah batas umur, atau mengosongkan folder, dan dengan itu membuat baris Cadangan (backup) yang merah menjadi kuning atau hijau serta menutup peringatan Cadangan master usang. Perubahan itu tercatat di Audit.`
+- README "Keamanan", gerbang — diubah: `Baris yang dibaca dari laporan agent (jam, pin master, ruang disk, performance_schema, cadangan)` → `Baris yang dibaca dari laporan atau jawaban agent (versi agent, pin master, jam, ruang disk, akun panel, performance_schema, cadangan)`.
+- README, komentar `unlock-master` — diubah: `kedua flag OFF sampai restart` → `kedua flag OFF sekarang`.
