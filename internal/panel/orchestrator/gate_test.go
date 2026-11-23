@@ -598,6 +598,13 @@ func TestGateBackup(t *testing.T) {
 		"Cadangan (backup) belum diketahui: agent db-master belum melaporkannya.", "")
 	backup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 60, NewestSize: 10})
 	wantGreen(t, g.row(GatePromotePlanned, "backup"))
+	// A scan the entry limit cut short keeps its judgement; the red row's
+	// detail says why it may be wrong (Ruling R39).
+	backup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 30 * 3600, NewestSize: 10, Truncated: true})
+	wantRow(t, g.row(GatePromotePlanned, "backup"), GateRed,
+		"Berkas terbaru di folder cadangan master db-master berumur 30 jam (batas 24 jam). "+monitor.BackupTruncatedText, wantG8f)
+	backup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 60, NewestSize: 10, Truncated: true})
+	wantGreen(t, g.row(GatePromotePlanned, "backup"))
 
 	// An offline master's last report is not judged (Ruling R25): its age
 	// would grow by extrapolation alone.

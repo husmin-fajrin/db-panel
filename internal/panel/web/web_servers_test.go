@@ -187,6 +187,11 @@ func backupCardOf(t *testing.T, body string) string {
 	return card
 }
 
+// wantBackupTruncated follows a backup verdict judged from a scan the
+// agent's entry limit cut short (Ruling R39).
+const wantBackupTruncated = "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas " +
+	"yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas."
+
 func TestServerPageShowsBackupState(t *testing.T) {
 	e, _, mon := controlEnv(t) // db-master (1), db-replika (2)
 	c := e.cookie()
@@ -239,6 +244,14 @@ func TestServerPageShowsBackupState(t *testing.T) {
 		{2, monitor.View{ServerID: 2, ReceivedAt: now,
 			Snap: snap(proto.BackupState{Status: proto.BackupUnreadable, Reason: proto.BackupReasonDenied})},
 			"Folder cadangan server db-replika tidak bisa dibaca agent: izin ditolak."},
+		// The entry limit cut the scan short: the judgement stands and
+		// the card says why it may be wrong.
+		{1, monitor.View{ServerID: 1, ReceivedAt: now,
+			Snap: snap(proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 2*h + 600, NewestSize: 5 << 20, Truncated: true})},
+			"Berkas terbaru: 2 jam lalu, 5.0 MB. " + wantBackupTruncated},
+		{1, monitor.View{ServerID: 1, ReceivedAt: now,
+			Snap: snap(proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 30 * h, NewestSize: 5, Truncated: true})},
+			"Berkas terbaru di folder cadangan master db-master berumur 30 jam (batas 24 jam). " + wantBackupTruncated},
 	}
 	for _, tc := range cases {
 		mon.setView(tc.view)

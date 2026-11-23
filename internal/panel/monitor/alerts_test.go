@@ -3276,6 +3276,10 @@ const (
 	wantG8b = "Berkas terbaru di folder cadangan master %s kosong (0 byte)."
 	wantG8c = "Folder cadangan master %s tidak berisi berkas."
 	wantG8d = "Folder cadangan master %s tidak bisa dibaca agent: %s."
+	// wantTruncated follows a verdict judged from a scan the entry limit
+	// cut short.
+	wantTruncated = "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih " +
+		"baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas."
 )
 
 // backupView is a master's view whose last report, received at, carries
@@ -3317,7 +3321,20 @@ func TestJudgeBackupTable(t *testing.T) {
 		{"ok at exactly the limit", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 48 * h, NewestSize: 5}), srv,
 			BackupVerdict{Status: "ok", AgeSec: 48 * h, Size: 5}},
 		{"ok but truncated", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: h, NewestSize: 5, Truncated: true}), srv,
-			BackupVerdict{Status: "ok", AgeSec: h, Size: 5}},
+			BackupVerdict{Status: "ok", AgeSec: h, Size: 5, Truncated: true}},
+		{"stale and truncated", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 5,
+			Truncated: true}), srv, BackupVerdict{Status: "stale", AgeSec: 50 * h, Size: 5, Truncated: true}},
+		{"truncated without a file: the agent's reason", backupView(now, &proto.BackupState{Status: proto.BackupUnreadable,
+			Reason: proto.BackupReasonLimit, Truncated: true}), srv, BackupVerdict{Status: "unreadable", Reason: "limit"}},
+		// The agent's integers are not trusted (C-4): a negative age is 0,
+		// a huge one saturates instead of wrapping to "fresh", a size
+		// below 0 is an empty file.
+		{"negative age", backupView(now.Add(-time.Hour), &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: -100 * h,
+			NewestSize: 5}), srv, BackupVerdict{Status: "ok", AgeSec: h, Size: 5}},
+		{"huge age", backupView(now.Add(-time.Hour), &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: math.MaxInt64,
+			NewestSize: 5}), srv, BackupVerdict{Status: "stale", AgeSec: math.MaxInt64, Size: 5}},
+		{"negative size", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: h, NewestSize: -5}), srv,
+			BackupVerdict{Status: "empty_file", AgeSec: h}},
 		{"stale", backupView(now, &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * h, NewestSize: 5}), srv,
 			BackupVerdict{Status: "stale", AgeSec: 50 * h, Size: 5}},
 		{"stale only by the time since the report", backupView(now.Add(-2*time.Hour),
@@ -3358,6 +3375,12 @@ func TestBackupMessageTexts(t *testing.T) {
 		{BackupVerdict{Status: "unset"}, ""},
 		{BackupVerdict{Status: "unknown"}, ""},
 		{BackupVerdict{Status: "ok", AgeSec: h, Size: 5}, ""},
+		// The entry limit cut the scan short (A-1, C-5): the verdict
+		// keeps its words and gains the sentence.
+		{BackupVerdict{Status: "stale", AgeSec: 50 * h, Size: 5, Truncated: true},
+			fmt.Sprintf(wantG8a, "db-master", "50 jam", 48) + " " + wantTruncated},
+		{BackupVerdict{Status: "empty_file", AgeSec: h, Truncated: true}, fmt.Sprintf(wantG8b, "db-master") + " " + wantTruncated},
+		{BackupVerdict{Status: "ok", AgeSec: h, Size: 5, Truncated: true}, ""},
 	}
 	for _, c := range cases {
 		if got := BackupMessage(c.b, "db-master", 48); got != c.want {
@@ -3552,5 +3575,26 @@ func TestBackupMessageAsServer(t *testing.T) {
 		if got, want := BackupMessageAs(c.b, "master db1", 48), BackupMessage(c.b, "db1", 48); got != want {
 			t.Errorf("BackupMessageAs master %+v = %q, BackupMessage = %q", c.b, got, want)
 		}
+	}
+}
+
+// A stale verdict judged from a scan the entry limit cut short opens
+// backup_stale with G8a and the truncation sentence (Ruling R39); the text
+// stays far inside a Telegram message.
+func TestBackupStaleAlertTruncated(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	if err := r.st.SetServerBackup(mID, "/srv/backup", 48); err != nil {
+		t.Fatal(err)
+	}
+	snap := masterSnap(srcUUID + ":1-100")
+	snap.Backup = &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 50 * 3600, NewestSize: 100, Truncated: true}
+	r.agent(mID, true, snap).attach().send()
+	a := r.openAlert(mID, KindBackupStale)
+	if want := fmt.Sprintf(wantG8a, "db-master", "50 jam", 48) + " " + wantTruncated; a.Message != want {
+		t.Fatalf("message %q, want %q", a.Message, want)
+	}
+	if len(a.Message) > 1024 {
+		t.Fatalf("message of %d bytes", len(a.Message))
 	}
 }

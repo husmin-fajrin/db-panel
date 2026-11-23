@@ -127,7 +127,9 @@ func backupMaxAge(srv store.Server) int {
 // until the agent reports the folder; the newest file's age and size
 // when it is fine; else the monitor's words for the problem, with
 // "master <name>" on a master and "server <name>" on any other server
-// (Ruling R19). A negative age or size from the agent shows as 0.
+// (Ruling R19). A negative age or size from the agent shows as 0. A
+// verdict judged from a scan the entry limit cut short is followed by
+// monitor.BackupTruncatedText.
 func (a *app) newBackupCard(srv store.Server, v monitor.View) backupCard {
 	maxAge := backupMaxAge(srv)
 	c := backupCard{Dir: shownBackupFolder(srv.BackupDir), MaxAgeHours: strconv.Itoa(maxAge)}
@@ -138,6 +140,9 @@ func (a *app) newBackupCard(srv store.Server, v monitor.View) backupCard {
 		c.State = backupNoReport
 	case monitor.BackupStatusOK:
 		c.State = fmt.Sprintf(backupNewestFile, monitor.BackupAge(max(b.AgeSec, 0)), fmtBytes(uint64(max(b.Size, 0))))
+		if b.Truncated {
+			c.State += " " + monitor.BackupTruncatedText
+		}
 	default:
 		if srv.Role == store.RoleMaster {
 			c.State = monitor.BackupMessage(b, srv.Name, maxAge)

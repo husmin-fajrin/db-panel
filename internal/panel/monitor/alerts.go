@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -1080,6 +1081,9 @@ type BackupVerdict struct {
 	Status       string
 	AgeSec, Size int64
 	Reason       string
+	// Truncated: the entry limit ended the scan after a file was found
+	// (ok, stale, empty_file), so a newer file may not have been seen.
+	Truncated bool
 }
 
 // JudgeBackup judges the backup folder of srv from the last report in v,
@@ -1106,12 +1110,20 @@ func JudgeBackup(v View, srv store.Server, now time.Time) BackupVerdict {
 	default: // pending, or a status the panel does not know
 		return BackupVerdict{Status: BackupStatusUnknown}
 	}
-	age := b.NewestAgeSec + int64(max(now.Sub(v.ReceivedAt), 0)/time.Second)
-	out := BackupVerdict{Status: BackupStatusOK, AgeSec: age, Size: b.NewestSize}
+	// The agent's numbers are not trusted (an honest agent sends neither
+	// a negative nor a huge age): a negative age counts as 0, the sum
+	// saturates instead of wrapping, and a size of 0 or less is empty.
+	age := max(b.NewestAgeSec, 0)
+	if since := int64(max(now.Sub(v.ReceivedAt), 0) / time.Second); age > math.MaxInt64-since {
+		age = math.MaxInt64
+	} else {
+		age += since
+	}
+	out := BackupVerdict{Status: BackupStatusOK, AgeSec: age, Size: max(b.NewestSize, 0), Truncated: b.Truncated}
 	switch {
 	case age > int64(backupMaxAgeHours(srv))*3600:
 		out.Status = BackupStatusStale
-	case b.NewestSize == 0:
+	case out.Size == 0:
 		out.Status = BackupStatusEmptyFile
 	}
 	return out
@@ -1145,6 +1157,22 @@ const (
 	backupUnreadableText = "Folder cadangan %s tidak bisa dibaca agent: %s."
 )
 
+// BackupTruncatedText follows the words of a verdict judged from a scan
+// the agent's entry limit (10,000) ended after a file was found (Ruling
+// R39): the judgement stands, and the operator learns why it may be
+// wrong.
+const BackupTruncatedText = "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang " +
+	"lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas."
+
+// withTruncated is text followed by BackupTruncatedText when b was judged
+// from a scan cut short.
+func withTruncated(text string, b BackupVerdict) string {
+	if b.Truncated {
+		return text + " " + BackupTruncatedText
+	}
+	return text
+}
+
 // backupReasonWords words why the agent cannot read a backup folder (G8d);
 // any reason not listed reads as backupReasonOther.
 var backupReasonWords = map[string]string{
@@ -1172,9 +1200,9 @@ func BackupMessage(b BackupVerdict, master string, maxAgeHours int) string {
 func BackupMessageAs(b BackupVerdict, subject string, maxAgeHours int) string {
 	switch b.Status {
 	case BackupStatusStale:
-		return fmt.Sprintf(backupStaleText, subject, staleAge(b.AgeSec, maxAgeHours), maxAgeHours)
+		return withTruncated(fmt.Sprintf(backupStaleText, subject, staleAge(b.AgeSec, maxAgeHours), maxAgeHours), b)
 	case BackupStatusEmptyFile:
-		return fmt.Sprintf(backupEmptyFileText, subject)
+		return withTruncated(fmt.Sprintf(backupEmptyFileText, subject), b)
 	case BackupStatusNone:
 		return fmt.Sprintf(backupNoneText, subject)
 	case BackupStatusUnreadable:
