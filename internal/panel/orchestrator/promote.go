@@ -131,6 +131,10 @@ type PromoteParams struct {
 	// transactions it lacks are rebuilt (repoint finds them needs_rebuild;
 	// spec 5.2).
 	AcceptBranched bool
+	// BackupAck: the user ticked that the master is backed up (form
+	// backup_ack=1); a planned promote needs it when the gate's backup row
+	// asks for it (no backup folder set, GateResult.NeedsBackupAck).
+	BackupAck bool
 }
 
 // StartPromote starts the promotion of p.CandidateServerID to master of
@@ -270,6 +274,18 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		}
 		if err := r.refuseBusy(x.ServerID, who+r.nameOf(x.ServerID)); err != nil {
 			return "", err
+		}
+	}
+	// The precondition gate (spec 5.7), last before the first write; an
+	// emergency is never refused by a row.
+	if mode == proto.PromotePlanned {
+		res, err := r.refuseRedGate(GateInput{Action: GatePromotePlanned, MasterID: p.MasterServerID,
+			TargetID: p.CandidateServerID})
+		if err != nil {
+			return "", err
+		}
+		if res.NeedsBackupAck() && !p.BackupAck {
+			return "", ErrBackupAck
 		}
 	}
 

@@ -296,6 +296,7 @@ func TestRetryRebuildRechecksConnections(t *testing.T) {
 	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	greenGate(t, e, g.c.id) // the new master
 	row := proto.ConnectionRow{Host: "10.0.0.9", User: "app", DB: "simrs", Count: 2, Kind: "sql"}
 	g.m.reply("mysql.connections", proto.ConnectionsResult{Rows: []proto.ConnectionRow{row}, Typed: true, TakenAt: time.Now()})
 	scriptReplicaTarget(g.m, "db-master", "clone")
@@ -370,6 +371,7 @@ func TestApproveRebuildRechecksConnections(t *testing.T) {
 	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	greenGate(t, e, g.c.id) // the new master
 	g.m.reply("mysql.connections", proto.ConnectionsResult{Typed: true, TakenAt: time.Now()})
 	scriptReplicaTarget(g.m, "db-master", "clone")
 	g.m.fail("mysql.preflight", "pemeriksaan gagal")

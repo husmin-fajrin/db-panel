@@ -664,6 +664,81 @@ func dropsData(kind string, st jobState) bool {
 	return false
 }
 
+// refuseRedGate judges in (Gate) for a Start function, a Retry or an
+// Approve; callers hold startMu, after their own checks and before their
+// first write. A red row refuses with a *GateError (its text names the red
+// rows' labels only, G0). An error of the gate itself (an unknown server or
+// topology, a store failure) refuses too: nothing starts unjudged.
+func (r *Runner) refuseRedGate(in GateInput) (GateResult, error) {
+	res, err := r.Gate(in)
+	if err != nil {
+		r.log.Warn("action refused: the gate could not judge it", "action", in.Action, "master", in.MasterID,
+			"target", in.TargetID, "err", err)
+		return res, err
+	}
+	if red := res.Red(); len(red) > 0 {
+		r.log.Info("action refused: a precondition row is red", "action", in.Action, "master", in.MasterID,
+			"target", in.TargetID, "rows", res.RedKeys())
+		return res, &GateError{Rows: red}
+	}
+	return res, nil
+}
+
+// refuseRedJobGate is refuseRedGate for a Retry or Approve of j
+// (JobGateInput); a job without a gate passes. The rebuild's approval was
+// read by rebuildApprovalForJob before startMu, which refuses without it.
+func (r *Runner) refuseRedJobGate(j store.Job) error {
+	in, ok := JobGateInput(j)
+	if !ok {
+		return nil
+	}
+	if in.Action == GateRebuildOldMaster {
+		in.Approval = new(true)
+	}
+	_, err := r.refuseRedGate(in)
+	return err
+}
+
+// gateActionForJob is the gate action a Retry or Approve of a job of kind
+// with st judges: the action that started it. A promote job is never
+// judged again (K4), nor are the kinds without a gated start; ok is false
+// for them.
+func gateActionForJob(kind string, st jobState) (GateAction, bool) {
+	switch kind {
+	case KindCreateReplica:
+		if st.RebuildOldMaster {
+			return GateRebuildOldMaster, true
+		}
+		return GateCreateReplica, true
+	case KindResyncReplica:
+		return GateResync, true
+	case KindAddDatabases:
+		return GateAddDatabases, true
+	case KindRemoveDatabases:
+		return GateRemoveWithDrop, true
+	}
+	return "", false
+}
+
+// JobGateInput is the gate a Retry or Approve of j judges before it runs
+// on: only for a job whose remaining steps drop data (dropsData) and whose
+// kind has a gate (gateActionForJob); ok is false otherwise, and for a job
+// whose params cannot be read (newRun fails it before any step). The
+// master is the one the job copies from (its MasterServerID; for a rebuild
+// the new master), the target the job's server. Approval is left nil: the
+// caller that read root's approval fills it.
+func JobGateInput(j store.Job) (GateInput, bool) {
+	st, drops, err := jobDropsData(j)
+	if err != nil || !drops {
+		return GateInput{}, false
+	}
+	action, ok := gateActionForJob(j.Kind, st)
+	if !ok {
+		return GateInput{}, false
+	}
+	return GateInput{Action: action, MasterID: st.MasterServerID, TargetID: j.ServerID}, true
+}
+
 // jobDropsData is dropsData of j; a job whose params cannot be read counts
 // as dropping (fail closed), with the error.
 func jobDropsData(j store.Job) (jobState, bool, error) {
@@ -846,6 +921,9 @@ func (r *Runner) Approve(jobID string, ack JobAck) error {
 	if err := r.refuseCutWipeList(j); err != nil {
 		return err
 	}
+	if err := r.refuseRedJobGate(j); err != nil {
+		return err
+	}
 	if err := r.confirmDrop(j, ack, false, connsClear); err != nil {
 		return err
 	}
@@ -908,6 +986,9 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 			return errors.New("server ini sudah menjalankan pekerjaan lain")
 		}
 		if err := r.refuseSuperseded(j); err != nil {
+			return err
+		}
+		if err := r.refuseRedJobGate(j); err != nil {
 			return err
 		}
 		if err := r.confirmDrop(j, ack, true, connsClear); err != nil {

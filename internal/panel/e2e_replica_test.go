@@ -32,6 +32,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/pki"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
+	"github.com/husmin-fajrin/db-panel/internal/version"
 )
 
 // Deadlines of the end-to-end test.
@@ -79,6 +80,9 @@ func TestE2ECreateReplica(t *testing.T) {
 
 	var logs syncBuffer // panel and agents; checked for the replication password
 	o := testOptions(t)
+	// The panel at the agents' version (version.Version), as after an
+	// update of both: the gate refuses an agent of another version.
+	o.Version = version.Version
 	o.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	p := newPanel(t, o)
 	uiAddr, _ := startPanel(t, p)
@@ -90,9 +94,10 @@ func TestE2ECreateReplica(t *testing.T) {
 	ui := newUIClient(t, base)
 	ui.login(readInitialPassword(t, o))
 
-	// Hubungkan MySQL on both servers as the instances' root over the socket.
+	// Hubungkan MySQL on both servers as the agents' account over the
+	// socket.
 	for _, id := range []int64{masterSrv, replicaSrv} {
-		loc := ui.postRedirect(serverPath(id)+"/mysql/connect", url.Values{"user": {"root"}, "password": {""}, "host": {""}})
+		loc := ui.postRedirect(serverPath(id)+"/mysql/connect", e2eAdminForm())
 		if want := serverPath(id) + "?pesan=terhubung"; loc != want {
 			t.Fatalf("connect MySQL on server %d redirected to %q, want %q", id, loc, want)
 		}
@@ -134,6 +139,9 @@ func TestE2ECreateReplica(t *testing.T) {
 		t.Fatalf("master server_tls after Siapkan master: %v", err)
 	}
 	wantServedCert(t, masterDB, masterCert)
+	// A report taken after Siapkan master carries the master's role pin,
+	// which the gate of Buat replika reads ("Periksa sekarang").
+	takeHealthReports(t, p, masterSrv, 1)
 
 	// Buat replika: the form offers the replica server and both databases.
 	form := ui.get(fmt.Sprintf("/masters/%d/replicas/new", masterSrv))
@@ -242,13 +250,12 @@ func TestE2ECreateReplica(t *testing.T) {
 			t.Fatalf("clone job waits at step %d (%s):\n%s", j.CurrentStep, j.ParamsJSON, jobLogText(t, p, cloneID))
 		}
 		// The job page links to the server page, where the user connects
-		// the master's admin account (root here).
+		// the master's admin account (dbpanel_admin here).
 		if body := ui.get("/jobs/" + j.ID); !strings.Contains(body, `href="`+serverPath(cloneSrv)+`"`) ||
 			!strings.Contains(body, "Sudah saya hubungkan ulang") {
 			t.Fatalf("job page lacks the reconnect link or button:\n%s", body)
 		}
-		if loc := ui.postRedirect(serverPath(cloneSrv)+"/mysql/connect",
-			url.Values{"user": {"root"}, "password": {""}, "host": {""}}); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
+		if loc := ui.postRedirect(serverPath(cloneSrv)+"/mysql/connect", e2eAdminForm()); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
 			t.Fatalf("reconnect redirected to %q", loc)
 		}
 		ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
@@ -528,7 +535,41 @@ func openInstance(t *testing.T, inst *testmysql.Instance) *sql.DB {
 	// The pool must not outlive mysqld: close it before the instance stops.
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxIdleConns(0) // the replica restarts during the job
+	createE2EAdmin(t, db)
 	return db
+}
+
+// The agents log in to MySQL as a dedicated account, never as root (the
+// precondition gate refuses an agent that logs in as root): the one
+// "dbpanel agent admin reset" makes, dbpanel_admin@localhost with every
+// privilege, here with one password on every instance, so that a CLONE
+// (which copies the donor's accounts) keeps it.
+const e2eAdminPW = "E2e-Admin.Pw1"
+
+// e2eAdminForm is "Hubungkan MySQL" as that account over the socket.
+func e2eAdminForm() url.Values {
+	return url.Values{"user": {"dbpanel_admin"}, "password": {e2eAdminPW}, "host": {""}}
+}
+
+// createE2EAdmin creates the agents' account on db's instance, outside the
+// binary log (no GTID of the instance's own).
+func createE2EAdmin(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	c, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for _, s := range []string{
+		"SET SESSION sql_log_bin = 0",
+		"CREATE USER IF NOT EXISTS 'dbpanel_admin'@'localhost' IDENTIFIED BY '" + e2eAdminPW + "'",
+		"GRANT ALL PRIVILEGES ON *.* TO 'dbpanel_admin'@'localhost' WITH GRANT OPTION",
+	} {
+		if _, err := c.ExecContext(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
 }
 
 func execSQL(t *testing.T, db *sql.DB, stmts ...string) {

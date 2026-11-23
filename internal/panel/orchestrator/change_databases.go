@@ -111,6 +111,10 @@ func (r *Runner) StartAddDatabases(ctx context.Context, replicaServerID int64, d
 		}
 		bytes += inv.Databases[i].Bytes
 	}
+	if _, err := r.refuseRedGate(GateInput{Action: GateAddDatabases, MasterID: topo.MasterServerID,
+		TargetID: replicaServerID}); err != nil {
+		return "", err
+	}
 	st := jobState{MasterServerID: topo.MasterServerID, Databases: rep.Databases, Change: add, DataBytes: bytes}
 	return r.createJob(KindAddDatabases, replicaServerID, topo.ID, st, addDatabasesStepNames())
 }
@@ -143,6 +147,12 @@ func (r *Runner) StartRemoveDatabases(ctx context.Context, replicaServerID int64
 	}
 	if len(remove) == len(rep.Databases) {
 		return "", errors.New("lepas semua database tidak didukung; hapus replika ini bila tidak diperlukan lagi")
+	}
+	// Only dropping the data is gated.
+	if dropData {
+		if _, err := r.refuseRedGate(GateInput{Action: GateRemoveWithDrop, TargetID: replicaServerID}); err != nil {
+			return "", err
+		}
 	}
 	st := jobState{MasterServerID: topo.MasterServerID, Databases: rep.Databases, Change: remove, DropData: dropData}
 	if dropData {

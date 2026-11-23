@@ -62,6 +62,9 @@ func (r *Runner) StartPrepareMaster(ctx context.Context, serverID int64) (string
 	if err := r.refuseBusy(serverID, "server ini"); err != nil {
 		return "", err
 	}
+	if _, err := r.refuseRedGate(GateInput{Action: GatePrepareMaster, MasterID: serverID}); err != nil {
+		return "", err
+	}
 	return r.createJob(KindPrepareMaster, serverID, 0, jobState{}, prepareMasterStepNames())
 }
 

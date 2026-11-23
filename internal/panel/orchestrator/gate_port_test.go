@@ -92,6 +92,7 @@ func TestGatePortProbeOnceWhileInFlight(t *testing.T) {
 // The default probe dials with a one-second bound and sends nothing.
 func TestGateDefaultPortProbe(t *testing.T) {
 	e := newEnv(t)
+	e.r.d.PortProbe = nil // the default probe
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

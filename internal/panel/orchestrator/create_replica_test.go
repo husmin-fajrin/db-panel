@@ -990,6 +990,7 @@ func TestStartRebuildRechecksConnections(t *testing.T) {
 	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	greenGate(t, e, g.c.id) // the new master
 	row := proto.ConnectionRow{Host: "10.0.0.9", User: "app", DB: "simrs", Count: 1, Kind: "sql"}
 	typed := func(rows ...proto.ConnectionRow) proto.ConnectionsResult {
 		return proto.ConnectionsResult{Rows: rows, Typed: true, TakenAt: time.Now()}

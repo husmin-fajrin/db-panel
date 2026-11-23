@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"slices"
@@ -74,6 +75,68 @@ type Orchestrator interface {
 	// its rebuild ("Bangun ulang sebagai replika", spec 5.2), and the code
 	// to approve while not.
 	RebuildApproval(ctx context.Context, serverID int64) (proto.RebuildApprovalResult, error)
+	// Gate judges the preconditions of a planned action from the panel's
+	// own data (no agent call, nothing written); the Start functions,
+	// Retry and Approve judge it again and refuse a red row.
+	Gate(in orchestrator.GateInput) (orchestrator.GateResult, error)
+}
+
+// Refusals of the precondition gate (plan 5b-2b): G14 names the labels of
+// the red rows; G15 asks for the backup tick.
+const (
+	msgGateRed = "Tindakan ini ditolak karena ada prasyarat yang belum terpenuhi: %s. Cara memperbaikinya ada di " +
+		"daftar Prasyarat di halaman ini."
+	msgBackupAck = `Centang "Saya sudah memastikan ada cadangan (backup) terbaru" untuk melanjutkan.`
+)
+
+// gateRefusal is why a gated action stops before its handler consumes a
+// token or starts anything; status 0: it may go on.
+type gateRefusal struct {
+	status  int
+	flash   string // shown on the page
+	outcome string // the audit entry's outcome
+}
+
+// gateCheck judges in (Orchestrator.Gate) for a gated handler, before its
+// confirmation token: a red row is 409 with G14, audited with G0 (the red
+// rows' labels only); with ack set, a backup row that asks for the tick
+// without it is 400 with G15; a gate that cannot judge (an unknown server
+// or topology, a store failure) is 400 with its error: the action never
+// goes on unjudged.
+func (a *app) gateCheck(in orchestrator.GateInput, ack *bool) gateRefusal {
+	res, err := a.Orchestrator.Gate(in)
+	if err != nil {
+		a.Logger.Warn("gate not judged", "action", in.Action, "master", in.MasterID, "target", in.TargetID, "err", logErr(err))
+		return gateRefusal{http.StatusBadRequest, a.shownError(err), a.outcomeOf(err)}
+	}
+	if red := res.Red(); len(red) > 0 {
+		err := &orchestrator.GateError{Rows: red}
+		status, flash := a.startRefusal(err, http.StatusBadRequest)
+		a.Logger.Warn("gate refused", "action", in.Action, "master", in.MasterID, "target", in.TargetID, "rows", res.RedKeys())
+		return gateRefusal{status, flash, a.outcomeOf(err)}
+	}
+	if ack != nil && res.NeedsBackupAck() && !*ack {
+		return gateRefusal{http.StatusBadRequest, msgBackupAck, a.outcomeOf(orchestrator.ErrBackupAck)}
+	}
+	return gateRefusal{}
+}
+
+// startRefusal is how a gated handler shows err of a Start, Retry or
+// Approve: a red row (the gate judged again under the start lock) as
+// gateCheck shows it, the missing backup tick with G15, anything else as
+// shownError with status def.
+func (a *app) startRefusal(err error, def int) (status int, flash string) {
+	if ge, ok := errors.AsType[*orchestrator.GateError](err); ok {
+		var labels []string
+		for _, r := range (orchestrator.GateResult{Rows: ge.Rows}).Red() {
+			labels = append(labels, r.Label)
+		}
+		return http.StatusConflict, fmt.Sprintf(msgGateRed, strings.Join(labels, ", "))
+	}
+	if errors.Is(err, orchestrator.ErrBackupAck) {
+		return http.StatusBadRequest, msgBackupAck
+	}
+	return def, a.shownError(err)
 }
 
 const (
@@ -245,6 +308,12 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
 		return
 	}
+	// The precondition gate, before any confirmation is asked.
+	if g := a.gateCheck(orchestrator.GateInput{Action: orchestrator.GatePrepareMaster, MasterID: srv.ID}, nil); g.status != 0 {
+		a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{}, g.outcome)
+		a.renderServer(w, r, srv, serverView{Status: g.status, Flash: g.flash})
+		return
+	}
 	// Preparing a server that already is a master (it has a topology)
 	// again needs the password confirmed.
 	_, err := a.Store.GetTopologyByMaster(srv.ID)
@@ -261,7 +330,8 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "prepare_master", auditServer, srv.ID, map[string]any{"job_id": id}, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("prepare master refused", "server", srv.ID, "err", logErr(err))
-		a.renderServer(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: a.shownError(err)})
+		status, flash := a.startRefusal(err, http.StatusBadRequest)
+		a.renderServer(w, r, srv, serverView{Status: status, Flash: flash})
 		return
 	}
 	a.Logger.Info("prepare master started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
@@ -673,9 +743,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	target, _ := strconv.ParseInt(r.PostFormValue("target"), 10, 64)
 	rebuild := r.PostFormValue("rebuild") == "1"
 	acceptConnections := rebuild && r.PostFormValue("accept_connections") == "1"
-	if rebuild && !a.requireConfirm(w, r, ActRebuildOldMaster, auditServer, target) {
-		return
-	}
+	backupAck := rebuild && r.PostFormValue("backup_ack") == "1"
 	selected := r.PostForm["databases"]
 	checked := make(map[string]bool, len(selected))
 	for _, d := range selected {
@@ -685,6 +753,37 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	if rebuild {
 		rebuildID = max(target, 1)
 	}
+	detail := map[string]any{"master_server_id": master.ID, "databases": selected, "force_dump": r.PostFormValue("force_dump") != "",
+		"rebuild_old_master": rebuild}
+	if backupAck {
+		detail["backup_ack"] = true
+	}
+	// The precondition gate, before the rebuild's token (a target the form
+	// does not name is refused below, as before). Root's approval is not
+	// read here: its row stays "not checked yet" and the start reads it.
+	if target > 0 {
+		in := orchestrator.GateInput{Action: orchestrator.GateCreateReplica, MasterID: master.ID, TargetID: target}
+		var ack *bool
+		if rebuild {
+			in.Action, ack = orchestrator.GateRebuildOldMaster, &backupAck
+		}
+		if g := a.gateCheck(in, ack); g.status != 0 {
+			p, err := a.replicaForm(r, master, checked, rebuildID)
+			if err != nil {
+				a.internalError(w, "replica form", err)
+				return
+			}
+			p.Target = target
+			p.ForceDump = r.PostFormValue("force_dump") != ""
+			a.audit(r, "create_replica", auditReplica, target, detail, g.outcome)
+			p.Flash = g.flash
+			a.render.renderStatus(w, g.status, "replica_new", p)
+			return
+		}
+	}
+	if rebuild && !a.requireConfirm(w, r, ActRebuildOldMaster, auditServer, target) {
+		return
+	}
 	p, err := a.replicaForm(r, master, checked, rebuildID)
 	if err != nil {
 		a.internalError(w, "replica form", err)
@@ -692,8 +791,6 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Target = target
 	p.ForceDump = r.PostFormValue("force_dump") != ""
-	detail := map[string]any{"master_server_id": master.ID, "databases": selected, "force_dump": p.ForceDump,
-		"rebuild_old_master": rebuild}
 	failStatus := func(status int, msg string) {
 		a.audit(r, "create_replica", auditReplica, p.Target, detail, msg)
 		p.Flash = msg
@@ -761,7 +858,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	id, err := a.Orchestrator.StartCreateReplica(r.Context(), orchestrator.CreateReplicaParams{
 		MasterServerID: master.ID, TargetServerID: p.Target,
 		Databases: selected, ForceDump: p.ForceDump, ConfirmWipe: true, RebuildOldMaster: rebuild,
-		AcceptConnections: acceptConnections, Approval: seen,
+		AcceptConnections: acceptConnections, BackupAck: backupAck, Approval: seen,
 	})
 	if rebuild {
 		localApprovalDetail(seen, detail)
@@ -773,7 +870,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, orchestrator.ErrRebuildNeedsApproval) && p.Rebuild != nil {
 			a.rebuildApproval(r.Context(), p.Rebuild)
 		}
-		fail(a.shownError(err))
+		failStatus(a.startRefusal(err, http.StatusBadRequest))
 		return
 	}
 	detail["job_id"] = id
@@ -1075,60 +1172,109 @@ func (a *app) replicaDatabases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
-	a.changeReplicaDatabases(w, r, "add_databases", nil, func(p replicaDatabasesPage, selected []string) (string, string) {
+	if !a.databasesGate(w, r, "add_databases", false) {
+		return
+	}
+	a.changeReplicaDatabases(w, r, "add_databases", nil, func(p replicaDatabasesPage, selected []string) (string, string, int) {
 		if p.NoInventory {
-			return "", msgNoMasterInventory
+			return "", msgNoMasterInventory, 0
 		}
 		for _, d := range selected {
 			i := slices.IndexFunc(p.Databases, func(rd replicaDatabase) bool { return rd.Name == d })
 			switch {
 			case i < 0 || !p.Databases[i].OnMaster:
-				return "", "Database " + d + " tidak ada di master"
+				return "", "Database " + d + " tidak ada di master", 0
 			case p.Databases[i].Followed:
-				return "", "Database " + d + " sudah diikuti replika ini"
+				return "", "Database " + d + " sudah diikuti replika ini", 0
 			}
 		}
 		id, err := a.Orchestrator.StartAddDatabases(r.Context(), p.Server.ID, selected)
 		if err != nil {
-			return "", a.shownError(err)
+			status, msg := a.startRefusal(err, http.StatusBadRequest)
+			return "", msg, status
 		}
-		return id, ""
+		return id, "", 0
 	})
+}
+
+// databasesGate judges the gate of Tambah database (add) or of Lepas
+// database with its data dropped, before the token; false when it refused
+// (the databases page with the refusal, audited as action).
+func (a *app) databasesGate(w http.ResponseWriter, r *http.Request, action string, drop bool) bool {
+	srv, rep, ok := a.subsetReplicaFromPath(w, r)
+	if !ok {
+		return false
+	}
+	in := orchestrator.GateInput{Action: orchestrator.GateRemoveWithDrop, TargetID: srv.ID}
+	if !drop {
+		topo, err := a.Store.GetTopology(rep.TopologyID)
+		if err != nil {
+			a.internalError(w, "get topology", err)
+			return false
+		}
+		in = orchestrator.GateInput{Action: orchestrator.GateAddDatabases, MasterID: topo.MasterServerID, TargetID: srv.ID}
+	}
+	g := a.gateCheck(in, nil)
+	if g.status == 0 {
+		return true
+	}
+	detail := map[string]any{"databases": r.PostForm["databases"]}
+	if action == "remove_databases" {
+		detail["drop_data"] = drop
+	}
+	a.audit(r, action, auditReplica, srv.ID, detail, g.outcome)
+	p, err := a.replicaDatabasesForm(r, srv, rep)
+	if err != nil {
+		a.internalError(w, "replica databases", err)
+		return false
+	}
+	p.Flash = g.flash
+	a.render.renderStatus(w, g.status, "replica_databases", p)
+	return false
 }
 
 func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 	srv, _, ok := a.subsetReplicaFromPath(w, r)
-	if !ok || !a.requireConfirm(w, r, ActRemoveDatabases, auditReplica, srv.ID) {
+	if !ok {
 		return
 	}
 	dropData := r.PostFormValue("drop_data") != ""
-	a.changeReplicaDatabases(w, r, "remove_databases", map[string]any{"drop_data": dropData}, func(p replicaDatabasesPage, selected []string) (string, string) {
+	// Only dropping the data is gated.
+	if dropData && !a.databasesGate(w, r, "remove_databases", true) {
+		return
+	}
+	if !a.requireConfirm(w, r, ActRemoveDatabases, auditReplica, srv.ID) {
+		return
+	}
+	a.changeReplicaDatabases(w, r, "remove_databases", map[string]any{"drop_data": dropData}, func(p replicaDatabasesPage, selected []string) (string, string, int) {
 		// Dropping the data also needs the replica's name typed (spec 5.6).
 		if dropData && !typedName(r, p.Server) {
-			return "", msgNameMismatch
+			return "", msgNameMismatch, 0
 		}
 		for _, d := range selected {
 			if !slices.Contains(p.Replica.Databases, d) {
-				return "", "Database " + d + " tidak diikuti replika ini"
+				return "", "Database " + d + " tidak diikuti replika ini", 0
 			}
 		}
 		if !slices.ContainsFunc(p.Replica.Databases, func(d string) bool { return !slices.Contains(selected, d) }) {
-			return "", msgRemoveAll
+			return "", msgRemoveAll, 0
 		}
 		id, err := a.Orchestrator.StartRemoveDatabases(r.Context(), p.Server.ID, selected, dropData)
 		if err != nil {
-			return "", a.shownError(err)
+			status, msg := a.startRefusal(err, http.StatusBadRequest)
+			return "", msg, status
 		}
-		return id, ""
+		return id, "", 0
 	})
 }
 
 // changeReplicaDatabases handles the add and remove posts of the databases
 // page: start checks the selection like the orchestrator does and starts
-// the job, answering its id or the reason it refused. action is the audit
-// action; detail (may be nil) goes into its entry.
+// the job, answering its id or the reason it refused with its status (0:
+// 400). action is the audit action; detail (may be nil) goes into its
+// entry.
 func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, action string, detail map[string]any,
-	start func(p replicaDatabasesPage, selected []string) (jobID, refusal string)) {
+	start func(p replicaDatabasesPage, selected []string) (jobID, refusal string, status int)) {
 	srv, rep, ok := a.subsetReplicaFromPath(w, r)
 	if !ok {
 		return
@@ -1141,13 +1287,17 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 	selected := r.PostForm["databases"]
 	msg := ""
 	id := ""
+	status := 0
 	switch {
 	case !p.CanChange:
 		msg = msgReplicaNotReady
 	case len(selected) == 0:
 		msg = msgPickDatabase
 	default:
-		id, msg = start(p, selected)
+		id, msg, status = start(p, selected)
+	}
+	if status == 0 {
+		status = http.StatusBadRequest
 	}
 	verb := strings.TrimSuffix(action, "_databases") // add or remove
 	if detail == nil {
@@ -1161,7 +1311,7 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 	if msg != "" {
 		a.Logger.Warn("replica databases "+verb+" refused", "server", srv.ID, "err", msg)
 		p.Flash = msg
-		a.render.renderStatus(w, http.StatusBadRequest, "replica_databases", p)
+		a.render.renderStatus(w, status, "replica_databases", p)
 		return
 	}
 	a.Logger.Info("replica databases "+verb+" started", "server", srv.ID, "databases", selected, "job", id,

@@ -38,6 +38,10 @@ type CreateReplicaParams struct {
 	// be counted) and what they wrote is lost. Without it a rebuild is
 	// refused unless the connection list is complete and empty.
 	AcceptConnections bool
+	// BackupAck: the user ticked that the new master is backed up (form
+	// backup_ack=1); a rebuild needs it when the gate's backup row asks for
+	// it (GateResult.NeedsBackupAck).
+	BackupAck bool
 	// Approval, when set, receives the agent's answer about root's
 	// approval that the start decided on (a rebuild only), for the audit.
 	Approval *ApprovalSeen
@@ -171,6 +175,23 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 			return "", errRebuildCutoverPending
 		}
 	}
+	dbs, err := selectDatabases(p.Databases, inv.Databases)
+	if err != nil {
+		return "", err
+	}
+	// The precondition gate (spec 5.7), last before the first write. A
+	// rebuild got here with root's approval read (requireRebuildApproval).
+	in := GateInput{Action: GateCreateReplica, MasterID: p.MasterServerID, TargetID: target.ID}
+	if p.RebuildOldMaster {
+		in.Action, in.Approval = GateRebuildOldMaster, new(true)
+	}
+	res, err := r.refuseRedGate(in)
+	if err != nil {
+		return "", err
+	}
+	if p.RebuildOldMaster && res.NeedsBackupAck() && !p.BackupAck {
+		return "", ErrBackupAck
+	}
 	// A target whose earlier attempt failed is free for a new one. So is
 	// any row of a quarantined old master that passed refuseBusy (no job
 	// queued, running or waiting): one left in another state by a panel
@@ -194,10 +215,6 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		return "", errors.New("server tujuan bukan master lama yang dikarantina")
 	case target.Role != store.RoleUnassigned:
 		return "", fmt.Errorf("server tujuan sudah berperan sebagai %s", target.Role)
-	}
-	dbs, err := selectDatabases(p.Databases, inv.Databases)
-	if err != nil {
-		return "", err
 	}
 	if _, err := r.d.Store.AddReplica(topo.ID, target.ID, dbs); err != nil {
 		return "", err

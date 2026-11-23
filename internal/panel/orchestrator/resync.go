@@ -81,6 +81,9 @@ func (r *Runner) StartResync(ctx context.Context, p ResyncParams) (string, error
 	if err := r.refuseBusy(p.ServerID, "server ini"); err != nil {
 		return "", err
 	}
+	if _, err := r.refuseRedGate(GateInput{Action: GateResync, MasterID: topo.MasterServerID, TargetID: p.ServerID}); err != nil {
+		return "", err
+	}
 	wipe := slices.Clone(p.WipeList)
 	slices.Sort(wipe)
 	wipe = slices.Compact(wipe)

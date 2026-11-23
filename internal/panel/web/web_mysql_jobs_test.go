@@ -94,6 +94,21 @@ type fakeOrch struct {
 	approvalCalls int
 	// onStart runs in StartCreateReplica before it answers.
 	onStart func()
+	// gate answers Gate (nil: a gate with every row green, as a healthy
+	// rig has); gateIns are the inputs it received. Gate is not in calls.
+	gate    func(orchestrator.GateInput) (orchestrator.GateResult, error)
+	gateIns []orchestrator.GateInput
+}
+
+func (f *fakeOrch) Gate(in orchestrator.GateInput) (orchestrator.GateResult, error) {
+	f.mu.Lock()
+	f.gateIns = append(f.gateIns, in)
+	g := f.gate
+	f.mu.Unlock()
+	if g == nil {
+		return orchestrator.GateResult{}, nil
+	}
+	return g(in)
 }
 
 func (f *fakeOrch) record(call string) {

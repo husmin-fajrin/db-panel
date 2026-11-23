@@ -109,6 +109,9 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 
 	var logs syncBuffer
 	o := testOptions(t)
+	// The panel at the agents' version (version.Version), as after an
+	// update of both: the gate refuses an agent of another version.
+	o.Version = version.Version
 	o.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -127,7 +130,7 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 	e.ui = newUIClient(t, base)
 	e.ui.login(readInitialPassword(t, o))
 	for _, id := range []int64{e.masterSrv, e.replicaSrv} {
-		loc := e.ui.postRedirect(serverPath(id)+"/mysql/connect", url.Values{"user": {"root"}, "password": {""}, "host": {""}})
+		loc := e.ui.postRedirect(serverPath(id)+"/mysql/connect", e2eAdminForm())
 		if want := serverPath(id) + "?pesan=terhubung"; loc != want {
 			t.Fatalf("connect MySQL on server %d redirected to %q, want %q", id, loc, want)
 		}
@@ -142,6 +145,9 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 	if job.Status != store.JobSucceeded {
 		t.Fatalf("prepare_master ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, e.p, prepareID))
 	}
+	// A report taken after Siapkan master carries the master's role pin,
+	// which the gate of Buat replika reads ("Periksa sekarang").
+	takeHealthReports(t, e.p, e.masterSrv, 1)
 	createID := e.ui.postJob(fmt.Sprintf("/masters/%d/replicas", e.masterSrv), url.Values{
 		"target":       {strconv.FormatInt(e.replicaSrv, 10)},
 		"databases":    {"a"},
@@ -748,6 +754,9 @@ func startE2EPromoteTopology(t *testing.T) *e2ePromoteTopology {
 	if job.Status != store.JobSucceeded {
 		t.Fatalf("prepare_master ended %s: %s\n%s", job.Status, job.Error, jobLogText(t, e.p, prepareID))
 	}
+	// A report taken after Siapkan master carries the master's role pin,
+	// which the gate of Buat replika reads ("Periksa sekarang").
+	takeHealthReports(t, e.p, e.master.srv(), 1)
 	for _, n := range []*e2eNode{e.ra, e.rb} {
 		e.createReplica(t, e.master, n, false, false)
 	}
@@ -762,11 +771,11 @@ func startE2EPromoteTopology(t *testing.T) *e2ePromoteTopology {
 	return e
 }
 
-// connectRoot is "Hubungkan MySQL" on n as the instance's root over the
-// socket.
+// connectRoot is "Hubungkan MySQL" on n as the agents' account
+// (e2eAdminForm) over the socket.
 func (e *e2ePromoteTopology) connectRoot(t *testing.T, n *e2eNode) {
 	t.Helper()
-	loc := e.ui.postRedirect(serverPath(n.srv())+"/mysql/connect", url.Values{"user": {"root"}, "password": {""}, "host": {""}})
+	loc := e.ui.postRedirect(serverPath(n.srv())+"/mysql/connect", e2eAdminForm())
 	if want := serverPath(n.srv()) + "?pesan=terhubung"; loc != want {
 		t.Fatalf("connect MySQL on %s redirected to %q, want %q", n.name, loc, want)
 	}
@@ -886,6 +895,9 @@ func (e *e2ePromoteTopology) replicaForm(t *testing.T, master, target *e2eNode, 
 		vals.Set("rebuild", "1")
 		vals.Set("confirm_name", target.name)
 		vals.Set("confirm_token", e.ui.confirmToken(web.ActRebuildOldMaster, "server", target.srv()))
+		// No backup folder is set: the user ticks that the new master is
+		// backed up.
+		vals.Set("backup_ack", "1")
 	}
 	return form, vals
 }
@@ -969,6 +981,11 @@ func (e *e2ePromoteTopology) startPromote(t *testing.T, candidate *e2eNode, mode
 	}
 	form := url.Values{"candidate": {strconv.FormatInt(candidate.srv(), 10)}, "mode": {mode},
 		"confirm_token": {e.ui.confirmToken(web.ActPromote, "master", e.master.srv())}}
+	if mode == proto.PromotePlanned {
+		// No backup folder is set: the user ticks that the master is
+		// backed up.
+		form.Set("backup_ack", "1")
+	}
 	for k, v := range extra {
 		form[k] = v
 	}

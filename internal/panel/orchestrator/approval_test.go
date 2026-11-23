@@ -40,6 +40,7 @@ func rebuildRig(t *testing.T) *promoteRig {
 	g.c.reply("mysql.createDumpUser", nil)
 	g.c.reply("mysql.dropUser", nil)
 	g.c.reply("mysql.sweepDumpUsers", proto.SweepDumpUsersResult{})
+	greenGate(t, e, g.c.id) // the new master
 	return g
 }
 

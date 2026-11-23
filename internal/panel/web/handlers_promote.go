@@ -243,10 +243,40 @@ func (a *app) promoteViewFailed(w http.ResponseWriter, r *http.Request, srv stor
 // startPromote starts the promotion of the chosen replica of master {id}.
 func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	srv, topo, ok := a.masterFromPath(w, r)
-	if !ok || !a.requireConfirm(w, r, ActPromote, auditMaster, srv.ID) {
+	if !ok {
 		return
 	}
 	choice := parsePromoteChoice(r)
+	backupAck := r.PostFormValue("backup_ack") == "1"
+	// The precondition gate of a planned promote, before the token; an
+	// emergency is never refused by a row. A post without a candidate is
+	// refused below, as before.
+	if choice.Mode == proto.PromotePlanned && choice.Candidate > 0 {
+		in := orchestrator.GateInput{Action: orchestrator.GatePromotePlanned, MasterID: srv.ID, TargetID: choice.Candidate}
+		if g := a.gateCheck(in, &backupAck); g.status != 0 {
+			detail := map[string]any{"candidate": choice.Candidate, "mode": choice.Mode}
+			if backupAck {
+				detail["backup_ack"] = true
+			}
+			a.audit(r, "promote", auditMaster, srv.ID, detail, g.outcome)
+			view, err := a.Orchestrator.PromoteView(r.Context(), srv.ID)
+			if err != nil {
+				a.promoteViewFailed(w, r, srv, err)
+				return
+			}
+			p, err := a.newPromotePage(r, srv, topo, view, &choice)
+			if err != nil {
+				a.internalError(w, "promote page", err)
+				return
+			}
+			p.Flash = g.flash
+			a.render.renderStatus(w, g.status, "promote", p)
+			return
+		}
+	}
+	if !a.requireConfirm(w, r, ActPromote, auditMaster, srv.ID) {
+		return
+	}
 	view, err := a.Orchestrator.PromoteView(r.Context(), srv.ID)
 	if err != nil {
 		a.audit(r, "promote", auditMaster, srv.ID, map[string]any{"candidate": choice.Candidate},
@@ -255,14 +285,19 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	params, msg := checkPromote(view, choice)
+	params.BackupAck = backupAck && view.Mode == proto.PromotePlanned
 	id := ""
+	status := http.StatusBadRequest
 	if msg == "" {
 		if id, err = a.Orchestrator.StartPromote(r.Context(), params); err != nil {
-			msg = a.shownError(err)
+			status, msg = a.startRefusal(err, http.StatusBadRequest)
 		}
 	}
 	detail := map[string]any{"candidate": choice.Candidate, "mode": view.Mode, "accept_partial": params.AcceptPartial,
 		"accept_unreachable": params.AcceptUnreachable, "accept_branched": params.AcceptBranched, "job_id": id}
+	if params.BackupAck {
+		detail["backup_ack"] = true
+	}
 	if msg != "" {
 		a.audit(r, "promote", auditMaster, srv.ID, detail, msg)
 		a.Logger.Warn("promote refused", "master", srv.ID, "candidate", choice.Candidate, "err", msg)
@@ -272,7 +307,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.Flash = msg
-		a.render.renderStatus(w, http.StatusBadRequest, "promote", p)
+		a.render.renderStatus(w, status, "promote", p)
 		return
 	}
 	a.audit(r, "promote", auditMaster, srv.ID, detail, auditOK)

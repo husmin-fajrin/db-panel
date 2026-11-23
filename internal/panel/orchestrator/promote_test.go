@@ -20,11 +20,63 @@ import (
 )
 
 // fakeHealth is the Monitor as the Runner sees it: scripted views, and
-// CheckNow recorded.
+// CheckNow recorded. A server marked green (markGreen) reports what a
+// healthy agent does for the gate: its view, or a healthy one when none is
+// scripted, gets what its snapshot leaves out (greenView); a scripted view
+// without a snapshot (an agent away) stays as it is.
 type fakeHealth struct {
 	mu     sync.Mutex
 	views  map[int64]monitor.View
 	checks []int64
+	green  map[int64]bool
+	st     *store.Store // the role pin of a green server; nil: none
+}
+
+func (h *fakeHealth) markGreen(id int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.green == nil {
+		h.green = map[int64]bool{}
+	}
+	h.green[id] = true
+}
+
+// greenView is v (ok: scripted) of the green server id as a healthy agent
+// reports it: the role pin of its role now (master of a topology, else
+// replica of one), its clock equal to the panel's when the report came,
+// performance_schema on, half of the disk free and a backup an hour old.
+// What the snapshot already says is kept.
+func (h *fakeHealth) greenView(id int64, v monitor.View, ok bool) (monitor.View, bool) {
+	if ok && v.Snap == nil {
+		return v, ok
+	}
+	if !ok {
+		v = monitor.View{ServerID: id, Status: monitor.Status{Code: monitor.StatusHealthy}, ReceivedAt: time.Now(),
+			Snap: &proto.HealthSnapshot{MySQLOK: true}}
+	}
+	s := *v.Snap
+	if s.RolePin == "" && h.st != nil {
+		if _, err := h.st.GetTopologyByMaster(id); err == nil {
+			s.RolePin = "master"
+		} else if _, err := h.st.GetReplicaByServer(id); err == nil {
+			s.RolePin = "replica"
+		}
+	}
+	if s.ClockUnixMS == 0 {
+		s.ClockUnixMS = v.ReceivedAt.UnixMilli()
+	}
+	if s.PerfSchema == nil {
+		on := true
+		s.PerfSchema = &on
+	}
+	if s.DiskTotal == 0 {
+		s.DiskTotal, s.DiskFree = 1000, 500
+	}
+	if s.Backup == nil {
+		s.Backup = &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 3600, NewestSize: 1024}
+	}
+	v.Snap = &s
+	return v, true
 }
 
 func (h *fakeHealth) CheckNow(_ context.Context, id int64) error {
@@ -36,8 +88,12 @@ func (h *fakeHealth) CheckNow(_ context.Context, id int64) error {
 
 func (h *fakeHealth) View(id int64) (monitor.View, bool) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	v, ok := h.views[id]
+	green := h.green[id]
+	h.mu.Unlock()
+	if green {
+		return h.greenView(id, v, ok)
+	}
 	return v, ok
 }
 
@@ -84,8 +140,7 @@ func replicaView(executed, retrieved string) monitor.View {
 
 func newPromoteRig(t *testing.T) *promoteRig {
 	e := newEnv(t)
-	h := &fakeHealth{views: map[int64]monitor.View{}}
-	e.r.d.Health = h
+	h := e.health
 	e.r.promoteCatchUp = 2 * time.Second
 	m, topo := e.readyMaster("db-master")
 	g := &promoteRig{e: e, h: h, m: m, topo: topo}
@@ -127,6 +182,7 @@ func newPromoteRig(t *testing.T) *promoteRig {
 		j.Logf("info", "replika dipromosikan (%s)", p.Mode)
 		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Mode: p.Mode}, nil
 	})
+	greenGate(t, e, m.id, g.c.id, g.b.id, g.d.id)
 	return g
 }
 
@@ -190,7 +246,7 @@ func TestPromotePlannedStepsAndCommands(t *testing.T) {
 	}
 	e.seqMu.Unlock()
 	wantCmds(t, "all agents", seq, []string{"cand mysql.status", "db-master mysql.lockForPromote", "cand mysql.waitSynced",
-		"cand mysql.promote", "db-master mysql.quarantine", "cand mysql.inventory", "rep-b mysql.repoint", "cand mysql.recordReplicas"})
+		"cand mysql.tlsTrust", "cand mysql.promote", "db-master mysql.quarantine", "cand mysql.inventory", "rep-b mysql.repoint", "cand mysql.recordReplicas"})
 
 	var lock proto.LockForPromoteParams
 	g.m.params("mysql.lockForPromote", &lock)
@@ -1002,6 +1058,7 @@ func TestPromoteNewMasterReadyForReplicas(t *testing.T) {
 	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	greenGate(t, e, g.c.id) // the new master
 	g.m.reply("mysql.connections", proto.ConnectionsResult{Typed: true})
 	// Root on the old master approved its rebuild.
 	g.m.reply("mysql.rebuildApproval", proto.RebuildApprovalResult{Required: true, Approved: true,
@@ -1186,6 +1243,7 @@ func TestRebuiltOldMasterIsNoLongerOldMaster(t *testing.T) {
 	if err := e.st.SetCutoverPending(g.topo.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	greenGate(t, e, g.c.id) // the new master
 	if topo, err := e.st.GetTopologyByOldMaster(g.m.id); err != nil || topo.ID != g.topo.ID {
 		t.Fatalf("old master before the rebuild: %+v, %v", topo, err)
 	}
@@ -1349,6 +1407,7 @@ func secondPromoteRig(t *testing.T) *promoteRig {
 	for _, fa := range []*fakeAgent{g.b, g.d} {
 		g.h.set(fa.id, replicaView(masterGTID, masterGTID))
 	}
+	greenGate(t, g.e, g.c.id, g.b.id, g.d.id)
 	return g
 }
 

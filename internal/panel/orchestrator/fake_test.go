@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 	"github.com/husmin-fajrin/db-panel/internal/secrets"
@@ -394,6 +396,9 @@ type env struct {
 	seq   []string
 
 	agents []*fakeAgent
+	// health is the fake Monitor (Deps.Health); every agent's reports are
+	// green for the gate (fakeHealth.green).
+	health *fakeHealth
 }
 
 // testListener hands agent events to the Runner, as the panel's listener does.
@@ -424,9 +429,14 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	l := &testListener{}
-	e := &env{t: t, st: st, dbPath: dbPath, hub: hub.New(l), box: box, alerts: &fakeAlerts{}, mysqlCA: mysqlCA}
+	e := &env{t: t, st: st, dbPath: dbPath, hub: hub.New(l), box: box, alerts: &fakeAlerts{}, mysqlCA: mysqlCA,
+		health: &fakeHealth{views: map[int64]monitor.View{}, st: st}}
+	// The master's MySQL port is closed to the panel host (the gate's
+	// master_port row): no test dials the network.
+	closedPort := func(context.Context, string) bool { return false }
 	e.r = New(Deps{Store: st, Hub: e.hub, Secrets: box, Publish: e.publish, Alerts: e.alerts,
-		Logger: slog.New(slog.DiscardHandler), Now: time.Now, PublicHost: "203.0.113.7", MySQLCA: mysqlCA})
+		Logger: slog.New(slog.DiscardHandler), Now: time.Now, PublicHost: "203.0.113.7", MySQLCA: mysqlCA,
+		Health: e.health, PortProbe: closedPort})
 	e.r.offlineGrace = 300 * time.Millisecond
 	e.r.pollEvery = 10 * time.Millisecond
 	l.r.Store(e.r)
@@ -497,6 +507,7 @@ func (e *env) agent(name, addr string) *fakeAgent {
 	}
 	fa := newFakeAgent(e.t, e, srv.ID, name)
 	e.agents = append(e.agents, fa)
+	e.health.markGreen(srv.ID)
 	fa.scriptTLS()
 	fa.attach()
 	return fa
@@ -709,5 +720,56 @@ func wantCmds(t *testing.T, who string, got, want []string) {
 	t.Helper()
 	if !slices.Equal(got, want) {
 		t.Fatalf("%s commands:\n got %v\nwant %v", who, got, want)
+	}
+}
+
+// greenGate gives the servers ids what makes every precondition row of the
+// gate green, as a healthy rig holds it (Task 10: tests start from a green
+// gate). Their agents' reports are green (fakeHealth.green: the role pin of
+// the server's role, the clock of the report, performance_schema on, half
+// of the disk free, a backup an hour old). In the store: the agent at the
+// panel's version; the account dbpanel_admin@localhost on a connected
+// inventory without one; on a topology master the panel's MySQL
+// certificate and a backup folder; on a replica, replication verifying the
+// master's certificate. Called by the rigs whose actions judge those rows
+// (promote, rebuild).
+func greenGate(t *testing.T, e *env, ids ...int64) {
+	t.Helper()
+	now := time.Now()
+	for _, id := range ids {
+		e.health.markGreen(id)
+		srv, err := e.st.GetServer(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := e.r.d.Version; v != "" && srv.AgentVersion != v {
+			if err := e.st.UpdateProbe(id, proto.ProbeResult{Hostname: srv.Name}, v, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if inv, err := e.st.GetInventory(id); err == nil && inv.Connected && inv.Account == "" {
+			inv.Account = "dbpanel_admin@localhost"
+			if err := e.st.SetInventory(inv); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := e.st.GetTopologyByMaster(id); err == nil {
+			if _, err := e.st.GetServerTLS(id); errors.Is(err, store.ErrNotFound) {
+				if err := e.st.SetServerTLS(store.ServerTLS{ServerID: id, CertSerial: fmt.Sprintf("%032x", id),
+					NotAfter: now.AddDate(1, 0, 0), InstalledAt: now}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if srv.BackupDir == "" {
+				if err := e.st.SetServerBackup(id, "/srv/backup", 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if _, err := e.st.GetReplicaByServer(id); err == nil {
+			if err := e.st.SetReplicaTLSVerified(id, true); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }

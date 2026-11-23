@@ -482,6 +482,15 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 	}
 	ack := orchestrator.JobAck{Approval: &orchestrator.ApprovalSeen{}}
 	if drops {
+		// The precondition gate of what the job runs on, before the token
+		// (a promote job is never judged again).
+		if in, gated := orchestrator.JobGateInput(job); gated {
+			if g := a.gateCheck(in, nil); g.status != 0 {
+				a.audit(r, name, auditJob, job.ServerID, map[string]any{"job_id": job.ID, "kind": job.Kind}, g.outcome)
+				a.renderJob(w, r, g.status, g.flash)
+				return
+			}
+		}
 		if !a.requireConfirm(w, r, jobConfirmAction(name, job.ID), auditJob, job.ServerID) {
 			return
 		}
@@ -632,7 +641,8 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, n
 		case errors.Is(err, orchestrator.ErrJobNeedsConfirm):
 			status = http.StatusForbidden
 		}
-		a.renderJob(w, r, status, a.shownError(err))
+		status, flash := a.startRefusal(err, status)
+		a.renderJob(w, r, status, flash)
 		return
 	}
 	a.Logger.Info("job action", "action", name, "job", job.ID, "by", auth.UsernameFrom(r.Context()))

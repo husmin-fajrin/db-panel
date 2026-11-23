@@ -205,12 +205,27 @@ func (a *app) validWipeList(rep store.Replica, serverID int64, list, only []stri
 
 func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	srv, rep, ok := a.replicaFromPath(w, r)
-	if !ok || !a.requireConfirm(w, r, ActResync, auditReplica, srv.ID) {
+	if !ok {
 		return
 	}
 	p := orchestrator.ResyncParams{ServerID: srv.ID, ForceDump: r.PostFormValue("force_dump") != "",
 		WipeList: r.PostForm["wipe_list[]"], WipeOnly: r.PostForm["wipe_only[]"]}
 	detail := map[string]any{"force_dump": p.ForceDump, "wipe_list": p.WipeList, "wipe_only": p.WipeOnly}
+	// The precondition gate, before the token.
+	topo, err := a.Store.GetTopology(rep.TopologyID)
+	if err != nil {
+		a.internalError(w, "get topology", err)
+		return
+	}
+	in := orchestrator.GateInput{Action: orchestrator.GateResync, MasterID: topo.MasterServerID, TargetID: srv.ID}
+	if g := a.gateCheck(in, nil); g.status != 0 {
+		a.audit(r, "replica_resync", auditReplica, srv.ID, detail, g.outcome)
+		a.replicaErrorStatus(w, r, srv, rep, g.status, g.flash)
+		return
+	}
+	if !a.requireConfirm(w, r, ActResync, auditReplica, srv.ID) {
+		return
+	}
 	refused := ""
 	if !typedName(r, srv) {
 		refused = msgNameMismatch
@@ -232,7 +247,8 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, "replica_resync", auditReplica, srv.ID, detail, a.outcomeOf(err))
 	if err != nil {
 		a.Logger.Warn("resync refused", "server", srv.ID, "err", logErr(err))
-		a.replicaError(w, r, srv, rep, a.shownError(err))
+		status, flash := a.startRefusal(err, http.StatusBadRequest)
+		a.replicaErrorStatus(w, r, srv, rep, status, flash)
 		return
 	}
 	a.Logger.Info("resync started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))
@@ -374,7 +390,12 @@ func (a *app) showError(w http.ResponseWriter, r *http.Request, srv store.Server
 
 // replicaError shows msg with 400 on the replica's page.
 func (a *app) replicaError(w http.ResponseWriter, r *http.Request, srv store.Server, rep store.Replica, msg string) {
+	a.replicaErrorStatus(w, r, srv, rep, http.StatusBadRequest, msg)
+}
+
+// replicaErrorStatus shows msg with status on the replica's page.
+func (a *app) replicaErrorStatus(w http.ResponseWriter, r *http.Request, srv store.Server, rep store.Replica, status int, msg string) {
 	p := replicaPage{Page: a.page(r), Server: srv, Replica: rep}
 	p.Flash = msg
-	a.renderReplica(w, r, http.StatusBadRequest, p)
+	a.renderReplica(w, r, status, p)
 }
