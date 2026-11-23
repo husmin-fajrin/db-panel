@@ -763,11 +763,18 @@ func TestSecurityHeaders(t *testing.T) {
 	rec := e.do("GET", "/login", nil, nil)
 	wantCode(t, rec, http.StatusOK)
 	wantHeaders(t, "GET /login", rec.Header(), "no-store")
-	for _, p := range []string{"/", "/servers", "/servers/new"} {
+	for _, p := range []string{"/", "/servers", "/servers/new", "/panduan"} {
 		rec := e.do("GET", p, nil, c)
 		wantCode(t, rec, http.StatusOK)
 		wantHeaders(t, "GET "+p, rec.Header(), "no-store")
 	}
+	// A page with a precondition list (a promote page, a row red).
+	pe, pf := promoteEnvF(t)
+	pf.setGate(redDisk)
+	rec = pe.do("GET", "/masters/1/promote", nil, pe.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "data-gate-list")
+	wantHeaders(t, "GET /masters/1/promote", rec.Header(), "no-store")
 	e.st.CreateServer("db-header")
 	rec = e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
@@ -806,7 +813,7 @@ func TestPagesHaveNoInlineScript(t *testing.T) {
 	e.st.MarkPaired(srv.ID, "serial", "10.0.0.1")
 	e.st.CreateServer("db-unpaired")
 	inline := regexp.MustCompile(`(?i)<script(?:\s[^>]*)?>[^<]|\son[a-z]+=|javascript:|\sstyle=`)
-	for _, p := range []string{"/login", "/", "/servers", "/servers/new", "/servers/1", "/servers/2"} {
+	for _, p := range []string{"/login", "/", "/servers", "/servers/new", "/servers/1", "/servers/2", "/panduan"} {
 		var ck *http.Cookie
 		if p != "/login" {
 			ck = c
@@ -816,6 +823,15 @@ func TestPagesHaveNoInlineScript(t *testing.T) {
 		if m := inline.FindString(rec.Body.String()); m != "" {
 			t.Errorf("GET %s has inline script/handler/style %q", p, m)
 		}
+	}
+	// A page with a precondition list (a promote page, a row red).
+	pe, pf := promoteEnvF(t)
+	pf.setGate(redDisk)
+	rec := pe.do("GET", "/masters/1/promote", nil, pe.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "data-gate-list")
+	if m := inline.FindString(rec.Body.String()); m != "" {
+		t.Errorf("GET /masters/1/promote has inline script/handler/style %q", m)
 	}
 }
 
