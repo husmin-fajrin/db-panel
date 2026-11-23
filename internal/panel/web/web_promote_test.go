@@ -961,6 +961,24 @@ func TestEmergencyPromoteAuditFields(t *testing.T) {
 		t.Fatalf("audit detail without report or red row = %s", d)
 	}
 
+	// The gate cannot judge (an error, not a red row): an emergency
+	// promote is never refused by the gate, so it still starts, and the
+	// audit records that no rows were read (null, not an empty list).
+	f.setGate(func(orchestrator.GateInput) (orchestrator.GateResult, error) {
+		return orchestrator.GateResult{}, errors.New("prasyarat: server #1: tidak ditemukan")
+	})
+	before := len(f.promoteList())
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	if len(f.promoteList()) != before+1 {
+		t.Fatal("emergency promote with a gate error did not start")
+	}
+	entries = withoutConfirms(auditEntries(t, e.st))
+	if last := entries[len(entries)-1]; last.Outcome != "ok" || !strings.Contains(last.DetailJSON, `"skipped_red":null`) {
+		t.Fatalf("audit of an emergency promote with a gate error = %+v", last)
+	}
+	f.setGate(nil)
+
 	// A planned promote records none of the three.
 	f.setView(plannedView())
 	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "planned", "accept_unreachable", "4"),
