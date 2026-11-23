@@ -3503,8 +3503,10 @@ MySQL master lama tidak dibuat baca-saja (read-only).
    "Master lama (dikarantina sejak …)".
 8. Bila MySQL master lama mati, baru sekarang boleh dinyalakan: sesudah
    langkah 7, dan sesudah **Detail teknis** di halaman servernya menulis
-   "Kunci start: Terkunci". Lalu periksa di master lama bahwa MySQL-nya
-   baca-saja. Jawabannya harus `1 1`.
+   "Kunci start: Terkunci".
+
+   Dalam kedua keadaan (MySQL tadi mati atau sudah menyala), periksa di
+   master lama bahwa MySQL-nya baca-saja. Jawabannya harus `1 1`.
 
    ```sh
    mysql -e 'SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;'
