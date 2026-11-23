@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -649,12 +650,18 @@ func TestGreenGateShowsNothingOnModalOnlyButtons(t *testing.T) {
 		env  func(t *testing.T) (*env, *fakeOrch)
 		path string
 		attr string
+		in   orchestrator.GateInput // the gate the page reads for attr
 	}{
-		{"resync", ctlEnv, "/replicas/2", `data-confirm-action="resync"`},
-		{"prepare master again", ctlEnv, "/servers/1", `data-confirm-action="prepare_master_again"`},
-		{"prepare master", prepareEnv, "/servers/1", `>Siapkan sebagai master</button>`},
-		{"add databases", addEnv, "/replicas/2/databases", `data-gate-button`},
-		{"remove databases", ctlEnv, "/replicas/2/databases", `name="drop_data"`},
+		{"resync", ctlEnv, "/replicas/2", `data-confirm-action="resync"`,
+			orchestrator.GateInput{Action: orchestrator.GateResync, MasterID: 1, TargetID: 2}},
+		{"prepare master again", ctlEnv, "/servers/1", `data-confirm-action="prepare_master_again"`,
+			orchestrator.GateInput{Action: orchestrator.GatePrepareMaster, MasterID: 1}},
+		{"prepare master", prepareEnv, "/servers/1", `>Siapkan sebagai master</button>`,
+			orchestrator.GateInput{Action: orchestrator.GatePrepareMaster, MasterID: 1}},
+		{"add databases", addEnv, "/replicas/2/databases", `data-gate-button`,
+			orchestrator.GateInput{Action: orchestrator.GateAddDatabases, MasterID: 1, TargetID: 2}},
+		{"remove databases", ctlEnv, "/replicas/2/databases", `name="drop_data"`,
+			orchestrator.GateInput{Action: orchestrator.GateRemoveWithDrop, TargetID: 2}},
 	}
 	for _, tc := range cases {
 		for name, g := range map[string]func(orchestrator.GateInput) (orchestrator.GateResult, error){
@@ -666,8 +673,16 @@ func TestGreenGateShowsNothingOnModalOnlyButtons(t *testing.T) {
 				wantCode(t, rec, http.StatusOK)
 				wantOn(t, rec.Body.String(), tc.attr)
 				wantNoBody(t, rec, "data-gate-list", wantD2, "Akun panel belum diketahui")
-				if len(f.gateInputs()) == 0 {
-					t.Fatal("the page did not ask the gate")
+				// The page reads the gate of its action, for the servers of
+				// that action, and no other server pair for it.
+				got := f.gateInputs()
+				if !slices.Contains(got, tc.in) {
+					t.Fatalf("gate inputs = %+v, want %+v among them", got, tc.in)
+				}
+				for _, in := range got {
+					if in.Action == tc.in.Action && in != tc.in {
+						t.Fatalf("gate read for other servers: %+v", in)
+					}
 				}
 			})
 		}
@@ -686,6 +701,13 @@ func TestBackupAckCheckboxShownOnlyWhenNeeded(t *testing.T) {
 	f.setGate(backupUnset)
 	rec = e.do("GET", "/masters/1/promote", nil, c)
 	wantBody(t, rec, box, wantD3)
+	wantUnticked(t, rec.Body.String(), `name="backup_ack"`)
+	// Nor after a refused post that carried the tick.
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "planned", "backup_ack", "1"),
+		web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Setujui bahwa replika db-mati diarahkan ulang", box)
+	wantUnticked(t, rec.Body.String(), `name="backup_ack"`)
 	f.setView(emergencyView())
 	rec = e.do("GET", "/masters/1/promote", nil, c)
 	wantNoBody(t, rec, box, wantD3)
@@ -697,11 +719,27 @@ func TestBackupAckCheckboxShownOnlyWhenNeeded(t *testing.T) {
 	f.setGate(backupUnset)
 	rec = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
 	wantBody(t, rec, box, wantD3)
+	wantUnticked(t, rec.Body.String(), `name="backup_ack"`)
 
 	// Buat replika never asks for it.
 	e, f = createEnv(t)
 	f.setGate(backupUnset)
 	wantNoBody(t, e.do("GET", "/masters/1/replicas/new", nil, e.cookie()), box, wantD3)
+}
+
+// wantUnticked fails unless body has an input with attr and none of them
+// is checked.
+func wantUnticked(t *testing.T, body, attr string) {
+	t.Helper()
+	tags := tagsWith(body, attr)
+	if len(tags) == 0 {
+		t.Fatalf("no element with %s", attr)
+	}
+	for _, tag := range tags {
+		if strings.Contains(tag, "checked") {
+			t.Fatalf("box pre-ticked: %s", tag)
+		}
+	}
 }
 
 // TestGateListEscapesServerNames: a row's label, detail and fix carry
