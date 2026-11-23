@@ -360,7 +360,8 @@ func TestGuideRedRowsMatchGate(t *testing.T) {
 		t.Fatalf("gate.go: %d labels, %d texts; the parse missed some", len(labels), len(texts))
 	}
 	alerts, _ := goConsts(t, alertsSourcePath)
-	for _, name := range []string{"backupStaleText", "backupEmptyFileText", "backupNoneText", "backupUnreadableText"} {
+	for _, name := range []string{"backupStaleText", "backupEmptyFileText", "backupNoneText", "backupUnreadableText",
+		"BackupTruncatedText"} {
 		if alerts[name] == "" {
 			t.Fatalf("alerts.go has no %s", name)
 		}

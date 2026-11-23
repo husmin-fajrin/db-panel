@@ -1190,7 +1190,12 @@ Yang dilihat agent:
 
 Agent memindai (scan) folder paling sering sekali tiap 5 menit, satu
 pemindaian pada satu waktu, paling banyak 10.000 entri, paling lama 10
-detik. Folder yang baru disimpan dipindai pada pemeriksaan agent berikutnya
+detik. Bila folder berisi lebih dari 10.000 entri, agent hanya memeriksa
+sebagian, sehingga berkas yang lebih baru bisa terlewat; kartu (dan teks
+masalahnya di peringatan dan di baris **Cadangan (backup)**) lalu ditambah
+kalimat "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya
+memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder
+cadangan ke subfolder yang berisi lebih sedikit berkas." Folder yang baru disimpan dipindai pada pemeriksaan agent berikutnya
 (interval pemeriksaan di **Pengaturan > Ambang dan interval**).
 
 Yang tidak dilihat agent:
@@ -3597,6 +3602,12 @@ Tertulis (merah), salah satu dari:
 - "Berkas terbaru di folder cadangan master <server> kosong (0 byte)."
 - "Folder cadangan master <server> tidak berisi berkas."
 - "Folder cadangan master <server> tidak bisa dibaca agent: <sebab>."
+
+Di belakang teks pertama atau kedua bisa tertulis: "Folder ini berisi lebih
+dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang
+lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi
+lebih sedikit berkas." Bila begitu, kerjakan saran itu dulu: berkas terbaru
+mungkin ada tetapi tidak terlihat oleh agent.
 
 Perbaikan: "Jalankan cadangan master, atau betulkan folder cadangan di
 halaman server master."

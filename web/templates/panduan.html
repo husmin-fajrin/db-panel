@@ -130,6 +130,7 @@ GRANT ALL PRIVILEGES ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;</pre
     <p>Perbaikan: "Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru." Caranya ada di panduan "<a class="link" href="#jadwal-cadangan">Memindahkan jadwal cadangan sesudah promote</a>".</p>
     <p>Tertulis (merah), salah satu dari:</p>
     <ul class="ml-6 flex list-disc flex-col gap-1"><li>"Berkas terbaru di folder cadangan master &lt;server&gt; berumur &lt;umur&gt; (batas &lt;jam&gt; jam)."</li><li>"Berkas terbaru di folder cadangan master &lt;server&gt; kosong (0 byte)."</li><li>"Folder cadangan master &lt;server&gt; tidak berisi berkas."</li><li>"Folder cadangan master &lt;server&gt; tidak bisa dibaca agent: &lt;sebab&gt;."</li></ul>
+    <p>Di belakang teks pertama atau kedua bisa tertulis: "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas." Bila begitu, kerjakan saran itu dulu: berkas terbaru mungkin ada tetapi tidak terlihat oleh agent.</p>
     <p>Perbaikan: "Jalankan cadangan master, atau betulkan folder cadangan di halaman server master."</p>
     <h3 class="mt-2 font-semibold">Persetujuan di server</h3>
     <p>Tertulis: "Persetujuan di server &lt;server&gt; belum diperiksa." atau "Belum disetujui di server &lt;server&gt;."</p>
