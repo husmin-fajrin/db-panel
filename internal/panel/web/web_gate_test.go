@@ -884,3 +884,32 @@ func TestPromoteModeMovedBeforeGateAndToken(t *testing.T) {
 	rec = e.do("POST", "/masters/1/promote", planned, c)
 	wantCode(t, rec, http.StatusSeeOther)
 }
+
+// TestPrepareAgainBoxOpensOnRedRow: the folded "Tindakan lanjutan" box of
+// a master's page opens while its "Siapkan ulang" list has a red row, so
+// the operator sees why the button is off; folded otherwise.
+func TestPrepareAgainBoxOpensOnRedRow(t *testing.T) {
+	e, f := ctlEnv(t)
+	c := e.cookie()
+	box := func() string {
+		t.Helper()
+		rec := e.do("GET", "/servers/1", nil, c)
+		wantCode(t, rec, http.StatusOK)
+		tags := tagsWith(rec.Body.String(), "data-advanced")
+		if len(tags) != 1 {
+			t.Fatalf("advanced box tags = %v", tags)
+		}
+		return tags[0]
+	}
+	for name, g := range map[string]func(orchestrator.GateInput) (orchestrator.GateResult, error){
+		"green": nil, "yellow": yellowOnly} {
+		f.setGate(g)
+		if tag := box(); strings.Contains(tag, " open") {
+			t.Fatalf("%s: box open: %s", name, tag)
+		}
+	}
+	f.setGate(redDisk)
+	if tag := box(); !strings.Contains(tag, " open") {
+		t.Fatalf("red: box folded: %s", tag)
+	}
+}

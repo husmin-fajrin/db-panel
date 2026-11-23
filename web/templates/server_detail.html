@@ -300,8 +300,9 @@
 {{if and .CanPrepare .PrepareAgain}}
 {{/* The server already is a master: preparing it again is the only way
      to redo the replication account and binlog settings, so it stays,
-     folded away (design spec 5.6, 5.8 #3). */}}
-<details class="mt-2 rounded-lg border border-base-300 p-3" data-advanced>
+     folded away (design spec 5.6, 5.8 #3); open while its button is off,
+     so its precondition list says why. */}}
+<details class="mt-2 rounded-lg border border-base-300 p-3"{{if and .PrepareGate .PrepareGate.Off}} open{{end}} data-advanced>
   <summary class="cursor-pointer font-semibold">Tindakan lanjutan</summary>
   <div class="mt-3 flex flex-col items-start gap-2">
     <p class="help">Siapkan ulang (akun replikasi, pengaturan binlog)</p>
