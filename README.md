@@ -2929,7 +2929,7 @@ mengamankannya.
    dengan perintah ini di server master, lalu jalankan promote terencana:
 
    ```sh
-   systemctl restart dbpanel-agent
+   sudo systemctl restart dbpanel-agent
    ```
 
 5. Di kotak **Pilih replika yang dijadikan master baru**, pilih replikanya.
@@ -2995,9 +2995,10 @@ dari master baru.
    sudo dbpanel agent approve <kode>
    ```
 
-9. Layar menampilkan nama server, sumber data dan alamat IP-nya. Pastikan
-   nama dan alamat IP itu memang master baru yang sekarang dipakai aplikasi.
-   Bila benar, ketik `ya` lalu Enter. Bila tidak, tekan Enter saja.
+9. Layar menampilkan nama server ini, sumber data dan alamat IP-nya.
+   Pastikan **Sumber data** dan **Alamat IP** itu memang master baru yang
+   sekarang dipakai aplikasi. Bila benar, ketik `ya` lalu Enter. Bila tidak,
+   tekan Enter saja.
 10. Kembali ke form dan klik **Periksa lagi**. Kotak itu kini menulis "Sudah
     disetujui …".
 11. Baca daftar **Prasyarat**. Perbaiki baris bertanda "Belum terpenuhi"
@@ -3021,9 +3022,11 @@ Kapan dipakai: sesudah promote. Master baru sekarang satu-satunya sumber
 data, jadi cadangan (backup) yang terjadwal harus dibuat di sana, bukan di
 master lama.
 
-1. Cari jadwal cadangan database di master lama, misalnya tugas terjadwal
-   yang menjalankan alat cadangan Anda. Catat perintahnya, jamnya, dan
-   folder tempat cadangan ditulis.
+1. Cari jadwal cadangan database yang dulu berjalan di master lama,
+   misalnya tugas terjadwal yang menjalankan alat cadangan Anda. Catat
+   perintahnya, jamnya, dan folder tempat cadangan ditulis. Bila master lama
+   mati atau tidak bisa dimasuki (misalnya sesudah promote darurat), ambil
+   keterangan itu dari catatan Anda atau dari orang yang memasang jadwalnya.
 2. Pasang jadwal yang sama di master baru, dengan alat cadangan yang sama.
 3. Hentikan jadwal itu di master lama, supaya tidak ada cadangan baru dari
    data lama. Jangan hapus berkas cadangan lama: bangun ulang tidak
@@ -3287,7 +3290,7 @@ padahal tidak ada promote yang berjalan atau baru selesai.
    lain yang dipakai aplikasi.
 2. Di halaman server master itu, buka **Detail teknis** dan baca baris
    "Peran dipin: …".
-3. Bila tertulis `quarantined`, server itu dikarantina. Karantina hanya
+3. Bila tertulis `dikarantina`, server itu dikarantina. Karantina hanya
    berakhir lewat bangun ulang yang selesai, atau dengan `set-role` di
    server itu sendiri. Jalankan perintah ini di server itu hanya bila
    master lain tidak lagi dipakai: bila master lain masih dipakai aplikasi,
@@ -3302,8 +3305,12 @@ padahal tidak ada promote yang berjalan atau baru selesai.
 5. Baca hasil langkah pertamanya: "Kunci start dilepas: …", "Kunci start
    tidak ditemukan; …" atau "MySQL tidak ditemukan di server ini; …". Bila
    perintah menulis "kunci start tidak bisa diperiksa …", ikuti panduan
-   "Melepas kunci master lama dengan tangan". Bila perintah meminta "Jalankan
-   perintah ini lagi", jalankan `set-role master` sekali lagi.
+   "Melepas kunci master lama dengan tangan". Bila perintah menulis "kunci
+   start tidak bisa dilepas (…); peran tidak diubah", server itu tetap
+   dikarantina dan kuncinya tetap terpasang: perbaiki sebab di dalam kurung
+   bila Anda bisa lalu jalankan `set-role master` sekali lagi, atau ikuti
+   panduan "Melepas kunci master lama dengan tangan". Bila perintah meminta
+   "Jalankan perintah ini lagi", jalankan `set-role master` sekali lagi.
 6. Bila "Peran dipin" `master` tetapi MySQL masih baca-saja (misalnya
    dikunci dengan `lock-master`, atau sesudah langkah 3 sampai 5), buka
    hanya bila server ini memang dipakai aplikasi sebagai master dan master
@@ -3567,14 +3574,15 @@ mana langkahnya dikerjakan:
    lewat replikasi. Di MySQL replika itu (sebagai root), jalankan
    pemeriksaan langkah 2: harus tampil satu baris. Bila belum, lihat
    **Ketertinggalan** di halaman replika itu, tunggu, lalu periksa lagi.
-   Sesudah itu kerjakan langkah 5 di halaman replika itu, dengan sandi yang
-   sama.
+   Sesudah itu kerjakan langkah 5 di halaman server replika itu, dengan
+   sandi yang sama.
 7. Muat ulang layar tindakan. Baris **Akun panel** harus bertanda
    "Terpenuhi".
 
 Di server yang dikarantina (master lama), MySQL baca-saja menolak
-pernyataan di langkah 4. Di sana jalankan perintah ini, lalu klik
-**Segarkan** di halaman server itu:
+pernyataan di langkah 4. Di sana jalankan perintah ini. Perintah itu
+menampilkan apa yang akan dikerjakannya lalu meminta Anda mengetik `ya`.
+Sesudah selesai, klik **Segarkan** di halaman server itu:
 
 ```sh
 sudo dbpanel agent reset-admin
@@ -3662,15 +3670,25 @@ MySQL master lama tidak dibuat baca-saja (read-only).
    lama mati, biarkan mati sampai langkah 8.
 2. Di halaman server master lama, buka **Detail teknis**. Lanjutkan hanya
    bila tertulis "Peran dipin: master".
-3. Di master lama, lihat daftar replika yang pernah tersambung ke server itu:
+3. Masuk ke master lama. Pastikan dulu Anda memang di master lama, karena
+   perintah langkah 4 tidak bertanya. Jalankan perintah ini; jawabannya harus
+   sama dengan **Hostname** di halaman server master lama. Bila berbeda,
+   berhenti: Anda berada di server lain.
+
+   ```sh
+   hostname
+   ```
+
+   Di server yang sama, lihat daftar replika yang pernah tersambung ke
+   server itu:
 
    ```sh
    sudo cat /var/lib/dbpanel/replicas-seen
    ```
 
    Lanjutkan hanya bila host master baru tidak ada di daftar itu.
-4. Di master lama, pin server itu sebagai dikarantina. Perintah ini tidak
-   bertanya. Agent yang berjalan lalu menulis kunci start dalam beberapa
+4. Di server yang sama (master lama), pin server itu sebagai dikarantina.
+   Perintah ini tidak bertanya. Agent yang berjalan lalu menulis kunci start dalam beberapa
    detik dan membuat MySQL-nya baca-saja bila MySQL menyala. Bila MySQL
    master lama sedang menyala dan bisa ditulis, panel lalu membuka
    peringatan **Master lama sempat bisa ditulis**: itu benar, karena
@@ -3682,7 +3700,11 @@ MySQL master lama tidak dibuat baca-saja (read-only).
    ```
 
 5. Pin master baru sebagai sumbernya. Ganti `<host:port>` dengan **Alamat
-   master baru** di layar pengalihan, persis seperti tertulis di sana.
+   master baru** di layar pengalihan, persis seperti tertulis di sana. Bila
+   layar itu sudah tidak ada, alamat yang sama tertulis sebagai **Alamat
+   untuk replika** di halaman master baru. Alamat yang ditulis lain
+   (misalnya alamat IP untuk nama host) membuat agent menolak karantina
+   lagi.
 
    ```sh
    sudo dbpanel agent set-source <host:port>
@@ -3711,6 +3733,11 @@ MySQL master lama tidak dibuat baca-saja (read-only).
 9. Lanjutkan dengan panduan "Bangun ulang master lama", mulai dari
    **Periksa data tertinggal**: tulisan yang masuk ke master lama sebelum
    langkah 4 ditemukan di sana.
+
+Langkah 6 dan 7 sudah dicocokkan dengan kode panel dan agent, tetapi belum
+pernah dijalankan dari awal sampai akhir dengan panel dan dua agent. Bila
+yang Anda lihat berbeda dari yang tertulis di sini, berhenti dan panggil
+admin MySQL.
 
 Bila salah satu pemeriksaan di atas tidak cocok, atau sebuah langkah gagal:
 jangan sambungkan master lama ke aplikasi, dan panggil admin MySQL.
