@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/url"
 	"slices"
@@ -568,6 +569,7 @@ func TestRedRowDisablesButton(t *testing.T) {
 		path   string
 		form   url.Values
 		attr   string // the gated element
+		note   string // D2, or for the drop checkbox its option form; "" is D2
 	}{
 		{name: "promote", env: promoteEnvF, method: "GET", path: "/masters/1/promote", attr: `data-confirm-action="promote"`},
 		{name: "create replica", env: createEnv, method: "POST", path: "/masters/1/replicas",
@@ -580,7 +582,7 @@ func TestRedRowDisablesButton(t *testing.T) {
 		{name: "prepare master", env: prepareEnv, method: "GET", path: "/servers/1", attr: `>Siapkan sebagai master</button>`},
 		{name: "add databases", env: addEnv, method: "GET", path: "/replicas/2/databases", attr: `data-gate-button`},
 		{name: "remove databases with drop", env: ctlEnv, method: "GET", path: "/replicas/2/databases",
-			attr: `name="drop_data"`},
+			attr: `name="drop_data"`, note: wantD2Option},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -589,7 +591,14 @@ func TestRedRowDisablesButton(t *testing.T) {
 			rec := e.do(tc.method, tc.path, tc.form, e.cookie())
 			body := rec.Body.String()
 			wantOff(t, body, tc.attr)
-			wantBody(t, rec, wantD1, wantD2, "Belum terpenuhi", "Ruang disk", "Disk &lt;agent-kata&gt; terpakai 99% (ambang kritis 95%).",
+			note := tc.note
+			if note == "" {
+				note = wantD2
+			}
+			if !strings.Contains(html.UnescapeString(body), note) {
+				t.Errorf("page lacks %q", note)
+			}
+			wantBody(t, rec, wantD1, "Belum terpenuhi", "Ruang disk", "Disk &lt;agent-kata&gt; terpakai 99% (ambang kritis 95%).",
 				"Kosongkan ruang")
 			for _, tag := range tagsWith(body, "data-gate-off-note") {
 				if strings.Contains(tag, "hidden") {
@@ -1017,4 +1026,28 @@ func TestResyncRefusalOpensDialog(t *testing.T) {
 	// A plain GET keeps the dialog closed.
 	rec = e.do("GET", "/replicas/2", nil, c)
 	wantNoBody(t, rec, open)
+}
+
+// wantD2Option is D2 for the drop checkbox of Lepas database, whose
+// button stays on (W-6): it speaks of the option, not the button.
+const wantD2Option = "Pilihan ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda \"Belum terpenuhi\", " +
+	"lalu muat ulang halaman ini."
+
+// TestDropOptionOffNote: under the disabled "Hapus datanya juga di
+// replika" the note speaks of the option, while the button's D2 stays
+// where a button is off (Tambah database).
+func TestDropOptionOffNote(t *testing.T) {
+	e, f := addEnv(t)
+	f.setGate(redDisk)
+	rec := e.do("GET", "/replicas/2/databases", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	drop := between(body, `id="lepas"`, "</form>")
+	if !strings.Contains(html.UnescapeString(drop), wantD2Option) || strings.Contains(html.UnescapeString(drop), "Tombol ini mati") {
+		t.Fatalf("Lepas database's note:\n%s", drop)
+	}
+	add := body[:strings.Index(body, `id="lepas"`)]
+	if !strings.Contains(html.UnescapeString(add), wantD2) {
+		t.Fatalf("Tambah database lost D2:\n%s", add)
+	}
 }

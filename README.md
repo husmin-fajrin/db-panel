@@ -1514,8 +1514,9 @@ Tiap baris punya satu dari tiga tanda:
 Selama ada baris "Belum terpenuhi", tombol tindakannya mati (pada **Lepas
 database**, centang **Hapus datanya juga di replika** yang mati), dan di
 bawahnya tertulis "Tombol ini mati selama ada prasyarat yang belum terpenuhi.
-Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini."
-Kiriman yang tetap sampai ke panel ditolak dengan "Tindakan ini ditolak
+Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini." (di
+bawah centang itu: "Pilihan ini mati …"; tombol **Lepas database** tetap
+hidup untuk melepas tanpa hapus data). Kiriman yang tetap sampai ke panel ditolak dengan "Tindakan ini ditolak
 karena ada prasyarat yang belum terpenuhi: <baris>. Cara memperbaikinya ada
 di daftar Prasyarat di halaman ini." Panel menilai lagi tepat sebelum
 pekerjaan dimulai, dan lagi pada **Ulangi** dan **Setujui** pekerjaan yang

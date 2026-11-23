@@ -29,6 +29,11 @@
      chosen server's gate has a red row). */}}
 {{define "gate-off-note"}}<p class="text-sm text-warning-text{{if not .}} hidden{{end}}" data-gate-off-note>Tombol ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini.</p>{{end}}
 
+{{/* gate-off-option-note: D2 for an option the gate disabled while the
+     button below it stays on (Hapus datanya juga di replika of Lepas
+     database): the same meaning, said of the option. */}}
+{{define "gate-off-option-note"}}<p class="text-sm text-warning-text" data-gate-off-note>Pilihan ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini.</p>{{end}}
+
 {{/* backup-ack: D3, the backup tick of a planned promote and a rebuild
      (backup_ack=1), required while the backup row asks for it. */}}
 {{define "backup-ack"}}<label class="flex items-start gap-2" data-backup-ack>

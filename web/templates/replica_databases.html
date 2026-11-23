@@ -93,7 +93,7 @@
       <input type="checkbox" class="checkbox checkbox-sm" name="drop_data" value="1"{{if and .DropGate .DropGate.Off}} disabled{{end}}>
       <span>Hapus datanya juga di replika</span>
     </label>
-    {{if and .DropGate .DropGate.RedNote}}{{template "gate-off-note" true}}{{end}}
+    {{if and .DropGate .DropGate.RedNote}}{{template "gate-off-option-note"}}{{end}}
     <p class="help">Tanpa centang ini, data database yang dilepas tetap ada di replika tetapi tidak lagi diperbarui; bila ditambahkan lagi, isi di replika dibuang lebih dulu.</p>
     <p class="text-sm text-error-text" x-text="error"></p>
     <div class="card-actions justify-end">
