@@ -465,6 +465,7 @@ const (
 	maxAgentReason = 300 // StartLockState.Reason
 	maxAgentFile   = 300 // a file name
 	maxAgentHost   = 120 // a host:port
+	maxAgentPin    = 32  // a role pin the panel does not know
 	maxKeptHosts   = 10  // hosts named in master_lock_kept; the rest are counted
 )
 
@@ -565,8 +566,13 @@ func unpinnedMessage(snap *proto.HealthSnapshot) string {
 			"Saran: jalankan ulang Siapkan master."
 	}
 	// Siapkan master never changes a pinned role (replica, quarantined):
-	// only the local CLI does.
-	return "Master tidak dipin: peran yang dipin di server ini " + snap.RolePin + ", bukan master." + advice +
+	// only the local CLI does. Any other value is the agent's text: bounded,
+	// one line, and named unknown as on the server page.
+	pin := snap.RolePin
+	if pin != "replica" && pin != "quarantined" {
+		pin = "tidak dikenal (" + agentText(pin, maxAgentPin) + ")"
+	}
+	return "Master tidak dipin: peran yang dipin di server ini " + pin + ", bukan master." + advice +
 		"Saran: bila server ini memang master, jalankan di server ini: sudo dbpanel agent set-role master, " +
 		"lalu jalankan ulang Siapkan master."
 }

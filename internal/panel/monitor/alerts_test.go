@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -1358,6 +1359,34 @@ func TestMasterQuarantinedFromStore(t *testing.T) {
 
 func rolePin(role string) func(s *proto.HealthSnapshot) {
 	return func(s *proto.HealthSnapshot) { s.RolePin, s.PinError = role, "" }
+}
+
+// TestMasterUnpinnedAlertBoundsAgentPin: a role pin the panel does not know
+// is the agent's text: the stored message carries it bounded, on one line,
+// as "tidak dikenal (…)", never raw.
+func TestMasterUnpinnedAlertBoundsAgentPin(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	pin := "PINX" + strings.Repeat("Jalankan ini\nsudo rm -rf /\r\n\u202e", 200)
+	pin = pin[:5000]
+	snap := masterSnap(srcUUID + ":1-100")
+	snap.RolePin = pin
+	ma := r.agent(mID, true, snap).attach()
+	ma.send()
+	ma.send()
+	a := r.openAlert(mID, KindMasterUnpinned)
+	if strings.ContainsAny(a.Message, "\n\r\u202e") {
+		t.Errorf("message is not one line: %q", a.Message)
+	}
+	if !strings.Contains(a.Message, "peran yang dipin di server ini tidak dikenal (PINX") {
+		t.Errorf("message %q lacks the unknown-pin form", a.Message)
+	}
+	if n := utf8.RuneCountInString(a.Message); n > 400 {
+		t.Errorf("message is %d characters, want the pin bounded: %q", n, a.Message)
+	}
+	if !strings.Contains(a.Message, "sudo dbpanel agent set-role master") {
+		t.Errorf("message %q lost its advice", a.Message)
+	}
 }
 
 // TestMasterUnpinnedAlertAfterThreeReports: a master whose agent reports
