@@ -5,6 +5,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,5 +144,54 @@ func TestGatePortProbeSkipsPanelHostAsTarget(t *testing.T) {
 	wantGreen(t, gateRow(t, g.gate(in), "master_port"))
 	if got := g.probed(); len(got) != 0 {
 		t.Fatalf("probes = %v", got)
+	}
+}
+
+// A probe that panics leaves no gate waiting for it: the panic is
+// recovered into a closed port (the row is yellow-only, it never breaks a
+// start), the answer is not kept, and the next gate for the master probes
+// again.
+func TestGatePortProbePanicReleasesWaiters(t *testing.T) {
+	g := newGateRig(t)
+	var calls atomic.Int32
+	g.e.r.d.PortProbe = func(ctx context.Context, hostPort string) bool {
+		if calls.Add(1) == 1 {
+			panic("probe broke")
+		}
+		return true
+	}
+	first := make(chan any, 1)
+	go func() {
+		defer func() { first <- recover() }()
+		res, err := g.e.r.Gate(g.input(GatePromotePlanned))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		wantGreen(t, gateRow(t, res, "master_port"))
+	}()
+	if v := <-first; v != nil {
+		t.Errorf("the probe's panic reached the gate: %v", v)
+	}
+	second := make(chan GateRow, 1)
+	go func() {
+		defer func() { recover() }()
+		res, err := g.e.r.Gate(g.input(GatePromotePlanned))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		second <- gateRow(t, res, "master_port")
+	}()
+	select {
+	case row := <-second:
+		if row.Status != GateYellow {
+			t.Fatalf("master_port after the panic = %+v", row)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the second gate is still waiting for the probe that panicked")
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("probes = %d, want 2 (a panicked probe is not kept)", n)
 	}
 }

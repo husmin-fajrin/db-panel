@@ -75,10 +75,28 @@ func (r *Runner) masterPortOpen(masterID int64, hostPort string) bool {
 	r.ports.byMaster[masterID] = p
 	r.ports.mu.Unlock()
 
-	p.open = r.dialPort(hostPort)
-	p.at = now
-	close(p.done)
-	return p.open
+	// The gates waiting for this probe are released however it ends (the
+	// caller may hold startMu).
+	defer close(p.done)
+	open, ok := r.probePort(hostPort)
+	p.open = open
+	if ok {
+		p.at = now
+	} // else p.at stays zero: the answer is not kept and the next gate probes again
+	return open
+}
+
+// probePort is dialPort with a panic of the probe recovered: the port then
+// reads as closed (the row is yellow-only and must never break a start)
+// and ok is false.
+func (r *Runner) probePort(hostPort string) (open, ok bool) {
+	defer func() {
+		if v := recover(); v != nil {
+			r.log.Warn("master port probe panicked; the port is taken as closed", "addr", hostPort, "panic", v)
+			open, ok = false, false
+		}
+	}()
+	return r.dialPort(hostPort), true
 }
 
 // dialPort is one probe of hostPort, bounded by portProbeTimeout:
