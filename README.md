@@ -3198,13 +3198,17 @@ Pilih salah satu, lalu kerjakan di server itu.
 3. Perintah menulis: "Langkah berikutnya: bila MySQL di server ini masih
    baca-saja (read-only) dan server ini memang akan dipakai aplikasi sebagai
    master, pastikan master lain tidak lagi dipakai, lalu buka dengan: sudo
-   dbpanel agent unlock-master". Hanya bila begitu, jalankan:
+   dbpanel agent unlock-master". Jalankan hanya bila MySQL masih baca-saja
+   (read-only), server ini memang akan dipakai aplikasi sebagai master, dan
+   master lain tidak lagi dipakai:
 
    ```sh
    sudo dbpanel agent unlock-master
    ```
 
-4. Syarat langkah 3 berlaku juga di sini. `unlock-master` tidak menghapus
+4. Kerjakan langkah ini hanya bila Anda menjalankan langkah 3: server ini
+   memang akan dipakai aplikasi sebagai master, dan master lain tidak lagi
+   dipakai. `unlock-master` tidak menghapus
    `read_only` yang disimpan karantina dengan `SET PERSIST`, jadi setelah
    MySQL restart `read_only` menyala lagi. Matikan dengan pernyataan ini
    sebagai root MySQL (misalnya lewat `sudo mysql`, atau `mysql -u root -p`
@@ -3299,8 +3303,22 @@ Langkah membuat akun khusus panel `panel_admin` (hak yang sama dengan
 akun buatan `sudo dbpanel agent reset-admin`). Jangan memakai nama yang
 diawali `dbpanel_`: awalan itu dipakai akun buatan panel.
 
-1. Masuk ke server yang disebut baris itu, lalu masuk ke MySQL sebagai
-   root:
+Lihat dulu di halaman **Replikasi** di mana langkahnya dikerjakan:
+
+- Server itu bertanda **replika**: jangan jalankan pernyataan di bawah di
+  replika itu, dan jangan pernah mematikan baca-saja (read-only) di
+  replika. Replika yang ditulis langsung menjadi berbeda dari masternya dan
+  harus dibangun ulang. Buka halaman replika itu. Bila **Database yang
+  diikuti** tertulis "semua", kerjakan langkah 1 sampai 5 di master
+  replika itu, lalu langkah 6 untuk replika ini. Bila tertulis daftar
+  database (replika sebagian), akun dari master tidak sampai ke replika
+  ini: panggil admin MySQL.
+- Server itu bertanda **master**, atau tidak tampil di halaman
+  **Replikasi**: kerjakan langkah 1 sampai 5 di server itu, lalu langkah 6
+  bila server itu master.
+- Server itu master lama yang dikarantina: lihat akhir sub-bagian ini.
+
+1. Masuk ke server itu, lalu masuk ke MySQL sebagai root:
 
    ```sh
    sudo mysql
@@ -3312,19 +3330,33 @@ diawali `dbpanel_`: awalan itu dipakai akun buatan panel.
    mysql -u root -p
    ```
 
-2. Siapkan sandi acak yang panjang (paling sedikit 24 karakter), misalnya
-   dari perintah ini di terminal lain. Jangan pakai sandi yang dipakai di
-   tempat lain.
+2. Periksa apakah akun itu sudah ada. Pernyataan ini hanya membaca.
 
-   ```sh
-   openssl rand -base64 24
+   ```sql
+   SELECT user, host FROM mysql.user WHERE user = 'panel_admin' AND host = 'localhost';
    ```
 
-3. Jalankan tiga pernyataan ini. Ganti kedua `<sandi-acak-panjang>` dengan
-   sandi dari langkah 2. Pernyataan ini berlaku untuk akun baru maupun akun
-   yang sudah ada. Bila akun `panel_admin` sudah ada, sandinya diganti
-   dengan sandi baru ini, jadi **Hubungkan MySQL** (langkah 4) harus
-   dijalankan lagi dengan sandi baru.
+   - Tidak ada baris: lanjutkan ke langkah 3.
+   - Ada satu baris dan sandinya Anda ketahui: lewati langkah 3 dan 4,
+     lanjutkan ke langkah 5 dengan sandi itu.
+   - Ada satu baris tetapi sandinya tidak diketahui: langkah 4 mengganti
+     sandinya. Setiap server yang memakai akun itu lalu tidak bisa masuk ke
+     MySQL sampai **Hubungkan MySQL** dijalankan lagi di sana dengan sandi
+     baru: server ini dan, bila server ini master, setiap replikanya yang
+     mengikuti semua database.
+3. Buat sandi acak yang panjang dengan perintah ini di terminal lain.
+   Bagian `-Aa1` di belakangnya membuat sandi itu selalu memuat huruf besar,
+   huruf kecil, angka dan tanda baca, yang diwajibkan sebagian MySQL.
+   Jangan pakai sandi yang dipakai di tempat lain.
+
+   ```sh
+   echo "$(openssl rand -base64 24)-Aa1"
+   ```
+
+4. Jalankan tiga pernyataan ini. Ganti kedua `<sandi-acak-panjang>` dengan
+   sandi dari langkah 3. Pernyataan ini berlaku untuk akun baru maupun akun
+   yang sudah ada; bila akun `panel_admin` sudah ada, sandinya diganti
+   dengan sandi baru ini (lihat langkah 2).
 
    ```sql
    CREATE USER IF NOT EXISTS 'panel_admin'@'localhost' IDENTIFIED BY '<sandi-acak-panjang>';
@@ -3332,15 +3364,23 @@ diawali `dbpanel_`: awalan itu dipakai akun buatan panel.
    GRANT ALL PRIVILEGES ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;
    ```
 
-4. Di panel, buka halaman server itu. Di kartu MySQL, buka **Hubungkan
+5. Di panel, buka halaman server itu. Di kartu MySQL, buka **Hubungkan
    ulang**. Isi **Pengguna MySQL** dengan `panel_admin` dan **Kata sandi**
-   dengan sandi dari langkah 2. Kosongkan **Host (opsional)**. Tekan
-   **Hubungkan MySQL**.
-5. Muat ulang layar tindakan. Baris **Akun panel** harus bertanda
+   dengan sandinya. Kosongkan **Host (opsional)**. Tekan **Hubungkan
+   MySQL**.
+6. Bila server itu master: kerjakan ini untuk setiap replikanya yang
+   mengikuti semua database, bila baris **Akun panel** replika itu merah
+   atau replika itu sudah memakai `panel_admin`. Akun dari master sampai ke
+   replika lewat replikasi. Di MySQL replika itu (sebagai root), jalankan
+   pemeriksaan langkah 2: harus tampil satu baris. Bila belum, lihat
+   **Ketertinggalan** di halaman replika itu, tunggu, lalu periksa lagi.
+   Sesudah itu kerjakan langkah 5 di halaman replika itu, dengan sandi yang
+   sama.
+7. Muat ulang layar tindakan. Baris **Akun panel** harus bertanda
    "Terpenuhi".
 
 Di server yang dikarantina (master lama), MySQL baca-saja menolak
-pernyataan di langkah 3. Di sana jalankan perintah ini, lalu klik
+pernyataan di langkah 4. Di sana jalankan perintah ini, lalu klik
 **Segarkan** di halaman server itu:
 
 ```sh
@@ -3420,7 +3460,7 @@ MySQL master lama tidak dibuat baca-saja (read-only).
 1. Pastikan tidak ada aplikasi yang bisa menulis ke master lama sebelum ia
    dinyalakan atau disambungkan lagi ke jaringan. Semua aplikasi harus sudah
    memakai **Alamat master baru** dari layar pengalihan. Bila MySQL master
-   lama mati, biarkan mati sampai langkah 7.
+   lama mati, biarkan mati sampai langkah 8.
 2. Di halaman server master lama, buka **Detail teknis**. Lanjutkan hanya
    bila tertulis "Peran dipin: master".
 3. Di master lama, lihat daftar replika yang pernah tersambung ke server itu:
@@ -3432,7 +3472,11 @@ MySQL master lama tidak dibuat baca-saja (read-only).
    Lanjutkan hanya bila host master baru tidak ada di daftar itu.
 4. Di master lama, pin server itu sebagai dikarantina. Perintah ini tidak
    bertanya. Agent yang berjalan lalu menulis kunci start dalam beberapa
-   detik dan membuat MySQL-nya baca-saja bila MySQL menyala.
+   detik dan membuat MySQL-nya baca-saja bila MySQL menyala. Bila MySQL
+   master lama sedang menyala dan bisa ditulis, panel lalu membuka
+   peringatan **Master lama sempat bisa ditulis**: itu benar, karena
+   MySQL-nya tadi bisa ditulis. Langkah 9 (**Periksa data tertinggal**)
+   memeriksa tulisan itu dan menutup peringatannya.
 
    ```sh
    sudo dbpanel agent set-role quarantined
@@ -3454,8 +3498,10 @@ MySQL master lama tidak dibuat baca-saja (read-only).
 
 7. Di panel, muat ulang halaman server master lama. Judul kotaknya kini
    "Master lama (dikarantina sejak …)".
-8. Bila MySQL master lama menyala, periksa di sana bahwa ia baca-saja.
-   Jawabannya harus `1 1`.
+8. Bila MySQL master lama mati, baru sekarang boleh dinyalakan: sesudah
+   langkah 7, dan sesudah **Detail teknis** di halaman servernya menulis
+   "Kunci start: Terkunci". Lalu periksa di master lama bahwa MySQL-nya
+   baca-saja. Jawabannya harus `1 1`.
 
    ```sh
    mysql -e 'SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;'
