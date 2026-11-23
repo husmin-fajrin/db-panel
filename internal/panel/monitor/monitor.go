@@ -124,6 +124,12 @@ type Monitor struct {
 	settings  Settings
 	servers   map[int64]*serverState
 	lastCheck map[int64]time.Time // last CheckNow per server
+	// configMu holds one lock per server, taken by configure across
+	// reading the server row, the agent's call and taking its answer, so
+	// two configures of one server reach its agent in turn (the agent
+	// does not keep the order of requests). Lock order: a configMu lock,
+	// then mu; mu is never held while waiting for one.
+	configMu map[int64]*sync.Mutex
 	// ageClamped: servers whose report age was clamped (SEC-81), logged
 	// once per server.
 	ageClamped map[int64]bool
@@ -162,6 +168,7 @@ func New(d Deps) *Monitor {
 		st: d.Store, hub: d.Hub, publish: d.Publish, log: d.Logger, now: d.Now,
 		tickEvery: d.TickEvery, startedAt: d.Now(), ctx: ctx, cancel: cancel,
 		servers: make(map[int64]*serverState), lastCheck: make(map[int64]time.Time),
+		configMu:        make(map[int64]*sync.Mutex),
 		ageClamped:      make(map[int64]bool),
 		onAlertsChanged: d.OnAlertsChanged,
 		sendWeekly:      d.SendWeekly,
@@ -401,6 +408,13 @@ func (m *Monitor) CheckNow(ctx context.Context, serverID int64) error {
 // the agent's scan off), to the agent of id and takes its answer as a
 // report. An agent that does not know the command needs an upgrade.
 func (m *Monitor) configure(ctx context.Context, id int64) {
+	// One configure of id at a time, from reading its row to taking the
+	// answer: the last to run reads the last folder saved. The call is
+	// bounded by configureTimeout and by Close, so a waiter is not held
+	// for longer.
+	lock := m.configLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, configureTimeout)
 	defer cancel()
 	srv, err := m.st.GetServer(id)
@@ -438,6 +452,18 @@ func (m *Monitor) configure(ctx context.Context, id int64) {
 	default:
 		m.report(id, he)
 	}
+}
+
+// configLock is the configure lock of server id (configMu).
+func (m *Monitor) configLock(id int64) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.configMu[id]
+	if !ok {
+		l = &sync.Mutex{}
+		m.configMu[id] = l
+	}
+	return l
 }
 
 func unknownCommand(err error) bool {

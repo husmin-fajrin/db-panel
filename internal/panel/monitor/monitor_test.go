@@ -212,7 +212,7 @@ func (r *rig) agent(id int64, modern bool, snap proto.HealthSnapshot) *fakeAgent
 	reg := commands.NewRegistry()
 	reg.Register("probe", func(context.Context, json.RawMessage) (any, error) { return proto.ProbeResult{}, nil })
 	if modern {
-		reg.Register("monitor.configure", func(_ context.Context, raw json.RawMessage) (any, error) {
+		reg.Register("monitor.configure", func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var p proto.MonitorConfigureParams
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return nil, err
@@ -225,7 +225,13 @@ func (r *rig) agent(id int64, modern bool, snap proto.HealthSnapshot) *fakeAgent
 			configGate := a.configGate
 			a.mu.Unlock()
 			if configGate != nil {
-				<-configGate
+				// As over a real connection, the call ends with the
+				// caller's context.
+				select {
+				case <-configGate:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
 			}
 			for _, he := range backlog {
 				a.emit(he)
@@ -1554,5 +1560,85 @@ func TestClockSkew(t *testing.T) {
 	// No report at all.
 	if d, ok := ClockSkew(View{ServerID: mID, ReceivedAt: r.clk.Now()}); ok {
 		t.Fatalf("ClockSkew without a report = %v, true; want false", d)
+	}
+}
+
+// waitUntil polls cond for up to 5 s.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestConfigureInOrderPerServer (C-3, A-2): two configures of one server
+// do not overlap: the second reads the server row only once the first's
+// call is answered, so the agent gets the folders in the order they were
+// saved and ends on the last one. Another server's configure is not held
+// up meanwhile.
+func TestConfigureInOrderPerServer(t *testing.T) {
+	r := newRig(t)
+	mID, topo := r.master("db-master")
+	rID := r.replica("db-replica", topo)
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+	before := ma.count("monitor.configure")
+
+	release := ma.holdConfigures()
+	if err := r.st.SetServerBackup(mID, "/srv/a", 48); err != nil {
+		t.Fatal(err)
+	}
+	r.m.ConfigureServer(context.Background(), mID)
+	waitUntil(t, "the first configure to reach the agent", func() bool { return ma.count("monitor.configure") == before+1 })
+	if err := r.st.SetServerBackup(mID, "/srv/b", 48); err != nil {
+		t.Fatal(err)
+	}
+	r.m.ConfigureServer(context.Background(), mID)
+
+	// Another server is configured while the first call is held.
+	rBefore := ra.count("monitor.configure")
+	r.m.ConfigureServer(context.Background(), rID)
+	waitUntil(t, "the other server's configure", func() bool { return ra.count("monitor.configure") == rBefore+1 })
+
+	// The second configure of the held server waits for the first.
+	time.Sleep(100 * time.Millisecond)
+	if n := ma.count("monitor.configure"); n != before+1 {
+		t.Fatalf("%d configures reached the agent while the first was unanswered, want 1", n-before)
+	}
+	release()
+	r.settle()
+	ma.mu.Lock()
+	got := ma.configs[before:]
+	ma.mu.Unlock()
+	if len(got) != 2 || got[0].BackupFolder != "/srv/a" || got[1].BackupFolder != "/srv/b" {
+		t.Fatalf("folders sent = %+v, want /srv/a then /srv/b", got)
+	}
+}
+
+// Close is not held up by a configure waiting for another of the same
+// server whose call the agent does not answer: Close ends the call, and
+// the waiter's call ends with it.
+func TestConfigureLockDoesNotHoldClose(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	before := ma.count("monitor.configure")
+	ma.holdConfigures()
+	r.m.ConfigureServer(context.Background(), mID)
+	r.m.ConfigureServer(context.Background(), mID)
+	waitUntil(t, "the first configure to reach the agent", func() bool { return ma.count("monitor.configure") == before+1 })
+	done := make(chan struct{})
+	go func() {
+		r.m.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close held up by a configure waiting for its server's lock")
 	}
 }
