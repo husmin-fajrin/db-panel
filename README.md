@@ -3372,9 +3372,9 @@ mana langkahnya dikerjakan:
    dengan sandinya. Kosongkan **Host (opsional)**. Tekan **Hubungkan
    MySQL**.
 6. Bila server itu master: kerjakan ini untuk setiap replikanya yang
-   mengikuti semua database, bila baris **Akun panel** replika itu merah
-   atau replika itu sudah memakai `panel_admin`. Akun dari master sampai ke
-   replika lewat replikasi. Di MySQL replika itu (sebagai root), jalankan
+   mengikuti semua database. Langkah ini tidak merugikan replika yang sudah
+   benar, jadi kerjakan di semuanya. Akun dari master sampai ke replika
+   lewat replikasi. Di MySQL replika itu (sebagai root), jalankan
    pemeriksaan langkah 2: harus tampil satu baris. Bila belum, lihat
    **Ketertinggalan** di halaman replika itu, tunggu, lalu periksa lagi.
    Sesudah itu kerjakan langkah 5 di halaman replika itu, dengan sandi yang
