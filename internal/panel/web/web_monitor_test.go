@@ -3,6 +3,8 @@ package web_test
 import (
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -249,7 +251,9 @@ func masterSnap() *proto.HealthSnapshot {
 		DiskTotal: 100 << 30, DiskFree: 29 << 30, MemTotal: 16 << 30, MemAvailable: 6 << 30, Load1: 0.42}
 }
 
-func TestMasterPageDownShowsManualGuidance(t *testing.T) {
+// A master presumed down points to the panel's emergency promote and its
+// guide; it never tells the operator to make a replica writable by hand.
+func TestMasterPageDownPointsToEmergencyPromote(t *testing.T) {
 	e, mon, _ := monitorEnv(t)
 	down := "Diduga tumbang (agent offline): agent tidak terhubung 3 menit dan 1 replika kehilangan koneksi"
 	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow.Add(-3 * time.Minute),
@@ -258,13 +262,22 @@ func TestMasterPageDownShowsManualGuidance(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	status := between(rec.Body.String(), `data-status-for="1"`, `<h2>Kontrol</h2>`)
 	for _, s := range []string{"Diduga tumbang", "lencana-error", down, "Yang bisa dilakukan sekarang",
-		"STOP REPLICA; RESET REPLICA ALL; SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF;",
-		"tetap terbuka walau MySQL di-restart",
-		"Executed_Gtid_Set", "panel belum bisa"} {
+		"Periksa listrik, jaringan dan MySQL di server master.",
+		"Jangan me-restart replika",
+		"Bila master tidak bisa dipulihkan, jalankan promote darurat: di kartu <strong>Ganti master</strong> di halaman ini, tekan <strong>Promote…</strong>.",
+		`href="/panduan#promote-darurat"`} {
 		if !strings.Contains(status, s) {
 			t.Errorf("status section lacks %q:\n%s", s, status)
 		}
 	}
+	for _, s := range []string{"RESET REPLICA", "STOP REPLICA", "SET PERSIST", "read_only", "secara manual",
+		"panel belum bisa", "versi berikutnya", "Executed_Gtid_Set"} {
+		if strings.Contains(status, s) {
+			t.Errorf("status section still has %q:\n%s", s, status)
+		}
+	}
+	// The card and button the box names are on the same page.
+	wantBody(t, rec, "<h2>Ganti master</h2>", `href="/masters/1/promote">Promote…</a>`)
 
 	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: monNow,
 		Status: monitor.Status{Code: monitor.StatusHealthy, Severity: monitor.SevOK, Detail: "Master menjawab dan bisa ditulisi"}, Snap: masterSnap()})
@@ -659,5 +672,25 @@ func TestStatusLabelMengejar(t *testing.T) {
 	v.Status.Code, v.Status.LagSec = monitor.StatusLagging, ptr[int64](0)
 	if got := web.StatusLabelOf(2, store.RoleReplica, v); got != monitor.StatusLagging {
 		t.Errorf("label of Ketinggalan = %q", got)
+	}
+}
+
+// No template tells the operator to promote a replica by hand: the panel's
+// promote is the only way it offers to make a replica the master.
+func TestNoTemplatePromotesByHand(t *testing.T) {
+	files, err := filepath.Glob("../../../web/templates/*.html")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("templates: %v %v", files, err)
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range []string{"RESET REPLICA ALL", "master secara manual", "panel belum bisa"} {
+			if strings.Contains(string(b), s) {
+				t.Errorf("%s contains %q", f, s)
+			}
+		}
 	}
 }

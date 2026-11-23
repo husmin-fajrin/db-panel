@@ -42,7 +42,8 @@ type statusView struct {
 	// left (old master, replica to repoint or rebuild), in plain
 	// language; nil otherwise.
 	Explain *monitor.Explanation
-	// DownGuide: a master presumed down shows the manual steps.
+	// DownGuide: a master presumed down shows what to check and where the
+	// emergency promote is.
 	DownGuide bool
 }
 

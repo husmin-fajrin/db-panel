@@ -52,13 +52,10 @@ health_update. */}}
 <div class="flex flex-1 flex-col items-start gap-2">
   <h3 class="font-semibold">Yang bisa dilakukan sekarang</h3>
   <ol class="list-decimal ml-6 flex flex-col gap-1">
-    <li>Periksa listrik dan jaringan server master. Bila master hidup lagi, panel melihatnya sendiri dan replika menyambung kembali.</li>
+    <li>Periksa listrik, jaringan dan MySQL di server master. Bila master hidup lagi, panel melihatnya sendiri dan replika menyambung kembali.</li>
     <li>Jangan me-restart replika: posisi replikasinya dibutuhkan untuk langkah berikut.</li>
-    <li>Buka halaman tiap replika dan cari replika dengan GTID dieksekusi (Executed_Gtid_Set) paling banyak.</li>
-    <li>Bila master tidak bisa dipulihkan, jadikan replika itu master secara manual. Di MySQL replika itu jalankan: <code class="break-all">STOP REPLICA; RESET REPLICA ALL; SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF;</code> (SET PERSIST: tetap terbuka walau MySQL di-restart).</li>
-    <li>Arahkan aplikasi ke alamat IP replika itu.</li>
+    <li>Bila master tidak bisa dipulihkan, jalankan promote darurat: di kartu <strong>Ganti master</strong> di halaman ini, tekan <strong>Promote…</strong>. Ikuti langkahnya di panduan "<a class="link" href="/panduan#promote-darurat">Promote darurat</a>".</li>
   </ol>
-  <p class="text-sm">Catatan: panel belum bisa melakukan langkah ini; versi berikutnya akan melakukannya otomatis.</p>
 </div>
 </div>
 {{end}}

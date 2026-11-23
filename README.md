@@ -1054,9 +1054,11 @@ Status master: **Sehat**, **Terkunci** (`super_read_only` menyala, aplikasi
 tidak bisa menulis), **Tidak terjangkau**, **Agent offline**, **Menunggu
 laporan pertama** (seperti di replika), dan **Diduga
 tumbang** (agent atau MySQL master tidak menjawab lebih dari 30 detik).
-Untuk master yang diduga tumbang, halamannya menampilkan langkah manual
-"Yang bisa dilakukan sekarang"; panel belum bisa memindahkan peran master
-sendiri.
+Untuk master yang diduga tumbang, halamannya menampilkan kotak "Yang bisa
+dilakukan sekarang": periksa listrik, jaringan dan MySQL di server master,
+jangan me-restart replika, dan bila master tidak bisa dipulihkan, jalankan
+promote darurat dari kartu **Ganti master** (tombol **Promote…**) dengan
+panduan "Promote darurat".
 
 Halaman master dan replika juga menampilkan versi, uptime, koneksi, disk,
 RAM, beban, lag, umur binlog, dan garis waktu kejadian 7 hari (bisa diperluas ke
