@@ -3295,8 +3295,9 @@ Perbaikan: "Buat akun MySQL khusus panel lalu hubungkan lagi (Panduan,
 "Memperbaiki baris merah"). Bila akunnya sudah diganti di server, klik
 Segarkan di kartu MySQL halaman server itu."
 
-Langkah membuat akun khusus panel `dbpanel_admin` (hak yang sama dengan
-akun buatan `sudo dbpanel agent reset-admin`):
+Langkah membuat akun khusus panel `panel_admin` (hak yang sama dengan
+akun buatan `sudo dbpanel agent reset-admin`). Jangan memakai nama yang
+diawali `dbpanel_`: awalan itu dipakai akun buatan panel.
 
 1. Masuk ke server yang disebut baris itu, lalu masuk ke MySQL sebagai
    root:
@@ -3320,16 +3321,19 @@ akun buatan `sudo dbpanel agent reset-admin`):
    ```
 
 3. Jalankan tiga pernyataan ini. Ganti kedua `<sandi-acak-panjang>` dengan
-   sandi dari langkah 2. Bila akun itu sudah ada, sandinya diganti.
+   sandi dari langkah 2. Pernyataan ini berlaku untuk akun baru maupun akun
+   yang sudah ada. Bila akun `panel_admin` sudah ada, sandinya diganti
+   dengan sandi baru ini, jadi **Hubungkan MySQL** (langkah 4) harus
+   dijalankan lagi dengan sandi baru.
 
    ```sql
-   CREATE USER IF NOT EXISTS 'dbpanel_admin'@'localhost' IDENTIFIED BY '<sandi-acak-panjang>';
-   ALTER USER 'dbpanel_admin'@'localhost' IDENTIFIED WITH caching_sha2_password BY '<sandi-acak-panjang>' REQUIRE NONE ACCOUNT UNLOCK;
-   GRANT ALL PRIVILEGES ON *.* TO 'dbpanel_admin'@'localhost' WITH GRANT OPTION;
+   CREATE USER IF NOT EXISTS 'panel_admin'@'localhost' IDENTIFIED BY '<sandi-acak-panjang>';
+   ALTER USER 'panel_admin'@'localhost' IDENTIFIED WITH caching_sha2_password BY '<sandi-acak-panjang>' REQUIRE NONE ACCOUNT UNLOCK;
+   GRANT ALL PRIVILEGES ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;
    ```
 
 4. Di panel, buka halaman server itu. Di kartu MySQL, buka **Hubungkan
-   ulang**. Isi **Pengguna MySQL** dengan `dbpanel_admin` dan **Kata sandi**
+   ulang**. Isi **Pengguna MySQL** dengan `panel_admin` dan **Kata sandi**
    dengan sandi dari langkah 2. Kosongkan **Host (opsional)**. Tekan
    **Hubungkan MySQL**.
 5. Muat ulang layar tindakan. Baris **Akun panel** harus bertanda
