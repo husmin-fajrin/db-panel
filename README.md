@@ -3415,7 +3415,8 @@ Baris yang belum diketahui berwarna kuning: "<baris> belum diketahui: agent
 <server> sedang tidak tersambung." (perbaikannya: "Pastikan agent di server
 itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."), atau
 "<baris> belum diketahui: agent <server> belum melaporkannya." (tunggu
-laporan berikutnya, lalu muat ulang).
+laporan berikutnya, lalu muat ulang; untuk baris **Akun panel**, lihat
+sub-bagiannya).
 
 #### Versi agent
 
@@ -3474,6 +3475,13 @@ Tertulis: "Agent di <server> masuk ke MySQL sebagai root."
 Perbaikan: "Buat akun MySQL khusus panel lalu hubungkan lagi (Panduan,
 "Memperbaiki baris merah"). Bila akunnya sudah diganti di server, klik
 Segarkan di kartu MySQL halaman server itu."
+
+Atau tertulis (kuning): "Akun panel belum diketahui: agent <server> belum
+melaporkannya."
+
+Perbaikan: "Klik Segarkan di kartu MySQL halaman server itu, lalu muat
+ulang halaman ini." Laporan berkala agent tidak membawa akun itu, jadi
+menunggu tidak menolong.
 
 Langkah membuat akun khusus panel `panel_admin` (hak yang sama dengan
 akun buatan `sudo dbpanel agent reset-admin`). Jangan memakai nama yang
@@ -3830,17 +3838,20 @@ sebelum promote terencana berikutnya:
    agent** di atas). Panel menolak agent yang versinya berbeda dari panel
    (baris **Versi agent**), dan agent lama tidak melaporkan jam dan folder
    cadangan yang dibaca baris lain.
-2. Bila agent di sebuah server masih masuk ke MySQL sebagai `root`, buat
+2. Di halaman setiap server, klik **Segarkan** di kartu MySQL. Versi panel
+   sebelumnya tidak menyimpan akun MySQL yang dipakai agent; **Segarkan**
+   membacanya, sehingga baris **Akun panel** bisa dinilai.
+3. Bila agent di sebuah server masih masuk ke MySQL sebagai `root`, buat
    akun MySQL khusus panel dan hubungkan lagi (baris **Akun panel**;
    langkahnya di panduan "Memperbaiki baris merah").
-3. Di halaman setiap master, pastikan master punya sertifikat MySQL dari
+4. Di halaman setiap master, pastikan master punya sertifikat MySQL dari
    panel (**Pasang sertifikat MySQL** di halaman servernya bila belum),
    lalu jalankan **Wajibkan pemeriksaan sertifikat TLS** (baris
    **Pemeriksaan sertifikat TLS**).
-4. Isi **Folder cadangan** di halaman setiap master (lihat "Cadangan
+5. Isi **Folder cadangan** di halaman setiap master (lihat "Cadangan
    (backup)" di "Pemantauan"), dan tekan **Tandai sudah** di **Pengaturan**
    untuk `panel.key` dan log audit bila keduanya memang sudah dikerjakan.
-5. Buka layar **Promote…** setiap master hanya untuk melihat daftarnya.
+6. Buka layar **Promote…** setiap master hanya untuk melihat daftarnya.
    Perbaiki setiap baris "Belum terpenuhi" dengan panduan "Memperbaiki
    baris merah". Baca juga setiap baris "Perlu perhatian".
 
