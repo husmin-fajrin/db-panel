@@ -220,7 +220,7 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	in := orchestrator.GateInput{Action: orchestrator.GateResync, MasterID: topo.MasterServerID, TargetID: srv.ID}
 	if g := a.gateCheck(in, nil); g.status != 0 {
 		a.audit(r, "replica_resync", auditReplica, srv.ID, detail, g.outcome)
-		a.replicaErrorStatus(w, r, srv, rep, g.status, g.flash)
+		a.resyncRefused(w, r, srv, rep, g.status, g.flash)
 		return
 	}
 	if !a.requireConfirm(w, r, ActResync, auditReplica, srv.ID) {
@@ -248,6 +248,10 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.Logger.Warn("resync refused", "server", srv.ID, "err", logErr(err))
 		status, flash := a.startRefusal(err, http.StatusBadRequest)
+		if _, gate := errors.AsType[*orchestrator.GateError](err); gate {
+			a.resyncRefused(w, r, srv, rep, status, flash)
+			return
+		}
 		a.replicaErrorStatus(w, r, srv, rep, status, flash)
 		return
 	}
@@ -394,6 +398,15 @@ func (a *app) replicaError(w http.ResponseWriter, r *http.Request, srv store.Ser
 }
 
 // replicaErrorStatus shows msg with status on the replica's page.
+// resyncRefused renders the replica page of a resync the gate refused,
+// with the resync dialog open: the precondition list G14 points at is in
+// that dialog.
+func (a *app) resyncRefused(w http.ResponseWriter, r *http.Request, srv store.Server, rep store.Replica, status int, msg string) {
+	p := replicaPage{Page: a.page(r), Server: srv, Replica: rep, OpenResync: true}
+	p.Flash = msg
+	a.renderReplica(w, r, status, p)
+}
+
 func (a *app) replicaErrorStatus(w http.ResponseWriter, r *http.Request, srv store.Server, rep store.Replica, status int, msg string) {
 	p := replicaPage{Page: a.page(r), Server: srv, Replica: rep}
 	p.Flash = msg

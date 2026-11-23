@@ -981,3 +981,40 @@ func TestJobPageRedGate(t *testing.T) {
 		})
 	}
 }
+
+// TestResyncRefusalOpensDialog (W-3): a resync refused for a red row, by
+// the handler or by the start, renders the replica page with the resync
+// dialog open, so the list G14 points at is in sight.
+func TestResyncRefusalOpensDialog(t *testing.T) {
+	const open = `id="modal-resync" class="modal" x-data="openDialog" data-open="true"`
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	f.setGate(redDisk)
+	form := withToken(t, e, url.Values{"confirm_name": {"db-replika"}}, web.ActResync, "replica", 2)
+	rec := e.do("POST", "/replicas/2/resync", form, c)
+	wantCode(t, rec, http.StatusConflict)
+	wantBody(t, rec, wantG14Disk, open, "Kosongkan ruang", wantD2)
+
+	// The start's own gate refusal (the row turned red after the check).
+	f.setGate(nil)
+	f.mu.Lock()
+	f.err = &orchestrator.GateError{Rows: []orchestrator.GateRow{{Key: "disk", Label: "Ruang disk", Status: orchestrator.GateRed}}}
+	f.mu.Unlock()
+	rec = e.do("POST", "/replicas/2/resync", form, c)
+	wantCode(t, rec, http.StatusConflict)
+	wantBody(t, rec, wantG14Disk, open)
+	// Another refusal of the start keeps the dialog closed.
+	f.mu.Lock()
+	f.err = errGateStore
+	f.mu.Unlock()
+	form = withToken(t, e, url.Values{"confirm_name": {"db-replika"}}, web.ActResync, "replica", 2)
+	rec = e.do("POST", "/replicas/2/resync", form, c)
+	wantNoBody(t, rec, open)
+	f.mu.Lock()
+	f.err = nil
+	f.mu.Unlock()
+
+	// A plain GET keeps the dialog closed.
+	rec = e.do("GET", "/replicas/2", nil, c)
+	wantNoBody(t, rec, open)
+}
