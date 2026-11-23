@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
 // TestCloneCreateRetryPageNeedsToken (ruling 16): with the real
@@ -49,6 +51,35 @@ func TestCloneCreateRetryPageNeedsToken(t *testing.T) {
 	}
 	if err := p.Store.UpdateJob(id, store.JobFailed, 4, "CLONE gagal", time.Now()); err != nil {
 		t.Fatal(err)
+	}
+	// The retry's gate has no red row, so the token decides: both agents
+	// were at the panel's version and the master's last report carries
+	// its role pin.
+	local, err := p.Store.GetServer(p.localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []store.Server{master, local} {
+		if err := p.Store.UpdateProbe(s.ID, proto.ProbeResult{Hostname: s.Name}, o.Version, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, err := json.Marshal(proto.HealthEvent{Seq: 1, Snapshot: proto.HealthSnapshot{MySQLOK: true, RolePin: "master",
+		AgentVersion: o.Version}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.onEvent(master.ID, proto.Event{Type: proto.EventHealth, Payload: b})
+	j, _, err := p.Store.GetJob(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, gated := orchestrator.JobGateInput(j)
+	if !gated {
+		t.Fatal("the retry of a CLONE that failed at Salin data is not gated")
+	}
+	if res, err := p.Orchestrator.Gate(in); err != nil || len(res.Red()) > 0 {
+		t.Fatalf("gate of the retry = %+v, %v; want no red row", res.Rows, err)
 	}
 
 	body := ui.get("/jobs/" + id)
