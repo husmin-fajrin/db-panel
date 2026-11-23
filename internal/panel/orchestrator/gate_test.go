@@ -272,6 +272,9 @@ const (
 	wantG8uf  = "Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru."
 	wantG10af = "Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."
 	wantG13f  = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
+	// wantG10bAccountF: the account row's fix while a connected server's
+	// account is not reported (Ruling R40).
+	wantG10bAccountF = "Klik Segarkan di kartu MySQL halaman server itu, lalu muat ulang halaman ini."
 )
 
 func TestGateAgentVersion(t *testing.T) {
@@ -502,7 +505,10 @@ func TestGateAccountSplitsAtLastAt(t *testing.T) {
 	wantRow(t, g.row(GateResync, "account"), GateRed,
 		"Agent di db-replica masuk ke MySQL sebagai root. Akun panel belum diketahui: agent db-master belum melaporkannya.", wantG6f)
 	g.setAccount(g.rep, true, "dbpanel@localhost")
-	wantRow(t, g.row(GateResync, "account"), GateYellow, "Akun panel belum diketahui: agent db-master belum melaporkannya.", "")
+	wantRow(t, g.row(GateResync, "account"), GateYellow, "Akun panel belum diketahui: agent db-master belum melaporkannya.",
+		wantG10bAccountF)
+	wantRow(t, g.row(GatePrepareMaster, "account"), GateYellow, "Akun panel belum diketahui: agent db-master belum melaporkannya.",
+		wantG10bAccountF)
 }
 
 // Ruling R30: only the target of Buat replika, whose MySQL may not be

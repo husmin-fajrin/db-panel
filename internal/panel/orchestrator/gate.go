@@ -190,7 +190,8 @@ const (
 	textG9f  = "Jalankan perintah di kotak Persetujuan di server pada halaman ini, lalu klik Periksa lagi."
 	textG10a = "%s belum diketahui: agent %s sedang tidak tersambung." // %s: the row's label, then the server
 	textG10b = "%s belum diketahui: agent %s belum melaporkannya."     // %s: the row's label, then the server
-	// Fixes of two yellow rows (Ruling R28): G8u, and G10a. G10b has none.
+	// Fixes of two yellow rows (Ruling R28): G8u, and G10a. G10b has none
+	// (but see textG10bAccount).
 	textG8uf  = "Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru."
 	textG10af = "Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."
 	textG11a  = "Port MySQL master %s bisa dijangkau dari host panel; sebaiknya hanya terbuka untuk replika."
@@ -200,6 +201,11 @@ const (
 	textG13a  = "panel.key belum ditandai sudah dicadangkan."
 	textG13f  = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
 )
+
+// textG10bAccount is the account row's fix while a connected server's
+// account is not known yet (Ruling R40): stored before the panel read it
+// (an upgrade), it is read on Segarkan. %s is refreshButton.
+const textG10bAccount = "Klik %s di kartu MySQL halaman server itu, lalu muat ulang halaman ini."
 
 // refreshButton is the label of the MySQL card's button that posts
 // /servers/{id}/mysql/refresh (server_detail.html).
@@ -505,9 +511,11 @@ func (c *gateCtx) diskRow() (GateRow, error) {
 // accountRow: no agent logs in to MySQL as root (G6). The target of Buat
 // replika without a connected inventory (its MySQL not connected yet) is
 // not judged; any other server without one is not known yet (G10b, Ruling
-// R30), and so is a connected inventory without the account.
+// R30), and so is a connected inventory without the account; a yellow row
+// with such an inventory gets textG10bAccount as its fix (Ruling R40).
 func (c *gateCtx) accountRow() (GateRow, error) {
 	var vs []verdict
+	refresh := false // a connected server's account is not known yet
 	for _, s := range c.servers {
 		skip := c.in.Action == GateCreateReplica && s.srv.ID == c.in.TargetID
 		inv, err := c.r.d.Store.GetInventory(s.srv.ID)
@@ -522,13 +530,20 @@ func (c *gateCtx) accountRow() (GateRow, error) {
 		}
 		switch {
 		case !inv.Connected && skip:
-		case !inv.Connected, inv.Account == "":
+		case !inv.Connected:
 			vs = append(vs, yellow(textG10b, labelAccount, s.srv.Name))
+		case inv.Account == "":
+			vs = append(vs, yellow(textG10b, labelAccount, s.srv.Name))
+			refresh = true
 		case gateAccountUser(inv.Account) == rootUser:
 			vs = append(vs, red(textG6a, s.srv.Name))
 		}
 	}
-	return combine(keyAccount, labelAccount, vs, fmt.Sprintf(textG6f, refreshButton)), nil
+	row := combine(keyAccount, labelAccount, vs, fmt.Sprintf(textG6f, refreshButton))
+	if row.Status == GateYellow && refresh {
+		row.Fix = fmt.Sprintf(textG10bAccount, refreshButton)
+	}
+	return row, nil
 }
 
 // gateAccountUser is the user of a MySQL account user@host: the part
