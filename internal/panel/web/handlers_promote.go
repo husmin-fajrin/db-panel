@@ -305,10 +305,11 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	params, msg := checkPromote(view, choice)
 	params.BackupAck = backupAck && view.Mode == proto.PromotePlanned
 	id := ""
-	status := http.StatusBadRequest
+	status, outcome := http.StatusBadRequest, msg
 	if msg == "" {
 		if id, err = a.Orchestrator.StartPromote(r.Context(), params); err != nil {
-			status, msg = a.startRefusal(err, http.StatusBadRequest)
+			g := a.startRefused(err, http.StatusBadRequest)
+			status, msg, outcome = g.status, g.flash, g.outcome
 		}
 	}
 	detail := map[string]any{"candidate": choice.Candidate, "mode": view.Mode, "accept_partial": params.AcceptPartial,
@@ -317,7 +318,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 		detail["backup_ack"] = true
 	}
 	if msg != "" {
-		a.audit(r, "promote", auditMaster, srv.ID, detail, msg)
+		a.audit(r, "promote", auditMaster, srv.ID, detail, outcome)
 		a.Logger.Warn("promote refused", "master", srv.ID, "candidate", choice.Candidate, "err", msg)
 		p, err := a.newPromotePage(r, srv, topo, view, &choice)
 		if err != nil {

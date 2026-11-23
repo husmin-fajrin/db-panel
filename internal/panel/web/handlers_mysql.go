@@ -139,6 +139,21 @@ func (a *app) startRefusal(err error, def int) (status int, flash string) {
 	return def, a.shownError(err)
 }
 
+// refusalMsg is a refusal with msg shown and audited (status 0: 400).
+func refusalMsg(msg string) gateRefusal { return gateRefusal{0, msg, msg} }
+
+// startRefused is startRefusal as a gateRefusal: its audit outcome is G0
+// for a *GateError (a row turned red after the handler's own gate check;
+// gateCheck audits it the same), else the text shown.
+func (a *app) startRefused(err error, def int) gateRefusal {
+	status, flash := a.startRefusal(err, def)
+	outcome := flash
+	if _, ok := errors.AsType[*orchestrator.GateError](err); ok {
+		outcome = a.outcomeOf(err)
+	}
+	return gateRefusal{status, flash, outcome}
+}
+
 const (
 	msgMySQLUserRequired = "Nama pengguna MySQL wajib diisi"
 	msgMySQLFieldTooLong = "Nama pengguna, kata sandi, atau host MySQL terlalu panjang"
@@ -847,11 +862,12 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Target = target
 	p.ForceDump = r.PostFormValue("force_dump") != ""
-	failStatus := func(status int, msg string) {
-		a.audit(r, "create_replica", auditReplica, p.Target, detail, msg)
-		p.Flash = msg
-		a.renderReplicaNew(w, status, p)
+	refuse := func(g gateRefusal) {
+		a.audit(r, "create_replica", auditReplica, p.Target, detail, g.outcome)
+		p.Flash = g.flash
+		a.renderReplicaNew(w, g.status, p)
 	}
+	failStatus := func(status int, msg string) { refuse(gateRefusal{status, msg, msg}) }
 	fail := func(msg string) { failStatus(http.StatusBadRequest, msg) }
 	if p.Target <= 0 {
 		fail(msgReplicaTarget)
@@ -926,7 +942,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, orchestrator.ErrRebuildNeedsApproval) && p.Rebuild != nil {
 			a.rebuildApproval(r.Context(), p.Rebuild)
 		}
-		failStatus(a.startRefusal(err, http.StatusBadRequest))
+		refuse(a.startRefused(err, http.StatusBadRequest))
 		return
 	}
 	detail["job_id"] = id
@@ -1255,25 +1271,24 @@ func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 	if !a.databasesGate(w, r, "add_databases", false) {
 		return
 	}
-	a.changeReplicaDatabases(w, r, "add_databases", nil, func(p replicaDatabasesPage, selected []string) (string, string, int) {
+	a.changeReplicaDatabases(w, r, "add_databases", nil, func(p replicaDatabasesPage, selected []string) (string, gateRefusal) {
 		if p.NoInventory {
-			return "", msgNoMasterInventory, 0
+			return "", refusalMsg(msgNoMasterInventory)
 		}
 		for _, d := range selected {
 			i := slices.IndexFunc(p.Databases, func(rd replicaDatabase) bool { return rd.Name == d })
 			switch {
 			case i < 0 || !p.Databases[i].OnMaster:
-				return "", "Database " + d + " tidak ada di master", 0
+				return "", refusalMsg("Database " + d + " tidak ada di master")
 			case p.Databases[i].Followed:
-				return "", "Database " + d + " sudah diikuti replika ini", 0
+				return "", refusalMsg("Database " + d + " sudah diikuti replika ini")
 			}
 		}
 		id, err := a.Orchestrator.StartAddDatabases(r.Context(), p.Server.ID, selected)
 		if err != nil {
-			status, msg := a.startRefusal(err, http.StatusBadRequest)
-			return "", msg, status
+			return "", a.startRefused(err, http.StatusBadRequest)
 		}
-		return id, "", 0
+		return id, gateRefusal{}
 	})
 }
 
@@ -1326,35 +1341,34 @@ func (a *app) removeReplicaDatabases(w http.ResponseWriter, r *http.Request) {
 	if !a.requireConfirm(w, r, ActRemoveDatabases, auditReplica, srv.ID) {
 		return
 	}
-	a.changeReplicaDatabases(w, r, "remove_databases", map[string]any{"drop_data": dropData}, func(p replicaDatabasesPage, selected []string) (string, string, int) {
+	a.changeReplicaDatabases(w, r, "remove_databases", map[string]any{"drop_data": dropData}, func(p replicaDatabasesPage, selected []string) (string, gateRefusal) {
 		// Dropping the data also needs the replica's name typed (spec 5.6).
 		if dropData && !typedName(r, p.Server) {
-			return "", msgNameMismatch, 0
+			return "", refusalMsg(msgNameMismatch)
 		}
 		for _, d := range selected {
 			if !slices.Contains(p.Replica.Databases, d) {
-				return "", "Database " + d + " tidak diikuti replika ini", 0
+				return "", refusalMsg("Database " + d + " tidak diikuti replika ini")
 			}
 		}
 		if !slices.ContainsFunc(p.Replica.Databases, func(d string) bool { return !slices.Contains(selected, d) }) {
-			return "", msgRemoveAll, 0
+			return "", refusalMsg(msgRemoveAll)
 		}
 		id, err := a.Orchestrator.StartRemoveDatabases(r.Context(), p.Server.ID, selected, dropData)
 		if err != nil {
-			status, msg := a.startRefusal(err, http.StatusBadRequest)
-			return "", msg, status
+			return "", a.startRefused(err, http.StatusBadRequest)
 		}
-		return id, "", 0
+		return id, gateRefusal{}
 	})
 }
 
 // changeReplicaDatabases handles the add and remove posts of the databases
 // page: start checks the selection like the orchestrator does and starts
-// the job, answering its id or the reason it refused with its status (0:
-// 400). action is the audit action; detail (may be nil) goes into its
-// entry.
+// the job, answering its id or its refusal (status 0: 400; the outcome is
+// what the audit records). action is the audit action; detail (may be
+// nil) goes into its entry.
 func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, action string, detail map[string]any,
-	start func(p replicaDatabasesPage, selected []string) (jobID, refusal string, status int)) {
+	start func(p replicaDatabasesPage, selected []string) (jobID string, refusal gateRefusal)) {
 	srv, rep, ok := a.subsetReplicaFromPath(w, r)
 	if !ok {
 		return
@@ -1365,17 +1379,17 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 	selected := r.PostForm["databases"]
-	msg := ""
+	var ref gateRefusal
 	id := ""
-	status := 0
 	switch {
 	case !p.CanChange:
-		msg = msgReplicaNotReady
+		ref = refusalMsg(msgReplicaNotReady)
 	case len(selected) == 0:
-		msg = msgPickDatabase
+		ref = refusalMsg(msgPickDatabase)
 	default:
-		id, msg, status = start(p, selected)
+		id, ref = start(p, selected)
 	}
+	msg, status := ref.flash, ref.status
 	if status == 0 {
 		status = http.StatusBadRequest
 	}
@@ -1387,7 +1401,7 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 	if id != "" {
 		detail["job_id"] = id
 	}
-	a.audit(r, action, auditReplica, srv.ID, detail, outcomeMsg(msg))
+	a.audit(r, action, auditReplica, srv.ID, detail, outcomeMsg(ref.outcome))
 	if msg != "" {
 		a.Logger.Warn("replica databases "+verb+" refused", "server", srv.ID, "err", msg)
 		p.Flash = msg

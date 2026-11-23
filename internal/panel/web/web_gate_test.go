@@ -751,3 +751,59 @@ func TestGateErrorOnPage(t *testing.T) {
 		wantOff(t, rec.Body.String(), tc.attr)
 	}
 }
+
+// TestLateGateRefusalAuditedWithG0: when the orchestrator's start refuses
+// with a *GateError after the handler's own gate check passed (a row
+// turned red in between), every gated handler audits G0 (the red rows'
+// labels), as resync and the job actions do; the page still shows G14.
+func TestLateGateRefusalAuditedWithG0(t *testing.T) {
+	late := &orchestrator.GateError{Rows: []orchestrator.GateRow{{Key: "disk", Label: "Ruang disk", Status: orchestrator.GateRed,
+		Detail: "Disk <agent-kata> penuh."}}}
+	cases := []struct {
+		name   string
+		env    func(t *testing.T) (*env, *fakeOrch)
+		path   string
+		form   url.Values
+		token  [3]string
+		action string
+	}{
+		{name: "planned promote", env: promoteEnvF, path: "/masters/1/promote",
+			form:  promoteForm("2", "planned", "accept_unreachable", "4"),
+			token: [3]string{web.ActPromote, "master", "1"}, action: "promote"},
+		{name: "create replica", env: createEnv, path: "/masters/1/replicas",
+			form: url.Values{"target": {"2"}, "databases": {"toko"}, "confirm_wipe": {"1"}}, action: "create_replica"},
+		{name: "add databases", env: addEnv, path: "/replicas/2/databases/add", form: url.Values{"databases": {"arsip"}},
+			action: "add_databases"},
+		{name: "remove databases with drop", env: ctlEnv, path: "/replicas/2/databases/remove",
+			form:  url.Values{"databases": {"gudang"}, "drop_data": {"1"}, "confirm_name": {"db-replika"}},
+			token: [3]string{web.ActRemoveDatabases, "replica", "2"}, action: "remove_databases"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, f := tc.env(t)
+			c := e.cookie()
+			form := tc.form
+			if tc.token[0] != "" {
+				form = withToken(t, e, form, tc.token[0], tc.token[1], atoi(tc.token[2]))
+			}
+			f.mu.Lock()
+			if tc.action == "promote" {
+				f.promoteErr = late
+			} else {
+				f.err = late
+			}
+			f.mu.Unlock()
+			rec := e.do("POST", tc.path, form, c)
+			wantCode(t, rec, http.StatusConflict)
+			wantBody(t, rec, wantG14Disk)
+			entries := withoutConfirms(auditEntries(t, e.st))
+			last := entries[len(entries)-1]
+			if last.Action != tc.action || last.Outcome != "prasyarat belum terpenuhi: Ruang disk" {
+				t.Fatalf("audit = %+v", last)
+			}
+			if strings.Contains(last.DetailJSON, "agent-kata") {
+				t.Fatalf("audit carries the agent's text: %+v", last)
+			}
+		})
+	}
+}
