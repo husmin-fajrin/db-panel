@@ -1426,15 +1426,16 @@ func (r *Runner) RepointNow(ctx context.Context, replicaServerID int64) error {
 // OnOnline runs when an agent connects (the panel calls it after the
 // Monitor's): a quarantined old master whose quarantine is pending gets
 // mysql.quarantine, a replica in needs_repoint whose topology's master was
-// swapped gets mysql.repoint. It runs under the hub's lifecycle lock, so
-// the work happens on its own goroutine.
+// swapped gets mysql.repoint, and a server whose MySQL account is not
+// known yet has its inventory read (refreshUnknownAccount). It runs under
+// the hub's lifecycle lock, so the work happens on goroutines of its own.
 func (r *Runner) OnOnline(serverID int64) {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
 		return
 	}
-	r.wg.Add(1)
+	r.wg.Add(2)
 	r.mu.Unlock()
 	go func() {
 		defer r.wg.Done()
@@ -1442,6 +1443,28 @@ func (r *Runner) OnOnline(serverID int64) {
 		defer cancel()
 		r.onOnline(ctx, serverID)
 	}()
+	go func() {
+		defer r.wg.Done()
+		r.refreshUnknownAccount(r.base, serverID)
+	}()
+}
+
+// refreshUnknownAccount reads the inventory of serverID once, as Segarkan
+// does (RefreshInventory: read-only on the agent), when the stored one is
+// connected without the MySQL account the agent logs in with: an
+// inventory stored before the panel read accounts (Ruling R40). The gate's
+// Akun panel row then judges the account. It takes no lock but the
+// inventory's own; a failure is logged and the row stays as it was.
+func (r *Runner) refreshUnknownAccount(ctx context.Context, serverID int64) {
+	inv, err := r.d.Store.GetInventory(serverID)
+	if err != nil || !inv.Connected || inv.Account != "" {
+		return
+	}
+	if _, err := r.RefreshInventory(ctx, serverID); err != nil {
+		r.log.Warn("inventory not read on connect (MySQL account unknown)", "server_id", serverID, "err", logErr(err))
+		return
+	}
+	r.log.Info("inventory read on connect (MySQL account was unknown)", "server_id", serverID)
 }
 
 func (r *Runner) onOnline(ctx context.Context, serverID int64) {

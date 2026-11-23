@@ -2,10 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -75,5 +78,65 @@ func TestInventoryAccountBounded(t *testing.T) {
 	}
 	if inv, _ := e.st.GetInventory(fa.id); inv.Account != "dbpanel_admin@localhost" {
 		t.Fatalf("honest account stored as %q", inv.Account)
+	}
+}
+
+// TestOnOnlineRefreshesUnknownAccount (C-1, Ruling R40): when an agent
+// connects and its stored inventory is connected without an account (as
+// every inventory is after the upgrade), the panel reads the inventory
+// once in the background, as Segarkan does, so the Akun panel row judges
+// itself. It does not wait for the start lock, does not hold up OnOnline,
+// and asks nothing when the account is known or MySQL is not connected.
+func TestOnOnlineRefreshesUnknownAccount(t *testing.T) {
+	e := newEnv(t)
+	fa := e.connectedMaster("db-master")
+	release := make(chan struct{})
+	fa.on("mysql.inventory", func(json.RawMessage) (any, error) {
+		<-release
+		return proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs,
+			Account: "root@localhost"}, nil
+	})
+	// The start lock held meanwhile (a start judging its gate).
+	e.r.startMu.Lock()
+	n := fa.count("mysql.inventory")
+	done := make(chan struct{})
+	go func() {
+		e.r.OnOnline(fa.id)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnOnline waited for the inventory read")
+	}
+	e.waitFor("the inventory read", func() bool { return fa.count("mysql.inventory") == n+1 })
+	close(release)
+	e.waitFor("the account stored", func() bool {
+		inv, err := e.st.GetInventory(fa.id)
+		return err == nil && inv.Account == "root@localhost"
+	})
+	e.r.startMu.Unlock()
+	res, err := e.r.Gate(GateInput{Action: GatePrepareMaster, MasterID: fa.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row := gateRow(t, res, "account"); row.Status != GateRed {
+		t.Fatalf("account row after the refresh = %+v, want red", row)
+	}
+
+	// Known now: the next connect asks nothing.
+	e.r.OnOnline(fa.id)
+	// MySQL not connected: nothing either.
+	other := e.agent("db-other", "10.0.0.7")
+	if err := e.st.SetInventory(store.Inventory{ServerID: other.id, Connected: false, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	e.r.OnOnline(other.id)
+	time.Sleep(50 * time.Millisecond)
+	if got := fa.count("mysql.inventory"); got != n+1 {
+		t.Fatalf("mysql.inventory sent %d times, want once", got-n)
+	}
+	if got := other.count("mysql.inventory"); got != 0 {
+		t.Fatalf("mysql.inventory sent to a server whose MySQL is not connected")
 	}
 }
