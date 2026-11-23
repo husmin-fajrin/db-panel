@@ -244,7 +244,7 @@ func TestEmergencyPromoteNotGated(t *testing.T) {
 	if err != nil || len(res.Red()) == 0 {
 		t.Fatalf("gate = %+v, %v; want red rows", res.Rows, err)
 	}
-	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id,
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.c.id,
 		Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}})
 	if err != nil {
 		t.Fatalf("emergency promote with red rows: %v", err)

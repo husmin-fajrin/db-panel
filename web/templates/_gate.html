@@ -1,10 +1,12 @@
 {{/* gate-list: the precondition list of one gated action (plan 5b-2b,
-     D1, D4). Data: *gateView (nil draws nothing). Each row shows its
+     D1, D4, D6). Data: *gateView (nil draws nothing). Each row shows its
      status in words, its label and, when not green, its detail and then
-     its fix. */}}
+     its fix. An emergency promote's list says first that no row holds it
+     back. */}}
 {{define "gate-list"}}{{if and . .Shown}}
 <section class="flex min-w-0 flex-col gap-2" data-gate-list>
   <h3 class="font-semibold">Prasyarat</h3>
+  {{if .Emergency}}<p class="text-sm" data-gate-emergency>Baris yang belum terpenuhi tidak menghalangi promote darurat.</p>{{end}}
   {{with .Err}}<p class="text-sm" data-gate-error>{{.}}</p>{{else}}
   <ul class="flex flex-col gap-3">
     {{range .Rows}}

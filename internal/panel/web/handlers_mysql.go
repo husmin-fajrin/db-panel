@@ -127,7 +127,8 @@ func (a *app) gateCheck(in orchestrator.GateInput, ack *bool) gateRefusal {
 
 // startRefusal is how a gated handler shows err of a Start, Retry or
 // Approve: a red row (the gate judged again under the start lock) as
-// gateCheck shows it, the missing backup tick with G15, anything else as
+// gateCheck shows it, the missing backup tick with G15, the missing
+// dead-master tick of an emergency promote with D7, anything else as
 // shownError with status def.
 func (a *app) startRefusal(err error, def int) (status int, flash string) {
 	if ge, ok := errors.AsType[*orchestrator.GateError](err); ok {
@@ -139,6 +140,9 @@ func (a *app) startRefusal(err error, def int) (status int, flash string) {
 	}
 	if errors.Is(err, orchestrator.ErrBackupAck) {
 		return http.StatusBadRequest, msgBackupAck
+	}
+	if errors.Is(err, orchestrator.ErrOldMasterAck) {
+		return http.StatusBadRequest, msgOldMasterAck
 	}
 	return def, a.shownError(err)
 }

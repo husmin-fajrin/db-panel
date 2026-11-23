@@ -986,10 +986,55 @@ func (e *e2ePromoteTopology) startPromote(t *testing.T, candidate *e2eNode, mode
 		// backed up.
 		form.Set("backup_ack", "1")
 	}
+	if mode == proto.PromoteEmergency {
+		// The user ticks that the old master is dead or cut off (D5).
+		if !strings.Contains(page, `name="old_master_dead" value="1" required>`) {
+			t.Fatalf("emergency screen lacks the dead-master tick:\n%s", page)
+		}
+		form.Set("old_master_dead", "1")
+	}
 	for k, v := range extra {
 		form[k] = v
 	}
-	return e.ui.postJob(path, form), page
+	id := e.ui.postJob(path, form)
+	if mode == proto.PromoteEmergency {
+		e.wantEmergencyAudit(t, id)
+	}
+	return id, page
+}
+
+// wantEmergencyAudit checks the audit entry of the emergency promote that
+// started job id: the tick, the time the panel received the master's last
+// report and the red rows it skipped (keys only).
+func (e *e2ePromoteTopology) wantEmergencyAudit(t *testing.T, id string) {
+	t.Helper()
+	entries, err := e.p.Store.ListAudit(0, time.Time{}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range entries {
+		if a.Action != "promote" || !strings.Contains(a.DetailJSON, id) {
+			continue
+		}
+		var d struct {
+			OldMasterDead    bool      `json:"old_master_dead"`
+			MasterLastReport *string   `json:"master_last_report"`
+			SkippedRed       *[]string `json:"skipped_red"`
+		}
+		if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
+			t.Fatal(err)
+		}
+		if !d.OldMasterDead || d.MasterLastReport == nil || d.SkippedRed == nil {
+			t.Fatalf("emergency promote audit = %s", a.DetailJSON)
+		}
+		if *d.MasterLastReport != "" {
+			if _, err := time.Parse(time.RFC3339, *d.MasterLastReport); err != nil {
+				t.Fatalf("master_last_report %q: %v", *d.MasterLastReport, err)
+			}
+		}
+		return
+	}
+	t.Fatalf("no audit entry of the emergency promote %s", id)
 }
 
 // leftoverCheck runs "Periksa data tertinggal" on the quarantined old

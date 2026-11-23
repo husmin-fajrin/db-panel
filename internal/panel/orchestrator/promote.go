@@ -135,15 +135,26 @@ type PromoteParams struct {
 	// backup_ack=1); a planned promote needs it when the gate's backup row
 	// asks for it (no backup folder set, GateResult.NeedsBackupAck).
 	BackupAck bool
+	// OldMasterDeadAck: the user ticked that the old master is dead or
+	// cut off from the applications (form old_master_dead=1, D5); an
+	// emergency promote needs it (ErrOldMasterAck), a planned one does
+	// not ask.
+	OldMasterDeadAck bool
 }
+
+// ErrOldMasterAck: an emergency promote without the tick that the old
+// master is dead or cut off from the applications. While the old master
+// still takes writes, a second master loses data.
+var ErrOldMasterAck = errors.New("centang master lama mati belum diisi")
 
 // StartPromote starts the promotion of p.CandidateServerID to master of
 // p.MasterServerID's topology and records it in promotions. It refuses
 // what the consideration data (PromoteView) does not allow: a candidate
 // that is not eligible, branched replicas, a partial candidate without
 // AcceptPartial, unreachable replicas not in AcceptUnreachable, a mode the
-// master's status does not permit, an outdated agent (SEC-62), and a
-// topology with an unfinished job or a cutover still pending.
+// master's status does not permit, an emergency without OldMasterDeadAck
+// (ErrOldMasterAck), an outdated agent (SEC-62), and a topology with an
+// unfinished job or a cutover still pending.
 func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, error) {
 	if p.MasterServerID == p.CandidateServerID {
 		return "", errors.New("kandidat tidak boleh master itu sendiri")
@@ -188,6 +199,11 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		return "", errors.New("master masih sehat; jalankan promote terencana")
 	default:
 		return "", fmt.Errorf("mode promote tidak dikenal: %q", p.Mode)
+	}
+	// An emergency while the old master still takes writes makes two
+	// masters: the user ticks that it is dead or cut off (D5).
+	if mode == proto.PromoteEmergency && !p.OldMasterDeadAck {
+		return "", ErrOldMasterAck
 	}
 	// An emergency is never held back by it: the master is gone.
 	if mode == proto.PromotePlanned {

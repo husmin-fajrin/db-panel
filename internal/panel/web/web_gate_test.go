@@ -187,7 +187,8 @@ func atoi(s string) int64 {
 }
 
 // Lepas database without dropping the data, and an emergency promote, are
-// never gated.
+// never gated: the emergency reads only its own gate (for its audit, never
+// a planned one) and starts with a red row.
 func TestUngatedHandlersSkipGate(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	c := e.cookie()
@@ -202,11 +203,13 @@ func TestUngatedHandlersSkipGate(t *testing.T) {
 	c = e.cookie()
 	f.setGate(redDisk)
 	f.setView(emergencyView())
-	form = withToken(t, e, promoteForm("3", "emergency", "accept_unreachable", "4", "accept_partial", "3",
+	form = withToken(t, e, promoteForm("3", "emergency", "old_master_dead", "1", "accept_unreachable", "4", "accept_partial", "3",
 		"confirm_name", "db-master", "confirm_replica_name", "db-sebagian"), web.ActPromote, "master", 1)
 	wantCode(t, e.do("POST", "/masters/1/promote", form, c), http.StatusSeeOther)
-	if got := f.gateInputs(); len(got) != 0 {
-		t.Fatalf("gate asked for an emergency promote: %+v", got)
+	for _, in := range f.gateInputs() {
+		if in != (orchestrator.GateInput{Action: orchestrator.GatePromoteEmergency, MasterID: 1, TargetID: 3}) {
+			t.Fatalf("gate asked for an emergency promote: %+v", in)
+		}
 	}
 }
 

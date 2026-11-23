@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -414,7 +415,7 @@ func TestPromoteEmergencyQuarantineDeferredUntilOnline(t *testing.T) {
 		AcceptUnreachable: []int64{g.d.id}}); err == nil {
 		t.Fatal("planned promote of an offline master accepted")
 	}
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}})
+	id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}})
 	if err != nil {
 		t.Fatalf("StartPromote: %v", err)
 	}
@@ -483,7 +484,7 @@ func TestPendingQuarantineSentAfterSecondPromote(t *testing.T) {
 	for _, fa := range []*fakeAgent{g.c, g.b} {
 		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
 	}
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}})
+	id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}})
 	if err != nil {
 		t.Fatalf("first promote: %v", err)
 	}
@@ -498,7 +499,7 @@ func TestPendingQuarantineSentAfterSecondPromote(t *testing.T) {
 	}
 	g.h.set(g.b.id, replicaView(masterGTID, masterGTID))
 	g.emergencyOnC()
-	id, err = e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+	id, err = e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.c.id, CandidateServerID: g.b.id,
 		Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}})
 	if err != nil {
 		t.Fatalf("second promote: %v", err)
@@ -680,7 +681,7 @@ func TestPromoteViewBranchedNeedsAcceptance(t *testing.T) {
 			t.Fatalf("candidate %s branched = %v, want %v", c.Name, c.Branched, want)
 		}
 	}
-	accept := PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}}
+	accept := PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}}
 	if _, err := e.r.StartPromote(context.Background(), accept); err == nil || !strings.Contains(err.Error(), "bercabang") {
 		t.Fatalf("StartPromote on branched replicas: %v", err)
 	}
@@ -1157,7 +1158,7 @@ func TestPromoteEmergencyRefusedWhileLockMayStand(t *testing.T) {
 	deadline := *g.promotion().LockAt // the rig's lock: LockedAt + 30 min
 	deadline = deadline.Add(30 * time.Minute)
 	ctx := context.Background()
-	_, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id})
+	_, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.b.id})
 	if err == nil {
 		t.Fatal("emergency promote while the earlier lock may stand was accepted")
 	}
@@ -1176,7 +1177,7 @@ func TestPromoteEmergencyRefusedWhileLockMayStand(t *testing.T) {
 	}
 	// Past the deadline but within the grace: still refused.
 	e.r.now = func() time.Time { return deadline.Add(30 * time.Second) }
-	if _, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id}); err == nil ||
+	if _, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.b.id}); err == nil ||
 		!strings.Contains(err.Error(), "mungkin masih terkunci") {
 		t.Fatalf("emergency promote within the grace = %v, want refused", err)
 	}
@@ -1192,7 +1193,7 @@ func TestPromoteEmergencyRefusedWhileLockMayStand(t *testing.T) {
 		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Mode: proto.PromoteEmergency}, nil
 	})
 	g.b.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs})
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id})
+	id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.b.id})
 	if err != nil {
 		t.Fatalf("emergency promote after the deadline and grace: %v", err)
 	}
@@ -1223,7 +1224,7 @@ func TestPromoteEmergencyAllowedAfterConfirmedUnlock(t *testing.T) {
 		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Mode: proto.PromoteEmergency}, nil
 	})
 	g.b.reply("mysql.inventory", proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.4.3", Series: "8.4"}, Databases: masterDBs})
-	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id, CandidateServerID: g.b.id})
 	if err != nil {
 		t.Fatalf("emergency promote after a confirmed unlock: %v", err)
 	}
@@ -1555,7 +1556,7 @@ func TestEmergencyPromoteNotRefused(t *testing.T) {
 	if v.Mode != proto.PromoteEmergency || v.PendingOldMaster != "db-master" {
 		t.Fatalf("view mode %s, pending old master %q", v.Mode, v.PendingOldMaster)
 	}
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+	id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.c.id, CandidateServerID: g.b.id,
 		Mode: proto.PromoteEmergency})
 	if err != nil {
 		t.Fatalf("emergency promote with a pending old master: %v", err)
@@ -1632,7 +1633,7 @@ func TestOldMasterAfterSecondPromote(t *testing.T) {
 	})
 	g.emergencyOnC()
 	ctx := context.Background()
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+	id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.c.id, CandidateServerID: g.b.id,
 		Mode: proto.PromoteEmergency})
 	if err != nil {
 		t.Fatalf("second promote: %v", err)
@@ -1693,7 +1694,7 @@ func TestEmergencyPromoteIgnoresWritableOldMaster(t *testing.T) {
 	g.emergencyOnC()
 	ctx := context.Background()
 	mark, checks := g.m.mark(), len(g.h.checked())
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+	id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.c.id, CandidateServerID: g.b.id,
 		Mode: proto.PromoteEmergency})
 	if err != nil {
 		t.Fatalf("emergency promote with a writable quarantined old master: %v", err)
@@ -1763,7 +1764,7 @@ func TestOldMasterLeftoverNotBranched(t *testing.T) {
 			t.Fatalf("replica candidate = %+v", c)
 		}
 	}
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+	id, err := e.r.StartPromote(ctx, PromoteParams{OldMasterDeadAck: true, MasterServerID: g.c.id, CandidateServerID: g.b.id,
 		Mode: proto.PromoteEmergency})
 	if err != nil {
 		t.Fatalf("emergency promote without AcceptBranched: %v", err)
@@ -1786,7 +1787,7 @@ func TestBusyLabelForQuarantinedOldMaster(t *testing.T) {
 		ParamsJSON: "{}", CreatedAt: time.Now()}, mysqlTLSStepNames()); err != nil {
 		t.Fatal(err)
 	}
-	_, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.c.id, CandidateServerID: g.b.id,
+	_, err := e.r.StartPromote(context.Background(), PromoteParams{OldMasterDeadAck: true, MasterServerID: g.c.id, CandidateServerID: g.b.id,
 		Mode: proto.PromoteEmergency})
 	if !errors.Is(err, ErrBusy) || !strings.HasPrefix(err.Error(), "master lama db-master ") {
 		t.Fatalf("StartPromote with the old master busy = %v, want busy naming master lama db-master", err)
@@ -1857,5 +1858,173 @@ func TestAgentSentOfflineIsNotDisconnect(t *testing.T) {
 				t.Errorf("b = %s %q, want needs_repoint waiting", rep.State, rep.LastError)
 			}
 		})
+	}
+}
+
+// emergencyRig is a promote rig whose master is gone (emergency): c and b
+// cannot reach it, d's agent is offline.
+func emergencyRig(t *testing.T) *promoteRig {
+	g := newPromoteRig(t)
+	g.offline(g.m)
+	g.offline(g.d)
+	for _, fa := range []*fakeAgent{g.c, g.b} {
+		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
+	}
+	return g
+}
+
+// noPromotionStarted fails when g's topology has a promotion or an
+// unfinished job.
+func noPromotionStarted(t *testing.T, g *promoteRig) {
+	t.Helper()
+	if _, err := g.e.st.LatestPromotion(g.topo.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a refused promote recorded a promotion: %v", err)
+	}
+	if _, busy, err := g.e.st.ActiveJobForTopology(g.topo.ID); err != nil || busy {
+		t.Fatalf("a refused promote left a job: %v, %v", busy, err)
+	}
+}
+
+// TestEmergencyPromoteNeedsDeadMasterTick (D5): an emergency promote
+// without the tick that the old master is dead or cut off is refused with
+// ErrOldMasterAck before anything is written, whether the mode was posted
+// or follows the master's state; with the tick it runs. A planned promote
+// does not ask for it.
+func TestEmergencyPromoteNeedsDeadMasterTick(t *testing.T) {
+	ctx := context.Background()
+	g := emergencyRig(t)
+	e := g.e
+	for _, mode := range []string{proto.PromoteEmergency, ""} {
+		marks := markAll(e)
+		_, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, Mode: mode,
+			AcceptUnreachable: []int64{g.d.id}})
+		if !errors.Is(err, ErrOldMasterAck) {
+			t.Fatalf("mode %q without the tick = %v, want ErrOldMasterAck", mode, err)
+		}
+		noPromotionStarted(t, g)
+		onlyCmds(t, marks, "mysql.probeSource")
+	}
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id,
+		Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}, OldMasterDeadAck: true})
+	if err != nil {
+		t.Fatalf("emergency promote with the tick: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+
+	// Planned: never asked.
+	g = newPromoteRig(t)
+	id, err = g.e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id,
+		Mode: proto.PromotePlanned, AcceptUnreachable: []int64{g.d.id}})
+	if err != nil {
+		t.Fatalf("planned promote without the dead-master tick: %v", err)
+	}
+	g.e.waitJob(id, store.JobSucceeded)
+}
+
+// TestEmergencyPromoteStartsWithEveryRowRed: the master's agent is
+// connected but its MySQL is down (emergency) and every row that can be
+// red is: the master's agent version differs, its role pin is gone, its
+// clock is 5 minutes off, it has no certificate, the candidate's agent
+// logs in as root, the master's backup is stale. The emergency promote
+// starts all the same.
+func TestEmergencyPromoteStartsWithEveryRowRed(t *testing.T) {
+	ctx := context.Background()
+	g := newPromoteRig(t)
+	e := g.e
+	g.offline(g.d)
+	e.r.d.Version = "1.4.0"
+	now := time.Now()
+	for _, fa := range []*fakeAgent{g.c, g.b} {
+		if err := e.st.UpdateProbe(fa.id, proto.ProbeResult{Hostname: fa.name}, "1.4.0", now); err != nil {
+			t.Fatal(err)
+		}
+		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
+	}
+	if err := e.st.UpdateProbe(g.m.id, proto.ProbeResult{Hostname: g.m.name}, "1.3.0", now); err != nil {
+		t.Fatal(err)
+	}
+	g.h.set(g.m.id, monitor.View{Status: monitor.Status{Code: monitor.StatusDown}, ReceivedAt: now,
+		Snap: &proto.HealthSnapshot{MySQLOK: false, RolePin: "", ClockUnixMS: now.Add(-5 * time.Minute).UnixMilli(),
+			Backup: &proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 100 * 3600, NewestSize: 1024}}})
+	g.h.mu.Lock()
+	delete(g.h.green, g.m.id) // the scripted report, as it is
+	g.h.mu.Unlock()
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DELETE FROM server_tls WHERE server_id = ?`, g.m.id); err != nil {
+		t.Fatal(err)
+	}
+	e.rootAccount(g.c)
+
+	if mode := e.r.PromoteMode(g.m.id); mode != proto.PromoteEmergency {
+		t.Fatalf("mode = %q, want emergency", mode)
+	}
+	res, err := e.r.Gate(GateInput{Action: GatePromoteEmergency, MasterID: g.m.id, TargetID: g.c.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{keyAgentVersion, keyMasterPin, keyClock, keyTLS, keyAccount, keyBackup}
+	if got := res.RedKeys(); !slices.Equal(got, want) {
+		t.Fatalf("red rows = %v, want %v\n%+v", got, want, res.Rows)
+	}
+	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id,
+		Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}, OldMasterDeadAck: true})
+	if err != nil {
+		t.Fatalf("emergency promote with every row red: %v", err)
+	}
+	if job, _ := e.waitJob(id, store.JobSucceeded); job.Kind != KindPromoteEmergency {
+		t.Fatalf("job kind = %s", job.Kind)
+	}
+}
+
+// TestEmergencyPromoteCandidateRulesUnchanged (K1, K2): the tick does not
+// loosen the emergency's own checks: a candidate whose agent is of
+// another version still cannot be chosen, and an unfinished job of the
+// topology still refuses.
+func TestEmergencyPromoteCandidateRulesUnchanged(t *testing.T) {
+	ctx := context.Background()
+	g := emergencyRig(t)
+	e := g.e
+	e.r.d.Version = "1.4.0"
+	now := time.Now()
+	for _, fa := range []*fakeAgent{g.m, g.b} {
+		if err := e.st.UpdateProbe(fa.id, proto.ProbeResult{Hostname: fa.name}, "1.4.0", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.st.UpdateProbe(g.c.id, proto.ProbeResult{Hostname: g.c.name}, "1.3.0", now); err != nil {
+		t.Fatal(err)
+	}
+	v, err := e.r.PromoteView(ctx, g.m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range v.Candidates {
+		if c.ServerID == g.c.id && (c.Eligible || c.Reason != reasonAgentOutdated) {
+			t.Fatalf("outdated candidate = %+v", c)
+		}
+	}
+	params := PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, Mode: proto.PromoteEmergency,
+		AcceptUnreachable: []int64{g.d.id}, OldMasterDeadAck: true}
+	if _, err := e.r.StartPromote(ctx, params); err == nil || !strings.Contains(err.Error(), reasonAgentOutdated) {
+		t.Fatalf("outdated candidate with the tick: %v", err)
+	}
+	noPromotionStarted(t, g)
+
+	// An unfinished job of the topology refuses, tick or not.
+	params.CandidateServerID = g.b.id
+	const jobID = "77777777777777777777777777777777"
+	if err := e.st.CreateJob(store.Job{ID: jobID, Kind: KindCreateReplica, ServerID: g.d.id, TopologyID: g.topo.ID,
+		ParamsJSON: "{}", CreatedAt: now}, []string{"Langkah"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.StartPromote(ctx, params); !errors.Is(err, ErrBusy) {
+		t.Fatalf("emergency promote with an unfinished job = %v, want ErrBusy", err)
+	}
+	if _, err := e.st.LatestPromotion(g.topo.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a refused promote recorded a promotion: %v", err)
 	}
 }

@@ -1,10 +1,13 @@
 package web_test
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -136,7 +139,7 @@ func TestPromotePageShowsModeAndCandidates(t *testing.T) {
 	wantCode(t, rec, http.StatusServiceUnavailable)
 	wantBody(t, rec, "Data pertimbangan promote tidak bisa dikumpulkan; rinciannya ada di log panel.", "Master db-master")
 	wantNoBody(t, rec, "rahasia")
-	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "emergency"), web.ActPromote, "master", 1), c)
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "emergency", "old_master_dead", "1"), web.ActPromote, "master", 1), c)
 	wantCode(t, rec, http.StatusServiceUnavailable)
 	wantNoBody(t, rec, "rahasia")
 	entries, err := e.st.ListAudit(0, time.Time{}, 1)
@@ -230,35 +233,36 @@ func TestPromotePostNeedsTokenAndNames(t *testing.T) {
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Status master berubah")
 
-	// Emergency: the old master's name must be typed, for any candidate.
+	// Emergency (the D5 tick given): the old master's name must be typed,
+	// for any candidate.
 	f.setView(emergencyView())
 	before := len(f.promoteList())
-	rec = post(promoteForm("2", "emergency", "accept_unreachable", "4"))
+	rec = post(promoteForm("2", "emergency", "old_master_dead", "1", "accept_unreachable", "4"))
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Ketik nama master lama db-master")
-	rec = post(promoteForm("2", "emergency", "accept_unreachable", "4", "confirm_name", "db-replika"))
+	rec = post(promoteForm("2", "emergency", "old_master_dead", "1", "accept_unreachable", "4", "confirm_name", "db-replika"))
 	wantCode(t, rec, http.StatusBadRequest)
 	// A partial candidate in an emergency: both names (spec 5.2 "juga").
-	rec = post(promoteForm("3", "emergency", "accept_unreachable", "4", "accept_partial", "3", "confirm_name", "db-sebagian"))
+	rec = post(promoteForm("3", "emergency", "old_master_dead", "1", "accept_unreachable", "4", "accept_partial", "3", "confirm_name", "db-sebagian"))
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Ketik nama master lama db-master")
-	rec = post(promoteForm("3", "emergency", "accept_unreachable", "4", "accept_partial", "3", "confirm_name", "db-master"))
+	rec = post(promoteForm("3", "emergency", "old_master_dead", "1", "accept_unreachable", "4", "accept_partial", "3", "confirm_name", "db-master"))
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Ketik nama replika db-sebagian")
-	rec = post(promoteForm("3", "emergency", "accept_unreachable", "4", "accept_partial", "3",
+	rec = post(promoteForm("3", "emergency", "old_master_dead", "1", "accept_unreachable", "4", "accept_partial", "3",
 		"confirm_name", "db-sebagian", "confirm_replica_name", "db-master"))
 	wantCode(t, rec, http.StatusBadRequest)
 	if len(f.promoteList()) != before {
 		t.Fatalf("emergency promote started without the master's name")
 	}
-	rec = post(promoteForm("2", "emergency", "accept_unreachable", "4", "confirm_name", "db-master"))
+	rec = post(promoteForm("2", "emergency", "old_master_dead", "1", "accept_unreachable", "4", "confirm_name", "db-master"))
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/jobs/"+f.nextID)
 	got = f.promoteList()
 	if p := got[len(got)-1]; p.Mode != proto.PromoteEmergency || p.CandidateServerID != 2 || p.AcceptPartial || p.AcceptBranched {
 		t.Fatalf("emergency StartPromote got %+v", p)
 	}
-	rec = post(promoteForm("3", "emergency", "accept_unreachable", "4", "accept_partial", "3",
+	rec = post(promoteForm("3", "emergency", "old_master_dead", "1", "accept_unreachable", "4", "accept_partial", "3",
 		"confirm_name", "db-master", "confirm_replica_name", "db-sebagian"))
 	wantCode(t, rec, http.StatusSeeOther)
 	got = f.promoteList()
@@ -534,7 +538,7 @@ func TestPromoteConfirmTokenIssued(t *testing.T) {
 func promoteParamsEqual(a, b orchestrator.PromoteParams) bool {
 	if a.MasterServerID != b.MasterServerID || a.CandidateServerID != b.CandidateServerID || a.Mode != b.Mode ||
 		a.AcceptPartial != b.AcceptPartial || a.AcceptBranched != b.AcceptBranched ||
-		len(a.AcceptUnreachable) != len(b.AcceptUnreachable) {
+		a.OldMasterDeadAck != b.OldMasterDeadAck || len(a.AcceptUnreachable) != len(b.AcceptUnreachable) {
 		return false
 	}
 	for i := range a.AcceptUnreachable {
@@ -773,4 +777,237 @@ func TestPromoteScreenNamesBlockingJob(t *testing.T) {
 			wantNoBody(t, rec, promoteJobBlockedLine)
 		})
 	}
+}
+
+// Texts of the emergency promote (plan 5b-2b, D5-D7), as the page shows
+// them.
+const (
+	wantD5 = "Saya sudah memastikan master lama mati atau terputus dari aplikasi"
+	wantD6 = "Baris yang belum terpenuhi tidak menghalangi promote darurat."
+	wantD7 = "Centang &#34;Saya sudah memastikan master lama mati atau terputus dari aplikasi&#34; untuk melanjutkan promote darurat."
+	// d5Box is the D5 checkbox, required and not ticked.
+	d5Box = `name="old_master_dead" value="1" required>`
+)
+
+// emergencyPost is a complete emergency post for db-replika (2), without
+// the D5 tick.
+func emergencyPost() url.Values {
+	return promoteForm("2", "emergency", "accept_unreachable", "4", "confirm_name", "db-master")
+}
+
+// tickedPost is emergencyPost with the D5 tick.
+func tickedPost() url.Values {
+	form := emergencyPost()
+	form.Set("old_master_dead", "1")
+	return form
+}
+
+// TestEmergencyPromoteNeedsDeadMasterTick (D5, D7): the emergency screen
+// has the D5 box, required and not ticked; a post without it (or with any
+// value but "1") is refused with 400 and D7 before the token is used, and
+// with it the orchestrator gets OldMasterDeadAck. A planned promote has
+// no such box and does not ask for it.
+func TestEmergencyPromoteNeedsDeadMasterTick(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	f.setView(plannedView())
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantNoBody(t, rec, "old_master_dead", wantD5)
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "planned", "accept_unreachable", "4"),
+		web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	if p := f.promoteList(); len(p) != 1 || p[0].OldMasterDeadAck {
+		t.Fatalf("planned promotes = %+v", p)
+	}
+
+	f.setView(emergencyView())
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, d5Box, wantD5)
+	wantUnticked(t, rec.Body.String(), `name="old_master_dead"`)
+
+	form := withToken(t, e, emergencyPost(), web.ActPromote, "master", 1)
+	for _, v := range []string{"", "on", "true", "0"} {
+		if v != "" {
+			form.Set("old_master_dead", v)
+		}
+		rec = e.do("POST", "/masters/1/promote", form, c)
+		wantCode(t, rec, http.StatusBadRequest)
+		wantBody(t, rec, wantD7, d5Box)
+		wantUnticked(t, rec.Body.String(), `name="old_master_dead"`)
+	}
+	if len(f.promoteList()) != 1 {
+		t.Fatal("emergency promote started without the tick")
+	}
+	entries := withoutConfirms(auditEntries(t, e.st))
+	if last := entries[len(entries)-1]; last.Action != "promote" || !strings.Contains(last.Outcome, "untuk melanjutkan promote darurat") {
+		t.Fatalf("audit of the refusal = %+v", last)
+	}
+	form.Set("old_master_dead", "1")
+	rec = e.do("POST", "/masters/1/promote", form, c) // the same token
+	wantCode(t, rec, http.StatusSeeOther)
+	got := f.promoteList()
+	want := orchestrator.PromoteParams{MasterServerID: 1, CandidateServerID: 2, Mode: proto.PromoteEmergency,
+		AcceptUnreachable: []int64{4}, OldMasterDeadAck: true}
+	if len(got) != 2 || !promoteParamsEqual(got[1], want) {
+		t.Fatalf("StartPromote got %+v, want %+v", got, want)
+	}
+
+	// The orchestrator's own refusal reads the same.
+	f.mu.Lock()
+	f.promoteErr = orchestrator.ErrOldMasterAck
+	f.mu.Unlock()
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, wantD7)
+}
+
+// allRed is a gate in which every row that can be red is, between a
+// green and a yellow one; the agent's words are in a detail.
+func allRed(orchestrator.GateInput) (orchestrator.GateResult, error) {
+	return orchestrator.GateResult{Rows: []orchestrator.GateRow{
+		{Key: "agent_version", Label: "Versi agent", Status: orchestrator.GateRed, Detail: "Agent db-master versi <agent-kata>."},
+		{Key: "master_pin", Label: "Pin master", Status: orchestrator.GateRed, Detail: "Pin tidak ada."},
+		{Key: "clock", Label: "Jam (clock)", Status: orchestrator.GateRed, Detail: "Jam berbeda 5 menit."},
+		{Key: "tls", Label: "Sertifikat TLS", Status: orchestrator.GateRed, Detail: "Tanpa sertifikat."},
+		{Key: "account", Label: "Akun panel", Status: orchestrator.GateRed, Detail: "Akun root."},
+		{Key: "backup", Label: "Cadangan (backup)", Status: orchestrator.GateRed, Detail: "Cadangan usang."},
+		{Key: "master_port", Label: "Port master", Status: orchestrator.GateYellow, Detail: "Port menjawab."},
+		{Key: "audit_forward", Label: "Log audit"},
+	}}, nil
+}
+
+var allRedKeys = []string{"agent_version", "master_pin", "clock", "tls", "account", "backup"}
+
+// TestEmergencyPromoteStartsWithEveryRowRed: with every row red the
+// emergency screen keeps its button on, shows the list with D6 above it
+// and no D2, and the post starts the promote.
+func TestEmergencyPromoteStartsWithEveryRowRed(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	f.setView(emergencyView())
+	f.setGate(allRed)
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	wantOn(t, body, `data-confirm-action="promote"`)
+	list := between(body, `data-promote-box="2" data-gate-box`, "</section>")
+	if !strings.Contains(list, wantD6) || strings.Index(list, wantD6) > strings.Index(list, `data-gate-row="agent_version"`) {
+		t.Fatalf("D6 not above the list:\n%s", list)
+	}
+	wantNoBody(t, rec, wantD2)
+	for _, in := range f.gateInputs() {
+		if in.Action != orchestrator.GatePromoteEmergency {
+			t.Fatalf("emergency screen read the gate of %s", in.Action)
+		}
+	}
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	if len(f.promoteList()) != 1 {
+		t.Fatal("emergency promote with every row red did not start")
+	}
+
+	// D6 is the emergency's only: a planned list does not carry it.
+	f.setView(plannedView())
+	f.setGate(nil)
+	wantNoBody(t, e.do("GET", "/masters/1/promote", nil, c), wantD6)
+}
+
+// TestEmergencyPromoteAuditFields: the started emergency promote's audit
+// entry records the tick, the time the panel received the master's last
+// report (RFC 3339, UTC) and the keys of the rows that were red then, in
+// the list's order, and none of a row's text.
+func TestEmergencyPromoteAuditFields(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	v := emergencyView()
+	f.setView(v)
+	f.setGate(allRed)
+	rec := e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	entries := withoutConfirms(auditEntries(t, e.st))
+	last := entries[len(entries)-1]
+	if last.Action != "promote" || last.Outcome != "ok" {
+		t.Fatalf("audit = %+v", last)
+	}
+	var detail struct {
+		OldMasterDead    *bool    `json:"old_master_dead"`
+		MasterLastReport *string  `json:"master_last_report"`
+		SkippedRed       []string `json:"skipped_red"`
+	}
+	if err := json.Unmarshal([]byte(last.DetailJSON), &detail); err != nil {
+		t.Fatal(err)
+	}
+	wantReport := v.LastReportAt.UTC().Format(time.RFC3339)
+	if detail.OldMasterDead == nil || !*detail.OldMasterDead || detail.MasterLastReport == nil ||
+		*detail.MasterLastReport != wantReport || !slices.Equal(detail.SkippedRed, allRedKeys) {
+		t.Fatalf("audit detail = %s, want old_master_dead true, master_last_report %s, skipped_red %v",
+			last.DetailJSON, wantReport, allRedKeys)
+	}
+	for _, s := range []string{"agent-kata", "Jam berbeda", "Versi agent", "Cadangan usang"} {
+		if strings.Contains(last.DetailJSON, s) {
+			t.Fatalf("audit carries a row's text %q: %s", s, last.DetailJSON)
+		}
+	}
+
+	// No report ever received: "". No red row: an empty list.
+	v.LastReportAt = nil
+	f.setView(v)
+	f.setGate(nil)
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	entries = withoutConfirms(auditEntries(t, e.st))
+	if d := entries[len(entries)-1].DetailJSON; !strings.Contains(d, `"master_last_report":""`) || !strings.Contains(d, `"skipped_red":[]`) {
+		t.Fatalf("audit detail without report or red row = %s", d)
+	}
+
+	// A planned promote records none of the three.
+	f.setView(plannedView())
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "planned", "accept_unreachable", "4"),
+		web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	entries = withoutConfirms(auditEntries(t, e.st))
+	if d := entries[len(entries)-1].DetailJSON; strings.Contains(d, "old_master_dead") || strings.Contains(d, "master_last_report") ||
+		strings.Contains(d, "skipped_red") {
+		t.Fatalf("planned audit detail = %s", d)
+	}
+}
+
+// TestEmergencyPromoteCandidateRulesUnchanged (K1, K2): with the tick, a
+// candidate whose agent is of another version still cannot be chosen, and
+// an unfinished job of the topology still blocks the screen and refuses.
+func TestEmergencyPromoteCandidateRulesUnchanged(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	v := emergencyView()
+	v.Candidates[0].Eligible, v.Candidates[0].Reason = false, "Agent perlu dimutakhirkan"
+	f.setView(v)
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, `name="candidate" value="2"`)
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "db-replika tidak bisa dipilih: Agent perlu dimutakhirkan")
+	if len(f.promoteList()) != 0 {
+		t.Fatal("promote of an outdated candidate started")
+	}
+
+	f.setView(emergencyView())
+	topo, err := e.st.GetTopologyByMaster(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.CreateJob(store.Job{ID: "77777777777777777777777777777777", Kind: orchestrator.KindCreateReplica, ServerID: 3,
+		TopologyID: topo.ID, ParamsJSON: "{}", CreatedAt: time.Now()}, []string{"Langkah"}); err != nil {
+		t.Fatal(err)
+	}
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantBody(t, rec, promoteJobBlockedLine)
+	wantNoBody(t, rec, `name="candidate" value="2"`, d5Box)
+	f.mu.Lock()
+	f.promoteErr = fmt.Errorf("topologi ini %w", orchestrator.ErrBusy)
+	f.mu.Unlock()
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, promoteJobBlockedLine)
 }

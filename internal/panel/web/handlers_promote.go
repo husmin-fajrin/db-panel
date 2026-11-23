@@ -47,6 +47,9 @@ const (
 	// msgPromoteJobOpen: a job of the topology is unfinished, which the
 	// promote's POST refuses on (ruling D61).
 	msgPromoteJobOpen = "Topologi ini masih punya pekerjaan yang belum selesai. Buka pekerjaan itu dan tekan Batalkan, lalu kembali ke sini."
+	// msgOldMasterAck (D7): an emergency promote without the D5 tick that
+	// the old master is dead or cut off from the applications.
+	msgOldMasterAck = `Centang "Saya sudah memastikan master lama mati atau terputus dari aplikasi" untuk melanjutkan promote darurat.`
 
 	reasonWritable = "Bisa ditulis (super_read_only mati); mungkin sudah menjadi master"
 	// reasonAgentOffline is the orchestrator's reason for a replica whose
@@ -67,12 +70,16 @@ type promoteChoice struct {
 	// typed candidate's name, both trimmed.
 	ConfirmName        string
 	ConfirmReplicaName string
+	// OldMasterDead: the D5 tick (old_master_dead=1) that the old master
+	// is dead or cut off from the applications; an emergency asks for it.
+	OldMasterDead bool
 }
 
 func parsePromoteChoice(r *http.Request) promoteChoice {
 	c := promoteChoice{Mode: r.PostFormValue("mode"), AcceptBranched: r.PostFormValue("accept_branched") == "1",
 		ConfirmName:        strings.TrimSpace(r.PostFormValue("confirm_name")),
-		ConfirmReplicaName: strings.TrimSpace(r.PostFormValue("confirm_replica_name"))}
+		ConfirmReplicaName: strings.TrimSpace(r.PostFormValue("confirm_replica_name")),
+		OldMasterDead:      r.PostFormValue("old_master_dead") == "1"}
 	c.Candidate, _ = strconv.ParseInt(r.PostFormValue("candidate"), 10, 64)
 	c.AcceptPartial = formIDs(r, "accept_partial")
 	c.AcceptUnreachable = formIDs(r, "accept_unreachable")
@@ -267,15 +274,18 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	choice := parsePromoteChoice(r)
 	backupAck := r.PostFormValue("backup_ack") == "1"
 	// Before the token: a form whose mode is missing or no longer the
-	// master's is refused (the post is checked again against the
-	// consideration data below, and by the orchestrator); then the
-	// precondition gate of a planned promote. An emergency is never
-	// refused by a row. A post without a candidate is refused below, as
-	// before.
+	// master's, or an emergency without the D5 tick, is refused (the post
+	// is checked again against the consideration data below, and by the
+	// orchestrator); then the precondition gate of a planned promote. An
+	// emergency is never refused by a row. A post without a candidate is
+	// refused below, as before.
 	refuse := func(status int, flash, outcome string) {
 		detail := map[string]any{"candidate": choice.Candidate, "mode": choice.Mode}
 		if backupAck {
 			detail["backup_ack"] = true
+		}
+		if choice.Mode == proto.PromoteEmergency {
+			detail["old_master_dead"] = choice.OldMasterDead
 		}
 		a.audit(r, "promote", auditMaster, srv.ID, detail, outcome)
 		view, err := a.Orchestrator.PromoteView(r.Context(), srv.ID)
@@ -291,7 +301,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 		p.Flash = flash
 		a.render.renderStatus(w, status, "promote", p)
 	}
-	if msg := checkPromoteMode(a.Orchestrator.PromoteMode(srv.ID), choice); msg != "" {
+	if msg := checkPromotePosted(a.Orchestrator.PromoteMode(srv.ID), choice); msg != "" {
 		a.Logger.Warn("promote refused", "master", srv.ID, "candidate", choice.Candidate, "err", msg)
 		refuse(http.StatusBadRequest, msg, msg)
 		return
@@ -315,19 +325,35 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	}
 	params, msg := checkPromote(view, choice)
 	params.BackupAck = backupAck && view.Mode == proto.PromotePlanned
+	emergency := view.Mode == proto.PromoteEmergency
+	detail := map[string]any{"candidate": choice.Candidate, "mode": view.Mode, "accept_partial": params.AcceptPartial,
+		"accept_unreachable": params.AcceptUnreachable, "accept_branched": params.AcceptBranched}
+	if params.BackupAck {
+		detail["backup_ack"] = true
+	}
+	if emergency {
+		// What the user ticked, and when the panel last heard from the
+		// master (its own clock, not the agent's).
+		detail["old_master_dead"] = params.OldMasterDeadAck
+		detail["master_last_report"] = ""
+		if view.LastReportAt != nil {
+			detail["master_last_report"] = view.LastReportAt.UTC().Format(time.RFC3339)
+		}
+	}
 	id := ""
 	status, outcome := http.StatusBadRequest, msg
 	if msg == "" {
+		if emergency {
+			// The rows no emergency is refused by, red as it starts: their
+			// keys only (a row's detail may quote an agent).
+			detail["skipped_red"] = a.skippedRed(srv.ID, choice.Candidate)
+		}
 		if id, err = a.Orchestrator.StartPromote(r.Context(), params); err != nil {
 			g := a.startRefused(err, http.StatusBadRequest)
 			status, msg, outcome = g.status, g.flash, g.outcome
 		}
 	}
-	detail := map[string]any{"candidate": choice.Candidate, "mode": view.Mode, "accept_partial": params.AcceptPartial,
-		"accept_unreachable": params.AcceptUnreachable, "accept_branched": params.AcceptBranched, "job_id": id}
-	if params.BackupAck {
-		detail["backup_ack"] = true
-	}
+	detail["job_id"] = id
 	if msg != "" {
 		a.audit(r, "promote", auditMaster, srv.ID, detail, outcome)
 		a.Logger.Warn("promote refused", "master", srv.ID, "candidate", choice.Candidate, "err", msg)
@@ -341,18 +367,41 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit(r, "promote", auditMaster, srv.ID, detail, auditOK)
-	a.Logger.Info("promote started", "master", srv.ID, "candidate", params.CandidateServerID, "mode", view.Mode,
-		"job", id, "by", auth.UsernameFrom(r.Context()))
+	args := []any{"master", srv.ID, "candidate", params.CandidateServerID, "mode", view.Mode, "job", id,
+		"by", auth.UsernameFrom(r.Context())}
+	if emergency {
+		args = append(args, "skipped_red", detail["skipped_red"])
+	}
+	a.Logger.Info("promote started", args...)
 	http.Redirect(w, r, jobURL(id), http.StatusSeeOther)
+}
+
+// skippedRed is the keys of the rows of an emergency promote of master to
+// candidate that are red now, in the list's order (none: an empty list).
+// The gate never refuses an emergency; when it cannot judge, nil (null in
+// the audit: not known) and the start goes on.
+func (a *app) skippedRed(master, candidate int64) []string {
+	in := orchestrator.GateInput{Action: orchestrator.GatePromoteEmergency, MasterID: master, TargetID: candidate}
+	res, err := a.Orchestrator.Gate(in)
+	if err != nil {
+		a.Logger.Warn("gate not judged", "action", in.Action, "master", master, "target", candidate, "err", logErr(err))
+		return nil
+	}
+	keys := res.RedKeys()
+	if keys == nil {
+		keys = []string{}
+	}
+	return keys
 }
 
 // checkPromote checks choice against the consideration data; it answers
 // the orchestrator's parameters, or why the choice is refused.
 func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrator.PromoteParams, string) {
 	params := orchestrator.PromoteParams{MasterServerID: v.Master.ID, CandidateServerID: choice.Candidate, Mode: v.Mode}
-	if msg := checkPromoteMode(v.Mode, choice); msg != "" {
+	if msg := checkPromotePosted(v.Mode, choice); msg != "" {
 		return params, msg
 	}
+	params.OldMasterDeadAck = v.Mode == proto.PromoteEmergency && choice.OldMasterDead
 	i := slices.IndexFunc(v.Candidates, func(c orchestrator.Candidate) bool { return c.ServerID == choice.Candidate })
 	if i < 0 {
 		return params, msgPromotePick
@@ -401,14 +450,18 @@ func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrato
 	return params, ""
 }
 
-// checkPromoteMode is why choice's mode is refused against the master's
-// mode: missing, or no longer the master's; "" when it may go on.
-func checkPromoteMode(mode string, choice promoteChoice) string {
+// checkPromotePosted is why choice is refused against the master's mode,
+// from the form alone: its mode missing or no longer the master's, or an
+// emergency without the D5 tick (D7); "" when it may go on.
+func checkPromotePosted(mode string, choice promoteChoice) string {
 	if choice.Mode == "" {
 		return msgPromoteModeGone
 	}
 	if choice.Mode != mode {
 		return fmt.Sprintf(msgPromoteModeMoved, modeWord(mode))
+	}
+	if mode == proto.PromoteEmergency && !choice.OldMasterDead {
+		return msgOldMasterAck
 	}
 	return ""
 }
