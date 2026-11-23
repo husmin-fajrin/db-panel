@@ -47,6 +47,7 @@
     {{if .Emergency}}
     <p>Panel tidak bisa memakai MySQL master {{.Master.Name}}{{with .MasterStatus}} (status: {{.}}){{end}}, jadi hanya promote darurat yang tersedia: replika terpilih dijadikan master dengan transaksi yang sudah diterimanya. Anda tidak memilih mode; mode mengikuti keadaan master.</p>
     <p class="text-sm">Ragu master benar-benar tidak terjangkau? <a class="btn btn-sm" href="/masters/{{.Master.ID}}/promote">Periksa sekarang</a> membuka ulang halaman ini dan meminta laporan baru dari master dan tiap replika.</p>
+    <p class="text-sm" data-guide-link><a class="link" href="/panduan#promote-darurat">Panduan: Promote darurat</a></p>
     {{if .LastReport}}
     <p class="text-sm">Laporan terakhir master: pukul <span class="mono">{{.LastReport}}</span> ({{.LastReportAgo}}).</p>
     {{else}}

@@ -14,6 +14,7 @@
         <button type="button" class="btn btn-sm" @click="copy" x-text="buttonLabel">Salin</button>
       </div>
       <p>Arahkan semua aplikasi yang menulis ke database ke alamat ini, lalu restart aplikasinya.</p>
+      <p data-backup-move>Pindahkan jadwal cadangan (backup) ke master baru, lalu isi folder cadangan di halaman servernya. <a class="link" href="/panduan#jadwal-cadangan">Panduan: Memindahkan jadwal cadangan sesudah promote</a></p>
       {{with .OldAddress}}<p class="help">Alamat lama{{if $.HasOld}} ({{$.Old.Name}}){{end}}: <code class="mono">{{.}}</code></p>{{end}}
     </div>
   </section>

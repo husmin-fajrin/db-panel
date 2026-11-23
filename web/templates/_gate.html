@@ -14,6 +14,8 @@
       <div class="flex flex-wrap items-center gap-2">{{template "badge" .Badge}}<span class="font-semibold">{{.Label}}</span></div>
       {{with .Detail}}<p class="text-sm break-words" data-gate-detail>{{.}}</p>{{end}}
       {{with .Fix}}<p class="text-sm break-words" data-gate-fix>{{.}}</p>{{end}}
+      {{/* G6f names the guide; the link is here, the fix text stays plain. */}}
+      {{if and (eq .Key "account") (eq .Badge.Tone "error")}}<p class="text-sm" data-guide-link><a class="link" href="/panduan#baris-merah">Panduan: Memperbaiki baris merah</a></p>{{end}}
       {{if .Backup}}<p class="help">Panel hanya melihat umur dan ukuran berkas, bukan apakah cadangan itu bisa dipulihkan.</p>{{end}}
     </li>
     {{end}}

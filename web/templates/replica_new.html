@@ -6,6 +6,7 @@
   <span>{{.Server.Name}} adalah master lama yang dikarantina. Semua data MySQL-nya diganti salinan dari master baru {{$.Master.Name}}, lalu ia mengikuti master baru sebagai replika.</span>
   {{if .Warnings}}<ul class="list-disc ml-6">{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>{{end}}
 </div>
+<p class="mb-4 text-sm" data-guide-link><a class="link" href="/panduan#bangun-ulang-master-lama">Panduan: Bangun ulang master lama</a></p>
 {{if .CutoverPending}}
 <div role="alert" class="alert alert-error mb-4"><span>Tekan 'Sudah saya alihkan' dulu: membangun ulang membuka kunci tulis sebentar saat memuat data, dan aplikasi yang belum dialihkan bisa menulis ke sini. <a class="link" href="/masters/{{$.Master.ID}}/cutover">Buka layar pengalihan</a></span></div>
 {{end}}

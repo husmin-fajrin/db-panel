@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 )
 
 // guideTable is the guide page's nine guides, in order: their <h2> title
@@ -356,5 +358,67 @@ func TestGuideRedRowsMatchGate(t *testing.T) {
 				t.Errorf("README does not quote %s: lacks %q", name, frag)
 			}
 		}
+	}
+}
+
+// redAccount is a gate whose account row is red (G6a, G6f).
+func redAccount(orchestrator.GateInput) (orchestrator.GateResult, error) {
+	return orchestrator.GateResult{Rows: []orchestrator.GateRow{
+		{Key: "agent_version", Label: "Versi agent"},
+		{Key: "account", Label: "Akun panel", Status: orchestrator.GateRed, Detail: "Agent di db-calon masuk ke MySQL sebagai root.",
+			Fix: "Buat akun MySQL khusus panel lalu hubungkan lagi (Panduan, \"Memperbaiki baris merah\"). Bila akunnya " +
+				"sudah diganti di server, klik Segarkan di kartu MySQL halaman server itu."},
+	}}, nil
+}
+
+const (
+	linkPromote = `<a class="link" href="/panduan#promote-darurat">Panduan: Promote darurat</a>`
+	linkRebuild = `<a class="link" href="/panduan#bangun-ulang-master-lama">Panduan: Bangun ulang master lama</a>`
+	linkAccount = `<a class="link" href="/panduan#baris-merah">Panduan: Memperbaiki baris merah</a>`
+	linkBackup  = `<a class="link" href="/panduan#jadwal-cadangan">Panduan: Memindahkan jadwal cadangan sesudah promote</a>`
+	wantD8      = "Pindahkan jadwal cadangan (backup) ke master baru, lalu isi folder cadangan di halaman servernya."
+)
+
+func TestScreensLinkToGuides(t *testing.T) {
+	// The emergency promote screen; not the planned one.
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	f.setView(emergencyView())
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, linkPromote)
+	f.setView(plannedView())
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantNoBody(t, rec, "/panduan#promote-darurat")
+
+	// G6f: the red account row, inside its row; not on another row.
+	f.setGate(redAccount)
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	row := between(rec.Body.String(), `data-gate-row="account"`, "</li>")
+	if !strings.Contains(row, linkAccount) {
+		t.Errorf("red account row has no link to the guide:\n%s", row)
+	}
+	f.setGate(yellowOnly)
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantNoBody(t, rec, "/panduan#baris-merah")
+
+	// The rebuild form.
+	e2, _ := rebuildEnvF(t)
+	rec = e2.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, e2.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, linkRebuild)
+
+	// The cutover screen: D8 and its link.
+	e3, _, _ := promotedEnv(t)
+	rec = e3.do("GET", "/masters/2/cutover", nil, e3.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, wantD8, linkBackup)
+
+	// Every anchor is on the guide page.
+	rec = e3.do("GET", "/panduan", nil, e3.cookie())
+	wantCode(t, rec, http.StatusOK)
+	for _, id := range []string{"promote-darurat", "bangun-ulang-master-lama", "baris-merah", "jadwal-cadangan"} {
+		wantBody(t, rec, `id="`+id+`"`)
 	}
 }
