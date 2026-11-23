@@ -807,3 +807,42 @@ func TestLateGateRefusalAuditedWithG0(t *testing.T) {
 		})
 	}
 }
+
+// TestPromoteModeMovedBeforeGateAndToken: the mode the form posted is
+// checked against the master's mode before the gate and before the
+// token: a planned post after the master went offline reads "mode moved"
+// (not G14), an emergency post against a planned master too, and neither
+// consumes the token.
+func TestPromoteModeMovedBeforeGateAndToken(t *testing.T) {
+	e, f := promoteEnvF(t)
+	c := e.cookie()
+	f.setView(emergencyView())
+	f.setGate(redDisk)
+	planned := withToken(t, e, promoteForm("2", "planned", "accept_unreachable", "4"), web.ActPromote, "master", 1)
+	rec := e.do("POST", "/masters/1/promote", planned, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Status master berubah sejak halaman dibuka: sekarang hanya promote darurat yang tersedia.")
+	wantNoBody(t, rec, wantG14Disk)
+	if got := f.gateInputs(); len(got) > 0 && got[0].Action == orchestrator.GatePromotePlanned {
+		t.Fatalf("planned gate asked for a mode that moved: %+v", got)
+	}
+
+	// An emergency post against a planned master: refused, token kept.
+	f.setView(plannedView())
+	f.setGate(nil)
+	emergency := withToken(t, e, promoteForm("2", "emergency", "accept_unreachable", "4", "confirm_name", "db-master"),
+		web.ActPromote, "master", 1)
+	rec = e.do("POST", "/masters/1/promote", emergency, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, "Status master berubah sejak halaman dibuka: sekarang hanya promote terencana yang tersedia.")
+	if len(f.promoteList()) != 0 {
+		t.Fatal("promote started")
+	}
+	// The same token, now with the mode the master has, is accepted: the
+	// refusals did not consume it.
+	emergency.Set("mode", "planned")
+	rec = e.do("POST", "/masters/1/promote", emergency, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	rec = e.do("POST", "/masters/1/promote", planned, c)
+	wantCode(t, rec, http.StatusSeeOther)
+}

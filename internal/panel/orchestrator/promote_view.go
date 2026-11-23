@@ -161,15 +161,7 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 
 	mv, _ := r.view(masterServerID)
 	masterOnline := r.d.Hub.IsOnline(masterServerID)
-	v.Mode = proto.PromoteEmergency
-	if masterOnline && mv.Snap != nil && mv.Snap.MySQLOK {
-		switch mv.Status.Code {
-		// Menunggu laporan pertama: the last report predates a reconnect.
-		case monitor.StatusDown, monitor.StatusUnreachable, monitor.StatusAgentOffline, monitor.StatusAwaitingReport:
-		default:
-			v.Mode = proto.PromotePlanned
-		}
-	}
+	v.Mode = promoteMode(mv, masterOnline)
 	if !mv.ReceivedAt.IsZero() {
 		t := mv.ReceivedAt
 		v.LastReportAt = &t
@@ -475,4 +467,26 @@ func (r *Runner) writePause(v PromoteView) string {
 		}
 	}
 	return s
+}
+
+// PromoteMode is the mode a promotion of master masterServerID has now,
+// from the panel's last report of it and its agent's connection (no agent
+// call): planned while its agent is connected and its MySQL answers,
+// emergency otherwise. PromoteView answers the same after asking for
+// fresh reports.
+func (r *Runner) PromoteMode(masterServerID int64) string {
+	mv, _ := r.view(masterServerID)
+	return promoteMode(mv, r.d.Hub.IsOnline(masterServerID))
+}
+
+func promoteMode(mv monitor.View, online bool) string {
+	if online && mv.Snap != nil && mv.Snap.MySQLOK {
+		switch mv.Status.Code {
+		// Menunggu laporan pertama: the last report predates a reconnect.
+		case monitor.StatusDown, monitor.StatusUnreachable, monitor.StatusAgentOffline, monitor.StatusAwaitingReport:
+		default:
+			return proto.PromotePlanned
+		}
+	}
+	return proto.PromoteEmergency
 }

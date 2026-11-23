@@ -563,6 +563,32 @@ func TestPromoteViewWaitingMasterIsEmergency(t *testing.T) {
 	}
 }
 
+// TestPromoteModeMatchesView: PromoteMode (no agent call) answers the mode
+// PromoteView answers, for a healthy, a waiting and an offline master.
+func TestPromoteModeMatchesView(t *testing.T) {
+	g := newPromoteRig(t)
+	check := func(want string) {
+		t.Helper()
+		mark := g.m.mark()
+		if got := g.e.r.PromoteMode(g.m.id); got != want {
+			t.Fatalf("PromoteMode = %q, want %q", got, want)
+		}
+		if cmds := g.m.cmds(mark); len(cmds) > 0 {
+			t.Fatalf("PromoteMode called the agent: %v", cmds)
+		}
+		if v, err := g.e.r.PromoteView(context.Background(), g.m.id); err != nil || v.Mode != want {
+			t.Fatalf("PromoteView mode %q, err %v; want %q", v.Mode, err, want)
+		}
+	}
+	check(proto.PromotePlanned)
+	g.h.set(g.m.id, healthyView(monitor.StatusAwaitingReport, masterGTID, nil))
+	check(proto.PromoteEmergency)
+	g.h.set(g.m.id, healthyView(monitor.StatusHealthy, masterGTID, nil))
+	check(proto.PromotePlanned)
+	g.offline(g.m)
+	check(proto.PromoteEmergency)
+}
+
 func TestPromoteViewMarksPartialAndMostCurrent(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e

@@ -266,29 +266,40 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 	}
 	choice := parsePromoteChoice(r)
 	backupAck := r.PostFormValue("backup_ack") == "1"
-	// The precondition gate of a planned promote, before the token; an
-	// emergency is never refused by a row. A post without a candidate is
-	// refused below, as before.
+	// Before the token: a form whose mode is missing or no longer the
+	// master's is refused (the post is checked again against the
+	// consideration data below, and by the orchestrator); then the
+	// precondition gate of a planned promote. An emergency is never
+	// refused by a row. A post without a candidate is refused below, as
+	// before.
+	refuse := func(status int, flash, outcome string) {
+		detail := map[string]any{"candidate": choice.Candidate, "mode": choice.Mode}
+		if backupAck {
+			detail["backup_ack"] = true
+		}
+		a.audit(r, "promote", auditMaster, srv.ID, detail, outcome)
+		view, err := a.Orchestrator.PromoteView(r.Context(), srv.ID)
+		if err != nil {
+			a.promoteViewFailed(w, r, srv, err)
+			return
+		}
+		p, err := a.newPromotePage(r, srv, topo, view, &choice)
+		if err != nil {
+			a.internalError(w, "promote page", err)
+			return
+		}
+		p.Flash = flash
+		a.render.renderStatus(w, status, "promote", p)
+	}
+	if msg := checkPromoteMode(a.Orchestrator.PromoteMode(srv.ID), choice); msg != "" {
+		a.Logger.Warn("promote refused", "master", srv.ID, "candidate", choice.Candidate, "err", msg)
+		refuse(http.StatusBadRequest, msg, msg)
+		return
+	}
 	if choice.Mode == proto.PromotePlanned && choice.Candidate > 0 {
 		in := orchestrator.GateInput{Action: orchestrator.GatePromotePlanned, MasterID: srv.ID, TargetID: choice.Candidate}
 		if g := a.gateCheck(in, &backupAck); g.status != 0 {
-			detail := map[string]any{"candidate": choice.Candidate, "mode": choice.Mode}
-			if backupAck {
-				detail["backup_ack"] = true
-			}
-			a.audit(r, "promote", auditMaster, srv.ID, detail, g.outcome)
-			view, err := a.Orchestrator.PromoteView(r.Context(), srv.ID)
-			if err != nil {
-				a.promoteViewFailed(w, r, srv, err)
-				return
-			}
-			p, err := a.newPromotePage(r, srv, topo, view, &choice)
-			if err != nil {
-				a.internalError(w, "promote page", err)
-				return
-			}
-			p.Flash = g.flash
-			a.render.renderStatus(w, g.status, "promote", p)
+			refuse(g.status, g.flash, g.outcome)
 			return
 		}
 	}
@@ -339,11 +350,8 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 // the orchestrator's parameters, or why the choice is refused.
 func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrator.PromoteParams, string) {
 	params := orchestrator.PromoteParams{MasterServerID: v.Master.ID, CandidateServerID: choice.Candidate, Mode: v.Mode}
-	if choice.Mode == "" {
-		return params, msgPromoteModeGone
-	}
-	if choice.Mode != v.Mode {
-		return params, fmt.Sprintf(msgPromoteModeMoved, modeWord(v.Mode))
+	if msg := checkPromoteMode(v.Mode, choice); msg != "" {
+		return params, msg
 	}
 	i := slices.IndexFunc(v.Candidates, func(c orchestrator.Candidate) bool { return c.ServerID == choice.Candidate })
 	if i < 0 {
@@ -391,6 +399,18 @@ func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrato
 		return params, fmt.Sprintf(msgPromoteTypeRep, want)
 	}
 	return params, ""
+}
+
+// checkPromoteMode is why choice's mode is refused against the master's
+// mode: missing, or no longer the master's; "" when it may go on.
+func checkPromoteMode(mode string, choice promoteChoice) string {
+	if choice.Mode == "" {
+		return msgPromoteModeGone
+	}
+	if choice.Mode != mode {
+		return fmt.Sprintf(msgPromoteModeMoved, modeWord(mode))
+	}
+	return ""
 }
 
 // unreachable is the orchestrator's test for a replica that must be

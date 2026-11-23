@@ -307,6 +307,13 @@ func (f *fakeOrch) PromoteView(_ context.Context, masterServerID int64) (orchest
 	return f.view, f.err
 }
 
+// PromoteMode is the mode of view; not in calls (no agent call).
+func (f *fakeOrch) PromoteMode(int64) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.view.Mode
+}
+
 func (f *fakeOrch) StartPromote(_ context.Context, p orchestrator.PromoteParams) (string, error) {
 	f.record(fmt.Sprintf("promote %d %d %s", p.MasterServerID, p.CandidateServerID, p.Mode))
 	f.mu.Lock()

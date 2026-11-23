@@ -56,6 +56,10 @@ type Orchestrator interface {
 	// "Sudah saya alihkan", and "Arahkan sekarang" for a replica waiting
 	// to be pointed at the new master.
 	PromoteView(ctx context.Context, masterServerID int64) (orchestrator.PromoteView, error)
+	// PromoteMode is the mode PromoteView would answer, from the panel's
+	// own data (no agent call): the promote's POST checks the posted mode
+	// with it before its gate and its token.
+	PromoteMode(masterServerID int64) string
 	StartPromote(ctx context.Context, p orchestrator.PromoteParams) (string, error)
 	// ConfirmCutover's warning, when not "", must be shown: the old master
 	// is not quarantined yet.

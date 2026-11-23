@@ -136,7 +136,7 @@ func TestPromotePageShowsModeAndCandidates(t *testing.T) {
 	wantCode(t, rec, http.StatusServiceUnavailable)
 	wantBody(t, rec, "Data pertimbangan promote tidak bisa dikumpulkan; rinciannya ada di log panel.", "Master db-master")
 	wantNoBody(t, rec, "rahasia")
-	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "planned"), web.ActPromote, "master", 1), c)
+	rec = e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "emergency"), web.ActPromote, "master", 1), c)
 	wantCode(t, rec, http.StatusServiceUnavailable)
 	wantNoBody(t, rec, "rahasia")
 	entries, err := e.st.ListAudit(0, time.Time{}, 1)
