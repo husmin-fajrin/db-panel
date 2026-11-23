@@ -800,7 +800,7 @@ Master bisa dikunci dan dibuka langsung di servernya:
 
 ```sh
 sudo dbpanel agent lock-master     # SET PERSIST super_read_only=ON + kunci promosi
-sudo dbpanel agent unlock-master   # RESET PERSIST, read_only OFF, hapus kunci promosi
+sudo dbpanel agent unlock-master   # RESET PERSIST super_read_only, kedua flag OFF sampai restart, hapus kunci promosi
 ```
 
 `lock-master` membuat MySQL read-only, juga sesudah restart, dan menulis
@@ -810,7 +810,11 @@ dan tidak ada proses otomatis yang membukanya. `lock-master` menolak bila
 kunci sudah ada; `unlock-master` aman diulang dan hanya berjalan di server
 yang dipin `master` (atau server `unassigned` yang dikunci dengan
 `lock-master`): replika dan server `quarantined` tidak pernah dibuat bisa
-ditulis olehnya. Catatan promosi terakhir
+ditulis olehnya. `unlock-master` hanya menghapus `super_read_only` yang
+tersimpan, lalu mematikan `super_read_only` dan `read_only` pada MySQL yang
+sedang berjalan. `read_only` yang tersimpan, misalnya oleh karantina, tetap
+tersimpan dan menyala lagi saat MySQL restart (lihat "Memakai lagi server
+yang dihapus saat masih dikarantina"). Catatan promosi terakhir
 disimpan di `/etc/dbpanel/promoted`. Kedua berkas ini ditulis dan dibaca
 seperti berkas pin.
 
