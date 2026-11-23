@@ -505,6 +505,9 @@ func TestGateAccountSplitsAtLastAt(t *testing.T) {
 	wantRow(t, g.row(GateResync, "account"), GateYellow, "Akun panel belum diketahui: agent db-master belum melaporkannya.", "")
 }
 
+// Ruling R30: only the target of Buat replika, whose MySQL may not be
+// connected yet, is skipped without a connected inventory; for every other
+// server a missing or unconnected inventory is not known yet (G10b).
 func TestGateAccountSkippedForTargetWithoutMySQL(t *testing.T) {
 	g := newGateRig(t)
 	g.setAccount(g.tgt, false, "root@localhost")
@@ -516,6 +519,39 @@ func TestGateAccountSkippedForTargetWithoutMySQL(t *testing.T) {
 	}
 	res := g.gate(GateInput{Action: GateCreateReplica, MasterID: g.m.id, TargetID: bare.id})
 	wantGreen(t, gateRow(t, res, "account"))
+}
+
+func TestGateAccountUnknownWithoutInventory(t *testing.T) {
+	g := newGateRig(t)
+	unknownOf := func(name string) string { return "Akun panel belum diketahui: agent " + name + " belum melaporkannya." }
+
+	// The master of Buat replika, unconnected (its old account is not read).
+	g.setAccount(g.m, false, "root@localhost")
+	wantRow(t, g.row(GateCreateReplica, "account"), GateYellow, unknownOf("db-master"), "")
+	wantRow(t, g.row(GatePrepareMaster, "account"), GateYellow, unknownOf("db-master"), "")
+	wantRow(t, g.row(GatePromotePlanned, "account"), GateYellow, unknownOf("db-master"), "")
+	g.setAccount(g.m, true, "dbpanel@localhost")
+
+	// The target of the other actions, unconnected or without inventory.
+	g.setAccount(g.rep, false, "dbpanel@localhost")
+	for _, a := range []GateAction{GatePromotePlanned, GatePromoteEmergency, GateResync, GateAddDatabases, GateRemoveWithDrop} {
+		wantRow(t, g.row(a, "account"), GateYellow, unknownOf("db-replica"), "")
+	}
+	bare := g.e.agent("db-bare", "10.0.0.6")
+	if err := g.e.st.UpdateProbe(bare.id, proto.ProbeResult{}, gateVersion, g.now()); err != nil {
+		t.Fatal(err)
+	}
+	g.h.set(bare.id, g.goodView("replica"))
+	res := g.gate(GateInput{Action: GateRebuildOldMaster, MasterID: g.m.id, TargetID: bare.id, Approval: new(true)})
+	wantRow(t, gateRow(t, res, "account"), GateYellow, unknownOf("db-bare"), "")
+	res = g.gate(GateInput{Action: GateRemoveWithDrop, TargetID: bare.id})
+	wantRow(t, gateRow(t, res, "account"), GateYellow, unknownOf("db-bare"), "")
+
+	// A master without inventory, with a red target: red first.
+	g.setAccount(g.rep, true, "root@localhost")
+	res = g.gate(GateInput{Action: GateResync, MasterID: bare.id, TargetID: g.rep.id})
+	wantRow(t, gateRow(t, res, "account"), GateRed,
+		"Agent di db-replica masuk ke MySQL sebagai root. "+unknownOf("db-bare"), wantG6f)
 }
 
 func TestGatePerfSchema(t *testing.T) {
@@ -670,6 +706,15 @@ func TestGateUnknownIsYellow(t *testing.T) {
 		for _, r := range res.Red() {
 			if r.Key != "agent_version" && r.Key != "master_pin" {
 				t.Errorf("%s: row %s red: %q", a, r.Key, r.Detail)
+			}
+		}
+		// The live rows are yellow, not merely not red.
+		for _, r := range res.Rows {
+			switch r.Key {
+			case "clock", "disk", "perf_schema", "backup":
+				if r.Status != GateYellow {
+					t.Errorf("%s: row %s = %v %q, want yellow", a, r.Key, r.Status, r.Detail)
+				}
 			}
 		}
 	}

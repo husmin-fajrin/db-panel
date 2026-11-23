@@ -497,22 +497,27 @@ func (c *gateCtx) diskRow() (GateRow, error) {
 	}), nil
 }
 
-// accountRow: no agent logs in to MySQL as root (G6). A server without a
-// connected inventory (a Buat replika target before its MySQL) is not
-// judged.
+// accountRow: no agent logs in to MySQL as root (G6). The target of Buat
+// replika without a connected inventory (its MySQL not connected yet) is
+// not judged; any other server without one is not known yet (G10b, Ruling
+// R30), and so is a connected inventory without the account.
 func (c *gateCtx) accountRow() (GateRow, error) {
 	var vs []verdict
 	for _, s := range c.servers {
+		skip := c.in.Action == GateCreateReplica && s.srv.ID == c.in.TargetID
 		inv, err := c.r.d.Store.GetInventory(s.srv.ID)
 		if errors.Is(err, store.ErrNotFound) {
+			if !skip {
+				vs = append(vs, yellow(textG10b, labelAccount, s.srv.Name))
+			}
 			continue
 		}
 		if err != nil {
 			return GateRow{}, fmt.Errorf("prasyarat: inventaris %s: %w", s.srv.Name, err)
 		}
 		switch {
-		case !inv.Connected:
-		case inv.Account == "":
+		case !inv.Connected && skip:
+		case !inv.Connected, inv.Account == "":
 			vs = append(vs, yellow(textG10b, labelAccount, s.srv.Name))
 		case gateAccountUser(inv.Account) == rootUser:
 			vs = append(vs, red(textG6a, s.srv.Name))
