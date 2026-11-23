@@ -931,3 +931,184 @@ Diisi Task 14: setiap teks operator yang baru, berubah atau hilang antara
 tampilnya, ditulis seperti di kode. Id (F…, B…, G…, D…) mengikuti rencana
 ini; teks yang ditambahkan pelaksana di luar daftar itu diberi tanda
 "tidak ada di rencana".
+
+`%s` dan `%d` adalah tempat nilai; `<…>` di judul kotak adalah nilai dari
+halaman. "diubah" menulis teks lama lalu teks baru.
+
+### Menu dan halaman Panduan
+
+- Menu: `Panduan` — tidak ada di rencana
+- Judul halaman: `Panduan` — tidak ada di rencana
+- Pembuka halaman: `Panduan langkah demi langkah untuk keadaan yang jarang terjadi. Isinya sama di dua tempat: bagian "Panduan" di README, dan halaman Panduan di panel (menu Panduan, butuh login). Kerjakan langkahnya berurutan. Sebelum menjalankan sebuah perintah, baca dulu syarat yang tertulis tepat di atasnya.` — tidak ada di rencana
+- Daftar isi: `Daftar panduan` — tidak ada di rencana
+- Sembilan panduan. Isinya dibaca di halaman **Panduan** panel atau di
+  bagian `## Panduan` README (isinya sama):
+  1. `Promote darurat` — halaman Panduan dan README "Panduan"
+  2. `Bangun ulang master lama` — halaman Panduan dan README "Panduan"
+  3. `Memindahkan jadwal cadangan sesudah promote` — halaman Panduan dan README "Panduan"
+  4. `Memperpanjang sertifikat` — halaman Panduan dan README "Panduan"
+  5. `Melepas kunci master lama dengan tangan` — halaman Panduan dan README "Panduan"
+  6. `Master terkunci padahal tidak ada promote` — halaman Panduan dan README "Panduan"
+  7. `Memakai lagi server yang dihapus saat masih dikarantina` — halaman Panduan dan README "Panduan"
+  8. `Memperbaiki baris merah` — halaman Panduan dan README "Panduan"
+  9. `Replika yang tersambung di luar alur panel` — halaman Panduan dan README "Panduan"
+
+### Daftar Prasyarat (di setiap layar tindakan)
+
+- **D1** `Prasyarat`
+- **D1** `Terpenuhi`
+- **D1** `Perlu perhatian`
+- **D1** `Belum terpenuhi`
+- **D2** `Tombol ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini.`
+- **D3** `Saya sudah memastikan ada cadangan (backup) terbaru`
+- **D4** `Panel hanya melihat umur dan ukuran berkas, bukan apakah cadangan itu bisa dipulihkan.`
+- `Panduan: Memperbaiki baris merah` (tautan di bawah baris Akun panel yang merah) — tidak ada di rencana
+- `Prasyarat tidak bisa dibaca: %s` — tidak ada di rencana
+- Label baris: `Versi agent`, `Pin master`, `Jam (clock)`, `Pemeriksaan sertifikat TLS`, `Ruang disk`, `Akun panel`, `performance_schema`, `Cadangan (backup)`, `Persetujuan di server`, `Port MySQL master`, `Log audit`, `Cadangan panel.key`
+- **G1a** `Agent di %s versi %s, panel versi %s.`
+- **G1b** `Versi agent di %s belum diketahui.`
+- **G1f** `Perbarui agent di server itu (Pasang ulang agent di halaman server), lalu muat ulang halaman ini.`
+- **G2a** `Agent master %s tidak melaporkan pin master (yang dilaporkan: %s).`
+- **G2a** (nilai bila kosong) `tidak ada`
+- **G2f** `Jalankan Siapkan master di halaman server itu. Bila baru saja dijalankan, klik Periksa sekarang di halaman server, lalu muat ulang halaman ini.`
+- **G3a** `Jam server %s berbeda %s dari jam host panel (batas 30 detik).`
+- **G3a** (selisih) `%d detik`, `%d menit`, `%d jam` — tidak ada di rencana
+- **G3f** `Selaraskan jam server itu dan host panel dengan NTP (di server: timedatectl set-ntp true), klik Periksa sekarang di halaman server, lalu muat ulang halaman ini.`
+- **G4a** `Master %s belum punya sertifikat MySQL dari panel.`
+- **G4f** `Pasang sertifikat MySQL di halaman server master, lalu jalankan Wajibkan pemeriksaan sertifikat TLS di halaman master.`
+- **G4b** `Replika %s belum memeriksa sertifikat master.`
+- **G4g** `Jalankan Wajibkan pemeriksaan sertifikat TLS di halaman master.`
+- **G5a** `Disk %s terpakai %d%% (ambang kritis %d%%).`
+- **G5f** `Kosongkan ruang di server itu, klik Periksa sekarang di halaman server, lalu muat ulang halaman ini.`
+- **G6a** `Agent di %s masuk ke MySQL sebagai root.`
+- **G6f** `Buat akun MySQL khusus panel lalu hubungkan lagi (Panduan, "Memperbaiki baris merah"). Bila akunnya sudah diganti di server, klik Segarkan di kartu MySQL halaman server itu.`
+- **G7a** `performance_schema mati di master %s.`
+- **G7f** `Hapus performance_schema=OFF dari konfigurasi MySQL master, lalu restart MySQL master di jam sepi.`
+- **G8a–G8d**: lihat "Peringatan dan Telegram"
+- **G8f** `Jalankan cadangan master, atau betulkan folder cadangan di halaman server master.`
+- **G8u** `Folder cadangan master %s belum diisi, jadi panel tidak bisa melihat umur cadangan.`
+- **G8u** (perbaikan) `Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru.` — tidak ada di rencana
+- **G9u** `Persetujuan di server %s belum diperiksa.`
+- **G9a** `Belum disetujui di server %s.`
+- **G9f** `Jalankan perintah di kotak Persetujuan di server pada halaman ini, lalu klik Periksa lagi.`
+- **G10a** `%s belum diketahui: agent %s sedang tidak tersambung.`
+- **G10a** (perbaikan) `Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini.` — tidak ada di rencana
+- **G10b** `%s belum diketahui: agent %s belum melaporkannya.`
+- **G11a** `Port MySQL master %s bisa dijangkau dari host panel; sebaiknya hanya terbuka untuk replika.`
+- **G11f** `Batasi port itu di firewall master hanya untuk alamat replika.`
+- **G12a** `Log audit belum ditandai diteruskan ke server lain.`
+- **G12f** `Teruskan journal host panel ke server lain (systemd-journal-upload), lalu tandai di Pengaturan.`
+- **G13a** `panel.key belum ditandai sudah dicadangkan.`
+- **G13f** `Cadangkan panel.key (README, "Cadangkan kunci panel"), lalu tandai di Pengaturan.`
+- `prasyarat: tindakan %q tidak dikenal` — tidak ada di rencana
+- `prasyarat: server #%d: %s` — tidak ada di rencana
+- `prasyarat: topologi master #%d: %s` — tidak ada di rencana
+- `prasyarat: sertifikat master: %s` — tidak ada di rencana
+- `prasyarat: replika: %s` — tidak ada di rencana
+- `prasyarat: pengaturan: %s` — tidak ada di rencana
+- `prasyarat: inventaris %s: %s` — tidak ada di rencana
+
+### Penolakan tindakan (layar tindakan dan layar pekerjaan)
+
+- **G14** `Tindakan ini ditolak karena ada prasyarat yang belum terpenuhi: %s. Cara memperbaikinya ada di daftar Prasyarat di halaman ini.`
+- **G15** `Centang "Saya sudah memastikan ada cadangan (backup) terbaru" untuk melanjutkan.`
+- `master lama %s masih punya pekerjaan yang belum selesai` (penolakan sibuk; sebelumnya `replika %s masih punya pekerjaan yang belum selesai` untuk baris yang sama)
+- `server tujuan masih punya pekerjaan yang belum selesai (promote sedang berjalan di topologinya)` — tidak ada di rencana
+
+### Layar Promote…
+
+- **D5** `Saya sudah memastikan master lama mati atau terputus dari aplikasi`
+- **D6** `Baris yang belum terpenuhi tidak menghalangi promote darurat.`
+- **D7** `Centang "Saya sudah memastikan master lama mati atau terputus dari aplikasi" untuk melanjutkan promote darurat.`
+- `Panduan: Promote darurat` (tautan) — tidak ada di rencana
+
+### Form Buat replika dan Bangun ulang sebagai replika
+
+- `Panduan: Bangun ulang master lama` (tautan) — tidak ada di rencana
+
+### Layar pengalihan aplikasi
+
+- **D8** `Pindahkan jadwal cadangan (backup) ke master baru, lalu isi folder cadangan di halaman servernya.`
+- `Panduan: Memindahkan jadwal cadangan sesudah promote` (tautan) — tidak ada di rencana
+
+### Halaman server
+
+- **B1** `Cadangan (backup)`
+- **B1** `Folder cadangan`
+- **B1** `Umur paling lama (jam)`
+- **B1** `Simpan`
+- **B2** `Panel hanya melihat umur dan ukuran berkas terbaru di folder ini (paling dalam tiga tingkat), bukan apakah cadangan itu bisa dipulihkan. Nama dan isi berkas tidak pernah dikirim ke panel. Kosongkan folder bila server ini tidak menyimpan cadangan.`
+- Contoh isian folder: `/var/backups/mysql` — tidak ada di rencana
+- **B3** `Folder cadangan harus path absolut tanpa "..", misalnya /var/backups/mysql.`
+- **B4** `Folder di bawah %s tidak terlihat oleh layanan agent; pakai folder lain, misalnya /var/backups/mysql.`
+- **B5** `Folder %s tidak boleh dipakai sebagai folder cadangan.`
+- **B6** `Umur paling lama harus 1 sampai 8760 jam.`
+- **B7** `Belum ada laporan dari agent.`
+- **B7** `Berkas terbaru: %s lalu, %s.`
+- **B7** (umur) `%d menit`, `%d jam`, `%d hari`, `%d hari %d jam` — tidak ada di rencana
+- **B7** di server yang bukan master: teks G8a–G8d dengan `server %s` di tempat `master %s` — tidak ada di rencana
+- `Pengaturan cadangan disimpan. Keadaan folder tampil setelah laporan berikutnya dari agent.` — tidak ada di rencana
+- `Folder cadangan dikosongkan; panel tidak memeriksa cadangan server ini.` — tidak ada di rencana
+- **F1** `Master lama (belum dikarantina; promote terencana ke <master baru> pada <waktu>)` dan `Master lama (belum dikarantina; promote darurat ke <master baru> pada <waktu>)`
+- **F6** `Agent server ini melaporkan peran %s, bukan karantina. Menghapusnya dari panel tidak mengubah apa pun di server itu; periksa dulu peran itu di halaman server.`
+- **F8** `server ini masih menjadi master dan master lamanya masih tercatat di topologi ini; selesaikan bangun ulang master lama itu atau hapus master lama itu dari panel dulu` — tidak ada di rencana
+- Detail teknis, peran dipin yang tidak dikenal: `tidak dikenal (Pesan dari agent %s (bukan dari panel): %s)`
+- Detail teknis, sumber dipin yang bukan host:port: `tidak dikenal (Pesan dari agent %s (bukan dari panel): %s)` — tidak ada di rencana
+- Detail teknis, galat pin dan pesan galat MySQL (juga di halaman master dan replika): kini diawali `Pesan dari agent %s (bukan dari panel): ` (teks yang sudah ada, kini juga di sini)
+
+### Halaman master
+
+- diubah: `Perketat sambungan replikasi` → `Wajibkan pemeriksaan sertifikat TLS (TLS certificate verification)` (judul)
+- diubah: `Perketat sambungan replikasi` → `Wajibkan pemeriksaan sertifikat TLS` (tombol)
+- diubah: `Perketat sambungan replikasi master %s dan replikanya.` → `Wajibkan pemeriksaan sertifikat TLS untuk replikasi master %s dan replikanya.` (dialog konfirmasi)
+
+### Pengaturan
+
+- `Cadangan (backup) panel dan log audit` — tidak ada di rencana
+- **B8** `panel.key sudah dicadangkan`
+- **B8** `Log audit diteruskan ke server lain`
+- **B8** `Tandai sudah`
+- **B8** `Batalkan tanda`
+- **B8** `Ditandai oleh %s pada %s.`
+- `Tanda disimpan.` — tidak ada di rencana
+- `Tanda dibatalkan.` — tidak ada di rencana
+
+### Peringatan dan Telegram
+
+- `Cadangan master usang` (jenis peringatan, halaman Peringatan dan pilihan Telegram di Pengaturan)
+- `cadangan master usang` (nama jenis di pesan Telegram) — tidak ada di rencana
+- **G8a** `Berkas terbaru di folder cadangan master %s berumur %s (batas %d jam).`
+- **G8a** (umur) `lebih dari %d jam`, `%d menit`, `%d jam`, `%d hari`, `%d hari %d jam` — tidak ada di rencana
+- **G8b** `Berkas terbaru di folder cadangan master %s kosong (0 byte).`
+- **G8c** `Folder cadangan master %s tidak berisi berkas.`
+- **G8d** `Folder cadangan master %s tidak bisa dibaca agent: %s.`
+- **G8d** (sebab) `folder itu tidak ada`, `itu bukan folder`, `izin ditolak`, `folder itu tidak terlihat oleh layanan agent`, `path-nya tidak sah`, `pemindaian tidak selesai dalam 10 detik`, `lebih dari 10.000 entri dan belum ada berkas yang ditemukan`
+- **G8d** (sebab lain) `galat lain; lihat log agent`
+- **F7** `master lama sempat bisa ditulis; topologinya sudah dihapus dari panel, jadi tulisan itu tidak bisa diperiksa lagi dari panel. Hapus server ini`
+- **F7** (alasan tutup) `topologinya sudah dihapus dari panel; tulisan itu tidak bisa diperiksa lagi dari panel`
+
+### Pekerjaan
+
+- diubah: `Perketat sambungan replikasi` → `Wajibkan pemeriksaan sertifikat TLS` (nama pekerjaan, juga di peringatan pekerjaan gagal)
+- diubah: `… Jalankan Perketat sambungan replikasi di halaman master.` → `… Jalankan Wajibkan pemeriksaan sertifikat TLS di halaman master.` (log pekerjaan)
+- diubah: `… tanda terverifikasi belum diberikan. Jalankan Perketat sambungan replikasi di halaman master setelah replika tersambung.` → `… tanda terverifikasi belum diberikan. Jalankan Wajibkan pemeriksaan sertifikat TLS di halaman master setelah replika tersambung.`
+- diubah: `… tanda terverifikasi diberikan setelah replikasi dijalankan lagi dan Perketat diulang.` → `… tanda terverifikasi diberikan setelah replikasi dijalankan lagi dan Wajibkan pemeriksaan sertifikat TLS diulang.`
+- **F2** `kunci baca-saja server ini tidak bisa diperiksa sebelum karantina diakhiri (%v); karantina tidak diakhiri dan tidak ada yang diubah. Tekan "Ulangi dari tahap ini"`
+
+### Audit
+
+- diubah: `Perketat sambungan replikasi` → `Wajibkan pemeriksaan sertifikat TLS` (label tindakan)
+- `Atur folder cadangan` — tidak ada di rencana
+- `Tanda cadangan panel.key` — tidak ada di rencana
+- `Tanda penerusan log audit` — tidak ada di rencana
+- **G0** `prasyarat belum terpenuhi: %s` (hasil)
+- `centang cadangan belum diisi` (hasil)
+- `centang master lama mati belum diisi` (hasil)
+- Hasil yang berasal dari agent: `Pesan dari agent %s (bukan dari panel): %s`
+- Isian rincian (detail): `backup_ack`, `old_master_dead`, `master_last_report`, `skipped_red`, `backup_dir`, `backup_max_age_hours`
+
+### Keluaran CLI agent (`dbpanel agent reset-admin`)
+
+- **F3** `Akun MySQL yang disimpan agent tidak bisa dibaca (%v); akun itu akan diganti dengan yang baru.`
+- **F4** `Akun dbpanel_admin@localhost sudah dibuat ulang dan bisa masuk, tetapi tidak bisa disimpan agent (%s). Kunci baca-saja server ini sudah terpasang lagi.`
+- **F4** `Agent masih memakai akun lama dan mungkin tidak bisa masuk ke MySQL. Perbaiki sebabnya, lalu jalankan perintah ini lagi.`
