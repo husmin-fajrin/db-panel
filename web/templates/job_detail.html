@@ -16,6 +16,7 @@
 </div>
 {{end}}
 {{with .Superseded}}{{template "banner" (banner "info" (printf "Pekerjaan ini tidak bisa diulang atau disetujui lagi: %s. Mulai pekerjaan baru bila perlu." .))}}{{end}}
+{{with .RetryRefused}}{{template "banner" (banner "info" .)}}{{end}}
 {{if and (eq .Job.Status "failed") .Job.Error}}{{template "banner" (banner "error" .Job.Error)}}{{end}}
 
 <div class="mb-4 grid gap-4 lg:grid-cols-12">

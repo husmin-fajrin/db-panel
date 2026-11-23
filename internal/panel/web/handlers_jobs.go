@@ -142,7 +142,11 @@ type jobPage struct {
 	// says why the job may no longer be approved or retried.
 	Approval   approval
 	Superseded string
-	StatusJSON string
+	// RetryRefused, when set, says why Ulangi is not offered for the job
+	// (a promote that failed before the master was replaced: a new promote
+	// is started instead).
+	RetryRefused string
+	StatusJSON   string
 	// DropsData: approving or retrying the job drops data, behind a
 	// job_approve or job_retry token (spec 5.6). "Ulangi" then goes
 	// through /retry/prepare and opens the retry dialog (OpenRetry, after
@@ -331,6 +335,11 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 	if p.CanApprove || p.CanRetry {
 		if p.Superseded = a.Orchestrator.Superseded(job.ID); p.Superseded != "" {
 			p.CanApprove, p.CanRetry = false, false
+		}
+	}
+	if p.CanRetry {
+		if p.RetryRefused = a.Orchestrator.RetryRefused(job.ID); p.RetryRefused != "" {
+			p.CanRetry = false
 		}
 	}
 	if p.CanApprove || p.CanRetry {

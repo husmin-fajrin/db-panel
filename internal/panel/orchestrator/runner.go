@@ -991,6 +991,11 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 		if err := r.refuseSuperseded(j); err != nil {
 			return err
 		}
+		if refused, err := r.promoteRetryRefused(j); err != nil {
+			return err
+		} else if refused {
+			return ErrPromoteRetryBeforePoint
+		}
 		if err := r.refuseRedJobGate(j); err != nil {
 			return err
 		}

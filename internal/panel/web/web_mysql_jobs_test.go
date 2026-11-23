@@ -53,8 +53,9 @@ type fakeOrch struct {
 	resyncs    []orchestrator.ResyncParams // what StartResync received
 	err        error                       // returned by every call when set
 	nextID     string
-	// superseded answers Superseded per job id.
-	superseded map[string]string
+	// superseded answers Superseded per job id; retryRefused RetryRefused.
+	superseded   map[string]string
+	retryRefused map[string]string
 	// drops answers DropsData per job id; acks are what Approve and Retry
 	// received, in order. Like the orchestrator, Approve and Retry refuse a
 	// dropping job without ack.Confirmed.
@@ -442,6 +443,12 @@ func (f *fakeOrch) Superseded(id string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.superseded[id]
+}
+
+func (f *fakeOrch) RetryRefused(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.retryRefused[id]
 }
 
 // syncBuffer is a log sink safe for concurrent writes.

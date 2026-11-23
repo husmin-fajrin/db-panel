@@ -2891,6 +2891,17 @@ dibangun ulang**: replikasinya tidak diubah, pin sumbernya dipindah ke
 master baru, dan **Resync ulang** dari master baru memperbaikinya (tidak
 otomatis). Keduanya memunculkan peringatan sampai selesai.
 
+Bila promote gagal sebelum master diganti (replika terpilih belum bisa
+ditulis dan tidak ada yang berubah), halaman pekerjaannya tidak menawarkan
+**Ulangi dari tahap ini** dan menulis "Promote ini gagal sebelum master
+diganti. "Ulangi dari tahap ini" tidak tersedia untuk keadaan ini: mulai
+promote baru dari halaman master." Promote baru menilai lagi jenisnya dan
+meminta lagi centang, kata sandi, dan untuk promote terencana daftar
+**Prasyarat**. Satu pengecualian: setelah promote terencana yang kunci
+masternya belum terbukti dibuka, **Ulangi dari tahap ini** tetap ada sampai
+tenggat kunci itu ditambah 60 detik lewat (lihat "Promote terencana dan
+darurat").
+
 Bila promote berhenti setelah replika terpilih sudah bisa ditulis, panel
 tidak membatalkannya (tidak ada jalan mundur yang aman dari dua master).
 Pekerjaan berhenti dengan status selesai sebagian; buka pekerjaannya dan

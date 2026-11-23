@@ -224,29 +224,29 @@ func TestApproveRefreshesConfirmedAt(t *testing.T) {
 	}
 }
 
-// TestPromoteRetryStillTokenless: a promote drops nothing; its Retry needs
-// no confirmation (spec 5.6).
+// TestPromoteRetryStillTokenless: a promote drops nothing; the Retry of a
+// promote past the point of no return needs no confirmation (spec 5.6).
+// One that failed before it is not retried (PC-1,
+// TestPromotePlannedRetryBeforePointRefused).
 func TestPromoteRetryStillTokenless(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
-	e.r.promoteCatchUp = 100 * time.Millisecond
-	g.c.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: false, Executed: lagUUIDs,
-		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
+	g.m.fail("mysql.quarantine", "master lama tidak menjawab")
 	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.waitJob(id, store.JobFailed)
-	e.waitFor("unlockPromote", func() bool { return g.m.count("mysql.unlockPromote") == 1 })
+	e.waitJob(id, store.JobPartial)
 	if drops, err := e.r.DropsData(id); err != nil || drops {
 		t.Fatalf("DropsData = %v, %v; want false", drops, err)
 	}
+	e.waitIdle(id)
 	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry of a promote without confirmation: %v", err)
 	}
-	e.waitJob(id, store.JobFailed)
-	if n := g.m.count("mysql.lockForPromote"); n != 2 {
-		t.Fatalf("lockForPromote sent %d times, want 2 (the retry ran)", n)
+	e.waitJob(id, store.JobPartial)
+	if n := g.m.count("mysql.quarantine"); n != 2 {
+		t.Fatalf("quarantine sent %d times, want 2 (the retry ran)", n)
 	}
 }
 

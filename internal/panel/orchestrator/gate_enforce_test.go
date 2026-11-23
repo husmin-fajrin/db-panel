@@ -346,7 +346,10 @@ func TestRetryGatedOnlyWhenDataIsDropped(t *testing.T) {
 		e.waitJob(id, store.JobSucceeded)
 	})
 	t.Run("promote", func(t *testing.T) {
-		// K4: a promote job is never judged again.
+		// K4: a promote job is never judged again. One that failed before
+		// mysql.promote is not retried at all (PC-1): the new start that
+		// replaces it is judged (TestPromoteRetryPastPointStillRuns: a job
+		// past the point retries with a red row).
 		g := newPromoteRig(t)
 		e := g.e
 		e.r.promoteCatchUp = 100 * time.Millisecond
@@ -364,10 +367,12 @@ func TestRetryGatedOnlyWhenDataIsDropped(t *testing.T) {
 		if res, _ := e.r.Gate(GateInput{Action: GatePromotePlanned, MasterID: g.m.id, TargetID: g.c.id}); len(res.Red()) == 0 {
 			t.Fatalf("gate = %+v, want a red row", res.Rows)
 		}
-		if err := e.r.Retry(id, JobAck{}); err != nil {
-			t.Fatalf("Retry of a failed promote with a red row: %v", err)
+		if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrPromoteRetryBeforePoint) {
+			t.Fatalf("Retry of a promote failed before the point = %v, want ErrPromoteRetryBeforePoint", err)
 		}
-		e.waitJob(id, store.JobFailed)
+		if _, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id}); !errors.Is(err, ErrGateRed) {
+			t.Fatalf("new planned start with a red row = %v, want ErrGateRed", err)
+		}
 	})
 	t.Run("rebuild_approval", func(t *testing.T) {
 		// Approve of a rebuild without root's approval is refused as before

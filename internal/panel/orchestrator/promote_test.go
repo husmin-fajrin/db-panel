@@ -346,13 +346,14 @@ func TestPromotePlannedCatchUpTimeoutUnlocks(t *testing.T) {
 	if p := g.promotion(); p.Status != "failed" {
 		t.Fatalf("promotion status = %s", p.Status)
 	}
-	if err := e.r.Retry(id, JobAck{}); err != nil {
-		t.Fatalf("Retry of a failed promote before the point of no return: %v", err)
+	// Nothing changed and the lock is lifted: Ulangi is refused (PC-1), a
+	// new promote is started instead (TestPromotePlannedRetryBeforePointRefused).
+	e.waitIdle(id)
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrPromoteRetryBeforePoint) {
+		t.Fatalf("Retry of a failed promote before the point of no return = %v, want ErrPromoteRetryBeforePoint", err)
 	}
-	e.waitJob(id, store.JobFailed)
-	// The retry took the lock again before waiting, and lifted it again.
-	if g.m.count("mysql.lockForPromote") != 2 || g.m.count("mysql.unlockPromote") != 2 {
-		t.Fatalf("master commands after retry: %v", g.m.cmds(0))
+	if g.m.count("mysql.lockForPromote") != 1 || g.m.count("mysql.unlockPromote") != 1 {
+		t.Fatalf("master commands after the refused retry: %v", g.m.cmds(0))
 	}
 }
 
@@ -873,11 +874,17 @@ func TestPromoteFailureAtNewMasterUnlocksOrGoesPartial(t *testing.T) {
 		t.Fatalf("promotion = %s", p.Status)
 	}
 
-	// It fails again, but the candidate answers writable this time: past
-	// the point of no return, nothing is undone and the job is partial.
+	// Ulangi is refused (PC-1); a new promote fails the same way, but the
+	// candidate answers writable this time: past the point of no return,
+	// nothing is undone and the job is partial.
+	e.waitIdle(id)
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrPromoteRetryBeforePoint) {
+		t.Fatalf("Retry before the point = %v, want ErrPromoteRetryBeforePoint", err)
+	}
 	g.c.reply("mysql.status", proto.MySQLStatus{Port: 3306})
-	if err := e.r.Retry(id, JobAck{}); err != nil {
-		t.Fatalf("Retry: %v", err)
+	id, err = e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("new StartPromote: %v", err)
 	}
 	j, _ = e.waitJob(id, store.JobPartial)
 	if j.CurrentStep != 3 || g.m.count("mysql.lockForPromote") != 2 || g.m.count("mysql.unlockPromote") != 1 {

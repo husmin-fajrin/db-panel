@@ -412,22 +412,8 @@ func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) er
 	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
 		return fmt.Errorf("catatan promote sebelumnya tidak terbaca: %w", err)
 	}
-	if st.LockUnlocked || (!st.LockTried && st.LockDeadline == nil) {
-		return nil
-	}
-	var deadline time.Time
-	switch {
-	case st.LockDeadline != nil:
-		deadline = *st.LockDeadline
-	case st.LockTriedAt != nil:
-		deadline = st.LockTriedAt.Add(promoteLockSec*time.Second + lockCallSlack)
-	case prev.FinishedAt != nil:
-		deadline = prev.FinishedAt.Add(promoteLockSec * time.Second)
-	default:
-		deadline = prev.StartedAt.Add(promoteLockSec*time.Second + defaultPromoteCatchUp + lockCallSlack)
-	}
-	until := deadline.Add(proto.PromoteLockGrace)
-	if !r.now().Before(until) {
+	until, may := lockMayStandUntil(st, prev)
+	if !may || !r.now().Before(until) {
 		return nil
 	}
 	// The command alone does not tell the panel: only the planned
@@ -444,6 +430,29 @@ func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) er
 	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka, "+
 		"dan memuat data membuat replika bisa ditulis sebentar dan penjaga kunci bisa mengkarantina master. "+
 		"%s baru bisa dijalankan mulai %s, saat penjaga kunci sudah memutuskan. %s", r.nameOf(masterID), what, at, howToUnlock)
+}
+
+// lockMayStandUntil is until when the promote lock a planned promotion's
+// job (st, promotion prev) asked for may still stand on the master: its
+// deadline plus the guard's grace (proto.PromoteLockGrace). may is false
+// when the lock was never asked for or its unlock was confirmed
+// (LockUnlocked).
+func lockMayStandUntil(st jobState, prev store.Promotion) (until time.Time, may bool) {
+	if st.LockUnlocked || (!st.LockTried && st.LockDeadline == nil) {
+		return time.Time{}, false
+	}
+	var deadline time.Time
+	switch {
+	case st.LockDeadline != nil:
+		deadline = *st.LockDeadline
+	case st.LockTriedAt != nil:
+		deadline = st.LockTriedAt.Add(promoteLockSec*time.Second + lockCallSlack)
+	case prev.FinishedAt != nil:
+		deadline = prev.FinishedAt.Add(promoteLockSec * time.Second)
+	default:
+		deadline = prev.StartedAt.Add(promoteLockSec*time.Second + defaultPromoteCatchUp + lockCallSlack)
+	}
+	return deadline.Add(proto.PromoteLockGrace), true
 }
 
 // refuseOldMasterPending is errOldMasterPending while topo's old master
@@ -1680,4 +1689,62 @@ func (r *Runner) markReplica(promID, topologyID, serverID int64, state, detail s
 		promID = p.ID
 	}
 	r.setPromotionServer(promID, PromotionServer{ServerID: serverID, Role: PromotionReplica, State: state, Detail: redact.Quotes(detail)})
+}
+
+// ErrPromoteRetryBeforePoint refuses Ulangi of a promote job that failed
+// before mysql.promote was sent (promoteRetryRefused).
+var ErrPromoteRetryBeforePoint = errors.New(`Promote ini gagal sebelum master diganti. "Ulangi dari tahap ini" tidak tersedia ` +
+	`untuk keadaan ini: mulai promote baru dari halaman master.`)
+
+// promoteRetryRefused reports whether Ulangi of j is refused (PC-1, ruling
+// R43): a promote job whose mysql.promote was never sent (PromoteSent) and
+// that is not past the point of no return (PastPoint) changed nothing; a
+// new promote reads the mode again and asks for the tick, the names, the
+// password and, planned, the gate and the backup tick, which Ulangi would
+// skip. One exception keeps today's Ulangi: a planned job whose promote
+// lock may still stand on the master (lockMayStandUntil, not yet past): a
+// new start would meet that lock (the master's agent refuses a second
+// one), and Ulangi is how the panel confirms the lock open
+// (refuseWhileLockMayStand names it). A job whose params cannot be read is
+// left to the checks that refuse it (promoteSupersededBy, newRun).
+func (r *Runner) promoteRetryRefused(j store.Job) (bool, error) {
+	if !isPromote(j.Kind) {
+		return false, nil
+	}
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		return false, nil
+	}
+	if st.PromoteSent || st.PastPoint {
+		return false, nil
+	}
+	if j.Kind == KindPromotePlanned {
+		prom, err := r.d.Store.GetPromotion(st.PromotionID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+		if until, may := lockMayStandUntil(st, prom); may && r.now().Before(until) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// RetryRefused is why Ulangi of the job is refused whatever is acked
+// (ErrPromoteRetryBeforePoint's text); "" when it is not, or when that
+// cannot be read (Retry decides then). The job page hides Ulangi for it.
+func (r *Runner) RetryRefused(jobID string) string {
+	j, _, err := r.d.Store.GetJob(jobID)
+	if err != nil {
+		return ""
+	}
+	refused, err := r.promoteRetryRefused(j)
+	if err != nil {
+		r.log.Warn("promote retry check", "job", jobID, "err", err)
+		return ""
+	}
+	if refused {
+		return ErrPromoteRetryBeforePoint.Error()
+	}
+	return ""
 }
