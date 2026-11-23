@@ -864,8 +864,10 @@ func TestPromoteModeMovedBeforeGateAndToken(t *testing.T) {
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Status master berubah sejak halaman dibuka: sekarang hanya promote darurat yang tersedia.")
 	wantNoBody(t, rec, wantG14Disk)
-	if got := f.gateInputs(); len(got) > 0 && got[0].Action == orchestrator.GatePromotePlanned {
-		t.Fatalf("planned gate asked for a mode that moved: %+v", got)
+	for _, in := range f.gateInputs() {
+		if in.Action == orchestrator.GatePromotePlanned {
+			t.Fatalf("planned gate asked for a mode that moved: %+v", f.gateInputs())
+		}
 	}
 
 	// An emergency post against a planned master: refused, token kept.
