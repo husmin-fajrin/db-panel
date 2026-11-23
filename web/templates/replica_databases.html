@@ -61,9 +61,11 @@
       <span>Selama database baru dimuat, replika <strong>bisa ditulis</strong> (hanya-baca dicabut sementara). Pastikan tidak ada aplikasi yang menulis ke replika selama itu; tulisan seperti itu membuat data replika berbeda dari master.</span>
       </div>
     </div>
+    {{template "gate-list" .AddGate}}
     <div class="card-actions justify-end">
-      <button type="submit" class="btn btn-primary">Tambah database</button>
+      <button type="submit" class="btn btn-primary"{{if and .AddGate .AddGate.Off}} disabled{{end}} data-gate-button>Tambah database</button>
     </div>
+    {{if and .AddGate .AddGate.RedNote}}{{template "gate-off-note" true}}{{end}}
     {{else if .NoInventory}}
     <p>Daftar database master belum ada; hubungkan MySQL master dulu.</p>
     {{else}}
@@ -86,10 +88,12 @@
       {{end}}
       <p class="label whitespace-normal">Minimal satu database harus tetap diikuti.</p>
     </fieldset>
+    {{template "gate-list" .DropGate}}
     <label class="label">
-      <input type="checkbox" class="checkbox checkbox-sm" name="drop_data" value="1">
+      <input type="checkbox" class="checkbox checkbox-sm" name="drop_data" value="1"{{if and .DropGate .DropGate.Off}} disabled{{end}}>
       <span>Hapus datanya juga di replika</span>
     </label>
+    {{if and .DropGate .DropGate.RedNote}}{{template "gate-off-note" true}}{{end}}
     <p class="help">Tanpa centang ini, data database yang dilepas tetap ada di replika tetapi tidak lagi diperbarui; bila ditambahkan lagi, isi di replika dibuang lebih dulu.</p>
     <p class="text-sm text-error-text" x-text="error"></p>
     <div class="card-actions justify-end">

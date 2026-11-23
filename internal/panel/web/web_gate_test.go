@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -61,9 +62,15 @@ func TestGateRefusesBeforeTokenIsConsumed(t *testing.T) {
 	rec := e.do("POST", "/replicas/2/resync", form, c)
 	wantCode(t, rec, http.StatusConflict)
 	wantBody(t, rec, wantG14Disk)
-	wantNoBody(t, rec, "agent-kata")
+	// The agent's words are in the page's precondition list only, never
+	// in the refusal.
+	if strings.Contains(outsideGateLists(rec.Body.String()), "agent-kata") {
+		t.Fatalf("the agent's text outside the precondition list:\n%s", rec.Body.String())
+	}
 	wantCalls(t, f)
-	if got := f.gateInputs(); len(got) != 1 || got[0] != (orchestrator.GateInput{Action: orchestrator.GateResync,
+	// The first input is the handler's; the refused page reads the gate
+	// again for its list.
+	if got := f.gateInputs(); len(got) == 0 || got[0] != (orchestrator.GateInput{Action: orchestrator.GateResync,
 		MasterID: 1, TargetID: 2}) {
 		t.Fatalf("gate inputs = %+v", got)
 	}
@@ -135,7 +142,9 @@ func TestGatedHandlersRefuseOnRedRow(t *testing.T) {
 			rec := e.do("POST", tc.path, form, c)
 			wantCode(t, rec, http.StatusConflict)
 			wantBody(t, rec, wantG14Disk)
-			if got := f.gateInputs(); len(got) != 1 || got[0] != tc.input {
+			// The first input is the handler's; the refused page reads the
+			// gate again for its lists.
+			if got := f.gateInputs(); len(got) == 0 || got[0] != tc.input {
 				t.Fatalf("gate inputs = %+v, want %+v", got, tc.input)
 			}
 			for _, call := range f.callList() {
@@ -306,7 +315,9 @@ func TestRebuildGatedBeforeToken(t *testing.T) {
 	wantCode(t, rec, http.StatusConflict)
 	wantBody(t, rec, wantG14Disk)
 	wantCalls(t, f)
-	if got := f.gateInputs(); len(got) != 1 || got[0] != (orchestrator.GateInput{Action: orchestrator.GateRebuildOldMaster,
+	// The first input is the handler's (no approval read); the refused
+	// page reads the gate again for its list.
+	if got := f.gateInputs(); len(got) == 0 || got[0] != (orchestrator.GateInput{Action: orchestrator.GateRebuildOldMaster,
 		MasterID: 2, TargetID: 1}) {
 		t.Fatalf("gate inputs = %+v", got)
 	}
@@ -330,5 +341,413 @@ func TestRebuildGatedBeforeToken(t *testing.T) {
 	var detail map[string]any
 	if err := json.Unmarshal([]byte(entries[len(entries)-1].DetailJSON), &detail); err != nil || detail["backup_ack"] != true {
 		t.Fatalf("audit = %+v (%v)", entries[len(entries)-1], err)
+	}
+}
+
+// Texts of the precondition list (plan 5b-2b, D1-D4), as the page shows
+// them.
+const (
+	wantD1 = "Prasyarat"
+	wantD2 = "Tombol ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda \"Belum terpenuhi\", lalu muat ulang halaman ini."
+	wantD3 = "Saya sudah memastikan ada cadangan (backup) terbaru"
+	wantD4 = "Panel hanya melihat umur dan ukuran berkas, bukan apakah cadangan itu bisa dipulihkan."
+)
+
+// everyKind is a gate with a green row, a yellow row with a fix (the
+// backup folder not set), a yellow row without one (not reported yet) and
+// a red row.
+func everyKind(orchestrator.GateInput) (orchestrator.GateResult, error) {
+	return orchestrator.GateResult{Rows: []orchestrator.GateRow{
+		{Key: "agent_version", Label: "Versi agent"},
+		{Key: "backup", Label: "Cadangan (backup)", Status: orchestrator.GateYellow,
+			Detail: "Folder cadangan master db-master belum diisi.", Fix: "Isi folder cadangan di halaman server master."},
+		{Key: "account", Label: "Akun panel", Status: orchestrator.GateYellow,
+			Detail: "Akun panel belum diketahui: agent db-replika belum melaporkannya."},
+		{Key: "disk", Label: "Ruang disk", Status: orchestrator.GateRed, Detail: "Disk db-replika terpakai 99%.",
+			Fix: "Kosongkan ruang disk db-replika."},
+	}}, nil
+}
+
+// yellowOnly is a gate without a red row.
+func yellowOnly(orchestrator.GateInput) (orchestrator.GateResult, error) {
+	return orchestrator.GateResult{Rows: []orchestrator.GateRow{
+		{Key: "agent_version", Label: "Versi agent"},
+		{Key: "account", Label: "Akun panel", Status: orchestrator.GateYellow,
+			Detail: "Akun panel belum diketahui: agent db-replika belum melaporkannya."},
+	}}, nil
+}
+
+// outsideGateLists is body without its precondition lists.
+func outsideGateLists(body string) string {
+	for {
+		i := strings.Index(body, "<section class=\"flex min-w-0 flex-col gap-2\" data-gate-list>")
+		if i < 0 {
+			return body
+		}
+		j := strings.Index(body[i:], "</section>")
+		if j < 0 {
+			return body[:i]
+		}
+		body = body[:i] + body[i+j+len("</section>"):]
+	}
+}
+
+// tagsWith is every HTML start tag of body that contains attr.
+func tagsWith(body, attr string) []string {
+	var out []string
+	for rest := body; ; {
+		i := strings.Index(rest, attr)
+		if i < 0 {
+			return out
+		}
+		start := strings.LastIndex(rest[:i], "<")
+		end := strings.Index(rest[i:], ">")
+		out = append(out, rest[start:i+end+1])
+		rest = rest[i+end+1:]
+	}
+}
+
+// wantOff fails unless body has a tag with attr and every such tag is
+// disabled.
+func wantOff(t *testing.T, body, attr string) {
+	t.Helper()
+	tags := tagsWith(body, attr)
+	if len(tags) == 0 {
+		t.Fatalf("no element with %s", attr)
+	}
+	for _, tag := range tags {
+		if !strings.Contains(tag, " disabled") {
+			t.Fatalf("element not disabled: %s", tag)
+		}
+	}
+}
+
+// wantOn fails unless body has a tag with attr and none of them is
+// disabled.
+func wantOn(t *testing.T, body, attr string) {
+	t.Helper()
+	tags := tagsWith(body, attr)
+	if len(tags) == 0 {
+		t.Fatalf("no element with %s", attr)
+	}
+	for _, tag := range tags {
+		if strings.Contains(tag, " disabled") {
+			t.Fatalf("element disabled: %s", tag)
+		}
+	}
+}
+
+// TestPromoteScreenListsEveryRow: the promote screen lists every row of
+// the chosen candidate's gate (green, yellow and red), with the status in
+// words; a row that is not green shows its detail, then its fix when it
+// has one; the backup row carries D4. One list per selectable candidate.
+func TestPromoteScreenListsEveryRow(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	f.setView(plannedView())
+	f.setGate(everyKind)
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	list := between(body, `data-promote-box="2" data-gate-box`, "</section>")
+	if list == "" {
+		t.Fatalf("no precondition list for the chosen candidate:\n%s", body)
+	}
+	for _, want := range []string{"<h3", wantD1, "Versi agent", "Cadangan (backup)", "Akun panel", "Ruang disk",
+		"Terpenuhi", "Perlu perhatian", "Belum terpenuhi",
+		"Folder cadangan master db-master belum diisi.", "Isi folder cadangan di halaman server master.",
+		"Akun panel belum diketahui: agent db-replika belum melaporkannya.",
+		"Disk db-replika terpakai 99%.", "Kosongkan ruang disk db-replika.", wantD4} {
+		if !strings.Contains(list, want) {
+			t.Errorf("list lacks %q:\n%s", want, list)
+		}
+	}
+	// Detail before fix; a row without a fix shows no fix element.
+	if strings.Index(list, "Disk db-replika terpakai") > strings.Index(list, "Kosongkan ruang disk") {
+		t.Error("the fix comes before the detail")
+	}
+	account := between(list, `data-gate-row="account"`, "</li>")
+	if account == "" || strings.Contains(account, "data-gate-fix") {
+		t.Errorf("account row (no fix): %q", account)
+	}
+	green := between(list, `data-gate-row="agent_version"`, "</li>")
+	if green == "" || strings.Contains(green, "data-gate-detail") || strings.Contains(green, "data-gate-fix") {
+		t.Errorf("green row: %q", green)
+	}
+	// The other selectable candidate has its own list, hidden until chosen.
+	if !strings.Contains(body, `class="hidden" data-promote-box="3" data-gate-box`) {
+		t.Errorf("no hidden list for candidate 3")
+	}
+	ins := f.gateInputs()
+	want := []orchestrator.GateInput{{Action: orchestrator.GatePromotePlanned, MasterID: 1, TargetID: 2},
+		{Action: orchestrator.GatePromotePlanned, MasterID: 1, TargetID: 3}}
+	if len(ins) != len(want) || ins[0] != want[0] || ins[1] != want[1] {
+		t.Fatalf("gate inputs = %+v, want %+v", ins, want)
+	}
+
+	// An emergency lists the rows too; a red row disables nothing.
+	f.setView(emergencyView())
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, wantD1, "Belum terpenuhi", "Disk db-replika terpakai 99%.")
+	wantOn(t, rec.Body.String(), `data-confirm-action="promote"`)
+	wantNoBody(t, rec, wantD2, `data-gate-off="1"`)
+	if ins := f.gateInputs(); ins[len(ins)-1].Action != orchestrator.GatePromoteEmergency {
+		t.Fatalf("emergency gate input = %+v", ins[len(ins)-1])
+	}
+}
+
+// TestCreateReplicaFormListsRows: Buat replika lists every row of each
+// offered target's gate, shown for the chosen one; Bangun ulang lists the
+// rows of its one target, the approval judged from the answer the page
+// already read (no further agent call).
+func TestCreateReplicaFormListsRows(t *testing.T) {
+	e, f, _ := newMySQLEnv(t)
+	c := e.cookie()
+	master := e.pairedOnline(t, "db-master")
+	e.pairedOnline(t, "db-calon") // 2
+	e.makeMaster(t, master, shopDatabases...)
+	f.setGate(everyKind)
+	rec := e.do("GET", "/masters/1/replicas/new", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	list := between(body, `data-gate-for="2"`, "</section>")
+	for _, want := range []string{wantD1, "Versi agent", "Terpenuhi", "Perlu perhatian", "Belum terpenuhi",
+		"Akun panel belum diketahui: agent db-replika belum melaporkannya.", "Disk db-replika terpakai 99%.",
+		"Kosongkan ruang disk db-replika."} {
+		if !strings.Contains(list, want) {
+			t.Errorf("list lacks %q:\n%s", want, list)
+		}
+	}
+	wantBody(t, rec, `x-data="targetGate"`, `<option value="2" data-gate-off="1" data-gate-red="1">db-calon`)
+	if ins := f.gateInputs(); len(ins) != 1 || ins[0] != (orchestrator.GateInput{Action: orchestrator.GateCreateReplica,
+		MasterID: 1, TargetID: 2}) {
+		t.Fatalf("gate inputs = %+v", ins)
+	}
+
+	e, f, _ = failedRebuildEnv(t)
+	c = e.cookie()
+	f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+	f.setGate(everyKind)
+	rec = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, wantD1, "Disk db-replika terpakai 99%.", wantD4)
+	approved := true
+	if ins := f.gateInputs(); len(ins) != 1 || ins[0] != (orchestrator.GateInput{Action: orchestrator.GateRebuildOldMaster,
+		MasterID: 2, TargetID: 1, Approval: ins[0].Approval}) || ins[0].Approval == nil || *ins[0].Approval != approved {
+		t.Fatalf("gate inputs = %+v", ins)
+	}
+	if f.approvalCalls != 1 {
+		t.Fatalf("approval read %d times, want 1 (the box's)", f.approvalCalls)
+	}
+	// Not approved: the row reads the agent's "no".
+	f.approval = proto.RebuildApprovalResult{Required: true, Code: "123456", Source: "10.0.0.2:3306", RemainingSec: 1700}
+	e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	if ins := f.gateInputs(); ins[len(ins)-1].Approval == nil || *ins[len(ins)-1].Approval {
+		t.Fatalf("gate input = %+v", ins[len(ins)-1])
+	}
+}
+
+// TestRedRowDisablesButton: with a red row each gated button (the drop
+// checkbox of Lepas database) is disabled, D2 is shown below it, and the
+// red row's detail and fix are on the page.
+func TestRedRowDisablesButton(t *testing.T) {
+	cases := []struct {
+		name   string
+		env    func(t *testing.T) (*env, *fakeOrch)
+		method string
+		path   string
+		form   url.Values
+		attr   string // the gated element
+	}{
+		{name: "promote", env: promoteEnvF, method: "GET", path: "/masters/1/promote", attr: `data-confirm-action="promote"`},
+		{name: "create replica", env: createEnv, method: "POST", path: "/masters/1/replicas",
+			form: url.Values{"target": {"2"}, "databases": {"toko"}, "confirm_wipe": {"1"}}, attr: `data-gate-button`},
+		{name: "rebuild", env: rebuildEnvF, method: "GET", path: "/masters/2/replicas/new?bangun-ulang=1",
+			attr: `data-confirm-action="rebuild_old_master"`},
+		{name: "resync", env: ctlEnv, method: "GET", path: "/replicas/2", attr: `data-confirm-action="resync"`},
+		{name: "prepare master again", env: ctlEnv, method: "GET", path: "/servers/1",
+			attr: `data-confirm-action="prepare_master_again"`},
+		{name: "prepare master", env: prepareEnv, method: "GET", path: "/servers/1", attr: `>Siapkan sebagai master</button>`},
+		{name: "add databases", env: addEnv, method: "GET", path: "/replicas/2/databases", attr: `data-gate-button`},
+		{name: "remove databases with drop", env: ctlEnv, method: "GET", path: "/replicas/2/databases",
+			attr: `name="drop_data"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, f := tc.env(t)
+			f.setGate(redDisk)
+			rec := e.do(tc.method, tc.path, tc.form, e.cookie())
+			body := rec.Body.String()
+			wantOff(t, body, tc.attr)
+			wantBody(t, rec, wantD1, wantD2, "Belum terpenuhi", "Ruang disk", "Disk &lt;agent-kata&gt; terpakai 99% (ambang kritis 95%).",
+				"Kosongkan ruang")
+			for _, tag := range tagsWith(body, "data-gate-off-note") {
+				if strings.Contains(tag, "hidden") {
+					t.Errorf("D2 hidden: %s", tag)
+				}
+			}
+			// Only the red row on the pages that list red rows only.
+			if tc.name != "promote" && tc.name != "create replica" && tc.name != "rebuild" {
+				wantNoBody(t, rec, "Terpenuhi<", `data-gate-row="agent_version"`)
+			}
+		})
+	}
+	// Lepas database without dropping the data stays offered.
+	e, f := ctlEnv(t)
+	f.setGate(redDisk)
+	rec := e.do("GET", "/replicas/2/databases", nil, e.cookie())
+	wantOn(t, rec.Body.String(), `data-confirm-action="remove_databases"`)
+}
+
+func createEnv(t *testing.T) (*env, *fakeOrch) {
+	e, f, _ := newMySQLEnv(t)
+	master := e.pairedOnline(t, "db-master")
+	e.pairedOnline(t, "db-calon") // 2
+	e.makeMaster(t, master, shopDatabases...)
+	return e, f
+}
+
+func rebuildEnvF(t *testing.T) (*env, *fakeOrch) {
+	e, f, _ := failedRebuildEnv(t)
+	f.approval = proto.RebuildApprovalResult{Required: true, Approved: true, RemainingSec: 86000, AgeSec: 60,
+		Source: "10.0.0.2:3306", Addr: "10.0.0.2"}
+	return e, f
+}
+
+// prepareEnv: server 1 is connected and not a master yet (Siapkan master).
+func prepareEnv(t *testing.T) (*env, *fakeOrch) {
+	e, f, _ := newMySQLEnv(t)
+	e.pairedOnline(t, "db-utama")
+	if err := e.st.SetInventory(store.Inventory{ServerID: 1, Connected: true, Version: "8.0.39",
+		Databases: shopDatabases, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	return e, f
+}
+
+// addEnv is controlEnv whose master has a database the replica does not
+// follow (Tambah database).
+func addEnv(t *testing.T) (*env, *fakeOrch) {
+	e, f := ctlEnv(t)
+	dbs := append(append([]proto.DatabaseInfo(nil), shopDatabases...), proto.DatabaseInfo{Name: "arsip", Bytes: 1 << 20})
+	if err := e.st.SetInventory(store.Inventory{ServerID: 1, Connected: true, Version: "8.0.39", Series: "8.0",
+		Databases: dbs, MasterReady: true, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	return e, f
+}
+
+// TestGreenGateShowsNothingOnModalOnlyButtons: while no row is red, the
+// pages whose gated action has only its button (Resync, Siapkan master,
+// Siapkan master lagi, Tambah database, Lepas database) show no list and no
+// D2, also with yellow rows, and nothing is disabled.
+func TestGreenGateShowsNothingOnModalOnlyButtons(t *testing.T) {
+	cases := []struct {
+		name string
+		env  func(t *testing.T) (*env, *fakeOrch)
+		path string
+		attr string
+	}{
+		{"resync", ctlEnv, "/replicas/2", `data-confirm-action="resync"`},
+		{"prepare master again", ctlEnv, "/servers/1", `data-confirm-action="prepare_master_again"`},
+		{"prepare master", prepareEnv, "/servers/1", `>Siapkan sebagai master</button>`},
+		{"add databases", addEnv, "/replicas/2/databases", `data-gate-button`},
+		{"remove databases", ctlEnv, "/replicas/2/databases", `name="drop_data"`},
+	}
+	for _, tc := range cases {
+		for name, g := range map[string]func(orchestrator.GateInput) (orchestrator.GateResult, error){
+			"green": nil, "yellow": yellowOnly} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				e, f := tc.env(t)
+				f.setGate(g)
+				rec := e.do("GET", tc.path, nil, e.cookie())
+				wantCode(t, rec, http.StatusOK)
+				wantOn(t, rec.Body.String(), tc.attr)
+				wantNoBody(t, rec, "data-gate-list", wantD2, "Akun panel belum diketahui")
+				if len(f.gateInputs()) == 0 {
+					t.Fatal("the page did not ask the gate")
+				}
+			})
+		}
+	}
+}
+
+// TestBackupAckCheckboxShownOnlyWhenNeeded: D3 is a required checkbox
+// (backup_ack=1) on a planned promote and a rebuild whose backup row asks
+// for it, and nowhere else.
+func TestBackupAckCheckboxShownOnlyWhenNeeded(t *testing.T) {
+	const box = `name="backup_ack" value="1" required`
+	e, f := promoteEnvF(t)
+	c := e.cookie()
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantNoBody(t, rec, box, wantD3)
+	f.setGate(backupUnset)
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantBody(t, rec, box, wantD3)
+	f.setView(emergencyView())
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantNoBody(t, rec, box, wantD3)
+
+	e, f = rebuildEnvF(t)
+	c = e.cookie()
+	rec = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantNoBody(t, rec, box, wantD3)
+	f.setGate(backupUnset)
+	rec = e.do("GET", "/masters/2/replicas/new?bangun-ulang=1", nil, c)
+	wantBody(t, rec, box, wantD3)
+
+	// Buat replika never asks for it.
+	e, f = createEnv(t)
+	f.setGate(backupUnset)
+	wantNoBody(t, e.do("GET", "/masters/1/replicas/new", nil, e.cookie()), box, wantD3)
+}
+
+// TestGateListEscapesServerNames: a row's label, detail and fix carry
+// names the operator chose; they are escaped like any other text.
+func TestGateListEscapesServerNames(t *testing.T) {
+	evil := func(orchestrator.GateInput) (orchestrator.GateResult, error) {
+		return orchestrator.GateResult{Rows: []orchestrator.GateRow{
+			{Key: "disk", Label: "Ruang <i>disk</i>", Status: orchestrator.GateRed,
+				Detail: `Disk <script>alert("db")</script> penuh.`, Fix: `Kosongkan <b onclick="x">db<1</b>.`},
+		}}, nil
+	}
+	for _, tc := range []struct {
+		env  func(t *testing.T) (*env, *fakeOrch)
+		path string
+	}{{promoteEnvF, "/masters/1/promote"}, {ctlEnv, "/replicas/2"}, {createEnv, "/masters/1/replicas/new"}} {
+		e, f := tc.env(t)
+		f.setGate(evil)
+		rec := e.do("GET", tc.path, nil, e.cookie())
+		wantBody(t, rec, "Ruang &lt;i&gt;disk&lt;/i&gt;", "Disk &lt;script&gt;alert(&#34;db&#34;)&lt;/script&gt; penuh.",
+			"Kosongkan &lt;b onclick=&#34;x&#34;&gt;db&lt;1&lt;/b&gt;.")
+		wantNoBody(t, rec, "<i>disk", "<script>alert", `<b onclick`)
+	}
+}
+
+// TestGateErrorOnPage: a gate that cannot judge leaves the page readable:
+// the list is one line saying the preconditions could not be read, and the
+// gated button is disabled (its post would be refused).
+func TestGateErrorOnPage(t *testing.T) {
+	gateErr := func(orchestrator.GateInput) (orchestrator.GateResult, error) {
+		return orchestrator.GateResult{}, errGateStore
+	}
+	for _, tc := range []struct {
+		env  func(t *testing.T) (*env, *fakeOrch)
+		path string
+		attr string
+	}{
+		{ctlEnv, "/replicas/2", `data-confirm-action="resync"`},
+		{promoteEnvF, "/masters/1/promote", `data-confirm-action="promote"`},
+		{rebuildEnvF, "/masters/2/replicas/new?bangun-ulang=1", `data-confirm-action="rebuild_old_master"`},
+	} {
+		e, f := tc.env(t)
+		f.setGate(gateErr)
+		rec := e.do("GET", tc.path, nil, e.cookie())
+		wantCode(t, rec, http.StatusOK)
+		wantBody(t, rec, wantD1, "Prasyarat tidak bisa dibaca: prasyarat: server #2: database terkunci")
+		wantNoBody(t, rec, wantD2)
+		wantOff(t, rec.Body.String(), tc.attr)
 	}
 }

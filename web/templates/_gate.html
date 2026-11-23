@@ -1,0 +1,33 @@
+{{/* gate-list: the precondition list of one gated action (plan 5b-2b,
+     D1, D4). Data: *gateView (nil draws nothing). Each row shows its
+     status in words, its label and, when not green, its detail and then
+     its fix. */}}
+{{define "gate-list"}}{{if and . .Shown}}
+<section class="flex min-w-0 flex-col gap-2" data-gate-list>
+  <h3 class="font-semibold">Prasyarat</h3>
+  {{with .Err}}<p class="text-sm" data-gate-error>{{.}}</p>{{else}}
+  <ul class="flex flex-col gap-3">
+    {{range .Rows}}
+    <li class="flex min-w-0 flex-col gap-1" data-gate-row="{{.Key}}">
+      <div class="flex flex-wrap items-center gap-2">{{template "badge" .Badge}}<span class="font-semibold">{{.Label}}</span></div>
+      {{with .Detail}}<p class="text-sm break-words" data-gate-detail>{{.}}</p>{{end}}
+      {{with .Fix}}<p class="text-sm break-words" data-gate-fix>{{.}}</p>{{end}}
+      {{if .Backup}}<p class="help">Panel hanya melihat umur dan ukuran berkas, bukan apakah cadangan itu bisa dipulihkan.</p>{{end}}
+    </li>
+    {{end}}
+  </ul>
+  {{end}}
+</section>
+{{end}}{{end}}
+
+{{/* gate-off-note: D2, below a button the gate disabled. Data: whether it
+     is shown now (false: drawn hidden; the page's script shows it when the
+     chosen server's gate has a red row). */}}
+{{define "gate-off-note"}}<p class="text-sm text-warning-text{{if not .}} hidden{{end}}" data-gate-off-note>Tombol ini mati selama ada prasyarat yang belum terpenuhi. Perbaiki baris bertanda "Belum terpenuhi", lalu muat ulang halaman ini.</p>{{end}}
+
+{{/* backup-ack: D3, the backup tick of a planned promote and a rebuild
+     (backup_ack=1), required while the backup row asks for it. */}}
+{{define "backup-ack"}}<label class="flex items-start gap-2" data-backup-ack>
+  <input type="checkbox" class="checkbox checkbox-sm" name="backup_ack" value="1" required>
+  <span>Saya sudah memastikan ada cadangan (backup) terbaru</span>
+</label>{{end}}

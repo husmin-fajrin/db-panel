@@ -123,7 +123,7 @@
           <tbody>
             {{range .Rows}}
             <tr data-candidate-row="{{.ServerID}}" class="align-top{{if .Checked}} bg-primary/5{{end}}">
-              <td>{{if and .Selectable (not $.Blocked) (not $refusal)}}<input type="radio" class="radio radio-sm radio-primary" name="candidate" value="{{.ServerID}}"{{if .Checked}} checked{{end}} data-name="{{.MasterName}}" data-replica-name="{{.ReplicaName}}" data-text="{{.ConfirmText}}" aria-label="Pilih {{.Name}}" required>{{else}}<span class="text-muted">-</span>{{end}}</td>
+              <td>{{if and .Selectable (not $.Blocked) (not $refusal)}}<input type="radio" class="radio radio-sm radio-primary" name="candidate" value="{{.ServerID}}"{{if .Checked}} checked{{end}} data-name="{{.MasterName}}" data-replica-name="{{.ReplicaName}}" data-text="{{.ConfirmText}}"{{with .Gate}}{{if .Off}} data-gate-off="1"{{end}}{{if .RedNote}} data-gate-red="1"{{end}}{{end}} aria-label="Pilih {{.Name}}" required>{{else}}<span class="text-muted">-</span>{{end}}</td>
               <td class="min-w-32">
                 <a class="link font-semibold whitespace-nowrap" href="/replicas/{{.ServerID}}">{{.Name}}</a>
                 {{with .Badges}}<div class="mt-1 flex flex-wrap gap-1">{{range .}}{{template "badge" .}}{{end}}</div>{{end}}
@@ -173,13 +173,24 @@
       </div>
       {{end}}
 
+      {{/* The precondition list of each candidate that can be chosen,
+           shown for the chosen one (promotePicker). */}}
+      {{range $row := .Rows}}{{with .Gate}}
+      <div{{if not $row.Checked}} class="hidden"{{end}} data-promote-box="{{$row.ServerID}}" data-gate-box>{{template "gate-list" .}}</div>
+      {{end}}{{end}}
+
       {{if not (or .Blocked $refusal)}}
+      {{if .NeedsAck}}{{template "backup-ack"}}{{end}}
+      {{$sel := .SelectedGate}}
       <div class="mt-2 flex flex-col gap-4 border-t border-base-300 pt-4 md:flex-row md:items-center md:justify-between" data-promote-footer>
         <div class="kotak-bahaya flex min-w-0 flex-1 flex-col gap-1 text-sm">
           {{if .Emergency}}<p class="font-semibold">Transaksi yang belum sampai ke replika terpilih akan hilang dari master baru. Bila master lama hidup kembali, panel bisa memeriksa dan mengamankannya.</p>{{end}}
           <p>Promote tidak bisa dibatalkan setelah dikirim ke kandidat (langkah "Jadikan master baru"); tunggu sampai selesai.</p>
         </div>
-        <button type="submit" class="btn btn-error md:self-center" data-confirm-action="promote" data-confirm-kind="master" data-confirm-id="{{.Master.ID}}" data-confirm-name="{{.SelectedMasterName}}" data-confirm-name-label="Ketik nama master lama" data-confirm-replica-name="{{.SelectedReplicaName}}" data-confirm-danger="1" data-confirm-text="{{.SelectedConfirmText}}">Promote</button>
+        <div class="flex min-w-0 flex-col items-start gap-2 md:max-w-xs md:items-end md:self-center">
+        <button type="submit" class="btn btn-error"{{if and $sel $sel.Off}} disabled{{end}} data-gate-button data-confirm-action="promote" data-confirm-kind="master" data-confirm-id="{{.Master.ID}}" data-confirm-name="{{.SelectedMasterName}}" data-confirm-name-label="Ketik nama master lama" data-confirm-replica-name="{{.SelectedReplicaName}}" data-confirm-danger="1" data-confirm-text="{{.SelectedConfirmText}}">Promote</button>
+        {{if .RedNote}}{{template "gate-off-note" (and $sel $sel.RedNote)}}{{end}}
+        </div>
       </div>
       {{else if .Emergency}}
       <p class="font-semibold">Transaksi yang belum sampai ke replika terpilih akan hilang dari master baru. Bila master lama hidup kembali, panel bisa memeriksa dan mengamankannya.</p>

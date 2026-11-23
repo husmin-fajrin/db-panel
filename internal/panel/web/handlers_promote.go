@@ -112,6 +112,9 @@ type promoteRow struct {
 	// under the name.
 	StatusTone string
 	Badges     []Badge
+	// Gate is the precondition list of a promote to this replica; nil
+	// when it cannot be chosen now.
+	Gate *gateView
 }
 
 // promoteStep is one step of the "Urutan langkah" card.
@@ -214,6 +217,21 @@ type promotePage struct {
 	Steps          []promoteStep
 	WritePauseFrom string
 	MostCurrent    *promoteRow
+	// NeedsAck: a candidate's backup row asks for the tick (D3); RedNote:
+	// a candidate's gate has a red row (D2 is drawn, shown while it is
+	// the chosen one).
+	NeedsAck, RedNote bool
+}
+
+// SelectedGate is the precondition list of the chosen candidate; nil when
+// none is chosen.
+func (p promotePage) SelectedGate() *gateView {
+	for _, row := range p.Rows {
+		if row.Checked {
+			return row.Gate
+		}
+	}
+	return nil
 }
 
 // promoteForm shows the consideration screen of master {id}.
@@ -544,6 +562,23 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 	}
 	if p.BlockedJob != "" && p.BlockedJobLink == "" {
 		p.BlockedJobLink = "Buka pekerjaan promote"
+	}
+	// The precondition list of each candidate that can be chosen now
+	// (plan 5b-2b): the stored data only, no agent call.
+	if p.Blocked == "" && v.OldMasterRefusal() == "" {
+		action := orchestrator.GatePromotePlanned
+		if p.Emergency {
+			action = orchestrator.GatePromoteEmergency
+		}
+		for i := range p.Rows {
+			row := &p.Rows[i]
+			if !row.Selectable {
+				continue
+			}
+			row.Gate = a.gateFor(orchestrator.GateInput{Action: action, MasterID: srv.ID, TargetID: row.ServerID}, false)
+			p.NeedsAck = p.NeedsAck || row.Gate.NeedsAck
+			p.RedNote = p.RedNote || row.Gate.RedNote()
+		}
 	}
 	return p, nil
 }

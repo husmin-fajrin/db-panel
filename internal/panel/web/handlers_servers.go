@@ -146,6 +146,9 @@ type serverDetailPage struct {
 	// PrepareAgain: the server already is a master (it has a topology), so
 	// preparing it again asks for the password.
 	PrepareAgain bool
+	// PrepareGate is the precondition list of Siapkan sebagai master (red
+	// rows only); nil when it is not offered.
+	PrepareGate *gateView
 	// InventoryCut: the inventory holds as many databases as the panel
 	// keeps; the list may be cut.
 	InventoryCut bool
@@ -799,6 +802,7 @@ func (a *app) renderServerWith(w http.ResponseWriter, r *http.Request, srv store
 				return
 			}
 			p.PrepareAgain = err == nil
+			p.PrepareGate = a.gateFor(orchestrator.GateInput{Action: orchestrator.GatePrepareMaster, MasterID: srv.ID}, true)
 		}
 		p.Controls = a.controls(srv)
 		p.CanInstallCert = p.Inventory.Connected && len(p.Inventory.MissingGrants) == 0

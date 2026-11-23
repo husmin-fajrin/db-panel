@@ -192,11 +192,13 @@
     <p>Ukuran data master: <strong>{{fmtBytes .MasterBytes}}</strong>. Jalankan di luar jam sibuk: penyalinan membebani master dan jaringan.</p>
     <p>Selama resync, data di replika ini belum lengkap untuk dibaca, dan MySQL di replika bisa dimulai ulang (restart) bila pengaturannya perlu diubah.</p>
     <label class="label"><input type="checkbox" name="force_dump" value="1" class="checkbox checkbox-sm"> Paksa dump (jangan pakai CLONE)</label>
+    {{template "gate-list" .ResyncGate}}
     <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">
-      <button type="submit" class="btn btn-error" data-confirm-action="resync" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-danger="1" data-confirm-text="Resync ulang {{.Server.Name}}: data replika ini disalin ulang dari master.">Ya, resync ulang</button>
+      <button type="submit" class="btn btn-error"{{if and .ResyncGate .ResyncGate.Off}} disabled{{end}} data-confirm-action="resync" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-name="{{.Server.Name}}" data-confirm-danger="1" data-confirm-text="Resync ulang {{.Server.Name}}: data replika ini disalin ulang dari master.">Ya, resync ulang</button>
       <button type="submit" class="btn" formmethod="dialog" formnovalidate>Batal</button>
     </div>
+    {{if and .ResyncGate .ResyncGate.RedNote}}{{template "gate-off-note" true}}{{end}}
   </form>
   <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
 </dialog>

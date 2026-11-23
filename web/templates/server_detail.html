@@ -266,16 +266,18 @@
 </div>
 {{end}}
 {{end}}
+{{if and .CanPrepare (not .PrepareAgain)}}{{template "gate-list" .PrepareGate}}{{end}}
 <div class="mt-2 flex flex-wrap gap-2">
   <form method="post" action="/servers/{{.Server.ID}}/mysql/refresh">
     <button type="submit" class="btn btn-sm">Segarkan</button>
   </form>
   {{if and .CanPrepare (not .PrepareAgain)}}
   <form method="post" action="/servers/{{.Server.ID}}/prepare-master">
-    <button type="submit" class="btn btn-primary btn-sm">Siapkan sebagai master</button>
+    <button type="submit" class="btn btn-primary btn-sm"{{if and .PrepareGate .PrepareGate.Off}} disabled{{end}}>Siapkan sebagai master</button>
   </form>
   {{end}}
 </div>
+{{if and .CanPrepare (not .PrepareAgain) .PrepareGate .PrepareGate.RedNote}}{{template "gate-off-note" true}}{{end}}
 {{if and .CanPrepare .Local}}
 <div role="status" class="banner banner-warning mb-0 mt-2" data-local-master>{{template "banner-icon" "warning"}}<div class="flex-1">Panel berjalan di server ini; bila server ini mati, promote darurat tidak bisa dilakukan dari panel</div></div>
 {{end}}
@@ -303,9 +305,11 @@
   <summary class="cursor-pointer font-semibold">Tindakan lanjutan</summary>
   <div class="mt-3 flex flex-col items-start gap-2">
     <p class="help">Siapkan ulang (akun replikasi, pengaturan binlog)</p>
+    {{template "gate-list" .PrepareGate}}
     <form method="post" action="/servers/{{.Server.ID}}/prepare-master">
-      <button type="submit" class="btn btn-sm" data-confirm-action="prepare_master_again" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="{{.Server.Name}} sudah menjadi master; panel menyiapkannya sekali lagi.">Siapkan sebagai master</button>
+      <button type="submit" class="btn btn-sm"{{if and .PrepareGate .PrepareGate.Off}} disabled{{end}} data-confirm-action="prepare_master_again" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-text="{{.Server.Name}} sudah menjadi master; panel menyiapkannya sekali lagi.">Siapkan sebagai master</button>
     </form>
+    {{if and .PrepareGate .PrepareGate.RedNote}}{{template "gate-off-note" true}}{{end}}
   </div>
 </details>
 {{end}}

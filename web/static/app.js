@@ -25,6 +25,23 @@
     return Promise.resolve();
   }
 
+  // ikutiPrasyarat makes a form follow the precondition gate of the chosen
+  // server (plan 5b-2b): pilih is the chosen radio or option (null: none).
+  // Its data-gate-off disables the [data-gate-button] (one marked
+  // data-always-off stays disabled), its data-gate-red shows D2
+  // ([data-gate-off-note]). The panel refuses a red row on the post
+  // anyway; this only spares the operator a refused click.
+  function ikutiPrasyarat(form, pilih) {
+    const tombol = form.querySelector("[data-gate-button]");
+    if (tombol) {
+      tombol.disabled = tombol.hasAttribute("data-always-off") || Boolean(pilih && pilih.dataset.gateOff === "1");
+    }
+    const merah = Boolean(pilih && pilih.dataset.gateRed === "1");
+    form.querySelectorAll("[data-gate-off-note]").forEach((el) => {
+      el.classList.toggle("hidden", !merah);
+    });
+  }
+
   // aliranSSE mengembalikan satu EventSource /events yang dipakai bersama
   // oleh semua komponen halaman, supaya tiap halaman hanya membuka satu
   // koneksi SSE (peramban membatasi koneksi per host).
@@ -519,12 +536,34 @@
             tombol.dataset.confirmReplicaName = pilih.dataset.replicaName || "";
             tombol.dataset.confirmText = pilih.dataset.text || "";
           }
+          ikutiPrasyarat(form, pilih);
         };
         form.addEventListener("change", (e) => {
           if (e.target.name === "candidate") {
             perbarui();
           }
         });
+        perbarui();
+      },
+    }));
+
+    // targetGate: the Buat replika form shows the precondition list of the
+    // chosen target ([data-gate-for]) and follows its gate.
+    window.Alpine.data("targetGate", () => ({
+      init() {
+        const form = this.$el;
+        const daftar = form.querySelector('select[name="target"]');
+        if (!daftar) {
+          return;
+        }
+        const perbarui = () => {
+          const id = daftar.value;
+          form.querySelectorAll("[data-gate-for]").forEach((el) => {
+            el.classList.toggle("hidden", el.dataset.gateFor !== id);
+          });
+          ikutiPrasyarat(form, id ? daftar.selectedOptions[0] : null);
+        };
+        daftar.addEventListener("change", perbarui);
         perbarui();
       },
     }));

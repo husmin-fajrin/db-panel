@@ -595,6 +595,9 @@ type targetChoice struct {
 	// NotConnected: its MySQL is installed but not connected; it is shown
 	// disabled, with a link to its page (Hubungkan MySQL).
 	NotConnected bool
+	// Gate is the precondition list of Buat replika to this server; nil
+	// when it cannot be chosen.
+	Gate *gateView
 }
 
 // databaseChoice is one database checkbox of the replica form.
@@ -616,6 +619,59 @@ type replicaNewPage struct {
 	// it is the only target. RebuildBad: the server asked for is not one.
 	Rebuild    *rebuildInfo
 	RebuildBad bool
+	// Gate is the precondition list of the rebuild (nil for Buat replika,
+	// whose lists are its targets').
+	Gate *gateView
+}
+
+// TargetGate is the precondition list of the chosen target of Buat
+// replika; nil when none is chosen.
+func (p replicaNewPage) TargetGate() *gateView {
+	for _, c := range p.Targets {
+		if c.ID == p.Target {
+			return c.Gate
+		}
+	}
+	return nil
+}
+
+// RedNote reports whether a target's gate of Buat replika has a red row
+// (D2 is drawn, shown while it is the chosen one).
+func (p replicaNewPage) RedNote() bool {
+	for _, c := range p.Targets {
+		if c.Gate != nil && c.Gate.RedNote() {
+			return true
+		}
+	}
+	return false
+}
+
+// renderReplicaNew renders the replica form with its precondition lists
+// (plan 5b-2b): the rebuild's, its approval row judged from the answer
+// the "Persetujuan di server" box already read (no further agent call),
+// or one per target of Buat replika.
+func (a *app) renderReplicaNew(w http.ResponseWriter, status int, p replicaNewPage) {
+	switch {
+	case p.RebuildBad:
+	case p.Rebuild != nil:
+		in := orchestrator.GateInput{Action: orchestrator.GateRebuildOldMaster, MasterID: p.Master.ID,
+			TargetID: p.Rebuild.Server.ID}
+		if p.Rebuild.Approval != nil {
+			approved := p.Rebuild.ApprovalOK
+			in.Approval = &approved
+		}
+		p.Gate = a.gateFor(in, false)
+	default:
+		for i := range p.Targets {
+			c := &p.Targets[i]
+			if c.NotConnected {
+				continue
+			}
+			c.Gate = a.gateFor(orchestrator.GateInput{Action: orchestrator.GateCreateReplica, MasterID: p.Master.ID,
+				TargetID: c.ID}, false)
+		}
+	}
+	a.render.renderStatus(w, status, "replica_new", p)
 }
 
 // replicaForm builds the replica form for master. checked nil means every
@@ -729,7 +785,7 @@ func (a *app) newReplicaForm(w http.ResponseWriter, r *http.Request) {
 	if p.RebuildBad {
 		status = http.StatusBadRequest
 	}
-	a.render.renderStatus(w, status, "replica_new", p)
+	a.renderReplicaNew(w, status, p)
 }
 
 // createReplica starts "Buat replika"; with rebuild=1 it rebuilds the
@@ -777,7 +833,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 			p.ForceDump = r.PostFormValue("force_dump") != ""
 			a.audit(r, "create_replica", auditReplica, target, detail, g.outcome)
 			p.Flash = g.flash
-			a.render.renderStatus(w, g.status, "replica_new", p)
+			a.renderReplicaNew(w, g.status, p)
 			return
 		}
 	}
@@ -794,7 +850,7 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	failStatus := func(status int, msg string) {
 		a.audit(r, "create_replica", auditReplica, p.Target, detail, msg)
 		p.Flash = msg
-		a.render.renderStatus(w, status, "replica_new", p)
+		a.renderReplicaNew(w, status, p)
 	}
 	fail := func(msg string) { failStatus(http.StatusBadRequest, msg) }
 	if p.Target <= 0 {
@@ -921,6 +977,9 @@ type replicaPage struct {
 	OpenResync          bool // open the resync dialog on load (after prepareResync)
 	Status              statusView
 	Timeline            timelineView
+	// ResyncGate is the precondition list of Resync ulang (red rows
+	// only); nil when it is not offered.
+	ResyncGate *gateView
 }
 
 // ButtonClass is the extra class of the control an explanation's Primary
@@ -1085,6 +1144,10 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 		p.Quarantined = true
 		p.CanResync, p.CanDetach = false, false
 	}
+	if p.CanResync {
+		p.ResyncGate = a.gateFor(orchestrator.GateInput{Action: orchestrator.GateResync, MasterID: p.Master.ID,
+			TargetID: srv.ID}, true)
+	}
 	a.render.renderStatus(w, status, "replica_detail", p)
 }
 
@@ -1112,6 +1175,23 @@ type replicaDatabasesPage struct {
 	Databases   []replicaDatabase // the master's, then followed ones it no longer has
 	Unfollowed  []replicaDatabase // can be added
 	Followed    []replicaDatabase // can be removed
+	// AddGate and DropGate are the precondition lists (red rows only) of
+	// Tambah database and of Lepas database with its data dropped; nil
+	// when the action is not offered.
+	AddGate, DropGate *gateView
+}
+
+// renderDatabases renders the databases page with its precondition lists
+// (plan 5b-2b).
+func (a *app) renderDatabases(w http.ResponseWriter, status int, p replicaDatabasesPage) {
+	if p.CanChange && len(p.Unfollowed) > 0 {
+		p.AddGate = a.gateFor(orchestrator.GateInput{Action: orchestrator.GateAddDatabases, MasterID: p.Master.ID,
+			TargetID: p.Server.ID}, true)
+	}
+	if p.CanChange && len(p.Followed) > 1 {
+		p.DropGate = a.gateFor(orchestrator.GateInput{Action: orchestrator.GateRemoveWithDrop, TargetID: p.Server.ID}, true)
+	}
+	a.render.renderStatus(w, status, "replica_databases", p)
 }
 
 // subsetReplicaFromPath is replicaFromPath for a replica that follows a
@@ -1168,7 +1248,7 @@ func (a *app) replicaDatabases(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, "replica databases", err)
 		return
 	}
-	a.render.Render(w, "replica_databases", p)
+	a.renderDatabases(w, http.StatusOK, p)
 }
 
 func (a *app) addReplicaDatabases(w http.ResponseWriter, r *http.Request) {
@@ -1229,7 +1309,7 @@ func (a *app) databasesGate(w http.ResponseWriter, r *http.Request, action strin
 		return false
 	}
 	p.Flash = g.flash
-	a.render.renderStatus(w, g.status, "replica_databases", p)
+	a.renderDatabases(w, g.status, p)
 	return false
 }
 
@@ -1311,7 +1391,7 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 	if msg != "" {
 		a.Logger.Warn("replica databases "+verb+" refused", "server", srv.ID, "err", msg)
 		p.Flash = msg
-		a.render.renderStatus(w, status, "replica_databases", p)
+		a.renderDatabases(w, status, p)
 		return
 	}
 	a.Logger.Info("replica databases "+verb+" started", "server", srv.ID, "databases", selected, "job", id,
