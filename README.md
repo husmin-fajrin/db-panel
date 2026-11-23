@@ -800,7 +800,7 @@ Master bisa dikunci dan dibuka langsung di servernya:
 
 ```sh
 sudo dbpanel agent lock-master     # SET PERSIST super_read_only=ON + kunci promosi
-sudo dbpanel agent unlock-master   # RESET PERSIST super_read_only, kedua flag OFF sampai restart, hapus kunci promosi
+sudo dbpanel agent unlock-master   # RESET PERSIST super_read_only, kedua flag OFF sekarang, hapus kunci promosi
 ```
 
 `lock-master` membuat MySQL read-only, juga sesudah restart, dan menulis
@@ -1177,7 +1177,9 @@ Di halaman server ada kartu **Cadangan (backup)** dengan dua isian:
 Tekan **Simpan**. Panel mengirim folder itu ke agent server tersebut.
 Mengubah folder tidak meminta kata sandi panel, tetapi tercatat di
 **Audit** ("Atur folder cadangan"). Sampai agent melapor, kartu menulis
-"Belum ada laporan dari agent." Sesudah itu kartu menulis umur dan ukuran
+"Belum ada laporan dari agent." Agent versi sebelumnya tidak memindai
+folder, jadi kartunya tetap menulis kalimat itu sampai agent tersebut
+diperbarui. Sesudah itu kartu menulis umur dan ukuran
 berkas terbaru, misalnya "Berkas terbaru: 3 jam lalu, 1.2 GB.", atau
 masalahnya.
 
@@ -1543,6 +1545,10 @@ Baris yang diperiksa:
 "Promote" di tabel berarti promote terencana dan darurat. **Siapkan
 sebagai master** dan **Lepas database** dengan hapus data hanya memeriksa
 **Versi agent** dan **Akun panel**.
+
+Bila host panel adalah master itu sendiri, server tujuan tindakan, atau
+replika di topologi master itu, panel tidak memeriksa port MySQL master dan
+baris **Port MySQL master** selalu bertanda "Terpenuhi".
 
 Baris **Cadangan (backup)** kuning bila folder cadangan master belum diisi:
 "Folder cadangan master <server> belum diisi, jadi panel tidak bisa melihat
@@ -3874,9 +3880,10 @@ tidak bisa dipilih sebagai master baru. Kerjakan langkah ini berurutan,
 sebelum promote terencana berikutnya:
 
 1. Perbarui agent di setiap server database (langkah **Pasang ulang
-   agent** di atas). Panel menolak agent yang versinya berbeda dari panel
-   (baris **Versi agent**), dan agent lama tidak melaporkan jam dan folder
-   cadangan yang dibaca baris lain.
+   agent** di atas). Selama agent sebuah server berbeda versi dari panel,
+   tindakan terencana yang melibatkan server itu ditolak (baris **Versi
+   agent**); agent itu tetap tersambung dan dipantau. Agent lama juga tidak
+   melaporkan jam dan folder cadangan yang dibaca baris lain.
 2. Di halaman setiap server, klik **Segarkan** di kartu MySQL. Versi panel
    sebelumnya tidak menyimpan akun MySQL yang dipakai agent; **Segarkan**
    membacanya, sehingga baris **Akun panel** bisa dinilai.
@@ -4244,18 +4251,24 @@ sebelum promote terencana berikutnya:
 - **Folder cadangan.** Agent hanya membaca umur dan ukuran berkas terbaru
   di folder cadangan; ia tidak membuka berkas, tidak mengirim nama berkas,
   dan tidak mengikuti symlink di dalam folder. Risiko yang tersisa: panel
-  yang disusupi bisa menunjuk agent ke folder lain, dan dengan begitu
-  mengetahui umur dan ukuran berkas terbaru di sana (paling dalam tiga
-  tingkat), di luar folder yang ditolak (lihat "Cadangan (backup)" di
-  "Pemantauan"). Hal yang sama bisa dilakukan siapa pun yang bisa memasang
-  symlink di path folder cadangan. Mengubah folder tidak meminta kata
-  sandi panel; perubahan itu tercatat di **Audit**.
+  yang disusupi bisa menunjuk agent ke path lain di luar folder yang
+  ditolak (lihat "Cadangan (backup)" di "Pemantauan"), dan dengan begitu
+  mengetahui dari kode status dan sebab yang dikirim agent apakah path itu
+  ada, apakah itu folder, apakah di dalamnya ada berkas biasa (paling dalam
+  tiga tingkat), dan apakah isinya lebih dari 10.000 entri, serta umur dan
+  ukuran berkas terbarunya. Hal yang sama bisa dilakukan siapa pun yang bisa
+  memasang symlink di path folder cadangan. Mengubah folder tidak meminta
+  kata sandi panel: sesi yang sudah masuk, tanpa kata sandi, bisa mengganti
+  folder, mengubah batas umur, atau mengosongkan folder, dan dengan itu
+  membuat baris **Cadangan (backup)** yang merah menjadi kuning atau hijau
+  serta menutup peringatan **Cadangan master usang**. Perubahan itu tercatat
+  di **Audit**.
 - **Gerbang prasyarat menahan salah langkah, bukan panel yang disusupi.**
   Daftar **Prasyarat** mencegah operator menjalankan tindakan terencana
   pada keadaan yang salah. Panel yang disusupi tetap bisa memerintahkan
-  agent langsung, tanpa gerbang. Baris yang dibaca dari laporan agent (jam,
-  pin master, ruang disk, performance_schema, cadangan) bisa dibuat hijau
-  oleh agent yang disusupi.
+  agent langsung, tanpa gerbang. Baris yang dibaca dari laporan atau jawaban
+  agent (versi agent, pin master, jam, ruang disk, akun panel,
+  performance_schema, cadangan) bisa dibuat hijau oleh agent yang disusupi.
 - **Baris yang salah merah menahan pekerjaan terencana.** Bila sebuah baris
   merah padahal keadaannya baik (misalnya laporan yang salah), tindakan
   terencana tetap ditolak sampai baris itu diperbaiki. Tidak ada tombol
