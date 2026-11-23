@@ -270,8 +270,12 @@ func TestJobRetryGatedBeforeToken(t *testing.T) {
 	rec := e.do("POST", "/jobs/"+resyncJob+"/retry", form, c)
 	wantCode(t, rec, http.StatusConflict)
 	wantBody(t, rec, wantG14Disk)
+	// The refused page lists the red row G14 points at.
+	wantBody(t, rec, wantD2, "Kosongkan ruang")
 	wantCalls(t, f)
-	if got := f.gateInputs(); len(got) != 1 || got[0] != (orchestrator.GateInput{Action: orchestrator.GateResync,
+	// The first input is the handler's; the refused page reads the gate
+	// again for its list.
+	if got := f.gateInputs(); len(got) == 0 || got[0] != (orchestrator.GateInput{Action: orchestrator.GateResync,
 		MasterID: 1, TargetID: 2}) {
 		t.Fatalf("gate inputs = %+v", got)
 	}
@@ -916,5 +920,64 @@ func TestPrepareAgainBoxOpensOnRedRow(t *testing.T) {
 	f.setGate(redDisk)
 	if tag := box(); !strings.Contains(tag, " open") {
 		t.Fatalf("red: box folded: %s", tag)
+	}
+}
+
+// TestJobPageRedGate (W-1): the page of a data-dropping job whose gate has
+// a red row lists that row (red rows only), disables Ulangi and Setujui
+// and shows D2; the page asks the agent nothing. With a green gate the
+// buttons are on and no list is drawn.
+func TestJobPageRedGate(t *testing.T) {
+	const approveJob = "3333333333333333333333333333333d"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, e *env, f *fakeOrch) string
+		attrs []string
+	}{
+		{name: "retry", setup: func(t *testing.T, e *env, f *fakeOrch) string {
+			failedResyncJob(t, e, f, resyncJob, "gudang", "toko")
+			return resyncJob
+		}, attrs: []string{`data-confirm-action="job_retry:` + resyncJob + `"`, `data-gate-button`}},
+		{name: "approve", setup: func(t *testing.T, e *env, f *fakeOrch) string {
+			storeJob(t, e.st, approveJob, orchestrator.KindCreateReplica, 1,
+				`{"master_server_id":2,"wait_reason":"wipe","wait_list":["toko"]}`, store.JobWaiting,
+				"Periksa master", "Periksa server tujuan")
+			f.mu.Lock()
+			f.drops = map[string]bool{approveJob: true}
+			f.mu.Unlock()
+			return approveJob
+		}, attrs: []string{`data-confirm-action="job_approve:` + approveJob + `"`, `data-gate-button`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, f, _ := controlEnv(t)
+			c := e.cookie()
+			id := tc.setup(t, e, f)
+			f.setGate(redDisk)
+			rec := e.do("GET", "/jobs/"+id, nil, c)
+			wantCode(t, rec, http.StatusOK)
+			body := rec.Body.String()
+			for _, attr := range tc.attrs {
+				wantOff(t, body, attr)
+			}
+			wantBody(t, rec, wantD1, wantD2, "Belum terpenuhi", "Ruang disk",
+				"Disk &lt;agent-kata&gt; terpakai 99% (ambang kritis 95%).", "Kosongkan ruang")
+			wantNoBody(t, rec, "Terpenuhi<", `data-gate-row="agent_version"`)
+			if strings.Contains(outsideGateLists(body), "agent-kata") {
+				t.Fatalf("the agent's text outside the precondition list:\n%s", body)
+			}
+			wantCalls(t, f)
+			if got := f.gateInputs(); len(got) != 1 || got[0].TargetID == 0 {
+				t.Fatalf("gate inputs = %+v", got)
+			}
+
+			f.setGate(nil)
+			rec = e.do("GET", "/jobs/"+id, nil, c)
+			body = rec.Body.String()
+			for _, attr := range tc.attrs {
+				wantOn(t, body, attr)
+			}
+			wantNoBody(t, rec, wantD2, "data-gate-list")
+		})
 	}
 }

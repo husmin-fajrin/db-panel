@@ -161,6 +161,10 @@ type jobPage struct {
 	// connections again (SP-1); the acknowledgement it needs, tied to the
 	// approve form.
 	ApproveConns *retryView
+	// Gate: the red rows of the precondition gate a Setujui or Ulangi of a
+	// data-dropping job judges (JobGateInput); nil for a job without one.
+	// While it is Off, both are disabled (the handler refuses them anyway).
+	Gate *gateView
 }
 
 // retryView is what the retry dialog of a job that drops data shows: the
@@ -336,6 +340,12 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 			a.Logger.Warn("drops data check", "job", job.ID, "err", logErr(err))
 		}
 		p.DropsData = drops || err != nil
+	}
+	if (p.CanApprove || p.CanRetry) && p.DropsData {
+		// The list G14 points at; the gate asks no agent.
+		if in, gated := orchestrator.JobGateInput(job); gated {
+			p.Gate = a.gateFor(in, true)
+		}
 	}
 	if p.CanApprove && p.DropsData && params.RebuildOldMaster && job.Kind == orchestrator.KindCreateReplica {
 		p.ApproveConns = &retryView{Server: srv, AcceptLabel: acceptLabel(a.connectionsOf(r.Context(), srv)), Form: "form-setujui"}
