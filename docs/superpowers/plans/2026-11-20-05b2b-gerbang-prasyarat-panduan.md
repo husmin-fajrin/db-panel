@@ -923,6 +923,69 @@ README menambah:
     (Task 12).** Penolakan gerbang yang datang dari `Start*` diaudit dengan
     teks G0 di semua layar; kotak "Tindakan lanjutan" terbuka sendiri
     selama "Siapkan ulang" dimatikan baris merah.
+28. **2026-11-23 — aturan isi panduan (Task 13).** Panduan 5 dan 7 menyalin
+    langkah README yang sudah diaudit kata demi kata, termasuk
+    `SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF;`, masing-masing
+    tepat sesudah syarat yang disebut sumbernya. Tidak ada panduan yang
+    menambah langkah semacam itu. Panduan 6 hanya menambah satu kalimat
+    rujukan ke langkah panduan 7. Panduan 9 dan 3 ditulis baru karena spek
+    5.10 memintanya dan belum ada teks yang diaudit: panduan 9 hanya memakai
+    perintah CLI agent yang sudah ada dan hanya ke arah aman (menuju
+    baca-saja atau karantina); panduan 3 dari spek 5.8 dan halaman Task 8.
+29. **2026-11-23 — akun di panduan 8 (Task 13).** Namanya
+    `panel_admin@localhost`, bukan `dbpanel_admin` seperti di rencana: README
+    "Hubungkan MySQL" melarang nama berawalan `dbpanel_`. Hak aksesnya sama
+    dengan yang diberikan `mysql.ResetAdmin`. Pernyataan SQL-nya tidak pernah
+    dijalankan di replika dan baca-saja tidak pernah dimatikan di replika;
+    dalam satu topologi dijalankan di master (dibuktikan dengan tiga mysqld
+    coba). Untuk replika yang hanya sebagian mengikuti master, panduan
+    menyuruh memanggil admin MySQL.
+30. **2026-11-23 — tinjauan akhir memakai tiga peninjau, bukan dua.** Diff
+    sisi panel terlalu besar untuk dibaca habis satu peninjau: sisi agent;
+    inti panel (orchestrator, monitor, store); web panel dengan template dan
+    README. Tidak ada temuan Kritis; empat temuan Penting.
+31. **2026-11-23 — gelombang perbaikan tinjauan akhir (`d12a4df..b950757`,
+    15 commit).** Yang mengubah perilaku: halaman pekerjaan menampilkan
+    baris merah dan mematikan "Ulangi" dan "Setujui"; laporan cadangan yang
+    terpotong (folder lebih dari 10.000 entri) tetap dinilai dan mendapat
+    satu kalimat penjelasan; peringatan `backup_stale` tidak dibuka dan
+    tidak ditutup selama agent master tidak tersambung atau laporannya
+    sudah lama; baris "Akun panel" yang belum dilaporkan mendapat teks
+    perbaikan yang menyebut "Segarkan", dan panel membaca inventaris satu
+    kali saat agent tersambung bila akunnya belum diketahui; satu
+    `monitor.configure` per server pada satu waktu. Pemeriksaan ulang satu
+    kali: semua butir beres. Butir kecil yang tersisa ada di dokumen audit.
+32. **2026-11-23 — `unlock-master` tidak diubah.** Perintah itu membiarkan
+    `read_only` yang disimpan karantina. Ini perilaku lama agent pada
+    perintah root dan tertulis di README yang sudah diaudit. Auditor agent
+    menegaskan bahwa perbaikan yang diusulkan tinjauan akhir
+    (`RESET PERSIST`) tidak aman: master yang pernah dipromosikan tetap bisa
+    ditulis hanya karena nilai OFF yang tersimpan. Dibawa ke pemilik dengan
+    saran.
+33. **2026-11-24 — gelombang perbaikan audit keamanan lebih luas dari
+    "Kritis dan Tinggi" (`b950757..5fb84df`).** Selain satu temuan Tinggi
+    (kotak petunjuk di halaman master yang menyuruh promote dengan tangan),
+    ikut dikerjakan temuan Sedang dan Rendah yang kecil, tidak mengubah
+    keputusan yang sudah disetujui, dan bisa diperiksa dari diff: teks peran
+    di peringatan `master_unpinned` dibatasi; pemeriksaan asal permintaan
+    mewajibkan https; agent menolak folder cadangan lebih dari 1024 byte;
+    `no-store` pada galat berkas statis dan aliran peristiwa;
+    `Permissions-Policy` lebih ketat. Temuan lain dibawa ke pemilik dengan
+    akibat terburuk dan saran. Pemeriksaan ulang dilakukan dua pemeriksa
+    baru pada diff perbaikan, bukan oleh tiga auditor semula, untuk
+    menghemat kuota.
+34. **2026-11-24 — "Ulangi" pada promote yang gagal sebelum master diganti
+    (`f2514a2`, dibetulkan `dcdfacf`).** Gelombang audit mula-mula menolak
+    "Ulangi" untuk kedua jenis promote. Pemeriksaan ulang menemukan
+    akibatnya pada promote terencana: bila kunci master masih terpasang
+    sesudah jendela kunci, master tetap baca-saja dan tombol yang dulu
+    membukanya hilang. Keputusan itu dicabut untuk promote terencana:
+    "Ulangi"-nya kembali seperti sebelum `f2514a2` (keputusan K4 tidak
+    berubah), dan logika jendela kunci dihapus. Penolakan tetap berlaku
+    untuk promote darurat, yang tidak melibatkan kunci master. README
+    menulis apa adanya bahwa "Ulangi" pada promote terencana yang gagal
+    melanjutkan pekerjaan tanpa membaca ulang Prasyarat dan tanpa kata
+    sandi. Soal itu dibawa ke pemilik sebagai keputusan.
 
 ## Teks baru untuk dibaca pemilik
 
