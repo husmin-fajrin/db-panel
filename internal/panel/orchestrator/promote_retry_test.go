@@ -14,10 +14,13 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
-// Ulangi of a promote job that failed before mysql.promote was sent (PC-1,
-// ruling R43): refused, so that the operator starts a new promote, which
-// reads the mode again and asks for the tick, the names, the password and
-// (planned) the gate. A job past that point keeps its tokenless Ulangi.
+// Ulangi of an emergency promote job that failed before mysql.promote was
+// sent (PC-1, rulings R43 and R46): refused, so that the operator starts a
+// new emergency promote, which reads the mode again and asks for the tick,
+// the names and the password. A planned promote job keeps its tokenless,
+// ungated Ulangi in every state (K4): it is also how the panel lifts a
+// promote lock the master's guard kept. A job past the point keeps its
+// tokenless Ulangi, whatever its kind.
 
 // wantRetryRefused fails unless Retry of id is refused with
 // ErrPromoteRetryBeforePoint, the job stays failed, no agent got a
@@ -109,52 +112,13 @@ func TestPromoteEmergencyRetryBeforePointRefused(t *testing.T) {
 	}
 }
 
-// A planned promote that failed in "Replika mengejar" and whose lock was
-// lifted: Ulangi is refused and sends nothing; a new planned start is
-// judged by the gate (refused on a red row) and runs once it is green.
-func TestPromotePlannedRetryBeforePointRefused(t *testing.T) {
-	g := newPromoteRig(t)
-	e := g.e
-	ctx := context.Background()
-	e.r.promoteCatchUp = 100 * time.Millisecond
-	g.c.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: false, Executed: lagUUIDs,
-		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
-	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
-	if err != nil {
-		t.Fatalf("StartPromote: %v", err)
-	}
-	e.waitJob(id, store.JobFailed)
-	e.waitFor("unlockPromote", func() bool { return g.m.count("mysql.unlockPromote") == 1 })
-	wantRetryRefused(t, e, id)
-	if n := g.m.count("mysql.lockForPromote"); n != 1 {
-		t.Fatalf("lockForPromote sent %d times, want 1", n)
-	}
-
-	// A red row refuses the new start before anything is written.
-	if err := e.st.SetReplicaTLSVerified(g.b.id, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id}); !errors.Is(err, ErrGateRed) {
-		t.Fatalf("new planned start with a red row = %v, want ErrGateRed", err)
-	}
-	if err := e.st.SetReplicaTLSVerified(g.b.id, true); err != nil {
-		t.Fatal(err)
-	}
-	g.c.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: true, Executed: masterGTID,
-		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
-	id2, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
-	if err != nil {
-		t.Fatalf("new planned start after the refused retry: %v", err)
-	}
-	e.waitJob(id2, store.JobSucceeded)
-}
-
-// A planned promote whose unlock failed (the master's agent did not
-// answer it): while its lock may still stand, Ulangi stays as it was (it
-// is how the panel confirms the lock open, and a new start would meet the
-// lock); once the lock's deadline and the guard's grace have passed, it is
-// refused like any other.
-func TestPromotePlannedRetryWhileLockMayStand(t *testing.T) {
+// A planned promote that failed in "Replika mengejar" while the master's
+// agent could not take the unlock: the guard kept the lock past its
+// deadline and the guard's grace, and the master stays read-only. Ulangi is
+// still offered and runs without a token or the gate; its relock is
+// refused by the master's agent, and its failure path lifts the lock with
+// the candidate's credential (R46: the planned Ulangi is not refused).
+func TestPromotePlannedRetryLiftsKeptLock(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
 	e.r.promoteCatchUp = 100 * time.Millisecond
@@ -173,38 +137,15 @@ func TestPromotePlannedRetryWhileLockMayStand(t *testing.T) {
 	if !st.LockTried || st.LockUnlocked || st.LockDeadline == nil {
 		t.Fatalf("job state = %+v, want a lock not confirmed open", st)
 	}
-	if got := e.r.RetryRefused(id); got != "" {
-		t.Fatalf("RetryRefused while the lock may stand = %q", got)
-	}
-	if err := e.r.Retry(id, JobAck{}); err != nil {
-		t.Fatalf("Retry while the lock may stand: %v", err)
-	}
-	e.waitJob(id, store.JobFailed)
-	e.waitIdle(id)
 
-	deadline := *e.storedState(id).LockDeadline
-	e.r.now = func() time.Time { return deadline.Add(proto.PromoteLockGrace - time.Second) }
+	// Long past the lock's deadline and the guard's grace; the guard kept
+	// the lock, so a second one is refused.
+	deadline := *st.LockDeadline
+	e.r.now = func() time.Time { return deadline.Add(proto.PromoteLockGrace + time.Hour) }
+	g.m.fail("mysql.lockForPromote", "master sudah dikunci untuk promosi; kunci baru ditolak")
+	g.m.reply("mysql.unlockPromote", nil)
 	if got := e.r.RetryRefused(id); got != "" {
-		t.Fatalf("RetryRefused within the grace = %q", got)
-	}
-	e.r.now = func() time.Time { return deadline.Add(proto.PromoteLockGrace + time.Second) }
-	wantRetryRefused(t, e, id)
-}
-
-// A promote past the point of no return keeps its Ulangi, without a
-// token and without the gate (K4).
-func TestPromoteRetryPastPointStillRuns(t *testing.T) {
-	g := newPromoteRig(t)
-	e := g.e
-	g.m.fail("mysql.quarantine", "master lama tidak menjawab")
-	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
-	if err != nil {
-		t.Fatalf("StartPromote: %v", err)
-	}
-	e.waitJob(id, store.JobPartial)
-	e.waitIdle(id)
-	if got := e.r.RetryRefused(id); got != "" {
-		t.Fatalf("RetryRefused past the point = %q", got)
+		t.Fatalf("RetryRefused of a planned promote = %q, want none", got)
 	}
 	if drops, err := e.r.DropsData(id); err != nil || drops {
 		t.Fatalf("DropsData = %v, %v; want false", drops, err)
@@ -212,12 +153,137 @@ func TestPromoteRetryPastPointStillRuns(t *testing.T) {
 	if j, _, err := e.st.GetJob(id); err != nil {
 		t.Fatal(err)
 	} else if in, gated := JobGateInput(j); gated {
-		t.Fatalf("a promote past the point is judged again: %+v", in)
+		t.Fatalf("a planned promote's Ulangi is judged again: %+v", in)
 	}
-	e.fullDisk(g.c) // a red row on the new master changes nothing
-	g.m.reply("mysql.quarantine", proto.QuarantineResult{Applied: true})
 	if err := e.r.Retry(id, JobAck{}); err != nil {
-		t.Fatalf("Retry past the point: %v", err)
+		t.Fatalf("Retry of a planned promote whose lock the guard kept: %v", err)
 	}
-	e.waitJob(id, store.JobSucceeded)
+	e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	if n := g.m.count("mysql.lockForPromote"); n != 2 {
+		t.Fatalf("lockForPromote sent %d times, want 2 (the relock of the retry)", n)
+	}
+	if n := g.m.count("mysql.unlockPromote"); n != 2 {
+		t.Fatalf("unlockPromote sent %d times, want 2 (the retry's failure path)", n)
+	}
+	var u proto.UnlockPromoteParams
+	g.m.params("mysql.unlockPromote", &u)
+	if u.Candidate.Host != "10.0.0.2" {
+		t.Fatalf("unlock params = %+v, want the candidate's credential", u)
+	}
+	if st := e.storedState(id); !st.LockUnlocked {
+		t.Fatalf("job state after the retry = %+v, want the unlock confirmed", st)
+	}
+	if g.c.count("mysql.promote") != 0 {
+		t.Fatalf("candidate commands: %v", g.c.cmds(0))
+	}
+}
+
+// A promote past the point of no return keeps its Ulangi, without a
+// token and without the gate (K4), whatever its kind.
+func TestPromoteRetryPastPointStillRuns(t *testing.T) {
+	t.Run("planned", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		g.m.fail("mysql.quarantine", "master lama tidak menjawab")
+		id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+		if err != nil {
+			t.Fatalf("StartPromote: %v", err)
+		}
+		e.waitJob(id, store.JobPartial)
+		e.waitIdle(id)
+		wantRetryOffered(t, e, id)
+		e.fullDisk(g.c) // a red row on the new master changes nothing
+		g.m.reply("mysql.quarantine", proto.QuarantineResult{Applied: true})
+		if err := e.r.Retry(id, JobAck{}); err != nil {
+			t.Fatalf("Retry past the point: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+	})
+	t.Run("emergency", func(t *testing.T) {
+		// mysql.promote was sent and its answer lost: the job is partial
+		// (PromoteSent, not PastPoint) and Ulangi sends it again.
+		g := emergencyRig(t)
+		e := g.e
+		g.c.mu.Lock()
+		g.c.dropReply = map[string]bool{"mysql.promote": true}
+		g.c.mu.Unlock()
+		id, err := e.r.StartPromote(context.Background(), PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id,
+			CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}})
+		if err != nil {
+			t.Fatalf("StartPromote: %v", err)
+		}
+		if j, _ := e.waitJob(id, store.JobPartial); j.Kind != KindPromoteEmergency {
+			t.Fatalf("kind = %s", j.Kind)
+		}
+		e.waitIdle(id)
+		if st := e.storedState(id); !st.PromoteSent || st.PastPoint {
+			t.Fatalf("job state = %+v, want mysql.promote sent, outcome unknown", st)
+		}
+		wantRetryOffered(t, e, id)
+		g.c.mu.Lock()
+		g.c.dropReply = nil
+		g.c.mu.Unlock()
+		if err := e.r.Retry(id, JobAck{}); err != nil {
+			t.Fatalf("Retry past the point: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+		if n := g.c.count("mysql.promote"); n != 2 {
+			t.Fatalf("mysql.promote sent %d times, want 2 (the retry ran)", n)
+		}
+	})
+}
+
+// wantRetryOffered fails unless Ulangi of id is offered, needs no token and
+// is not judged by the gate.
+func wantRetryOffered(t *testing.T, e *env, id string) {
+	t.Helper()
+	if got := e.r.RetryRefused(id); got != "" {
+		t.Fatalf("RetryRefused = %q, want none", got)
+	}
+	if drops, err := e.r.DropsData(id); err != nil || drops {
+		t.Fatalf("DropsData = %v, %v; want false", drops, err)
+	}
+	if j, _, err := e.st.GetJob(id); err != nil {
+		t.Fatal(err)
+	} else if in, gated := JobGateInput(j); gated {
+		t.Fatalf("a promote's Ulangi is judged again: %+v", in)
+	}
+}
+
+// An agent that does not know a promotion command (N2): on an emergency
+// job, whose Ulangi is refused, the step error says to run promote again;
+// on a planned job it still says Ulangi.
+func TestPromoteOldAgentTextFollowsRetry(t *testing.T) {
+	const old = "Klik Pasang ulang agent di halaman server itu, jalankan perintahnya, "
+	t.Run("emergency", func(t *testing.T) {
+		g := emergencyRig(t)
+		e := g.e
+		g.c.oldAgent("mysql.promote")
+		id, err := e.r.StartPromote(context.Background(), PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id,
+			CandidateServerID: g.c.id, AcceptUnreachable: []int64{g.d.id}})
+		if err != nil {
+			t.Fatalf("StartPromote: %v", err)
+		}
+		j, _ := e.waitJob(id, store.JobFailed)
+		if !strings.HasSuffix(j.Error, old+"lalu jalankan promote lagi.") {
+			t.Fatalf("error = %q", j.Error)
+		}
+		wantRetryRefused(t, e, id)
+	})
+	t.Run("planned", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		g.c.oldAgent("mysql.promote")
+		id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+		if err != nil {
+			t.Fatalf("StartPromote: %v", err)
+		}
+		j, _ := e.waitJob(id, store.JobFailed)
+		if !strings.HasSuffix(j.Error, old+"lalu Ulangi.") {
+			t.Fatalf("error = %q", j.Error)
+		}
+		e.waitIdle(id)
+		wantRetryOffered(t, e, id)
+	})
 }

@@ -1524,8 +1524,11 @@ hidup untuk melepas tanpa hapus data). Kiriman yang tetap sampai ke panel ditola
 karena ada prasyarat yang belum terpenuhi: <baris>. Cara memperbaikinya ada
 di daftar Prasyarat di halaman ini." Panel menilai lagi tepat sebelum
 pekerjaan dimulai, dan lagi pada **Ulangi** dan **Setujui** pekerjaan yang
-membuang data. Tidak ada tombol untuk melewati gerbang. Cara memperbaiki
-tiap baris ada di panduan "Memperbaiki baris merah".
+membuang data. Tidak ada tombol untuk melewati gerbang saat tindakan
+terencana dimulai. Satu pengecualian: **Ulangi dari tahap ini** pada promote
+terencana yang gagal melanjutkan promote itu tanpa menilai lagi daftar
+**Prasyarat**. Cara memperbaiki tiap baris ada di panduan "Memperbaiki baris
+merah".
 
 Baris yang diperiksa:
 
@@ -2891,16 +2894,14 @@ dibangun ulang**: replikasinya tidak diubah, pin sumbernya dipindah ke
 master baru, dan **Resync ulang** dari master baru memperbaikinya (tidak
 otomatis). Keduanya memunculkan peringatan sampai selesai.
 
-Bila promote gagal sebelum master diganti (replika terpilih belum bisa
-ditulis dan tidak ada yang berubah), halaman pekerjaannya tidak menawarkan
-**Ulangi dari tahap ini** dan menulis "Promote ini gagal sebelum master
-diganti. "Ulangi dari tahap ini" tidak tersedia untuk keadaan ini: mulai
-promote baru dari halaman master." Promote baru menilai lagi jenisnya dan
-meminta lagi centang, kata sandi, dan untuk promote terencana daftar
-**Prasyarat**. Satu pengecualian: setelah promote terencana yang kunci
-masternya belum terbukti dibuka, **Ulangi dari tahap ini** tetap ada sampai
-tenggat kunci itu ditambah 60 detik lewat (lihat "Promote terencana dan
-darurat").
+Bila promote darurat gagal sebelum master diganti (replika terpilih belum
+bisa ditulis dan tidak ada yang berubah), halaman pekerjaannya tidak
+menawarkan **Ulangi dari tahap ini** dan menulis "Promote ini gagal sebelum
+master diganti. "Ulangi dari tahap ini" tidak tersedia untuk keadaan ini:
+mulai promote baru dari halaman master." Promote baru menilai lagi jenisnya
+dan meminta lagi centang dan kata sandi. Bila promote terencana gagal,
+**Ulangi dari tahap ini** tetap ada: ia melanjutkan pekerjaan itu tanpa
+menilai lagi daftar **Prasyarat** dan tanpa meminta kata sandi lagi.
 
 Bila promote berhenti setelah replika terpilih sudah bisa ditulis, panel
 tidak membatalkannya (tidak ada jalan mundur yang aman dari dua master).
@@ -3440,8 +3441,10 @@ perhatian" (kuning).
 2. Kerjakan perbaikannya.
 3. Muat ulang layar tindakan. Baris itu harus bertanda "Terpenuhi".
 
-Tidak ada tombol untuk melewati baris merah. Promote darurat tidak pernah
-ditolak oleh sebuah baris.
+Tidak ada tombol untuk melewati baris merah saat tindakan terencana
+dimulai. Satu pengecualian: **Ulangi dari tahap ini** pada promote terencana
+yang gagal tidak menilai lagi barisnya. Promote darurat tidak pernah ditolak
+oleh sebuah baris.
 
 Baris yang belum diketahui berwarna kuning: "<baris> belum diketahui: agent
 <server> sedang tidak tersambung." (perbaikannya: "Pastikan agent di server
@@ -4285,7 +4288,9 @@ sebelum promote terencana berikutnya:
 - **Baris yang salah merah menahan pekerjaan terencana.** Bila sebuah baris
   merah padahal keadaannya baik (misalnya laporan yang salah), tindakan
   terencana tetap ditolak sampai baris itu diperbaiki. Tidak ada tombol
-  untuk melewatinya. Promote darurat tetap bisa dijalankan.
+  untuk melewatinya saat tindakan itu dimulai; satu pengecualian: **Ulangi
+  dari tahap ini** pada promote terencana yang gagal tidak menilai lagi
+  barisnya. Promote darurat tetap bisa dijalankan.
 - **Penerusan log audit hanya ditandai dengan tangan.** Panel tidak
   memeriksa apakah journal host panel benar diteruskan ke server lain. Tanda
   di **Pengaturan** hanya menyatakan bahwa seseorang mengaku sudah

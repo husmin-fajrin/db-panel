@@ -143,8 +143,8 @@ type jobPage struct {
 	Approval   approval
 	Superseded string
 	// RetryRefused, when set, says why Ulangi is not offered for the job
-	// (a promote that failed before the master was replaced: a new promote
-	// is started instead).
+	// (an emergency promote that failed before the master was replaced: a
+	// new promote is started instead).
 	RetryRefused string
 	StatusJSON   string
 	// DropsData: approving or retrying the job drops data, behind a

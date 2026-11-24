@@ -386,32 +386,33 @@ func TestWipeApprovalListsEveryName(t *testing.T) {
 }
 
 // TestPromoteRetryStillTokenless and TestTightenTLSRetryTokenless: jobs
-// that drop nothing keep their plain buttons and need no token (a promote
-// past the point of no return; one that failed before it offers no Ulangi,
+// that drop nothing keep their plain buttons and need no token: a planned
+// promote in every state, and a promote of either kind past the point of
+// no return (an emergency one that failed before it offers no Ulangi,
 // TestPromoteRetryRefusedHidesButton).
 func TestPromoteRetryStillTokenless(t *testing.T) {
+	tokenlessRetry(t, orchestrator.KindPromotePlanned, `{}`)
 	tokenlessRetry(t, orchestrator.KindPromotePlanned, `{"promote_sent":true,"past_point":true}`)
+	tokenlessRetry(t, orchestrator.KindPromoteEmergency, `{"promote_sent":true}`)
 }
 
 func TestTightenTLSRetryTokenless(t *testing.T) {
 	tokenlessRetry(t, orchestrator.KindTightenTLS, `{}`)
 }
 
-// TestPromoteRetryRefusedHidesButton (PC-1): a promote job that failed
-// before the master was replaced offers no Ulangi; the page says why and
-// where to start a new promote. Past the point (tokenlessRetry) it does.
+// TestPromoteRetryRefusedHidesButton (PC-1): an emergency promote job that
+// failed before the master was replaced offers no Ulangi; the page says why
+// and where to start a new promote. Past the point (tokenlessRetry) it does.
 func TestPromoteRetryRefusedHidesButton(t *testing.T) {
-	for _, kind := range []string{orchestrator.KindPromotePlanned, orchestrator.KindPromoteEmergency} {
-		e, f, _ := controlEnv(t)
-		const id = "4444444444444444444444444444444b"
-		storeJob(t, e.st, id, kind, 1, `{}`, store.JobFailed, "Tahap")
-		f.retryRefused = map[string]string{id: orchestrator.ErrPromoteRetryBeforePoint.Error()}
-		rec := e.do("GET", "/jobs/"+id, nil, e.cookie())
-		wantCode(t, rec, http.StatusOK)
-		wantBody(t, rec, "Promote ini gagal sebelum master diganti. &#34;Ulangi dari tahap ini&#34; tidak tersedia untuk keadaan ini: "+
-			"mulai promote baru dari halaman master.")
-		wantNoBody(t, rec, `action="/jobs/`+id+`/retry"`, "/retry/prepare", ">Ulangi dari tahap ini<")
-	}
+	e, f, _ := controlEnv(t)
+	const id = "4444444444444444444444444444444b"
+	storeJob(t, e.st, id, orchestrator.KindPromoteEmergency, 1, `{}`, store.JobFailed, "Tahap")
+	f.retryRefused = map[string]string{id: orchestrator.ErrPromoteRetryBeforePoint.Error()}
+	rec := e.do("GET", "/jobs/"+id, nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Promote ini gagal sebelum master diganti. &#34;Ulangi dari tahap ini&#34; tidak tersedia untuk keadaan ini: "+
+		"mulai promote baru dari halaman master.")
+	wantNoBody(t, rec, `action="/jobs/`+id+`/retry"`, "/retry/prepare", ">Ulangi dari tahap ini<")
 }
 
 func tokenlessRetry(t *testing.T, kind, params string) {

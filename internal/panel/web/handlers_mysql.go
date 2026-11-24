@@ -53,7 +53,8 @@ type Orchestrator interface {
 	// Superseded says why a job may no longer be approved or retried; "".
 	Superseded(jobID string) string
 	// RetryRefused says why Ulangi of a job is refused whatever is
-	// confirmed (a promote that failed before the master was replaced); "".
+	// confirmed (an emergency promote that failed before the master was
+	// replaced); "".
 	RetryRefused(jobID string) string
 	// Promotion of a replica to master: the consideration data, the job,
 	// "Sudah saya alihkan", and "Arahkan sekarang" for a replica waiting

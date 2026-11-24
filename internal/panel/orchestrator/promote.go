@@ -412,8 +412,22 @@ func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) er
 	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
 		return fmt.Errorf("catatan promote sebelumnya tidak terbaca: %w", err)
 	}
-	until, may := lockMayStandUntil(st, prev)
-	if !may || !r.now().Before(until) {
+	if st.LockUnlocked || (!st.LockTried && st.LockDeadline == nil) {
+		return nil
+	}
+	var deadline time.Time
+	switch {
+	case st.LockDeadline != nil:
+		deadline = *st.LockDeadline
+	case st.LockTriedAt != nil:
+		deadline = st.LockTriedAt.Add(promoteLockSec*time.Second + lockCallSlack)
+	case prev.FinishedAt != nil:
+		deadline = prev.FinishedAt.Add(promoteLockSec * time.Second)
+	default:
+		deadline = prev.StartedAt.Add(promoteLockSec*time.Second + defaultPromoteCatchUp + lockCallSlack)
+	}
+	until := deadline.Add(proto.PromoteLockGrace)
+	if !r.now().Before(until) {
 		return nil
 	}
 	// The command alone does not tell the panel: only the planned
@@ -430,29 +444,6 @@ func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) er
 	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka, "+
 		"dan memuat data membuat replika bisa ditulis sebentar dan penjaga kunci bisa mengkarantina master. "+
 		"%s baru bisa dijalankan mulai %s, saat penjaga kunci sudah memutuskan. %s", r.nameOf(masterID), what, at, howToUnlock)
-}
-
-// lockMayStandUntil is until when the promote lock a planned promotion's
-// job (st, promotion prev) asked for may still stand on the master: its
-// deadline plus the guard's grace (proto.PromoteLockGrace). may is false
-// when the lock was never asked for or its unlock was confirmed
-// (LockUnlocked).
-func lockMayStandUntil(st jobState, prev store.Promotion) (until time.Time, may bool) {
-	if st.LockUnlocked || (!st.LockTried && st.LockDeadline == nil) {
-		return time.Time{}, false
-	}
-	var deadline time.Time
-	switch {
-	case st.LockDeadline != nil:
-		deadline = *st.LockDeadline
-	case st.LockTriedAt != nil:
-		deadline = st.LockTriedAt.Add(promoteLockSec*time.Second + lockCallSlack)
-	case prev.FinishedAt != nil:
-		deadline = prev.FinishedAt.Add(promoteLockSec * time.Second)
-	default:
-		deadline = prev.StartedAt.Add(promoteLockSec*time.Second + defaultPromoteCatchUp + lockCallSlack)
-	}
-	return deadline.Add(proto.PromoteLockGrace), true
 }
 
 // refuseOldMasterPending is errOldMasterPending while topo's old master
@@ -542,8 +533,33 @@ func (r *Runner) promoteCmdErr(serverID int64, err error) error {
 	if r.d.Alerts != nil {
 		r.d.Alerts.AgentNeedsUpgrade(serverID)
 	}
-	return stepError(fmt.Sprintf("Agent di %s versi lama dan belum mengenal promote. "+
-		"Klik Pasang ulang agent di halaman server itu, jalankan perintahnya, lalu Ulangi.", r.nameOf(serverID)))
+	return oldPromoteAgent{r.nameOf(serverID)}
+}
+
+// oldPromoteAgent is promoteCmdErr's step error: the agent of the server
+// named name does not know a promotion command. Its text ends "lalu
+// Ulangi."; promoteAgainErr ends it otherwise where Ulangi is refused.
+type oldPromoteAgent struct{ name string }
+
+func (e oldPromoteAgent) text(then string) string {
+	return fmt.Sprintf("Agent di %s versi lama dan belum mengenal promote. "+
+		"Klik Pasang ulang agent di halaman server itu, jalankan perintahnya, %s", e.name, then)
+}
+
+func (e oldPromoteAgent) Error() string { return e.text("lalu Ulangi.") }
+
+// Unwrap makes it a stepError: its text is the step's whole message.
+func (e oldPromoteAgent) Unwrap() error { return stepError(e.Error()) }
+
+// promoteAgainErr is err for promoteNewMaster: an emergency job that fails
+// there before the point of no return has no Ulangi (promoteRetryRefused),
+// so an oldPromoteAgent text says to run promote again instead.
+func (jr *jobRun) promoteAgainErr(err error) error {
+	var old oldPromoteAgent
+	if jr.job.Kind == KindPromoteEmergency && errors.As(err, &old) {
+		return stepError(old.text("lalu jalankan promote lagi."))
+	}
+	return err
 }
 
 // candidatePort is the candidate's MySQL port, read once (mysql.status).
@@ -727,7 +743,7 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	}
 	old, err := jr.r.peerCred(ctx, jr.candidate(), jr.master(), jr.st.OldSourceHost, jr.st.OldSourcePort, topo.ReplUser, password)
 	if err != nil {
-		return outcome{}, err
+		return outcome{}, jr.promoteAgainErr(err)
 	}
 	params := proto.PromoteParams{Mode: mode, OldSource: old, ReplUser: topo.ReplUser, ReplPassword: password}
 	if mode == proto.PromotePlanned {
@@ -765,7 +781,7 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 		// a lost link as a *proto.Error it makes itself, without an agent
 		// reply, so those codes are no answer too.
 		jr.promoteStartUnknown = !jr.agentStarted && !promoteStartRefused(err)
-		return outcome{}, jr.r.promoteCmdErr(jr.candidate(), err)
+		return outcome{}, jr.promoteAgainErr(jr.r.promoteCmdErr(jr.candidate(), err))
 	}
 	jr.st.PastPoint = true
 	jr.save()
@@ -1691,60 +1707,39 @@ func (r *Runner) markReplica(promID, topologyID, serverID int64, state, detail s
 	r.setPromotionServer(promID, PromotionServer{ServerID: serverID, Role: PromotionReplica, State: state, Detail: redact.Quotes(detail)})
 }
 
-// ErrPromoteRetryBeforePoint refuses Ulangi of a promote job that failed
-// before mysql.promote was sent (promoteRetryRefused).
+// ErrPromoteRetryBeforePoint refuses Ulangi of an emergency promote job
+// that failed before mysql.promote was sent (promoteRetryRefused).
 var ErrPromoteRetryBeforePoint = errors.New(`Promote ini gagal sebelum master diganti. "Ulangi dari tahap ini" tidak tersedia ` +
 	`untuk keadaan ini: mulai promote baru dari halaman master.`)
 
-// promoteRetryRefused reports whether Ulangi of j is refused (PC-1, ruling
-// R43): a promote job whose mysql.promote was never sent (PromoteSent) and
-// that is not past the point of no return (PastPoint) changed nothing; a
-// new promote reads the mode again and asks for the tick, the names, the
-// password and, planned, the gate and the backup tick, which Ulangi would
-// skip. One exception keeps today's Ulangi: a planned job whose promote
-// lock may still stand on the master (lockMayStandUntil, not yet past): a
-// new start would meet that lock (the master's agent refuses a second
-// one), and Ulangi is how the panel confirms the lock open
-// (refuseWhileLockMayStand names it). A job whose params cannot be read is
-// left to the checks that refuse it (promoteSupersededBy, newRun).
-func (r *Runner) promoteRetryRefused(j store.Job) (bool, error) {
-	if !isPromote(j.Kind) {
-		return false, nil
+// promoteRetryRefused reports whether Ulangi of j is refused (PC-1, rulings
+// R43 and R46): an emergency promote job whose mysql.promote was never sent
+// (PromoteSent) and that is not past the point of no return (PastPoint)
+// changed nothing; a new emergency promote reads the mode again and asks
+// for the tick, the names and the password, which Ulangi would skip. A
+// planned promote job keeps its Ulangi (K4): it is also how the panel
+// lifts a promote lock the master's guard kept (its relock is refused and
+// its failure path unlocks with the candidate's credential). A job whose
+// params cannot be read is left to the checks that refuse it
+// (promoteSupersededBy, newRun).
+func promoteRetryRefused(j store.Job) bool {
+	if j.Kind != KindPromoteEmergency {
+		return false
 	}
 	var st jobState
 	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
-		return false, nil
+		return false
 	}
-	if st.PromoteSent || st.PastPoint {
-		return false, nil
-	}
-	if j.Kind == KindPromotePlanned {
-		prom, err := r.d.Store.GetPromotion(st.PromotionID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return false, err
-		}
-		if until, may := lockMayStandUntil(st, prom); may && r.now().Before(until) {
-			return false, nil
-		}
-	}
-	return true, nil
+	return !st.PromoteSent && !st.PastPoint
 }
 
 // RetryRefused is why Ulangi of the job is refused whatever is acked
-// (ErrPromoteRetryBeforePoint's text); "" when it is not, or when that
+// (ErrPromoteRetryBeforePoint's text); "" when it is not, or when the job
 // cannot be read (Retry decides then). The job page hides Ulangi for it.
 func (r *Runner) RetryRefused(jobID string) string {
 	j, _, err := r.d.Store.GetJob(jobID)
-	if err != nil {
+	if err != nil || !promoteRetryRefused(j) {
 		return ""
 	}
-	refused, err := r.promoteRetryRefused(j)
-	if err != nil {
-		r.log.Warn("promote retry check", "job", jobID, "err", err)
-		return ""
-	}
-	if refused {
-		return ErrPromoteRetryBeforePoint.Error()
-	}
-	return ""
+	return ErrPromoteRetryBeforePoint.Error()
 }
