@@ -986,6 +986,17 @@ README menambah:
     menulis apa adanya bahwa "Ulangi" pada promote terencana yang gagal
     melanjutkan pekerjaan tanpa membaca ulang Prasyarat dan tanpa kata
     sandi. Soal itu dibawa ke pemilik sebagai keputusan.
+35. **2026-11-25 — kalimat "Satu pengecualian" diperbaiki atas keputusan
+    pemilik (`c8bc7bd`).** Pemeriksaan ulang pembetulan menemukan bahwa
+    README (tiga tempat) dan halaman Panduan menyebut "Ulangi" promote
+    terencana sebagai satu-satunya pengecualian, padahal "Ulangi" setiap
+    pekerjaan yang tidak membuang data juga tidak menilai lagi daftar
+    Prasyarat. Semula tidak diperbaiki (satu gelombang perbaikan sudah
+    terpakai) dan dibawa ke pemilik; pemilik memutuskan diperbaiki sebelum
+    merge. Tinjauan diff: kalimat baru benar; dua catatan kecil (arti
+    "tidak membuang data" tidak dijelaskan di halaman Panduan; "Setujui"
+    tidak disebut) masuk rencana berikutnya bersama temuan audit lain yang
+    masih terbuka, juga atas keputusan pemilik.
 
 ## Teks baru untuk dibaca pemilik
 

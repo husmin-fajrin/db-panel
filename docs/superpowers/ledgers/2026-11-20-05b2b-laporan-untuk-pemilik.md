@@ -2,6 +2,8 @@
 
 Dokumen ini untuk pemilik dbpanel, yang memutuskan apakah cabang kerja Rencana 5b-2 (`claude/install-superpowers-plugin-ev2k9i`) digabung (merge) ke `main`. Isinya hanya fakta dari catatan pekerjaan. Laporan ini tidak memutuskan apa pun dan tidak menyatakan cabang ini aman untuk digabung: penilaian itu ada pada Anda.
 
+**Keputusan Anda (2026-11-25).** Atas tiga pertanyaan yang diajukan Anda menjawab "1 ya, 2 ya, 3 ya": (1) kalimat "Satu pengecualian" diperbaiki sekarang; itu sudah dikerjakan (`c8bc7bd`) dan ditinjau; (2) cabang kerja di-merge ke `main` sesudah butir 1; (3) semua butir lain di Bagian 2 masuk rencana berikutnya, dikerjakan paling awal. Bagian 2 di bawah tetap ditulis seperti saat laporan ini diserahkan.
+
 Catatan lengkapnya ada di buku catatan pelaksanaan `docs/superpowers/ledgers/2026-11-20-05b2b-gerbang-prasyarat-panduan-ledger.md` dan di catatan audit `docs/superpowers/ledgers/2026-11-20-05b2b-audit-agent.md`, `…-audit-panel-core.md`, `…-audit-web.md`, `…-audit-fix-recheck-web.md`, `…-audit-fix-recheck-core-agent.md`, `…-corrective-fix-report.md`, `…-corrective-fix-recheck.md`.
 
 **Istilah yang sering muncul.**
@@ -108,7 +110,7 @@ Butir di bawah ini **tidak diperbaiki**. Untuk tiap butir: apa itu, akibat terbu
 - **Akibat terburuk (menurut pemeriksa ulang web):** ini kini satu-satunya tempat panel sendiri mencetak langkah itu. "Lepas replika" tersedia juga saat master "Diduga tumbang". Operator yang tidak bisa menjalankan promote darurat (misalnya karena WB-2) bisa sampai ke keadaan yang sama dengan kotak lama yang sudah dihapus (WB-1): replika bisa ditulis dan master lama tidak dikarantina, sehingga ada dua master bila master lama kembali.
 - **Saran:** rencana berikutnya: tambahkan peringatan dua master dan syarat "tidak ada aplikasi yang bisa menjangkau server ini", atau pindahkan langkahnya ke sebuah panduan dengan syarat.
 
-### Kata "Satu pengecualian" (SEC-283) — teks Prasyarat yang terlalu yakin
+### Kata "Satu pengecualian" (SEC-283) — teks Prasyarat yang terlalu yakin (sudah diperbaiki 2026-11-25, `c8bc7bd`)
 
 - **Apa itu:** README (sekitar baris 1528, 3445, 4291) dan halaman Panduan (`web/templates/panduan.html:91`) menyebut "Ulangi" promote terencana sebagai *satu-satunya* pengecualian dari "tidak ada tombol untuk melewati gerbang". Sebenarnya ada satu golongan: "Ulangi" pada pekerjaan yang tahap sisanya tidak membuang data juga berjalan tanpa menilai Prasyarat lagi (Siapkan master; Tambah database tanpa data yang dibuang; Buat replika sesudah salinannya jadi). Temuan Rendah dari pemeriksaan ulang perubahan pembetulan (keputusan R47).
 - **Akibat terburuk:** tidak ada tindakan yang menjadi tidak aman karena ini; teksnya melebih-lebihkan. Operator membaca bahwa hanya ada satu pengecualian.
