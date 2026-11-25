@@ -1525,10 +1525,10 @@ karena ada prasyarat yang belum terpenuhi: <baris>. Cara memperbaikinya ada
 di daftar Prasyarat di halaman ini." Panel menilai lagi tepat sebelum
 pekerjaan dimulai, dan lagi pada **Ulangi** dan **Setujui** pekerjaan yang
 membuang data. Tidak ada tombol untuk melewati gerbang saat tindakan
-terencana dimulai. Satu pengecualian: **Ulangi dari tahap ini** pada promote
-terencana yang gagal melanjutkan promote itu tanpa menilai lagi daftar
-**Prasyarat**. Cara memperbaiki tiap baris ada di panduan "Memperbaiki baris
-merah".
+terencana dimulai. **Ulangi dari tahap ini** pada pekerjaan yang tidak
+membuang data tidak menilai lagi daftar **Prasyarat**; itu termasuk promote
+terencana yang gagal. Cara memperbaiki tiap baris ada di panduan "Memperbaiki
+baris merah".
 
 Baris yang diperiksa:
 
@@ -3442,9 +3442,9 @@ perhatian" (kuning).
 3. Muat ulang layar tindakan. Baris itu harus bertanda "Terpenuhi".
 
 Tidak ada tombol untuk melewati baris merah saat tindakan terencana
-dimulai. Satu pengecualian: **Ulangi dari tahap ini** pada promote terencana
-yang gagal tidak menilai lagi barisnya. Promote darurat tidak pernah ditolak
-oleh sebuah baris.
+dimulai. **Ulangi dari tahap ini** pada pekerjaan yang tidak membuang data
+tidak menilai lagi barisnya; itu termasuk promote terencana yang gagal.
+Promote darurat tidak pernah ditolak oleh sebuah baris.
 
 Baris yang belum diketahui berwarna kuning: "<baris> belum diketahui: agent
 <server> sedang tidak tersambung." (perbaikannya: "Pastikan agent di server
@@ -4288,9 +4288,10 @@ sebelum promote terencana berikutnya:
 - **Baris yang salah merah menahan pekerjaan terencana.** Bila sebuah baris
   merah padahal keadaannya baik (misalnya laporan yang salah), tindakan
   terencana tetap ditolak sampai baris itu diperbaiki. Tidak ada tombol
-  untuk melewatinya saat tindakan itu dimulai; satu pengecualian: **Ulangi
-  dari tahap ini** pada promote terencana yang gagal tidak menilai lagi
-  barisnya. Promote darurat tetap bisa dijalankan.
+  untuk melewatinya saat tindakan itu dimulai. **Ulangi dari tahap ini**
+  pada pekerjaan yang tidak membuang data tidak menilai lagi barisnya; itu
+  termasuk promote terencana yang gagal. Promote darurat tetap bisa
+  dijalankan.
 - **Penerusan log audit hanya ditandai dengan tangan.** Panel tidak
   memeriksa apakah journal host panel benar diteruskan ke server lain. Tanda
   di **Pengaturan** hanya menyatakan bahwa seseorang mengaku sudah

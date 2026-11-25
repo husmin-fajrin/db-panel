@@ -88,7 +88,7 @@ SET PERSIST read_only=OFF;</pre><p>Bila Anda memilih <code>unassigned</code>, bi
     <h2 id="baris-merah">Memperbaiki baris merah</h2>
     <p>Kapan dipakai: daftar <strong>Prasyarat</strong> di sebuah layar tindakan menampilkan baris bertanda "Belum terpenuhi" (merah; tombolnya mati) atau "Perlu perhatian" (kuning).</p>
     <ol class="ml-6 flex list-decimal flex-col gap-3"><li>Cari sub-bagian di bawah yang judulnya sama dengan nama baris itu.</li><li>Kerjakan perbaikannya.</li><li>Muat ulang layar tindakan. Baris itu harus bertanda "Terpenuhi".</li></ol>
-    <p>Tidak ada tombol untuk melewati baris merah saat tindakan terencana dimulai. Satu pengecualian: <strong>Ulangi dari tahap ini</strong> pada promote terencana yang gagal tidak menilai lagi barisnya. Promote darurat tidak pernah ditolak oleh sebuah baris.</p>
+    <p>Tidak ada tombol untuk melewati baris merah saat tindakan terencana dimulai. <strong>Ulangi dari tahap ini</strong> pada pekerjaan yang tidak membuang data tidak menilai lagi barisnya; itu termasuk promote terencana yang gagal. Promote darurat tidak pernah ditolak oleh sebuah baris.</p>
     <p>Baris yang belum diketahui berwarna kuning: "&lt;baris&gt; belum diketahui: agent &lt;server&gt; sedang tidak tersambung." (perbaikannya: "Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."), atau "&lt;baris&gt; belum diketahui: agent &lt;server&gt; belum melaporkannya." (tunggu laporan berikutnya, lalu muat ulang; untuk baris <strong>Akun panel</strong>, lihat sub-bagiannya).</p>
     <h3 class="mt-2 font-semibold">Versi agent</h3>
     <p>Tertulis: "Agent di &lt;server&gt; versi &lt;versi&gt;, panel versi &lt;versi&gt;." atau "Versi agent di &lt;server&gt; belum diketahui."</p>
