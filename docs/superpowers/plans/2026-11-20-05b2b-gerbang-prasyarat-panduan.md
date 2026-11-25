@@ -997,6 +997,16 @@ README menambah:
     "tidak membuang data" tidak dijelaskan di halaman Panduan; "Setujui"
     tidak disebut) masuk rencana berikutnya bersama temuan audit lain yang
     masih terbuka, juga atas keputusan pemilik.
+36. **2026-11-25 — nomor versi `0.2.0`.** Pemilik meminta nomor versi
+    diberikan. Repositori belum punya tag atau rilis; `0.1.0` adalah nomor
+    yang ditulis ke README untuk keadaan `main` sesudah Rencana 5b-2a.
+    Rencana ini menambah fitur, satu migrasi database dan isi laporan agent
+    yang baru, jadi angka tengah naik. Ditulis di tiga tempat README:
+    paragraf "Sesudah memperbarui ke versi dengan daftar Prasyarat
+    (`0.2.0`)", contoh `DBPANEL_VERSION=v0.2.0`, dan contoh
+    `make release VERSION=0.2.0`. "sejak versi `0.1.0`" untuk tiga
+    perintah server tidak berubah. Tag dan rilis GitHub tidak dibuat di
+    sini.
 
 ## Teks baru untuk dibaca pemilik
 

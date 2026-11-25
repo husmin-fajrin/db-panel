@@ -29,8 +29,8 @@ agent biasa yang terpisah dari panel: saat start, panel menulis token
 pemasangan untuk servernya sendiri (berlaku 15 menit), skrip menyerahkannya
 ke agent, dan agent berpasangan sendiri lewat `https://127.0.0.1:8080`
 (lihat "Keamanan" untuk tata letak berkas).
-Rilis tertentu: tambahkan `DBPANEL_VERSION=v0.1.0` sebelum `bash`
-(`... | sudo DBPANEL_VERSION=v0.1.0 bash`).
+Rilis tertentu: tambahkan `DBPANEL_VERSION=v0.2.0` sebelum `bash`
+(`... | sudo DBPANEL_VERSION=v0.2.0 bash`).
 
 **Tanpa internet (offline):** salin binary (dari halaman rilis, atau
 `dist/dbpanel` hasil `make build`) dan `scripts/install.sh` ke server, lalu:
@@ -3886,8 +3886,8 @@ menulis berkas peran (dengan petunjuk peran dari panel); pin sumber replika
 baru ditulis pada konfigurasi replikasi, dump, atau CLONE berikutnya (lihat
 "Peran dan sumber yang dipin").
 
-**Sesudah memperbarui ke versi dengan daftar Prasyarat.** Versi ini
-memeriksa daftar **Prasyarat** sebelum tindakan terencana (lihat
+**Sesudah memperbarui ke versi dengan daftar Prasyarat (`0.2.0`).** Versi
+ini memeriksa daftar **Prasyarat** sebelum tindakan terencana (lihat
 "Prasyarat" di "Promote"). Sampai langkah di bawah selesai, banyak baris
 bisa "Belum terpenuhi", dan promote terencana, **Buat replika**, **Resync
 ulang**, **Tambah database** serta bangun ulang ditolak. Promote darurat
@@ -4329,7 +4329,7 @@ make test    # go vet, go test, dan pemeriksaan skrip instalasi
 Untuk dua arsitektur sekaligus (`linux/amd64` dan `linux/arm64`):
 
 ```sh
-make release VERSION=0.1.0   # -> dist/dbpanel_linux_{amd64,arm64} dan dist/SHA256SUMS
+make release VERSION=0.2.0   # -> dist/dbpanel_linux_{amd64,arm64} dan dist/SHA256SUMS
 sudo DBPANEL_BIN=dist/dbpanel_linux_amd64 DBPANEL_BIN_DIR=dist bash scripts/install.sh
 ```
 
