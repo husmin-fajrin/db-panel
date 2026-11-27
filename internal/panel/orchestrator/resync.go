@@ -75,7 +75,7 @@ func (r *Runner) StartResync(ctx context.Context, p ResyncParams) (string, error
 		return "", fmt.Errorf("topologi replika: %w", err)
 	}
 	// The load makes the replica writable for a while.
-	if err := r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, "Resync ulang"); err != nil {
+	if err := r.refuseWhileLockMayStand(topo.MasterServerID, "Resync ulang"); err != nil {
 		return "", err
 	}
 	if err := r.refuseBusy(p.ServerID, "server ini"); err != nil {

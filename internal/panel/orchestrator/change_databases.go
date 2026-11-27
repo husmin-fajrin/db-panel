@@ -86,7 +86,7 @@ func (r *Runner) StartAddDatabases(ctx context.Context, replicaServerID int64, d
 		return "", err
 	}
 	// The dump load makes the replica writable for a while.
-	if err := r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, "Tambah database"); err != nil {
+	if err := r.refuseWhileLockMayStand(topo.MasterServerID, "Tambah database"); err != nil {
 		return "", err
 	}
 	add, err := pickDatabases(databases)
@@ -132,7 +132,7 @@ func (r *Runner) StartRemoveDatabases(ctx context.Context, replicaServerID int64
 	// Dropping the data lifts read-only on the replica for a while
 	// (mysql.dropDatabases).
 	if dropData {
-		if err := r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, "Lepas database"); err != nil {
+		if err := r.refuseWhileLockMayStand(topo.MasterServerID, "Lepas database"); err != nil {
 			return "", err
 		}
 	}

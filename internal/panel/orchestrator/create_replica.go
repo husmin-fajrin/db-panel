@@ -156,7 +156,7 @@ func (r *Runner) StartCreateReplica(ctx context.Context, p CreateReplicaParams) 
 		return "", fmt.Errorf("topologi master: %w", err)
 	}
 	// The load makes the target writable for a while.
-	if err := r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, "Buat replika"); err != nil {
+	if err := r.refuseWhileLockMayStand(topo.MasterServerID, "Buat replika"); err != nil {
 		return "", err
 	}
 	if err := r.refuseBusy(target.ID, "server tujuan"); err != nil {

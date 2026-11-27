@@ -121,3 +121,29 @@ func (s *Store) LatestPromotion(topologyID int64) (Promotion, error) {
 func (s *Store) PromotionByOldMaster(serverID int64) (Promotion, error) {
 	return s.onePromotion(`old_master_server_id = ?`, serverID)
 }
+
+// maxListPromotions bounds ListPromotions.
+const maxListPromotions = 200
+
+// ListPromotions returns the promotions of the topology, newest first, at
+// most 200 of them.
+func (s *Store) ListPromotions(topologyID int64) ([]Promotion, error) {
+	rows, err := s.db.Query(`SELECT `+promotionColumns+` FROM promotions WHERE topology_id = ? ORDER BY id DESC LIMIT ?`,
+		topologyID, maxListPromotions)
+	if err != nil {
+		return nil, fmt.Errorf("list promotions: %w", err)
+	}
+	defer rows.Close()
+	var out []Promotion
+	for rows.Next() {
+		p, err := scanPromotion(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list promotions: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list promotions: %w", err)
+	}
+	return out, nil
+}

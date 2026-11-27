@@ -51,6 +51,9 @@ type serverState struct {
 	snap         *proto.HealthSnapshot // never modified once stored
 	receivedAt   time.Time
 	snapBacklog  bool // snap came from the agent's backlog
+	// snapRestored: snap was loaded from the store at startup and no
+	// report has been taken since (View.Restored).
+	snapRestored bool
 	// marks: the start marks of the store (start_marks), loaded on first
 	// use; nil until then.
 	marks map[string]string
@@ -114,7 +117,7 @@ func (m *Monitor) state(id int64) *serverState {
 
 func (s *serverState) view(id int64) View {
 	v := View{ServerID: id, Role: s.role, Status: s.status, Since: s.since, ReceivedAt: s.receivedAt,
-		Snap: s.snap, Backlog: s.snapBacklog, NeedsUpgrade: s.needsUpgrade, QuarantinePending: s.quarantinePending}
+		Snap: s.snap, Backlog: s.snapBacklog, Restored: s.snapRestored, NeedsUpgrade: s.needsUpgrade, QuarantinePending: s.quarantinePending}
 	if s.snooze != nil {
 		t := *s.snooze
 		v.SnoozeUntil = &t
@@ -154,7 +157,7 @@ func (m *Monitor) load() {
 				m.log.Warn("monitor: stored snapshot unreadable", "server_id", h.ServerID, "err", err)
 			} else {
 				snap = redactSnapshot(snap) // stored before the panel censored them
-				s.snap = &snap
+				s.snap, s.snapRestored = &snap, true
 				m.snapshotEvents(h.ServerID, s, &snap, h.ReceivedAt, false)
 			}
 		}
@@ -182,6 +185,7 @@ func (m *Monitor) ingest(id int64, he proto.HealthEvent, at time.Time) ([]health
 	snap := redactSnapshot(he.Snapshot)
 	m.reportSample(id, &snap, at)
 	s.snap, s.receivedAt, s.snapBacklog, s.graceUntil = &snap, at, he.Backlog, time.Time{}
+	s.snapRestored = false
 	s.needsUpgrade = false // only a current agent reports
 	s.dirty = true
 	if !he.Backlog {

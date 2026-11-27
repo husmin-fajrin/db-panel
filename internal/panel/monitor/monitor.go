@@ -60,13 +60,16 @@ type View struct {
 	ServerID int64
 	// Role is store.RoleMaster or store.RoleReplica; "" when the server is
 	// in no topology and so not monitored (Status is then zero).
-	Role         string
-	Status       Status
-	Since        time.Time             // when Status.Code took its current value
-	ReceivedAt   time.Time             // when the last report was taken, by the panel's clock
-	Snap         *proto.HealthSnapshot // shared with the Monitor: read only
-	Backlog      bool                  // Snap came from the agent's backlog, not a live report
-	NeedsUpgrade bool                  // the agent does not know monitor.*
+	Role       string
+	Status     Status
+	Since      time.Time             // when Status.Code took its current value
+	ReceivedAt time.Time             // when the last report was taken, by the panel's clock
+	Snap       *proto.HealthSnapshot // shared with the Monitor: read only
+	Backlog    bool                  // Snap came from the agent's backlog, not a live report
+	// Restored: Snap was loaded from the store at startup and no report
+	// has been taken since (in memory only; no migration).
+	Restored     bool
+	NeedsUpgrade bool // the agent does not know monitor.*
 	SnoozeUntil  *time.Time
 	// QuarantinePending: an old master (Role store.RoleQuarantined) whose
 	// quarantine was not delivered yet.
@@ -74,6 +77,19 @@ type View struct {
 	// ReportsDropped: health reports the hub dropped over its rate limit
 	// in the last hour (spec 5.12, Detail teknis).
 	ReportsDropped int
+}
+
+// Live reports whether v holds a live report (spec 5.7, "laporan
+// langsung"): its agent is online (online), the snapshot is neither from
+// the agent's backlog nor restored at startup, and it was taken no longer
+// than staleAfter (Settings.StaleAfter) before now. An age below zero (the
+// panel's clock went back) is not live (K8).
+func Live(v View, online bool, now time.Time, staleAfter time.Duration) bool {
+	if !online || v.Snap == nil || v.Backlog || v.Restored || v.ReceivedAt.IsZero() {
+		return false
+	}
+	age := now.Sub(v.ReceivedAt)
+	return age >= 0 && age <= staleAfter
 }
 
 // AgentAway reports whether the view's status comes from the agent's

@@ -162,3 +162,37 @@ func TestReplicaStatesAccepted(t *testing.T) {
 		}
 	}
 }
+
+// TestListPromotions: a topology's promotions, newest first, at most 200;
+// another topology's are not listed.
+func TestListPromotions(t *testing.T) {
+	s := openTemp(t)
+	topo, m, r := mustTopology(t, s)
+	other, err := s.CreateTopology(mustServer(t, s, "other").ID, "repl", []byte{1}, "10.0.0.5", 3306)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPromotion(Promotion{TopologyID: other.ID, Mode: "planned", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for range 201 {
+		id, err := s.AddPromotion(Promotion{TopologyID: topo.ID, Mode: "planned", OldMasterServerID: m.ID,
+			NewMasterServerID: r.ID, StartedAt: time.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	got, err := s.ListPromotions(topo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 200 || got[0].ID != ids[200] || got[199].ID != ids[1] {
+		t.Fatalf("listed %d promotions, first %d, last %d; want 200 from %d down to %d",
+			len(got), got[0].ID, got[len(got)-1].ID, ids[200], ids[1])
+	}
+	if none, err := s.ListPromotions(9999); err != nil || len(none) != 0 {
+		t.Fatalf("unknown topology: %v, %v", none, err)
+	}
+}

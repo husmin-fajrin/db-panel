@@ -1642,3 +1642,59 @@ func TestConfigureLockDoesNotHoldClose(t *testing.T) {
 		t.Fatal("Close held up by a configure waiting for its server's lock")
 	}
 }
+
+// TestLiveReport: a report is live only from a connected agent, with a
+// snapshot that is neither from its backlog nor restored at startup, taken
+// no longer ago than StaleAfter; an age below zero (the clock went back)
+// is not live (K8).
+func TestLiveReport(t *testing.T) {
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	stale := 6 * time.Minute
+	fresh := View{ReceivedAt: now.Add(-time.Minute), Snap: &proto.HealthSnapshot{MySQLOK: true}}
+	for _, tc := range []struct {
+		name   string
+		v      func(View) View
+		online bool
+		want   bool
+	}{
+		{"fresh", func(v View) View { return v }, true, true},
+		{"agent offline", func(v View) View { return v }, false, false},
+		{"no snapshot", func(v View) View { v.Snap = nil; return v }, true, false},
+		{"backlog", func(v View) View { v.Backlog = true; return v }, true, false},
+		{"restored", func(v View) View { v.Restored = true; return v }, true, false},
+		{"never received", func(v View) View { v.ReceivedAt = time.Time{}; return v }, true, false},
+		{"older than StaleAfter", func(v View) View { v.ReceivedAt = now.Add(-stale - time.Second); return v }, true, false},
+		{"exactly StaleAfter", func(v View) View { v.ReceivedAt = now.Add(-stale); return v }, true, true},
+		{"taken now", func(v View) View { v.ReceivedAt = now; return v }, true, true},
+		{"negative age", func(v View) View { v.ReceivedAt = now.Add(time.Second); return v }, true, false},
+	} {
+		if got := Live(tc.v(fresh), tc.online, now, stale); got != tc.want {
+			t.Errorf("%s: Live = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRestoredSnapshotMarked: a report loaded from the store at startup is
+// marked Restored until the agent's first report is taken.
+func TestRestoredSnapshotMarked(t *testing.T) {
+	var mID int64
+	r := newRig(t, func(st *store.Store) {
+		m, _ := st.CreateServer("db-master")
+		mID = m.ID
+		if _, err := st.CreateTopology(m.ID, "u", nil, "h", 3306); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(masterSnap(srcUUID + ":1-100"))
+		if err := st.SetHealth(store.Health{ServerID: m.ID, ReceivedAt: time.Date(2026, 11, 2, 8, 59, 0, 0, time.UTC),
+			SnapshotJSON: string(b), Status: StatusHealthy, StatusSince: time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if v := r.view(mID); v.Snap == nil || !v.Restored {
+		t.Fatalf("loaded view = %+v, want a restored snapshot", v)
+	}
+	r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	if v := r.view(mID); v.Snap == nil || v.Restored || !v.ReceivedAt.Equal(r.clk.Now()) {
+		t.Fatalf("view after a report = %+v, want a live one", v)
+	}
+}

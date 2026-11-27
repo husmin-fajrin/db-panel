@@ -442,6 +442,23 @@ func (r *Runner) view(id int64) (monitor.View, bool) {
 	return r.d.Health.View(id)
 }
 
+// liveView is the Monitor's view of serverID, and whether its report is
+// live (monitor.Live: the agent online, the report neither from its
+// backlog nor restored at startup, and no older than the Monitor's
+// StaleAfter). Settings that cannot be read make no report live.
+func (r *Runner) liveView(serverID int64) (monitor.View, bool) {
+	v, ok := r.view(serverID)
+	if !ok {
+		return v, false
+	}
+	set, err := monitor.LoadSettings(r.d.Store)
+	if err != nil {
+		r.log.Warn("monitor settings", "err", err)
+		return v, false
+	}
+	return v, monitor.Live(v, r.d.Hub.IsOnline(serverID), r.now(), set.StaleAfter)
+}
+
 // freshBound is how old a report may be to judge a replica: twice the
 // check interval (spec 5.2).
 func (r *Runner) freshBound() time.Duration {

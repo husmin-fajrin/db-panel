@@ -1644,7 +1644,9 @@ type jobState struct {
 	LockTried   bool       `json:"lock_tried,omitempty"`
 	LockTriedAt *time.Time `json:"lock_tried_at,omitempty"`
 	// LockUnlocked: the master's agent confirmed the lock is gone
-	// (unlockPromote succeeded, or answered that nothing is locked). A
+	// (unlockPromote succeeded, or answered that nothing is locked), or a
+	// live report of the master showed it writable past the lock's Until
+	// (settleLockRecords). A
 	// failed promotion whose lock was tried without it may still have the
 	// master locked until the guard's deadline (StartPromote refuses an
 	// emergency promotion meanwhile, SEC-66).

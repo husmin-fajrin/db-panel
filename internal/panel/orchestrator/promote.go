@@ -242,7 +242,7 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		return "", err
 	}
 	if mode == proto.PromoteEmergency {
-		if err := r.refuseWhileLockMayStand(topo.ID, p.MasterServerID, verbEmergency); err != nil {
+		if err := r.refuseWhileLockMayStand(p.MasterServerID, verbEmergency); err != nil {
 			return "", err
 		}
 	}
@@ -371,63 +371,35 @@ func (r *Runner) refuseRetryWhileLockMayStand(j store.Job) error {
 	if err != nil {
 		return err
 	}
-	return r.refuseWhileLockMayStand(topo.ID, topo.MasterServerID, what)
+	return r.refuseWhileLockMayStand(topo.MasterServerID, what)
 }
 
 // refuseWhileLockMayStand refuses what (an emergency promotion of
 // masterID, or a job that makes one of its replicas writable for a while)
-// while the latest promotion of topology topoID, a failed planned one of
-// that master, asked for the master's promote lock and its unlock was
-// never confirmed, until the lock's deadline plus the guard's grace
-// (proto.PromoteLockGrace) has passed (SEC-66). Before then the master
-// may be locked for the earlier candidate: an emergency promotion of
-// another replica would see it alive (and the agent refuses it then), or
-// it would reopen beside the new master once its guard unlocks it. A
-// replica the guard has seen that is writable at the deadline (a resync
-// or dump load, Buat replika, Tambah database) makes the guard quarantine
-// a healthy master instead of unlocking it (4b final review). what starts
-// the message's second sentence ("Promote darurat", "Resync ulang", ...).
-func (r *Runner) refuseWhileLockMayStand(topoID, masterID int64, what string) error {
-	prev, err := r.d.Store.LatestPromotion(topoID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
+// while a standing lock record of a planned promotion of that master
+// (LockRecords: every one, not only the latest) is within its Until, the
+// lock's clamped deadline plus the guard's grace (proto.PromoteLockGrace)
+// (SEC-66). Before then the master may be locked for the earlier
+// candidate: an emergency promotion of another replica would see it alive
+// (and the agent refuses it then), or it would reopen beside the new
+// master once its guard unlocks it. A replica the guard has seen that is
+// writable at the deadline (a resync or dump load, Buat replika, Tambah
+// database) makes the guard quarantine a healthy master instead of
+// unlocking it (4b final review). what starts the message's second
+// sentence ("Promote darurat", "Resync ulang", ...).
+func (r *Runner) refuseWhileLockMayStand(masterID int64, what string) error {
+	recs, err := r.LockRecords(masterID)
 	if err != nil {
 		return err
 	}
-	if prev.Status != promotionFailed || prev.OldMasterServerID != masterID || prev.JobID == "" {
-		return nil
+	now := r.now()
+	var until time.Time
+	for _, rec := range recs {
+		if now.Before(rec.Until) && rec.Until.After(until) {
+			until = rec.Until
+		}
 	}
-	j, _, err := r.d.Store.GetJob(prev.JobID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if j.Kind != KindPromotePlanned {
-		return nil
-	}
-	var st jobState
-	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
-		return fmt.Errorf("catatan promote sebelumnya tidak terbaca: %w", err)
-	}
-	if st.LockUnlocked || (!st.LockTried && st.LockDeadline == nil) {
-		return nil
-	}
-	var deadline time.Time
-	switch {
-	case st.LockDeadline != nil:
-		deadline = *st.LockDeadline
-	case st.LockTriedAt != nil:
-		deadline = st.LockTriedAt.Add(promoteLockSec*time.Second + lockCallSlack)
-	case prev.FinishedAt != nil:
-		deadline = prev.FinishedAt.Add(promoteLockSec * time.Second)
-	default:
-		deadline = prev.StartedAt.Add(promoteLockSec*time.Second + defaultPromoteCatchUp + lockCallSlack)
-	}
-	until := deadline.Add(proto.PromoteLockGrace)
-	if !r.now().Before(until) {
+	if until.IsZero() {
 		return nil
 	}
 	// The command alone does not tell the panel: only the planned
@@ -517,11 +489,6 @@ func (r *Runner) nameOf(id int64) string {
 // ---- the steps ----
 
 func (jr *jobRun) candidate() int64 { return jr.st.CandidateServerID }
-
-// promoteCall is jr.call for a promotion command (see promoteCmdErr).
-func (jr *jobRun) promoteCall(ctx context.Context, serverID int64, cmd string, params, result any) error {
-	return jr.r.promoteCmdErr(serverID, jr.call(ctx, serverID, cmd, params, result))
-}
 
 // promoteCmdErr turns the unknown_command of an agent older than the
 // promotion commands into a clear message, and marks the agent as needing
@@ -641,20 +608,44 @@ func (jr *jobRun) promoteAccount(ctx context.Context, _ bool) (outcome, error) {
 }
 
 // promoteLock locks the master for the promotion (ruling R2: 1800 s).
+//
+// The lock record (promote_lockrecord.go) is never wiped by an error: the
+// master's agent can answer one after the lock is set. A refusal by the
+// agent (lockRefused: nothing was locked by this call) puts the times
+// back to what they were before it, so that a refused relock does not
+// move the window of a lock that may still stand (SEC-289). Any other
+// error may have set a lock now: the time it was asked for stays, and the
+// deadline is forgotten, so the record counts from that time (lockUntil).
+// The deadline the agent answers is cut to lockDeadlineCap (SEC-290); the
+// cut value is stored and sent to the candidate.
 func (jr *jobRun) promoteLock(ctx context.Context, _ bool) (outcome, error) {
 	cred, err := jr.candidateCred(ctx, jr.master())
 	if err != nil {
 		return outcome{}, err
 	}
 	var res proto.LockForPromoteResult
+	oldTried, oldDeadline := jr.st.LockTriedAt, jr.st.LockDeadline
 	tried := jr.r.now()
 	jr.st.LockTried, jr.st.LockTriedAt, jr.st.LockUnlocked = true, &tried, false
 	jr.save()
-	if err := jr.promoteCall(ctx, jr.master(), "mysql.lockForPromote",
+	if err := jr.call(ctx, jr.master(), "mysql.lockForPromote",
 		proto.LockForPromoteParams{Candidate: cred, TimeoutSec: promoteLockSec}, &res); err != nil {
-		return outcome{}, err
+		if lockRefused(err) {
+			if oldTried != nil {
+				jr.st.LockTriedAt, jr.st.LockDeadline = oldTried, oldDeadline
+			}
+		} else {
+			jr.st.LockDeadline = nil
+		}
+		jr.save()
+		return outcome{}, jr.r.promoteCmdErr(jr.master(), err)
 	}
 	deadline := res.Deadline
+	if limit := lockDeadlineCap(tried); deadline.After(limit) {
+		jr.r.log.Warn("promote lock deadline from the master's agent cut", "job", jr.job.ID,
+			"deadline", res.Deadline, "cut_to", limit)
+		deadline = limit
+	}
 	jr.st.LockDeadline = &deadline
 	if res.GTIDExecuted != "" {
 		jr.st.LastMasterGTID = res.GTIDExecuted
@@ -667,6 +658,25 @@ func (jr *jobRun) promoteLock(ctx context.Context, _ bool) (outcome, error) {
 	jr.logf("warn", "Master dikunci pukul %s (sampai %s): aplikasi tidak bisa menulis sampai master baru dibuka.",
 		lockedAt.Local().Format("15:04:05"), deadline.Local().Format("15:04:05"))
 	return done("dikunci pukul %s", lockedAt.Local().Format("15:04:05")), nil
+}
+
+// lockRefused reports whether err from mysql.lockForPromote (as jr.call
+// returns it) is the master's agent refusing the lock before taking it:
+// an answer from the agent (hub.SentByAgent, or labelled as its words by
+// jr.call) with a code it gives only to a refusal: bad_params, which the
+// agent's lockForPromote returns only before it writes the lock, or an
+// unknown command. Its other errors may come after the lock was set, and
+// no answer says nothing.
+func lockRefused(err error) bool {
+	_, labelled := errors.AsType[agentTextError](err)
+	if !labelled && !hub.SentByAgent(err) {
+		return false
+	}
+	var pe *proto.Error
+	if !errors.As(err, &pe) {
+		return false
+	}
+	return pe.Code == proto.CodeBadParams || pe.Code == proto.CodeUnknownCommand
 }
 
 // locked reports whether the master's promote lock is held as far as the
