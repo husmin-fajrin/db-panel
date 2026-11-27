@@ -107,6 +107,8 @@ type fakeOrch struct {
 	unlockSent    bool
 	unlockOut     orchestrator.UnlockOutcome
 	unlockErr     error
+	// lockRecords answers LockRecords.
+	lockRecords []orchestrator.LockRecord
 }
 
 func (f *fakeOrch) Gate(in orchestrator.GateInput) (orchestrator.GateResult, error) {
@@ -482,6 +484,12 @@ func (f *fakeOrch) UnlockLockJob(int64) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.unlockJob, f.unlockSent, nil
+}
+
+func (f *fakeOrch) LockRecords(int64) ([]orchestrator.LockRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.lockRecords), nil
 }
 
 // syncBuffer is a log sink safe for concurrent writes.

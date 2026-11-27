@@ -563,3 +563,337 @@ func TestLockRefused(t *testing.T) {
 		}
 	}
 }
+
+// ---- refusals while a lock record stands (spec 5.2, Task 4) ----
+
+// wantT15b is T15b for what, naming the promote job.
+func wantT15b(what, job string) string {
+	return "Master db-master mungkin masih terkunci oleh promote terencana sebelumnya. " + what +
+		" tidak dijalankan selama itu: memuat data membuat replika bisa ditulis sebentar, dan penjaga kunci " +
+		`master bisa mengkarantina master. Tekan "Buka kunci promote" pada pekerjaan promote ` + job + " dulu."
+}
+
+// wantT12c is T12c naming the promote job.
+func wantT12c(job string) string {
+	return `Master db-master masih terkunci, atau kunci promote terencana sebelumnya belum terbukti dibuka. ` +
+		`Tekan "Buka kunci promote" pada pekerjaan promote ` + job + ` dulu, lalu mulai promote ini lagi.`
+}
+
+// wantT12d is T12d.
+const wantT12d = `Master db-master masih terkunci. Buka kuncinya dulu dengan "Buka kunci master" di halaman master, ` +
+	`lalu mulai promote ini lagi.`
+
+// plantSentAt is plantStanding of a job whose mysql.promote was sent.
+func (g *promoteRig) plantSentAt(tried time.Time) (string, int64) {
+	return g.plantPlanned(`{"master_server_id":%d,"candidate_server_id":%d,"promotion_id":%d,"lock_tried":true,`+
+		`"promote_sent":true,"lock_tried_at":"`+tried.UTC().Format(time.RFC3339Nano)+`","lock_deadline":"`+
+		tried.Add(30*time.Minute).UTC().Format(time.RFC3339Nano)+`"}`, nil)
+}
+
+// lockedMaster is a live report of the master reading Terkunci.
+func lockedMaster() monitor.View {
+	return monitor.View{Status: monitor.Status{Code: monitor.StatusLocked}, ReceivedAt: time.Now(),
+		Snap: &proto.HealthSnapshot{MySQLOK: true, GTIDExecuted: masterGTID, ReadOnly: true, SuperReadOnly: true}}
+}
+
+// loadStart is a load of the rig's topology, started or retried.
+type loadStart struct {
+	what, how string
+	run       func() error
+}
+
+// loadStarts are the loads of the rig's topology (spec 5.2: Resync ulang,
+// Buat replika, Tambah database, Lepas database with its data), each
+// started and retried ("Ulangi" of a failed job of its kind).
+func (g *promoteRig) loadStarts() []loadStart {
+	e := g.e
+	t := e.t
+	sub := e.agent("rep-sub", "10.0.0.5")
+	if _, err := e.st.AddReplica(g.topo.ID, sub.id, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.SetReplicaState(sub.id, store.ReplicaReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	target := e.agent("baru", "10.0.0.6")
+	retry := func(id, kind string, serverID int64, params string) func() error {
+		if err := e.st.CreateJob(store.Job{ID: id, Kind: kind, ServerID: serverID, TopologyID: g.topo.ID, ParamsJSON: params,
+			CreatedAt: time.Now()}, []string{"x"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.st.UpdateJob(id, store.JobFailed, 0, "gagal", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return func() error { return e.r.Retry(id, JobAck{}) }
+	}
+	ctx := context.Background()
+	return []loadStart{
+		{"Resync ulang", "mulai", func() error {
+			_, err := e.r.StartResync(ctx, ResyncParams{ServerID: g.b.id})
+			return err
+		}},
+		{"Resync ulang", "Ulangi", retry("failed-resync", KindResyncReplica, g.b.id, "{}")},
+		{"Buat replika", "mulai", func() error {
+			_, err := e.r.StartCreateReplica(ctx, CreateReplicaParams{MasterServerID: g.m.id, TargetServerID: target.id,
+				Databases: []string{"a"}})
+			return err
+		}},
+		{"Buat replika", "Ulangi", retry("failed-create", KindCreateReplica, target.id, "{}")},
+		{"Tambah database", "mulai", func() error {
+			_, err := e.r.StartAddDatabases(ctx, sub.id, []string{"b"})
+			return err
+		}},
+		{"Tambah database", "Ulangi", retry("failed-add", KindAddDatabases, sub.id, "{}")},
+		{"Lepas database", "mulai", func() error {
+			_, err := e.r.StartRemoveDatabases(ctx, sub.id, []string{"a"}, true)
+			return err
+		}},
+		{"Lepas database", "Ulangi", retry("failed-drop", KindRemoveDatabases, sub.id, `{"drop_data":true}`)},
+	}
+}
+
+// wantLoadRefused checks err is T15b for s naming job.
+func wantLoadRefused(t *testing.T, s loadStart, err error, job, when string) {
+	t.Helper()
+	want := wantT15b(s.what, job)
+	ls, ok := errors.AsType[*LockStandsError](err)
+	if !ok || err.Error() != want || ls.Code != "load" || ls.What != s.what || ls.JobID != job {
+		t.Errorf("%s %s %s: %v (%T), want %q", s.what, s.how, when, err, err, want)
+	}
+}
+
+// wantPastLockCheck checks err is not a lock refusal (the start went on to
+// its next check, or started).
+func wantPastLockCheck(t *testing.T, what string, err error) {
+	t.Helper()
+	if _, ok := errors.AsType[*LockStandsError](err); ok || (err != nil && strings.Contains(err.Error(), "terkunci")) {
+		t.Errorf("%s: %v, want past the lock check", what, err)
+	}
+}
+
+// TestLoadRefusedWhileLockRecordStands (5.13 guard): a lock kept by a
+// failed planned promote, two hours past its deadline, the master reading
+// Terkunci: every load, started or retried, is refused with T15b naming
+// that job; a job whose mysql.promote was sent holds them the same way.
+func TestLoadRefusedWhileLockRecordStands(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(g *promoteRig, tried time.Time) (string, int64)
+	}{
+		{"not sent", (*promoteRig).plantStanding},
+		{"sent", (*promoteRig).plantSentAt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newPromoteRig(t)
+			id, _ := tc.plant(g, time.Now().Add(-30*time.Minute-2*time.Hour))
+			g.h.set(g.m.id, lockedMaster())
+			for _, s := range g.loadStarts() {
+				wantLoadRefused(t, s, s.run(), id, "two hours past the deadline")
+			}
+			if st := g.e.storedState(id); st.LockUnlocked {
+				t.Fatal("record stored as unlocked")
+			}
+		})
+	}
+}
+
+// TestLoadRefusedWithoutLiveMasterReport (5.13 guard, N-2): past the
+// window, with no live report of the master (restored at startup, none at
+// all, its agent away), Resync ulang and Ulangi of a failed resync are
+// refused: the record is not proven gone.
+func TestLoadRefusedWithoutLiveMasterReport(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(g *promoteRig)
+	}{
+		{"restored report", func(g *promoteRig) {
+			v := healthyView(monitor.StatusHealthy, masterGTID, nil)
+			v.Restored = true
+			g.h.set(g.m.id, v)
+		}},
+		{"no report", func(g *promoteRig) { g.h.forget(g.m.id) }},
+		{"agent disconnected", func(g *promoteRig) { g.m.detach() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newPromoteRig(t)
+			id, _ := g.plantStanding(time.Now().Add(-2 * time.Hour))
+			tc.set(g)
+			for _, s := range g.loadStarts() {
+				if s.what == "Resync ulang" {
+					wantLoadRefused(t, s, s.run(), id, tc.name)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadRefusedInsideWindowDespiteOpenReport (N-2): inside the window a
+// load is refused whatever the report says, also a live report with both
+// read-only flags off.
+func TestLoadRefusedInsideWindowDespiteOpenReport(t *testing.T) {
+	g := newPromoteRig(t)
+	id, _ := g.plantStanding(time.Now().Add(-time.Minute))
+	g.h.set(g.m.id, healthyView(monitor.StatusHealthy, masterGTID, nil))
+	for _, s := range g.loadStarts() {
+		wantLoadRefused(t, s, s.run(), id, "inside the window")
+	}
+}
+
+// TestLoadAllowedAfterLiveOpenReport: past the window a live report of the
+// master with both flags off proves the record gone (stored, P9); a
+// resync and a new planned promote are let through.
+func TestLoadAllowedAfterLiveOpenReport(t *testing.T) {
+	t.Run("resync", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		id, _ := g.plantStanding(time.Now().Add(-2 * time.Hour))
+		starts := g.loadStarts()
+		// A busy b shows the resync got past the lock check without
+		// starting a job.
+		if err := e.st.CreateJob(store.Job{ID: "busy-b", Kind: KindMySQLTLS, ServerID: g.b.id, ParamsJSON: "{}",
+			CreatedAt: time.Now()}, []string{"x"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range starts[:2] {
+			err := s.run()
+			wantPastLockCheck(t, s.what+" "+s.how, err)
+			if err == nil || !strings.Contains(err.Error(), "pekerjaan") {
+				t.Errorf("%s %s: %v, want refused by b's busy job", s.what, s.how, err)
+			}
+		}
+		if st := e.storedState(id); !st.LockUnlocked {
+			t.Fatal("record not stored as gone")
+		}
+		if log := e.jobLog(id); strings.Count(log, textP9) != 1 {
+			t.Fatalf("job log lacks P9 once:\n%s", log)
+		}
+	})
+	t.Run("planned promote", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		g.plantStanding(time.Now().Add(-2 * time.Hour))
+		id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+		if err != nil {
+			t.Fatalf("StartPromote: %v", err)
+		}
+		e.waitJob(id, store.JobSucceeded)
+	})
+}
+
+// TestLoadIgnoresRecordOfFormerMaster: a record of a job whose master was
+// replaced since holds nothing back.
+func TestLoadIgnoresRecordOfFormerMaster(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.plantStanding(time.Now().Add(-time.Minute))
+	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.CreateJob(store.Job{ID: "busy-d", Kind: KindMySQLTLS, ServerID: g.d.id, ParamsJSON: "{}",
+		CreatedAt: time.Now()}, []string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.CreateJob(store.Job{ID: "failed-resync-d", Kind: KindResyncReplica, ServerID: g.d.id, TopologyID: g.topo.ID,
+		ParamsJSON: "{}", CreatedAt: time.Now()}, []string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpdateJob("failed-resync-d", store.JobFailed, 0, "gagal", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: g.d.id})
+	wantPastLockCheck(t, "Resync ulang of d", err)
+	if err == nil || !strings.Contains(err.Error(), "pekerjaan") {
+		t.Errorf("Resync ulang of d: %v, want refused by d's busy job", err)
+	}
+	err = e.r.Retry("failed-resync-d", JobAck{})
+	wantPastLockCheck(t, "Ulangi of d's resync", err)
+	if err == nil || !strings.Contains(err.Error(), "pekerjaan lain") {
+		t.Errorf("Ulangi of d's resync: %v, want refused by d's busy job", err)
+	}
+	e.r.startMu.Lock()
+	defer e.r.startMu.Unlock()
+	for _, id := range []int64{g.m.id, g.b.id} {
+		if err := e.r.refusePlannedWhileLockStands(id); err != nil {
+			t.Errorf("planned refusal for %d: %v", id, err)
+		}
+	}
+}
+
+// TestPlannedStartRefusedWhileLockStands (S-2): a new planned promote of a
+// master whose record stands is refused at its start with T12c naming
+// the newest such job, inside the window, past it with the master
+// Terkunci, and for a job whose mysql.promote was sent; nothing is sent.
+func TestPlannedStartRefusedWhileLockStands(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tried  time.Duration
+		plant  func(g *promoteRig, tried time.Time) (string, int64)
+		locked bool
+	}{
+		{"inside the window", -time.Minute, (*promoteRig).plantStanding, false},
+		{"past the window, master Terkunci", -2 * time.Hour, (*promoteRig).plantStanding, true},
+		{"sent", -time.Minute, (*promoteRig).plantSentAt, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newPromoteRig(t)
+			e := g.e
+			g.plantStanding(time.Now().Add(-3 * time.Hour)) // older: not the one named
+			id, promID := tc.plant(g, time.Now().Add(tc.tried))
+			if tc.locked {
+				g.h.set(g.m.id, lockedMaster())
+			}
+			_, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+			ls, ok := errors.AsType[*LockStandsError](err)
+			if !ok || ls.Code != "planned" || ls.JobID != id || err.Error() != wantT12c(id) {
+				t.Fatalf("StartPromote = %v (%T), want %q", err, err, wantT12c(id))
+			}
+			if n := g.m.count("mysql.lockForPromote"); n != 0 {
+				t.Fatalf("lockForPromote sent %d times", n)
+			}
+			if p := g.promotion(); p.ID != promID {
+				t.Fatalf("latest promotion = %+v, want the planted one", p)
+			}
+		})
+	}
+}
+
+// TestPlannedStartRefusedWhileMasterLocked (S-2): no record, but the
+// master reads Terkunci: T12d, without a job.
+func TestPlannedStartRefusedWhileMasterLocked(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	g.h.set(g.m.id, lockedMaster())
+	_, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	ls, ok := errors.AsType[*LockStandsError](err)
+	if !ok || ls.Code != "master_locked" || ls.JobID != "" || err.Error() != wantT12d {
+		t.Fatalf("StartPromote = %v (%T), want %q", err, err, wantT12d)
+	}
+	if n := g.m.count("mysql.lockForPromote"); n != 0 {
+		t.Fatalf("lockForPromote sent %d times", n)
+	}
+}
+
+// TestEmergencyKeepsClockRuleOnly (T-4): an emergency promote is refused
+// only until the record's Until; past it, with the master not reporting at
+// all, it starts although the record stands.
+func TestEmergencyKeepsClockRuleOnly(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id, _ := g.plantStanding(time.Now().Add(-2 * time.Hour))
+	g.offline(g.m)
+	g.h.forget(g.m.id)
+	for _, fa := range []*fakeAgent{g.c, g.b, g.d} {
+		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
+	}
+	if got := recordJobs(g.lockRecords()); len(got) != 1 || got[0] != id {
+		t.Fatalf("records = %v, want %s standing", got, id)
+	}
+	job, err := e.r.StartPromote(context.Background(), PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id,
+		CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("emergency promote past the record's Until: %v", err)
+	}
+	if j, _ := e.waitJob(job, store.JobSucceeded); j.Kind != KindPromoteEmergency {
+		t.Fatalf("kind = %s", j.Kind)
+	}
+}

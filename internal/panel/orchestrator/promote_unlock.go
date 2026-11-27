@@ -77,6 +77,12 @@ const (
 	textLoadLockStands = `Master %s mungkin masih terkunci oleh promote terencana sebelumnya. %s tidak dijalankan selama ` +
 		`itu: memuat data membuat replika bisa ditulis sebentar, dan penjaga kunci master bisa mengkarantina master. ` +
 		`Tekan "Buka kunci promote" pada pekerjaan promote %s dulu.`
+	// textPlannedLockStands is T12c: the master, the promote job.
+	textPlannedLockStands = `Master %s masih terkunci, atau kunci promote terencana sebelumnya belum terbukti dibuka. ` +
+		`Tekan "Buka kunci promote" pada pekerjaan promote %s dulu, lalu mulai promote ini lagi.`
+	// textPlannedMasterLocked is T12d.
+	textPlannedMasterLocked = `Master %s masih terkunci. Buka kuncinya dulu dengan "Buka kunci master" di halaman master, ` +
+		`lalu mulai promote ini lagi.`
 	// textEmergencyLockStands is T15, the end of the emergency promotion's
 	// refusal while a lock may stand.
 	textEmergencyLockStands = `Sebelum itu, bila agent master tersambung, tekan "Buka kunci promote" pada pekerjaan promote ` +
@@ -183,16 +189,24 @@ func (*PromoteLockStandsError) Is(target error) bool {
 	return ok
 }
 
-// LockStandsError refuses a load while a planned promote's lock record
-// may stand (T15b); Task 4 adds the codes planned and master_locked.
+// LockStandsError refuses a load (Code "load", T15b) or a new planned
+// promote while a planned promote's lock record may stand (Code
+// "planned", T12c), or while the master reads Terkunci without one (Code
+// "master_locked", T12d, no JobID).
 type LockStandsError struct {
-	Code   string // load
+	Code   string // load | planned | master_locked
 	Master string
-	What   string // "Resync ulang", "Buat replika", "Tambah database", "Lepas database"
-	JobID  string // the promote job whose lock record stands
+	What   string // load: "Resync ulang", "Buat replika", "Tambah database", "Lepas database"
+	JobID  string // the promote job whose lock record stands; "" for master_locked
 }
 
 func (e *LockStandsError) Error() string {
+	switch e.Code {
+	case "planned":
+		return fmt.Sprintf(textPlannedLockStands, e.Master, e.JobID)
+	case "master_locked":
+		return fmt.Sprintf(textPlannedMasterLocked, e.Master)
+	}
 	return fmt.Sprintf(textLoadLockStands, e.Master, e.What, e.JobID)
 }
 

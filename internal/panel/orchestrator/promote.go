@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/redact"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -153,8 +154,11 @@ var ErrOldMasterAck = errors.New("centang master lama mati belum diisi")
 // that is not eligible, branched replicas, a partial candidate without
 // AcceptPartial, unreachable replicas not in AcceptUnreachable, a mode the
 // master's status does not permit, an emergency without OldMasterDeadAck
-// (ErrOldMasterAck), an outdated agent (SEC-62), and a topology with an
-// unfinished job or a cutover still pending.
+// (ErrOldMasterAck), an outdated agent (SEC-62), a topology with an
+// unfinished job or a cutover still pending, an emergency while an earlier
+// planned promote's lock is within its Until (SEC-66), and a planned one
+// while such a lock record stands or the master reads Terkunci (T12c,
+// T12d).
 func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, error) {
 	if p.MasterServerID == p.CandidateServerID {
 		return "", errors.New("kandidat tidak boleh master itu sendiri")
@@ -251,6 +255,8 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 		if err := r.refuseWhileLockMayStand(p.MasterServerID, verbEmergency); err != nil {
 			return "", err
 		}
+	} else if err := r.refusePlannedWhileLockStands(p.MasterServerID); err != nil {
+		return "", err
 	}
 	if !cand.Eligible {
 		return "", fmt.Errorf("%s tidak bisa dipromosikan: %s", cand.Name, cand.Reason)
@@ -382,44 +388,66 @@ func (r *Runner) refuseRetryWhileLockMayStand(j store.Job) error {
 
 // refuseWhileLockMayStand refuses what (an emergency promotion of
 // masterID, or a job that makes one of its replicas writable for a while)
-// while a standing lock record of a planned promotion of that master
-// (LockRecords: every one, not only the latest) is within its Until, the
-// lock's clamped deadline plus the guard's grace (proto.PromoteLockGrace)
-// (SEC-66). Before then the master may be locked for the earlier
-// candidate: an emergency promotion of another replica would see it alive
-// (and the agent refuses it then), or it would reopen beside the new
-// master once its guard unlocks it. A replica the guard has seen that is
+// while a lock record of a planned promotion of that master may stand
+// (every one, not only the latest). A replica the guard has seen that is
 // writable at the deadline (a resync or dump load, Buat replika, Tambah
-// database) makes the guard quarantine a healthy master instead of
-// unlocking it (4b final review). what names the action ("Promote
-// darurat", "Resync ulang", ...): an emergency promotion is refused until
-// that time, its text ending with T15; a load is a *LockStandsError (T15b)
-// naming the promote job whose record stands (K13).
+// database, Lepas database with its data) makes the guard quarantine a
+// healthy master instead of unlocking it (4b final review, T-4): a load
+// is refused with a *LockStandsError (T15b) naming the newest record's
+// job (K13) for as long as a record stands (settleLockRecords; callers
+// hold startMu). Inside the record's Until nothing proves it gone, so the
+// clock rule holds whatever the report says; past it only an unlock or a
+// live report of the master with both flags off does (N-2): no live
+// report means refused. An emergency promotion keeps the clock rule only
+// (SEC-66): it is refused while a record is within its Until, the lock's
+// clamped deadline plus the guard's grace (proto.PromoteLockGrace), its
+// text ending with T15, and never longer: the master may be dead.
 func (r *Runner) refuseWhileLockMayStand(masterID int64, what string) error {
+	if what != verbEmergency {
+		recs, err := r.settleLockRecords(masterID)
+		if err != nil || len(recs) == 0 {
+			return err
+		}
+		return &LockStandsError{Code: "load", Master: r.nameOf(masterID), What: what, JobID: recs[0].JobID}
+	}
 	recs, err := r.LockRecords(masterID)
 	if err != nil {
 		return err
 	}
 	now := r.now()
-	var (
-		until time.Time
-		job   string
-	)
+	var until time.Time
 	for _, rec := range recs {
 		if now.Before(rec.Until) && rec.Until.After(until) {
-			until, job = rec.Until, rec.JobID
+			until = rec.Until
 		}
 	}
 	if until.IsZero() {
 		return nil
 	}
-	if what != verbEmergency {
-		return &LockStandsError{Code: "load", Master: r.nameOf(masterID), What: what, JobID: job}
-	}
 	at := until.Local().Format("02-01-2006 15:04:05")
 	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka. "+
 		"%s baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
 		"masih replika. %s", r.nameOf(masterID), what, at, textEmergencyLockStands)
+}
+
+// refusePlannedWhileLockStands refuses a new planned promotion of
+// masterID (S-2): while a lock record of an earlier one stands
+// (settleLockRecords; callers hold startMu) with T12c naming the newest
+// record's job, also one whose mysql.promote was sent; else while the
+// Monitor reads the master Terkunci with T12d. A second planned promote
+// on top of a standing lock can strand the first.
+func (r *Runner) refusePlannedWhileLockStands(masterID int64) error {
+	recs, err := r.settleLockRecords(masterID)
+	if err != nil {
+		return err
+	}
+	if len(recs) > 0 {
+		return &LockStandsError{Code: "planned", Master: r.nameOf(masterID), JobID: recs[0].JobID}
+	}
+	if v, ok := r.view(masterID); ok && v.Status.Code == monitor.StatusLocked {
+		return &LockStandsError{Code: "master_locked", Master: r.nameOf(masterID)}
+	}
+	return nil
 }
 
 // refuseOldMasterPending is errOldMasterPending while topo's old master

@@ -361,9 +361,10 @@ func TestJobFailedClosesOnLaterJob(t *testing.T) {
 // master's guard may still hold the lock and, at its deadline, quarantine
 // the master if a replica it has seen is writable. Resync ulang, Buat
 // replika and Tambah database each make a replica writable for a while,
-// so each is refused, saying from when it is possible and naming
-// unlock-master, until the lock's deadline plus the guard's grace; then
-// each is accepted again (here it goes on to its next check).
+// so each is refused with T15b until the lock's deadline plus the guard's
+// grace, and past it until a live report of the master with both
+// read-only flags off proves the lock gone; then each is accepted again
+// (here it goes on to its next check).
 func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
@@ -456,6 +457,10 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 	}
 	// Past the deadline but within the grace: still refused.
 	check("within the grace", deadline.Add(30*time.Second), true)
+	// Past both, the master's agent still away: no live report proves the
+	// lock gone, so still refused (N-2).
+	later := deadline.Add(proto.PromoteLockGrace + time.Second)
+	check("after the grace without a live master report", later, true)
 	// Past both: the guard has decided. A busy b shows the resync got past
 	// the lock check without starting a job.
 	for _, srv := range []int64{g.b.id, sub.id} {
@@ -466,7 +471,12 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 	}
 	// Tambah and Lepas database now meet sub's busy job first.
 	starts[2].after, starts[3].after = "pekerjaan", "pekerjaan"
-	check("after the grace", deadline.Add(proto.PromoteLockGrace+time.Second), false)
+	// Its live report with both flags off proves it gone: accepted.
+	g.m.attach()
+	v := healthyView(healthmon.StatusHealthy, masterGTID, nil)
+	v.ReceivedAt = later
+	g.h.set(g.m.id, v)
+	check("after the grace", later, false)
 	if rep := e.replica(g.b.id); rep.State != store.ReplicaReady {
 		t.Fatalf("b after the refusals = %s, want ready", rep.State)
 	}

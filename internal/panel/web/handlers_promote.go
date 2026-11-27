@@ -340,7 +340,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 			detail["master_last_report"] = view.LastReportAt.UTC().Format(time.RFC3339)
 		}
 	}
-	id := ""
+	id, flashJob := "", ""
 	status, outcome := http.StatusBadRequest, msg
 	if msg == "" {
 		if emergency {
@@ -350,7 +350,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 		}
 		if id, err = a.Orchestrator.StartPromote(r.Context(), params); err != nil {
 			g := a.startRefused(err, http.StatusBadRequest)
-			status, msg, outcome = g.status, g.flash, g.outcome
+			status, msg, outcome, flashJob = g.status, g.flash, g.outcome, g.flashJob
 		}
 	}
 	detail["job_id"] = id
@@ -362,7 +362,7 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 			a.internalError(w, "promote page", err)
 			return
 		}
-		p.Flash = msg
+		p.Flash, p.FlashJob = msg, flashJob
 		a.render.renderStatus(w, status, "promote", p)
 		return
 	}
@@ -621,6 +621,7 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		p.Blocked = fmt.Sprintf(msgPromoteWritable, writable)
 	case !slices.ContainsFunc(p.Rows, func(row promoteRow) bool { return row.Selectable }):
 		p.Blocked = msgPromoteNone
+	case !p.Emergency && a.plannedLockRefusal(&p):
 	default:
 		// The job the POST refuses on (StartPromote's ActiveJobForTopology).
 		j, busy, err := a.Store.ActiveJobForTopology(topo.ID)
@@ -655,6 +656,30 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		}
 	}
 	return p, nil
+}
+
+// plannedLockRefusal sets p's blocker to the refusal StartPromote gives a
+// planned promote of p's master while a lock may stand (S-2): T12c with
+// the newest standing record's job, or T12d while the master reads
+// Terkunci without one; it reports whether it did. An emergency keeps the
+// clock rule only and is not blocked here. It writes nothing (K10).
+func (a *app) plannedLockRefusal(p *promotePage) bool {
+	recs, err := a.Orchestrator.LockRecords(p.Master.ID)
+	if err != nil {
+		a.Logger.Warn("lock records", "master", p.Master.ID, "err", logErr(err))
+		return false // StartPromote reads them again and refuses
+	}
+	var refusal *orchestrator.LockStandsError
+	switch {
+	case len(recs) > 0:
+		refusal = &orchestrator.LockStandsError{Code: "planned", Master: p.Master.Name, JobID: recs[0].JobID}
+	case p.MasterStatus == monitor.StatusLocked:
+		refusal = &orchestrator.LockStandsError{Code: "master_locked", Master: p.Master.Name}
+	default:
+		return false
+	}
+	p.Blocked, p.BlockedJob = refusal.Error(), refusal.JobID
+	return true
 }
 
 // defaultCandidate is the choice the screen starts with: the most current

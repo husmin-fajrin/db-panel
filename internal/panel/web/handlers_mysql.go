@@ -65,6 +65,10 @@ type Orchestrator interface {
 	UnlockPromoteLock(ctx context.Context, jobID string) (orchestrator.UnlockOutcome, error)
 	UnlockLockOffered(jobID string) bool
 	UnlockLockJob(masterID int64) (jobID string, sent bool, err error)
+	// LockRecords are the standing lock records of the master's planned
+	// promotes, newest first; it writes nothing (K10). The promote screen
+	// shows T12c from them before anything is typed.
+	LockRecords(masterID int64) ([]orchestrator.LockRecord, error)
 	// Promotion of a replica to master: the consideration data, the job,
 	// "Sudah saya alihkan", and "Arahkan sekarang" for a replica waiting
 	// to be pointed at the new master.

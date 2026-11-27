@@ -1029,3 +1029,67 @@ func TestEmergencyPromoteCandidateRulesUnchanged(t *testing.T) {
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, promoteJobBlockedLine)
 }
+
+// T12c and T12d as the page shows them (quotes escaped).
+const (
+	wantT12cStart = "Master db-master masih terkunci, atau kunci promote terencana sebelumnya belum terbukti dibuka. " +
+		"Tekan &#34;Buka kunci promote&#34; pada pekerjaan promote "
+	wantT12cEnd = " dulu, lalu mulai promote ini lagi."
+	wantT12d    = "Master db-master masih terkunci. Buka kuncinya dulu dengan &#34;Buka kunci master&#34; di halaman master, " +
+		"lalu mulai promote ini lagi."
+)
+
+func (f *fakeOrch) setLockRecords(recs ...orchestrator.LockRecord) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lockRecords = recs
+}
+
+// TestPromoteScreenShowsLockRefusal (S-2): the planned screen of a master
+// whose promote lock record stands shows T12c with a link to the newest
+// record's job before anything is typed, with no candidate to choose and
+// no Promote button; a master reading Terkunci without a record shows
+// T12d. The emergency screen keeps its choice (the clock rule only).
+func TestPromoteScreenShowsLockRefusal(t *testing.T) {
+	const job, older = "11111111111111111111111111111111", "22222222222222222222222222222222"
+	e, f, mon := promoteEnv(t)
+	c := e.cookie()
+	f.setView(plannedView())
+	f.setLockRecords(orchestrator.LockRecord{JobID: job, MasterID: 1, CandidateID: 2},
+		orchestrator.LockRecord{JobID: older, MasterID: 1, CandidateID: 3})
+	rec := e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "data-promote-blocked", wantT12cStart+job+wantT12cEnd, `href="/jobs/`+job+`"`,
+		">Buka pekerjaan promote</a>")
+	wantNoBody(t, rec, `name="candidate"`, `data-confirm-action="promote"`, older)
+
+	f.setLockRecords()
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, ReceivedAt: time.Now(),
+		Status: monitor.Status{Code: monitor.StatusLocked, Severity: monitor.SevCrit}, Snap: masterSnap()})
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "data-promote-blocked", wantT12d)
+	wantNoBody(t, rec, `name="candidate"`, `data-confirm-action="promote"`, "Buka pekerjaan promote")
+
+	f.setLockRecords(orchestrator.LockRecord{JobID: job, MasterID: 1, CandidateID: 2})
+	f.setView(emergencyView())
+	rec = e.do("GET", "/masters/1/promote", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `name="candidate" value="2"`, `data-confirm-action="promote"`)
+	wantNoBody(t, rec, "data-promote-blocked", "masih terkunci, atau kunci promote")
+}
+
+// TestLockRefusalLinksJob (K13): a planned promote StartPromote refuses
+// with T12c shows the job it names as a link to it.
+func TestLockRefusalLinksJob(t *testing.T) {
+	const job = "33333333333333333333333333333333"
+	e, f, _ := promoteEnv(t)
+	f.setView(plannedView())
+	f.mu.Lock()
+	f.promoteErr = &orchestrator.LockStandsError{Code: "planned", Master: "db-master", JobID: job}
+	f.mu.Unlock()
+	form := promoteForm("2", "planned", "accept_unreachable", "4", "confirm_name", "db-master")
+	rec := e.do("POST", "/masters/1/promote", withToken(t, e, form, web.ActPromote, "master", 1), e.cookie())
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, wantT12cStart, `<a class="link mono" href="/jobs/`+job+`">`+job+`</a>`+wantT12cEnd)
+}
