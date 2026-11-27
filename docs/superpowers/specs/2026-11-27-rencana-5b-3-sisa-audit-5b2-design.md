@@ -1,8 +1,9 @@
 # Rencana 5b-3: Sisa Audit Rencana 5b-2
 
 - Tanggal: 2026-11-27
-- Status: menunggu persetujuan pemilik; diubah sesudah builder check, tinjauan
-  rancangan dan pemeriksaan ulangnya (bagian 9)
+- Status: disetujui pemilik pada 2026-11-27 ("Setuju, kerjakan"), sesudah
+  builder check, tinjauan rancangan dan pemeriksaan ulangnya (bagian 9).
+  Dikerjakan dalam dua rencana pelaksanaan: bagian A lalu bagian B (bagian 6)
 - Asal: tabel temuan terbuka audit Rencana 5b-2
   (`docs/superpowers/security/2026-11-24-audit-plan-5b2.md`, disebut "A5b2" di
   bawah) dan baris R-181 sampai R-205 inventaris risiko
