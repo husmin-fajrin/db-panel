@@ -278,9 +278,10 @@ func TestHandlerRefusesMissingOrForeignToken(t *testing.T) {
 	}
 }
 
-// TestConfirmLimiterCountsWrongPasswords: only wrong passwords count, a
-// right one resets the count, and the budget is shared with the login's
-// per-username limiter both ways (SEC-60).
+// TestConfirmLimiterCountsWrongPasswords: only wrong passwords count and a
+// right one resets the count. Wrong confirmations still count against the
+// login's per-username limit, but that limit no longer refuses a
+// confirmation (R-181; TestConfirmWrongStillCountsForLogin).
 func TestConfirmLimiterCountsWrongPasswords(t *testing.T) {
 	e := newEnv(t, func(d *web.Deps) { d.ConfirmLimiter = nil })
 	c := e.cookie()
@@ -300,7 +301,8 @@ func TestConfirmLimiterCountsWrongPasswords(t *testing.T) {
 		}
 	}
 
-	// Wrong confirmations hold off the login of that user.
+	// Wrong confirmations hold off the login of that user, not the
+	// session's own right password.
 	e = newEnv(t, func(d *web.Deps) {
 		d.UserLimiter = auth.NewRateLimiter(3, 15*time.Minute, time.Now)
 	})
@@ -308,39 +310,29 @@ func TestConfirmLimiterCountsWrongPasswords(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		e.postConfirm(web.ActDeleteServer, "server", 1, "salah", c)
 	}
-	if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusTooManyRequests {
-		t.Fatalf("confirm after the shared budget is used: status %d, want 429", code)
-	}
 	rec := e.do("POST", "/login", url.Values{"username": {"admin"}, "password": {testPassword}}, nil)
 	wantCode(t, rec, http.StatusTooManyRequests)
-
-	// Wrong logins hold off confirmations.
-	e = newEnv(t, func(d *web.Deps) {
-		d.UserLimiter = auth.NewRateLimiter(3, 15*time.Minute, time.Now)
-	})
-	c = e.cookie()
-	for i := 0; i < 3; i++ {
-		e.do("POST", "/login", url.Values{"username": {"admin"}, "password": {"salah"}}, nil)
-	}
-	if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusTooManyRequests {
-		t.Fatalf("confirm after 3 wrong logins: status %d, want 429", code)
+	if code, _ := e.postConfirm(web.ActDeleteServer, "server", 1, testPassword, c); code != http.StatusOK {
+		t.Fatalf("confirm with the username limit full: status %d, want 200", code)
 	}
 }
 
 // TestConfirmLimiterConcurrent (N1): concurrent wrong confirmations from
-// one session cannot all pass the limit before any is counted. With the
-// password checks held open, only the budget's worth reach CheckPassword;
-// the rest are refused at once, and the user's login is then blocked too.
+// one session cannot all pass either per-session budget before any is
+// counted. With the password checks held open, only the budget's worth
+// reach CheckPassword; the rest are refused at once, and the user's login
+// is then blocked too.
 func TestConfirmLimiterConcurrent(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		confirm *auth.RateLimiter // nil: the router's 5 per minute
+		long    *auth.RateLimiter // nil: the router's 20 per 15 minutes
 		user    *auth.RateLimiter
 		limit   int
 	}{
-		{"confirm budget", nil, auth.NewRateLimiter(5, 15*time.Minute, time.Now), 5},
-		{"shared login budget", auth.NewRateLimiter(1000, time.Minute, time.Now),
-			auth.NewRateLimiter(3, 15*time.Minute, time.Now), 3},
+		{"confirm budget", nil, nil, auth.NewRateLimiter(5, 15*time.Minute, time.Now), 5},
+		{"15-minute budget", auth.NewRateLimiter(1000, time.Minute, time.Now),
+			auth.NewRateLimiter(3, 15*time.Minute, time.Now), auth.NewRateLimiter(3, 15*time.Minute, time.Now), 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const n = 20
@@ -351,6 +343,7 @@ func TestConfirmLimiterConcurrent(t *testing.T) {
 			)
 			e := newEnv(t, func(d *web.Deps) {
 				d.ConfirmLimiter = tc.confirm
+				d.ConfirmLongLimiter = tc.long
 				d.UserLimiter = tc.user
 				d.CheckPassword = func(_, pw string) bool {
 					checks.Add(1)

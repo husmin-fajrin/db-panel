@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -57,10 +58,16 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := clientIP(r)
+	if d, ok := a.validDevice(r, username); ok {
+		a.deviceLogin(w, r, d, username, password, next, ip, retry)
+		return
+	}
+	addrKey := ipKey(ip)
 	userKey := usernameKey(username)
-	// Every attempt counts per IP; per username only wrong passwords count
-	// (below), so a flood refused as busy cannot lock an account out.
-	if !a.Limiter.Allow(ip) || a.UserLimiter.Blocked(userKey) {
+	// Every attempt counts per address; per username only wrong passwords
+	// count (below), so a flood refused as busy cannot lock an account
+	// out.
+	if !a.Limiter.Allow(addrKey) || a.UserLimiter.Blocked(userKey) {
 		a.Logger.Warn("login rate limited", "ip", ip)
 		retry(http.StatusTooManyRequests, msgLoginBlocked)
 		return
@@ -76,31 +83,133 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash := dummyHash
-	user, err := a.Store.GetUser(username)
-	switch {
-	case err == nil:
-		hash = user.PasswordHash
-	case !errors.Is(err, store.ErrNotFound):
+	user, ok, err := a.checkLogin(username, password)
+	if err != nil {
 		a.internalError(w, "get user", err)
 		return
 	}
-	// Always run bcrypt, even for an unknown user.
-	// Only attempts that reached the password check are audited: those
-	// refused earlier (rate limits, busy) cost an attacker nothing and
-	// would fill the append-only log.
-	if ok := a.CheckPassword(hash, password); !ok || err != nil {
+	if !ok {
 		a.UserLimiter.Fail(userKey)
-		who := auditUsername(username, err == nil)
-		a.auditAs(r, who, "login_failed", auditSession, 0, nil, msgLoginFailed)
-		// Never the typed name: it may be a password (SEC-44).
-		a.Logger.Info("login failed", "username", journalUsername(who), "ip", ip)
+		a.loginFailed(r, username, user, ip)
 		retry(http.StatusOK, msgLoginFailed)
 		return
 	}
-
-	a.Limiter.Reset(ip)
+	a.Limiter.Reset(addrKey)
 	a.UserLimiter.Reset(userKey)
+	// No valid device cookie came for this name: issue one (K5). This
+	// browser and address have now logged in with it.
+	if a.DeviceKey != nil {
+		v, d := auth.NewDevice(a.DeviceKey, user.Username, a.Now())
+		auth.SetDeviceCookie(w, v)
+		a.devicePairs.add(devicePairKey(d.ID, ip))
+	}
+	a.loginSucceeded(w, r, user, next, ip)
+}
+
+// validDevice returns the device cookie the request carries when it is
+// valid for the typed username: signed with DeviceKey, under a year old,
+// issued for that name (any case) and after the last password reset.
+func (a *app) validDevice(r *http.Request, username string) (auth.Device, bool) {
+	if a.DeviceKey == nil {
+		return auth.Device{}, false
+	}
+	v, ok := auth.DeviceCookie(r)
+	if !ok {
+		return auth.Device{}, false
+	}
+	d, ok := auth.ParseDevice(a.DeviceKey, v, a.Now())
+	if !ok || !strings.EqualFold(d.Username, username) || !a.IssuedValid(d.Issued) {
+		return auth.Device{}, false
+	}
+	return d, true
+}
+
+// deviceLogin is a login with a valid device cookie d (spec 5.1). It never
+// reads the address or username limits nor loginSem, and its wrong
+// passwords count only against its own budgets (K6): 5 per cookie and
+// address (reserved before the check, given back when the check never
+// runs) and 20 per cookie for all addresses. Once that total is used up,
+// only the pairs that have never logged in since the panel started are
+// refused. It waits at most deviceSlotWait for one of its own check slots
+// (K7).
+func (a *app) deviceLogin(w http.ResponseWriter, r *http.Request, d auth.Device, username, password, next, ip string,
+	retry func(int, string)) {
+	pair := devicePairKey(d.ID, ip)
+	totalUsed := func() bool { return a.DeviceTotalLimiter.Blocked(d.ID) && !a.devicePairs.has(pair) }
+	if totalUsed() || !a.DevicePairLimiter.Allow(pair) {
+		a.Logger.Warn("login rate limited", "ip", ip, "device", d.ID)
+		retry(http.StatusTooManyRequests, msgLoginBlocked)
+		return
+	}
+	timer := time.NewTimer(deviceSlotWait)
+	defer timer.Stop()
+	select {
+	case a.deviceSem <- struct{}{}:
+		defer func() { <-a.deviceSem }()
+	case <-timer.C:
+		a.DevicePairLimiter.Refund(pair)
+		a.Logger.Warn("login refused: device password checks busy", "ip", ip, "device", d.ID)
+		retry(http.StatusTooManyRequests, msgLoginBusy)
+		return
+	case <-r.Context().Done():
+		a.DevicePairLimiter.Refund(pair)
+		retry(http.StatusTooManyRequests, msgLoginBusy)
+		return
+	}
+	// The total may have been used up while this login waited.
+	if totalUsed() {
+		a.DevicePairLimiter.Refund(pair)
+		a.Logger.Warn("login rate limited", "ip", ip, "device", d.ID)
+		retry(http.StatusTooManyRequests, msgLoginBlocked)
+		return
+	}
+
+	user, ok, err := a.checkLogin(username, password)
+	if err != nil {
+		a.DevicePairLimiter.Refund(pair)
+		a.internalError(w, "get user", err)
+		return
+	}
+	if !ok {
+		a.DeviceTotalLimiter.Fail(d.ID)
+		a.loginFailed(r, username, user, ip)
+		retry(http.StatusOK, msgLoginFailed)
+		return
+	}
+	a.DevicePairLimiter.Reset(pair)
+	a.devicePairs.add(pair)
+	a.loginSucceeded(w, r, user, next, ip)
+}
+
+// checkLogin checks password for username. bcrypt always runs, against
+// dummyHash for an unknown user, so the response time does not reveal
+// which usernames exist. user.Username is "" when the user does not exist.
+func (a *app) checkLogin(username, password string) (user store.User, ok bool, err error) {
+	hash := dummyHash
+	user, err = a.Store.GetUser(username)
+	switch {
+	case err == nil:
+		hash = user.PasswordHash
+	case errors.Is(err, store.ErrNotFound):
+		user = store.User{}
+	default:
+		return store.User{}, false, err
+	}
+	return user, a.CheckPassword(hash, password) && user.Username != "", nil
+}
+
+// loginFailed audits and logs a wrong password. Only attempts that reached
+// the password check are audited: those refused earlier (rate limits,
+// busy) cost an attacker nothing and would fill the append-only log.
+func (a *app) loginFailed(r *http.Request, username string, user store.User, ip string) {
+	who := auditUsername(username, user.Username != "")
+	a.auditAs(r, who, "login_failed", auditSession, 0, nil, msgLoginFailed)
+	// Never the typed name: it may be a password (SEC-44).
+	a.Logger.Info("login failed", "username", journalUsername(who), "ip", ip)
+}
+
+// loginSucceeded starts the session and redirects to next.
+func (a *app) loginSucceeded(w http.ResponseWriter, r *http.Request, user store.User, next, ip string) {
 	// Secure always: the panel serves the UI over HTTPS only (plain HTTP
 	// is redirected before it reaches here).
 	auth.SetSessionCookie(w, a.Sessions.Create(user.Username))

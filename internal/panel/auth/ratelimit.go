@@ -104,6 +104,23 @@ func (r *RateLimiter) Refund(key string) {
 	r.m[key] = w
 }
 
+// RetryAfter returns how long until key is accepted again: the rest of its
+// window when it has used up its attempts, the whole window when it is new
+// and the limiter is full, and 0 when it is not blocked now.
+func (r *RateLimiter) RetryAfter(key string) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	w, ok := r.current(key, now)
+	switch {
+	case !ok && !r.room(now):
+		return r.window
+	case !ok || w.count < r.max:
+		return 0
+	}
+	return w.start.Add(r.window).Sub(now)
+}
+
 // Reset forgets key (called after a successful login).
 func (r *RateLimiter) Reset(key string) {
 	r.mu.Lock()
@@ -119,11 +136,12 @@ func (r *RateLimiter) Len() int {
 }
 
 // current returns key's bucket in the window containing now, or a fresh one
-// (ok=false) when the key is unknown or its window has elapsed. Caller holds
-// r.mu.
+// (ok=false) when the key is unknown or its window has elapsed. A window
+// that starts after now (the clock was set back) has elapsed too: a clock
+// moved back must not hold a key for longer. Caller holds r.mu.
 func (r *RateLimiter) current(key string, now time.Time) (bucket, bool) {
 	w, ok := r.m[key]
-	if !ok || !now.Before(w.start.Add(r.window)) {
+	if !ok || expired(w, now, r.window) {
 		delete(r.m, key)
 		return bucket{start: now}, false
 	}
@@ -134,13 +152,19 @@ func (r *RateLimiter) current(key string, now time.Time) (bucket, bool) {
 // limiter is full or a window has passed since the last sweep. Caller holds
 // r.mu.
 func (r *RateLimiter) room(now time.Time) bool {
-	if len(r.m) >= r.maxKeys || !now.Before(r.lastSweep.Add(r.window)) {
+	if len(r.m) >= r.maxKeys || !now.Before(r.lastSweep.Add(r.window)) || r.lastSweep.After(now) {
 		for k, w := range r.m {
-			if !now.Before(w.start.Add(r.window)) {
+			if expired(w, now, r.window) {
 				delete(r.m, k)
 			}
 		}
 		r.lastSweep = now
 	}
 	return len(r.m) < r.maxKeys
+}
+
+// expired reports whether w's window is over at now: elapsed, or starting
+// after now.
+func expired(w bucket, now time.Time, window time.Duration) bool {
+	return w.start.After(now) || !now.Before(w.start.Add(window))
 }

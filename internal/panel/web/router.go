@@ -35,14 +35,15 @@ const (
 )
 
 // Deps are the panel services the UI uses. All fields except Now, Version,
-// Logger, CheckPassword, LoginConcurrency, UserLimiter and ConfirmLimiter
-// are required.
+// Logger, CheckPassword, LoginConcurrency, the limiters other than Limiter,
+// DeviceKey and IssuedValid are required.
 // Sessions and the limiters are configured (TTL, limits) by the caller.
 type Deps struct {
 	Store    *store.Store
 	Hub      *hub.Hub
 	Sessions *auth.Sessions
-	// Limiter counts every login attempt per client IP.
+	// Limiter counts every login attempt without a valid device cookie
+	// per client address (ipKey).
 	Limiter *auth.RateLimiter
 	// UserLimiter counts failed logins (wrong password) per username, so
 	// rotating source addresses does not buy more guesses for one account;
@@ -53,9 +54,27 @@ type Deps struct {
 	Now         func() time.Time // nil means time.Now
 	Version     string
 	Logger      *slog.Logger // nil means slog.Default()
-	// ConfirmLimiter counts POST /confirm attempts per username; nil
-	// means 5 per minute.
+	// ConfirmLimiter counts POST /confirm attempts per session key
+	// (sessionKey); nil means 5 per minute.
 	ConfirmLimiter *auth.RateLimiter
+	// ConfirmLongLimiter counts them per session key too; nil means 20 per
+	// 15 minutes.
+	ConfirmLongLimiter *auth.RateLimiter
+	// DevicePairLimiter counts logins with a valid device cookie per
+	// device ID and address (ID + "|" + ipKey); nil means 5 per 15
+	// minutes.
+	DevicePairLimiter *auth.RateLimiter
+	// DeviceTotalLimiter counts wrong passwords with a valid device
+	// cookie per device ID, whatever the address; nil means 20 per 15
+	// minutes.
+	DeviceTotalLimiter *auth.RateLimiter
+	// DeviceKey signs the device cookies; nil means no device cookie is
+	// set or read.
+	DeviceKey []byte
+	// IssuedValid reports whether a device cookie issued at issued is
+	// still valid (issued after the last password reset); nil means
+	// always.
+	IssuedValid func(issued time.Time) bool
 	// CheckPassword compares a password with a stored hash; nil means
 	// auth.CheckPassword. Tests replace it with a slow fake.
 	CheckPassword func(hash, password string) bool
@@ -141,7 +160,11 @@ type app struct {
 	Deps
 	render   *Renderer
 	loginSem chan struct{} // one slot per running password check
-	chain    chainCache    // the audit page's chain status
+	// deviceSem holds the password checks of logins with a valid device
+	// cookie, apart from loginSem.
+	deviceSem   chan struct{}
+	devicePairs succeededPairs // device pairs that have logged in
+	chain       chainCache     // the audit page's chain status
 }
 
 // NewRouter returns the UI handler. It does not serve the agent endpoints
@@ -166,6 +189,18 @@ func NewRouter(d Deps) http.Handler {
 	if d.ConfirmLimiter == nil {
 		d.ConfirmLimiter = auth.NewRateLimiter(defaultConfirmMax, defaultConfirmWindow, d.Now)
 	}
+	if d.ConfirmLongLimiter == nil {
+		d.ConfirmLongLimiter = auth.NewRateLimiter(defaultConfirmLongMax, defaultConfirmLongWindow, d.Now)
+	}
+	if d.DevicePairLimiter == nil {
+		d.DevicePairLimiter = auth.NewRateLimiter(defaultDevicePairMax, defaultDeviceWindow, d.Now)
+	}
+	if d.DeviceTotalLimiter == nil {
+		d.DeviceTotalLimiter = auth.NewRateLimiter(defaultDeviceTotalMax, defaultDeviceWindow, d.Now)
+	}
+	if d.IssuedValid == nil {
+		d.IssuedValid = func(time.Time) bool { return true }
+	}
 	if d.CertInfo == nil {
 		d.CertInfo = func() CertInfo { return CertInfo{} }
 	}
@@ -177,7 +212,8 @@ func NewRouter(d Deps) http.Handler {
 		panic("web: " + err.Error())
 	}
 	render.logger = d.Logger
-	a := &app{Deps: d, render: render, loginSem: make(chan struct{}, d.LoginConcurrency)}
+	a := &app{Deps: d, render: render, loginSem: make(chan struct{}, d.LoginConcurrency),
+		deviceSem: make(chan struct{}, deviceLoginConcurrency)}
 
 	static, err := fs.Sub(webfs.FS, "static")
 	if err != nil {

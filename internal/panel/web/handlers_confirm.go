@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -103,17 +104,15 @@ const (
 	confirmTTL = 2 * time.Minute
 	// confirmTokenBytes is the token's random length.
 	confirmTokenBytes = 32
-	// Default POST /confirm limit per username when Deps.ConfirmLimiter
-	// is nil.
-	defaultConfirmMax    = 5
-	defaultConfirmWindow = time.Minute
 )
 
 const (
 	msgConfirmInvalid  = "Konfirmasi tidak berlaku; ulangi konfirmasi."
 	msgConfirmBadInput = "Permintaan konfirmasi tidak dikenal."
 	msgConfirmPassword = "Kata sandi salah."
-	msgConfirmBlocked  = "Terlalu banyak percobaan konfirmasi; coba lagi dalam 1 menit."
+	// msgConfirmTooMany is T1 (spec 5.11): %d is the minutes until the
+	// session may try again.
+	msgConfirmTooMany = "Terlalu banyak kata sandi salah di sesi ini; coba lagi dalam %d menit, atau keluar lalu login lagi."
 	// outcomeRateLimited is the audit outcome of a confirmation refused by
 	// the limiter.
 	outcomeRateLimited = "rate_limited"
@@ -131,13 +130,15 @@ func confirmHash(token string) string {
 // issueConfirm checks the session user's password and answers a one-time
 // token for the posted action and target: 200 {"token": ...}, 400 for an
 // unknown action or target, 401 for a wrong password, 429 when the
-// user's attempts are used up. The password and the token are never
+// session's attempts are used up. The password and the token are never
 // audited or logged.
 //
-// Only wrong passwords count against the user (ConfirmLimiter, reset by a
-// right one), and they share the login's per-username budget
-// (UserLimiter): a stolen session cannot guess the password here faster
-// than at the login page, and failures here also hold off logins.
+// The budget is the session's own (ConfirmLimiter and ConfirmLongLimiter,
+// keyed by sessionKey; a right password empties both), so wrong logins
+// from outside never refuse the logged-in admin (R-181). A wrong password
+// here still counts against the login's per-username limit (UserLimiter),
+// which holds off logins without a device cookie, but that limit is not
+// read here.
 func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	username := auth.UsernameFrom(r.Context())
 	action, kind := r.PostFormValue("action"), r.PostFormValue("target_kind")
@@ -150,36 +151,37 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := map[string]any{"action": action, "target_kind": kind, "target_id": id}
-	userKey := usernameKey(username)
+	sk := sessionKey(auth.TokenFrom(r.Context()))
 	// Reserve a slot in both budgets before the slow password check, so
 	// concurrent requests cannot all pass a check made before any of them
 	// is counted (check-then-act). A wrong password keeps its slots; a
 	// right one resets both below; a request that never reaches the check
 	// gives its slots back.
-	if !a.ConfirmLimiter.Allow(username) {
-		a.confirmRateLimited(w, r, username, kind, id, detail)
+	if !a.ConfirmLimiter.Allow(sk) {
+		a.confirmRateLimited(w, r, username, sk, kind, id, detail)
 		return
 	}
-	if !a.UserLimiter.Allow(userKey) {
-		a.ConfirmLimiter.Refund(username)
-		a.confirmRateLimited(w, r, username, kind, id, detail)
+	if !a.ConfirmLongLimiter.Allow(sk) {
+		a.ConfirmLimiter.Refund(sk)
+		a.confirmRateLimited(w, r, username, sk, kind, id, detail)
 		return
 	}
 	user, err := a.Store.GetUser(username)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.ConfirmLimiter.Refund(username)
-		a.UserLimiter.Refund(userKey)
+		a.ConfirmLimiter.Refund(sk)
+		a.ConfirmLongLimiter.Refund(sk)
 		a.internalError(w, "get user", err)
 		return
 	}
 	if err != nil || !a.CheckPassword(user.PasswordHash, r.PostFormValue("password")) {
+		a.UserLimiter.Fail(usernameKey(username))
 		a.audit(r, "confirm_failed", kind, id, detail, msgConfirmPassword)
 		a.Logger.Info("confirmation refused: wrong password", "username", username, "action", action)
 		writeJSONError(w, http.StatusUnauthorized, msgConfirmPassword)
 		return
 	}
-	a.ConfirmLimiter.Reset(username)
-	a.UserLimiter.Reset(userKey)
+	a.ConfirmLimiter.Reset(sk)
+	a.ConfirmLongLimiter.Reset(sk)
 	raw := make([]byte, confirmTokenBytes)
 	rand.Read(raw) // never fails (crypto/rand)
 	token := base64.RawURLEncoding.EncodeToString(raw)
@@ -199,12 +201,16 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 
-// confirmRateLimited answers 429 for a confirmation refused by a limiter.
-func (a *app) confirmRateLimited(w http.ResponseWriter, r *http.Request, username, kind string, id int64,
+// confirmRateLimited answers 429 (T1) for a confirmation refused by a
+// session budget, naming the whole minutes until both budgets accept the
+// session again (at least 1).
+func (a *app) confirmRateLimited(w http.ResponseWriter, r *http.Request, username, sk, kind string, id int64,
 	detail map[string]any) {
+	wait := max(a.ConfirmLimiter.RetryAfter(sk), a.ConfirmLongLimiter.RetryAfter(sk))
+	minutes := max(1, int((wait+time.Minute-1)/time.Minute))
 	a.audit(r, "confirm_failed", kind, id, detail, outcomeRateLimited)
 	a.Logger.Warn("confirmation rate limited", "username", username)
-	writeJSONError(w, http.StatusTooManyRequests, msgConfirmBlocked)
+	writeJSONError(w, http.StatusTooManyRequests, fmt.Sprintf(msgConfirmTooMany, minutes))
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {

@@ -7,7 +7,9 @@ package secrets
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -136,4 +138,15 @@ func (b *Box) Open(ct []byte) ([]byte, error) {
 		return nil, ErrOpen
 	}
 	return plain, nil
+}
+
+// DeriveKey returns HMAC-SHA256(key, label): a key for another purpose
+// (signing a cookie, say) that never reveals the sealing key, so no further
+// key file is needed. Each purpose uses its own label.
+func (b *Box) DeriveKey(label string) [32]byte {
+	m := hmac.New(sha256.New, b.key[:])
+	m.Write([]byte(label))
+	var out [32]byte
+	copy(out[:], m.Sum(nil))
+	return out
 }

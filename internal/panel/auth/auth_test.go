@@ -465,3 +465,147 @@ func TestRateLimiterBlockedAndFail(t *testing.T) {
 		t.Fatal("still blocked after the window")
 	}
 }
+
+// TestRateLimiterRetryAfter: the time left until a blocked key is
+// accepted again; 0 for a key that is not blocked.
+func TestRateLimiterRetryAfter(t *testing.T) {
+	c := newClock()
+	r := NewRateLimiter(5, time.Minute, c.now)
+	for range 5 {
+		r.Allow("k")
+	}
+	c.advance(20 * time.Second)
+	if got := r.RetryAfter("k"); got != 40*time.Second {
+		t.Errorf("RetryAfter = %v, want 40s", got)
+	}
+	if got := r.RetryAfter("lain"); got != 0 {
+		t.Errorf("RetryAfter of an unknown key = %v, want 0", got)
+	}
+	r.Allow("sebagian")
+	if got := r.RetryAfter("sebagian"); got != 0 {
+		t.Errorf("RetryAfter of a key with room left = %v, want 0", got)
+	}
+	c.advance(40 * time.Second)
+	if got := r.RetryAfter("k"); got != 0 {
+		t.Errorf("RetryAfter after the window = %v, want 0", got)
+	}
+}
+
+// TestRateLimiterClockSetBack (K8): a window whose start lies after now
+// (the clock was set back) has ended; it does not hold the key for longer.
+func TestRateLimiterClockSetBack(t *testing.T) {
+	c := newClock()
+	r := NewRateLimiter(5, time.Minute, c.now)
+	for range 5 {
+		r.Allow("k")
+	}
+	if r.Allow("k") {
+		t.Fatal("full bucket allowed")
+	}
+	c.advance(-time.Hour)
+	if r.Blocked("k") || r.RetryAfter("k") != 0 {
+		t.Error("key still blocked after the clock went back")
+	}
+	if !r.Allow("k") {
+		t.Error("Allow refused after the clock went back")
+	}
+}
+
+// TestTokenFrom: RequireLogin puts the accepted session token in the
+// context.
+func TestTokenFrom(t *testing.T) {
+	s := NewSessions(time.Hour, time.Now)
+	tok := s.Create("admin")
+	var got string
+	h := RequireLogin(s, "/login")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = TokenFrom(r.Context())
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(&http.Cookie{Name: SecureCookieName, Value: tok})
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if got != tok {
+		t.Errorf("TokenFrom = %q, want the session token", got)
+	}
+	if v := TokenFrom(httptest.NewRequest("GET", "/", nil).Context()); v != "" {
+		t.Errorf("TokenFrom without login = %q", v)
+	}
+}
+
+var deviceKey = []byte("0123456789abcdef0123456789abcdef")
+
+func TestDeviceCookieRoundTrip(t *testing.T) {
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	v, d := NewDevice(deviceKey, "admin", now)
+	if d.Username != "admin" || !d.Issued.Equal(now) || !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(d.ID) {
+		t.Fatalf("device = %+v", d)
+	}
+	if !regexp.MustCompile(`^v1\.[A-Za-z0-9_-]+\.[0-9a-f]{32}\.[0-9]+\.[A-Za-z0-9_-]+$`).MatchString(v) {
+		t.Fatalf("value = %q", v)
+	}
+	got, ok := ParseDevice(deviceKey, v, now.Add(364*24*time.Hour))
+	if !ok || got != d {
+		t.Fatalf("ParseDevice = %+v, %v; want %+v", got, ok, d)
+	}
+	// K8: a cookie issued "in the future" stays valid.
+	if _, ok := ParseDevice(deviceKey, v, now.Add(-time.Hour)); !ok {
+		t.Error("cookie refused after the clock went back")
+	}
+	_, d2 := NewDevice(deviceKey, "admin", now)
+	if d2.ID == d.ID {
+		t.Error("two devices got the same ID")
+	}
+
+	rec := httptest.NewRecorder()
+	SetDeviceCookie(rec, v)
+	c := rec.Result().Cookies()[0]
+	if c.Name != DeviceCookieName || c.Value != v || c.Path != "/" || !c.HttpOnly || !c.Secure ||
+		c.SameSite != http.SameSiteLaxMode || c.Domain != "" || c.MaxAge != 31536000 {
+		t.Errorf("cookie = %+v", c)
+	}
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(c)
+	if got, ok := DeviceCookie(req); !ok || got != v {
+		t.Errorf("DeviceCookie = %q, %v", got, ok)
+	}
+	if _, ok := DeviceCookie(httptest.NewRequest("GET", "/", nil)); ok {
+		t.Error("DeviceCookie found one in a bare request")
+	}
+}
+
+func TestDeviceCookieRejected(t *testing.T) {
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	v, _ := NewDevice(deviceKey, "admin", now)
+	parts := strings.Split(v, ".")
+	flip := func(s string) string {
+		b := []byte(s)
+		if b[0] == 'A' {
+			b[0] = 'B'
+		} else {
+			b[0] = 'A'
+		}
+		return string(b)
+	}
+	join := func(p ...string) string { return strings.Join(p, ".") }
+	other, _ := NewDevice(deviceKey, "operator", now)
+	op := strings.Split(other, ".")
+	for name, val := range map[string]string{
+		"signature changed": join(parts[0], parts[1], parts[2], parts[3], flip(parts[4])),
+		"username swapped":  join(parts[0], op[1], parts[2], parts[3], parts[4]),
+		"issued changed":    join(parts[0], parts[1], parts[2], "1", parts[4]),
+		"part missing":      join(parts[0], parts[1], parts[2], parts[3]),
+		"extra part":        v + ".x",
+		"other version":     join("v2", parts[1], parts[2], parts[3], parts[4]),
+		"empty":             "",
+		"not hex id":        join(parts[0], parts[1], strings.Repeat("z", 32), parts[3], parts[4]),
+	} {
+		if _, ok := ParseDevice(deviceKey, val, now); ok {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, ok := ParseDevice([]byte("another key, another key, anothe"), v, now); ok {
+		t.Error("another key: accepted")
+	}
+	if _, ok := ParseDevice(deviceKey, v, now.Add(DeviceCookieMaxAge+time.Second)); ok {
+		t.Error("issued more than a year ago: accepted")
+	}
+}

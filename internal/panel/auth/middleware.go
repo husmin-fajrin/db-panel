@@ -26,15 +26,19 @@ func SessionToken(r *http.Request) (string, bool) {
 
 type ctxKey struct{}
 
+// tokenCtxKey holds the session token RequireLogin accepted.
+type tokenCtxKey struct{}
+
 // RequireLogin redirects requests without a valid session to
-// loginPath?next=<request URI> (303) and otherwise stores the username in the
-// request context.
+// loginPath?next=<request URI> (303) and otherwise stores the username and
+// the session token in the request context.
 func RequireLogin(s *Sessions, loginPath string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if tok, ok := SessionToken(r); ok {
 				if user, ok := s.Get(tok); ok {
 					ctx := context.WithValue(r.Context(), ctxKey{}, user)
+					ctx = context.WithValue(ctx, tokenCtxKey{}, tok)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -48,6 +52,13 @@ func RequireLogin(s *Sessions, loginPath string) func(http.Handler) http.Handler
 func UsernameFrom(ctx context.Context) string {
 	u, _ := ctx.Value(ctxKey{}).(string)
 	return u
+}
+
+// TokenFrom returns the session token RequireLogin accepted, or "" when
+// absent.
+func TokenFrom(ctx context.Context) string {
+	t, _ := ctx.Value(tokenCtxKey{}).(string)
+	return t
 }
 
 // SetSessionCookie sets the session cookie for token: Secure and named

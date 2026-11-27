@@ -54,8 +54,18 @@ const (
 	loginMaxFailures = 20 // per username, wrong passwords only
 	loginWindow      = 15 * time.Minute
 
-	confirmMaxAttempts = 5 // password confirmations per username, every attempt
-	confirmWindow      = time.Minute
+	// Wrong password confirmations per session (spec 5.1).
+	confirmMaxAttempts     = 5
+	confirmWindow          = time.Minute
+	confirmLongMaxAttempts = 20
+	confirmLongWindow      = 15 * time.Minute
+	// Logins with a valid device cookie: per cookie and address, and wrong
+	// passwords per cookie for all addresses (spec 5.1).
+	deviceMaxPairAttempts = 5
+	deviceMaxFailures     = 20
+	deviceWindow          = 15 * time.Minute
+	// deviceKeyLabel derives the device cookie's key from panel.key (K4).
+	deviceKeyLabel = "dbpanel device cookie v1"
 
 	defaultProbeInterval = 60 * time.Second
 	probeTimeout         = 30 * time.Second
@@ -98,9 +108,14 @@ type Panel struct {
 	Limiter     *auth.RateLimiter // login attempts per IP
 	UserLimiter *auth.RateLimiter // failed logins per username
 	Broker      *web.Broker
-	// ConfirmLimiter counts password confirmations (POST /confirm) per
-	// username.
-	ConfirmLimiter *auth.RateLimiter
+	// ConfirmLimiter and ConfirmLongLimiter count password confirmations
+	// (POST /confirm) per session.
+	ConfirmLimiter     *auth.RateLimiter
+	ConfirmLongLimiter *auth.RateLimiter
+	// DevicePairLimiter counts logins with a device cookie per cookie and
+	// address; DeviceTotalLimiter their wrong passwords per cookie.
+	DevicePairLimiter  *auth.RateLimiter
+	DeviceTotalLimiter *auth.RateLimiter
 	// Orchestrator runs the prepare-master and create-replica jobs.
 	Orchestrator *orchestrator.Runner
 	// Monitor turns the agents' health reports into statuses and the
@@ -183,7 +198,11 @@ func New(o Options) (*Panel, error) {
 		pruneFirst:    defaultPruneFirst,
 		readTimeout:   readTimeout,
 	}
-	p.ConfirmLimiter = auth.NewRateLimiter(confirmMaxAttempts, confirmWindow, func() time.Time { return p.now() })
+	panelNow := func() time.Time { return p.now() }
+	p.ConfirmLimiter = auth.NewRateLimiter(confirmMaxAttempts, confirmWindow, panelNow)
+	p.ConfirmLongLimiter = auth.NewRateLimiter(confirmLongMaxAttempts, confirmLongWindow, panelNow)
+	p.DevicePairLimiter = auth.NewRateLimiter(deviceMaxPairAttempts, deviceWindow, panelNow)
+	p.DeviceTotalLimiter = auth.NewRateLimiter(deviceMaxFailures, deviceWindow, panelNow)
 	p.publish = p.Broker.Publish
 	// The hub's report rate limit follows the panel's clock.
 	p.Hub = hub.New(&listenerImpl{p: p}, hub.WithNow(func() time.Time { return p.now() }), hub.WithLogger(p.log))

@@ -123,3 +123,30 @@ func TestBoxRefusesLoosePerms(t *testing.T) {
 		t.Fatal("LoadOrCreate accepted a 16-byte key file")
 	}
 }
+
+// TestBoxDeriveKey: a derived key depends on both the box's key and the
+// label, and is never the sealing key itself.
+func TestBoxDeriveKey(t *testing.T) {
+	dir := t.TempDir()
+	a, err := LoadOrCreate(filepath.Join(dir, "a.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := LoadOrCreate(filepath.Join(dir, "b.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k1 := a.DeriveKey("dbpanel device cookie v1")
+	if k2 := a.DeriveKey("dbpanel device cookie v1"); k1 != k2 {
+		t.Fatal("same key and label gave different keys")
+	}
+	if k := a.DeriveKey("another label"); k == k1 {
+		t.Error("another label gave the same key")
+	}
+	if k := b.DeriveKey("dbpanel device cookie v1"); k == k1 {
+		t.Error("another box key gave the same key")
+	}
+	if k1 == a.key {
+		t.Error("derived key equals the sealing key")
+	}
+}
