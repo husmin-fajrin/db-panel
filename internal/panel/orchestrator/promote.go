@@ -385,37 +385,35 @@ func (r *Runner) refuseRetryWhileLockMayStand(j store.Job) error {
 // master once its guard unlocks it. A replica the guard has seen that is
 // writable at the deadline (a resync or dump load, Buat replika, Tambah
 // database) makes the guard quarantine a healthy master instead of
-// unlocking it (4b final review). what starts the message's second
-// sentence ("Promote darurat", "Resync ulang", ...).
+// unlocking it (4b final review). what names the action ("Promote
+// darurat", "Resync ulang", ...): an emergency promotion is refused until
+// that time, its text ending with T15; a load is a *LockStandsError (T15b)
+// naming the promote job whose record stands (K13).
 func (r *Runner) refuseWhileLockMayStand(masterID int64, what string) error {
 	recs, err := r.LockRecords(masterID)
 	if err != nil {
 		return err
 	}
 	now := r.now()
-	var until time.Time
+	var (
+		until time.Time
+		job   string
+	)
 	for _, rec := range recs {
 		if now.Before(rec.Until) && rec.Until.After(until) {
-			until = rec.Until
+			until, job = rec.Until, rec.JobID
 		}
 	}
 	if until.IsZero() {
 		return nil
 	}
-	// The command alone does not tell the panel: only the planned
-	// promotion's Ulangi records a confirmed unlock (LockUnlocked).
-	const howToUnlock = "Sebelum itu, bila agent master tersambung lagi, tekan Ulangi pada promote terencana itu; bila tidak, " +
-		"buka kuncinya di server master dengan `sudo dbpanel agent unlock-master`, lalu tekan Ulangi pada promote terencana " +
-		"itu (panel memastikan kunci terbuka)."
-	at := until.Local().Format("02-01-2006 15:04:05")
-	if what == verbEmergency {
-		return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka. "+
-			"%s baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
-			"masih replika. %s", r.nameOf(masterID), what, at, howToUnlock)
+	if what != verbEmergency {
+		return &LockStandsError{Code: "load", Master: r.nameOf(masterID), What: what, JobID: job}
 	}
-	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka, "+
-		"dan memuat data membuat replika bisa ditulis sebentar dan penjaga kunci bisa mengkarantina master. "+
-		"%s baru bisa dijalankan mulai %s, saat penjaga kunci sudah memutuskan. %s", r.nameOf(masterID), what, at, howToUnlock)
+	at := until.Local().Format("02-01-2006 15:04:05")
+	return fmt.Errorf("master %s mungkin masih terkunci oleh promote terencana sebelumnya: kuncinya belum terbukti dibuka. "+
+		"%s baru bisa dijalankan mulai %s, saat agent master sudah membuka kunci itu sendiri bila kandidat lama "+
+		"masih replika. %s", r.nameOf(masterID), what, at, textEmergencyLockStands)
 }
 
 // refuseOldMasterPending is errOldMasterPending while topo's old master
@@ -1134,37 +1132,22 @@ func (jr *jobRun) promoteUndo(ctx context.Context) {
 		return
 	}
 	r := jr.r
-	cred, err := func() (proto.PeerCred, error) {
-		srv, err := r.d.Store.GetServer(jr.candidate())
-		if err != nil {
-			return proto.PeerCred{}, err
-		}
-		topo, password, err := jr.replAccount()
-		if err != nil {
-			return proto.PeerCred{}, err
-		}
-		port := jr.st.CandidatePort
-		if port == 0 {
-			port = 3306
-		}
-		return r.peerCred(ctx, jr.master(), jr.candidate(), r.sourceHost(srv), port, topo.ReplUser, password)
-	}()
+	cred, err := r.promoteUnlockCred(ctx, jr.job.TopologyID, jr.st)
+	var ans unlockAnswer
 	if err == nil {
-		err = r.d.Hub.Call(ctx, jr.master(), "mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: cred}, nil)
-	}
-	if err != nil && strings.Contains(err.Error(), "tidak dikunci untuk promosi") {
-		jr.st.LockDeadline, jr.st.LockTried, jr.st.LockUnlocked = nil, false, true
-		jr.save()
-		jr.logf("info", "Master tidak sedang dikunci untuk promote; tidak ada yang dibuka.")
-		return
+		ans, err = r.sendUnlockPromote(ctx, jr.master(), cred)
 	}
 	if err != nil {
 		r.log.Warn("unlock promote", "job", jr.job.ID, "err", logErr(err))
-		jr.logf("error", "Kunci master tidak bisa dibuka (%v); agent master membukanya sendiri saat tenggat kunci.", err)
+		jr.logf("error", textUnlockFailed, r.agentErrText(err))
 		return
 	}
 	jr.st.LockDeadline, jr.st.LockTried, jr.st.LockUnlocked = nil, false, true
 	jr.save()
+	if ans == unlockWasNotLocked {
+		jr.logf("info", "Master tidak sedang dikunci untuk promote; tidak ada yang dibuka.")
+		return
+	}
 	jr.logf("info", "Kunci master dibuka; master tidak berubah.")
 }
 
@@ -1727,11 +1710,10 @@ var ErrPromoteRetryBeforePoint = errors.New(`Promote ini gagal sebelum master di
 // (PromoteSent) and that is not past the point of no return (PastPoint)
 // changed nothing; a new emergency promote reads the mode again and asks
 // for the tick, the names and the password, which Ulangi would skip. A
-// planned promote job keeps its Ulangi (K4): it is also how the panel
-// lifts a promote lock the master's guard kept (its relock is refused and
-// its failure path unlocks with the candidate's credential). A job whose
-// params cannot be read is left to the checks that refuse it
-// (promoteSupersededBy, newRun).
+// planned promote job keeps its Ulangi, refused only while its lock record
+// stands (T12b, refusePlannedRetryWhileLockStands): "Buka kunci promote"
+// lifts the lock, not Ulangi. A job whose params cannot be read is left to
+// the checks that refuse it (promoteSupersededBy, newRun).
 func promoteRetryRefused(j store.Job) bool {
 	if j.Kind != KindPromoteEmergency {
 		return false
@@ -1744,12 +1726,25 @@ func promoteRetryRefused(j store.Job) bool {
 }
 
 // RetryRefused is why Ulangi of the job is refused whatever is acked
-// (ErrPromoteRetryBeforePoint's text); "" when it is not, or when the job
+// (ErrPromoteRetryBeforePoint's text, or T12b while the lock record of a
+// planned promote job not sent stands); "" when it is not, or when the job
 // cannot be read (Retry decides then). The job page hides Ulangi for it.
+// It writes nothing (LockRecords).
 func (r *Runner) RetryRefused(jobID string) string {
 	j, _, err := r.d.Store.GetJob(jobID)
-	if err != nil || !promoteRetryRefused(j) {
+	if err != nil {
 		return ""
 	}
-	return ErrPromoteRetryBeforePoint.Error()
+	if promoteRetryRefused(j) {
+		return ErrPromoteRetryBeforePoint.Error()
+	}
+	master, stands, err := r.plannedLockStands(j, r.LockRecords)
+	if err != nil {
+		r.log.Warn("lock records", "job", jobID, "err", err)
+		return ""
+	}
+	if stands {
+		return (&PromoteLockStandsError{Master: r.nameOf(master)}).Error()
+	}
+	return ""
 }

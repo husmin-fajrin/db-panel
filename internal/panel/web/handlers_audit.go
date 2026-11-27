@@ -89,6 +89,7 @@ var auditActionLabels = map[string]string{
 	"tighten_tls":            "Wajibkan pemeriksaan sertifikat TLS",
 	"master_source":          "Ubah alamat untuk replika",
 	"master_unlock":          "Buka kunci master",
+	"promote_unlock_lock":    "Buka kunci promote",
 	"promote":                "Promote replika",
 	"create_replica":         "Buat replika",
 	"add_databases":          "Tambah database",

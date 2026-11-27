@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
@@ -146,7 +147,12 @@ type jobPage struct {
 	// (an emergency promote that failed before the master was replaced: a
 	// new promote is started instead).
 	RetryRefused string
-	StatusJSON   string
+	// UnlockLock: "Buka kunci promote" is offered (a planned promote job
+	// not sent whose lock record stands, Orchestrator.UnlockLockOffered),
+	// under UnlockText (T9).
+	UnlockLock bool
+	UnlockText string
+	StatusJSON string
 	// DropsData: approving or retrying the job drops data, behind a
 	// job_approve or job_retry token (spec 5.6). "Ulangi" then goes
 	// through /retry/prepare and opens the retry dialog (OpenRetry, after
@@ -295,14 +301,39 @@ func (a *app) jobDetail(w http.ResponseWriter, r *http.Request) {
 	a.renderJob(w, r, http.StatusOK, "")
 }
 
+// msgUnlockLock is T9, above "Buka kunci promote" on the job page; %s is
+// the master.
+const msgUnlockLock = "Master %s mungkin masih terkunci oleh promote ini. Tombol di bawah meminta agent master membuka " +
+	"kuncinya; agent memeriksa dulu bahwa kandidat masih replika."
+
+// Notices (?pesan=) of the job page after "Buka kunci promote".
+const (
+	noticeUnlockOpened    = "kunci-promote-dibuka"
+	noticeUnlockNotLocked = "kunci-promote-tidak-ada"
+)
+
 // renderJob renders the job page for {id} with status and flash.
 func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flash string) {
+	a.renderJobFlash(w, r, status, flash, "")
+}
+
+// renderJobFlash is renderJob with the job flash names (Page.FlashJob).
+func (a *app) renderJobFlash(w http.ResponseWriter, r *http.Request, status int, flash, flashJob string) {
 	job, steps, ok := a.jobFromPath(w, r)
 	if !ok {
 		return
 	}
 	p := jobPage{Page: a.page(r), Job: job, Steps: steps, StatusJSON: statusBadgesJSON}
-	p.Flash = flash
+	p.Flash, p.FlashJob = flash, flashJob
+	params := paramsOf(job)
+	if flash == "" && r.Method == http.MethodGet {
+		switch r.URL.Query().Get("pesan") {
+		case noticeUnlockOpened:
+			p.Notice = orchestrator.UnlockOutcomeText(orchestrator.UnlockOpened, a.serverName(params.MasterServerID))
+		case noticeUnlockNotLocked:
+			p.Notice = orchestrator.UnlockOutcomeText(orchestrator.UnlockNotLocked, a.serverName(params.MasterServerID))
+		}
+	}
 	srv, err := a.Store.GetServer(job.ServerID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		a.internalError(w, "get server", err)
@@ -314,7 +345,6 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 			p.Waiting = &steps[i]
 		}
 	}
-	params := paramsOf(job)
 	switch job.Status {
 	case store.JobWaiting:
 		p.CanApprove, p.CanCancel = true, true
@@ -341,6 +371,10 @@ func (a *app) renderJob(w http.ResponseWriter, r *http.Request, status int, flas
 		if p.RetryRefused = a.Orchestrator.RetryRefused(job.ID); p.RetryRefused != "" {
 			p.CanRetry = false
 		}
+	}
+	if job.Kind == orchestrator.KindPromotePlanned && a.Orchestrator.UnlockLockOffered(job.ID) {
+		p.UnlockLock = true
+		p.UnlockText = fmt.Sprintf(msgUnlockLock, a.serverName(params.MasterServerID))
 	}
 	if p.CanApprove || p.CanRetry {
 		drops, err := a.Orchestrator.DropsData(job.ID)
@@ -661,11 +695,48 @@ func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, n
 			status = http.StatusForbidden
 		}
 		status, flash := a.startRefusal(err, status)
-		a.renderJob(w, r, status, flash)
+		a.renderJobFlash(w, r, status, flash, refusalJob(err))
 		return
 	}
 	a.Logger.Info("job action", "action", name, "job", job.ID, "by", auth.UsernameFrom(r.Context()))
 	http.Redirect(w, r, jobURL(job.ID), http.StatusSeeOther)
+}
+
+// unlockPromoteLock is "Buka kunci promote" of the planned promote job of
+// {id} (K11), from its page or the master page: no confirmation token and
+// no gate (spec 5.2; the orchestrator and the master's agent check), and
+// audited as promote_unlock_lock with its result (opened, not_locked, or
+// the refusal's code). The job page follows, with T10 or T10b, or the
+// refusal.
+func (a *app) unlockPromoteLock(w http.ResponseWriter, r *http.Request) {
+	job, _, ok := a.jobFromPath(w, r)
+	if !ok {
+		return
+	}
+	out, err := a.Orchestrator.UnlockPromoteLock(r.Context(), job.ID)
+	result := "error"
+	switch {
+	case err == nil && out == orchestrator.UnlockOpened:
+		result = "opened"
+	case err == nil && out == orchestrator.UnlockNotLocked:
+		result = "not_locked"
+	default:
+		if e, ok := errors.AsType[*orchestrator.UnlockLockError](err); ok {
+			result = e.Code
+		}
+	}
+	a.audit(r, "promote_unlock_lock", auditJob, job.ServerID, map[string]any{"job_id": job.ID, "result": result}, a.outcomeOf(err))
+	if err != nil {
+		a.Logger.Warn("promote lock unlock refused", "job", job.ID, "result", result, "err", logErr(err))
+		a.renderJobFlash(w, r, http.StatusConflict, a.shownError(err), refusalJob(err))
+		return
+	}
+	a.Logger.Info("promote lock unlocked", "job", job.ID, "result", result, "by", auth.UsernameFrom(r.Context()))
+	notice := noticeUnlockOpened
+	if out == orchestrator.UnlockNotLocked {
+		notice = noticeUnlockNotLocked
+	}
+	http.Redirect(w, r, jobURL(job.ID)+"?pesan="+notice, http.StatusSeeOther)
 }
 
 func jobURL(id string) string { return "/jobs/" + id }

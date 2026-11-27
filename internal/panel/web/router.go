@@ -279,6 +279,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /jobs/{id}/retry", authedPost(a.retryJob))
 	mux.Handle("POST /jobs/{id}/retry/prepare", authedPost(a.prepareRetry))
 	mux.Handle("POST /jobs/{id}/cancel", authedPost(a.cancelJob))
+	// "Buka kunci promote" (K11): no confirmation token, no gate.
+	mux.Handle("POST /jobs/{id}/unlock-lock", authedPost(a.unlockPromoteLock))
 	mux.Handle("GET /alerts", authed(a.alertsPage))
 	mux.Handle("GET /alerts/count", authed(a.alertCount))
 	mux.Handle("GET /settings", authed(a.showSettings))

@@ -56,6 +56,15 @@ type Orchestrator interface {
 	// confirmed (an emergency promote that failed before the master was
 	// replaced); "".
 	RetryRefused(jobID string) string
+	// "Buka kunci promote" (spec 5.2): UnlockPromoteLock asks the master's
+	// agent to lift the promote lock of a planned promote job that was
+	// not sent (no token, no gate; the orchestrator refuses the rest);
+	// UnlockLockOffered says whether the job page offers it; UnlockLockJob
+	// is the job the master page's button acts on ("" for none; sent: the
+	// job sent mysql.promote, no button).
+	UnlockPromoteLock(ctx context.Context, jobID string) (orchestrator.UnlockOutcome, error)
+	UnlockLockOffered(jobID string) bool
+	UnlockLockJob(masterID int64) (jobID string, sent bool, err error)
 	// Promotion of a replica to master: the consideration data, the job,
 	// "Sudah saya alihkan", and "Arahkan sekarang" for a replica waiting
 	// to be pointed at the new master.
@@ -103,6 +112,8 @@ type gateRefusal struct {
 	status  int
 	flash   string // shown on the page
 	outcome string // the audit entry's outcome
+	// flashJob is the job flash names (Page.FlashJob, K13); "" for none.
+	flashJob string
 }
 
 // gateCheck judges in (Orchestrator.Gate) for a gated handler, before its
@@ -115,16 +126,16 @@ func (a *app) gateCheck(in orchestrator.GateInput, ack *bool) gateRefusal {
 	res, err := a.Orchestrator.Gate(in)
 	if err != nil {
 		a.Logger.Warn("gate not judged", "action", in.Action, "master", in.MasterID, "target", in.TargetID, "err", logErr(err))
-		return gateRefusal{http.StatusBadRequest, a.shownError(err), a.outcomeOf(err)}
+		return gateRefusal{status: http.StatusBadRequest, flash: a.shownError(err), outcome: a.outcomeOf(err)}
 	}
 	if red := res.Red(); len(red) > 0 {
 		err := &orchestrator.GateError{Rows: red}
 		status, flash := a.startRefusal(err, http.StatusBadRequest)
 		a.Logger.Warn("gate refused", "action", in.Action, "master", in.MasterID, "target", in.TargetID, "rows", res.RedKeys())
-		return gateRefusal{status, flash, a.outcomeOf(err)}
+		return gateRefusal{status: status, flash: flash, outcome: a.outcomeOf(err)}
 	}
 	if ack != nil && res.NeedsBackupAck() && !*ack {
-		return gateRefusal{http.StatusBadRequest, msgBackupAck, a.outcomeOf(orchestrator.ErrBackupAck)}
+		return gateRefusal{status: http.StatusBadRequest, flash: msgBackupAck, outcome: a.outcomeOf(orchestrator.ErrBackupAck)}
 	}
 	return gateRefusal{}
 }
@@ -152,7 +163,7 @@ func (a *app) startRefusal(err error, def int) (status int, flash string) {
 }
 
 // refusalMsg is a refusal with msg shown and audited (status 0: 400).
-func refusalMsg(msg string) gateRefusal { return gateRefusal{0, msg, msg} }
+func refusalMsg(msg string) gateRefusal { return gateRefusal{flash: msg, outcome: msg} }
 
 // startRefused is startRefusal as a gateRefusal: its audit outcome is G0
 // for a *GateError (a row turned red after the handler's own gate check;
@@ -163,7 +174,19 @@ func (a *app) startRefused(err error, def int) gateRefusal {
 	if _, ok := errors.AsType[*orchestrator.GateError](err); ok {
 		outcome = a.outcomeOf(err)
 	}
-	return gateRefusal{status, flash, outcome}
+	return gateRefusal{status: status, flash: flash, outcome: outcome, flashJob: refusalJob(err)}
+}
+
+// refusalJob is the job a refusal names in its text (K13: T11t, T15b),
+// shown as a link; "" for none.
+func refusalJob(err error) string {
+	if e, ok := errors.AsType[*orchestrator.LockStandsError](err); ok {
+		return e.JobID
+	}
+	if e, ok := errors.AsType[*orchestrator.UnlockLockError](err); ok {
+		return e.NewerJobID
+	}
+	return ""
 }
 
 const (
@@ -437,11 +460,16 @@ type masterPage struct {
 	Source string
 	// Locked: the monitor reports it read-only (Buka kunci master is
 	// offered).
-	Locked   bool
-	Controls serverControls
-	Status   statusView
-	Facts    masterFacts
-	Timeline timelineView
+	Locked bool
+	// UnlockLockJob: while Locked, the planned promote job whose
+	// "Buka kunci promote" the page offers beside "Buka kunci master"
+	// (Orchestrator.UnlockLockJob); "" for none, or when that job sent
+	// mysql.promote.
+	UnlockLockJob string
+	Controls      serverControls
+	Status        statusView
+	Facts         masterFacts
+	Timeline      timelineView
 	// NoCert: the master has no MySQL certificate from the panel. The
 	// "Wajibkan pemeriksaan sertifikat TLS" box shows when it has none or a
 	// replica is Unverified (Tighten).
@@ -543,6 +571,13 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 	p.Controls = a.controls(srv)
 	v, monitored := a.Monitor.View(srv.ID)
 	p.Locked = monitored && v.Status.Code == monitor.StatusLocked
+	if p.Locked {
+		if id, sent, err := a.Orchestrator.UnlockLockJob(srv.ID); err != nil {
+			a.Logger.Warn("promote lock job", "master", srv.ID, "err", logErr(err))
+		} else if !sent {
+			p.UnlockLockJob = id
+		}
+	}
 	p.Status = newStatusView(srv.ID, srv.Role, v, monitored, a.Now())
 	p.PromoteEmergency = promoteEmergency(p.Online, v, monitored)
 	p.Local = a.isLocal(srv)
@@ -876,10 +911,10 @@ func (a *app) createReplica(w http.ResponseWriter, r *http.Request) {
 	p.ForceDump = r.PostFormValue("force_dump") != ""
 	refuse := func(g gateRefusal) {
 		a.audit(r, "create_replica", auditReplica, p.Target, detail, g.outcome)
-		p.Flash = g.flash
+		p.Flash, p.FlashJob = g.flash, g.flashJob
 		a.renderReplicaNew(w, g.status, p)
 	}
-	failStatus := func(status int, msg string) { refuse(gateRefusal{status, msg, msg}) }
+	failStatus := func(status int, msg string) { refuse(gateRefusal{status: status, flash: msg, outcome: msg}) }
 	fail := func(msg string) { failStatus(http.StatusBadRequest, msg) }
 	if p.Target <= 0 {
 		fail(msgReplicaTarget)
@@ -1416,7 +1451,7 @@ func (a *app) changeReplicaDatabases(w http.ResponseWriter, r *http.Request, act
 	a.audit(r, action, auditReplica, srv.ID, detail, outcomeMsg(ref.outcome))
 	if msg != "" {
 		a.Logger.Warn("replica databases "+verb+" refused", "server", srv.ID, "err", msg)
-		p.Flash = msg
+		p.Flash, p.FlashJob = msg, ref.flashJob
 		a.renderDatabases(w, status, p)
 		return
 	}

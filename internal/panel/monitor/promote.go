@@ -396,8 +396,13 @@ func lockExpiredMessage(le proto.LockExpiredEvent) string {
 			"master membuka kunci sendiri dan bisa ditulisi lagi."
 	}
 	return lockKeptPrefix + cand + " belum bisa dipastikan; aplikasi belum bisa menulis. Periksa job promote di " +
-		`halaman Pekerjaan; bila promote tidak dilanjutkan, tekan "Buka kunci master" di halaman master.`
+		"halaman Pekerjaan. " + textLockKeptUnlock
 }
+
+// textLockKeptUnlock is T16, the end of the notice of a lock the guard
+// kept.
+const textLockKeptUnlock = `Bila promote tidak dilanjutkan, tekan "Buka kunci promote" pada pekerjaan promote itu atau di ` +
+	`halaman master. Jangan Resync kandidat selama master masih terkunci.`
 
 // lockKeptPrefix starts the message of a lock the guard kept.
 const lockKeptPrefix = "Batas waktu kunci promote di master habis, tetapi master tetap dikunci karena "

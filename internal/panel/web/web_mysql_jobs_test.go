@@ -99,6 +99,14 @@ type fakeOrch struct {
 	// rig has); gateIns are the inputs it received. Gate is not in calls.
 	gate    func(orchestrator.GateInput) (orchestrator.GateResult, error)
 	gateIns []orchestrator.GateInput
+	// "Buka kunci promote": unlockOffered answers UnlockLockOffered per
+	// job; unlockJob and unlockSent UnlockLockJob; unlockOut and unlockErr
+	// what UnlockPromoteLock answers.
+	unlockOffered map[string]bool
+	unlockJob     string
+	unlockSent    bool
+	unlockOut     orchestrator.UnlockOutcome
+	unlockErr     error
 }
 
 func (f *fakeOrch) Gate(in orchestrator.GateInput) (orchestrator.GateResult, error) {
@@ -449,6 +457,31 @@ func (f *fakeOrch) RetryRefused(id string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.retryRefused[id]
+}
+
+func (f *fakeOrch) UnlockPromoteLock(_ context.Context, id string) (orchestrator.UnlockOutcome, error) {
+	f.record("unlock-lock " + id)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unlockErr != nil {
+		return 0, f.unlockErr
+	}
+	if f.unlockOut == 0 {
+		return orchestrator.UnlockOpened, nil
+	}
+	return f.unlockOut, nil
+}
+
+func (f *fakeOrch) UnlockLockOffered(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unlockOffered[id]
+}
+
+func (f *fakeOrch) UnlockLockJob(int64) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unlockJob, f.unlockSent, nil
 }
 
 // syncBuffer is a log sink safe for concurrent writes.

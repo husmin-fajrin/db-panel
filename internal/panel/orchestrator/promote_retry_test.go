@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
@@ -17,10 +16,10 @@ import (
 // Ulangi of an emergency promote job that failed before mysql.promote was
 // sent (PC-1, rulings R43 and R46): refused, so that the operator starts a
 // new emergency promote, which reads the mode again and asks for the tick,
-// the names and the password. A planned promote job keeps its tokenless,
-// ungated Ulangi in every state (K4): it is also how the panel lifts a
-// promote lock the master's guard kept. A job past the point keeps its
-// tokenless Ulangi, whatever its kind.
+// the names and the password. A planned promote job keeps its Ulangi,
+// refused only while its lock record stands (T12b; "Buka kunci promote"
+// lifts the lock). A job past the point keeps its tokenless Ulangi,
+// whatever its kind.
 
 // wantRetryRefused fails unless Retry of id is refused with
 // ErrPromoteRetryBeforePoint, the job stays failed, no agent got a
@@ -112,72 +111,9 @@ func TestPromoteEmergencyRetryBeforePointRefused(t *testing.T) {
 	}
 }
 
-// A planned promote that failed in "Replika mengejar" while the master's
-// agent could not take the unlock: the guard kept the lock past its
-// deadline and the guard's grace, and the master stays read-only. Ulangi is
-// still offered and runs without a token or the gate; its relock is
-// refused by the master's agent, and its failure path lifts the lock with
-// the candidate's credential (R46: the planned Ulangi is not refused).
-func TestPromotePlannedRetryLiftsKeptLock(t *testing.T) {
-	g := newPromoteRig(t)
-	e := g.e
-	e.r.promoteCatchUp = 100 * time.Millisecond
-	g.c.reply("mysql.waitSynced", proto.WaitSyncedResult{Synced: false, Executed: lagUUIDs,
-		Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}})
-	g.m.on("mysql.unlockPromote", func(json.RawMessage) (any, error) {
-		return nil, &proto.Error{Code: proto.CodeOffline, Message: "agent offline"}
-	})
-	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
-	if err != nil {
-		t.Fatalf("StartPromote: %v", err)
-	}
-	e.waitJob(id, store.JobFailed)
-	e.waitIdle(id)
-	st := e.storedState(id)
-	if !st.LockTried || st.LockUnlocked || st.LockDeadline == nil {
-		t.Fatalf("job state = %+v, want a lock not confirmed open", st)
-	}
-
-	// Long past the lock's deadline and the guard's grace; the guard kept
-	// the lock, so a second one is refused.
-	deadline := *st.LockDeadline
-	e.r.now = func() time.Time { return deadline.Add(proto.PromoteLockGrace + time.Hour) }
-	g.m.fail("mysql.lockForPromote", "master sudah dikunci untuk promosi; kunci baru ditolak")
-	g.m.reply("mysql.unlockPromote", nil)
-	if got := e.r.RetryRefused(id); got != "" {
-		t.Fatalf("RetryRefused of a planned promote = %q, want none", got)
-	}
-	if drops, err := e.r.DropsData(id); err != nil || drops {
-		t.Fatalf("DropsData = %v, %v; want false", drops, err)
-	}
-	if j, _, err := e.st.GetJob(id); err != nil {
-		t.Fatal(err)
-	} else if in, gated := JobGateInput(j); gated {
-		t.Fatalf("a planned promote's Ulangi is judged again: %+v", in)
-	}
-	if err := e.r.Retry(id, JobAck{}); err != nil {
-		t.Fatalf("Retry of a planned promote whose lock the guard kept: %v", err)
-	}
-	e.waitJob(id, store.JobFailed)
-	e.waitIdle(id)
-	if n := g.m.count("mysql.lockForPromote"); n != 2 {
-		t.Fatalf("lockForPromote sent %d times, want 2 (the relock of the retry)", n)
-	}
-	if n := g.m.count("mysql.unlockPromote"); n != 2 {
-		t.Fatalf("unlockPromote sent %d times, want 2 (the retry's failure path)", n)
-	}
-	var u proto.UnlockPromoteParams
-	g.m.params("mysql.unlockPromote", &u)
-	if u.Candidate.Host != "10.0.0.2" {
-		t.Fatalf("unlock params = %+v, want the candidate's credential", u)
-	}
-	if st := e.storedState(id); !st.LockUnlocked {
-		t.Fatalf("job state after the retry = %+v, want the unlock confirmed", st)
-	}
-	if g.c.count("mysql.promote") != 0 {
-		t.Fatalf("candidate commands: %v", g.c.cmds(0))
-	}
-}
+// A planned promote that failed in "Replika mengejar" with its lock kept is
+// lifted by "Buka kunci promote" now, not by Ulangi:
+// TestUnlockPromoteLockAfterKeptLock (promote_unlock_test.go).
 
 // A promote past the point of no return keeps its Ulangi, without a
 // token and without the gate (K4), whatever its kind.

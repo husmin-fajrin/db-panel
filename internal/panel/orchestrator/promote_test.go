@@ -1164,7 +1164,9 @@ func TestPromoteEmergencyRefusedWhileLockMayStand(t *testing.T) {
 	}
 	until := deadline.Add(proto.PromoteLockGrace).Local().Format("02-01-2006 15:04:05")
 	for _, part := range []string{"mungkin masih terkunci", "Promote darurat baru bisa dijalankan mulai " + until,
-		"`sudo dbpanel agent unlock-master`, lalu tekan Ulangi pada promote terencana itu (panel memastikan kunci terbuka)"} {
+		// T15 ends it.
+		`Sebelum itu, bila agent master tersambung, tekan "Buka kunci promote" pada pekerjaan promote terencana itu: ` +
+			`begitu agent menjawab, panel mencatat kunci terbuka dan promote darurat bisa langsung dijalankan.`} {
 		if !strings.Contains(err.Error(), part) {
 			t.Errorf("refusal %q lacks %q", err, part)
 		}

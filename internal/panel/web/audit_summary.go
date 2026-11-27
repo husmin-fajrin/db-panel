@@ -75,6 +75,7 @@ var auditDetailFields = []auditDetailField{
 	{"reason", "alasan", sumText},
 	{"job_id", "pekerjaan", sumJob},
 	{"kind", "jenis", sumKind},
+	{"result", "hasil", sumText},
 }
 
 // auditLengthSuffixes are the keys lengths() writes for a refused

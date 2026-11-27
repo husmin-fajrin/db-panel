@@ -156,8 +156,9 @@ func TestLockRecordFromOldJobWithoutTimes(t *testing.T) {
 }
 
 // TestRelockRefusalKeepsRecordAndTimes (SEC-289, S-1): the guard kept the
-// lock; Ulangi long after its deadline relocks, the master's agent refuses
-// and the unlock cannot be delivered. The record stands with the times it
+// lock; Ulangi is refused while the record stands (T12b); once it was
+// settled open, Ulangi long after its deadline relocks, the master's agent
+// refuses and the unlock cannot be delivered. The record stands with the times it
 // had before Ulangi, so the clock window does not move: an emergency
 // promotion after it is not refused by the window.
 func TestRelockRefusalKeepsRecordAndTimes(t *testing.T) {
@@ -182,6 +183,13 @@ func TestRelockRefusalKeepsRecordAndTimes(t *testing.T) {
 
 	later := before.LockDeadline.Add(time.Hour)
 	e.r.now = func() time.Time { return later }
+	// While the record stands Ulangi is refused (T12b); once it was
+	// settled open (a live report of the master past its Until) Ulangi
+	// relocks.
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrPromoteLockStands) {
+		t.Fatalf("Retry while the record stands = %v, want T12b", err)
+	}
+	e.setState(id, func(st *jobState) { st.LockUnlocked = true })
 	g.m.fail("mysql.lockForPromote", "server ini sudah dikunci untuk promosi (kandidat 10.0.0.2:3306); kunci baru ditolak")
 	if err := e.r.Retry(id, JobAck{}); err != nil {
 		t.Fatalf("Retry: %v", err)
@@ -506,6 +514,9 @@ func TestRelockErrorMayHaveLockedCountsFromRetry(t *testing.T) {
 			later := before.LockDeadline.Add(time.Hour)
 			e.r.now = func() time.Time { return later }
 			tc.script(g)
+			// Settled open (a live report past its Until), so Ulangi
+			// relocks (T12b refuses it while the record stands).
+			e.setState(id, func(st *jobState) { st.LockUnlocked = true })
 			if err := e.r.Retry(id, JobAck{}); err != nil {
 				t.Fatalf("Retry: %v", err)
 			}

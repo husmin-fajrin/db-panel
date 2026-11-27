@@ -170,6 +170,9 @@ type Runner struct {
 	promoteCatchUp time.Duration
 	// verifyIOWait bounds awaitVerifiedLink; tests shorten it.
 	verifyIOWait time.Duration
+	// unlockTimeout bounds mysql.unlockPromote (callTimeout); tests
+	// shorten it.
+	unlockTimeout time.Duration
 	// afterReopen, when set (tests), runs in Retry between ReopenJob and
 	// launch.
 	afterReopen func(jobID string)
@@ -217,7 +220,7 @@ func New(d Deps) *Runner {
 	return &Runner{
 		d: d, log: d.Logger, now: d.Now,
 		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery, catchUpMax: defaultCatchUpMax,
-		promoteCatchUp: defaultPromoteCatchUp, verifyIOWait: defaultVerifyIOWait,
+		promoteCatchUp: defaultPromoteCatchUp, verifyIOWait: defaultVerifyIOWait, unlockTimeout: callTimeout,
 		base: base, stop: stop, live: make(map[string]*liveJob),
 	}
 }
@@ -963,7 +966,9 @@ func (r *Runner) refuseCutWipeList(j store.Job) error {
 // confirmMaxAge old; ack.WipeOnly replaces the acknowledged replica-only
 // databases, and the rebuild of an old master reads its connections again
 // (ErrConnectionsRemain without ack.AcceptConnections). The new
-// confirmation is stored before the job runs.
+// confirmation is stored before the job runs. A planned promote job whose
+// mysql.promote was not sent is refused with T12b while its lock record
+// stands, before anything is sent ("Buka kunci promote" lifts it).
 func (r *Runner) Retry(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
 	if err := r.rebuildApprovalForJob(jobID, ack.Approval); err != nil {
@@ -993,6 +998,12 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 		}
 		if promoteRetryRefused(j) {
 			return ErrPromoteRetryBeforePoint
+		}
+		// Before anything is sent (the checks above only read the
+		// store): a relock would move the window of a lock that may
+		// still stand.
+		if err := r.refusePlannedRetryWhileLockStands(j); err != nil {
+			return err
 		}
 		if err := r.refuseRedJobGate(j); err != nil {
 			return err

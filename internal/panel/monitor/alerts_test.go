@@ -1270,7 +1270,7 @@ func TestLockKeptClosesWhenOver(t *testing.T) {
 	r := newRig(t)
 	mID, _ := r.master("db-master")
 	r.m.HandleEvent(mID, lockExpired(t, "kept", ""))
-	if a := r.openAlert(mID, KindMasterLockExpired); !strings.Contains(a.Message, `"Buka kunci master"`) {
+	if a := r.openAlert(mID, KindMasterLockExpired); !strings.Contains(a.Message, `"Buka kunci promote"`) {
 		t.Fatalf("kept advice = %q", a.Message)
 	}
 	r.m.HandleEvent(mID, quarantinedEv)
@@ -3716,4 +3716,17 @@ func TestBackupStaleNotFromExtrapolation(t *testing.T) {
 			t.Fatal("backup_stale opened on the first tick after a restart, from extrapolation alone")
 		}
 	})
+}
+
+// TestLockKeptAlertNamesUnlockLock: the notice of a lock the guard kept
+// ends with T16 and no longer sends the operator to "Buka kunci master".
+func TestLockKeptAlertNamesUnlockLock(t *testing.T) {
+	const t16 = `Bila promote tidak dilanjutkan, tekan "Buka kunci promote" pada pekerjaan promote itu atau di halaman master. ` +
+		`Jangan Resync kandidat selama master masih terkunci.`
+	want := "Batas waktu kunci promote di master habis, tetapi master tetap dikunci karena kandidat 10.0.0.2:3306 belum bisa " +
+		"dipastikan; aplikasi belum bisa menulis. Periksa job promote di halaman Pekerjaan. " + t16
+	msg := lockExpiredMessage(proto.LockExpiredEvent{Action: lockExpiredKept, Candidate: "10.0.0.2:3306"})
+	if msg != want || strings.Contains(msg, "Buka kunci master") {
+		t.Fatalf("kept notice = %q\nwant %q", msg, want)
+	}
 }

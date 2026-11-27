@@ -22,6 +22,9 @@ type Page struct {
 	Username string // logged-in user; empty hides the sidebar
 	Version  string
 	Flash    string // error message shown above the page content
+	// FlashJob is a job id that Flash names in plain text (T11t, T15b):
+	// the banner shows it as a link to its page (K13); "" for none.
+	FlashJob string
 	Notice   string // success message shown above the page content
 	// AlertCount is the number of open alerts, on the sidebar's Peringatan
 	// link.
@@ -131,7 +134,31 @@ type Banner struct {
 const (
 	BannerCutover = "cutover"
 	BannerPartial = "partial"
+	// BannerJobLink: Text names the job JobID, shown as a link to it.
+	BannerJobLink = "joblink"
 )
+
+// flashBanner is the error banner of a page's Flash, with the job it
+// names (Page.FlashJob) as a link when its text holds that id.
+func flashBanner(text, jobID string) Banner {
+	b := Banner{Tone: "error", Text: text}
+	if jobID != "" && jobIDPattern.MatchString(jobID) && strings.Contains(text, jobID) {
+		b.Kind, b.JobID = BannerJobLink, jobID
+	}
+	return b
+}
+
+// jobCut is a banner text around the job id it names.
+type jobCut struct{ Before, After string }
+
+// cutJob splits text at the last occurrence of jobID.
+func cutJob(text, jobID string) jobCut {
+	i := strings.LastIndex(text, jobID)
+	if i < 0 {
+		return jobCut{Before: text}
+	}
+	return jobCut{Before: text[:i], After: text[i+len(jobID):]}
+}
 
 // pageNames are the page templates; each file templates/<name>.html defines
 // "title" and "content".
@@ -166,6 +193,9 @@ var templateFuncs = template.FuncMap{
 	"ago":           ago,
 	// banner is the data of the "banner" partial: banner "error" .Flash.
 	"banner": func(tone, text string) Banner { return Banner{Tone: tone, Text: text} },
+	// flashBanner is the layout's Flash banner (Page.FlashJob, K13).
+	"flashBanner": flashBanner,
+	"cutJob":      cutJob,
 	// bytesOf is a size in bytes from the agent (int64) for fmtBytes.
 	"bytesOf": func(n int64) uint64 { return uint64(max(n, 0)) },
 	// copyStartedText replaces Periksa and Amankan data tertinggal in the

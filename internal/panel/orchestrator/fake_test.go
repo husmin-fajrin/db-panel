@@ -79,8 +79,11 @@ type fakeAgent struct {
 	unknown map[string]bool // commands answered as an older agent does
 	// dropReply: commands the agent runs whose answer is lost on the way.
 	dropReply map[string]bool
-	attached  bool
-	started   []string // agent job ids, oldest first
+	// silent: commands the agent receives and never answers: the call
+	// ends at its context with the hub's own timeout.
+	silent   map[string]bool
+	attached bool
+	started  []string // agent job ids, oldest first
 	// forgetJobs: that many job.status calls answer "job tidak dikenal"
 	// (as an agent that restarted), whatever the job's state.
 	forgetJobs atomic.Int32
@@ -139,8 +142,13 @@ type fakeConn struct {
 
 func (c fakeConn) Call(ctx context.Context, cmd string, params, result any) error {
 	c.fa.mu.Lock()
-	unknown, drop := c.fa.unknown[cmd], c.fa.dropReply[cmd]
+	unknown, drop, silent := c.fa.unknown[cmd], c.fa.dropReply[cmd], c.fa.silent[cmd]
 	c.fa.mu.Unlock()
+	if silent {
+		c.fa.record(cmd, nil)
+		<-ctx.Done()
+		return &proto.Error{Code: proto.CodeTimeout, Message: "batas waktu perintah habis"}
+	}
 	if drop {
 		// The agent runs it, but its answer never arrives: the hub then
 		// reports the timeout it synthesizes without an agent reply.

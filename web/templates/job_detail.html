@@ -81,6 +81,12 @@
         <form method="post" action="/jobs/{{$.Job.ID}}/retry"><button type="submit" class="btn btn-primary"{{if and $.Gate $.Gate.Off}} disabled{{end}}>{{.}}</button></form>
         {{end}}
         {{end}}
+        {{if .UnlockLock}}
+        <div class="flex w-full flex-col items-start gap-2" data-unlock-lock>
+          <p class="text-sm">{{.UnlockText}}</p>
+          <form method="post" action="/jobs/{{.Job.ID}}/unlock-lock"><button type="submit" class="btn btn-warning">Buka kunci promote</button></form>
+        </div>
+        {{end}}
         {{if .CanRetry}}
         {{if .DropsData}}
         {{/* A job that drops data: the fresh lists first, then the dialog. */}}

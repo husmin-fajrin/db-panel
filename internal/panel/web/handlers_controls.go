@@ -252,7 +252,9 @@ func (a *app) resyncReplica(w http.ResponseWriter, r *http.Request) {
 			a.resyncRefused(w, r, srv, rep, status, flash)
 			return
 		}
-		a.replicaErrorStatus(w, r, srv, rep, status, flash)
+		p := replicaPage{Page: a.page(r), Server: srv, Replica: rep}
+		p.Flash, p.FlashJob = flash, refusalJob(err)
+		a.renderReplica(w, r, status, p)
 		return
 	}
 	a.Logger.Info("resync started", "server", srv.ID, "job", id, "by", auth.UsernameFrom(r.Context()))

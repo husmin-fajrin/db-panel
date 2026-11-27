@@ -371,7 +371,7 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 		return nil, &proto.Error{Code: proto.CodeOffline, Message: "agent offline"}
 	})
 	deadline := g.promotion().LockAt.Add(30 * time.Minute) // the rig's lock: LockedAt + 30 min
-	until := deadline.Add(proto.PromoteLockGrace).Local().Format("02-01-2006 15:04:05")
+	planned := g.promotion().JobID
 	// A replica following a subset, for Tambah database.
 	sub := e.agent("rep-sub", "10.0.0.5")
 	if _, err := e.st.AddReplica(g.topo.ID, sub.id, []string{"a"}); err != nil {
@@ -433,12 +433,13 @@ func TestResyncRefusedWhileLockMayStand(t *testing.T) {
 				if err == nil {
 					t.Fatalf("%s %s: accepted while the lock may stand", s.what, when)
 				}
-				for _, part := range []string{"mungkin masih terkunci", s.what + " baru bisa dijalankan mulai " + until,
-					"memuat data membuat replika bisa ditulis sebentar dan penjaga kunci bisa mengkarantina master",
-					"`sudo dbpanel agent unlock-master`, lalu tekan Ulangi pada promote terencana itu (panel memastikan kunci terbuka)"} {
-					if !strings.Contains(err.Error(), part) {
-						t.Errorf("%s %s: refusal %q lacks %q", s.what, when, err, part)
-					}
+				// T15b, naming the planned promote job (K13).
+				want := "Master db-master mungkin masih terkunci oleh promote terencana sebelumnya. " + s.what +
+					" tidak dijalankan selama itu: memuat data membuat replika bisa ditulis sebentar, dan penjaga kunci " +
+					`master bisa mengkarantina master. Tekan "Buka kunci promote" pada pekerjaan promote ` + planned + " dulu."
+				if ls, ok := errors.AsType[*LockStandsError](err); !ok || err.Error() != want || ls.JobID != planned ||
+					ls.Code != "load" || ls.What != s.what {
+					t.Errorf("%s %s: refusal %q (%T), want %q", s.what, when, err, err, want)
 				}
 				continue
 			}

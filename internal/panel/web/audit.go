@@ -54,8 +54,9 @@ var auditFullKeys = map[string]bool{store.SettingPanelBaseURL: true, store.Setti
 // action did not succeed: the handler checked it against a fixed list
 // first (the action and target kind of a confirmation).
 // salvage_file is a salvage file name the handler checked against the
-// agent's strict pattern before auditing it.
-var auditKeptKeys = map[string]bool{"action": true, "target_kind": true, auditSalvageFile: true}
+// agent's strict pattern before auditing it; result is how "Buka kunci
+// promote" ended, one of its fixed codes.
+var auditKeptKeys = map[string]bool{"action": true, "target_kind": true, auditSalvageFile: true, "result": true}
 
 // auditSalvageFile is the detail key of a salvage file's name
 // (salvage_download, salvage_delete).
