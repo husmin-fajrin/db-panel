@@ -1,8 +1,8 @@
 # Rencana 5b-3: Sisa Audit Rencana 5b-2
 
 - Tanggal: 2026-11-27
-- Status: menunggu persetujuan pemilik; diubah sesudah builder check dan
-  tinjauan rancangan (bagian 9)
+- Status: menunggu persetujuan pemilik; diubah sesudah builder check, tinjauan
+  rancangan dan pemeriksaan ulangnya (bagian 9)
 - Asal: tabel temuan terbuka audit Rencana 5b-2
   (`docs/superpowers/security/2026-11-24-audit-plan-5b2.md`, disebut "A5b2" di
   bawah) dan baris R-181 sampai R-205 inventaris risiko
@@ -88,8 +88,9 @@ tanpa tombol di panel. Setiap bagian 5.2 diperiksa terhadap kasus itu.
 
 - Master tertinggal baca-saja tanpa tombol di panel yang bisa membukanya atau
   menyebut perintah root yang membukanya. Hanya satu keadaan memakai perintah
-  root sebagai jalan keluar: promote terencana yang perintahnya sudah terkirim
-  dan kandidatnya tidak pernah menjawab lagi (5.2).
+  root sebagai jalan keluar: promote yang perintahnya sudah terkirim dan
+  kandidatnya tidak pernah menjawab lagi, selagi master masih terkunci (5.2,
+  baris 5 dan bentuk majemuknya di baris 7).
 - Perbaikan yang membuat dua master lebih mungkin: gerbang atau kata sandi
   yang menahan promote setengah jalan sehingga master lama lebih lama tidak
   dikarantina; buka kunci yang lebih longgar dari pemeriksaan agent sekarang.
@@ -107,7 +108,7 @@ tanpa tombol di panel. Setiap bagian 5.2 diperiksa terhadap kasus itu.
 | 3 | Promote darurat baru (centang, nama, kata sandi), bukan satu klik "Ulangi" | Promote darurat yang gagal sebelum master baru dibuka, termasuk yang "selesai sebagian" dan terbukti tidak terjadi | Satu klik berhari-hari kemudian bisa membuat dua master (SEC-288). Sudah dilihat pemilik |
 | 4 | Promote terencana baru, bukan "Ulangi" | "Ulangi" lebih dari 24 jam sesudah konfirmasi terakhir | Aturan yang sama dengan pekerjaan yang membuang data |
 | 5 | Tombol **Buka kunci promote** (tanpa kata sandi) lebih dulu; baru sesudah itu "Ulangi", promote terencana baru, Resync, Buat replika, Tambah atau Lepas database dengan data | Promote terencana gagal dan master masih terkunci, juga sesudah tenggat kunci lewat | Membuka kunci tidak lagi menjalankan promote; memuat data selagi kunci berdiri membuat penjaga mengkarantina master yang sehat |
-| 6 | Perintah root `unlock-master` di master, sesudah memastikan kandidat | Promote terencana yang perintahnya sudah terkirim dan kandidatnya tidak pernah menjawab lagi | Tombol di keadaan itu bisa membuat dua master. Satu-satunya keadaan yang jalan keluarnya perintah root |
+| 6 | Perintah root `unlock-master` di master, sesudah memastikan kandidat | Promote terencana yang perintahnya sudah terkirim dan kandidatnya tidak pernah menjawab lagi; atau promote darurat seperti itu selagi master lama kembali masih terkunci | Tombol di keadaan itu bisa membuat dua master. Satu-satunya keadaan yang jalan keluarnya perintah root |
 | 7 | Setiap replika lain harus terbaca, atau dilepas | Mulai dan "Ulangi" promote terencana | Replika yang tidak terbaca mungkin master yang tidak dikenal; pekerjaan terencana bukan jalur gangguan |
 | 8 | Mengetik `ya` pada `set-role` | Meninggalkan peran master; masuk karantina; replika dijadikan master; server tanpa peran dijadikan master selagi MySQL-nya masih punya kanal replikasi | Terminal yang salah menghentikan master produksi (R-187). Sudah dilihat pemilik |
 | 9 | Mengetik `ya` pada `unlock-master` | Server berdiri di bawah kunci promote sebuah kandidat | Perintah itu melewati semua pemeriksaan agent |
@@ -130,7 +131,7 @@ tanpa tombol di panel. Setiap bagian 5.2 diperiksa terhadap kasus itu.
 | Promote terencana, perintah terkirim, kandidat tidak pernah menjawab | Master baca-saja dan panel tidak punya tombol | Jalan keluarnya perintah root `unlock-master` dengan syarat tertulis (T14t). Disengaja: tombol di sini bisa membuat dua master. Satu-satunya keadaan begitu |
 | `mysql.promote` terkirim tanpa jawaban: "Ulangi" menunggu bukti | Promote darurat ke replika lain tertahan selama panel belum tahu pekerjaan di kandidat berakhir | Agent versi ini melaporkan ada-tidaknya pekerjaan itu begitu ia menjawab; batas B hanya untuk agent yang lebih lama. Tanpa aturan ini dua replika bisa dipromosikan |
 | `ya` pada `unlock-master` | Satu kata lagi selagi master tidak bisa ditulis | Disengaja; hanya bila kunci sebuah kandidat berdiri; `--ya` ada untuk skrip |
-| Muat data dan promote terencana baru ditolak selama master terkunci | Resync atau promote tertahan | Bukan jalur gangguan; promote darurat tetap memakai aturan jam, tidak lebih lama dari sekarang |
+| Muat data dan promote terencana baru ditolak selama kunci promote belum terbukti dibuka, juga selagi master belum punya laporan langsung | Resync atau promote tertahan, beberapa detik sesudah panel restart | Bukan jalur gangguan; catatan kunci hilang sendiri begitu master melapor bisa ditulis sesudah tenggat; promote darurat tetap memakai aturan jam, tidak lebih lama dari sekarang |
 | Promote terencana menolak replika yang tidak terbaca | Promote tertahan oleh replika offline | Hanya promote terencana; promote darurat tidak ditahan replika offline yang laporan terakhirnya baca-saja |
 | Promote darurat "selesai sebagian" bertanya kandidat dulu | Agent kandidat tidak menjawab | Ditolak tanpa mengubah apa pun; sama dengan hari ini, saat `mysql.promote` ulang juga gagal. Kandidat yang sudah bisa ditulis: satu klik seperti sekarang |
 | Batas permintaan agent | Agent menjawab "sibuk" pada perintah promote | Batas 64, pemakaian panel yang jujur segelintir; penjaga tidak lewat batas itu; "sibuk" adalah penolakan pasti, bukan hasil tak diketahui |
@@ -436,10 +437,14 @@ browser yang pernah login.
   menit, dengan kunci nomor cookie **dan** alamat klien, dan tempatnya dipesan
   sebelum pemeriksaan kata sandi. Anggaran yang habis menolak login untuk
   pasangan cookie dan alamat itu saja sampai jendelanya lewat; ia tidak jatuh
-  ke aturan tanpa cookie. Login tanpa cookie memakai aturan sekarang. Cookie
-  itu bukan kredensial: kata sandi tetap diminta. Ia ditolak bila tanda
-  tangannya salah, namanya lain, terbit sebelum `reset-password` terakhir,
-  atau lebih tua dari setahun. Logout tidak menghapusnya.
+  ke aturan tanpa cookie. Di atasnya ada jumlah per cookie untuk semua alamat:
+  20 salah per 15 menit. Bila jumlah itu habis, yang ditolak hanya pasangan
+  cookie dan alamat yang **belum pernah** berhasil login sejak panel menyala;
+  pasangan yang sudah pernah berhasil tetap memakai anggaran 5-nya sendiri.
+  Login tanpa cookie memakai aturan sekarang. Cookie itu bukan kredensial:
+  kata sandi tetap diminta. Ia ditolak bila tanda tangannya salah, namanya
+  lain, terbit sebelum `reset-password` terakhir, atau lebih tua dari setahun.
+  Logout tidak menghapusnya.
 - Batas per alamat memakai awalan /64 untuk IPv6. README "Keamanan" ditulis
   ulang: restart bukan obat; panel hanya dijangkau dari jaringan admin (B2).
 - Tepi. Browser yang belum pernah login tetap terkunci selama serangan,
@@ -449,13 +454,19 @@ browser yang pernah login.
   admin selama admin belum login lagi: 20 tebakan salah si pencuri menolak
   konfirmasi admin juga. Jalan keluarnya keluar lalu login lagi: logout
   mengakhiri sesi yang dicuri, dan sesi baru punya anggaran baru (T1
-  mengatakannya). Cookie perangkat curian yang dipakai dari alamat lain punya
-  anggarannya sendiri dan tidak mengunci browser admin.
+  mengatakannya). Pencuri cookie perangkat mendapat paling banyak 20 tebakan
+  per 15 menit, berapa pun alamat yang ia pakai, dan tidak mengunci browser
+  admin yang sudah pernah berhasil login dari alamatnya sejak panel menyala.
+  Yang masih bisa ia lakukan: sesudah panel restart, sebelum admin berhasil
+  login sekali, ia bisa menghabiskan jumlah itu dan menahan login ber-cookie
+  admin sampai 15 menit, berulang; dan selama dua slot pemeriksaan cookie ia
+  penuhi, login ber-cookie lain menunggu sebentar.
 - Verifikasi (unit, dengan jam): 20 login salah dari empat alamat, lalu
   konfirmasi benar dari sesi yang ada tetap 200 dan login benar ber-cookie
   tetap 303; cookie palsu, milik nama lain, atau dari sebelum `reset-password`
   ditolak; anggaran cookie yang habis di satu alamat tidak menolak alamat
-  lain; teks 429 menyebut menit yang benar.
+  lain; jumlah per cookie yang habis menolak alamat baru tetapi tidak alamat
+  yang sudah pernah berhasil; teks 429 menyebut menit yang benar.
 
 **Jendela kata sandi.** Aturannya: kata sandi yang terbukti benar membuka
 jendela 10 menit pada sesi itu; di dalamnya tindakan ringan tidak meminta kata
@@ -575,6 +586,7 @@ bukti.**
 | 4. Darurat, gagal sebelum dikirim | Tidak ada, seperti sekarang: promote darurat baru | Tidak ada kunci |
 | 5. `mysql.promote` terkirim, hasil belum diketahui (kedua jenis) | Panel mencari bukti di kandidat dulu (di bawah) | **Tidak ada, dan ditolak bila diminta.** Jalan keluar bila kandidat tidak pernah menjawab: perintah root (T14t) |
 | 6. Sesudah titik tak kembali (kedua jenis) | Seperti sekarang: tanpa gerbang, tanpa kata sandi | Tidak ada |
+| 7. Majemuk: promote terencana gagal dengan kunci dipertahankan; lalu promote darurat terkirim dan kandidatnya diam; lalu master lama kembali, masih terkunci dan masih master topologi | Pekerjaan darurat: baris 5, dengan ekor T14u selama master lama tersambung dan terbaca "Terkunci" | Pada pekerjaan terencana lama: ditolak dengan T11t (selesaikan dulu promote yang lebih baru). Jalan keluar: perintah root (T14u) |
 
 - **Buka kunci promote** mengirim `mysql.unlockPromote` dengan kredensial
   kandidat, seperti jalur gagal sekarang. Berhasil, atau agent menjawab "tidak
@@ -587,20 +599,22 @@ bukti.**
   handler dan di orchestrator, bukan hanya di templat:
   - hanya untuk pekerjaan promote terencana yang `mysql.promote`-nya **belum
     dikirim** (baris 2 dan 3);
-  - ditolak, dengan T11s dan **tanpa** menyebut `unlock-master`, bila
-    pekerjaan itu sudah digantikan: ada promosi yang lebih baru di topologi
-    itu yang berjalan, "selesai sebagian" atau selesai, atau master pekerjaan
-    itu bukan lagi master topologinya. Tanpa aturan ini satu klik sesudah
-    promote darurat ke replika lain bisa membuka master lama di samping master
-    baru;
+  - ditolak **tanpa** menyebut `unlock-master` bila pekerjaan itu sudah
+    digantikan. Promosi yang lebih baru di topologi itu sudah selesai, atau
+    master pekerjaan itu bukan lagi master topologinya: T11s. Promosi yang
+    lebih baru masih berjalan atau "selesai sebagian": T11t, yang menunjuk
+    pekerjaan itu. Tanpa aturan ini satu klik sesudah promote darurat ke
+    replika lain bisa membuka master lama di samping master baru;
   - ditolak selagi pekerjaan promote topologi itu berjalan.
 - **Di mana tombol itu.** Di halaman pekerjaannya (dengan kalimat T9), dan di
   halaman master selama statusnya "Terkunci". Halaman master memakai pekerjaan
   promote terencana terbaru master itu yang kuncinya belum terbukti dibuka;
   bila catatan panel tidak menunjuk satu pun, ia memakai promote terencana
   terakhir master itu yang gagal atau batal, belum dikirim dan belum
-  digantikan. Catatan panel bisa salah; agent yang tahu. **Buka kunci master**
-  tetap tampil di sampingnya.
+  digantikan. Catatan panel bisa salah; agent yang tahu. Bila pekerjaan yang
+  ditunjuk catatan itu sudah dikirim (baris 5), halaman master menampilkan T14
+  dengan ekornya dan tidak menampilkan tombol. **Buka kunci master** tetap
+  tampil di sampingnya.
 - **Jawaban agent yang menolak** dipilih dari keadaan, bukan dari teks agent:
   panel membaca kandidat (`mysql.status`) dan peran master, lalu menampilkan
   teks agent berlabel dengan salah satu ekor ini. Kandidat baca-saja, tidak
@@ -610,43 +624,62 @@ bukti.**
 - **Catatan kunci (bendera "kunci diminta, belum terbukti dibuka").** Jawaban
   galat dari master tidak membuktikan tidak ada kunci: agent bisa menjawab
   galat sesudah kunci terpasang. Karena itu sesudah kunci diminta, catatan itu
-  tetap berdiri sampai `mysql.unlockPromote` menjawab "dibuka" atau "tidak
-  dikunci". Kunci ulang yang dijawab penolakan hanya mengembalikan cap waktu
-  ke nilai sebelumnya (bila ada), supaya jendela tidak tergeser. Tenggat dari
+  tetap berdiri sampai salah satu dari dua hal: `mysql.unlockPromote` menjawab
+  "dibuka" atau "tidak dikunci"; atau, sesudah tenggat terpotong + kelonggaran
+  lewat, sebuah laporan langsung master (5.7) menunjukkan kedua bendera OFF.
+  Kunci promote yang berdiri menjaga `super_read_only` tetap ON (penjaga
+  memasangnya lagi tiap putaran), jadi laporan itu bukti kunci sudah tidak
+  ada; ini juga menghapus klik tambahan sesudah penjaga membuka master
+  sendiri. Kunci ulang yang dijawab penolakan hanya mengembalikan cap waktu ke
+  nilai sebelumnya (bila ada), supaya jendela tidak tergeser. Tenggat dari
   jawaban agent master dipotong ke waktu kunci diminta + lama kunci yang
   diminta + kelonggaran panggilan + kelonggaran jam; potongan yang sama
   berlaku saat membaca pekerjaan tersimpan dari 0.2.0, dan nilai terpotong
   itulah yang dikirim ke kandidat (sisa waktu lebih pendek: kandidat menolak,
   bukan membuka terlambat). Pemeriksaan "kunci mungkin berdiri" membaca
   **setiap** promote terencana master itu yang catatannya masih berdiri, bukan
-  hanya yang terakhir.
+  hanya yang terakhir. Sebuah catatan hanya dihitung selama server itu masih
+  master topologinya dan belum ada promosi topologi itu yang **selesai**
+  sesudah pekerjaannya; promosi yang lebih baru yang masih berjalan atau
+  "selesai sebagian" tidak melepas catatan (master itu masih bisa terkunci,
+  baris 7). Tanpa dua aturan ini catatan yang tidak bisa lagi dihapus tombol
+  (pekerjaan digantikan, kandidat mati sudah dihapus dari panel) akan menolak
+  setiap promote terencana berikutnya dari master itu.
 - **Selagi catatan itu berdiri:**
-  - "Ulangi" pekerjaan itu ditolak (baris 2). Jadi "Ulangi" tidak lagi membuka
+  - "Ulangi" pekerjaan itu ditolak selama `mysql.promote`-nya belum dikirim
+    (baris 2). Pekerjaan di baris 5 dan 6 tidak pernah ditolak karena catatan
+    kunci, walau catatannya masih berdiri. Jadi "Ulangi" tidak lagi membuka
     kunci sebagai efek samping, tidak bisa menggeser jendela, dan master sudah
     bisa ditulis sebelum operator memutuskan mencoba lagi.
   - Promote terencana **baru** dari master itu ditolak saat mulai (T12c), juga
-    bila master terbaca "Terkunci" tanpa catatan.
+    bila master terbaca "Terkunci" tanpa catatan (T12d).
   - Promote darurat memakai aturan jam seperti sekarang: ditolak sampai
     tenggat + kelonggaran, tidak lebih lama (T15).
   - Muat data di topologi itu (Resync ulang, Buat replika, Tambah atau Lepas
-    database dengan data, dan "Ulangi"-nya) ditolak **berapa pun jamnya**
-    selama laporan langsung master berkata "Terkunci" (T15b). Sesudah jendela
-    jam lewat, penjaga master masih membaca kandidat tiap menit; kandidat yang
-    sedang dimuat terbaca bisa ditulis, dan penjaga akan mengkarantina master
-    yang sehat. Bila master tidak terbaca, muat data dari master itu memang
-    tidak bisa jalan.
+    database dengan data, dan "Ulangi"-nya) ditolak (T15b). Aturan ini
+    **menambah** aturan jam, tidak menggantikannya: di dalam jendela jam muat
+    data ditolak apa pun kata laporan, seperti sekarang; sesudahnya ia ditolak
+    selama catatan berdiri, dan catatan hanya hilang oleh jawaban buka kunci
+    atau oleh laporan langsung master dengan kedua bendera OFF (butir di
+    atas). Tidak ada laporan langsung (panel baru menyala, laporan pertama
+    belum datang, agent master terputus dari panel) berarti ditolak: "Ulangi"
+    sebuah muat data bisa berjalan tanpa agent master, sementara penjaga
+    master tetap membaca kandidat tiap menit dan akan mengkarantina master
+    yang sehat bila kandidat yang sedang dimuat terbaca bisa ditulis.
 - **"Ulangi" sebelum dikirim** (baris 1) memanggil fungsi penolakan yang sama
   dengan `StartPromote` (replika lain bisa ditulis dengan pembacaan langsung
   5.7, kandidat layak, replika tak terjangkau, cabang, versi agent, master
   lama yang belum dibereskan), lalu gerbang, lalu token kata sandi.
 - **Terkirim, hasil belum diketahui** (baris 5). Keadaan pekerjaan kini
   menyimpan kapan `mysql.promote` dikirim dan apakah panggilan mulainya
-  **tidak berjawab** (terkirim, tetapi panel tidak memegang id pekerjaan
-  agent). Hari ini tanda itu hanya ada di memori satu percobaan (F11).
-  Pekerjaan tersimpan dari 0.2.0 yang terkirim tanpa id pekerjaan agent
-  dihitung tidak berjawab, dengan waktu pembaruan terakhirnya sebagai waktu
-  kirim. "Ulangi" membaca kandidat (berbatas waktu, di luar `startMu`, lalu
-  diperiksa ulang di bawahnya):
+  **tidak berjawab**. Sebelum setiap pengiriman panel menghapus id pekerjaan
+  agent yang tersimpan dari percobaan sebelumnya dan memasang tanda "tidak
+  berjawab"; tanda itu hanya dihapus oleh jawaban yang membawa id pekerjaan.
+  Hari ini tanda itu hanya ada di memori satu percobaan (F11). Pekerjaan
+  tersimpan dari 0.2.0 yang terkirim tanpa id pekerjaan agent dihitung tidak
+  berjawab, dengan waktu pembaruan terakhirnya sebagai waktu kirim. "Ulangi"
+  membaca kandidat (berbatas waktu, di luar `startMu`, lalu diperiksa ulang di
+  bawahnya):
   - kandidat bisa ditulis → dicatat lewat titik tak kembali; promote
     dilanjutkan tanpa kata sandi dan tanpa gerbang (menuntaskan karantina
     master lama adalah arah aman);
@@ -655,26 +688,44 @@ bukti.**
     terencana kunci dibuka; jawabannya T13 atau T13b. Yang dihitung bukti: (a)
     panel memegang id pekerjaan agent dan `job.status` berkata berakhir atau
     tidak dikenal agent; (b) `mysql.status` kandidat membawa field opsional
-    baru "pekerjaan promote: tidak ada"; (c) panggilan tidak berjawab, agent
+    baru "permintaan promote: tidak ada"; (c) panggilan tidak berjawab, agent
     tidak mengirim field itu, dan sudah lewat batas B sejak dikirim.
-    `mysql.status` yang berkata baca-saja **bukan** bukti;
+    `mysql.status` yang berkata baca-saja **bukan** bukti, dan field yang
+    berkata "ada" mengalahkan (a) dan (c);
   - selain itu → ditolak tanpa mengubah apa pun: T14 (kandidat tidak terbaca)
     atau T14b (masih berjalan, atau belum terbukti berakhir). Promosi tetap
     "selesai sebagian", jadi promote lain tetap ditolak.
-- **Batas B** harus lebih panjang dari seluruh batas pekerjaan promote di
-  agent. Task ini memeriksa bahwa setiap langkah pekerjaan itu memang berbatas
-  dan menetapkan angkanya. Yang terlihat di kode sekarang: tiga probe berjarak
-  10 detik dan tunggu relay log 600 detik; usulan awal rancangan 30 menit, dan
-  tidak kurang dari dua kali jumlah batas yang ditemukan. Agent versi ini
-  selalu mengirim field (b), jadi B hanya dipakai untuk agent yang lebih lama.
+- **Arti field itu.** "Ada" berarti: agent ini sudah **membaca** sebuah
+  permintaan `mysql.promote` dan pekerjaannya belum berakhir. Tanda itu
+  dipasang di putaran baca agent saat permintaan tiba, sebelum permintaan
+  berikutnya dibaca, bukan saat handler mendaftarkan pekerjaannya: handler
+  bekerja beberapa detik sebelum itu (pemeriksaan pin, pelepasan kunci start),
+  dan `mysql.status` yang dijawab di celah itu dari daftar pekerjaan akan
+  berkata "tidak ada". Agent menyambung ulang baru sesudah sesi lamanya
+  berhenti membaca, jadi permintaan yang tiba lewat sambungan lama sudah
+  tercatat sebelum `mysql.status` di sambungan baru dijawab; task memeriksa
+  urutan itu.
+- **Batas B** bergantung pada arti itu dan harus lebih panjang dari seluruh
+  batas pekerjaan promote di agent, dihitung sejak permintaan dibaca. Task ini
+  memeriksa bahwa setiap langkah pekerjaan itu memang berbatas dan menetapkan
+  angkanya. Yang terlihat di kode sekarang: tiga probe berjarak 10 detik dan
+  tunggu relay log 600 detik; usulan awal rancangan 30 menit, dan tidak kurang
+  dari dua kali jumlah batas yang ditemukan. Agent versi ini selalu mengirim
+  field (b), jadi B hanya dipakai untuk pekerjaan yang dikirim ke agent
+  sebelum pembaruan.
+- **Keadaan majemuk** (baris 7). Tombol pekerjaan terencana lama ditolak
+  dengan T11t, karena promote darurat yang lebih baru belum tuntas; pekerjaan
+  darurat itu menjawab T14 atau T14b, dan selama master lamanya tersambung dan
+  terbaca "Terkunci" kedua teks itu membawa ekor T14u: perintah root yang
+  sama, dengan syarat untuk kedua kandidat.
 - **Kandidat tidak pernah menjawab lagi** (baris 5, promote terencana): master
   tetap baca-saja, karena penjaganya mempertahankan kunci selama kandidat
   tidak terbaca. Panel tidak punya tombol untuk keadaan ini: membuka master
   selagi perintah promote mungkin masih berjalan di kandidat bisa membuat dua
   master. Jalan keluarnya perintah root di master, `sudo dbpanel agent
-  unlock-master`, dengan syarat yang ditulis di T14t. **Ini satu-satunya
-  keadaan di rancangan ini yang jalan keluarnya perintah root.** Promosinya
-  tetap "selesai sebagian" (bagian 8).
+  unlock-master`, dengan syarat yang ditulis di T14t. **Keadaan ini, dan
+  bentuk majemuknya di baris 7, satu-satunya di rancangan ini yang jalan
+  keluarnya perintah root.** Promosinya tetap "selesai sebagian" (bagian 8).
 - **Audit.** "Ulangi" promote terencana dicatat dengan field yang sama dengan
   mulainya; "Ulangi" sesudah titik tak kembali dicatat sebagai lanjutan;
   **Buka kunci promote** dicatat dengan hasilnya.
@@ -700,9 +751,13 @@ bukti.**
   - *Sesudah promote darurat ke replika lain.* Master lama kembali, masih
     terkunci. Tombol pada pekerjaan lama ditolak (T11s); server itu ditangani
     sebagai master lama (karantina tertunda, 5.3).
-  - *Terkirim, kandidat tidak pernah menjawab.* Tidak ada tombol; "Ulangi"
-    menjawab T14 dengan ekor T14t; root membuka master sesudah memastikan
-    syaratnya.
+    - *Terkirim, kandidat tidak pernah menjawab.* Tidak ada tombol; "Ulangi"
+      menjawab T14 dengan ekor T14t; root membuka master sesudah memastikan
+      syaratnya.
+  - *Majemuk (baris 7).* Tombol pekerjaan terencana lama menjawab T11t dan
+    menunjuk pekerjaan darurat; pekerjaan darurat menjawab T14 dengan ekor
+    T14u; root membuka master lama sesudah memastikan kedua kandidat. Muat
+    data dan promote terencana baru ditolak selama itu.
 
   Tidak ada cabang yang meninggalkan master tanpa langkah berikutnya; di satu
   cabang langkah itu perintah root.
@@ -713,13 +768,21 @@ bukti.**
   darurat langsung diizinkan); tombol pada pekerjaan yang sudah dikirim →
   ditolak, tidak ada yang terkirim; pekerjaan gagal dengan promosi darurat
   yang lebih baru selesai → tombol ditolak, tidak ada yang terkirim; kunci
-  dipertahankan, tenggat + 2 jam, master "Terkunci" → Resync ditolak;
-  penolakan kunci ulang tidak menghapus catatan; tenggat terpotong; mulai
-  tidak berjawab, kandidat baca-saja, "Ulangi" di dalam batas B → ditolak,
-  promosi tetap "selesai sebagian"; field "tidak ada pekerjaan" → digagalkan;
-  kandidat bisa ditulis → lanjut; **"Ulangi" sesudah titik tak kembali tetap
-  tanpa token dan tanpa gerbang, kedua jenis** (penjaga F13). Ujung ke ujung
-  dengan mysqld sungguhan: promote terencana gagal saat mengejar dengan agent
+  dipertahankan, tenggat + 2 jam, master "Terkunci" → Resync ditolak; catatan
+  berdiri dengan laporan master pulihan atau tidak ada → Resync dan
+  "Ulangi"-nya ditolak; di dalam jendela jam dengan laporan langsung kedua
+  bendera OFF → tetap ditolak; sesudah jendela dengan laporan langsung kedua
+  bendera OFF → catatan hilang, Resync dan promote terencana baru diizinkan;
+  catatan milik pekerjaan yang masternya sudah berganti tidak dihitung;
+  `mysql.status` berkata "permintaan promote: ada" padahal `job.status` id
+  lama berkata berakhir → ditolak; id pekerjaan agent dari percobaan
+  sebelumnya dihapus sebelum kirim; keadaan majemuk → T11t dan T14u; penolakan
+  kunci ulang tidak menghapus catatan; tenggat terpotong; mulai tidak
+  berjawab, kandidat baca-saja, "Ulangi" di dalam batas B → ditolak, promosi
+  tetap "selesai sebagian"; field "tidak ada pekerjaan" → digagalkan; kandidat
+  bisa ditulis → lanjut; **"Ulangi" sesudah titik tak kembali tetap tanpa
+  token dan tanpa gerbang, kedua jenis** (penjaga F13). Ujung ke ujung dengan
+  mysqld sungguhan: promote terencana gagal saat mengejar dengan agent
   kandidat dihentikan, lalu **Buka kunci promote** sesudah kandidat kembali,
   lewat pemeriksaan agent yang asli.
 
@@ -742,10 +805,15 @@ dikirimi perintah, dan mencoba lagi sendiri.**
   memperlambatnya ke selang 5 menit. Penolakan agent atas karantina kebanyakan
   keadaan yang lewat sendiri (master baru belum terbaca atau belum terbuka,
   berkas replika belum terbaca), dan jawaban "sibuk" (5.6) juga dicoba lagi.
-  Putaran berakhir hanya bila karantina mendarat atau promosinya tuntas dengan
-  cara lain (server dihapus, perannya berubah, topologi promote lagi). Halaman
-  server menampilkan kapan terakhir dicoba dan jawaban terakhir agent,
-  berlabel (T18); peringatannya tetap terbuka.
+  Tiap putaran memakai keputusan yang sama dengan `onOnline` sekarang: selama
+  server itu berperan `quarantined` dan karantina promosinya tertunda,
+  perintah dikirim atas nama master topologi **yang sekarang**, juga bila
+  topologi itu sudah promote lagi sejak itu (arah aman, dan sudah begitu hari
+  ini); bila topologinya tidak terbaca atau tidak punya master lain, putaran
+  itu tidak mengirim dan mencoba lagi nanti. Putaran berakhir hanya bila
+  karantina mendarat, server itu dihapus, atau perannya di panel bukan lagi
+  `quarantined`. Halaman server menampilkan kapan terakhir dicoba dan jawaban
+  terakhir agent, berlabel (T18); peringatannya tetap terbuka.
 - Tepi. Agent yang diam kini hanya menahan kuncinya sendiri. Master lama yang
   agentnya sendiri dibobol tetap bisa mengabaikan karantina (melekat pada
   model). Tidak ada protokol, migrasi, atau langkah operator baru.
@@ -979,14 +1047,17 @@ meninggalkan kedua bendera ON.
 
 ### 5.7 Gerbang dan status (R-197, R-198, R-199)
 
-- **Laporan segar atau "belum diketahui" (R-197).** Sebuah laporan segar bila
-  servernya tersambung, laporannya langsung (bukan susulan, bukan pulihan saat
-  panel menyala), dan umurnya tidak melewati batas basi monitor. Tidak segar:
-  baris jam, disk dan `performance_schema` kuning "belum diketahui" (T23);
-  baris pin master **merah** (T23b), karena pin yang tidak diketahui tidak
-  boleh meloloskan promote terencana. Laporan pulihan ditandai di memori;
-  tidak ada migrasi. Sesudah panel restart baris-baris itu kuning atau merah
-  sampai laporan langsung pertama. Verifikasi (unit, dengan jam).
+- **Laporan segar atau "belum diketahui" (R-197).** Ukuran "laporan segar"
+  (atau "laporan langsung") di bawah ini juga dipakai 5.2 dan pembacaan R-198,
+  jadi fungsinya dibangun di bagian A; pemakaiannya di baris gerbang tetap di
+  bagian B. Sebuah laporan segar bila servernya tersambung, laporannya
+  langsung (bukan susulan, bukan pulihan saat panel menyala), dan umurnya
+  tidak melewati batas basi monitor. Tidak segar: baris jam, disk dan
+  `performance_schema` kuning "belum diketahui" (T23); baris pin master
+  **merah** (T23b), karena pin yang tidak diketahui tidak boleh meloloskan
+  promote terencana. Laporan pulihan ditandai di memori; tidak ada migrasi.
+  Sesudah panel restart baris-baris itu kuning atau merah sampai laporan
+  langsung pertama. Verifikasi (unit, dengan jam).
 - **Replika lain yang bisa ditulis (R-198).** Tidak ada jalan melewati replika
   yang bisa ditulis, juga pada promote darurat (bagian 8). Yang berubah adalah
   dari mana panel tahu. Pembacaan langsung berarti satu `mysql.status` ke
@@ -1000,7 +1071,9 @@ meninggalkan kedua bendera ON.
     langsung. Bisa ditulis: ditolak (T24). Replika yang tidak tersambung, atau
     tidak menjawab dalam 10 detik, dinilai dari laporan terakhirnya: baca-saja
     tidak menahan, dan layar menyebut replika mana yang tidak terbaca (T24d);
-    bisa ditulis tetap menahan (T24b).
+    bisa ditulis tetap menahan (T24b). Replika yang tidak terbaca dan tidak
+    punya laporan sama sekali diperlakukan sama: tidak menahan, dan disebut di
+    layar.
   - Teks tampil di layar promote sebelum apa pun diketik. Verifikasi (unit):
     laporan basi bisa ditulis + jawaban baca-saja → diizinkan; terencana
     dengan replika tidak terbaca → ditolak; darurat dengan replika offline
@@ -1131,19 +1204,22 @@ adalah tempat nilai. Tata letak layar `set-role` mengikuti pola teks
 - T10b tidak ada kunci promote: `Master %s tidak sedang dikunci untuk promote; tidak ada yang dibuka. Bila master masih berstatus "Terkunci", sebabnya lain: tekan "Buka kunci master".`
 - T11 agent menolak membuka; kandidat baca-saja, tidak terbaca, atau kredensialnya tidak bisa disusun panel (pesan agent tampil berlabel di tengahnya): `Agent master %s tidak membuka kunci. <pesan agent>. Jangan Resync kandidat selama master masih terkunci. Bila Anda yakin kandidat tidak dipromosikan dan tidak ada replika lain yang sudah menjadi master, buka di server master: sudo dbpanel agent unlock-master`
 - T11b agent master tidak tersambung: `Agent master %s tidak tersambung, jadi panel tidak bisa membuka kuncinya. Sambungkan agent itu lalu tekan lagi. Jangan Resync kandidat selama master masih terkunci. Bila Anda yakin kandidat tidak dipromosikan dan tidak ada replika lain yang sudah menjadi master, buka di server master: sudo dbpanel agent unlock-master`
-- T11c agent menolak membuka; kandidat terbaca bisa ditulis: `Agent master %s tidak membuka kunci. <pesan agent>. Kandidat %s terbaca bisa ditulis dan mungkin sudah menjadi master: jangan buka master ini. Periksa kandidat itu dulu.`
+- T11c agent menolak membuka; kandidat terbaca bisa ditulis: `Agent master %s tidak membuka kunci. <pesan agent>. Kandidat %s terbaca bisa ditulis dan mungkin sudah menjadi master: jangan buka master ini. Periksa kandidat itu dulu. Bila ia memang bukan master, kunci lagi di halaman replikanya, lalu tekan tombol ini lagi.`
 - T11d agent menolak membuka; master sudah dikarantina: `Agent master %s tidak membuka kunci. <pesan agent>. Server ini sudah dikarantina; tindakannya ada di kotak Master lama di halaman server.`
-- T11s tombol ditolak karena pekerjaannya sudah digantikan: `Kunci promote ini tidak dibuka dari panel: topologi ini sudah promote lagi sejak pekerjaan ini, atau server itu bukan lagi masternya. Server itu ditangani sebagai master lama di halamannya.`
+- T11s tombol ditolak; promosi yang lebih baru sudah selesai, atau server itu bukan lagi master topologinya: `Kunci promote ini tidak dibuka dari panel: topologi ini sudah promote lagi sejak pekerjaan ini, atau server itu bukan lagi masternya. Server itu ditangani sebagai master lama di halamannya.`
+- T11t tombol ditolak; promosi yang lebih baru masih berjalan atau "selesai sebagian" (`%s`: tautan ke pekerjaannya): `Kunci promote ini tidak dibuka dari panel selagi promote yang lebih baru di topologi ini belum tuntas. Selesaikan dulu pekerjaan promote %s.`
 - T12 "Ulangi" promote terencana sesudah 24 jam: `Promote ini terakhir dikonfirmasi lebih dari 24 jam lalu, jadi "Ulangi dari tahap ini" tidak tersedia lagi. Mulai promote baru dari halaman master.`
 - T12b "Ulangi" promote terencana selagi kunci belum terbukti dibuka: `Master %s mungkin masih terkunci oleh promote ini. Tekan "Buka kunci promote" dulu; sesudah kuncinya terbuka, "Ulangi dari tahap ini" tersedia lagi.`
-- T12c promote terencana baru ditolak saat mulai: `Master %s masih terkunci, atau kunci promote terencana sebelumnya belum terbukti dibuka. Tekan "Buka kunci promote" pada pekerjaan promote itu dulu, lalu mulai promote ini lagi.`
+- T12c promote terencana baru ditolak saat mulai (`%s` kedua: tautan ke pekerjaannya): `Master %s masih terkunci, atau kunci promote terencana sebelumnya belum terbukti dibuka. Tekan "Buka kunci promote" pada pekerjaan promote %s dulu, lalu mulai promote ini lagi.`
+- T12d sama, master terbaca "Terkunci" tanpa catatan kunci promote: `Master %s masih terkunci. Buka kuncinya dulu dengan "Buka kunci master" di halaman master, lalu mulai promote ini lagi.`
 - T13 promote darurat yang ternyata belum membuka master baru: `Promote darurat ini belum membuka master baru: kandidat %s masih baca-saja. Pekerjaan ini digagalkan; tidak ada yang berubah. Mulai promote darurat baru dari halaman master.`
 - T13b sama, promote terencana: `Promote ini belum mengganti master: kandidat %s masih baca-saja. Pekerjaan ini digagalkan. Bila master masih terkunci, tekan "Buka kunci promote". Sesudah itu: "Ulangi dari tahap ini" bila konfirmasi terakhirnya belum lewat 24 jam, atau promote baru.`
 - T14 kandidat tidak terbaca: `Kandidat %s belum bisa dibaca, jadi panel belum tahu apakah ia sudah menerima tulisan. Tidak ada yang diubah. Tekan "Ulangi dari tahap ini" lagi sesudah agent kandidat tersambung.`
 - T14b pekerjaan agent kandidat masih berjalan, atau belum terbukti berakhir: `Pekerjaan promote di kandidat %s masih berjalan, atau belum terbukti berakhir. Tidak ada yang diubah. Tunggu sebentar, lalu tekan "Ulangi dari tahap ini" lagi. Bila agent kandidat tidak melaporkannya, panel menganggapnya berakhir pukul %s.`
 - T14t ekor T14 dan T14b pada promote terencana selagi master terkunci: `Master %s tetap baca-saja selama itu. Bila kandidat tidak akan kembali, buka master di servernya: sudo dbpanel agent unlock-master. Jalankan itu hanya sesudah Anda memastikan kandidat bukan master dan tidak akan menjadi master: MySQL-nya terbaca baca-saja di server kandidat itu sendiri, atau host-nya mati.`
+- T14u ekor T14 dan T14b pada promote darurat selagi master lamanya tersambung dan terbaca "Terkunci": `Master lama %s sudah kembali dan masih baca-saja oleh kunci promote terencana sebelumnya. Bila kandidat promote darurat ini tidak akan kembali, buka master lama itu di servernya: sudo dbpanel agent unlock-master. Jalankan itu hanya sesudah Anda memastikan kandidat promote darurat ini dan kandidat promote terencana sebelumnya bukan master dan tidak akan menjadi master: MySQL-nya terbaca baca-saja di servernya sendiri, atau host-nya mati.`
 - T15 kalimat penutup penolakan promote darurat selagi "kunci mungkin berdiri" (menggantikan kalimat yang menyuruh "Ulangi"): `Sebelum itu, bila agent master tersambung, tekan "Buka kunci promote" pada pekerjaan promote terencana itu: begitu agent menjawab, panel mencatat kunci terbuka dan promote darurat bisa langsung dijalankan.`
-- T15b muat data ditolak selama master terkunci (`%s` kedua: nama tindakannya; menggantikan teks lama yang berkata "saat penjaga kunci sudah memutuskan"): `Master %s masih terkunci oleh promote terencana sebelumnya. %s tidak dijalankan selama itu: memuat data membuat replika bisa ditulis sebentar, dan penjaga kunci master bisa mengkarantina master. Tekan "Buka kunci promote" pada pekerjaan promote itu dulu.`
+- T15b muat data ditolak selama kunci promote belum terbukti dibuka (`%s` kedua: nama tindakannya, `%s` ketiga: tautan ke pekerjaannya; menggantikan teks lama yang berkata "saat penjaga kunci sudah memutuskan"): `Master %s mungkin masih terkunci oleh promote terencana sebelumnya. %s tidak dijalankan selama itu: memuat data membuat replika bisa ditulis sebentar, dan penjaga kunci master bisa mengkarantina master. Tekan "Buka kunci promote" pada pekerjaan promote %s dulu.`
 - T16 akhir peringatan kunci yang dipertahankan penjaga: `Bila promote tidak dilanjutkan, tekan "Buka kunci promote" pada pekerjaan promote itu atau di halaman master. Jangan Resync kandidat selama master masih terkunci.`
 - T17 baris log saat panel gagal membuka kunci, juga untuk promote yang dibatalkan: `Kunci master tidak bisa dibuka (%v). Pada tenggat kunci agent master membukanya sendiri bila kandidat masih replika dan semua replika terbaca; bila tidak, kunci dipertahankan. Tekan "Buka kunci promote" untuk mencoba lagi. Jangan Resync kandidat selama master masih terkunci.`
 - T18 halaman master lama yang karantinanya tertunda (kalimat terakhir hanya bila agent pernah menolak): `Perintah karantina untuk server ini belum diterima; terakhir dicoba pukul %s. Panel mencoba lagi sendiri selama agent tersambung. Jawaban terakhir agent (bukan dari panel): <pesan agent>`
@@ -1159,7 +1235,7 @@ adalah tempat nilai. Tata letak layar `set-role` mengikuti pola teks
 - T24 promote ditolak, replika lain bisa ditulis: `Replika %s melaporkan bisa ditulis (super_read_only mati), jadi mungkin sudah menjadi master; promote ditolak, juga promote darurat. Bila %s memang bukan master (misalnya dibuka dengan tangan untuk perbaikan): kunci lagi di halaman replikanya, atau lepas dengan Lepas replika, lalu buka halaman ini lagi. Bila aplikasi sudah menulis ke %s: jangan promote; periksa server itu dulu.`
 - T24b sama, replika itu tidak menjawab: `Replika %s terakhir melaporkan bisa ditulis dan sekarang tidak menjawab, jadi panel tidak bisa memastikannya; promote ditolak, juga promote darurat. Bila Anda yakin %s bukan master: lepas dengan Lepas replika, lalu buka halaman ini lagi.`
 - T24c promote terencana, replika lain tidak terbaca: `Replika %s tidak bisa dibaca sekarang, jadi panel tidak bisa memastikan ia masih baca-saja; promote terencana ditolak. Sambungkan agent replika itu, atau lepas dengan Lepas replika, lalu buka halaman ini lagi.`
-- T24d promote darurat, catatan di layar: `Replika berikut tidak bisa dibaca sekarang dan dinilai dari laporan terakhirnya (baca-saja): %s.`
+- T24d promote darurat, catatan di layar: `Replika berikut tidak bisa dibaca sekarang; panel memakai laporan terakhirnya (baca-saja), atau tidak punya laporan sama sekali: %s.`
 - T25 spanduk dasbor: `Berkas kata sandi awal masih ada di host panel. Sesudah kata sandi itu Anda simpan di tempat aman, hapus berkasnya: sudo rm %s`
 - T26 kotak di dialog **Lepas replika** selagi master diduga tumbang: `Master %s sedang diduga tumbang. Bila replika ini harus menggantikannya, jangan lepas: jalankan Promote darurat dari halaman master, yang juga mengkarantina master lama. Replika yang dilepas lalu dibuka dengan tangan menjadi master kedua saat master lama hidup lagi.`
 - T27 flash sesudah lepas dan hentikan: `Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca. Kapan aman membukanya, dan caranya, ada di Panduan: "Memakai bekas replika sebagai server mandiri".`
@@ -1203,7 +1279,7 @@ adalah tempat nilai. Tata letak layar `set-role` mengikuti pola teks
   peringatan T20), buka dan kunci dengan kedua bendera (agent lama masih
   memakai `RESET PERSIST`), pengakhiran persetujuan (T21b), alamat replika di
   berkas kunci, pertanyaan `set-role` dan `unlock-master`, batas permintaan,
-  penanda folder cadangan, dan laporan "pekerjaan promote" di `mysql.status`
+  penanda folder cadangan, dan laporan "permintaan promote" di `mysql.status`
   (tanpa itu "Ulangi" promote yang mulainya tidak berjawab menunggu batas B,
   5.2). Aturan "Versi agent" yang ada tidak diubah: tindakan bergerbang dan
   promote darurat ke kandidat ber-agent lain versi tetap ditolak sampai agent
@@ -1216,10 +1292,16 @@ adalah tempat nilai. Tata letak layar `set-role` mengikuti pola teks
   (5.1) dan satu tanda pada token konfirmasi. Pekerjaan promote dari 0.2.0
   mengikuti aturan 5.2 pada "Ulangi" berikutnya; tenggat kunci tersimpan
   dipotong saat dibaca, dan pekerjaan yang terkirim tanpa id pekerjaan agent
-  dihitung "mulai tidak berjawab". Ambang disk tersimpan di atas 95 tetap
-  tersimpan; gerbang memakai 95. Sesi ada di memori: restart saat pembaruan
-  mengakhirinya, seperti setiap restart. Berkas kunci promote dari agent lama
-  dibaca lewat nama.
+  dihitung "mulai tidak berjawab". Promote terencana dari 0.2.0 yang kuncinya
+  dibuka penjaga sendiri masih membawa catatan "kunci diminta, belum terbukti
+  dibuka": sesudah pembaruan catatan itu hilang begitu laporan langsung
+  pertama master menunjukkan kedua bendera OFF, biasanya dalam beberapa detik
+  sesudah agentnya tersambung; sampai saat itu muat data dan promote terencana
+  baru dari master itu ditolak (T15b, T12c). Catatan milik pekerjaan yang
+  masternya sudah berganti tidak dihitung dan tidak menahan apa pun. Ambang
+  disk tersimpan di atas 95 tetap tersimpan; gerbang memakai 95. Sesi ada di
+  memori: restart saat pembaruan mengakhirinya, seperti setiap restart. Berkas
+  kunci promote dari agent lama dibaca lewat nama.
 - **Langkah pembaruan untuk operator** (masuk README "Pembaruan" dan catatan
   rilis):
   1. Perbarui panel, lalu **segera** setiap agent (perintah pasang ulang tiap
@@ -1253,10 +1335,11 @@ adalah tempat nilai. Tata letak layar `set-role` mengikuti pola teks
   tak kembali tanpa token dan tanpa gerbang; **Buka kunci promote** sesudah
   tenggat + 1 jam; tombol itu ditolak sesudah `mysql.promote` dikirim dan
   sesudah pekerjaannya digantikan; mulai tidak berjawab tidak pernah
-  disimpulkan "tidak terjadi" dari `mysql.status` saja; Resync ditolak selama
-  master terkunci; putaran karantina tidak berhenti karena penolakan;
-  konfirmasi dan login ber-cookie selagi batas nama pengguna penuh; token
-  jendela ditolak tindakan berat; test kunci-per-server dengan `-race`.
+  disimpulkan "tidak terjadi" dari `mysql.status` saja; muat data ditolak
+  selama catatan kunci berdiri dan master tidak punya laporan langsung;
+  putaran karantina tidak berhenti karena penolakan; konfirmasi dan login
+  ber-cookie selagi batas nama pengguna penuh; token jendela ditolak tindakan
+  berat; test kunci-per-server dengan `-race`.
 - **mysqld sungguhan (harness yang ada).** Tabel restart 5.4, dijalankan dulu
   pada kode sekarang lalu pada perbaikan; kunci promote dengan alamat
   tercatat; perintah yang panik di jendela operator; buka kunci lewat
@@ -1285,14 +1368,14 @@ adalah tempat nilai. Tata letak layar `set-role` mengikuti pola teks
 
 - Nama fungsi, berkas, field, kunci JSON dan kolom; bentuk cookie perangkat;
   bentuk kunci per server (5.3); bentuk field laporan baru.
-- Bentuk tanda "mulai tidak berjawab" di keadaan pekerjaan dan field
-  "pekerjaan promote" di `mysql.status` (5.2).
+- Bentuk tanda "mulai tidak berjawab" di keadaan pekerjaan dan bentuk field
+  "permintaan promote" di `mysql.status`; **artinya** tidak diserahkan (5.2).
 - Bentuk permintaan "akhiri persetujuan" (5.5): parameter opsional pada
   `mysql.rebuildApproval` atau perintah sendiri. Syaratnya tetap: selalu
   diizinkan di server yang dikarantina, hanya bisa mengakhiri, dan agent 0.2.0
   tidak terganggu olehnya.
-- Angka yang tidak ditetapkan: batas total sambungan UI, laju baris log
-  pekerjaan, batas baris karena sambungan berkedip.
+- Angka yang tidak ditetapkan: laju baris log pekerjaan, batas baris karena
+  sambungan berkedip.
 - Pembagian menjadi task (rencana pelaksanaan).
 
 **Yang belum diketahui dan harus diperiksa, di task yang disebut**
@@ -1325,10 +1408,10 @@ Bagian A, yang berbahaya, dalam urutan ini:
    promote terencana baru dan "Ulangi" selagi kunci belum terbukti dibuka;
    teks T9 sampai T12c dan T15 sampai T17.
 3. R-184, bagian "Ulangi": fungsi penolakan bersama dengan mulai, termasuk
-   pembacaan langsung R-198 (5.7), yang karena itu masuk bagian A; kata sandi
-   setiap kali; keadaan "terkirim" dengan tanda tidak berjawab, field
-   `mysql.status` di agent dan batas B; teks T13 sampai T14t, T24 sampai T24d,
-   B1.
+   pembacaan langsung R-198 dan fungsi "laporan segar" (5.7), yang karena itu
+   masuk bagian A (fungsi itu sudah dibutuhkan butir 2); kata sandi setiap
+   kali; keadaan "terkirim" dengan tanda tidak berjawab, field `mysql.status`
+   di agent dan batas B; teks T13 sampai T14t, T24 sampai T24d, B1.
 4. Kelompok kata sandi: jendela, R-182, R-183, R-191, Stop replika dan
    Telegram.
 5. R-185.
@@ -1409,13 +1492,16 @@ pertama, dengan perubahan yang disebut.
    terencana yang perintahnya sudah terkirim dan kandidatnya tidak pernah
    menjawab lagi. Master tetap baca-saja sampai root menjalankan
    `unlock-master` sesudah memastikan kandidat bukan dan tidak akan menjadi
-   master (T14t). Tombol di keadaan itu bisa membuat dua master.
+   master (T14t). Tombol di keadaan itu bisa membuat dua master. Hal yang sama
+   berlaku untuk bentuk majemuknya: promote darurat yang kandidatnya diam
+   sementara master lama kembali masih terkunci (T14u).
 6. **Selagi master masih terkunci oleh promote terencana yang gagal, panel
    menolak Resync, Buat replika, Tambah dan Lepas database dengan data,
    promote terencana baru, dan "Ulangi" promote itu, sampai kuncinya dibuka**
    (5.2), juga sesudah tenggat kunci lewat. Memuat data selagi kunci berdiri
    membuat penjaga mengkarantina master yang sehat. Harganya: satu klik **Buka
-   kunci promote** lebih dulu.
+   kunci promote** lebih dulu; dan sesudah panel restart, tindakan-tindakan
+   itu ditolak beberapa detik sampai laporan pertama master datang.
 7. **Promote terencana ditolak bila ada replika lain yang tidak bisa dibaca;
    promote darurat tidak** (5.7). Replika yang tidak terbaca mungkin master
    yang tidak dikenal. Bila salah: promote terencana menunggu agent replika
@@ -1500,8 +1586,9 @@ pertama, dengan perubahan yang disebut.
   lalu login (T1).
 - **Browser yang belum pernah login** tetap bisa dikunci dari luar, dan
   serangan dari banyak alamat masih bisa memenuhi slot pemeriksaan login
-  anonim. Cookie perangkat yang dicuri memberi 5 tebakan per 15 menit dari
-  tiap alamat.
+  anonim. Cookie perangkat yang dicuri memberi paling banyak 20 tebakan per 15
+  menit; sesudah panel restart, sebelum admin berhasil login sekali,
+  pencurinya bisa menahan login ber-cookie admin 15 menit berulang.
 - **Promote yang perintahnya terkirim dan kandidatnya tidak pernah kembali**
   tetap "selesai sebagian" dan menahan promote lain di topologi itu, juga
   sesudah root membuka master. Batas ini sudah ada. Panel tidak menawarkan
@@ -1511,8 +1598,12 @@ pertama, dengan perubahan yang disebut.
 - **Promote terencana, terkirim, kandidat diam:** jalan keluar master adalah
   perintah root dengan syarat yang dinilai orang (T14t). Root yang salah
   menilai mendapat dua master; karena itu `unlock-master` kini bertanya.
-- **Batas B** (agent lama yang tidak melaporkan pekerjaan promote) adalah
-  angka yang diturunkan dari batas pekerjaan agent; bila sebuah langkah agent
+- **Laporan langsung master sebagai bukti kunci sudah tidak ada.** Catatan
+  kunci dihapus oleh laporan master dengan kedua bendera OFF sesudah tenggat.
+  Agent master yang dibobol bisa melaporkan itu selagi terkunci; ia memang
+  sudah bisa membuka dirinya sendiri.
+- **Batas B** (pekerjaan yang dikirim ke agent sebelum pembaruan) adalah angka
+  yang diturunkan dari batas pekerjaan agent; bila sebuah langkah agent
   ternyata tidak berbatas, task berhenti dan melapor.
 - **Jendela "kunci mungkin berdiri" tetap ada untuk promote darurat.** Bila
   master mati sesudah promote terencana gagal dan sebelum kuncinya terbukti
@@ -1619,3 +1710,23 @@ tinjauan, bukan baris inventaris.
 | R-6 | Batas sambungan UI 64 per alamat, 512 seluruhnya | 5.8 |
 | R-7 | Aturan berhenti untuk "ukur dulu" | 5.4 butir 1 |
 | Putusan lain | `/usr/local` diterima; bunyi pilihan 1 dan 3 jendela kata sandi dikutip; empat pertanyaan lingkungan menjadi anggapan tertulis; R-198 pindah ke bagian A | 5.6, 5.12; bagian 4; bagian 8; bagian 6 |
+
+**Sesudah pemeriksaan ulang tinjauan rancangan.** Peninjau memeriksa revisi di
+atas: 14 dari 15 temuan tertutup, T-4 sebagian; tidak ada Kritis atau Tinggi
+baru; lima Sedang baru (N-1 sampai N-5) dan delapan Rendah (NR-1 sampai NR-8).
+Semuanya diambil.
+
+| Temuan | Yang berubah | Di mana |
+|---|---|---|
+| N-1 | Field `mysql.status` berarti "permintaan `mysql.promote` sudah dibaca agent dan pekerjaannya belum berakhir", dipasang di putaran baca; panel menghapus id pekerjaan agent lama dan memasang tanda "tidak berjawab" sebelum tiap kirim; "ada" mengalahkan bukti lain; batas B bergantung pada arti itu | 5.2 ("Arti field itu", "Batas B"); bagian 6 |
+| N-2 (melengkapi T-4) | Penolakan muat data **menambah** aturan jam: di dalam jendela selalu ditolak; sesudahnya ditolak selama catatan berdiri; tanpa laporan langsung master berarti ditolak | 5.2; T15b; 5.13 |
+| N-3 | Catatan kunci dihitung hanya selama server itu master topologinya dan belum ada promosi yang selesai sesudahnya; laporan langsung dengan kedua bendera OFF sesudah tenggat + kelonggaran menghapusnya; pekerjaan 0.2.0 dijelaskan | 5.2; 5.12; bagian 8 |
+| N-4 | Jumlah per cookie perangkat 20 per 15 menit untuk semua alamat; yang ditolak hanya pasangan yang belum pernah berhasil sejak panel menyala; sisa untuk pencuri disebut | 5.1; bagian 8 |
+| N-5 | Keadaan majemuk masuk tabel dan pemeriksaan N1; T11s dipecah (T11s, T11t); ekor T14u pada promote darurat | 5.2 baris 7; T11t, T14u; bagian 7 |
+| NR-1 | Putaran karantina memakai keputusan `onOnline`: tetap mengirim sesudah promote kedua, atas nama master yang sekarang | 5.3 |
+| NR-2 | T12c dan T15b menautkan pekerjaannya | T12c, T15b |
+| NR-3, NR-4 | Baris 5 dan 6 tidak pernah ditolak catatan kunci; halaman master untuk pekerjaan yang sudah dikirim menampilkan T14, bukan tombol | 5.2 |
+| NR-5 | T11c memberi langkah berikutnya | T11c |
+| NR-6 | Batas total sambungan UI tidak lagi tercatat terbuka | bagian 6 |
+| NR-7 | Replika tanpa laporan sama sekali pada promote darurat | 5.7; T24d |
+| NR-8 | Fungsi "laporan segar" dibangun di bagian A | 5.7; bagian 6 |
