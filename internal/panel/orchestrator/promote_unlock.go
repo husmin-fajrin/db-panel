@@ -63,6 +63,10 @@ const (
 	textUnlockUnrecorded = "Agent master %s sudah membuka kunci promote, tetapi panel tidak mencatatnya karena pekerjaan atau " +
 		"topologi berubah saat perintah berjalan. Master itu sekarang tidak lagi dikunci oleh promote ini. Periksa pekerjaan " +
 		"promote yang lebih baru di halaman Pekerjaan sebelum melakukan apa pun pada master ini."
+	// textUnlockBusy refuses the unlock while another job is active on
+	// the master (not in the spec; ErrBusy's words and textUnlockRunning's
+	// "tunggu sampai selesai").
+	textUnlockBusy = "master %s masih punya pekerjaan yang belum selesai; tunggu sampai selesai"
 	// textUnlockInFlight is P11 (not in the spec).
 	textUnlockInFlight = "Kunci promote master %s sedang dibuka dari panel; tunggu sampai selesai (paling lama dua menit), " +
 		"lalu coba lagi."
@@ -113,6 +117,8 @@ const (
 	UnlockQuarantined       = "quarantined"
 	UnlockRefused           = "refused"
 	UnlockNoCredential      = "no_credential"
+	// UnlockBusy: another job (not a promotion) is active on the master.
+	UnlockBusy = "busy"
 	// UnlockInFlight: an unlock of the same master is on its way (P11).
 	UnlockInFlight = "in_flight"
 	// UnlockOpenedUnrecorded: the agent lifted the lock, but the repeated
@@ -150,6 +156,8 @@ func (e *UnlockLockError) Error() string {
 		return refused() + fmt.Sprintf(textUnlockCandidateWritable, e.Candidate)
 	case UnlockQuarantined:
 		return refused() + textUnlockQuarantined
+	case UnlockBusy:
+		return fmt.Sprintf(textUnlockBusy, e.Master)
 	case UnlockInFlight:
 		return fmt.Sprintf(textUnlockInFlight, e.Master)
 	case UnlockOpenedUnrecorded:
@@ -281,6 +289,17 @@ func (r *Runner) unlockChecks(jobID string) (unlockTarget, error) {
 	switch j.Status {
 	case store.JobQueued, store.JobRunning, store.JobWaiting:
 		return t, &UnlockLockError{Code: UnlockRunning, Master: name}
+	}
+	// Another job active on the master: a promote job Retry reopened
+	// before its promotion row is running again, or any other job. No
+	// unlock goes into a master another job is working on (C-1).
+	if other, busy, err := r.d.Store.ActiveJobForServer(t.master); err != nil {
+		return t, err
+	} else if busy && other.ID != j.ID {
+		if isPromote(other.Kind) {
+			return t, &UnlockLockError{Code: UnlockNewerOpen, Master: name, NewerJobID: other.ID}
+		}
+		return t, &UnlockLockError{Code: UnlockBusy, Master: name}
 	}
 	if err := r.unlockSuperseded(t); err != nil {
 		return t, err

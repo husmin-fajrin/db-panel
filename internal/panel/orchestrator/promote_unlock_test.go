@@ -673,3 +673,92 @@ func TestUnlockOpenedUnrecorded(t *testing.T) {
 		t.Fatalf("job log lacks P10:\n%s", e.jobLog(id))
 	}
 }
+
+// Fix round 2 (C-1, open path): another job active on the master (a
+// promote job B reopened by Retry before its promotion row is running
+// again, or any other job) refuses the unlock before anything is sent.
+func TestUnlockRefusedWhileOtherJobActiveOnMaster(t *testing.T) {
+	t.Run("reopened promote job", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		a, _ := g.plantStanding(time.Now().Add(-2 * time.Minute))
+		b, bProm := g.plantPlanned(`{"master_server_id":%d,"candidate_server_id":%d,"promotion_id":%d,"lock_unlocked":true}`, nil)
+		// As Retry leaves B under startMu: the job running, its promotion
+		// still failed.
+		if err := e.st.ReopenJob(b, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := e.st.GetPromotion(bProm); p.Status != promotionFailed {
+			t.Fatalf("B's promotion = %s", p.Status)
+		}
+		marks := g.marks()
+		_, err := e.r.UnlockPromoteLock(context.Background(), a)
+		ue := wantUnlockRefused(t, err, UnlockNewerOpen, fmt.Sprintf(wantT11t, b))
+		if ue.NewerJobID != b {
+			t.Fatalf("NewerJobID = %q, want %s", ue.NewerJobID, b)
+		}
+		g.wantNoCommands(t, marks)
+		if e.r.unlockInFlightNow(g.m.id) {
+			t.Fatal("mark left")
+		}
+	})
+	t.Run("other job", func(t *testing.T) {
+		g := newPromoteRig(t)
+		e := g.e
+		a, _ := g.plantStanding(time.Now().Add(-time.Minute))
+		if err := e.st.CreateJob(store.Job{ID: "otherjob0000000000000000000000001", Kind: KindMySQLTLS, ServerID: g.m.id,
+			TopologyID: g.topo.ID, ParamsJSON: "{}", CreatedAt: time.Now()}, []string{"x"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.st.UpdateJob("otherjob0000000000000000000000001", store.JobRunning, 0, "", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		marks := g.marks()
+		_, err := e.r.UnlockPromoteLock(context.Background(), a)
+		wantUnlockRefused(t, err, UnlockBusy,
+			"master db-master masih punya pekerjaan yang belum selesai; tunggu sampai selesai")
+		g.wantNoCommands(t, marks)
+		if e.r.unlockInFlightNow(g.m.id) {
+			t.Fatal("mark left")
+		}
+	})
+}
+
+// TestUnlockInFlightRefusesStartInsidePromoteView (C-1): a start already
+// inside PromoteView when the mark is set is refused with P11 by its check
+// under startMu.
+func TestUnlockInFlightRefusesStartInsidePromoteView(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id, _ := g.plantStanding(time.Now().Add(-time.Minute))
+	hold := make(chan struct{})
+	var once sync.Once
+	g.m.on("mysql.binlogTail", func(json.RawMessage) (any, error) {
+		<-hold
+		return proto.BinlogTailResult{GTIDExecuted: masterGTID, File: "binlog.000007", MySQLRunning: true}, nil
+	})
+	t.Cleanup(func() { once.Do(func() { close(hold) }) })
+	started := make(chan error, 1)
+	go func() {
+		_, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+		started <- err
+	}()
+	e.waitFor("PromoteView reads the master", func() bool { return g.m.count("mysql.binlogTail") >= 1 })
+	release, result := g.heldUnlock(t, id)
+	once.Do(func() { close(hold) })
+	select {
+	case err := <-started:
+		if err == nil || err.Error() != wantP11 {
+			t.Fatalf("StartPromote = %v, want P11", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("StartPromote did not end")
+	}
+	if g.c.count("mysql.promote") != 0 || g.m.count("mysql.lockForPromote") != 0 {
+		t.Fatal("the start sent a promote command")
+	}
+	release()
+	if _, err := result(); err != nil {
+		t.Fatalf("UnlockPromoteLock: %v", err)
+	}
+}
