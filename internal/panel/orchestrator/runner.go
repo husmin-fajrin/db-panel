@@ -173,6 +173,9 @@ type Runner struct {
 	// unlockTimeout bounds mysql.unlockPromote (callTimeout); tests
 	// shorten it.
 	unlockTimeout time.Duration
+	// afterUnlockAnswer, when set (tests), runs in UnlockPromoteLock
+	// between the agent's answer and the repeated checks.
+	afterUnlockAnswer func(jobID string)
 	// afterReopen, when set (tests), runs in Retry between ReopenJob and
 	// launch.
 	afterReopen func(jobID string)
@@ -191,8 +194,11 @@ type Runner struct {
 	wg   sync.WaitGroup
 
 	startMu sync.Mutex // serialises the checks and creation of new jobs
-	invMu   sync.Mutex // serialises read-modify-write of inventories
-	promoMu sync.Mutex // serialises read-modify-write of promotions
+	// unlocking: masters whose "Buka kunci promote" has mysql.unlockPromote
+	// on its way (C-1); guarded by startMu, in memory only.
+	unlocking map[int64]bool
+	invMu     sync.Mutex // serialises read-modify-write of inventories
+	promoMu   sync.Mutex // serialises read-modify-write of promotions
 	// repointMu serialises mysql.repoint and mysql.quarantine sent outside
 	// a job step (OnOnline, RepointNow) with each other and with the job.
 	repointMu sync.Mutex
@@ -221,7 +227,7 @@ func New(d Deps) *Runner {
 		d: d, log: d.Logger, now: d.Now,
 		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery, catchUpMax: defaultCatchUpMax,
 		promoteCatchUp: defaultPromoteCatchUp, verifyIOWait: defaultVerifyIOWait, unlockTimeout: callTimeout,
-		base: base, stop: stop, live: make(map[string]*liveJob),
+		base: base, stop: stop, live: make(map[string]*liveJob), unlocking: make(map[int64]bool),
 	}
 }
 
@@ -982,6 +988,9 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 	}
 	switch j.Status {
 	case store.JobFailed, store.JobPartial, store.JobWaiting:
+		if err := r.refuseRetryWhileUnlocking(j); err != nil {
+			return err
+		}
 		if err := r.refuseQuarantinedTLS(j); err != nil {
 			return err
 		}

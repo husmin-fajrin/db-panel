@@ -161,6 +161,9 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	}
 	// Refusals that need no agent come first; they are checked again
 	// under startMu.
+	if err := r.refuseUnlockInFlightNow(p.MasterServerID); err != nil {
+		return "", err
+	}
 	if topo, err := r.d.Store.GetTopologyByMaster(p.MasterServerID); err == nil && topo.CutoverPending {
 		return "", errCutoverStillPending
 	} else if err == nil {
@@ -189,6 +192,9 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	}
 	if topo.CutoverPending {
 		return "", errCutoverStillPending
+	}
+	if err := r.refuseUnlockInFlight(topo.MasterServerID); err != nil {
+		return "", err
 	}
 	mode := view.Mode
 	switch p.Mode {

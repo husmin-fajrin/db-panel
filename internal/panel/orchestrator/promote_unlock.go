@@ -58,6 +58,14 @@ const (
 	textUnlockQuarantined = "Server ini sudah dikarantina; tindakannya ada di kotak Master lama di halaman server."
 	// textUnlockNoCredential is P2; T11's end follows.
 	textUnlockNoCredential = "Panel tidak bisa menyusun kredensial kandidat %s untuk membuka kunci (%s). "
+	// textUnlockUnrecorded is P10 (not in the spec): the agent lifted the
+	// lock, the panel could not record it.
+	textUnlockUnrecorded = "Agent master %s sudah membuka kunci promote, tetapi panel tidak mencatatnya karena pekerjaan atau " +
+		"topologi berubah saat perintah berjalan. Master itu sekarang tidak lagi dikunci oleh promote ini. Periksa pekerjaan " +
+		"promote yang lebih baru di halaman Pekerjaan sebelum melakukan apa pun pada master ini."
+	// textUnlockInFlight is P11 (not in the spec).
+	textUnlockInFlight = "Kunci promote master %s sedang dibuka dari panel; tunggu sampai selesai (paling lama dua menit), " +
+		"lalu coba lagi."
 	// textPromoteLockStands is T12b.
 	textPromoteLockStands = `Master %s mungkin masih terkunci oleh promote ini. Tekan "Buka kunci promote" dulu; sesudah ` +
 		`kuncinya terbuka, "Ulangi dari tahap ini" tersedia lagi.`
@@ -105,6 +113,11 @@ const (
 	UnlockQuarantined       = "quarantined"
 	UnlockRefused           = "refused"
 	UnlockNoCredential      = "no_credential"
+	// UnlockInFlight: an unlock of the same master is on its way (P11).
+	UnlockInFlight = "in_flight"
+	// UnlockOpenedUnrecorded: the agent lifted the lock, but the repeated
+	// checks refused before the record was stored (P10).
+	UnlockOpenedUnrecorded = "opened_unrecorded"
 )
 
 // UnlockLockError is a refusal of "Buka kunci promote"; Code picks the text.
@@ -137,6 +150,10 @@ func (e *UnlockLockError) Error() string {
 		return refused() + fmt.Sprintf(textUnlockCandidateWritable, e.Candidate)
 	case UnlockQuarantined:
 		return refused() + textUnlockQuarantined
+	case UnlockInFlight:
+		return fmt.Sprintf(textUnlockInFlight, e.Master)
+	case UnlockOpenedUnrecorded:
+		return fmt.Sprintf(textUnlockUnrecorded, e.Master)
 	case UnlockNoCredential:
 		return fmt.Sprintf(textUnlockNoCredential, e.Candidate, e.Cause) + textUnlockNoResync
 	}
@@ -312,15 +329,26 @@ func (r *Runner) unlockSuperseded(t unlockTarget) error {
 	return nil
 }
 
-// UnlockPromoteLock is "Buka kunci promote" of job jobID (spec 5.2): rules
-// 1 to 4 (unlockChecks) under startMu; the agent of the job's master is
-// asked without it; the record (LockUnlocked) is stored only after rules 1
-// to 4 passed again under startMu. A refusal is an *UnlockLockError except
-// for rule 1 and a store failure.
+// UnlockPromoteLock is "Buka kunci promote" of job jobID (spec 5.2):
+//   - rules 1 to 5 (unlockChecks, the agent online) under startMu, nothing
+//     sent before them;
+//   - the candidate's credential (it may ask the master's agent to store
+//     the panel's CA), without startMu;
+//   - rules 1 to 4 again under startMu, and the master marked in flight
+//     (unlocking): until the mark goes, Retry of a promote job of that
+//     master, a promotion start in its topology and a second unlock of it
+//     are refused with P11 (C-1), so that no relock of the same candidate
+//     can be lifted by this unlock arriving late;
+//   - mysql.unlockPromote without startMu, bounded by unlockTimeout;
+//   - on the agent's "lifted" or "not locked", rules 1 to 4 once more under
+//     startMu before the record (LockUnlocked) is stored; when they refuse
+//     now, the record stands and the job log and the refusal say that the
+//     agent lifted the lock (P10, opened_unrecorded).
+//
+// The mark is removed on every return path. A refusal is an
+// *UnlockLockError except for rule 1 and a store failure.
 func (r *Runner) UnlockPromoteLock(ctx context.Context, jobID string) (UnlockOutcome, error) {
-	r.startMu.Lock()
-	t, err := r.unlockChecks(jobID)
-	r.startMu.Unlock()
+	t, err := r.unlockFirstChecks(jobID, false)
 	if err != nil {
 		return 0, err
 	}
@@ -334,31 +362,111 @@ func (r *Runner) UnlockPromoteLock(ctx context.Context, jobID string) (UnlockOut
 		return 0, &UnlockLockError{Code: UnlockNoCredential, Master: masterName, Candidate: candName,
 			Cause: r.agentErrText(err)}
 	}
-	ans, err := r.sendUnlockPromote(ctx, t.master, cred)
-	if err != nil {
-		r.log.Warn("unlock promote refused", "job", jobID, "master", t.master, "err", logErr(err))
-		if !hub.SentByAgent(err) {
+	if t, err = r.unlockFirstChecks(jobID, true); err != nil {
+		return 0, err
+	}
+	out, sendErr, err := r.unlockMarked(ctx, t, cred)
+	if sendErr != nil {
+		r.log.Warn("unlock promote refused", "job", jobID, "master", t.master, "err", logErr(sendErr))
+		if !hub.SentByAgent(sendErr) {
 			// No answer (K12): the panel cannot tell whether the lock is
 			// gone; the record stands.
 			return 0, &UnlockLockError{Code: UnlockAgentOffline, Master: masterName}
 		}
-		return 0, r.unlockRefusal(ctx, t, err)
+		return 0, r.unlockRefusal(ctx, t, sendErr)
 	}
-	r.startMu.Lock()
-	defer r.startMu.Unlock()
-	if _, err := r.unlockChecks(jobID); err != nil {
-		r.log.Warn("unlock promote: job changed while the agent answered; record not stored", "job", jobID, "err", logErr(err))
+	if err != nil {
 		return 0, err
 	}
-	out := UnlockOpened
+	r.log.Info("promote lock lifted by the operator", "job", jobID, "master", t.master, "not_locked", out == UnlockNotLocked)
+	return out, nil
+}
+
+// unlockFirstChecks are rules 1 to 4 under startMu, refusing with P11
+// while an unlock of the job's master is in flight; mark also marks it in
+// flight.
+func (r *Runner) unlockFirstChecks(jobID string, mark bool) (unlockTarget, error) {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	t, err := r.unlockChecks(jobID)
+	if err != nil {
+		return t, err
+	}
+	if err := r.refuseUnlockInFlight(t.master); err != nil {
+		return t, err
+	}
+	if mark {
+		r.unlocking[t.master] = true
+	}
+	return t, nil
+}
+
+// unlockMarked sends mysql.unlockPromote for t, whose master is marked in
+// flight, and on the agent's "lifted" or "not locked" stores the record
+// after rules 1 to 4 passed again under startMu; it removes the mark on
+// every path. sendErr is the call's failure; err any later refusal.
+func (r *Runner) unlockMarked(ctx context.Context, t unlockTarget, cred proto.PeerCred) (out UnlockOutcome, sendErr, err error) {
+	defer func() {
+		r.startMu.Lock()
+		delete(r.unlocking, t.master)
+		r.startMu.Unlock()
+	}()
+	ans, sendErr := r.sendUnlockPromote(ctx, t.master, cred)
+	if sendErr != nil {
+		return 0, sendErr, nil
+	}
+	if r.afterUnlockAnswer != nil {
+		r.afterUnlockAnswer(t.job.ID)
+	}
+	out = UnlockOpened
 	if ans == unlockWasNotLocked {
 		out = UnlockNotLocked
 	}
-	if err := r.storeLockOpened(jobID, UnlockOutcomeText(out, masterName)); err != nil {
-		return 0, err
+	masterName := r.nameOf(t.master)
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if _, err := r.unlockChecks(t.job.ID); err != nil {
+		r.log.Warn("unlock promote: the agent lifted the lock, but the job or topology changed meanwhile; record not stored",
+			"job", t.job.ID, "err", logErr(err))
+		line := fmt.Sprintf(textUnlockUnrecorded, masterName)
+		r.appendJobLog(t.job.ID, "warn", line)
+		return 0, nil, &UnlockLockError{Code: UnlockOpenedUnrecorded, Master: masterName}
 	}
-	r.log.Info("promote lock lifted by the operator", "job", jobID, "master", t.master, "not_locked", ans == unlockWasNotLocked)
-	return out, nil
+	if err := r.storeLockOpened(t.job.ID, UnlockOutcomeText(out, masterName)); err != nil {
+		return 0, nil, err
+	}
+	return out, nil, nil
+}
+
+// refuseUnlockInFlight is P11 while an unlock of masterID is in flight.
+// Callers hold startMu.
+func (r *Runner) refuseUnlockInFlight(masterID int64) error {
+	if r.unlocking[masterID] {
+		return &UnlockLockError{Code: UnlockInFlight, Master: r.nameOf(masterID)}
+	}
+	return nil
+}
+
+// refuseUnlockInFlightNow is refuseUnlockInFlight taking startMu, for a
+// caller that asks agents before it takes it (StartPromote).
+func (r *Runner) refuseUnlockInFlightNow(masterID int64) error {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	return r.refuseUnlockInFlight(masterID)
+}
+
+// refuseRetryWhileUnlocking refuses Ulangi of a promote job whose master
+// has an unlock in flight (P11). Callers hold startMu.
+func (r *Runner) refuseRetryWhileUnlocking(j store.Job) error {
+	if !isPromote(j.Kind) {
+		return nil
+	}
+	master := j.ServerID
+	var st jobState
+	if json.Unmarshal([]byte(j.ParamsJSON), &st) == nil && st.MasterServerID != 0 {
+		master = st.MasterServerID
+	}
+	return r.refuseUnlockInFlight(master)
 }
 
 // unlockRefusal words the master's agent's refusal err of the unlock of
@@ -413,14 +521,20 @@ func (r *Runner) storeLockOpened(id, line string) error {
 	if err := r.d.Store.SetJobParams(id, string(b)); err != nil {
 		return err
 	}
+	r.appendJobLog(id, "info", line)
+	return nil
+}
+
+// appendJobLog adds line to the log of job id, which no goroutine runs,
+// and publishes it.
+func (r *Runner) appendJobLog(id, level, line string) {
 	now := r.now()
-	lid, err := r.d.Store.AppendJobLog(id, "info", line, now)
+	lid, err := r.d.Store.AppendJobLog(id, level, line, now)
 	if err != nil {
 		r.log.Warn("job log", "job", id, "err", err)
-		return nil
+		return
 	}
-	r.d.Publish("job_log", map[string]any{"job_id": id, "id": lid, "ts": now, "level": "info", "message": line})
-	return nil
+	r.d.Publish("job_log", map[string]any{"job_id": id, "id": lid, "ts": now, "level": level, "message": line})
 }
 
 // UnlockLockOffered reports whether the job page offers "Buka kunci

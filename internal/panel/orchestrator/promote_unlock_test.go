@@ -2,9 +2,11 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -481,5 +483,191 @@ func TestEmergencyLockWindowTextT15(t *testing.T) {
 	err := g.e.r.refuseWhileLockMayStand(g.m.id, verbEmergency)
 	if err == nil || !strings.HasSuffix(err.Error(), ". "+wantT15) || strings.Contains(err.Error(), "Ulangi") {
 		t.Fatalf("emergency refusal = %v, want it to end with T15", err)
+	}
+}
+
+// Fix round 1 (C-1, I-1): an unlock in flight, and an unlock the panel
+// could not record.
+const (
+	wantP10 = `Agent master db-master sudah membuka kunci promote, tetapi panel tidak mencatatnya karena pekerjaan atau topologi berubah saat perintah berjalan. Master itu sekarang tidak lagi dikunci oleh promote ini. Periksa pekerjaan promote yang lebih baru di halaman Pekerjaan sebelum melakukan apa pun pada master ini.`
+	wantP11 = `Kunci promote master db-master sedang dibuka dari panel; tunggu sampai selesai (paling lama dua menit), lalu coba lagi.`
+)
+
+// unlockInFlightNow reports whether an unlock of master is marked in flight.
+func (r *Runner) unlockInFlightNow(master int64) bool {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	return r.unlocking[master]
+}
+
+// heldUnlock starts UnlockPromoteLock of id with the master's agent
+// holding its answer to mysql.unlockPromote until release is called; it
+// returns once the command reached the agent.
+func (g *promoteRig) heldUnlock(t *testing.T, id string) (release func(), result func() (UnlockOutcome, error)) {
+	t.Helper()
+	gate := make(chan struct{})
+	g.m.on("mysql.unlockPromote", func(json.RawMessage) (any, error) {
+		<-gate
+		return nil, nil
+	})
+	type res struct {
+		out UnlockOutcome
+		err error
+	}
+	done := make(chan res, 1)
+	before := g.m.count("mysql.unlockPromote")
+	go func() {
+		out, err := g.e.r.UnlockPromoteLock(context.Background(), id)
+		done <- res{out, err}
+	}()
+	g.e.waitFor("unlockPromote reached the agent", func() bool { return g.m.count("mysql.unlockPromote") == before+1 })
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	return release, func() (UnlockOutcome, error) {
+		select {
+		case r := <-done:
+			return r.out, r.err
+		case <-time.After(10 * time.Second):
+			t.Fatal("UnlockPromoteLock did not end")
+			return 0, nil
+		}
+	}
+}
+
+// TestUnlockInFlightRefusesRetry (C-1): while mysql.unlockPromote is on its
+// way, Ulangi of a promote job of that master is refused with P11 and sends
+// nothing; once the unlock returned, the mark is gone. Also for a job whose
+// record was settled open (the master page's fallback offers it).
+func TestUnlockInFlightRefusesRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(g *promoteRig) string
+	}{
+		{"record stands", func(g *promoteRig) string {
+			id, _ := g.plantStanding(time.Now().Add(-time.Minute))
+			return id
+		}},
+		{"record settled open", func(g *promoteRig) string {
+			id, _ := g.plantPlanned(`{"master_server_id":%d,"candidate_server_id":%d,"promotion_id":%d,"lock_unlocked":true}`, nil)
+			if got, _, err := g.e.r.UnlockLockJob(g.m.id); err != nil || got != id {
+				g.e.t.Fatalf("UnlockLockJob = %q, %v; want the fallback %s", got, err, id)
+			}
+			return id
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newPromoteRig(t)
+			e := g.e
+			id := tc.plant(g)
+			release, result := g.heldUnlock(t, id)
+			if !e.r.unlockInFlightNow(g.m.id) {
+				t.Fatal("no in-flight mark during the unlock")
+			}
+			marks := g.marks()
+			if err := e.r.Retry(id, JobAck{}); err == nil || err.Error() != wantP11 {
+				t.Fatalf("Retry during the unlock = %v, want P11", err)
+			}
+			g.wantNoCommands(t, marks)
+			if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+				t.Fatalf("job = %s, want failed", j.Status)
+			}
+			release()
+			if out, err := result(); err != nil || out != UnlockOpened {
+				t.Fatalf("UnlockPromoteLock = %v, %v", out, err)
+			}
+			if e.r.unlockInFlightNow(g.m.id) {
+				t.Fatal("mark left after the unlock")
+			}
+		})
+	}
+}
+
+// TestUnlockInFlightRefusesPromoteStart (C-1): planned and emergency starts
+// in the master's topology are refused with P11 during the unlock, before
+// any agent is asked; a start in another topology is not.
+func TestUnlockInFlightRefusesPromoteStart(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id, _ := g.plantStanding(time.Now().Add(-time.Minute))
+	m2, _ := e.readyMaster("db-master-2")
+	release, result := g.heldUnlock(t, id)
+	ctx := context.Background()
+	marks := g.marks()
+	for _, p := range []PromoteParams{
+		{MasterServerID: g.m.id, CandidateServerID: g.c.id, Mode: proto.PromotePlanned},
+		{MasterServerID: g.m.id, CandidateServerID: g.b.id, Mode: proto.PromoteEmergency, OldMasterDeadAck: true},
+		{MasterServerID: g.m.id, CandidateServerID: g.b.id},
+	} {
+		if _, err := e.r.StartPromote(ctx, p); err == nil || err.Error() != wantP11 {
+			t.Fatalf("StartPromote %+v during the unlock = %v, want P11", p, err)
+		}
+	}
+	g.wantNoCommands(t, marks)
+	if _, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: m2.id, CandidateServerID: g.c.id}); err != nil &&
+		err.Error() == wantP11 {
+		t.Fatal("a start in another topology refused with P11")
+	}
+	// A second Buka kunci promote for that master.
+	if _, err := e.r.UnlockPromoteLock(ctx, id); err == nil || err.Error() != wantP11 {
+		t.Fatalf("second unlock = %v, want P11", err)
+	}
+	release()
+	if _, err := result(); err != nil {
+		t.Fatalf("UnlockPromoteLock: %v", err)
+	}
+}
+
+// TestUnlockInFlightMarkClearedOnEveryPath (C-1): the mark goes on an
+// agent refusal, a timeout and a refusal of the repeated checks.
+func TestUnlockInFlightMarkClearedOnEveryPath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(g *promoteRig)
+		code  string
+	}{
+		{"agent refusal", func(g *promoteRig) { g.m.fail("mysql.unlockPromote", "kunci tidak dibuka") }, UnlockRefused},
+		{"timeout", func(g *promoteRig) {
+			g.e.r.unlockTimeout = 200 * time.Millisecond
+			g.m.mu.Lock()
+			g.m.silent = map[string]bool{"mysql.unlockPromote": true}
+			g.m.mu.Unlock()
+		}, UnlockAgentOffline},
+		{"repeated checks refuse", func(g *promoteRig) {
+			g.m.reply("mysql.unlockPromote", nil)
+			g.e.r.afterUnlockAnswer = func(string) { g.laterPromotion(promotionPartial) }
+		}, UnlockOpenedUnrecorded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newPromoteRig(t)
+			id, _ := g.plantStanding(time.Now().Add(-time.Minute))
+			tc.setup(g)
+			_, err := g.e.r.UnlockPromoteLock(context.Background(), id)
+			if ue, ok := errors.AsType[*UnlockLockError](err); !ok || ue.Code != tc.code {
+				t.Fatalf("UnlockPromoteLock = %v, want code %s", err, tc.code)
+			}
+			if g.e.r.unlockInFlightNow(g.m.id) {
+				t.Fatal("mark left")
+			}
+		})
+	}
+}
+
+// TestUnlockOpenedUnrecorded (I-1): the agent lifted the lock, but a newer
+// promotion appeared before the repeated checks: the record stands, the job
+// log and the refusal say what happened (P10).
+func TestUnlockOpenedUnrecorded(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id, _ := g.plantStanding(time.Now().Add(-time.Minute))
+	g.m.reply("mysql.unlockPromote", nil)
+	e.r.afterUnlockAnswer = func(string) { g.laterPromotion(promotionPartial) }
+	_, err := e.r.UnlockPromoteLock(context.Background(), id)
+	wantUnlockRefused(t, err, UnlockOpenedUnrecorded, wantP10)
+	if st := e.storedState(id); st.LockUnlocked {
+		t.Fatal("record stored open")
+	}
+	if !strings.Contains(e.jobLog(id), wantP10) {
+		t.Fatalf("job log lacks P10:\n%s", e.jobLog(id))
 	}
 }
