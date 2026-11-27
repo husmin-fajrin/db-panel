@@ -591,6 +591,8 @@ func TestUnlockInFlightRefusesPromoteStart(t *testing.T) {
 	e := g.e
 	id, _ := g.plantStanding(time.Now().Add(-time.Minute))
 	m2, _ := e.readyMaster("db-master-2")
+	// Its start goes past the mark and reads its master (PromoteView).
+	m2.reply("mysql.binlogTail", proto.BinlogTailResult{GTIDExecuted: masterGTID, File: "binlog.000007", MySQLRunning: true})
 	release, result := g.heldUnlock(t, id)
 	ctx := context.Background()
 	marks := g.marks()
