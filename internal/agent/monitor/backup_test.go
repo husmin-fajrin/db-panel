@@ -363,11 +363,15 @@ func TestBackupReasonMapsErrors(t *testing.T) {
 }
 
 // fakeScan stands in for scanBackup: it records the folders it was asked
-// for and, while gate is set, waits for it before answering.
+// for and, while gate is set, waits for it before answering. After it has
+// recorded a call it sends on started, so a test can wait for the scan
+// goroutine (the monitor starts it without waiting for it to run) before it
+// looks at the calls.
 type fakeScan struct {
-	mu    sync.Mutex
-	calls []string
-	gate  chan struct{}
+	mu      sync.Mutex
+	calls   []string
+	gate    chan struct{}
+	started chan string
 }
 
 func (f *fakeScan) scan(folder string, now func() time.Time) backupResult {
@@ -375,6 +379,7 @@ func (f *fakeScan) scan(folder string, now func() time.Time) backupResult {
 	f.calls = append(f.calls, folder)
 	gate := f.gate
 	f.mu.Unlock()
+	f.started <- folder // buffered well past any test's scans
 	if gate != nil {
 		<-gate
 	}
@@ -386,6 +391,19 @@ func (f *fakeScan) folders() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
+}
+
+// waitStarted waits, with a bound, for the next scan to have recorded its
+// call and returns its folder.
+func (f *fakeScan) waitStarted(t *testing.T) string {
+	t.Helper()
+	select {
+	case folder := <-f.started:
+		return folder
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fake scanner was never called")
+		return ""
+	}
 }
 
 func (f *fakeScan) setGate(g chan struct{}) {
@@ -400,7 +418,7 @@ func (f *fakeScan) setGate(g chan struct{}) {
 func newBackupRig(t *testing.T) (*rig, *fakeScan, chan wait) {
 	t.Helper()
 	r := newRig(t, base())
-	fsc := &fakeScan{}
+	fsc := &fakeScan{started: make(chan string, 64)}
 	timers := make(chan wait, 64)
 	r.m.mu.Lock()
 	r.m.scan = fsc.scan
@@ -458,6 +476,9 @@ func TestBackupScanOneAtATime(t *testing.T) {
 	if sw.d != 10*time.Second {
 		t.Fatalf("loop waits %v for a scan, want 10s", sw.d)
 	}
+	if got := fsc.waitStarted(t); got != "/srv/a" {
+		t.Fatalf("scan started on %q, want /srv/a", got)
+	}
 	r.clock.advance(10 * time.Second)
 	sw.ch <- r.clock.Now()
 	r.idle()
@@ -478,6 +499,9 @@ func TestBackupScanOneAtATime(t *testing.T) {
 	}
 	if len(timers) != 0 {
 		t.Fatalf("%d more scan bounds asked for, want none", len(timers))
+	}
+	if len(fsc.started) != 0 {
+		t.Fatalf("%d more scans started, want none", len(fsc.started))
 	}
 	if n := r.logs.count("backup folder scan still running"); n < 1 || n > 8 {
 		t.Errorf("still-running warning logged %d times over 7 minutes, want 1..8", n)
@@ -500,6 +524,9 @@ func TestBackupScanOneAtATime(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	r.tick(15 * time.Second)
+	if got := fsc.waitStarted(t); got != "/srv/b" {
+		t.Fatalf("scan started on %q, want /srv/b once the first returned", got)
+	}
 	if got := fsc.folders(); len(got) != 2 || got[1] != "/srv/b" {
 		t.Fatalf("scans = %q, want /srv/b scanned once the first returned", got)
 	}
@@ -520,6 +547,9 @@ func TestBackupScanOneAtATime(t *testing.T) {
 	case <-timers:
 	case <-time.After(5 * time.Second):
 		t.Fatal("no scan of /srv/c started")
+	}
+	if got := fsc.waitStarted(t); got != "/srv/c" {
+		t.Fatalf("scan started on %q, want /srv/c", got)
 	}
 }
 
