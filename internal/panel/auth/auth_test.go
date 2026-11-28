@@ -609,3 +609,86 @@ func TestDeviceCookieRejected(t *testing.T) {
 		t.Error("issued more than a year ago: accepted")
 	}
 }
+
+// TestSessionWindow: Create opens the password window; it closes exactly
+// window after the last proved password, using it never extends it, and
+// MarkVerified opens it again. An unknown token has no window.
+func TestSessionWindow(t *testing.T) {
+	c := newClock()
+	s := NewSessions(time.Hour, c.now)
+	tok := s.Create("admin")
+	const w = 10 * time.Minute
+	if !s.WindowOpen(tok, w) {
+		t.Fatal("window closed right after Create")
+	}
+	for range 9 {
+		c.advance(time.Minute)
+		if !s.WindowOpen(tok, w) {
+			t.Fatalf("window closed %v after Create", 9*time.Minute)
+		}
+	}
+	c.advance(time.Minute)
+	if s.WindowOpen(tok, w) {
+		t.Fatal("window still open exactly 10 minutes after Create")
+	}
+	s.MarkVerified(tok)
+	if !s.WindowOpen(tok, w) {
+		t.Fatal("window closed right after MarkVerified")
+	}
+	c.advance(w - time.Second)
+	if !s.WindowOpen(tok, w) {
+		t.Fatal("window closed a second before its end")
+	}
+	c.advance(time.Second)
+	if s.WindowOpen(tok, w) {
+		t.Fatal("window open at its end")
+	}
+	if _, ok := s.Get(tok); !ok {
+		t.Fatal("session ended with its window")
+	}
+	if s.WindowOpen("unknown", w) {
+		t.Fatal("window open for an unknown token")
+	}
+	s.MarkVerified("unknown") // no session: nothing to mark, no panic
+	if s.WindowOpen("unknown", w) {
+		t.Fatal("MarkVerified created a session")
+	}
+	s.MarkVerified(tok)
+	s.Delete(tok)
+	if s.WindowOpen(tok, w) {
+		t.Fatal("window open after Delete")
+	}
+}
+
+// TestWindowClockSetBack: a clock set back after MarkVerified does not
+// keep the window open (now-verified must not be negative).
+func TestWindowClockSetBack(t *testing.T) {
+	c := newClock()
+	s := NewSessions(2*time.Hour, c.now)
+	tok := s.Create("admin")
+	c.advance(time.Hour)
+	s.MarkVerified(tok)
+	c.advance(-time.Hour)
+	if s.WindowOpen(tok, 10*time.Minute) {
+		t.Fatal("window open after the clock went back an hour")
+	}
+}
+
+// TestWindowEndsWithSession: an expired or invalidated session (e.g.
+// after reset-password) has no window, even before Get removes it.
+func TestWindowEndsWithSession(t *testing.T) {
+	c := newClock()
+	s := NewSessions(5*time.Minute, c.now)
+	tok := s.Create("admin")
+	c.advance(5 * time.Minute)
+	if s.WindowOpen(tok, 10*time.Minute) {
+		t.Fatal("window open on an expired session")
+	}
+	valid := true
+	s = NewSessions(time.Hour, c.now, WithValidator(func(time.Time) bool { return valid }))
+	tok = s.Create("admin")
+	valid = false
+	if s.WindowOpen(tok, 10*time.Minute) {
+		t.Fatal("window open on an invalidated session")
+	}
+}

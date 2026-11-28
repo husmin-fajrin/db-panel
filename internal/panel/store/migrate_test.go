@@ -49,18 +49,18 @@ func TestMigrateSkipsApplied(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 13 {
-		t.Fatalf("schema_migrations rows = %d, want 13", n)
+	if n != 14 {
+		t.Fatalf("schema_migrations rows = %d, want 14", n)
 	}
 }
 
 // TestMigrate0004Applies: the monitoring tables and columns exist (0004
-// to 0013) and the schema is at version 13.
+// to 0014) and the schema is at version 14.
 func TestMigrate0004Applies(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 13 {
-		t.Fatalf("schema version = %d, %v; want 13", v, err)
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 14 {
+		t.Fatalf("schema version = %d, %v; want 14", v, err)
 	}
 	for _, table := range []string{"server_health", "status_events", "alerts", "audit_log", "confirmations", "server_tls", "health_samples", "start_marks"} {
 		var n int
@@ -154,7 +154,7 @@ func TestMigrate0009BackfillsEmptyAndLarge(t *testing.T) {
 			t.Logf("migration 0009 over %d rows: %v", n, time.Since(start))
 			defer s.Close()
 			var v int
-			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 13 {
+			if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 14 {
 				t.Fatalf("schema version = %d, %v", v, err)
 			}
 			lastOK, brokenAt, err := s.VerifyAuditChain()

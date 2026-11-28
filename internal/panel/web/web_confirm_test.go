@@ -1,7 +1,11 @@
 package web_test
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +18,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/auth"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
+	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 )
@@ -553,5 +558,309 @@ func TestJobTokenBoundToJob(t *testing.T) {
 	}
 	if issued != 3 || rejected != 5 {
 		t.Errorf("job confirmations issued %d, rejected %d; want 3 and 5", issued, rejected)
+	}
+}
+
+// msgNeedPassword is P8: /confirm's answer without a password outside
+// the window or for a heavy action.
+const msgNeedPassword = "Kata sandi panel diperlukan."
+
+// windowDeps gives the router a session store and Now on one fake clock,
+// so the password window can be moved past. The caller sets e.sessions to
+// the returned store.
+func windowDeps() (*fakeClock, *auth.Sessions, func(*web.Deps)) {
+	clock := &fakeClock{t: time.Now()}
+	s := auth.NewSessions(time.Hour, clock.Now)
+	return clock, s, func(d *web.Deps) {
+		d.Sessions = s
+		d.Now = clock.Now
+	}
+}
+
+// windowEnv is controlEnv on windowDeps.
+func windowEnv(t *testing.T) (*env, *fakeOrch, *fakeClock) {
+	t.Helper()
+	clock, s, mod := windowDeps()
+	e, f, _ := controlEnv(t, mod)
+	e.sessions = s
+	return e, f, clock
+}
+
+// wantNeedPassword checks /confirm's 401 need_password answer (P8),
+// without a token.
+func wantNeedPassword(t *testing.T, rec *httptest.ResponseRecorder, what string) {
+	t.Helper()
+	var body struct {
+		Error        string `json:"error"`
+		NeedPassword bool   `json:"need_password"`
+		Token        string `json:"token"`
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("%s: status %d, want 401: %s", what, rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error != msgNeedPassword || !body.NeedPassword ||
+		body.Token != "" {
+		t.Fatalf("%s: body %s (%v), want P8 with need_password", what, rec.Body, err)
+	}
+}
+
+// confirmRows counts the stored confirmations: all, and the window tokens
+// still unused.
+func confirmRows(t *testing.T, e *env) (all, unusedWindow int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.QueryRow(`SELECT COUNT(*), COUNT(CASE WHEN via_window = 1 AND used_at IS NULL THEN 1 END)
+		FROM confirmations`).Scan(&all, &unusedWindow); err != nil {
+		t.Fatal(err)
+	}
+	return all, unusedWindow
+}
+
+// windowToken obtains a token without a password, through the window.
+func windowToken(t *testing.T, e *env, action, kind string, id int64, c *http.Cookie) string {
+	t.Helper()
+	code, tok := e.postConfirm(action, kind, id, "", c)
+	if code != http.StatusOK || tok == "" {
+		t.Fatalf("window token for %s: status %d", action, code)
+	}
+	return tok
+}
+
+// lightTargets are the light actions with a target each may be bound to
+// in controlEnv.
+var lightTargets = []struct {
+	action, kind string
+	id           int64
+}{
+	{web.ActRepairToken, "server", 2},
+	{web.ActMasterSource, "master", 1},
+	{web.ActPrepareMaster, "server", 1},
+	{web.ActConnectMySQL, "server", 2},
+	{web.ActStopReplica, "replica", 2},
+	{web.ActTelegram, "settings", 0},
+}
+
+// TestWindowIssuesLightTokenWithoutPassword (spec 5.1): right after login
+// a light action's token is issued without a password, and its
+// confirm_issued says it came through the window.
+func TestWindowIssuesLightTokenWithoutPassword(t *testing.T) {
+	e, _, _ := windowEnv(t)
+	rec := e.loginFrom("10.0.0.1", "admin", testPassword)
+	wantCode(t, rec, http.StatusSeeOther)
+	var c *http.Cookie
+	for _, k := range rec.Result().Cookies() {
+		if k.Name == auth.SecureCookieName {
+			c = k
+		}
+	}
+	if c == nil {
+		t.Fatal("no session cookie after login")
+	}
+	windowToken(t, e, web.ActStopReplica, "replica", 2, c)
+	var issued *store.AuditEntry
+	for _, en := range auditEntries(t, e.st) {
+		if en.Action == "confirm_issued" {
+			issued = &en
+		}
+	}
+	if issued == nil {
+		t.Fatal("no confirm_issued entry")
+	}
+	if want := `{"action":"stop_replica","target_id":2,"target_kind":"replica","window":true}`; issued.DetailJSON != want ||
+		issued.Outcome != "ok" {
+		t.Errorf("confirm_issued = %+v, want detail %s", *issued, want)
+	}
+	if got := len(web.LightActions()); got != len(lightTargets) {
+		t.Fatalf("light actions = %d, want %d", got, len(lightTargets))
+	}
+	for _, l := range lightTargets {
+		windowToken(t, e, l.action, l.kind, l.id, c)
+	}
+	if all, unused := confirmRows(t, e); all != 7 || unused != 7 {
+		t.Fatalf("confirmations = %d, unused window tokens %d; want 7 and 7", all, unused)
+	}
+}
+
+// TestWindowClosedAsksPassword: ten minutes after the login the window is
+// closed and /confirm asks for the password; the right one is a token and
+// opens the window again.
+func TestWindowClosedAsksPassword(t *testing.T) {
+	e, _, clock := windowEnv(t)
+	c := e.cookie()
+	clock.Add(10 * time.Minute)
+	wantNeedPassword(t, e.do("POST", "/confirm", confirmForm(web.ActStopReplica, "replica", 2, ""), c), "window closed")
+	if code, tok := e.postConfirm(web.ActStopReplica, "replica", 2, testPassword, c); code != http.StatusOK || tok == "" {
+		t.Fatalf("with the password: status %d", code)
+	}
+	windowToken(t, e, web.ActStopReplica, "replica", 2, c)
+	if all, unused := confirmRows(t, e); all != 2 || unused != 1 {
+		t.Fatalf("confirmations = %d, unused window tokens %d; want 2 and 1", all, unused)
+	}
+}
+
+// TestWindowNotExtendedByUse: a token through the window at minute 9 does
+// not move the window's end.
+func TestWindowNotExtendedByUse(t *testing.T) {
+	e, _, clock := windowEnv(t)
+	c := e.cookie()
+	clock.Add(9 * time.Minute)
+	windowToken(t, e, web.ActStopReplica, "replica", 2, c)
+	clock.Add(time.Minute)
+	wantNeedPassword(t, e.do("POST", "/confirm", confirmForm(web.ActStopReplica, "replica", 2, ""), c), "minute 10")
+}
+
+// TestHeavyNeverIssuedWithoutPassword: inside the window a heavy action
+// without a password is 401 need_password and stores nothing.
+func TestHeavyNeverIssuedWithoutPassword(t *testing.T) {
+	e, _, _ := windowEnv(t)
+	c := e.cookie()
+	for _, h := range []struct {
+		action, kind string
+		id           int64
+	}{
+		{web.ActPromote, "master", 1},
+		{web.ActResync, "replica", 2},
+		{web.ActUnlockMaster, "master", 1},
+		{web.ActCertUpload, "settings", 0},
+	} {
+		wantNeedPassword(t, e.do("POST", "/confirm", confirmForm(h.action, h.kind, h.id, ""), c), h.action)
+	}
+	if all, _ := confirmRows(t, e); all != 0 {
+		t.Fatalf("confirmations = %d, want none", all)
+	}
+}
+
+// TestWindowTokenRefusedByHeavyAction (spec 5.13): a window token is
+// refused when a heavy action uses it, which leaves the job or master as
+// it was and the token unused; the same post with a password token passes.
+func TestWindowTokenRefusedByHeavyAction(t *testing.T) {
+	clock, s, mod := windowDeps()
+	_ = clock
+	e, f, _ := promoteEnv(t, mod)
+	e.sessions = s
+	c := e.cookie()
+
+	// Ulangi of a resync that drops data.
+	failedResyncJob(t, e, f, resyncJob, "gudang", "toko")
+	retry := "/jobs/" + resyncJob + "/retry"
+	tok := windowToken(t, e, "job_retry:"+resyncJob, "job", 2, c)
+	rec := e.do("POST", retry, url.Values{"confirm_token": {tok}}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantBody(t, rec, msgConfirmInvalid)
+	wantCalls(t, f)
+	if st := jobStatus(t, e.st, resyncJob); st != store.JobFailed {
+		t.Fatalf("resync job after a window token = %s", st)
+	}
+	if _, unused := confirmRows(t, e); unused != 1 {
+		t.Fatalf("unused window tokens = %d, want 1 (not burnt)", unused)
+	}
+	wantCode(t, e.do("POST", retry, withToken(t, e, url.Values{}, "job_retry:"+resyncJob, "job", 2), c), http.StatusSeeOther)
+	wantCalls(t, f, "retry "+resyncJob)
+
+	// Setujui of a rebuild that drops data.
+	const approveJob = "3333333333333333333333333333333c"
+	storeJob(t, e.st, approveJob, orchestrator.KindCreateReplica, 1,
+		`{"master_server_id":2,"rebuild_old_master":true,"wait_reason":"wipe"}`, store.JobWaiting,
+		"Periksa master", "Periksa server tujuan")
+	f.mu.Lock()
+	f.drops[approveJob] = true
+	f.mu.Unlock()
+	approve := "/jobs/" + approveJob + "/approve"
+	tok = windowToken(t, e, "job_approve:"+approveJob, "job", 1, c)
+	wantCode(t, e.do("POST", approve, url.Values{"confirm_token": {tok}}, c), http.StatusForbidden)
+	wantCalls(t, f, "retry "+resyncJob)
+	if st := jobStatus(t, e.st, approveJob); st != store.JobWaiting {
+		t.Fatalf("approve job after a window token = %s", st)
+	}
+
+	// Ulangi of a planned promote before mysql.promote was sent.
+	failedPlannedPromote(t, e, f)
+	planned := "/jobs/" + plannedRetryJob + "/retry"
+	tok = windowToken(t, e, "job_retry:"+plannedRetryJob, "job", 1, c)
+	wantCode(t, e.do("POST", planned, url.Values{"confirm_token": {tok}, "backup_ack": {"1"}}, c), http.StatusForbidden)
+	wantCalls(t, f, "retry "+resyncJob)
+	if st := jobStatus(t, e.st, plannedRetryJob); st != store.JobFailed {
+		t.Fatalf("planned promote after a window token = %s", st)
+	}
+
+	// A window token planted for promote (the panel never issues one).
+	f.setView(plannedView())
+	const planted = "ditanam-lewat-jendela"
+	sum := sha256.Sum256([]byte(planted))
+	if err := e.st.AddConfirmation(store.Confirmation{TokenHash: hex.EncodeToString(sum[:]), Username: "admin",
+		Action: web.ActPromote, TargetKind: "master", TargetID: 1, ExpiresAt: clock.Now().Add(time.Minute),
+		ViaWindow: true}); err != nil {
+		t.Fatal(err)
+	}
+	form := promoteForm("2", "planned", "accept_unreachable", "4")
+	form.Set("confirm_token", planted)
+	rec = e.do("POST", "/masters/1/promote", form, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantBody(t, rec, msgConfirmInvalid)
+	if len(f.promoteList()) != 0 {
+		t.Fatal("promote started with a window token")
+	}
+	if _, unused := confirmRows(t, e); unused != 4 {
+		t.Fatalf("unused window tokens = %d, want 4 (none burnt)", unused)
+	}
+	wantCode(t, e.do("POST", "/masters/1/promote", withToken(t, e, promoteForm("2", "planned", "accept_unreachable", "4"),
+		web.ActPromote, "master", 1), c), http.StatusSeeOther)
+}
+
+// TestWindowIsPerSession: the window belongs to the session that proved
+// the password, not to the user.
+func TestWindowIsPerSession(t *testing.T) {
+	e, _, clock := windowEnv(t)
+	b := e.cookie()
+	clock.Add(11 * time.Minute)
+	a := e.cookie()
+	wantNeedPassword(t, e.do("POST", "/confirm", confirmForm(web.ActStopReplica, "replica", 2, ""), b), "session B")
+	windowToken(t, e, web.ActStopReplica, "replica", 2, a)
+
+	// A password typed in A opens nothing in B.
+	clock.Add(11 * time.Minute)
+	if code, _ := e.postConfirm(web.ActResync, "replica", 2, testPassword, a); code != http.StatusOK {
+		t.Fatalf("A with the password: status %d", code)
+	}
+	windowToken(t, e, web.ActStopReplica, "replica", 2, a)
+	wantNeedPassword(t, e.do("POST", "/confirm", confirmForm(web.ActStopReplica, "replica", 2, ""), b), "session B later")
+}
+
+// TestWindowGoneAfterLogout: logout ends the session and its window.
+func TestWindowGoneAfterLogout(t *testing.T) {
+	e, _, _ := windowEnv(t)
+	c := e.cookie()
+	windowToken(t, e, web.ActStopReplica, "replica", 2, c)
+	wantCode(t, e.do("POST", "/logout", noForm, c), http.StatusSeeOther)
+	if e.sessions.WindowOpen(c.Value, 10*time.Minute) {
+		t.Fatal("window open after logout")
+	}
+	rec := e.do("POST", "/confirm", confirmForm(web.ActStopReplica, "replica", 2, ""), c)
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/login") {
+		t.Fatalf("after logout: status %d, Location %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if all, _ := confirmRows(t, e); all != 1 {
+		t.Fatalf("confirmations = %d, want only the one before logout", all)
+	}
+}
+
+// TestNeedPasswordDoesNotUseBudget: need_password answers use none of the
+// session's attempts (the router's own 5 per minute).
+func TestNeedPasswordDoesNotUseBudget(t *testing.T) {
+	clock, s, mod := windowDeps()
+	e := newEnv(t, mod, func(d *web.Deps) { d.ConfirmLimiter = nil })
+	e.sessions = s
+	c := e.cookie()
+	clock.Add(10 * time.Minute)
+	for i := range 6 {
+		wantNeedPassword(t, e.do("POST", "/confirm", confirmForm(web.ActStopReplica, "replica", 2, ""), c),
+			fmt.Sprintf("answer %d", i+1))
+	}
+	if code, tok := e.postConfirm(web.ActStopReplica, "replica", 2, testPassword, c); code != http.StatusOK || tok == "" {
+		t.Fatalf("right password after six need_password answers: status %d", code)
 	}
 }

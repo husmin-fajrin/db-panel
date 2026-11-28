@@ -74,3 +74,6 @@ var (
 	AuditActionLabel   = auditActionLabel
 	AuditDetailSummary = auditDetailSummary
 )
+
+// LightActions exposes lightActions to web_test.
+func LightActions() []string { return lightActions }

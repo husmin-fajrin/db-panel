@@ -51,6 +51,28 @@ const (
 	ActJobApprove = "job_approve"
 )
 
+// Light actions (spec 5.1, "Jendela kata sandi"): inside the session's
+// password window POST /confirm issues their tokens without a password,
+// and their handlers take such a token (requireConfirmLight). Every other
+// action is heavy and asks for the password each time.
+const (
+	ActRepairToken   = "repair_token"      // server (paired)
+	ActMasterSource  = "master_source"     // master
+	ActPrepareMaster = "prepare_master"    // server: the first "Siapkan sebagai master"
+	ActConnectMySQL  = "connect_mysql"     // server with a stored account
+	ActStopReplica   = "stop_replica"      // replica
+	ActTelegram      = "telegram_settings" // settings, target id 0
+)
+
+// lightActions are the actions whose token may come through the window.
+var lightActions = []string{ActRepairToken, ActMasterSource, ActPrepareMaster, ActConnectMySQL, ActStopReplica,
+	ActTelegram}
+
+// passwordWindow is how long a proved password spares the session's light
+// actions the password: from the login or the last right password in
+// /confirm; using the window does not extend it.
+const passwordWindow = 10 * time.Minute
+
 // jobConfirmAction is the confirmation action of act on job jobID.
 func jobConfirmAction(act, jobID string) string { return act + ":" + jobID }
 
@@ -62,7 +84,8 @@ var jobActions = []string{ActJobRetry, ActJobApprove}
 // confirmActions are the actions POST /confirm issues tokens for.
 var confirmActions = []string{ActResync, ActDetach, ActDeleteServer, ActRemoveDatabases, ActUnlockMaster,
 	ActPrepareMasterAgain, ActMySQLTLS, ActTightenTLS, ActPromote, ActCertUpload, ActCertRevert, ActCertNames,
-	ActRebuildOldMaster, ActSalvageDownload, ActSalvageDelete}
+	ActRebuildOldMaster, ActSalvageDownload, ActSalvageDelete, ActRepairToken, ActMasterSource, ActPrepareMaster,
+	ActConnectMySQL, ActStopReplica, ActTelegram}
 
 // fileActions are the confirmActions issued only for one salvage file,
 // as "<action>:<name>" (spec 5.4: the token is issued for that file).
@@ -94,7 +117,7 @@ func isJobAction(action string) bool {
 
 // settingsActions are the actions bound to the settings (target id 0)
 // rather than to a server.
-var settingsActions = []string{ActCertUpload, ActCertRevert, ActCertNames}
+var settingsActions = []string{ActCertUpload, ActCertRevert, ActCertNames, ActTelegram}
 
 // confirmKinds are the target kinds a token can be bound to.
 var confirmKinds = []string{auditServer, auditMaster, auditReplica, auditSettings, auditJob}
@@ -110,6 +133,9 @@ const (
 	msgConfirmInvalid  = "Konfirmasi tidak berlaku; ulangi konfirmasi."
 	msgConfirmBadInput = "Permintaan konfirmasi tidak dikenal."
 	msgConfirmPassword = "Kata sandi salah."
+	// msgNeedPassword is P8: /confirm without a password, for a heavy
+	// action or outside the session's password window.
+	msgNeedPassword = "Kata sandi panel diperlukan."
 	// msgConfirmTooMany is T1 (spec 5.11): %d is the minutes until the
 	// session may try again.
 	msgConfirmTooMany = "Terlalu banyak kata sandi salah di sesi ini; coba lagi dalam %d menit, atau keluar lalu login lagi."
@@ -131,7 +157,15 @@ func confirmHash(token string) string {
 // token for the posted action and target: 200 {"token": ...}, 400 for an
 // unknown action or target, 401 for a wrong password, 429 when the
 // session's attempts are used up. The password and the token are never
-// audited or logged.
+// audited or logged. A right password opens the session's password window
+// again (MarkVerified).
+//
+// Without a password (spec 5.1, "Jendela kata sandi"): a light action or
+// a job action, while the session's window is open, gets a token marked
+// ViaWindow (audited with "window": true); a heavy consumer refuses it
+// when it is used, and whether a job action is heavy is decided from the
+// job then. Anything else is 401 {"error": P8, "need_password": true},
+// which touches no budget: no password was tried.
 //
 // The budget is the session's own (ConfirmLimiter and ConfirmLongLimiter,
 // keyed by sessionKey; a right password empties both), so wrong logins
@@ -151,7 +185,20 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := map[string]any{"action": action, "target_kind": kind, "target_id": id}
-	sk := sessionKey(auth.TokenFrom(r.Context()))
+	sessionToken := auth.TokenFrom(r.Context())
+	if r.PostFormValue("password") == "" {
+		windowAction := slices.Contains(lightActions, action) || isJobAction(action)
+		if !windowAction || !a.Sessions.WindowOpen(sessionToken, passwordWindow) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]any{"error": msgNeedPassword, "need_password": true})
+			return
+		}
+		detail["window"] = true
+		a.writeConfirmToken(w, r, username, action, kind, id, true, detail)
+		return
+	}
+	sk := sessionKey(sessionToken)
 	// Reserve a slot in both budgets before the slow password check, so
 	// concurrent requests cannot all pass a check made before any of them
 	// is counted (check-then-act). A wrong password keeps its slots; a
@@ -182,12 +229,21 @@ func (a *app) issueConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	a.ConfirmLimiter.Reset(sk)
 	a.ConfirmLongLimiter.Reset(sk)
+	a.Sessions.MarkVerified(sessionToken)
+	a.writeConfirmToken(w, r, username, action, kind, id, false, detail)
+}
+
+// writeConfirmToken stores a new token for username, action and target
+// (viaWindow: issued without a password), audits confirm_issued with
+// detail and answers 200 {"token": ...}.
+func (a *app) writeConfirmToken(w http.ResponseWriter, r *http.Request, username, action, kind string, id int64,
+	viaWindow bool, detail map[string]any) {
 	raw := make([]byte, confirmTokenBytes)
 	rand.Read(raw) // never fails (crypto/rand)
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	now := a.Now()
-	err = a.Store.AddConfirmation(store.Confirmation{TokenHash: confirmHash(token), Username: username,
-		Action: action, TargetKind: kind, TargetID: id, ExpiresAt: now.Add(confirmTTL)})
+	err := a.Store.AddConfirmation(store.Confirmation{TokenHash: confirmHash(token), Username: username,
+		Action: action, TargetKind: kind, TargetID: id, ExpiresAt: now.Add(confirmTTL), ViaWindow: viaWindow})
 	if err != nil {
 		a.internalError(w, "add confirmation", err)
 		return
@@ -220,21 +276,36 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 }
 
 // requireConfirm consumes the form's confirm_token for the session user,
-// action and target. Without a valid one it answers 403 with
-// msgConfirmInvalid on the target's page and returns false; the handler
-// must then do nothing else. Handlers call it before any other check.
+// action and target, for a heavy action: a token issued through the
+// password window is refused (and stays unused). Without a valid one it
+// answers 403 with msgConfirmInvalid on the target's page and returns
+// false; the handler must then do nothing else. Handlers call it before
+// any other check.
 func (a *app) requireConfirm(w http.ResponseWriter, r *http.Request, action, targetKind string, targetID int64) bool {
-	return a.requireConfirmToken(w, r, r.PostFormValue("confirm_token"), action, targetKind, targetID)
+	return a.consumeConfirm(w, r, r.PostFormValue("confirm_token"), action, targetKind, targetID, false)
+}
+
+// requireConfirmLight is requireConfirm for a light action (lightActions):
+// it takes a token issued with the password or through the window.
+func (a *app) requireConfirmLight(w http.ResponseWriter, r *http.Request, action, targetKind string, targetID int64) bool {
+	return a.consumeConfirm(w, r, r.PostFormValue("confirm_token"), action, targetKind, targetID, true)
 }
 
 // requireConfirmToken is requireConfirm for a token taken from elsewhere
 // than the posted form: the salvage download is a GET whose token is in
 // its query.
 func (a *app) requireConfirmToken(w http.ResponseWriter, r *http.Request, token, action, targetKind string, targetID int64) bool {
+	return a.consumeConfirm(w, r, token, action, targetKind, targetID, false)
+}
+
+// consumeConfirm consumes token for the session user, action and target;
+// allowWindow says whether a token issued through the window will do.
+func (a *app) consumeConfirm(w http.ResponseWriter, r *http.Request, token, action, targetKind string, targetID int64,
+	allowWindow bool) bool {
 	err := store.ErrConfirmInvalid
 	if token != "" {
 		err = a.Store.ConsumeConfirmation(confirmHash(token), auth.UsernameFrom(r.Context()), action, targetKind,
-			targetID, a.Now())
+			targetID, a.Now(), allowWindow)
 	}
 	switch {
 	case err == nil:

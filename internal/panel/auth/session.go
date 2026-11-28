@@ -11,6 +11,10 @@ type session struct {
 	username string
 	created  time.Time
 	expires  time.Time
+	// verified is when the session last proved the user's password: its
+	// login, then every confirmation with the right password. It opens the
+	// password window (WindowOpen).
+	verified time.Time
 }
 
 // Sessions is an in-memory session store with sliding expiry, an optional
@@ -52,7 +56,8 @@ func NewSessions(ttl time.Duration, now func() time.Time, opts ...SessionOption)
 }
 
 // Create starts a session for username and returns its token (32 random bytes,
-// hex encoded).
+// hex encoded). The login proved the password, so the session's password
+// window opens now.
 func (s *Sessions) Create(username string) string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -64,7 +69,7 @@ func (s *Sessions) Create(username string) string {
 	defer s.mu.Unlock()
 	s.sweep()
 	now := s.now()
-	s.m[token] = session{username: username, created: now, expires: now.Add(s.ttl)}
+	s.m[token] = session{username: username, created: now, expires: now.Add(s.ttl), verified: now}
 	return token
 }
 
@@ -86,6 +91,37 @@ func (s *Sessions) Get(token string) (string, bool) {
 	sess.expires = now.Add(s.ttl)
 	s.m[token] = sess
 	return sess.username, true
+}
+
+// MarkVerified records that the session of token proved the user's
+// password now, opening its password window again. An unknown token is
+// ignored.
+func (s *Sessions) MarkVerified(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.m[token]; ok {
+		sess.verified = s.now()
+		s.m[token] = sess
+	}
+}
+
+// WindowOpen reports whether the session of token proved the password
+// less than window ago (0 <= now-verified < window, so a clock set back
+// closes it). An unknown, expired or invalidated session has no window.
+// It changes nothing: neither the window nor the session's expiry.
+func (s *Sessions) WindowOpen(token string, window time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.m[token]
+	if !ok {
+		return false
+	}
+	now := s.now()
+	if s.expired(sess, now) || (s.valid != nil && !s.valid(sess.created)) {
+		return false
+	}
+	since := now.Sub(sess.verified)
+	return since >= 0 && since < window
 }
 
 // Delete ends the session for token.

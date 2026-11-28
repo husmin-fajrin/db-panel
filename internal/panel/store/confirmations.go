@@ -11,19 +11,22 @@ import (
 var ErrConfirmInvalid = errors.New("konfirmasi tidak berlaku; ulangi konfirmasi")
 
 // Confirmation is a one-time token authorising one destructive action by one
-// user on one target. Only the token's hash is stored.
+// user on one target. Only the token's hash is stored. ViaWindow marks a
+// token issued without a password, inside the session's password window;
+// only a light action takes it.
 type Confirmation struct {
 	TokenHash, Username, Action, TargetKind string
 	TargetID                                int64
 	ExpiresAt                               time.Time
 	UsedAt                                  *time.Time
+	ViaWindow                               bool
 }
 
 // AddConfirmation stores a new confirmation.
 func (s *Store) AddConfirmation(c Confirmation) error {
-	_, err := s.db.Exec(`INSERT INTO confirmations (token_hash, username, action, target_kind, target_id, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		c.TokenHash, c.Username, c.Action, c.TargetKind, c.TargetID, formatTime(c.ExpiresAt))
+	_, err := s.db.Exec(`INSERT INTO confirmations (token_hash, username, action, target_kind, target_id, expires_at,
+		via_window) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		c.TokenHash, c.Username, c.Action, c.TargetKind, c.TargetID, formatTime(c.ExpiresAt), c.ViaWindow)
 	if err != nil {
 		return fmt.Errorf("add confirmation: %w", err)
 	}
@@ -32,12 +35,15 @@ func (s *Store) AddConfirmation(c Confirmation) error {
 
 // ConsumeConfirmation atomically marks the confirmation used. It returns
 // ErrConfirmInvalid when it is unknown, bound to another user, action or
-// target, expired (now >= ExpiresAt) or already used.
-func (s *Store) ConsumeConfirmation(tokenHash, username, action, targetKind string, targetID int64, now time.Time) error {
+// target, expired (now >= ExpiresAt) or already used, and, unless
+// allowWindow, for a token issued through the password window (ViaWindow).
+// A refused token is left unused.
+func (s *Store) ConsumeConfirmation(tokenHash, username, action, targetKind string, targetID int64, now time.Time,
+	allowWindow bool) error {
 	res, err := s.db.Exec(`UPDATE confirmations SET used_at = ?
 		WHERE token_hash = ? AND username = ? AND action = ? AND target_kind = ? AND target_id = ?
-		AND used_at IS NULL AND expires_at > ?`,
-		formatTime(now), tokenHash, username, action, targetKind, targetID, formatTime(now))
+		AND used_at IS NULL AND expires_at > ? AND (via_window = 0 OR ?)`,
+		formatTime(now), tokenHash, username, action, targetKind, targetID, formatTime(now), allowWindow)
 	if err != nil {
 		return fmt.Errorf("consume confirmation: %w", err)
 	}

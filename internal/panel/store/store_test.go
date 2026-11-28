@@ -49,8 +49,8 @@ func TestOpenRunsMigrationsIdempotently(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 13 {
-		t.Fatalf("schema_migrations rows = %d, want 13", n)
+	if n != 14 {
+		t.Fatalf("schema_migrations rows = %d, want 14", n)
 	}
 	list, err := s.ListServers()
 	if err != nil || len(list) != 1 {

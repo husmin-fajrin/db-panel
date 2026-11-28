@@ -363,6 +363,11 @@
     // server), meminta token ke POST /confirm, lalu mengisi confirm_token
     // (dan confirm_name) di formulir tombol dan mengirimnya. Panel
     // memeriksa token dan nama itu lagi.
+    // Tombol tindakan ringan (data-confirm-light="1") membuka dialog tanpa
+    // isian kata sandi dan meminta token tanpa kata sandi; bila panel
+    // menjawab 401 need_password (jendela kata sandi sesi tertutup), isian
+    // kata sandi muncul dengan kalimat T2 dan kiriman berikutnya membawa
+    // kata sandi. Browser tidak menyimpan keadaan jendela.
     window.Alpine.data("confirmModal", () => ({
       text: "",
       name: "",
@@ -373,6 +378,10 @@
       error: "",
       busy: false,
       danger: false,
+      // light: tombol tindakan ringan; askPassword: isian kata sandi
+      // tampil dan dikirim (selalu untuk tombol lain).
+      light: false,
+      askPassword: true,
       tombol: null,
       // sumber: dialog lain yang terbuka saat tombol diklik (mis. "Lepas
       // replika?"); ditutup selama konfirmasi agar tidak bertumpuk, lalu
@@ -408,13 +417,22 @@
         this.busy = false;
         this.$refs.typed.value = "";
         this.$refs.password.value = "";
+        this.light = btn.dataset.confirmLight === "1";
+        this.setAskPassword(!this.light);
         const sumber = btn.closest("dialog[open]");
         this.sumber = sumber && sumber !== this.$root ? sumber : null;
         if (this.sumber) {
           this.sumber.close();
         }
         this.$root.showModal();
-        fokuskan(this.name ? this.$refs.typed : this.replicaName ? this.$refs.typedReplica : this.$refs.password);
+        fokuskan(this.name ? this.$refs.typed : this.replicaName ? this.$refs.typedReplica :
+          this.askPassword ? this.$refs.password : this.$refs.konfirmasi);
+      },
+      // setAskPassword menampilkan (dan mewajibkan) isian kata sandi atau
+      // menyembunyikannya.
+      setAskPassword(ask) {
+        this.askPassword = ask;
+        this.$refs.password.required = ask;
       },
       input() {
         this.typed = this.$refs.typed.value;
@@ -449,6 +467,12 @@
       get replicaNameClass() {
         return { hidden: this.replicaName === "" };
       },
+      get passwordClass() {
+        return { hidden: !this.askPassword };
+      },
+      get lightNoteClass() {
+        return { hidden: !(this.light && this.askPassword) };
+      },
       get blocked() {
         return this.busy || (this.name !== "" && this.typed !== this.name) ||
           (this.replicaName !== "" && this.typedReplica !== this.replicaName);
@@ -463,7 +487,7 @@
           action: d.confirmAction || "",
           target_kind: d.confirmKind || "",
           target_id: d.confirmId || "",
-          password: this.$refs.password.value,
+          password: this.askPassword ? this.$refs.password.value : "",
         });
         this.busy = true;
         this.error = "";
@@ -474,6 +498,10 @@
               throw new Error("Sesi berakhir; muat ulang halaman lalu masuk lagi.");
             }
             return r.json().catch(() => ({})).then((j) => {
+              // Jendela tertutup: minta kata sandi, tanpa pesan galat.
+              if (r.status === 401 && j.need_password === true && !this.askPassword) {
+                return null;
+              }
               if (!r.ok || typeof j.token !== "string") {
                 throw new Error(j.error || "Konfirmasi gagal; coba lagi.");
               }
@@ -481,6 +509,12 @@
             });
           })
           .then((token) => {
+            if (token === null) {
+              this.setAskPassword(true);
+              this.busy = false;
+              fokuskan(this.$refs.password);
+              return;
+            }
             isiTersembunyi(form, "confirm_token", token);
             if (this.name !== "") {
               isiTersembunyi(form, "confirm_name", this.typed);
