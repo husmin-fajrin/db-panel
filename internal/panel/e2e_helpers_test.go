@@ -163,6 +163,10 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 	return e
 }
 
+// e2eCheckEvery is the agents' check interval in these tests: one health
+// report (and lag sample) per agent every e2eCheckEvery.
+const e2eCheckEvery = 10 * time.Second
+
 // configureE2EMonitoring sets the shortest intervals the settings accept
 // (check 10 s, summary 20 s, master down after 10 s), disk thresholds no
 // test host reaches, no weekly summary, and Telegram (token, chat id) sent
@@ -174,7 +178,7 @@ func configureE2EMonitoring(t *testing.T, p *Panel, tg *fakeTelegram) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	set.CheckEvery, set.SummaryEvery, set.DownAfter = 10*time.Second, 20*time.Second, 10*time.Second
+	set.CheckEvery, set.SummaryEvery, set.DownAfter = e2eCheckEvery, 20*time.Second, 10*time.Second
 	// A nearly full disk on the test host must not add alerts (and
 	// Telegram messages) the counts below would see.
 	set.DiskWarn, set.DiskCrit = 99, 100

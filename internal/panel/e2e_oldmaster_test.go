@@ -397,9 +397,10 @@ func TestE2ERebuildFailsAfterSettle(t *testing.T) {
 const roundWork = 1500 * time.Millisecond
 
 // TestE2ERelockAlert (spec 5.2, 5.10): super_read_only switched off by
-// hand on the quarantined old master: within two rounds of the agent's
-// guard it is on again and the panel has opened master_start_late with
-// T1 (label T20 on the alerts page); "Periksa data tertinggal" closes it.
+// hand on the quarantined old master: within one round of the agent's
+// guard it is on again, and the panel opens master_start_late with T1
+// (label T20 on the alerts page) from the agent's next health report;
+// "Periksa data tertinggal" closes it.
 func TestE2ERelockAlert(t *testing.T) {
 	skipWithoutE2E(t)
 	e := startE2EPromoteTopology(t)
@@ -409,34 +410,36 @@ func TestE2ERelockAlert(t *testing.T) {
 		t.Fatal("master_start_late open on the old master before anything lifted its lock")
 	}
 
-	// Two rounds of the guard: the first locks it again and records the
-	// relock, the snapshot sent after the next one carries it to the
-	// panel, which opens the alert from it (the event itself is left to
-	// the snapshot). GuardEvery is the pause after each round, so two
-	// rounds also take their own work (start lock checks, sweeps): the
-	// slack is for that, not for a slow panel.
-	deadline := 2 * (agentmon.GuardEvery + roundWork)
+	// The guard relocks within one round of its loop: GuardEvery is the
+	// pause after a round, roundWork that round's own work. The relock is
+	// recorded as the start state the agent reports; the panel opens the
+	// alert from the agent's next scheduled health report (the event is
+	// left to it), which comes from the agent's check loop, at most
+	// e2eCheckEvery plus one check's work after the relock: a check that
+	// read the state a moment before the relock carries it only at the
+	// next one.
+	relockWithin := agentmon.GuardEvery + roundWork
+	alertWithin := e2eCheckEvery + roundWork
 	lifted := time.Now()
 	execSQL(t, m.db, "SET GLOBAL super_read_only = OFF")
-	var late store.Alert
 	var relocked, alerted time.Duration
-	waitForWithin(t, deadline, "the guard's relock and master_start_late within two guard rounds", func() bool {
-		if relocked == 0 {
-			var v string
-			if m.db.QueryRow(globalVarQuery, "super_read_only").Scan(&v) == nil && v == "ON" {
-				relocked = time.Since(lifted)
-			}
+	waitForWithin(t, relockWithin, "the guard's relock within one guard round", func() bool {
+		var v string
+		if m.db.QueryRow(globalVarQuery, "super_read_only").Scan(&v) == nil && v == "ON" {
+			relocked = time.Since(lifted)
 		}
-		if alerted == 0 {
-			var open bool
-			if late, open = openAlert(t, p, healthmon.KindMasterStartLate, m.srv()); open {
-				alerted = time.Since(lifted)
-			}
-		}
-		return relocked != 0 && alerted != 0
+		return relocked != 0
 	})
-	t.Logf("super_read_only switched off: on again after %s, master_start_late open after %s (two guard rounds: %s)",
-		relocked.Round(time.Millisecond), alerted.Round(time.Millisecond), deadline)
+	var late store.Alert
+	waitForWithin(t, alertWithin, "master_start_late within one check interval of the relock", func() bool {
+		var open bool
+		if late, open = openAlert(t, p, healthmon.KindMasterStartLate, m.srv()); open {
+			alerted = time.Since(lifted)
+		}
+		return open
+	})
+	t.Logf("super_read_only switched off: on again after %s (bound %s), master_start_late open after %s (bound %s after the relock)",
+		relocked.Round(time.Millisecond), relockWithin, alerted.Round(time.Millisecond), alertWithin)
 	if late.Message != textT1 {
 		t.Fatalf("master_start_late message = %q, want T1 %q", late.Message, textT1)
 	}
