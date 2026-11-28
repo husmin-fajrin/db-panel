@@ -206,9 +206,23 @@ type Runner struct {
 	failSentStore func(id, oldParams, params string, step int, errMsg string, promotionID int64, now time.Time) error
 	invMu         sync.Mutex // serialises read-modify-write of inventories
 	promoMu       sync.Mutex // serialises read-modify-write of promotions
-	// repointMu serialises mysql.repoint and mysql.quarantine sent outside
-	// a job step (OnOnline, RepointNow) with each other and with the job.
-	repointMu sync.Mutex
+	// targets holds the per-server locks of lockTarget (quarantine_retry.go
+	// gives the lock order); guarded by targetMu. lockTargetHook, when set
+	// (tests), runs at each lockTarget.
+	targetMu       sync.Mutex
+	targets        map[int64]*targetLock
+	lockTargetHook func(serverID int64)
+	// onlineSend bounds each send of OnOnline and of the quarantine round
+	// (onlineSendTimeout); tests shorten it.
+	onlineSend time.Duration
+	// retries is the pending-quarantine round's schedule, by server;
+	// guarded by retryMu. retryScan is how often the round looks
+	// (quarantineRetryScan); tests shorten it. Resume starts the round
+	// once (retryOnce).
+	retryMu   sync.Mutex
+	retries   map[int64]*quarantineDue
+	retryScan time.Duration
+	retryOnce sync.Once
 
 	// ports keeps the gate's probes of the masters' MySQL ports.
 	ports portProbes
@@ -235,11 +249,14 @@ func New(d Deps) *Runner {
 		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery, catchUpMax: defaultCatchUpMax,
 		promoteCatchUp: defaultPromoteCatchUp, verifyIOWait: defaultVerifyIOWait, unlockTimeout: callTimeout,
 		otherReadTimeout: otherReplicaReadTimeout, base: base, stop: stop, live: make(map[string]*liveJob), unlocking: make(map[int64]bool),
+		targets: make(map[int64]*targetLock), onlineSend: onlineSendTimeout, retries: make(map[int64]*quarantineDue),
+		retryScan: quarantineRetryScan,
 	}
 }
 
-// Close stops every job goroutine and waits for them. Jobs interrupted this
-// way stay running in the store; Resume marks them failed at the next start.
+// Close stops every job goroutine, the pending-quarantine round and its
+// sends, and waits for them. Jobs interrupted this way stay running in the
+// store; Resume marks them failed at the next start.
 func (r *Runner) Close() {
 	r.mu.Lock()
 	r.closed = true
@@ -1332,7 +1349,9 @@ func (r *Runner) Cancel(jobID string) error {
 // and fails a job's replica row before the job itself: no Retry ever sees
 // a failed job whose row still reads creating. Then it brings the rows an
 // earlier panel left to the old-master rule (normalizeFailedRebuilds),
-// those it has just failed and those of waiting jobs included.
+// those it has just failed and those of waiting jobs included. It then
+// starts the pending-quarantine round (quarantineRetryLoop), which keeps
+// no state across a restart: it reads the store.
 func (r *Runner) Resume(ctx context.Context) {
 	var tighten []store.Job
 	func() {
@@ -1343,6 +1362,7 @@ func (r *Runner) Resume(ctx context.Context) {
 			r.log.Error("normalize failed rebuilds", "err", err)
 		}
 	}()
+	r.startQuarantineRetry()
 	// Outside startMu: these call agents.
 	for _, j := range tighten {
 		if ctx.Err() != nil {

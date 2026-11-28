@@ -366,6 +366,10 @@
 </form>
 {{end}}
 
+{{/* T18 (spec 5.3): kapan karantina tertunda terakhir dicoba dan, bila
+     agent menolak, jawabannya berlabel. Data: oldMasterBox. */}}
+{{define "old-master-attempt"}}{{with .QuarantineAttempt}}<div role="status" class="banner banner-warning mb-0" data-quarantine-attempt>{{template "banner-icon" "warning"}}<p class="flex-1">{{.}}</p></div>{{end}}{{end}}
+
 {{/* Kotak "Master lama" server yang dikarantina setelah promote (spec
      5.4; design spec 5.6: kartu bertepi warning). Data: serverDetailPage
      dengan OldMaster terisi. */}}
@@ -390,11 +394,13 @@
          quarantine still pending keeps its status: the server is not
          locked yet (ruling D58). */}}
     {{if .QuarantinePending}}<div data-status-for="{{$s.ID}}">{{template "status-full" .Status}}</div>{{end}}
+    {{template "old-master-attempt" .}}
     {{with .Superseded}}<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<p class="flex-1">{{.}}</p></div>{{end}}
     {{if not $p.Local}}<div class="flex flex-wrap gap-2">{{template "server-delete-button" $p}}</div>
     {{with $p.DeleteBlocked}}<p class="help">{{.}}</p>{{end}}{{end}}
     {{else}}
     <div data-status-for="{{$s.ID}}">{{template "status-full" .Status}}</div>
+    {{template "old-master-attempt" .}}
     {{with .AgentRoleText}}<div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}<p class="flex-1">{{.}}</p></div>{{end}}
     {{if .CutoverPending}}
     <div role="status" class="banner banner-warning mb-0">{{template "banner-icon" "warning"}}

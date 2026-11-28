@@ -1415,20 +1415,20 @@ func TestPromoteAgentErrorsCensored(t *testing.T) {
 	}
 }
 
-// TestRecordReplicasOutsideRepointMu (FR-12): the new master records its
-// replicas after the repoints, without repointMu held, so a hung agent's
+// TestRecordReplicasOutsideTargetLocks (FR-12): the new master records its
+// replicas after the repoints, with no target lock held, so a hung agent's
 // recordReplicas never holds back a quarantine or another repoint.
-func TestRecordReplicasOutsideRepointMu(t *testing.T) {
+func TestRecordReplicasOutsideTargetLocks(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
 	var held, calls atomic.Int32
 	g.c.on("mysql.recordReplicas", func(json.RawMessage) (any, error) {
 		calls.Add(1)
-		if e.r.repointMu.TryLock() {
-			e.r.repointMu.Unlock()
-		} else {
+		e.r.targetMu.Lock()
+		if len(e.r.targets) > 0 {
 			held.Add(1)
 		}
+		e.r.targetMu.Unlock()
 		return proto.RecordReplicasResult{}, nil
 	})
 	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id,
@@ -1441,7 +1441,7 @@ func TestRecordReplicasOutsideRepointMu(t *testing.T) {
 		t.Fatal("the new master never recorded its replicas")
 	}
 	if n := held.Load(); n != 0 {
-		t.Fatalf("mysql.recordReplicas ran %d times with repointMu held", n)
+		t.Fatalf("mysql.recordReplicas ran %d times with a target lock held", n)
 	}
 }
 

@@ -368,6 +368,10 @@ type oldMasterBox struct {
 	Superseded        string
 	CutoverPending    bool
 	QuarantinePending bool
+	// QuarantineAttempt is T18 while the quarantine is pending and was
+	// sent at least once: when it was last sent and, after a refusal, the
+	// agent's words labelled as its own (quarantineAttemptText); "" else.
+	QuarantineAttempt string
 	Status            statusView
 	// Leftover is the latest check (nil: never run); LeftoverSummary its
 	// sentence.
@@ -409,6 +413,37 @@ const (
 		"transaksi lama di server ini sudah dihapus, dan hasil \"tidak ada data tertinggal\" dari pemeriksaan ini belum " +
 		"tentu benar."
 )
+
+// T18 (spec 5.3): the box of an old master whose quarantine is pending and
+// was sent; %s is when it was last sent. msgQuarantineRefused follows it
+// only when the agent refused that send; %s is the agent's words.
+const (
+	msgQuarantineTried = "Perintah karantina untuk server ini belum diterima; terakhir dicoba pukul %s. Panel mencoba " +
+		"lagi sendiri selama agent tersambung."
+	msgQuarantineRefused = " Jawaban terakhir agent (bukan dari panel): %s"
+)
+
+// quarantineAttemptText is T18 for prom's old master, "" when its
+// quarantine is not pending or was never sent. The time is the hour and
+// minute of today, with the date before it on another day. The agent's
+// words are made one line and bounded again here (the stored text is the
+// agent's, whatever wrote it); the template escapes them.
+func quarantineAttemptText(prom store.Promotion, now time.Time) string {
+	rec, ok := orchestrator.OldMasterRecord(prom)
+	if !ok || rec.State != orchestrator.QuarantineStatePending || rec.TriedAt == nil {
+		return ""
+	}
+	at, today := rec.TriedAt.Local(), now.Local()
+	shown := at.Format("15:04")
+	if at.YearDay() != today.YearDay() || at.Year() != today.Year() {
+		shown = at.Format("02-01-2006 15:04")
+	}
+	text := fmt.Sprintf(msgQuarantineTried, shown)
+	if words := monitor.AgentText(orchestrator.QuarantineRefusal(rec), maxAgentWords); words != "" {
+		text += fmt.Sprintf(msgQuarantineRefused, words)
+	}
+	return text
+}
 
 // The box of a quarantined old master whose agent reports another role pin
 // (spec 5.1, T3 and T3b); %s is the pin.
@@ -563,8 +598,8 @@ func (a *app) oldMasterViews(ctx context.Context, srv store.Server, p *serverDet
 		return nil
 	}
 	box := &oldMasterBox{Promotion: prom, Planned: prom.Mode == proto.PromotePlanned, Online: p.Online,
-		QuarantinePending: orchestrator.QuarantinePending(prom), Status: a.statusOf(srv.ID, srv.Role),
-		Busy: p.ActiveJob != nil}
+		QuarantinePending: orchestrator.QuarantinePending(prom), QuarantineAttempt: quarantineAttemptText(prom, a.Now()),
+		Status: a.statusOf(srv.ID, srv.Role), Busy: p.ActiveJob != nil}
 	if j := p.ActiveJob; j != nil && j.Kind == orchestrator.KindCreateReplica && paramsOf(*j).RebuildOldMaster {
 		box.RebuildJobID = j.ID
 	}

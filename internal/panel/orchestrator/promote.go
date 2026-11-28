@@ -44,8 +44,6 @@ const (
 	// repointTimeout bounds mysql.repoint, which probes the old source
 	// three times before it touches anything.
 	repointTimeout = 3 * time.Minute
-	// onlineHookTimeout bounds the work OnOnline starts.
-	onlineHookTimeout = 5 * time.Minute
 	// promoteClockSkew is how much earlier than the promotion's start (the
 	// panel's clock) the candidate's own record of it (its clock) may be
 	// and still be taken as this promotion (PromoteParams.NotBefore).
@@ -777,14 +775,14 @@ func (jr *jobRun) promoteQuarantine(ctx context.Context, _ bool) (outcome, error
 		return outcome{}, err
 	}
 	if !jr.r.d.Hub.IsOnline(old) {
-		jr.r.markQuarantine(jr.st.PromotionID, old, true, "agent offline")
+		jr.r.markQuarantine(jr.st.PromotionID, old, true, "agent offline", nil, false)
 		jr.logf("warn", "Agent master lama %s offline: karantina tertunda dan dikirim saat agent tersambung lagi. "+
 			"Pastikan aplikasi dialihkan sebelum ia hidup kembali.", jr.serverName(old))
 		return skipped("tertunda: agent master lama offline; dikirim saat tersambung lagi"), nil
 	}
-	jr.r.repointMu.Lock()
+	unlock := jr.r.lockTarget(old)
 	qres, err := jr.r.sendQuarantine(ctx, jr.st.PromotionID, old, jr.candidate(), host, port, topo.ReplUser, password)
-	jr.r.repointMu.Unlock()
+	unlock()
 	if errors.Is(err, proto.ErrOffline) && !hub.SentByAgent(err) {
 		jr.logf("warn", "Agent master lama %s terputus: karantina tertunda dan dikirim saat agent tersambung lagi.", jr.serverName(old))
 		return skipped("tertunda: agent master lama terputus; dikirim saat tersambung lagi"), nil
@@ -861,7 +859,7 @@ func (jr *jobRun) promoteRepoint(ctx context.Context, _ bool) (outcome, error) {
 	var ok, waiting, rebuild, failed int
 	record := false
 	// The new master records the replicas now connected to it once, after
-	// the repoints and outside repointMu (FR-12).
+	// the repoints and outside any target lock (FR-12).
 	defer func() {
 		if record {
 			jr.r.recordReplicas(ctx, topo.MasterServerID)
@@ -879,9 +877,9 @@ func (jr *jobRun) promoteRepoint(ctx context.Context, _ bool) (outcome, error) {
 			continue
 		}
 		jr.setStep(store.StepRunning, "mengarahkan "+name)
-		jr.r.repointMu.Lock()
+		unlock := jr.r.lockTarget(rep.ServerID)
 		out := jr.r.repointReplica(ctx, topo, rep, jr.st.PromotionID)
-		jr.r.repointMu.Unlock()
+		unlock()
 		record = record || out.record
 		if ctx.Err() != nil {
 			return outcome{}, ctx.Err()
@@ -1197,10 +1195,13 @@ func (r *Runner) replPassword(topo store.Topology) (string, error) {
 // ---- quarantine and repoint, in a job or on their own ----
 
 // sendQuarantine sends mysql.quarantine to the old master and records the
-// outcome on the promotion. A failure keeps the quarantine pending.
-// Callers hold repointMu.
+// outcome on the promotion (when it was sent, and the agent's words when
+// it refused) and in the pending-quarantine round's schedule
+// (quarantineTried). A failure keeps the quarantine pending. Callers hold
+// lockTarget(oldID).
 func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64, host string, port int, user, password string) (proto.QuarantineResult, error) {
 	var res proto.QuarantineResult
+	tried := r.now()
 	cred, err := r.peerCred(ctx, oldID, newID, host, port, user, password)
 	if err == nil {
 		cctx, cancel := context.WithTimeout(ctx, callTimeout)
@@ -1210,11 +1211,17 @@ func (r *Runner) sendQuarantine(ctx context.Context, promID, oldID, newID int64,
 			r.log.Info("quarantine pinned; read-only follows when MySQL answers", "server_id", oldID)
 		}
 	}
+	// The record first: the round drops the schedule of a server no
+	// longer pending, and keeps one it sees still pending.
+	defer r.quarantineTried(oldID, err)
 	if err != nil {
-		r.markQuarantine(promID, oldID, true, truncate(r.agentErrText(err), maxLogLine))
+		// Refused: the agent answered; its words are labelled in the
+		// detail (QuarantineRefusal finds them for T18).
+		_, refused := fromAgent(err)
+		r.markQuarantine(promID, oldID, true, truncate(r.agentErrText(err), maxLogLine), &tried, refused)
 		return res, err
 	}
-	r.markQuarantine(promID, oldID, false, "")
+	r.markQuarantine(promID, oldID, false, "", &tried, false)
 	r.log.Info("old master quarantined", "server_id", oldID, "new_master", newID)
 	return res, nil
 }
@@ -1228,13 +1235,14 @@ type repointOutcome struct {
 	err     error  // it answered and refused or failed: needs_repoint
 	// record: its receiver is connected to the new master, which the
 	// caller has record its replicas (Runner.recordReplicas) once it no
-	// longer holds repointMu (FR-12).
+	// longer holds the replica's target lock (FR-12).
 	record bool
 }
 
 // repointReplica points rep at topo's (new) master and records its state
 // (ready, needs_rebuild, or needs_repoint) and the outcome on the
-// promotion promID (0: the topology's latest). Callers hold repointMu.
+// promotion promID (0: the topology's latest). Callers hold
+// lockTarget(rep.ServerID).
 func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep store.Replica, promID int64) repointOutcome {
 	set := func(o repointOutcome, lastErr string) repointOutcome {
 		// lastErr and ioErr may carry the agent's (MySQL's) text: censored
@@ -1310,7 +1318,7 @@ func (r *Runner) repointReplica(ctx context.Context, topo store.Topology, rep st
 	}
 	out := set(o, "")
 	// The receiver is connected to the new master: the caller has it
-	// record the connection, outside repointMu.
+	// record the connection, outside the target lock.
 	out.record = res.IORunning
 	return out
 }
@@ -1348,9 +1356,9 @@ func (r *Runner) RepointNow(ctx context.Context, replicaServerID int64) error {
 		return errors.New("agent replika offline; replika diarahkan otomatis saat agent tersambung lagi")
 	}
 	out, err := func() (repointOutcome, error) {
-		r.repointMu.Lock()
-		defer r.repointMu.Unlock()
-		// Re-read under repointMu: OnOnline may have repointed it meanwhile.
+		unlock := r.lockTarget(replicaServerID)
+		defer unlock()
+		// Re-read under the lock: OnOnline may have repointed it meanwhile.
 		rep, err := r.d.Store.GetReplicaByServer(replicaServerID)
 		if err != nil {
 			return repointOutcome{}, err
@@ -1395,9 +1403,7 @@ func (r *Runner) OnOnline(serverID int64) {
 	r.mu.Unlock()
 	go func() {
 		defer r.wg.Done()
-		ctx, cancel := context.WithTimeout(r.base, onlineHookTimeout)
-		defer cancel()
-		r.onOnline(ctx, serverID)
+		r.onOnline(serverID)
 	}()
 	go func() {
 		defer r.wg.Done()
@@ -1423,81 +1429,69 @@ func (r *Runner) refreshUnknownAccount(ctx context.Context, serverID int64) {
 	r.log.Info("inventory read on connect (MySQL account was unknown)", "server_id", serverID)
 }
 
-func (r *Runner) onOnline(ctx context.Context, serverID int64) {
-	srv, err := r.d.Store.GetServer(serverID)
-	if err != nil {
+// onOnline decides from the store first (spec 5.3) and returns without
+// any lock when serverID is owed nothing. What it owes is decided again
+// under the server's target lock, and each send gets its own bound
+// (onlineSend) once the lock is held, not what is left since the agent
+// connected.
+func (r *Runner) onOnline(serverID int64) {
+	if _, ok := r.pendingQuarantine(serverID); ok {
+		r.sendPendingQuarantine(serverID)
 		return
 	}
-	// A repointed replica's new master records it once repointMu is
-	// released (FR-12).
-	var recordOn int64
-	defer func() {
-		if recordOn != 0 {
-			r.recordReplicas(ctx, recordOn)
-		}
-	}()
-	r.repointMu.Lock()
-	defer r.repointMu.Unlock()
-	switch srv.Role {
-	case store.RoleQuarantined:
-		prom, err := r.d.Store.PromotionByOldMaster(serverID)
-		if err != nil || !QuarantinePending(prom) {
-			return
-		}
-		// The promotion's topology, also when it was promoted again since
-		// and its old-master marker moved on (ruling D58): the server is
-		// quarantined under the topology's current master, which holds
-		// its data's line. It will not be rebuilt from this quarantine
-		// (T6): the panel offers it only Hapus. Without that topology, or
-		// without a master, nothing is sent and it stays pending.
-		topo, err := r.d.Store.GetTopology(prom.TopologyID)
-		if err != nil {
-			r.log.Warn("pending quarantine not sent: the promotion's topology cannot be read", "server_id", serverID,
-				"topology_id", prom.TopologyID, "err", err)
-			return
-		}
-		if topo.MasterServerID == 0 || topo.MasterServerID == serverID {
-			r.log.Warn("pending quarantine not sent: the promotion's topology has no other master", "server_id", serverID,
-				"topology_id", topo.ID)
-			return
-		}
-		if topo.MasterServerID != prom.NewMasterServerID {
-			r.log.Info("pending quarantine sent under the topology's current master (promoted again since)",
-				"server_id", serverID, "master_id", topo.MasterServerID)
-		}
-		password, err := r.replPassword(topo)
-		if err != nil {
-			r.log.Warn("pending quarantine", "server_id", serverID, "err", err)
-			return
-		}
-		if _, err := r.sendQuarantine(ctx, prom.ID, serverID, topo.MasterServerID, topo.SourceHost, topo.SourcePort,
-			topo.ReplUser, password); err != nil {
-			r.log.Warn("pending quarantine failed", "server_id", serverID, "err", logErr(err))
-		}
-	case store.RoleReplica:
-		rep, err := r.d.Store.GetReplicaByServer(serverID)
-		if err != nil || rep.State != store.ReplicaNeedsRepoint {
-			return
-		}
-		topo, err := r.d.Store.GetTopology(rep.TopologyID)
-		if err != nil {
-			return
-		}
-		// Only after a promotion (the old master may since have been
-		// rebuilt or deleted, which clears OldMasterServerID).
-		if _, err := r.d.Store.LatestPromotion(topo.ID); err != nil {
-			return
-		}
-		// A promotion still running repoints its replicas itself.
-		if _, busy, err := r.d.Store.ActiveJobForTopology(topo.ID, KindPromotePlanned, KindPromoteEmergency); err != nil || busy {
-			return
-		}
-		out := r.repointReplica(ctx, topo, rep, 0)
-		if out.record {
-			recordOn = topo.MasterServerID
-		}
-		r.log.Info("replica repointed on reconnect", "server_id", serverID, "state", out.state, "err", logErr(out.err))
+	if _, _, ok := r.pendingRepoint(serverID); !ok {
+		return
 	}
+	// A repointed replica's new master records it once the replica's
+	// lock is released (FR-12).
+	recordOn := func() int64 {
+		unlock := r.lockTarget(serverID)
+		defer unlock()
+		topo, rep, ok := r.pendingRepoint(serverID)
+		if !ok {
+			return 0
+		}
+		ctx, cancel := context.WithTimeout(r.base, r.onlineSend)
+		defer cancel()
+		out := r.repointReplica(ctx, topo, rep, 0)
+		r.log.Info("replica repointed on reconnect", "server_id", serverID, "state", out.state, "err", logErr(out.err))
+		if out.record {
+			return topo.MasterServerID
+		}
+		return 0
+	}()
+	if recordOn != 0 {
+		ctx, cancel := context.WithTimeout(r.base, r.onlineSend)
+		defer cancel()
+		r.recordReplicas(ctx, recordOn)
+	}
+}
+
+// pendingRepoint is the repoint a connecting replica is owed, decided from
+// the store alone: it waits in needs_repoint after a promotion of its
+// topology (the old master may since have been rebuilt or deleted, which
+// clears OldMasterServerID) that no longer runs (a promotion still
+// running repoints its replicas itself).
+func (r *Runner) pendingRepoint(serverID int64) (store.Topology, store.Replica, bool) {
+	srv, err := r.d.Store.GetServer(serverID)
+	if err != nil || srv.Role != store.RoleReplica {
+		return store.Topology{}, store.Replica{}, false
+	}
+	rep, err := r.d.Store.GetReplicaByServer(serverID)
+	if err != nil || rep.State != store.ReplicaNeedsRepoint {
+		return store.Topology{}, store.Replica{}, false
+	}
+	topo, err := r.d.Store.GetTopology(rep.TopologyID)
+	if err != nil {
+		return store.Topology{}, store.Replica{}, false
+	}
+	if _, err := r.d.Store.LatestPromotion(topo.ID); err != nil {
+		return store.Topology{}, store.Replica{}, false
+	}
+	if _, busy, err := r.d.Store.ActiveJobForTopology(topo.ID, KindPromotePlanned, KindPromoteEmergency); err != nil || busy {
+		return store.Topology{}, store.Replica{}, false
+	}
+	return topo, rep, true
 }
 
 // ConfirmCutover records that the applications now write to the new
@@ -1552,6 +1546,11 @@ type PromotionServer struct {
 	Role     string `json:"role"` // PromotionOldMaster | PromotionReplica
 	State    string `json:"state"`
 	Detail   string `json:"detail,omitempty"`
+	// For the old master: TriedAt is the last mysql.quarantine sent (nil:
+	// none yet); Refused, that the agent answered it with a refusal,
+	// whose words Detail then holds after their label (QuarantineRefusal).
+	TriedAt *time.Time `json:"tried_at,omitempty"` // last send
+	Refused bool       `json:"refused,omitempty"`  // the agent answered that send with a refusal (Detail holds its text)
 }
 
 // PromotionServer roles and the old master's states.
@@ -1574,14 +1573,38 @@ func PromotionServers(p store.Promotion) []PromotionServer {
 
 // QuarantinePending reports whether the old master of p has not been
 // quarantined yet (its agent was offline or the command failed); OnOnline
-// sends it when the agent connects.
+// sends it when the agent connects, and the round again while it stays
+// connected.
 func QuarantinePending(p store.Promotion) bool {
+	s, ok := OldMasterRecord(p)
+	return ok && s.State == QuarantineStatePending
+}
+
+// QuarantineRefusal is the agent's own words in s, the old master's
+// entry, when its last send was refused: what follows the label of the
+// agent's text in Detail (the label is the panel's, so its first
+// occurrence ends it); "" when s records no refusal. The words are the
+// agent's: a page labels, bounds and escapes them.
+func QuarantineRefusal(s PromotionServer) string {
+	if !s.Refused {
+		return ""
+	}
+	_, words, ok := strings.Cut(s.Detail, agentLabelTail)
+	if !ok {
+		return ""
+	}
+	return words
+}
+
+// OldMasterRecord is the old master's entry in p's record; false when it
+// has none.
+func OldMasterRecord(p store.Promotion) (PromotionServer, bool) {
 	for _, s := range PromotionServers(p) {
 		if s.Role == PromotionOldMaster {
-			return s.State == QuarantineStatePending
+			return s, true
 		}
 	}
-	return false
+	return PromotionServer{}, false
 }
 
 // updatePromotion applies change to the stored promotion id (read, change,
@@ -1604,12 +1627,18 @@ func (r *Runner) updatePromotion(id int64, change func(p *store.Promotion)) {
 }
 
 func (r *Runner) setPromotionServer(promID int64, s PromotionServer) {
+	r.editPromotionServer(promID, s.ServerID, func(PromotionServer) PromotionServer { return s })
+}
+
+// editPromotionServer replaces serverID's entry in promotion promID with
+// change(the entry now; zero when it has none).
+func (r *Runner) editPromotionServer(promID, serverID int64, change func(old PromotionServer) PromotionServer) {
 	r.updatePromotion(promID, func(p *store.Promotion) {
 		list := PromotionServers(*p)
-		if i := slices.IndexFunc(list, func(x PromotionServer) bool { return x.ServerID == s.ServerID }); i >= 0 {
-			list[i] = s
+		if i := slices.IndexFunc(list, func(x PromotionServer) bool { return x.ServerID == serverID }); i >= 0 {
+			list[i] = change(list[i])
 		} else {
-			list = append(list, s)
+			list = append(list, change(PromotionServer{}))
 		}
 		if b, err := json.Marshal(list); err == nil {
 			p.ReplicasJSON = string(b)
@@ -1617,12 +1646,23 @@ func (r *Runner) setPromotionServer(promID int64, s PromotionServer) {
 	})
 }
 
-func (r *Runner) markQuarantine(promID, oldID int64, pending bool, detail string) {
+// markQuarantine records the old master's quarantine state on promID.
+// tried is when the send it records went out; nil (no send: the agent was
+// offline) keeps the last send's time and clears Refused, which then no
+// longer describes Detail. refused: detail is the agent's refusal.
+func (r *Runner) markQuarantine(promID, oldID int64, pending bool, detail string, tried *time.Time, refused bool) {
 	state := QuarantineStateDone
 	if pending {
 		state = QuarantineStatePending
 	}
-	r.setPromotionServer(promID, PromotionServer{ServerID: oldID, Role: PromotionOldMaster, State: state, Detail: redact.Quotes(detail)})
+	r.editPromotionServer(promID, oldID, func(old PromotionServer) PromotionServer {
+		s := PromotionServer{ServerID: oldID, Role: PromotionOldMaster, State: state, Detail: redact.Quotes(detail),
+			TriedAt: tried, Refused: refused}
+		if tried == nil && old.Role == PromotionOldMaster {
+			s.TriedAt = old.TriedAt
+		}
+		return s
+	})
 }
 
 // markReplica records a replica's outcome on promotion promID, or on the

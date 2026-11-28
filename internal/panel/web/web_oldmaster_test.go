@@ -1652,3 +1652,66 @@ func TestOldMasterHeadingPendingQuarantine(t *testing.T) {
 		t.Fatalf("heading of a pending quarantine:\n%s", box)
 	}
 }
+
+// msgQuarantineTried is T18 without its last sentence; %s is the time.
+const msgQuarantineTried = "Perintah karantina untuk server ini belum diterima; terakhir dicoba pukul %s. Panel mencoba " +
+	"lagi sendiri selama agent tersambung."
+
+// TestOldMasterBoxShowsLastAttempt (spec 5.3, T18): the box of an old
+// master whose quarantine is pending says when it was last sent; its last
+// sentence, the agent's words labelled as its own and escaped, only when
+// the agent refused that send. A quarantine never sent says neither.
+func TestOldMasterBoxShowsLastAttempt(t *testing.T) {
+	e, _, topo := promotedEnv(t)
+	c := e.cookie()
+	tried := time.Now()
+	setOld := func(s orchestrator.PromotionServer) {
+		t.Helper()
+		p, err := e.st.LatestPromotion(topo.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.ServerID, s.Role, s.State = 1, orchestrator.PromotionOldMaster, orchestrator.QuarantineStatePending
+		servers, _ := json.Marshal([]orchestrator.PromotionServer{s})
+		p.ReplicasJSON = string(servers)
+		if err := e.st.UpdatePromotion(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box := func() string {
+		t.Helper()
+		rec := e.do("GET", "/servers/1", nil, c)
+		wantCode(t, rec, http.StatusOK)
+		return oldMasterBoxOf(t, rec.Body.String())
+	}
+	first := fmt.Sprintf(msgQuarantineTried, tried.Local().Format("15:04"))
+	const label = "Jawaban terakhir agent (bukan dari panel):"
+
+	setOld(orchestrator.PromotionServer{Detail: "agent offline"})
+	if b := box(); strings.Contains(b, "terakhir dicoba") {
+		t.Fatalf("T18 for a quarantine never sent:\n%s", b)
+	}
+
+	setOld(orchestrator.PromotionServer{Detail: "batas waktu perintah habis", TriedAt: &tried})
+	b := box()
+	if !strings.Contains(b, html.EscapeString(first)) || strings.Contains(b, label) {
+		t.Fatalf("T18 after a send without a refusal:\n%s", b)
+	}
+
+	words := `master baru <b>tidak</b> bisa dibaca`
+	setOld(orchestrator.PromotionServer{Detail: "Pesan dari agent db-master (bukan dari panel): " + words, TriedAt: &tried, Refused: true})
+	b = box()
+	if want := html.EscapeString(first + " " + label + " " + words); !strings.Contains(b, want) {
+		t.Fatalf("box lacks T18 with the agent's words %q:\n%s", want, b)
+	}
+	if strings.Contains(b, "<b>tidak</b>") || strings.Contains(b, "Pesan dari agent db-master") {
+		t.Fatalf("the agent's words are not escaped:\n%s", b)
+	}
+
+	// An attempt on another day shows its date.
+	yesterday := time.Now().Add(-26 * time.Hour)
+	setOld(orchestrator.PromotionServer{TriedAt: &yesterday})
+	if want := fmt.Sprintf(msgQuarantineTried, yesterday.Local().Format("02-01-2006 15:04")); !strings.Contains(box(), html.EscapeString(want)) {
+		t.Fatalf("T18 of an attempt yesterday lacks its date")
+	}
+}

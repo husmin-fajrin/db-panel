@@ -27,6 +27,9 @@ import (
 // agentLabel is the label before an agent's words (spec 5.6).
 const agentLabel = "Pesan dari agent %s (bukan dari panel): %s"
 
+// agentLabelTail is what ends agentLabel before the agent's words.
+const agentLabelTail = " (bukan dari panel): "
+
 // agentLogPrefix starts a job log line that is the agent's own (spec 5.6).
 const agentLogPrefix = "agent: "
 
