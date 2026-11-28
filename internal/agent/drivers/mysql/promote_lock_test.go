@@ -465,11 +465,11 @@ func TestGuardKeepsLockWhenUnreachable(t *testing.T) {
 	r.wantLocked("an hour later")
 
 	// Read-only once, then unreachable again: the grace starts over.
-	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true})
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true})
 	r.tick(time.Hour + time.Minute)
 	r.peer.set(mysql.PeerState{Err: "unreachable"})
 	r.tick(time.Hour + 2*time.Minute)
-	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true})
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true})
 	r.tick(time.Hour + 3*time.Minute)
 	r.wantLocked("read-only once after unreachable")
 	r.tick(time.Hour + 4*time.Minute)
@@ -1035,7 +1035,7 @@ func TestKeptHostsReportedAtOnceAfterAnotherKeepReason(t *testing.T) {
 		t.Fatalf("first lockExpired = %+v, want kept without hosts", ev)
 	}
 
-	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true})
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true})
 	r.peer.setAt(a, mysql.PeerState{Err: "dial tcp 10.9.9.7:3306: i/o timeout"})
 	r.tick(time.Minute)
 	r.tick(time.Minute + lockGrace)

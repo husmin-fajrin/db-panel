@@ -131,12 +131,8 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	}
 
 	st := readPeer(ctx, dial, peerTimeout)
-	switch {
-	case !st.Reachable:
-		return res, &commands.ParamError{Msg: fmt.Sprintf("master baru %s tidak bisa dibaca (%s); karantina ditolak", key, st.Err)}
-	case st.SuperReadOnly:
-		return res, &commands.ParamError{Msg: fmt.Sprintf(
-			"master baru %s masih read-only (super_read_only=ON), belum dipromosikan; karantina ditolak", key)}
+	if err := newMasterRefusal(key, st, "karantina ditolak"); err != nil {
+		return res, err
 	}
 	if up {
 		uuid, err := localServerUUID(ctx, h)
@@ -172,6 +168,23 @@ func (d *Driver) quarantine(ctx context.Context, h Host, nm proto.PeerCred) (pro
 	d.guard.up, d.quarantinePending = false, true
 	d.warn("server pinned quarantined while MySQL is down; read-only follows once MySQL answers", "new_source", key, "verified_addr", addr)
 	return withStartLock(res, d.lockStart(ctx, h)), nil
+}
+
+// newMasterRefusal refuses to follow, or quarantine under, a new master
+// whose read st does not show it promoted: applications must be able to
+// write there (AppsWrite). read_only ON with super_read_only OFF is not
+// promoted. refused ends the text ("karantina ditolak").
+func newMasterRefusal(key string, st PeerState, refused string) error {
+	switch {
+	case !st.Reachable:
+		return &commands.ParamError{Msg: fmt.Sprintf("master baru %s tidak bisa dibaca (%s); %s", key, st.Err, refused)}
+	case NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"master baru %s masih read-only (super_read_only=ON), belum dipromosikan; %s", key, refused)}
+	case !AppsWrite(st.ReadOnly):
+		return &commands.ParamError{Msg: fmt.Sprintf("master baru %s %s, belum dipromosikan; %s", key, appsOnlyLocked, refused)}
+	}
+	return nil
 }
 
 // requarantine is mysql.quarantine on a server already quarantined: it
@@ -340,7 +353,7 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host, now time.Time) er
 		d.unverifiedRound(h, now)
 		return fmt.Errorf("baca super_read_only: %w", err)
 	}
-	off := !sro || !ro
+	off := !NoWrites(ro, sro)
 	if !off && d.guard.up && sameRun {
 		d.checkedRound()
 		return nil
@@ -373,7 +386,7 @@ func (d *Driver) guardQuarantined(ctx context.Context, h Host, now time.Time) er
 		release()
 		checked()
 		d.guard.up = false
-		if ro {
+		if !AppsWrite(ro) {
 			return nil
 		}
 		d.noteWritableAfterLoad()
@@ -734,7 +747,7 @@ func (d *Driver) flagsOnNow(ctx context.Context) error {
 	if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only").Scan(&sro, &ro); err != nil {
 		return &errFlagsUnread{cause: fmt.Errorf("baca super_read_only: %w", err)}
 	}
-	if !sro || !ro {
+	if !NoWrites(ro, sro) {
 		return fmt.Errorf("read_only=%v super_read_only=%v", ro, sro)
 	}
 	return nil

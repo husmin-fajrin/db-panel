@@ -170,12 +170,8 @@ func (d *Driver) repoint(ctx context.Context, h Host, p proto.RepointParams, caP
 	}
 
 	st := readPeer(ctx, nm, peerTimeout)
-	switch {
-	case !st.Reachable:
-		return res, &commands.ParamError{Msg: fmt.Sprintf("master baru %s tidak bisa dibaca (%s); repoint ditolak", key, st.Err)}
-	case st.SuperReadOnly:
-		return res, &commands.ParamError{Msg: fmt.Sprintf(
-			"master baru %s masih read-only (super_read_only=ON), belum dipromosikan; repoint ditolak", key)}
+	if err := newMasterRefusal(key, st, "repoint ditolak"); err != nil {
+		return res, err
 	}
 	for _, u := range oldUUIDs {
 		if !gtidHasUUID(st.GTIDExecuted, u) {
@@ -276,15 +272,24 @@ func sourceGone(ctx context.Context, db *sql.DB, old proto.PeerCred) (string, er
 		return "", nil
 	}
 	st := readPeer(ctx, old, peerTimeout)
-	switch {
-	case !st.Reachable:
-		return "", &commands.ParamError{Msg: fmt.Sprintf(
-			"sumber %s masih menjawab tetapi tidak bisa dibaca (%s); repoint ditolak", key, st.Err)}
-	case !st.SuperReadOnly:
-		return "", &commands.ParamError{Msg: fmt.Sprintf(
-			"sumber %s masih bisa ditulis (super_read_only=OFF); repoint ditolak sampai sumber itu dikunci atau mati", key)}
+	if err := oldSourceRefusal(key, st); err != nil {
+		return "", err
 	}
 	return st.ServerUUID, nil
+}
+
+// oldSourceRefusal refuses a repoint while the old source answers and
+// does not refuse writes from every account (NoWrites).
+func oldSourceRefusal(key string, st PeerState) error {
+	switch {
+	case !st.Reachable:
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"sumber %s masih menjawab tetapi tidak bisa dibaca (%s); repoint ditolak", key, st.Err)}
+	case !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"sumber %s masih bisa ditulis (%s); repoint ditolak sampai sumber itu dikunci atau mati", key, writableFlags(st))}
+	}
+	return nil
 }
 
 // oldSourceUUIDs is the old source's server_uuid as step 2 finds it: known

@@ -808,3 +808,25 @@ func SetFlagExec(f func(Execer) Execer) (restore func()) {
 	flagExec = func(db *sql.DB) execer { return f(old(db)) }
 	return func() { flagExec = old }
 }
+
+// The read-only flag decisions, testable without a server.
+var (
+	ResumeOpen             = resumeOpen
+	VerifyOldRefusal       = verifyOldRefusal
+	RecheckOldRefusal      = recheckOldRefusal
+	UnlockCandidateRefusal = unlockCandidateRefusal
+	NewMasterRefusal       = newMasterRefusal
+	OldSourceRefusal       = oldSourceRefusal
+	GuardCandidateStep     = guardCandidateStep
+)
+
+// GuardStep is guardCandidateStep's answer.
+type GuardStep = guardStep
+
+const (
+	GuardUnreachable = guardUnreachable
+	GuardPromoted    = guardPromoted
+	GuardAppsLocked  = guardAppsLocked
+	GuardGraceStart  = guardGraceStart
+	GuardGraceDone   = guardGraceDone
+)

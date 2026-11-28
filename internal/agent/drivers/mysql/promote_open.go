@@ -172,26 +172,49 @@ func (d *Driver) sendWriteOpening(j *jobs.Job, db *sql.DB, c *sql.Conn, m Promot
 		}
 		c, m = next, nm
 	}
-	if err := openExec(ctx, c, openSuperOnlyStmt); err != nil {
-		// Writes are open either way; only an unknown outcome, or flags
-		// that cannot be read after an error packet, is settled before the
-		// error of before is returned.
-		unknown := !knownOutcome(err)
-		if !unknown {
-			if _, rerr := answeredWritable(ctx, db); rerr != nil {
-				j.Logf("warn", "MySQL menjawab %s dengan galat (%v), lalu read_only tidak bisa dibaca (%v)", openSuperOnlyStmt, err, rerr)
-				unknown = true
-			}
+	return openSuper(ctx, j, db, c, m)
+}
+
+// openSuper sends the second write-opening statement on c (named in the
+// marker m), read_only being off already. Writes are open either way; only
+// an unknown outcome, or flags that cannot be read after an error packet,
+// is settled before the error is returned (run promote again to resume).
+func openSuper(ctx context.Context, j *jobs.Job, db *sql.DB, c *sql.Conn, m Promoting) error {
+	defer c.Close()
+	err := openExec(ctx, c, openSuperOnlyStmt)
+	if err == nil {
+		return nil
+	}
+	unknown := !knownOutcome(err)
+	if !unknown {
+		if _, rerr := answeredWritable(ctx, db); rerr != nil {
+			j.Logf("warn", "MySQL menjawab %s dengan galat (%v), lalu read_only tidak bisa dibaca (%v)", openSuperOnlyStmt, err, rerr)
+			unknown = true
 		}
-		if unknown {
-			c.Close()
-			j.Logf("warn", "MySQL tidak menjawab %s dengan pasti (%v); promote ditahan sampai pasti perintah itu sudah berhenti di MySQL", openSuperOnlyStmt, err)
-			settleOpen(ctx, m, jobDB, j.Logf)
-			j.Logf("info", "perintah pembuka tulis sudah berhenti di MySQL")
-		}
+	}
+	if unknown {
+		c.Close()
+		j.Logf("warn", "MySQL tidak menjawab %s dengan pasti (%v); promote ditahan sampai pasti perintah itu sudah berhenti di MySQL", openSuperOnlyStmt, err)
+		jobDB := func(context.Context) (*sql.DB, func(), error) { return db, func() {}, nil }
+		settleOpen(ctx, m, jobDB, j.Logf)
+		j.Logf("info", "perintah pembuka tulis sudah berhenti di MySQL")
+	}
+	return fmt.Errorf("%s: %w; tulis sudah terbuka, jalankan promote lagi untuk melanjutkan", openSuperOnlyStmt, err)
+}
+
+// finishWriteOpening is a resumed promotion on a server whose read_only is
+// off and super_read_only still on (resumeOpen): the first statement was
+// applied by an earlier run, whose marker m checkResume accepted. The
+// marker is written again naming a new connection, and the second
+// statement goes on it (openSuper), as in the earlier run.
+func (d *Driver) finishWriteOpening(j *jobs.Job, db *sql.DB, m Promoting) error {
+	// Past the point of no return a cancel does not stop anything.
+	ctx := context.WithoutCancel(j.Context())
+	c, nm, err := d.writeOpeningConn(ctx, db, m)
+	if err != nil {
 		return fmt.Errorf("%s: %w; tulis sudah terbuka, jalankan promote lagi untuk melanjutkan", openSuperOnlyStmt, err)
 	}
-	return nil
+	return openSuper(ctx, j, db, c, nm)
 }
 
 // openReadFlags reads read_only and super_read_only on db; tests replace
@@ -211,7 +234,7 @@ func answeredWritable(ctx context.Context, db *sql.DB) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return !ro, nil
+	return AppsWrite(ro), nil
 }
 
 // settleOpen returns once the connection m names is gone from mysqld, with

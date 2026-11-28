@@ -193,7 +193,7 @@ func (a *adminCommand) locked(ctx context.Context, s *rootSession) (code int, ok
 	if err != nil {
 		return a.fail(textMySQLUnread, err), false
 	}
-	if !ro || !sro {
+	if !mysql.NoWrites(ro, sro) {
 		return a.fail(textNotLocked), false
 	}
 	return 0, true

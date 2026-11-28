@@ -240,7 +240,7 @@ func mainDropDatabase(args []string, in io.Reader, stdout, stderr io.Writer, wri
 	if err != nil {
 		return fail(textMySQLUnread, err)
 	}
-	if !ro || !sro {
+	if !mysql.NoWrites(ro, sro) {
 		return fail(textNotLocked)
 	}
 

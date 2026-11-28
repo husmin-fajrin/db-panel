@@ -221,7 +221,7 @@ func (d *Driver) readOnlyProvedNow(ctx context.Context, h Host) bool {
 	defer db.Close()
 	if d.startLockProved {
 		var sro, ro bool
-		if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only").Scan(&sro, &ro); err == nil && sro && ro {
+		if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only, @@global.read_only").Scan(&sro, &ro); err == nil && NoWrites(ro, sro) {
 			return true
 		}
 	}

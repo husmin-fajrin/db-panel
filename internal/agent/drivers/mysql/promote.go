@@ -17,10 +17,12 @@ import (
 // mysql.promote (spec 5.1) makes this replica the master, as an agent
 // job. It verifies the old master itself before it opens writes:
 //
-//  1. Writes already open (read_only and super_read_only off): resumed
-//     at 6 only when the promoting marker of an earlier run from the
-//     same old master exists and is recent; replication a MySQL restart
-//     started again is stopped first (STOP REPLICA). Refused otherwise.
+//  1. Writes already open (read_only off, AppsWrite): resumed at 6 only
+//     when the promoting marker of an earlier run from the same old
+//     master exists and is recent; replication a MySQL restart started
+//     again is stopped first (STOP REPLICA), and a super_read_only still
+//     on (a restart between the two statements of 5) is turned off by the
+//     second statement of 5 first. Refused otherwise, never rolled back.
 //  2. planned: the old master answers, is super_read_only and holds no
 //     transaction this server lacks. emergency: three probes of the old
 //     master, 10 s apart, all fail and the replica's receiver is not
@@ -236,12 +238,23 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams, lockBy *tim
 		return res, fmt.Errorf("baca read_only: %w", err)
 	}
 	mode := p.Mode
-	if !ro && !sro {
+	if resume, finish := resumeOpen(ro, sro); resume {
 		// Never opens writes itself: an earlier run opened them, after
 		// its verification, and left the promoting marker.
 		m, err := d.checkResume(ctx, db, p)
 		if err != nil {
 			return res, err
+		}
+		if finish {
+			// read_only OFF with super_read_only ON: the first
+			// write-opening statement was applied and a MySQL restart came
+			// before the second was stored. Every account writes already;
+			// the opening is finished, never rolled back.
+			j.Logf("warn", "server ini sudah bisa ditulis oleh promote sebelumnya, tetapi super_read_only masih ON "+
+				"(MySQL dimulai ulang sebelum pembukaan tulis selesai); pembukaan tulis diselesaikan")
+			if err := d.finishWriteOpening(j, db, m); err != nil {
+				return res, err
+			}
 		}
 		j.Logf("warn", "server ini sudah bisa ditulis oleh promote sebelumnya (%s, %s); dilanjutkan tanpa verifikasi ulang",
 			m.Mode, m.At.UTC().Format(time.RFC3339))
@@ -257,6 +270,20 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams, lockBy *tim
 		return res, err
 	}
 	return res, nil
+}
+
+// resumeOpen is step 1's decision on this server's flags. resume: an
+// earlier run's writes are open (AppsWrite), so it is resumed, never
+// verified again or rolled back. finish: super_read_only is still on
+// there (read_only OFF, super_read_only ON, which only a restart between
+// the two write-opening statements produces), so the opening is finished
+// first. read_only ON with super_read_only OFF is not open: the promote's
+// own first statement never leaves it (it turns both off), so that state
+// came from elsewhere (a root SQL session, a load) and is verified as
+// read-only is.
+func resumeOpen(ro, sro bool) (resume, finish bool) {
+	resume = AppsWrite(ro)
+	return resume, resume && sro
 }
 
 // checkResume allows step 1's resume only for a promotion of this replica
@@ -427,17 +454,39 @@ func (d *Driver) verifyOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams)
 		return false, oldMasterAlive(key)
 	}
 	st := readPeer(ctx, old, peerTimeout)
-	switch {
-	case !st.Reachable:
-		return false, &commands.ParamError{Msg: fmt.Sprintf(
-			"master lama %s tidak bisa dibaca (%s); promote terencana butuh master yang menjawab dan sudah dikunci. Bila master mati, gunakan promote darurat",
-			key, st.Err)}
-	case !st.SuperReadOnly:
-		return false, &commands.ParamError{Msg: fmt.Sprintf(
-			"master lama %s masih bisa ditulis (super_read_only=OFF); kunci master dulu sebelum promote terencana", key)}
+	if err := verifyOldRefusal(key, st); err != nil {
+		return false, err
 	}
 	j.Logf("info", "master lama %s menjawab dan read-only", key)
 	return true, caughtUp(ctx, db, key, st.GTIDExecuted)
+}
+
+// verifyOldRefusal is step 2's refusal of a planned promotion on what the
+// old master's read st says: unless the old master refuses writes from
+// every account (NoWrites), this server must not go on to open writes.
+func verifyOldRefusal(key string, st PeerState) error {
+	switch {
+	case !st.Reachable:
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"master lama %s tidak bisa dibaca (%s); promote terencana butuh master yang menjawab dan sudah dikunci. Bila master mati, gunakan promote darurat",
+			key, st.Err)}
+	case !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"master lama %s masih bisa ditulis (%s); kunci master dulu sebelum promote terencana", key, writableFlags(st))}
+	}
+	return nil
+}
+
+// recheckOldRefusal is step 4's refusal on the old master's read st, as
+// verifyOldRefusal.
+func recheckOldRefusal(key string, st PeerState) error {
+	switch {
+	case !st.Reachable:
+		return &commands.ParamError{Msg: fmt.Sprintf("master lama %s tidak bisa dibaca lagi sebelum tulis dibuka (%s); promote dibatalkan", key, st.Err)}
+	case !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return &commands.ParamError{Msg: fmt.Sprintf("master lama %s bisa ditulis lagi sebelum tulis dibuka di sini; promote dibatalkan", key)}
+	}
+	return nil
 }
 
 // oldMasterAlive refuses an emergency promotion whose old master
@@ -479,11 +528,8 @@ func (d *Driver) recheckOldSource(j *jobs.Job, db *sql.DB, p proto.PromoteParams
 		return &commands.ParamError{Msg: "tenggat kunci master hampir habis; ulangi promote"}
 	}
 	st := readPeer(ctx, p.OldSource, peerTimeout)
-	switch {
-	case !st.Reachable:
-		return &commands.ParamError{Msg: fmt.Sprintf("master lama %s tidak bisa dibaca lagi sebelum tulis dibuka (%s); promote dibatalkan", key, st.Err)}
-	case !st.SuperReadOnly:
-		return &commands.ParamError{Msg: fmt.Sprintf("master lama %s bisa ditulis lagi sebelum tulis dibuka di sini; promote dibatalkan", key)}
+	if err := recheckOldRefusal(key, st); err != nil {
+		return err
 	}
 	return caughtUp(ctx, db, key, st.GTIDExecuted)
 }

@@ -35,8 +35,10 @@ import (
 // lockRecheck, until every listed replica reads read-only or "dbpanel agent
 // forget-replica" drops it. It quarantines this server too once the
 // candidate is writable and holds this server's transactions; otherwise
-// the lock stays. A lock set by the local CLI (CLILockCandidate) is never
-// touched.
+// the lock stays. "Read-only" is both flags ON (NoWrites) and "writable"
+// is read_only OFF (AppsWrite, whatever super_read_only says); a server
+// with read_only ON and super_read_only OFF is neither, and keeps the
+// lock. A lock set by the local CLI (CLILockCandidate) is never touched.
 
 const (
 	// minLockSec and maxLockSec bound mysql.lockForPromote's timeout.
@@ -390,9 +392,12 @@ func lockReadTargets(cred proto.PeerCred, candAddr string, candPort int, hosts [
 // account cred (readPeers). unreadable is, in list order, every entry not
 // read: unreachable, refused, not a host:port, or not started before ctx
 // ended. writable is the first entry, in list order, that is writable
-// (super_read_only off) and whose gtid_executed holds a transaction of
-// uuid, this server's: a replica of this server promoted to master.
-func readListed(ctx context.Context, cred proto.PeerCred, list []string, uuid string) (unreadable []string, writable string) {
+// (listedVerdict) and whose gtid_executed holds a transaction of uuid,
+// this server's: a replica of this server promoted to master. appsLocked
+// is, in list order, every other entry holding this server's transactions
+// that is locked for applications only (read_only ON, super_read_only
+// OFF): not proved a replica, so this server is not opened past it.
+func readListed(ctx context.Context, cred proto.PeerCred, list []string, uuid string) (unreadable []string, writable string, appsLocked []string) {
 	var creds []proto.PeerCred
 	var at []int // at[i]: the index in list of creds[i]
 	bad := make([]bool, len(list))
@@ -413,14 +418,50 @@ func readListed(ctx context.Context, cred proto.PeerCred, list []string, uuid st
 	}
 	for i, e := range list {
 		st := sts[i]
-		switch {
-		case bad[i] || !st.Reachable:
+		if bad[i] {
+			st = PeerState{}
+		}
+		switch listedVerdict(st, uuid) {
+		case listedUnread:
 			unreadable = append(unreadable, e)
-		case writable == "" && !st.SuperReadOnly && gtidHasUUID(st.GTIDExecuted, uuid):
-			writable = e
+		case listedMaster:
+			if writable == "" {
+				writable = e
+			}
+		case listedAppsLocked:
+			appsLocked = append(appsLocked, e)
 		}
 	}
-	return unreadable, writable
+	return unreadable, writable, appsLocked
+}
+
+// listed is what one listed replica's read says to this server
+// (listedVerdict).
+type listed int
+
+const (
+	listedUnread     listed = iota // not read: the lock stays
+	listedReplica                  // read-only for every account, or not this server's successor
+	listedMaster                   // writable with this server's transactions: quarantine
+	listedAppsLocked               // read_only ON, super_read_only OFF, with this server's transactions: the lock stays
+)
+
+// listedVerdict is what the read st of one listed replica says to a
+// server whose server_uuid is uuid: its successor only when applications
+// can write there (AppsWrite), a replica only when it refuses writes from
+// every account (NoWrites) or does not hold uuid's transactions.
+func listedVerdict(st PeerState, uuid string) listed {
+	switch {
+	case !st.Reachable:
+		return listedUnread
+	case !gtidHasUUID(st.GTIDExecuted, uuid):
+		return listedReplica
+	case AppsWrite(st.ReadOnly):
+		return listedMaster
+	case !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return listedAppsLocked
+	}
+	return listedReplica
 }
 
 // readPeers reads every cred with readPeer, each within peerTimeout, at
@@ -487,13 +528,8 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 		return &commands.ParamError{Msg: fmt.Sprintf(
 			"alamat kandidat %s tidak tercatat di kunci promosi, kandidat tidak bisa diperiksa; buka kunci di server ini dengan: sudo dbpanel agent unlock-master", key)}
 	}
-	st := readPeer(ctx, dialAt(c, addr), peerTimeout)
-	if !st.Reachable {
-		return &commands.ParamError{Msg: fmt.Sprintf("kandidat %s tidak bisa dibaca (%s); kunci tidak dibuka", key, st.Err)}
-	}
-	if !st.SuperReadOnly {
-		return &commands.ParamError{Msg: fmt.Sprintf(
-			"kandidat %s bisa ditulis (super_read_only=OFF) dan mungkin sudah menjadi master; kunci tidak dibuka", key)}
+	if err := unlockCandidateRefusal(key, readPeer(ctx, dialAt(c, addr), peerTimeout)); err != nil {
+		return err
 	}
 	db, err := openAdmin(ctx, h)
 	if err != nil {
@@ -507,7 +543,7 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 	if err != nil {
 		return err
 	}
-	unreadable, writable := readListed(ctx, c, l.Readable, uuid)
+	unreadable, writable, appsLocked := readListed(ctx, c, l.Readable, uuid)
 	switch {
 	case writable != "":
 		d.warn("unlock refused: another replica is a writable master with this server's transactions; quarantining",
@@ -520,6 +556,9 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 	case len(unreadable) > 0:
 		return &commands.ParamError{Msg: fmt.Sprintf("replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang (%s); "+
 			"kunci tidak dibuka", strings.Join(unreadable, ", "))}
+	case len(appsLocked) > 0:
+		return &commands.ParamError{Msg: fmt.Sprintf("replika %s %s, jadi belum pasti masih replika; kunci tidak dibuka",
+			strings.Join(appsLocked, ", "), appsOnlyLocked)}
 	}
 	// Both flags stored OFF; on an error the lock file stays and the
 	// guard locks again on its next round (fail closed).
@@ -530,6 +569,20 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 		return fmt.Errorf("MySQL sudah bisa ditulis, tetapi kunci promosi gagal dihapus: %w", err)
 	}
 	d.guard.reset(nil)
+	return nil
+}
+
+// unlockCandidateRefusal refuses unlockPromote on the candidate's read
+// st unless the candidate refuses writes from every account (NoWrites):
+// only a candidate still read-only for everyone is proved not promoted.
+func unlockCandidateRefusal(key string, st PeerState) error {
+	switch {
+	case !st.Reachable:
+		return &commands.ParamError{Msg: fmt.Sprintf("kandidat %s tidak bisa dibaca (%s); kunci tidak dibuka", key, st.Err)}
+	case !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return &commands.ParamError{Msg: fmt.Sprintf(
+			"kandidat %s bisa ditulis (%s) dan mungkin sudah menjadi master; kunci tidak dibuka", key, writableFlags(st))}
+	}
 	return nil
 }
 
@@ -634,7 +687,7 @@ func (d *Driver) ensureLocked(ctx context.Context, db *sql.DB) error {
 		if err := db.QueryRowContext(ctx, "SELECT @@global.read_only, @@global.super_read_only").Scan(&ro, &sro); err != nil {
 			return fmt.Errorf("baca read_only/super_read_only: %w", err)
 		}
-		if ro && sro {
+		if NoWrites(ro, sro) {
 			return nil
 		}
 		d.warnLimited("promote lock present but read_only or super_read_only was off; locking again", "read_only", ro, "super_read_only", sro)
@@ -668,11 +721,11 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		return nil
 	}
 	st := readPeer(ctx, dialAt(*g.cred, addr), peerTimeout)
-	switch {
-	case !st.Reachable:
+	switch guardCandidateStep(st, !g.graceAt.IsZero()) {
+	case guardUnreachable:
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
 		d.keepLock(now, key, "kandidat tidak terjangkau: "+st.Err)
-	case !st.SuperReadOnly:
+	case guardPromoted:
 		uuid, err := serverUUID(ctx, db)
 		if err != nil {
 			return err
@@ -683,7 +736,12 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		}
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
 		d.keepLock(now, key, "kandidat bisa ditulis tetapi gtid_executed-nya tidak memuat transaksi server ini")
-	case g.graceAt.IsZero():
+	case guardAppsLocked:
+		// Neither promoted nor proved a replica: the master is not opened
+		// on it; the grace starts over once it reads read-only.
+		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
+		d.keepLock(now, key, "kandidat "+appsOnlyLocked+", jadi belum pasti masih replika")
+	case guardGraceStart:
 		// Read-only: still a replica. Read again after the grace.
 		g.graceAt, g.nextRead = now, now.Add(lockGrace)
 	default:
@@ -696,7 +754,7 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		if err != nil {
 			return err
 		}
-		unreadable, writable := readListed(ctx, *g.cred, l.Readable, uuid)
+		unreadable, writable, appsLocked := readListed(ctx, *g.cred, l.Readable, uuid)
 		switch {
 		case writable != "":
 			d.warnLimited("promote lock expired but another replica is a writable master with this server's transactions; quarantining",
@@ -708,6 +766,14 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 			// The hosts travel in the event's Hosts only, not again in its
 			// reason (SP-9: an event over the panel's size is not judged).
 			d.keepLock(now, key, "replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang", unreadable...)
+			return nil
+		case len(appsLocked) > 0:
+			g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
+			// Not in the event's Hosts: the panel words those as replicas
+			// that cannot be read.
+			d.warnLimited("promote lock expired but a listed replica is locked for applications only; lock kept",
+				"candidate", key, "hosts", appsLocked)
+			d.keepLock(now, key, "replika yang terbaca saat kunci dipasang "+appsOnlyLocked+", jadi belum pasti masih replika")
 			return nil
 		}
 		// Every listed replica read read-only (or writable without this
@@ -728,6 +794,38 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		d.enqueue(proto.EventLockExpired, proto.LockExpiredEvent{Action: "unlocked", Candidate: key})
 	}
 	return nil
+}
+
+// guardStep is what the guard does with the candidate's read at the
+// lock's deadline.
+type guardStep int
+
+const (
+	guardUnreachable guardStep = iota // keep the lock, read again
+	guardPromoted                     // applications can write: the candidate took over (quarantine, or keep)
+	guardAppsLocked                   // read_only ON, super_read_only OFF: keep the lock, read again
+	guardGraceStart                   // read-only for every account: still a replica, read again after the grace
+	guardGraceDone                    // read-only for every account at both reads: the listed replicas, then open
+)
+
+// guardCandidateStep is guardExpired's decision on the candidate's read
+// st; inGrace is whether the grace started at an earlier read-only read.
+// Only a candidate that refuses writes from every account (NoWrites) is
+// still a replica; one whose applications can write (AppsWrite) is taken
+// for promoted; read_only ON with super_read_only OFF is neither, and the
+// master is never opened on it.
+func guardCandidateStep(st PeerState, inGrace bool) guardStep {
+	switch {
+	case !st.Reachable:
+		return guardUnreachable
+	case AppsWrite(st.ReadOnly):
+		return guardPromoted
+	case !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return guardAppsLocked
+	case !inGrace:
+		return guardGraceStart
+	}
+	return guardGraceDone
 }
 
 // serverUUID is db's @@global.server_uuid.

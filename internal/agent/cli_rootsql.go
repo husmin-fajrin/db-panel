@@ -403,7 +403,7 @@ func runLifted(ctx context.Context, s *rootSession, dir, lockPath string, rechec
 	if err != nil {
 		return err
 	}
-	if !ro || !sro {
+	if !mysql.NoWrites(ro, sro) {
 		return errStateChanged
 	}
 	if err := recheck(ctx, c); err != nil {
@@ -598,7 +598,7 @@ func finalCheck(ctx context.Context, s *rootSession, c *sql.Conn) error {
 	if err != nil {
 		ro, sro, err = readFlagsFresh(rctx, s.DB)
 	}
-	if err == nil && ro && sro {
+	if err == nil && mysql.NoWrites(ro, sro) {
 		return nil
 	}
 	if perr := putBack(rctx, s, c); perr != nil {
@@ -607,7 +607,7 @@ func finalCheck(ctx context.Context, s *rootSession, c *sql.Conn) error {
 	if ro, sro, err = readFlagsFresh(rctx, s.DB); err != nil {
 		return &relockError{err}
 	}
-	if !ro || !sro {
+	if !mysql.NoWrites(ro, sro) {
 		return &relockError{fmt.Errorf("read_only=%v, super_read_only=%v", ro, sro)}
 	}
 	fmt.Fprintln(s.out, textRelockedAgain)
