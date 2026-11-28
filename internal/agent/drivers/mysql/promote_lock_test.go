@@ -1387,7 +1387,7 @@ func TestUnlockPathsPersistBothOff(t *testing.T) {
 		{"agent unlock-master", func(t *testing.T) *testmysql.Instance {
 			r := lockedRig(t)
 			cliAgentDir(t, r.dir, r.inst)
-			runAgentCLI(t, r.inst, "unlock-master", "--dir", r.dir)
+			runAgentCLI(t, r.inst, "unlock-master", "--ya", "--dir", r.dir)
 			return r.inst
 		}},
 	}

@@ -477,9 +477,9 @@ func TestLockMasterKeepsLockWrittenMeanwhile(t *testing.T) {
 	}
 }
 
-// TestUnlockMasterSaysWhatItBypasses (SA-11): unlock-master of a promote
-// lock with a candidate says that it opens without reading the candidate
-// or the replicas the lock lists.
+// TestUnlockMasterSaysWhatItBypasses (SA-11): unlock-master --ya of a
+// promote lock with a candidate says that it opens without reading the
+// candidate or the replicas the lock lists.
 func TestUnlockMasterSaysWhatItBypasses(t *testing.T) {
 	inst := testmysql.Start(t, testmysql.Options{})
 	dir := t.TempDir()
@@ -498,8 +498,8 @@ func TestUnlockMasterSaysWhatItBypasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := Main([]string{"unlock-master", "--dir", dir}, &stdout, &stderr); code != 0 {
-		t.Fatalf("unlock-master = %d, %q", code, stderr.String())
+	if code := Main([]string{"unlock-master", "--ya", "--dir", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("unlock-master --ya = %d, %q", code, stderr.String())
 	}
 	for _, want := range []string{"10.0.0.2:3306", "tanpa memeriksa", "10.0.0.3:3306", "dua master"} {
 		if !strings.Contains(stderr.String(), want) {
@@ -670,6 +670,266 @@ func TestUnlockMasterPrintsC7(t *testing.T) {
 	code, out, errOut := runCLI("unlock-master", "--dir", dir)
 	if code != 0 || out != unlockC7+"\n" {
 		t.Errorf("unlock-master = %d, stdout %q, stderr %q; want 0 and stdout %q", code, out, errOut, unlockC7+"\n")
+	}
+}
+
+// unlockC9 is the question unlock-master asks under a candidate's promote
+// lock (text C9 of the 5b-3 spec), with the candidate and the deadline.
+const unlockC9 = "Server ini dikunci untuk promote kandidat %s (tenggat %s). Perintah ini membuka kunci tanpa memeriksa kandidat itu atau replika lain; bila salah satunya sudah menjadi master, Anda akan punya dua master yang bisa ditulis. Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: "
+
+const (
+	unlockCancelledP3 = "Dibatalkan; kunci tidak dibuka."
+	unlockChangedP4   = "Kunci promosi di server ini berubah selama Anda membaca; jalankan perintah ini lagi."
+)
+
+// unlockFixture is a real mysqld for unlock-master tests, with
+// cliMySQLHost pointing at it.
+type unlockFixture struct {
+	t    *testing.T
+	inst *testmysql.Instance
+}
+
+func newUnlockFixture(t *testing.T) *unlockFixture {
+	t.Helper()
+	inst := testmysql.Start(t, testmysql.Options{})
+	old := cliMySQLHost
+	cliMySQLHost = func(string) (mysql.Host, error) { return inst.Host(), nil }
+	t.Cleanup(func() { cliMySQLHost = old })
+	return &unlockFixture{t: t, inst: inst}
+}
+
+// flags reads read_only and super_read_only.
+func (f *unlockFixture) flags() (ro, sro string) {
+	f.t.Helper()
+	db, err := sql.Open("mysql", f.inst.DSN())
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.QueryRow("SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only").Scan(&ro, &sro); err != nil {
+		f.t.Fatal(err)
+	}
+	return ro, sro
+}
+
+// server is a new agent directory pinned with role (none when ""), its
+// MySQL locked with lock-master, then, when l has a candidate, under the
+// promote lock l in place of lock-master's.
+func (f *unlockFixture) server(role string, l mysql.PromoteLock) (string, *mysql.Pins) {
+	f.t.Helper()
+	dir := f.t.TempDir()
+	p, err := mysql.LoadPins(dir)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if role != "" {
+		if err := p.SetRole(role); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	if code, _, errOut := runCLI("lock-master", "--dir", dir); code != 0 {
+		f.t.Fatalf("lock-master = %d, %q", code, errOut)
+	}
+	if l.Candidate != "" {
+		if err := p.WriteLock(l); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	return dir, p
+}
+
+// lockFile is the promote lock file of dir, as written.
+func lockFile(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, mysql.LockFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func candidateLock() mysql.PromoteLock {
+	return mysql.PromoteLock{Candidate: "10.0.0.2:3306", Addr: "10.0.0.2", Deadline: time.Now().Add(time.Hour).UTC().Truncate(time.Second),
+		Readable: []string{"10.0.0.3:3306"}}
+}
+
+// TestUnlockMasterAsksUnderCandidateLock (spec 5.5, C9): under a
+// candidate's promote lock unlock-master asks; only "ya" opens MySQL and
+// removes the lock; any other answer, an empty line or no input at all
+// cancels with P3 and exit 1, both flags and the lock file unchanged.
+func TestUnlockMasterAsksUnderCandidateLock(t *testing.T) {
+	f := newUnlockFixture(t)
+	l := candidateLock()
+	question := fmt.Sprintf(unlockC9, l.Candidate, l.Deadline.Local().Format(time.RFC3339))
+
+	for _, input := range []string{"y\n", "tidak\n", "\n", "", "ya tentu\n"} {
+		dir, _ := f.server("master", l)
+		before := lockFile(t, dir)
+		code, out, errOut := runSetRole(input, "unlock-master", "--dir", dir)
+		if code != 1 || out != question+unlockCancelledP3+"\n" || errOut != "" {
+			t.Errorf("answer %q: code %d, stdout %q, stderr %q; want 1, C9 then P3", input, code, out, errOut)
+		}
+		if ro, sro := f.flags(); ro != "1" || sro != "1" {
+			t.Errorf("answer %q: read_only %s, super_read_only %s; want 1, 1", input, ro, sro)
+		}
+		if after := lockFile(t, dir); after != before || after == "" {
+			t.Errorf("answer %q: lock file %q, want %q unchanged", input, after, before)
+		}
+	}
+
+	for _, input := range []string{"ya\n", "  ya  \n", "ya"} {
+		dir, p := f.server("master", l)
+		code, out, errOut := runSetRole(input, "unlock-master", "--dir", dir)
+		if code != 0 || out != question+unlockC7+"\n" || errOut != "" {
+			t.Errorf("answer %q: code %d, stdout %q, stderr %q; want 0, C9 then C7", input, code, out, errOut)
+		}
+		if ro, sro := f.flags(); ro != "0" || sro != "0" {
+			t.Errorf("answer %q: read_only %s, super_read_only %s; want 0, 0", input, ro, sro)
+		}
+		if _, ok, err := p.ReadLock(); ok || err != nil {
+			t.Errorf("answer %q: lock after unlock %v, %v; want none", input, ok, err)
+		}
+	}
+}
+
+// TestUnlockMasterYaFlagSkipsQuestion: --ya, before or after --dir,
+// opens without asking (and without input), and still prints the
+// Perhatian line naming what it bypasses.
+func TestUnlockMasterYaFlagSkipsQuestion(t *testing.T) {
+	f := newUnlockFixture(t)
+	for _, yaFirst := range []bool{true, false} {
+		dir, p := f.server("master", candidateLock())
+		args := []string{"unlock-master", "--dir", dir, "--ya"}
+		if yaFirst {
+			args = []string{"unlock-master", "--ya", "--dir", dir}
+		}
+		code, out, errOut := runSetRole("", args...)
+		if code != 0 || out != unlockC7+"\n" {
+			t.Errorf("%v: code %d, stdout %q, stderr %q; want 0 and only C7", args, code, out, errOut)
+		}
+		for _, want := range []string{"Perhatian: kunci promosi untuk kandidat 10.0.0.2:3306", "10.0.0.3:3306", "dua master"} {
+			if !strings.Contains(errOut, want) {
+				t.Errorf("%v: stderr %q lacks %q", args, errOut, want)
+			}
+		}
+		if ro, sro := f.flags(); ro != "0" || sro != "0" {
+			t.Errorf("%v: read_only %s, super_read_only %s; want 0, 0", args, ro, sro)
+		}
+		if _, ok, err := p.ReadLock(); ok || err != nil {
+			t.Errorf("%v: lock after unlock %v, %v; want none", args, ok, err)
+		}
+	}
+}
+
+// TestUnlockMasterNoQuestionWithoutCandidateLock: a master without a lock,
+// a master or unassigned server under a lock-master lock, open without a
+// question and without input; a refused server is refused before any
+// question.
+func TestUnlockMasterNoQuestionWithoutCandidateLock(t *testing.T) {
+	f := newUnlockFixture(t)
+	for _, role := range []string{"master", ""} {
+		dir, p := f.server(role, mysql.PromoteLock{})
+		code, out, errOut := runSetRole("", "unlock-master", "--dir", dir)
+		if code != 0 || out != unlockC7+"\n" || errOut != "" {
+			t.Errorf("lock-master lock, role %q: code %d, stdout %q, stderr %q; want 0 and only C7", role, code, out, errOut)
+		}
+		if ro, sro := f.flags(); ro != "0" || sro != "0" {
+			t.Errorf("lock-master lock, role %q: read_only %s, super_read_only %s; want 0, 0", role, ro, sro)
+		}
+		if _, ok, err := p.ReadLock(); ok || err != nil {
+			t.Errorf("lock-master lock, role %q: lock after unlock %v, %v; want none", role, ok, err)
+		}
+	}
+
+	// A master without any lock (its MySQL locked by hand).
+	dir, p := f.server("master", mysql.PromoteLock{})
+	if err := p.ClearLock(); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := runSetRole("", "unlock-master", "--dir", dir); code != 0 || out != unlockC7+"\n" || errOut != "" {
+		t.Errorf("no lock: code %d, stdout %q, stderr %q; want 0 and only C7", code, out, errOut)
+	}
+	if ro, sro := f.flags(); ro != "0" || sro != "0" {
+		t.Errorf("no lock: read_only %s, super_read_only %s; want 0, 0", ro, sro)
+	}
+
+	// Refusals come first: a replica or a quarantined server under a
+	// candidate's lock is refused without a question, even answered ya.
+	for _, role := range []string{"replica", "quarantined"} {
+		dir, _ := f.server(role, candidateLock())
+		before := lockFile(t, dir)
+		code, out, errOut := runSetRole("ya\n", "unlock-master", "--dir", dir)
+		if code != 1 || out != "" || !strings.Contains(errOut, "unlock-master hanya untuk master") {
+			t.Errorf("role %s: code %d, stdout %q, stderr %q; want 1, no question, a refusal", role, code, out, errOut)
+		}
+		if ro, sro := f.flags(); ro != "1" || sro != "1" {
+			t.Errorf("role %s: read_only %s, super_read_only %s; want 1, 1", role, ro, sro)
+		}
+		if after := lockFile(t, dir); after != before {
+			t.Errorf("role %s: lock file %q, want %q unchanged", role, after, before)
+		}
+	}
+}
+
+// TestUnlockMasterLockChangedDuringQuestion (P4): the lock file is read
+// again after "ya"; a lock removed, given another candidate or another
+// deadline while root read the question opens nothing; nor does a role
+// changed meanwhile.
+func TestUnlockMasterLockChangedDuringQuestion(t *testing.T) {
+	f := newUnlockFixture(t)
+	l := candidateLock()
+	other := l
+	other.Candidate, other.Addr = "10.0.0.4:3306", "10.0.0.4"
+	rearmed := l
+	rearmed.Deadline = l.Deadline.Add(time.Hour)
+	cli := mysql.PromoteLock{Candidate: mysql.CLILockCandidate, Deadline: l.Deadline}
+	cases := []struct {
+		name   string
+		change func(t *testing.T, p *mysql.Pins)
+		want   string
+	}{
+		{"lock removed", func(t *testing.T, p *mysql.Pins) {
+			if err := p.ClearLock(); err != nil {
+				t.Error(err)
+			}
+		}, unlockChangedP4},
+		{"other candidate", func(t *testing.T, p *mysql.Pins) {
+			if err := p.WriteLock(other); err != nil {
+				t.Error(err)
+			}
+		}, unlockChangedP4},
+		{"re-armed", func(t *testing.T, p *mysql.Pins) {
+			if err := p.WriteLock(rearmed); err != nil {
+				t.Error(err)
+			}
+		}, unlockChangedP4},
+		{"lock-master lock", func(t *testing.T, p *mysql.Pins) {
+			if err := p.WriteLock(cli); err != nil {
+				t.Error(err)
+			}
+		}, unlockChangedP4},
+		{"quarantined", func(t *testing.T, p *mysql.Pins) {
+			if err := p.SetQuarantined("10.0.0.2:3306"); err != nil {
+				t.Error(err)
+			}
+		}, "Peran server ini berubah selama Anda membaca; jalankan perintah ini lagi."},
+	}
+	for _, c := range cases {
+		dir, p := f.server("master", l)
+		var changed string // the lock file as the change left it
+		in := &hookReader{r: strings.NewReader("ya\n"), f: func() { c.change(t, p); changed = lockFile(t, dir) }}
+		var stdout, stderr bytes.Buffer
+		code := RunCLI([]string{"unlock-master", "--dir", dir}, in, &stdout, &stderr)
+		if code != 1 || stderr.String() != c.want+"\n" || strings.Contains(stdout.String(), unlockC7) {
+			t.Errorf("%s: code %d, stdout %q, stderr %q; want 1 and %q", c.name, code, stdout.String(), stderr.String(), c.want)
+		}
+		if ro, sro := f.flags(); ro != "1" || sro != "1" {
+			t.Errorf("%s: read_only %s, super_read_only %s; want 1, 1", c.name, ro, sro)
+		}
+		// The changed lock is left as the change wrote it.
+		if after := lockFile(t, dir); after != changed {
+			t.Errorf("%s: lock file %q after the refusal, want %q as the change left it", c.name, after, changed)
+		}
 	}
 }
 

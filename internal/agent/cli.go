@@ -48,7 +48,9 @@ const usage = `Penggunaan:
   dbpanel agent set-source HOST:PORT [--dir DIR]         ubah sumber replikasi yang dipin
   dbpanel agent lock-master [--dir DIR]                  kunci master (super_read_only, juga
                                                          setelah restart) tanpa kandidat promosi
-  dbpanel agent unlock-master [--dir DIR]                buka kunci master dan hapus kunci promosi
+  dbpanel agent unlock-master [--ya] [--dir DIR]         buka kunci master dan hapus kunci promosi;
+                                                         --ya: tanpa pertanyaan di bawah kunci promote
+                                                         sebuah kandidat
   dbpanel agent forget-replica <host> [--dir DIR]        hapus replika dari daftar replika dan dari kunci
                                                          promosi yang sedang berdiri (host:port juga
                                                          diterima; portnya diabaikan)
@@ -167,7 +169,7 @@ func RunCLIWith(args []string, in io.Reader, stdout, stderr io.Writer, seams CLI
 		case "lock-master":
 			return mainLockMaster(args[1:], stdout, stderr)
 		case "unlock-master":
-			return mainUnlockMaster(args[1:], stdout, stderr)
+			return mainUnlockMaster(args[1:], in, stdout, stderr)
 		case "forget-replica":
 			return mainForgetReplica(args[1:], stdout, stderr)
 		case "forget-replica-port":
@@ -801,13 +803,33 @@ func mainLockMaster(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// parseUnlockMasterArgs parses "[--ya] [--dir DIR]" with no other argument.
+func parseUnlockMasterArgs(args []string, stderr io.Writer) (dir string, yes, ok bool) {
+	fs := newFlagSet("agent unlock-master", stderr)
+	d := fs.String("dir", config.DefaultDir, "direktori konfigurasi agent")
+	y := fs.Bool("ya", false, "tanpa pertanyaan")
+	if err := fs.Parse(args); err != nil {
+		return "", false, false
+	}
+	if fs.NArg() > 0 {
+		fs.Usage()
+		return "", false, false
+	}
+	return *d, *y, true
+}
+
 // mainUnlockMaster is "agent unlock-master": MySQL writable again (also
 // after a restart) and the promote lock removed. Running it again on a
 // master is harmless. It runs only on a server pinned master, or an
 // unassigned one holding a lock-master lock (candidate "cli"): a replica
 // or quarantined server is never made writable by it.
-func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
-	dir, ok := parseDirOnly("agent unlock-master", args, stderr)
+//
+// Under a promote lock with a candidate it asks first (C9; --ya skips the
+// question and prints what it bypasses instead): it opens only on "ya",
+// and only when the lock and the role on disk are still the ones the
+// question was asked about.
+func mainUnlockMaster(args []string, in io.Reader, stdout, stderr io.Writer) int {
+	dir, yes, ok := parseUnlockMasterArgs(args, stderr)
 	if !ok {
 		return 2
 	}
@@ -826,15 +848,35 @@ func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
-	// Say what this bypasses (SA-11): the guard's reads of the candidate
-	// and of the replicas the lock lists.
 	if lerr == nil && locked && l.Candidate != mysql.CLILockCandidate {
-		fmt.Fprintf(stderr, "Perhatian: kunci promosi untuk kandidat %s (tenggat %s) dibuka tanpa memeriksa kandidat itu", l.Candidate,
-			l.Deadline.Local().Format(time.RFC3339))
-		if len(l.Readable) > 0 {
-			fmt.Fprintf(stderr, " atau replika %s", strings.Join(l.Readable, ", "))
+		if yes {
+			// Say what this bypasses (SA-11): the guard's reads of the
+			// candidate and of the replicas the lock lists.
+			fmt.Fprintf(stderr, "Perhatian: kunci promosi untuk kandidat %s (tenggat %s) dibuka tanpa memeriksa kandidat itu", l.Candidate,
+				l.Deadline.Local().Format(time.RFC3339))
+			if len(l.Readable) > 0 {
+				fmt.Fprintf(stderr, " atau replika %s", strings.Join(l.Readable, ", "))
+			}
+			fmt.Fprintln(stderr, "; bila salah satunya sudah menjadi master, kini ada dua master yang bisa ditulis.")
+		} else {
+			fmt.Fprintf(stdout, unlockMasterAsk, l.Candidate, l.Deadline.Local().Format(time.RFC3339))
+			line, _ := bufio.NewReader(in).ReadString('\n')
+			if strings.TrimSpace(line) != "ya" {
+				fmt.Fprintln(stdout, unlockMasterCancelled)
+				return 1
+			}
+			// The panel may have removed, replaced or re-armed the lock,
+			// or changed the role, while root read the question: nothing
+			// opens on what was shown unless it is still what is on disk.
+			if now, err := p.RoleErr(); err != nil || now != role {
+				fmt.Fprintln(stderr, setRoleChanged)
+				return 1
+			}
+			if now, ok, err := p.ReadLock(); err != nil || !ok || now.Candidate != l.Candidate || !now.Deadline.Equal(l.Deadline) {
+				fmt.Fprintln(stderr, unlockMasterLockChanged)
+				return 1
+			}
 		}
-		fmt.Fprintln(stderr, "; bila salah satunya sudah menjadi master, kini ada dua master yang bisa ditulis.")
 	}
 	// mysql.OpenWrites, as every other unlock: both flags OFF and
 	// persisted. On a failure the lock file stays.
@@ -849,6 +891,17 @@ func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, unlockMasterDone)
 	return 0
 }
+
+const (
+	// unlockMasterAsk is the question under a candidate's promote lock
+	// (C9): the candidate, then the deadline.
+	unlockMasterAsk = "Server ini dikunci untuk promote kandidat %s (tenggat %s). Perintah ini membuka kunci tanpa memeriksa kandidat itu atau replika lain; bila salah satunya sudah menjadi master, Anda akan punya dua master yang bisa ditulis. Ketik ya untuk melanjutkan, atau apa saja untuk membatalkan: "
+	// unlockMasterCancelled follows any answer but "ya" (P3).
+	unlockMasterCancelled = "Dibatalkan; kunci tidak dibuka."
+	// unlockMasterLockChanged: the lock was removed, or its candidate or
+	// deadline changed, while root read the question (P4).
+	unlockMasterLockChanged = "Kunci promosi di server ini berubah selama Anda membaca; jalankan perintah ini lagi."
+)
 
 // unlockMasterDone is what unlock-master says once MySQL is open (C7).
 const unlockMasterDone = "MySQL server ini bisa ditulis lagi, dan tetap begitu sesudah MySQL di-restart."
