@@ -1544,19 +1544,28 @@ nilai berjalan sesudah restart terakhir; tersimpan ditulis sesudah tanda `;`.
 
 | Baris | Tersimpan sebelum restart | Sesudah restart, di head `b3a1a9d` | Wajib | Sesudah Task 16 |
 |---|---|---|---|---|
-| premis-1 | OFF/OFF (OF ada) | OFF/OFF; OFF/OFF | OFF/OFF | |
-| premis-2 | ON/ON (tanpa OF) | ON/ON; ON/ON | ON/ON | |
-| premis-3 | ON/ON (OF ada) | ON/ON; ON/ON | ON/ON | |
-| premis-4 | OFF/OFF (tanpa OF) | OFF/OFF; OFF/OFF | OFF/OFF | |
-| jenis1-kunci | `lockForPromote`: -/ON; `lock-master`: -/ON | keduanya ON/ON; -/ON | ON/ON | |
-| jenis1-buka | `unlockPromote`: -/-; `unlock-master`: -/- | keduanya OFF/OFF; -/- | OFF/OFF | |
-| jenis2-kunci | OFF/ON (OF ada) | ON/ON; OFF/ON | ON/ON | |
-| jenis2-buka | OFF/- (OF ada) | **OFF/ON**; OFF/- | OFF/OFF | |
-| jenis3-dari-1 | ON/- (tanpa OF) | **ON/OFF**; ON/- | OFF/OFF | |
-| jenis3-dari-2 | ON/- (OF ada) | **ON/ON**; ON/- | OFF/OFF | |
+| premis-1 | OFF/OFF (OF ada) | OFF/OFF; OFF/OFF | OFF/OFF | OFF/OFF; OFF/OFF |
+| premis-2 | ON/ON (tanpa OF) | ON/ON; ON/ON | ON/ON | ON/ON; ON/ON |
+| premis-3 | ON/ON (OF ada) | ON/ON; ON/ON | ON/ON | ON/ON; ON/ON |
+| premis-4 | OFF/OFF (tanpa OF) | OFF/OFF; OFF/OFF | OFF/OFF | OFF/OFF; OFF/OFF |
+| jenis1-kunci | `lockForPromote`: -/ON; `lock-master`: -/ON | keduanya ON/ON; -/ON | ON/ON | keduanya ON/ON; ON/ON |
+| jenis1-buka | `unlockPromote`: -/-; `unlock-master`: -/- | keduanya OFF/OFF; -/- | OFF/OFF | keduanya OFF/OFF; OFF/OFF |
+| jenis2-kunci | OFF/ON (OF ada) | ON/ON; OFF/ON | ON/ON | ON/ON; ON/ON |
+| jenis2-buka | OFF/- (OF ada) | **OFF/ON**; OFF/- | OFF/OFF | OFF/OFF; OFF/OFF |
+| jenis3-dari-1 | ON/- (tanpa OF) | **ON/OFF**; ON/- | OFF/OFF | OFF/OFF; OFF/OFF |
+| jenis3-dari-2 | ON/- (OF ada) | **ON/ON**; ON/- | OFF/OFF | OFF/OFF; OFF/OFF |
 
 Baris premis semua lulus di head: aturan berhenti tidak berlaku. Tiga baris
 yang tebal gagal di head; test menegaskan nilai terukurnya (K28) sampai Task 16.
+
+Kolom "Sesudah Task 16" diukur oleh Task 16 dengan `TestReadOnlyAcrossRestart`
+yang sama (mysqld `8.0.46-0ubuntu0.24.04.4`): nilai berjalan sesudah restart
+terakhir; tersimpan sesudah tanda `;`. Setiap baris lulus, dan test kini juga
+menegaskan nilai tersimpan: setiap kunci menyimpan ON/ON, setiap buka OFF/OFF.
+Langkah yang berubah: setiap `mysql.lockForPromote`, `agent lock-master` dan
+putaran penjaga menyimpan ON/ON (bukan -/ON atau OFF/ON); setiap
+`mysql.unlockPromote` dan `agent unlock-master` menyimpan OFF/OFF (bukan -/-,
+OFF/- atau ON/-). Kedua pertanyaan tetap dijawab sama dan kini ditegaskan.
 
 Langkah per baris (berjalan; tersimpan, sesudah tiap langkah):
 

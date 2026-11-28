@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -725,8 +726,8 @@ func parseDirOnly(name string, args []string, stderr io.Writer) (dir string, ok 
 	return *d, true
 }
 
-// cliExec runs stmts, in order, on the agent's MySQL in dir.
-func cliExec(dir string, stmts ...string) error {
+// cliDB runs f on the agent's MySQL in dir, within a minute.
+func cliDB(dir string, f func(ctx context.Context, db *sql.DB) error) error {
 	h, err := cliMySQLHost(dir)
 	if err != nil {
 		return err
@@ -740,12 +741,7 @@ func cliExec(dir string, stmts ...string) error {
 		return err
 	}
 	defer db.Close()
-	for _, q := range stmts {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			return fmt.Errorf("%s: %w", q, err)
-		}
-	}
-	return nil
+	return f(ctx, db)
 }
 
 // cliLockFor is how long a lock-master lock lasts on paper; a lock with
@@ -769,9 +765,24 @@ func mainLockMaster(args []string, stdout, stderr io.Writer) int {
 			l.Candidate, l.Deadline.Local().Format(time.RFC3339))
 		return 1
 	}
-	if err := cliExec(dir, "SET PERSIST super_read_only = ON"); err != nil {
+	// mysql.LockWrites, as the promote lock: both flags ON and persisted.
+	// A failure of its second statement leaves MySQL locked (now and
+	// after a restart): it is said, and the lock file is still written.
+	var warnErr error
+	err := cliDB(dir, func(ctx context.Context, db *sql.DB) error {
+		locked, err := mysql.LockWrites(ctx, db)
+		if locked {
+			warnErr = err
+			return nil
+		}
+		return err
+	})
+	if err != nil {
 		fmt.Fprintf(stderr, "gagal mengunci MySQL: %v\n", err)
 		return 1
+	}
+	if warnErr != nil {
+		fmt.Fprintf(stderr, "Perhatian: %v\n", warnErr)
 	}
 	// The check above and this write are not one step: write only when
 	// no lock appeared meanwhile (a planned promotion's), under the lock
@@ -825,8 +836,9 @@ func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stderr, "; bila salah satunya sudah menjadi master, kini ada dua master yang bisa ditulis.")
 	}
-	if err := cliExec(dir, "RESET PERSIST IF EXISTS super_read_only",
-		"SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF"); err != nil {
+	// mysql.OpenWrites, as every other unlock: both flags OFF and
+	// persisted. On a failure the lock file stays.
+	if err := cliDB(dir, func(ctx context.Context, db *sql.DB) error { return mysql.OpenWrites(ctx, db) }); err != nil {
 		fmt.Fprintf(stderr, "gagal membuka kunci MySQL: %v\n", err)
 		return 1
 	}
@@ -834,9 +846,12 @@ func mainUnlockMaster(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "MySQL sudah bisa ditulis, tetapi kunci promosi gagal dihapus: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "master dibuka: MySQL bisa ditulis dan kunci promosi dihapus")
+	fmt.Fprintln(stdout, unlockMasterDone)
 	return 0
 }
+
+// unlockMasterDone is what unlock-master says once MySQL is open (C7).
+const unlockMasterDone = "MySQL server ini bisa ditulis lagi, dan tetap begitu sesudah MySQL di-restart."
 
 // mainForgetReplica is "agent forget-replica HOST": host leaves the
 // replicas-seen file and the readable replicas of the standing promote

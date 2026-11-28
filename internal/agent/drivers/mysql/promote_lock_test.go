@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/monitor"
@@ -314,8 +316,8 @@ func TestLockRequiresConnectedCandidate(t *testing.T) {
 	if sro, ro := readOnly(t, mdb); !sro || !ro {
 		t.Errorf("after lock: super_read_only=%v read_only=%v", sro, ro)
 	}
-	if got := persisted(t, mdb, "super_read_only"); got != "ON" {
-		t.Errorf("persisted super_read_only = %q, want ON", got)
+	if s, ro := persisted(t, mdb, "super_read_only"), persisted(t, mdb, "read_only"); s != "ON" || ro != "ON" {
+		t.Errorf("persisted after lock: super_read_only=%q read_only=%q, want ON, ON", s, ro)
 	}
 	l, ok, err := r.d.Pins().ReadLock()
 	if err != nil || !ok || l.Candidate != key || !l.Deadline.Equal(res.Deadline) {
@@ -336,8 +338,8 @@ func TestLockRequiresConnectedCandidate(t *testing.T) {
 	if sro, ro := readOnly(t, mdb); sro || ro {
 		t.Errorf("after unlock: super_read_only=%v read_only=%v", sro, ro)
 	}
-	if got := persisted(t, mdb, "super_read_only"); got != "" {
-		t.Errorf("persisted super_read_only after unlock = %q", got)
+	if s, ro := persisted(t, mdb, "super_read_only"), persisted(t, mdb, "read_only"); s != "OFF" || ro != "OFF" {
+		t.Errorf("persisted after unlock: super_read_only=%q read_only=%q, want OFF, OFF", s, ro)
 	}
 	if got := pinFile(t, dir, mysql.LockFile); got != "" {
 		t.Errorf("lock file after unlock = %q", got)
@@ -417,8 +419,8 @@ func TestGuardUnlocksAfterGraceWhenStillReplica(t *testing.T) {
 	if sro, ro := readOnly(t, r.db); sro || ro {
 		t.Errorf("after the grace: super_read_only=%v read_only=%v, want both OFF", sro, ro)
 	}
-	if got := persisted(t, r.db, "super_read_only"); got != "" {
-		t.Errorf("persisted super_read_only after unlock = %q", got)
+	if s, ro := persisted(t, r.db, "super_read_only"), persisted(t, r.db, "read_only"); s != "OFF" || ro != "OFF" {
+		t.Errorf("persisted after unlock: super_read_only=%q read_only=%q, want OFF, OFF", s, ro)
 	}
 	if got := pinFile(t, r.dir, mysql.LockFile); got != "" {
 		t.Errorf("lock file after unlock = %q", got)
@@ -571,8 +573,8 @@ func TestLockReappliedAfterRestart(t *testing.T) {
 	execAll(t, r.db, "RESET PERSIST super_read_only", "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF")
 	r.tick(-9 * time.Minute)
 	r.wantLocked("after the guard's check")
-	if got := persisted(t, r.db, "super_read_only"); got != "ON" {
-		t.Errorf("persisted super_read_only = %q, want ON", got)
+	if s, ro := persisted(t, r.db, "super_read_only"), persisted(t, r.db, "read_only"); s != "ON" || ro != "ON" {
+		t.Errorf("persisted: super_read_only=%q read_only=%q, want ON, ON", s, ro)
 	}
 	if n := r.peer.count(); n != 0 {
 		t.Errorf("peer read %d times before the deadline", n)
@@ -1305,5 +1307,244 @@ func TestUnlockPromoteReadsListedReplicas(t *testing.T) {
 	}
 	if sro, ro := readOnly(t, r.db); !sro || !ro {
 		t.Errorf("quarantined: super_read_only=%v read_only=%v", sro, ro)
+	}
+}
+
+// failExec is an execer that answers err to the statement fail and sends
+// every other one on.
+type failExec struct {
+	mysql.Execer
+	fail string
+	err  error
+}
+
+func (f failExec) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	if q == f.fail {
+		return nil, f.err
+	}
+	return f.Execer.ExecContext(ctx, q, args...)
+}
+
+// failFlagStatement makes the driver's lock and unlock paths fail the
+// statement q with err, for the rest of the test.
+func failFlagStatement(t *testing.T, q string, err error) {
+	t.Helper()
+	t.Cleanup(mysql.SetFlagExec(func(e mysql.Execer) mysql.Execer { return failExec{Execer: e, fail: q, err: err} }))
+}
+
+// wantFlags fails unless inst runs and persists both flags as want.
+func wantFlags(t *testing.T, inst *testmysql.Instance, what string, want runFlags) {
+	t.Helper()
+	s := readFlags(t, inst)
+	if s.running() != want || s.PersistedRO != onOff(want.RO) || s.PersistedSRO != onOff(want.SRO) {
+		t.Errorf("%s: %s; want running and persisted %s", what, s, want)
+	}
+}
+
+// TestUnlockPathsPersistBothOff (R-188): every path that opens a master
+// stores read_only=OFF and super_read_only=OFF, from a server that had
+// both persisted ON (as a quarantine leaves them), so that no MySQL
+// restart makes it read-only again.
+func TestUnlockPathsPersistBothOff(t *testing.T) {
+	// lockedRig is a lock rig with read_only persisted ON as well, the
+	// candidate a read-only replica.
+	lockedRig := func(t *testing.T) *lockRig {
+		r := newLockRig(t, guardCandidateKey)
+		execAll(t, r.db, "SET PERSIST read_only = ON")
+		r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true, GTIDExecuted: r.uuid + ":1-3"})
+		wantFlags(t, r.inst, "before the unlock", bothOn)
+		return r
+	}
+	rows := []struct {
+		name string
+		open func(t *testing.T) *testmysql.Instance
+	}{
+		{"unlockPromote", func(t *testing.T) *testmysql.Instance {
+			r := lockedRig(t)
+			if resp := r.dispatch("mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: guardCandidate}); !resp.OK {
+				t.Fatalf("mysql.unlockPromote = %+v", resp.Error)
+			}
+			return r.inst
+		}},
+		{"guard at the deadline", func(t *testing.T) *testmysql.Instance {
+			r := lockedRig(t)
+			r.tick(0)
+			r.tick(60 * time.Second)
+			if got := pinFile(t, r.dir, mysql.LockFile); got != "" {
+				t.Fatalf("lock file after the guard's unlock = %q", got)
+			}
+			return r.inst
+		}},
+		{"setReadOnly(false)", func(t *testing.T) *testmysql.Instance {
+			inst := testmysql.Start(t, testmysql.Options{})
+			execOn(t, inst, "SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON")
+			r := newPinRig(t, inst.Host(), pinDir(t, "master", ""))
+			if resp := r.dispatch("mysql.setReadOnly", proto.ReadOnlyParams{On: false}); !resp.OK {
+				t.Fatalf("mysql.setReadOnly{on:false} = %+v", resp.Error)
+			}
+			return inst
+		}},
+		{"agent unlock-master", func(t *testing.T) *testmysql.Instance {
+			r := lockedRig(t)
+			cliAgentDir(t, r.dir, r.inst)
+			runAgentCLI(t, r.inst, "unlock-master", "--dir", r.dir)
+			return r.inst
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			inst := row.open(t)
+			wantFlags(t, inst, "after "+row.name, bothOff)
+			inst.Restart(t)
+			wantFlags(t, inst, "after a restart", bothOff)
+		})
+	}
+}
+
+// TestLockPathsPersistBothOn (R-188): every path that locks a master
+// stores read_only=ON and super_read_only=ON, from a server that had
+// both persisted OFF (as a promotion leaves them), so that no MySQL
+// restart opens it whatever the option file says.
+func TestLockPathsPersistBothOn(t *testing.T) {
+	rows := []struct {
+		name string
+		lock func(t *testing.T) *testmysql.Instance
+	}{
+		{"lockForPromote", func(t *testing.T) *testmysql.Instance {
+			m := newLockedMaster(t)
+			execOn(t, m.master, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+			m.lock(t)
+			return m.master
+		}},
+		{"ensureLocked", func(t *testing.T) *testmysql.Instance {
+			inst := testmysql.Start(t, testmysql.Options{})
+			execOn(t, inst, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+			r := newPinRig(t, inst.Host(), pinDir(t, "master", ""))
+			if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: guardCandidateKey, Deadline: time.Now().Add(time.Hour)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.d.GuardTick(context.Background(), time.Now()); err != nil {
+				t.Fatalf("GuardTick: %v", err)
+			}
+			return inst
+		}},
+		{"agent lock-master", func(t *testing.T) *testmysql.Instance {
+			inst, dir := cliMaster(t)
+			execOn(t, inst, "SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF")
+			runAgentCLI(t, inst, "lock-master", "--dir", dir)
+			return inst
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			inst := row.lock(t)
+			wantFlags(t, inst, "after "+row.name, bothOn)
+			inst.Restart(t)
+			wantFlags(t, inst, "after a restart", bothOn)
+		})
+	}
+}
+
+// TestLockSecondStatementFailureStillLocks (spec 5.4 item 2): when
+// SET PERSIST read_only = ON fails after super_read_only went on,
+// lockForPromote answers that the lock is taken, keeps the lock file,
+// and logs one warning: the master is locked, now and after a restart.
+func TestLockSecondStatementFailureStillLocks(t *testing.T) {
+	m := newLockedMaster(t)
+	var logs syncBuffer
+	m.r.d.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	failFlagStatement(t, "SET PERSIST read_only = ON", errors.New("connection reset"))
+	resp := m.r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: m.cred, TimeoutSec: 600})
+	if !resp.OK {
+		t.Fatalf("mysql.lockForPromote with its second statement failing = %+v; want the lock taken", resp.Error)
+	}
+	if got := pinFile(t, m.dir, mysql.LockFile); got == "" {
+		t.Error("lock file gone after a lock whose second statement failed")
+	}
+	if n := strings.Count(logs.String(), "read_only not persisted"); n != 1 {
+		t.Errorf("warning logged %d times, want 1:\n%s", n, logs.String())
+	}
+	s := readFlags(t, m.master)
+	if s.running() != bothOn || s.PersistedSRO != "ON" || s.PersistedRO == "ON" {
+		t.Errorf("after the lock: %s; want running ON/ON, super_read_only persisted ON, read_only not", s)
+	}
+	if s := restartAndRead(t, m.master); s.running() != bothOn {
+		t.Errorf("after a restart: %s; want running ON/ON", s)
+	}
+}
+
+// TestOpenSecondStatementFailureKeepsLockFile (spec 5.4 item 2): when
+// SET PERSIST read_only = OFF fails after super_read_only went off,
+// unlockPromote answers an error and keeps the lock file, and the
+// guard's next round puts super_read_only back on (fail closed).
+func TestOpenSecondStatementFailureKeepsLockFile(t *testing.T) {
+	r := newLockRig(t, guardCandidateKey)
+	r.peer.set(mysql.PeerState{Reachable: true, SuperReadOnly: true, ReadOnly: true, GTIDExecuted: r.uuid + ":1-3"})
+	r.tick(-time.Hour) // the guard has seen MySQL up: the next round reads the flags
+	failFlagStatement(t, "SET PERSIST read_only = OFF", errors.New("connection reset"))
+	resp := r.dispatch("mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: guardCandidate})
+	if resp.OK || resp.Error == nil || resp.Error.Code == proto.CodeBadParams {
+		t.Fatalf("mysql.unlockPromote with its second statement failing = %+v; want an error that is not a refusal", resp)
+	}
+	if got := pinFile(t, r.dir, mysql.LockFile); got == "" {
+		t.Fatal("lock file removed by an unlock that failed")
+	}
+	if sro, ro := readOnly(t, r.db); sro || !ro {
+		t.Fatalf("after the failed unlock: super_read_only=%v read_only=%v; want OFF, ON", sro, ro)
+	}
+	r.tick(-time.Hour + 5*time.Second)
+	r.wantLocked("after the guard's next round")
+	wantFlags(t, r.inst, "after the guard's next round", bothOn)
+}
+
+// TestLockForPromoteNeverRefusesAfterLockWritten: the panel takes a
+// bad_params answer to mysql.lockForPromote as "refused before the lock
+// was written" (orchestrator lockRefused). Once the lock file is being
+// written, or a lock statement was sent, no failure may answer
+// bad_params, even one whose cause is a ParamError.
+func TestLockForPromoteNeverRefusesAfterLockWritten(t *testing.T) {
+	m := newLockedMaster(t)
+	refusal := &commands.ParamError{Msg: "a refusal-shaped cause"}
+	lock := func() proto.Response {
+		return m.r.dispatch("mysql.lockForPromote", proto.LockForPromoteParams{Candidate: m.cred, TimeoutSec: 600})
+	}
+	wantNoRefusal := func(what string, resp proto.Response) {
+		t.Helper()
+		if resp.OK || resp.Error == nil {
+			t.Fatalf("%s = %+v; want an error", what, resp)
+		}
+		if resp.Error.Code == proto.CodeBadParams {
+			t.Errorf("%s answered bad_params (%q) after the lock was written", what, resp.Error.Message)
+		}
+	}
+
+	restore := mysql.SetWriteLock(func(p *mysql.Pins, l mysql.PromoteLock) error {
+		if err := p.WriteLock(l); err != nil {
+			return err
+		}
+		return fmt.Errorf("written, then: %w", refusal)
+	})
+	wantNoRefusal("lock file write failing after writing", lock())
+	restore()
+	if err := m.r.d.Pins().ClearLock(); err != nil {
+		t.Fatal(err)
+	}
+
+	restore = mysql.SetFlagExec(func(e mysql.Execer) mysql.Execer {
+		return failExec{Execer: e, fail: "SET PERSIST super_read_only = ON", err: refusal}
+	})
+	wantNoRefusal("SET PERSIST super_read_only = ON failing", lock())
+	restore()
+	if got := pinFile(t, m.dir, mysql.LockFile); got != "" {
+		t.Errorf("lock file after a lock whose first statement failed = %q; want it removed", got)
+	}
+
+	// A second statement failing is no failure at all: the lock is taken.
+	restore = mysql.SetFlagExec(func(e mysql.Execer) mysql.Execer {
+		return failExec{Execer: e, fail: "SET PERSIST read_only = ON", err: refusal}
+	})
+	defer restore()
+	if resp := lock(); !resp.OK {
+		t.Errorf("lock with SET PERSIST read_only = ON failing = %+v; want taken", resp.Error)
 	}
 }

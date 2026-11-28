@@ -612,16 +612,15 @@ func setReadOnly(ctx context.Context, h Host, on, checkSource bool) error {
 		return err
 	}
 	defer db.Close()
-	stmts := []string{"SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON"}
 	if !on {
 		if checkSource {
 			if err := refuseOnSource(ctx, db); err != nil {
 				return err
 			}
 		}
-		stmts = []string{"SET PERSIST super_read_only = OFF", "SET PERSIST read_only = OFF"}
+		return OpenWrites(ctx, db)
 	}
-	for _, q := range stmts {
+	for _, q := range []string{"SET PERSIST read_only = ON", "SET PERSIST super_read_only = ON"} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("%s: %w", q, err)
 		}

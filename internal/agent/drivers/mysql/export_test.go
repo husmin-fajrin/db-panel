@@ -797,3 +797,14 @@ func SetOpenReadFlags(f func(ctx context.Context, db *sql.DB) (ro, sro bool, err
 	openReadFlags = f
 	return func() { openReadFlags = old }
 }
+
+// Execer is what OpenWrites and LockWrites send their statements on.
+type Execer = execer
+
+// SetFlagExec replaces the execer the driver's lock and unlock paths send
+// OpenWrites and LockWrites on: f wraps the real one.
+func SetFlagExec(f func(Execer) Execer) (restore func()) {
+	old := flagExec
+	flagExec = func(db *sql.DB) execer { return f(old(db)) }
+	return func() { flagExec = old }
+}

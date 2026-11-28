@@ -56,15 +56,25 @@ var (
 	bothOn  = runFlags{RO: true, SRO: true}
 	bothOff = runFlags{}
 	roOnly  = runFlags{RO: true}
-	sroOnly = runFlags{SRO: true}
 )
 
-// measured is a row's head value: what the code reads now where it is not
-// the required state.
-func measured(f runFlags) *runFlags { return &f }
+// persistedFlag spells a persisted read_only or super_read_only value as
+// ON or OFF, accepting "1" and "0" and any letter case as the agent's
+// persistedReadOnlyOn does; "" (nothing persisted) and anything else are
+// kept as they are.
+func persistedFlag(v string) string {
+	switch {
+	case strings.EqualFold(v, "ON") || v == "1":
+		return "ON"
+	case strings.EqualFold(v, "OFF") || v == "0":
+		return "OFF"
+	}
+	return v
+}
 
 // readFlags reads inst's flags on a connection of its own (one made
-// before a restart is gone).
+// before a restart is gone); the persisted values are spelled by
+// persistedFlag.
 func readFlags(t *testing.T, inst *testmysql.Instance) flagState {
 	t.Helper()
 	db, err := sql.Open("mysql", inst.DSN())
@@ -81,6 +91,7 @@ func readFlags(t *testing.T, inst *testmysql.Instance) flagState {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			t.Fatal(err)
 		}
+		*v = persistedFlag(*v)
 	}
 	return s
 }
@@ -359,14 +370,14 @@ func premise(withOF bool, v string) func(t *testing.T) flagState {
 // running and persisted read_only/super_read_only after every step and
 // after a MySQL restart, for each kind of master and each path that
 // locks or opens one (R-188). want is the state each row must have after
-// its last restart; head, where set, is what the code reads there now.
-// It also answers the two questions of spec section 6 in its log.
+// its last restart, running and persisted: every lock stores both flags
+// ON, every unlock both OFF (Task 16). It also asserts the answers to the
+// two questions of spec section 6.
 func TestReadOnlyAcrossRestart(t *testing.T) {
 	rows := []struct {
 		name string
 		run  func(t *testing.T) flagState // the row's steps; the state after its last restart
 		want runFlags
-		head *runFlags
 	}{
 		{name: "premis-1", run: premise(true, "OFF"), want: bothOff},
 		{name: "premis-2", run: premise(false, "ON"), want: bothOn},
@@ -402,7 +413,7 @@ func TestReadOnlyAcrossRestart(t *testing.T) {
 		{name: "jenis2-kunci", want: bothOn, run: func(t *testing.T) flagState {
 			return lockPromoted(t, promotedMaster(t, true))
 		}},
-		{name: "jenis2-buka", want: bothOff, head: measured(sroOnly), // measured at b3a1a9d; Task 16 asserts the required state
+		{name: "jenis2-buka", want: bothOff,
 			run: func(t *testing.T) flagState {
 				r := promotedMaster(t, true)
 				lockPromoted(t, r)
@@ -412,7 +423,7 @@ func TestReadOnlyAcrossRestart(t *testing.T) {
 				logged(t, r.replica, "mysql.unlockPromote")
 				return restarted(t, r.replica)
 			}},
-		{name: "jenis3-dari-1", want: bothOff, head: measured(roOnly), // measured at b3a1a9d; Task 16 asserts the required state
+		{name: "jenis3-dari-1", want: bothOff,
 			run: func(t *testing.T) flagState {
 				inst := testmysql.Start(t, testmysql.Options{})
 				logVersion(t, inst)
@@ -423,7 +434,7 @@ func TestReadOnlyAcrossRestart(t *testing.T) {
 				quarantineThenMaster(t, inst, dir, r.d, r.dispatch)
 				return restarted(t, inst)
 			}},
-		{name: "jenis3-dari-2", want: bothOff, head: measured(bothOn), // measured at b3a1a9d; Task 16 asserts the required state
+		{name: "jenis3-dari-2", want: bothOff,
 			run: func(t *testing.T) flagState {
 				r := promotedMaster(t, false)
 				quarantineThenMaster(t, r.replica, r.dir, r.d, r.dispatch)
@@ -432,41 +443,52 @@ func TestReadOnlyAcrossRestart(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			got := row.run(t).running()
-			want := row.want
-			if row.head != nil {
-				want = *row.head
+			s := row.run(t)
+			t.Logf("after the last restart: %s; required %s, persisted the same", s, row.want)
+			if got := s.running(); got != row.want {
+				t.Errorf("after the last restart: running %s, want %s", got, row.want)
 			}
-			t.Logf("after the last restart: running %s; required %s", got, row.want)
-			if got != want {
-				t.Errorf("after the last restart: running %s, want %s", got, want)
+			if s.PersistedRO != onOff(row.want.RO) || s.PersistedSRO != onOff(row.want.SRO) {
+				t.Errorf("after the last restart: persisted %s/%s, want %s", orDash(s.PersistedRO), orDash(s.PersistedSRO), row.want)
 			}
 		})
 	}
-	// The two questions of spec section 6 (R-188): answered in the log,
-	// nothing of MySQL's behaviour asserted.
+	// The two questions of spec section 6 (R-188), as Task 15 measured
+	// them: SET PERSIST super_read_only = ON turns read_only on but does
+	// not persist it (why LockWrites sends both statements), and it stays
+	// so across a restart.
 	t.Run("question-persist-super_read_only-on", func(t *testing.T) {
 		inst := testmysql.Start(t, testmysql.Options{})
 		logVersion(t, inst)
 		logged(t, inst, "start")
 		execOn(t, inst, "SET PERSIST super_read_only = ON")
 		s := logged(t, inst, "SET PERSIST super_read_only = ON")
-		restarted(t, inst)
 		t.Logf("answer: persisted read_only after SET PERSIST super_read_only = ON is %s", orDash(s.PersistedRO))
+		if s.running() != bothOn || s.PersistedRO != "" || s.PersistedSRO != "ON" {
+			t.Errorf("after SET PERSIST super_read_only = ON: %s; want running ON/ON, persisted -/ON", s)
+		}
+		if s := restarted(t, inst); s.running() != bothOn || s.PersistedRO != "" || s.PersistedSRO != "ON" {
+			t.Errorf("after a restart: %s; want running ON/ON, persisted -/ON", s)
+		}
 	})
 	t.Run("question-setReadOnly-off-with-only-read_only-on", func(t *testing.T) {
 		inst := testmysql.Start(t, testmysql.Options{})
 		logVersion(t, inst)
 		r := newPinRig(t, inst.Host(), pinDir(t, "master", ""))
 		execOn(t, inst, "SET PERSIST read_only = ON")
-		logged(t, inst, "SET PERSIST read_only = ON")
+		if s := logged(t, inst, "SET PERSIST read_only = ON"); s.running() != roOnly || s.PersistedRO != "ON" || s.PersistedSRO != "" {
+			t.Fatalf("before mysql.setReadOnly{on:false}: %s; want running ON/OFF, persisted ON/-", s)
+		}
 		resp := r.dispatch("mysql.setReadOnly", proto.ReadOnlyParams{On: false})
-		logged(t, inst, "mysql.setReadOnly{on:false}")
-		restarted(t, inst)
-		if resp.OK {
-			t.Logf("answer: mysql.setReadOnly{on:false} accepted")
-		} else {
-			t.Logf("answer: mysql.setReadOnly{on:false} refused: %+v", resp.Error)
+		if !resp.OK {
+			t.Fatalf("answer: mysql.setReadOnly{on:false} refused: %+v", resp.Error)
+		}
+		t.Logf("answer: mysql.setReadOnly{on:false} accepted")
+		for what, s := range map[string]flagState{"after mysql.setReadOnly{on:false}": logged(t, inst, "mysql.setReadOnly{on:false}"),
+			"after a restart": restarted(t, inst)} {
+			if s.running() != bothOff || s.PersistedRO != "OFF" || s.PersistedSRO != "OFF" {
+				t.Errorf("%s: %s; want running OFF/OFF, persisted OFF/OFF", what, s)
+			}
 		}
 	})
 }

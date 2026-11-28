@@ -627,7 +627,7 @@ func TestCLILockUnlockMaster(t *testing.T) {
 	}
 
 	code, out, errOut = run("unlock-master", "--dir", dir)
-	if code != 0 || !strings.Contains(out, "master dibuka") {
+	if code != 0 || !strings.Contains(out, unlockC7) {
 		t.Fatalf("unlock-master = %d, %q, %q", code, out, errOut)
 	}
 	if ro, sro := vars(); ro != "0" || sro != "0" {
@@ -645,6 +645,56 @@ func TestCLILockUnlockMaster(t *testing.T) {
 	}
 	if code, _, errOut := run("lock-master", "--dir", dir, "lagi"); code != 2 || errOut == "" {
 		t.Errorf("lock-master with an argument = %d, %q; want 2", code, errOut)
+	}
+}
+
+// unlockC7 is what unlock-master says once MySQL is open (text C7 of the
+// 5b-3 spec).
+const unlockC7 = "MySQL server ini bisa ditulis lagi, dan tetap begitu sesudah MySQL di-restart."
+
+// TestUnlockMasterPrintsC7: unlock-master of a master locked with
+// lock-master prints C7, and only C7, on stdout.
+func TestUnlockMasterPrintsC7(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	dir := t.TempDir()
+	old := cliMySQLHost
+	cliMySQLHost = func(string) (mysql.Host, error) { return inst.Host(), nil }
+	t.Cleanup(func() { cliMySQLHost = old })
+	stubLayoutHost(t, func(config.Config) (mysql.Host, error) { return inst.Host(), nil })
+	if code, _, errOut := runCLI("set-role", "master", "--dir", dir); code != 0 {
+		t.Fatalf("set-role master = %d, %q", code, errOut)
+	}
+	if code, _, errOut := runCLI("lock-master", "--dir", dir); code != 0 {
+		t.Fatalf("lock-master = %d, %q", code, errOut)
+	}
+	code, out, errOut := runCLI("unlock-master", "--dir", dir)
+	if code != 0 || out != unlockC7+"\n" {
+		t.Errorf("unlock-master = %d, stdout %q, stderr %q; want 0 and stdout %q", code, out, errOut, unlockC7+"\n")
+	}
+}
+
+// TestNoResetPersistOfReadOnlyFlags (spec 5.4 item 2): no agent code
+// takes read_only or super_read_only out of the persisted set; every
+// path stores both explicitly (mysql.OpenWrites, mysql.LockWrites).
+func TestNoResetPersistOfReadOnlyFlags(t *testing.T) {
+	err := filepath.WalkDir(".", func(path string, e os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if e.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if src := string(b); strings.Contains(src, "RESET PERSIST") && strings.Contains(src, "read_only") {
+			t.Errorf("%s holds RESET PERSIST and read_only", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

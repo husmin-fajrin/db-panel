@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -244,6 +245,22 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 			"Replika yang terdaftar ada di %s dan %s; hapus yang sudah tidak dipakai dengan: sudo dbpanel agent forget-replica <host>",
 			lockReadBudget, d.seenPath(), d.seenPortsPath())}
 	}
+	// The panel reads a bad_params (or unknown_command) answer to
+	// mysql.lockForPromote as "refused before the lock was written"
+	// (orchestrator lockRefused) and then takes the master as never
+	// locked. Every refusal above returns before the lock file is
+	// written and before a lock statement is sent; from the write on,
+	// every error goes through notRefusal, so none of them can ever
+	// answer bad_params.
+	res, err = d.takeLock(ctx, db, p, key, addr, readable)
+	return res, notRefusal(err)
+}
+
+// takeLock writes the promote lock file for p's candidate (key, matched
+// at addr, readable: the other replicas read) and then locks MySQL
+// (LockWrites). The caller holds promoteMu.
+func (d *Driver) takeLock(ctx context.Context, db *sql.DB, p proto.LockForPromoteParams, key, addr string, readable []string) (proto.LockForPromoteResult, error) {
+	var res proto.LockForPromoteResult
 	// The lock file first: a failure or a crash after it leaves a lock
 	// the guard turns into super_read_only on its next tick, never a
 	// read-only master without a lock nothing automatic would open. The
@@ -254,19 +271,36 @@ func (d *Driver) lockForPromote(ctx context.Context, h Host, p proto.LockForProm
 		return res, fmt.Errorf("kunci promosi gagal ditulis, master tidak dikunci: %w", err)
 	}
 	d.guard.reset(&p.Candidate)
-	// PERSIST: a MySQL restart never opens writes, not even for a moment.
-	if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {
-		err = fmt.Errorf("kunci master (SET PERSIST super_read_only = ON): %w", err)
+	// PERSIST, both flags: a MySQL restart never opens writes, not even
+	// for a moment, whatever the option file says.
+	locked, err := LockWrites(ctx, flagExec(db))
+	if !locked {
 		if cerr := d.pins.ClearLock(); cerr != nil {
 			return res, fmt.Errorf("%w; berkas kunci promosi juga gagal dihapus (%v), hapus dengan: sudo dbpanel agent unlock-master", err, cerr)
 		}
 		d.guard.reset(nil)
 		return res, err
 	}
+	if err != nil {
+		// super_read_only is ON and persisted: the master is locked, now
+		// and after a restart; only read_only is not stored. The lock
+		// stands and is reported taken: the agent never reports "not
+		// locked" while super_read_only is ON.
+		d.warn("promote lock taken, but read_only not persisted", "err", err)
+	}
 	if err := db.QueryRowContext(ctx, "SELECT @@global.server_uuid, @@global.gtid_executed").Scan(&res.ServerUUID, &res.GTIDExecuted); err != nil {
 		return res, fmt.Errorf("master sudah dikunci (kunci promosi tetap), tetapi server_uuid/gtid_executed gagal dibaca: %w", err)
 	}
 	return res, nil
+}
+
+// notRefusal is err with no ParamError left in its chain (its text
+// kept): an answer that cannot be bad_params.
+func notRefusal(err error) error {
+	if _, ok := errors.AsType[*commands.ParamError](err); ok {
+		return errors.New(err.Error())
+	}
+	return err
 }
 
 // writeLock is Pins.WriteLock; tests replace it.
@@ -487,25 +521,15 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 		return &commands.ParamError{Msg: fmt.Sprintf("replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang (%s); "+
 			"kunci tidak dibuka", strings.Join(unreadable, ", "))}
 	}
-	if err := unlockMaster(ctx, db); err != nil {
+	// Both flags stored OFF; on an error the lock file stays and the
+	// guard locks again on its next round (fail closed).
+	if err := OpenWrites(ctx, flagExec(db)); err != nil {
 		return err
 	}
 	if err := d.pins.ClearLock(); err != nil {
 		return fmt.Errorf("MySQL sudah bisa ditulis, tetapi kunci promosi gagal dihapus: %w", err)
 	}
 	d.guard.reset(nil)
-	return nil
-}
-
-// unlockMaster opens a locked master: what the lock persisted is removed
-// and both flags are turned off (MySQL turns read_only on with
-// super_read_only but not off), as "dbpanel agent unlock-master" does.
-func unlockMaster(ctx context.Context, db *sql.DB) error {
-	for _, q := range []string{"RESET PERSIST IF EXISTS super_read_only", "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF"} {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			return fmt.Errorf("buka kunci master (%s): %w", q, err)
-		}
-	}
 	return nil
 }
 
@@ -598,21 +622,29 @@ func (d *Driver) GuardTick(ctx context.Context, now time.Time) error {
 	return d.guardExpired(ctx, db, l, now)
 }
 
-// ensureLocked turns super_read_only on (PERSIST) when MySQL was not seen
-// up by the guard before, or reads it off. The caller holds promoteMu.
+// ensureLocked locks MySQL (LockWrites: both flags ON and persisted) when
+// the guard did not see it up before, or reads read_only or
+// super_read_only off: super_read_only ON with read_only OFF, which only a
+// start can produce, is writable for every client. A lock whose second
+// statement failed is logged and counts as locked (super_read_only ON and
+// persisted). The caller holds promoteMu.
 func (d *Driver) ensureLocked(ctx context.Context, db *sql.DB) error {
 	if d.guard.up {
-		var on bool
-		if err := db.QueryRowContext(ctx, "SELECT @@global.super_read_only").Scan(&on); err != nil {
-			return fmt.Errorf("baca super_read_only: %w", err)
+		var ro, sro bool
+		if err := db.QueryRowContext(ctx, "SELECT @@global.read_only, @@global.super_read_only").Scan(&ro, &sro); err != nil {
+			return fmt.Errorf("baca read_only/super_read_only: %w", err)
 		}
-		if on {
+		if ro && sro {
 			return nil
 		}
-		d.warnLimited("promote lock present but super_read_only was off; locking again")
+		d.warnLimited("promote lock present but read_only or super_read_only was off; locking again", "read_only", ro, "super_read_only", sro)
 	}
-	if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {
-		return fmt.Errorf("pasang lagi kunci promosi (SET PERSIST super_read_only = ON): %w", err)
+	locked, err := LockWrites(ctx, flagExec(db))
+	if !locked {
+		return fmt.Errorf("pasang lagi kunci promosi: %w", err)
+	}
+	if err != nil {
+		d.warnLimited("promote lock put back, but read_only not persisted", "err", err)
 	}
 	d.guard.up = true
 	return nil
@@ -683,7 +715,9 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		// what the reads left of the tick's never cuts the unlock short.
 		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unlockTimeout)
 		defer cancel()
-		if err := unlockMaster(uctx, db); err != nil {
+		// Both flags stored OFF; on an error the lock file stays and the
+		// next round locks again, then reads the candidate again.
+		if err := OpenWrites(uctx, flagExec(db)); err != nil {
 			return err
 		}
 		if err := d.pins.ClearLock(); err != nil {
