@@ -558,3 +558,60 @@ func TestMarkUnpaired(t *testing.T) {
 		t.Fatalf("missing server: %v", err)
 	}
 }
+
+// TestCreateTokenChecksPairedState (review I1): CreateUnpairedToken and
+// CreateRepairToken check the server's paired state in their transaction
+// and create nothing, keeping no plaintext, when it is not the caller's.
+// A re-pairing token lasts at most MaxRepairTokenTTL and its plaintext is
+// never kept.
+func TestCreateTokenChecksPairedState(t *testing.T) {
+	s := openTemp(t)
+	now := time.Date(2026, 10, 30, 10, 0, 0, 0, time.UTC)
+	srv, err := s.CreateServer("db1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRepairToken(srv.ID, now, MaxRepairTokenTTL); !errors.Is(err, ErrPairedChanged) {
+		t.Fatalf("repair token for an unpaired server: %v", err)
+	}
+	if _, found, _ := s.ActivePairToken(srv.ID, now); found {
+		t.Fatal("refused repair token was stored")
+	}
+	unpaired, err := s.CreateUnpairedToken(srv.ID, now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.ActivePairToken(srv.ID, now); got.Token != unpaired.Token {
+		t.Fatal("unpaired token's plaintext not kept")
+	}
+
+	if err := s.MarkPaired(srv.ID, "serial", "10.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUnpairedToken(srv.ID, now, 24*time.Hour); !errors.Is(err, ErrPairedChanged) {
+		t.Fatalf("unpaired token for a paired server: %v", err)
+	}
+	if _, found, _ := s.ActivePairToken(srv.ID, now); found {
+		t.Fatal("refused unpaired token was stored")
+	}
+	if _, err := s.CreateRepairToken(srv.ID, now, MaxRepairTokenTTL+time.Second); err == nil {
+		t.Fatal("repair token longer than MaxRepairTokenTTL")
+	}
+	if _, found, _ := s.ActivePairToken(srv.ID, now); found {
+		t.Fatal("too long repair token was stored")
+	}
+	repair, err := s.CreateRepairToken(srv.ID, now, MaxRepairTokenTTL)
+	if err != nil || repair.Token == "" {
+		t.Fatalf("repair token: %+v, %v", repair, err)
+	}
+	got, found, _ := s.ActivePairToken(srv.ID, now)
+	if !found || got.Token != "" || !got.ExpiresAt.Equal(now.Add(MaxRepairTokenTTL)) {
+		t.Fatalf("active repair token = %+v (found %v), want it without plaintext", got, found)
+	}
+	if _, err := s.PeekPairToken(repair.Token, now); err != nil {
+		t.Fatalf("repair token not usable: %v", err)
+	}
+	if _, err := s.CreateUnpairedToken(999, now, time.Hour); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing server: %v", err)
+	}
+}

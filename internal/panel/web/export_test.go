@@ -77,3 +77,12 @@ var (
 
 // LightActions exposes lightActions to web_test.
 func LightActions() []string { return lightActions }
+
+// SetBeforeCreatePairToken makes f run right before a handler creates a
+// pairing token and returns a func restoring the default. Not for parallel
+// tests.
+func SetBeforeCreatePairToken(f func(serverID int64)) (restore func()) {
+	old := beforeCreatePairToken
+	beforeCreatePairToken = f
+	return func() { beforeCreatePairToken = old }
+}

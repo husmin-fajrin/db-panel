@@ -80,9 +80,53 @@ func newTokenString() (string, error) {
 	return string(out), nil
 }
 
+// ErrPairedChanged is returned by CreateUnpairedToken and
+// CreateRepairToken when the server's paired state is not the one the
+// caller decided on (a pairing or unpairing came in between): nothing is
+// created and no plaintext is kept.
+var ErrPairedChanged = errors.New("status pairing server berubah")
+
+// MaxRepairTokenTTL is the longest life of a paired server's re-pairing
+// token (spec 5.1).
+const MaxRepairTokenTTL = 15 * time.Minute
+
+// tokenKind is which server a token is created for.
+type tokenKind int
+
+const (
+	kindAny      tokenKind = iota // no check (CreatePairToken)
+	kindUnpaired                  // the server must be unpaired
+	kindRepair                    // the server must be paired
+)
+
 // CreatePairToken issues a new token for the server, invalidating any
-// earlier unused tokens for it.
+// earlier unused tokens for it, whether the server is paired or not.
+// Handlers use CreateUnpairedToken or CreateRepairToken.
 func (s *Store) CreatePairToken(serverID int64, now time.Time, ttl time.Duration) (PairToken, error) {
+	return s.createPairToken(serverID, now, ttl, kindAny)
+}
+
+// CreateUnpairedToken is CreatePairToken for a server that is not paired;
+// ErrPairedChanged when it is, checked in the same transaction as the
+// insert. The plaintext is kept in memory, so the server page can show its
+// command.
+func (s *Store) CreateUnpairedToken(serverID int64, now time.Time, ttl time.Duration) (PairToken, error) {
+	return s.createPairToken(serverID, now, ttl, kindUnpaired)
+}
+
+// CreateRepairToken is CreatePairToken for a paired server (a re-pairing,
+// after its confirmation); ErrPairedChanged when it is not paired, checked
+// in the same transaction as the insert. ttl may not exceed
+// MaxRepairTokenTTL. The plaintext is only in the returned token, never
+// kept: no later page can rebuild its command (spec 5.1).
+func (s *Store) CreateRepairToken(serverID int64, now time.Time, ttl time.Duration) (PairToken, error) {
+	if ttl > MaxRepairTokenTTL {
+		return PairToken{}, fmt.Errorf("re-pairing token life %v exceeds %v", ttl, MaxRepairTokenTTL)
+	}
+	return s.createPairToken(serverID, now, ttl, kindRepair)
+}
+
+func (s *Store) createPairToken(serverID int64, now time.Time, ttl time.Duration, kind tokenKind) (PairToken, error) {
 	token, err := newTokenString()
 	if err != nil {
 		return PairToken{}, err
@@ -95,12 +139,16 @@ func (s *Store) CreatePairToken(serverID int64, now time.Time, ttl time.Duration
 		return PairToken{}, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
-	var exists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM servers WHERE id = ?`, serverID).Scan(&exists); err != nil {
+	var paired int
+	err = tx.QueryRow(`SELECT paired FROM servers WHERE id = ?`, serverID).Scan(&paired)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PairToken{}, ErrNotFound
+	}
+	if err != nil {
 		return PairToken{}, fmt.Errorf("check server: %w", err)
 	}
-	if exists == 0 {
-		return PairToken{}, ErrNotFound
+	if (kind == kindUnpaired && paired != 0) || (kind == kindRepair && paired == 0) {
+		return PairToken{}, ErrPairedChanged
 	}
 	if _, err := tx.Exec(`DELETE FROM pair_tokens WHERE server_id = ? AND used_at IS NULL`, serverID); err != nil {
 		return PairToken{}, fmt.Errorf("delete old tokens: %w", err)
@@ -112,7 +160,12 @@ func (s *Store) CreatePairToken(serverID int64, now time.Time, ttl time.Duration
 	if err := tx.Commit(); err != nil {
 		return PairToken{}, fmt.Errorf("commit: %w", err)
 	}
-	s.remember(serverID, hash, token)
+	if kind == kindRepair {
+		// Any plaintext kept for an earlier token is for a deleted row.
+		s.forget(serverID)
+	} else {
+		s.remember(serverID, hash, token)
+	}
 	return pt, nil
 }
 

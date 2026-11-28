@@ -38,6 +38,10 @@ const (
 	msgRepairActive = "Token pasang ulang aktif sampai pukul %s. Perintahnya hanya ditampilkan sekali; bila hilang, buat token baru."
 )
 
+// beforeCreatePairToken runs right before a handler creates a pairing
+// token; tests replace it to pair the server at that moment.
+var beforeCreatePairToken = func(serverID int64) {}
+
 // repairActiveText is T3b for a re-pairing token that ends at expires.
 func repairActiveText(expires time.Time) string {
 	return fmt.Sprintf(msgRepairActive, expires.Local().Format("15:04"))
@@ -645,7 +649,7 @@ func (a *app) createServer(w http.ResponseWriter, r *http.Request) {
 		a.render.renderStatus(w, http.StatusBadRequest, "server_new", p)
 		return
 	}
-	if _, err := a.Store.CreatePairToken(srv.ID, a.Now(), pairTokenTTL); err != nil {
+	if _, err := a.Store.CreateUnpairedToken(srv.ID, a.Now(), pairTokenTTL); err != nil {
 		a.internalError(w, "create pair token", err)
 		return
 	}
@@ -789,8 +793,17 @@ func (a *app) renderServerWith(w http.ResponseWriter, r *http.Request, srv store
 	// The panel host's agent pairs with the token the panel wrote for it;
 	// a new one here would replace that token.
 	if err == nil && !found && !srv.Paired && !p.Local {
-		tok, err = a.Store.CreatePairToken(srv.ID, now, pairTokenTTL)
+		beforeCreatePairToken(srv.ID)
+		tok, err = a.Store.CreateUnpairedToken(srv.ID, now, pairTokenTTL)
 		found = err == nil
+		if errors.Is(err, store.ErrPairedChanged) {
+			// Paired since this request read it: the page is the one of a
+			// paired server, which shows no command.
+			if srv, err = a.Store.GetServer(srv.ID); err == nil {
+				p.Server = srv
+				tok, found, err = a.Store.ActivePairToken(srv.ID, now)
+			}
+		}
 	}
 	if err != nil {
 		a.internalError(w, "pair token", err)
@@ -925,20 +938,42 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if srv.Paired && !a.requireConfirmLight(w, r, ActRepairToken, auditServer, srv.ID) {
-		return
-	}
-	if a.isLocal(srv) {
-		a.audit(r, "server_token", auditServer, srv.ID, nil, msgLocalToken)
-		http.Error(w, msgLocalToken, http.StatusConflict)
-		return
-	}
-	ttl := pairTokenTTL
-	if srv.Paired {
-		ttl = repairTokenTTL
+	// The store checks, in the transaction that creates the token, that
+	// the server's paired state is still the one read here; when a
+	// pairing (or unpairing) came in between, the server is read again
+	// and handled as it now is, once.
+	confirmed := false
+	var (
+		tok store.PairToken
+		err error
+	)
+	for attempt := 0; ; attempt++ {
+		if srv.Paired && !confirmed {
+			if !a.requireConfirmLight(w, r, ActRepairToken, auditServer, srv.ID) {
+				return
+			}
+			confirmed = true
+		}
+		if a.isLocal(srv) {
+			a.audit(r, "server_token", auditServer, srv.ID, nil, msgLocalToken)
+			http.Error(w, msgLocalToken, http.StatusConflict)
+			return
+		}
+		beforeCreatePairToken(srv.ID)
+		if srv.Paired {
+			tok, err = a.Store.CreateRepairToken(srv.ID, a.Now(), repairTokenTTL)
+		} else {
+			tok, err = a.Store.CreateUnpairedToken(srv.ID, a.Now(), pairTokenTTL)
+		}
+		if !errors.Is(err, store.ErrPairedChanged) || attempt > 0 {
+			break
+		}
+		if srv, err = a.Store.GetServer(srv.ID); err != nil {
+			a.internalError(w, "get server", err)
+			return
+		}
 	}
 	// The token itself never goes into the audit log.
-	tok, err := a.Store.CreatePairToken(srv.ID, a.Now(), ttl)
 	a.audit(r, "server_token", auditServer, srv.ID, map[string]any{"repair": srv.Paired}, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "create pair token", err)

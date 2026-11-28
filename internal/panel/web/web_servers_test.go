@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -384,7 +385,16 @@ func TestRepairCommandShownOnce(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("no active token: %v, %v", found, err)
 	}
-	wantBody(t, rec, "agent/install?token="+tok.Token, "sha256sum -c")
+	// The panel keeps no plaintext of a re-pairing token: only this answer
+	// has it.
+	if tok.Token != "" {
+		t.Fatal("the store keeps the re-pairing token's plaintext")
+	}
+	shown := shownToken(t, rec)
+	if _, err := e.st.PeekPairToken(shown, clock.Now()); err != nil {
+		t.Fatalf("the shown token is not the active one: %v", err)
+	}
+	wantBody(t, rec, "sha256sum -c")
 	wantNoBody(t, rec, "Token pasang ulang aktif sampai pukul")
 	if want := issued.Add(15 * time.Minute).UTC().Truncate(time.Second); !tok.ExpiresAt.Equal(want) {
 		t.Errorf("re-pairing token expires %v, want %v (15 minutes)", tok.ExpiresAt, want)
@@ -392,25 +402,27 @@ func TestRepairCommandShownOnce(t *testing.T) {
 
 	rec = e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantNoBody(t, rec, "agent/install?token=", tok.Token)
+	wantNoBody(t, rec, "agent/install?token=", shown)
 	wantBody(t, rec, fmt.Sprintf(wantT3b, issued.Add(15*time.Minute).Local().Format("15:04")),
 		"Buat token baru", `action="/servers/1/token"`,
 		`data-confirm-action="repair_token" data-confirm-kind="server" data-confirm-id="1" data-confirm-light="1"`)
 	// Also on a page answered after another post.
 	rec = e.do("POST", "/servers/1/check", url.Values{}, c)
-	wantNoBody(t, rec, "agent/install?token=", tok.Token)
+	wantNoBody(t, rec, "agent/install?token=", shown)
 
 	// A new token, also confirmed, replaces it and is shown once too.
 	clock.Add(time.Minute)
 	form = url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
 	rec = e.do("POST", "/servers/1/token", form, c)
 	wantCode(t, rec, http.StatusOK)
-	tok2, _, _ := e.st.ActivePairToken(srv.ID, clock.Now())
-	if tok2.Token == "" || tok2.Token == tok.Token {
-		t.Fatalf("token not replaced: %q", tok2.Token)
+	shown2 := shownToken(t, rec)
+	if shown2 == shown {
+		t.Fatal("token not replaced")
 	}
-	wantBody(t, rec, "agent/install?token="+tok2.Token)
-	wantNoBody(t, e.do("GET", "/servers/1", nil, c), "agent/install?token=", tok2.Token)
+	if _, err := e.st.PeekPairToken(shown, clock.Now()); err == nil {
+		t.Fatal("the first token still works after a new one")
+	}
+	wantNoBody(t, e.do("GET", "/servers/1", nil, c), "agent/install?token=", shown2)
 
 	// Once it has expired the page says nothing of it.
 	clock.Add(15 * time.Minute)
@@ -425,12 +437,14 @@ func TestServerListShowsNoRepairCommand(t *testing.T) {
 	c := e.cookie()
 	mon.setView(monitor.View{ServerID: srv.ID, NeedsUpgrade: true})
 	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
-	wantCode(t, e.do("POST", "/servers/1/token", form, c), http.StatusOK)
+	rec := e.do("POST", "/servers/1/token", form, c)
+	wantCode(t, rec, http.StatusOK)
+	shown := shownToken(t, rec)
 	tok, _, _ := e.st.ActivePairToken(srv.ID, clock.Now())
 
-	rec := e.do("GET", "/servers", nil, c)
+	rec = e.do("GET", "/servers", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantNoBody(t, rec, "agent/install", tok.Token)
+	wantNoBody(t, rec, "agent/install", shown)
 	wantBody(t, rec, "perlu dimutakhirkan",
 		fmt.Sprintf(wantT3b, tok.ExpiresAt.Local().Format("15:04")))
 }
@@ -465,4 +479,108 @@ func TestUnpairedTokenStillPasswordless(t *testing.T) {
 	wantBody(t, rec, "agent/install?token="+tok.Token, `action="/servers/1/token"`, "Buat token baru")
 	wantNoBody(t, rec, `data-confirm-action="repair_token"`, "Token pasang ulang aktif")
 	wantBody(t, e.do("GET", "/servers/1", nil, c), "agent/install?token="+tok.Token)
+}
+
+// pairOnce makes the server paired the first time a handler is about to
+// create its pairing token (once only), as an agent pairing at that moment
+// would.
+func pairOnce(t *testing.T, e *env) {
+	t.Helper()
+	done := false
+	t.Cleanup(web.SetBeforeCreatePairToken(func(id int64) {
+		if done {
+			return
+		}
+		done = true
+		if err := e.st.MarkPaired(id, "serial-baru", "10.0.0.5"); err != nil {
+			t.Errorf("mark paired: %v", err)
+		}
+	}))
+}
+
+// wantNoTokenLongerThan fails if server id has an active token that
+// lasts more than d from now.
+func wantNoTokenLongerThan(t *testing.T, e *env, id int64, now time.Time, d time.Duration) {
+	t.Helper()
+	tok, found, err := e.st.ActivePairToken(id, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found && tok.ExpiresAt.After(now.Add(d)) {
+		t.Fatalf("paired server has a token until %v (more than %v)", tok.ExpiresAt, d)
+	}
+}
+
+// TestServerPageRacedByPairing (review I1): the server is paired between
+// the page's read of it and the creation of its token. The page shows no
+// install command and leaves no 24-hour token for the paired server.
+func TestServerPageRacedByPairing(t *testing.T) {
+	clock, s, mod := windowDeps()
+	e := newEnv(t, mod)
+	e.sessions = s
+	if _, err := e.st.CreateServer("db-baru"); err != nil {
+		t.Fatal(err)
+	}
+	pairOnce(t, e)
+	rec := e.do("GET", "/servers/1", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, "agent/install?token=")
+	wantNoTokenLongerThan(t, e, 1, clock.Now(), 15*time.Minute)
+	// Nor does a later page.
+	wantNoBody(t, e.do("GET", "/servers/1", nil, e.cookie()), "agent/install?token=")
+}
+
+// TestNewTokenRacedByPairing (review I1): the server is paired between
+// the post's read of it and the creation of the token. A post without a
+// confirmation is then refused as for any paired server, and no token
+// exists.
+func TestNewTokenRacedByPairing(t *testing.T) {
+	clock, s, mod := windowDeps()
+	e := newEnv(t, mod)
+	e.sessions = s
+	if _, err := e.st.CreateServer("db-baru"); err != nil {
+		t.Fatal(err)
+	}
+	pairOnce(t, e)
+	rec := e.do("POST", "/servers/1/token", url.Values{}, e.cookie())
+	wantCode(t, rec, http.StatusForbidden)
+	wantNoBody(t, rec, "agent/install?token=")
+	if _, found, err := e.st.ActivePairToken(1, clock.Now()); err != nil || found {
+		t.Fatalf("token after the raced post: %v, %v", found, err)
+	}
+}
+
+// TestRepairTokenRacedByUnpairing: the server is unpaired between a
+// confirmed re-pairing post's read and the creation: it gets the token of
+// an unpaired server (24 hours, its page shows the command).
+func TestRepairTokenRacedByUnpairing(t *testing.T) {
+	e, _, clock, srv := repairEnv(t)
+	c := e.cookie()
+	done := false
+	t.Cleanup(web.SetBeforeCreatePairToken(func(id int64) {
+		if !done {
+			done = true
+			if err := e.st.MarkUnpaired(id, "10.0.0.5"); err != nil {
+				t.Errorf("mark unpaired: %v", err)
+			}
+		}
+	}))
+	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
+	rec := e.do("POST", "/servers/1/token", form, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	tok, found, err := e.st.ActivePairToken(srv.ID, clock.Now())
+	if err != nil || !found || !tok.ExpiresAt.Equal(clock.Now().Add(24*time.Hour).UTC().Truncate(time.Second)) {
+		t.Fatalf("token after the raced post: %+v %v %v", tok, found, err)
+	}
+	wantBody(t, e.do("GET", "/servers/1", nil, c), "agent/install?token="+tok.Token)
+}
+
+// shownToken is the pairing token in the install command of rec's page.
+func shownToken(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	m := regexp.MustCompile(`agent/install\?token=([0-9A-Z-]+)`).FindStringSubmatch(rec.Body.String())
+	if m == nil {
+		t.Fatalf("no install command in the page:\n%.3000s", rec.Body)
+	}
+	return m[1]
 }

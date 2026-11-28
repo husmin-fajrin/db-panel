@@ -727,11 +727,13 @@ func TestRepairPairedServer(t *testing.T) {
 	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
 	rec = e.do("POST", "/servers/1/token", form, c)
 	wantCode(t, rec, http.StatusOK)
-	tok, ok, err := e.st.ActivePairToken(srv.ID, time.Now())
-	if err != nil || !ok {
+	if _, ok, err := e.st.ActivePairToken(srv.ID, time.Now()); err != nil || !ok {
 		t.Fatalf("no active token after re-pair: %v %v", ok, err)
 	}
-	wantBody(t, rec, "/agent/install?token="+tok.Token, "Agent lama tetap bekerja")
+	if _, err := e.st.PeekPairToken(shownToken(t, rec), time.Now()); err != nil {
+		t.Fatalf("the command's token is not the active one: %v", err)
+	}
+	wantBody(t, rec, "Agent lama tetap bekerja")
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control of the answer with the command = %q, want no-store", got)
 	}
