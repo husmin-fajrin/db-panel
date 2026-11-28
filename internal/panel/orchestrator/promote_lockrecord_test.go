@@ -897,3 +897,121 @@ func TestEmergencyKeepsClockRuleOnly(t *testing.T) {
 		t.Fatalf("kind = %s", j.Kind)
 	}
 }
+
+// plantRecordOf stores a failed planned promotion of masterID (topology
+// topo) to candidateID whose lock record stands, its lock tried a minute
+// ago, and returns its job id.
+func (e *env) plantRecordOf(topo store.Topology, masterID, candidateID int64) string {
+	e.t.Helper()
+	now := time.Now()
+	tried := now.Add(-time.Minute).UTC()
+	promID, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: proto.PromotePlanned, OldMasterServerID: masterID,
+		NewMasterServerID: candidateID, StartedAt: now.Add(-time.Hour), Status: promotionFailed})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	id := fmt.Sprintf("planted%025d", promID)
+	deadline := tried.Add(30 * time.Minute)
+	b, err := json.Marshal(jobState{MasterServerID: masterID, CandidateServerID: candidateID, PromotionID: promID,
+		LockTried: true, LockTriedAt: &tried, LockDeadline: &deadline})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.st.CreateJob(store.Job{ID: id, Kind: KindPromotePlanned, ServerID: masterID, TopologyID: topo.ID,
+		ParamsJSON: string(b), CreatedAt: now.Add(-time.Hour)}, promotePlannedStepNames()); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.st.UpdateJob(id, store.JobFailed, 2, "gagal", now); err != nil {
+		e.t.Fatal(err)
+	}
+	p, err := e.st.GetPromotion(promID)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	p.JobID = id
+	if err := e.st.UpdatePromotion(p); err != nil {
+		e.t.Fatal(err)
+	}
+	return id
+}
+
+// TestApproveLoadRefusedWhileLockRecordStands (review C1): approving a
+// waiting load (a resync waiting before its wipe, an add_databases
+// waiting for the databases the replica already has) drops and loads on
+// the replica, so while a lock record stands it is refused with T15b
+// before anything is sent, and the job keeps waiting, unchanged. Once a
+// live report of the master past the record's Until proves it gone, the
+// same approval goes through.
+func TestApproveLoadRefusedWhileLockRecordStands(t *testing.T) {
+	for _, tc := range []struct {
+		what  string
+		setup func(t *testing.T, e *env) (m, r *fakeAgent, topo store.Topology, id string)
+		ack   JobAck
+	}{
+		{"Resync ulang", func(t *testing.T, e *env) (*fakeAgent, *fakeAgent, store.Topology, string) {
+			m, topo := e.readyMaster("db-master")
+			r := e.resyncReplica(topo, []proto.DatabaseInfo{{Name: "a", Bytes: 100}, {Name: "b", Bytes: 200}}, "a")
+			id, err := e.r.StartResync(context.Background(), ResyncParams{ServerID: r.id, WipeList: []string{"a"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			j, _ := e.waitJob(id, store.JobWaiting)
+			if !strings.Contains(j.ParamsJSON, `"wait_reason":"wipe"`) {
+				t.Fatalf("job = %+v, want waiting for its wipe", j)
+			}
+			return m, r, topo, id
+		}, JobAck{Confirmed: true}},
+		{"Tambah database", func(t *testing.T, e *env) (*fakeAgent, *fakeAgent, store.Topology, string) {
+			m, r, id := waitingAddExisting(t, e)
+			topo, err := e.st.GetTopologyByMaster(m.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return m, r, topo, id
+		}, JobAck{Confirmed: true, TypedDatabases: []string{"rekap"}}},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			e := newEnv(t)
+			m, r, topo, id := tc.setup(t, e)
+			e.waitIdle(id)
+			cand := e.agent("cand", "10.0.0.9")
+			planted := e.plantRecordOf(topo, m.id, cand.id)
+			before, steps, err := e.st.GetJob(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mark, mmark := r.mark(), m.mark()
+			err = e.r.Approve(id, tc.ack)
+			ls, ok := errors.AsType[*LockStandsError](err)
+			if want := wantT15b(tc.what, planted); !ok || ls.Code != "load" || ls.JobID != planted || err.Error() != want {
+				t.Fatalf("Approve = %v (%T), want %q", err, err, want)
+			}
+			wantCmds(t, "replica", r.cmds(mark), nil)
+			wantCmds(t, "master", m.cmds(mmark), nil)
+			after, afterSteps, err := e.st.GetJob(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Status != store.JobWaiting || after.ParamsJSON != before.ParamsJSON || after.CurrentStep != before.CurrentStep ||
+				afterSteps[after.CurrentStep].Status != steps[before.CurrentStep].Status {
+				t.Fatalf("job after the refusal = %+v, want unchanged %+v", after, before)
+			}
+
+			// Past the record's Until, a live report of the master with both
+			// flags off proves it gone: the same approval goes through.
+			e.setState(planted, func(st *jobState) {
+				tried := time.Now().Add(-2 * time.Hour)
+				deadline := tried.Add(30 * time.Minute)
+				st.LockTriedAt, st.LockDeadline = &tried, &deadline
+			})
+			e.health.set(m.id, healthyView(monitor.StatusHealthy, masterGTID, nil))
+			if err := e.r.Approve(id, tc.ack); err != nil {
+				t.Fatalf("Approve once the record is gone: %v", err)
+			}
+			e.waitJob(id, store.JobSucceeded)
+			if st := e.storedState(planted); !st.LockUnlocked {
+				t.Fatal("record not stored as gone")
+			}
+		})
+	}
+}

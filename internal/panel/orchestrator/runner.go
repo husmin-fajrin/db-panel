@@ -912,7 +912,9 @@ func (r *Runner) launchRefused(id string) error {
 // reads its connections again, as a Retry does (ErrConnectionsRemain
 // without ack.AcceptConnections). The approval of an add_databases
 // waiting for WaitAddExisting also needs ack.TypedDatabases to be exactly
-// its AddExisting (ErrAddExistingNames).
+// its AddExisting (ErrAddExistingNames). A waiting load (create_replica,
+// resync_replica, add_databases) is refused with T15b while a planned
+// promote's lock record stands, as its Ulangi is.
 func (r *Runner) Approve(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
 	if err := r.rebuildApprovalForJob(jobID, ack.Approval); err != nil {
@@ -926,6 +928,12 @@ func (r *Runner) Approve(jobID string, ack JobAck) error {
 	}
 	if j.Status != store.JobWaiting {
 		return errNotWaiting
+	}
+	// Approving a waiting load drops and loads on the replica as a new
+	// one would (review C1): refused with T15b while a promote lock may
+	// stand, before anything is sent; the job keeps waiting.
+	if err := r.refuseRetryWhileLockMayStand(j); err != nil {
+		return err
 	}
 	if err := r.refuseSuperseded(j); err != nil {
 		return err

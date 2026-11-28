@@ -432,3 +432,21 @@ func tokenlessRetry(t *testing.T, kind, params string) {
 		t.Fatalf("ack = %+v", ack)
 	}
 }
+
+// TestApproveLoadRefusalLinksJob (review C1, K13): an approval of a
+// waiting load the orchestrator refuses with T15b shows that text on the
+// job page with the promote job it names as a link.
+func TestApproveLoadRefusalLinksJob(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	const id, promote = "2222222222222222222222222222222b", "44444444444444444444444444444444"
+	waitingJobFor(t, e.st, id, orchestrator.KindResyncReplica, orchestrator.WaitWipe)
+	f.err = &orchestrator.LockStandsError{Code: "load", Master: "db-master", What: "Resync ulang", JobID: promote}
+	rec := e.do("POST", "/jobs/"+id+"/approve", withToken(t, e, url.Values{}, "job_approve:"+id, "job", 1), c)
+	wantCode(t, rec, http.StatusConflict)
+	wantBody(t, rec, "Master db-master mungkin masih terkunci oleh promote terencana sebelumnya. Resync ulang tidak "+
+		"dijalankan selama itu: memuat data membuat replika bisa ditulis sebentar, dan penjaga kunci master bisa "+
+		"mengkarantina master. Tekan &#34;Buka kunci promote&#34; pada pekerjaan promote "+
+		`<a class="link mono" href="/jobs/`+promote+`">`+promote+`</a> dulu.`)
+	wantCalls(t, f, "approve "+id)
+}
