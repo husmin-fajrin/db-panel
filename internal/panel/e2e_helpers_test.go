@@ -130,16 +130,17 @@ func startE2ETopology(t *testing.T) *e2eTopology {
 	e.ui = newUIClient(t, base)
 	e.ui.login(readInitialPassword(t, o))
 	for _, id := range []int64{e.masterSrv, e.replicaSrv} {
-		loc := e.ui.postRedirect(serverPath(id)+"/mysql/connect", e2eAdminForm())
+		loc := e.ui.connectMySQL(id, e2eAdminForm())
 		if want := serverPath(id) + "?pesan=terhubung"; loc != want {
 			t.Fatalf("connect MySQL on server %d redirected to %q, want %q", id, loc, want)
 		}
 	}
 
-	prepareID := e.ui.postJob(serverPath(e.masterSrv)+"/prepare-master", nil)
+	prepareID := e.ui.prepareMaster(e.masterSrv)
 	job := waitJob(t, e.p, prepareID, e2ePrepareTimeout, func(j store.Job) bool {
-		// The instance binds 127.0.0.1 only: approve the restart.
-		e.ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
+		// The instance binds 127.0.0.1 only: approve the restart (its
+		// light token, spec 5.1).
+		e.ui.approveJob(j)
 		return true
 	})
 	if job.Status != store.JobSucceeded {
@@ -447,6 +448,30 @@ func (u *uiClient) approveJobAck(j store.Job, accept bool) {
 	u.postRedirect("/jobs/"+j.ID+"/approve", form)
 }
 
+// connectMySQL is "Hubungkan MySQL" on server id with form, as the user
+// gives it on the server page: when the button asks for a confirmation
+// (the server's account is stored, spec 5.1), its connect_mysql token for
+// the server goes with it. It answers the redirect's location.
+func (u *uiClient) connectMySQL(id int64, form url.Values) string {
+	u.t.Helper()
+	post := url.Values{}
+	for k, v := range form {
+		post[k] = v
+	}
+	if strings.Contains(u.get(serverPath(id)), `data-confirm-action="`+web.ActConnectMySQL+`"`) {
+		post.Set("confirm_token", u.confirmToken(web.ActConnectMySQL, "server", id))
+	}
+	return u.postRedirect(serverPath(id)+"/mysql/connect", post)
+}
+
+// prepareMaster is the first "Siapkan sebagai master" of server id, with
+// its prepare_master token (spec 5.1); it answers the job's id.
+func (u *uiClient) prepareMaster(id int64) string {
+	u.t.Helper()
+	return u.postJob(serverPath(id)+"/prepare-master",
+		url.Values{"confirm_token": {u.confirmToken(web.ActPrepareMaster, "server", id)}})
+}
+
 // tail is the last n lines of s.
 func tail(s string, n int) string {
 	lines := strings.Split(s, "\n")
@@ -745,10 +770,11 @@ func startE2EPromoteTopology(t *testing.T) *e2ePromoteTopology {
 	for _, n := range []*e2eNode{e.master, e.ra, e.rb} {
 		e.connectRoot(t, n)
 	}
-	prepareID := e.ui.postJob(serverPath(e.master.srv())+"/prepare-master", nil)
+	prepareID := e.ui.prepareMaster(e.master.srv())
 	job := waitJob(t, e.p, prepareID, e2ePrepareTimeout, func(j store.Job) bool {
-		// The instance binds 127.0.0.1 only: approve the restart.
-		e.ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
+		// The instance binds 127.0.0.1 only: approve the restart (its
+		// light token, spec 5.1).
+		e.ui.approveJob(j)
 		return true
 	})
 	if job.Status != store.JobSucceeded {
@@ -775,7 +801,7 @@ func startE2EPromoteTopology(t *testing.T) *e2ePromoteTopology {
 // (e2eAdminForm) over the socket.
 func (e *e2ePromoteTopology) connectRoot(t *testing.T, n *e2eNode) {
 	t.Helper()
-	loc := e.ui.postRedirect(serverPath(n.srv())+"/mysql/connect", e2eAdminForm())
+	loc := e.ui.connectMySQL(n.srv(), e2eAdminForm())
 	if want := serverPath(n.srv()) + "?pesan=terhubung"; loc != want {
 		t.Fatalf("connect MySQL on %s redirected to %q, want %q", n.name, loc, want)
 	}

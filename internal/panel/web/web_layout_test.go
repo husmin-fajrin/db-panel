@@ -255,15 +255,15 @@ func TestSettingsTampilan(t *testing.T) {
 		`<option value="sistem" selected>`, `<option value="gelap">`, `<option value="terang">`)
 
 	long := strings.Repeat("a", 61)
-	rec = e.do("POST", "/settings", with(validSettings(), "nama_instansi", long), c)
+	rec = e.saveSettings(t, with(validSettings(), "nama_instansi", long), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Nama instansi paling panjang 60 karakter.")
 	for _, bad := range []string{"Dinas \u202eatok", "Dinas\u200bKota", "Dinas\x07Kota"} {
-		rec = e.do("POST", "/settings", with(validSettings(), "nama_instansi", bad), c)
+		rec = e.saveSettings(t, with(validSettings(), "nama_instansi", bad), c)
 		wantCode(t, rec, http.StatusBadRequest)
 		wantBody(t, rec, "Nama instansi tidak boleh memuat karakter kendali atau karakter tak terlihat.")
 	}
-	rec = e.do("POST", "/settings", with(validSettings(), "tema_bawaan", "ungu"), c)
+	rec = e.saveSettings(t, with(validSettings(), "tema_bawaan", "ungu"), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Tema bawaan tidak dikenal.")
 	if v, _ := e.st.GetSetting(store.SettingTemaBawaan); v != "" {
@@ -272,7 +272,7 @@ func TestSettingsTampilan(t *testing.T) {
 
 	// 60 characters (not bytes) is allowed.
 	name := strings.Repeat("é", 60)
-	rec = e.do("POST", "/settings", with(validSettings(), "nama_instansi", name, "tema_bawaan", "gelap"), c)
+	rec = e.saveSettings(t, with(validSettings(), "nama_instansi", name, "tema_bawaan", "gelap"), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	if v, _ := e.st.GetSetting(store.SettingTemaBawaan); v != "gelap" {
 		t.Errorf("tema_bawaan = %q, want gelap", v)
@@ -299,7 +299,7 @@ func TestSettingsTampilan(t *testing.T) {
 	}
 
 	// A form without the fields (an older page) keeps the stored values.
-	rec = e.do("POST", "/settings", validSettings(), c)
+	rec = e.saveSettings(t, validSettings(), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	if v, _ := e.st.GetSetting(store.SettingTemaBawaan); v != "gelap" {
 		t.Errorf("tema_bawaan = %q after a form without it, want gelap", v)

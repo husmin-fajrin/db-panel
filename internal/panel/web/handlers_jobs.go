@@ -163,6 +163,9 @@ type jobPage struct {
 	// NeedsConfirm: approving or retrying the job needs a token typed for
 	// it (Orchestrator.NeedsConfirm), after its gate (Gate).
 	NeedsConfirm bool
+	// ApproveLight: Setujui is the master restart (masterRestartApproval)
+	// and needs no heavy confirmation: a light confirming button.
+	ApproveLight bool
 	// PromoteRetry: "Ulangi dari tahap ini" of a planned promote not sent
 	// (spec 5.2 row 1): a confirmed button, after the gate's red rows and
 	// the backup tick when asked; PromoteRetryText is its dialog's text.
@@ -398,6 +401,7 @@ func (a *app) renderJobFlash(w http.ResponseWriter, r *http.Request, status int,
 		}
 		p.NeedsConfirm = need || err != nil || p.DropsData
 	}
+	p.ApproveLight = p.CanApprove && !p.NeedsConfirm && masterRestartApproval(job)
 	if (p.CanApprove || p.CanRetry) && p.NeedsConfirm {
 		// The list G14 points at; the gate asks no agent.
 		if in, gated := orchestrator.JobGateInput(job); gated {
@@ -543,6 +547,16 @@ const msgRetryRefresh = "Daftar database tidak bisa disegarkan, jadi dialog Ulan
 // typed in confirm_db[] (the orchestrator compares them) and, for a
 // rebuild, accept_connections as for a retry. A refusal leaves the job as it was: 403
 // for the token, 400 for an acknowledgement, on the job page.
+//
+// The approval of a master restart (masterRestartApproval) that needs no
+// confirmation is a light action (spec 5.1): a job_approve token for the
+// job, issued with the password or through the window. It is never told
+// to the orchestrator as confirmed (JobAck.Confirmed), so a window token
+// cannot carry a job that needs a heavy confirmation: such a job takes
+// the heavy path above, which refuses a window token, and the
+// orchestrator refuses it unconfirmed should it have become one since
+// NeedsConfirm was read. Other approvals of jobs that drop no data, and
+// every Ulangi that needs no confirmation, stay without a token (K23).
 func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name string, do func(string, orchestrator.JobAck) error) {
 	job, _, ok := a.jobFromPath(w, r)
 	if !ok {
@@ -597,8 +611,25 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 				return
 			}
 		}
+	} else if name == ActJobApprove && masterRestartApproval(job) {
+		// A light action (spec 5.1): its token may come through the
+		// password window. ack.Confirmed stays false: the orchestrator,
+		// which re-checks under its lock whether the job now needs a
+		// confirmation, refuses it should that have changed since.
+		if !a.requireConfirmLight(w, r, jobConfirmAction(name, job.ID), auditJob, job.ServerID) {
+			return
+		}
 	}
 	a.jobActionDetail(w, r, job, name, ack.Approval, detail, func(id string) error { return do(id, ack) })
+}
+
+// masterRestartApproval: Setujui of job is "Restart MySQL di master
+// sekarang". A prepare_master job waits only for that restart
+// (orchestrator.WaitRestart), so every approval of one is decided as the
+// restart, whatever the job's state was read as: a job read a moment
+// before it starts waiting cannot be approved without the token.
+func masterRestartApproval(job store.Job) bool {
+	return job.Kind == orchestrator.KindPrepareMaster
 }
 
 // retryAuditDetail is the audit detail of action name (Setujui or Ulangi)

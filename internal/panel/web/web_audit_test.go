@@ -124,8 +124,10 @@ func TestEveryPostWritesAudit(t *testing.T) {
 	}
 	// Light actions: their token comes through the session's window.
 	needsLightToken := map[string]string{
-		"/servers/2/token":  web.ActRepairToken,
-		"/masters/1/source": web.ActMasterSource,
+		"/servers/2/token":          web.ActRepairToken,
+		"/masters/1/source":         web.ActMasterSource,
+		"/servers/2/prepare-master": web.ActPrepareMaster,
+		"/replicas/2/stop":          web.ActStopReplica,
 	}
 	for i, rt := range routes {
 		form := rt.form
@@ -188,7 +190,7 @@ func TestEveryPostWritesAudit(t *testing.T) {
 func TestAuditOutcomeTruncatedAndForwardedForIgnored(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	f.err = errors.New(strings.Repeat("é", 600))
-	req := httptest.NewRequest("POST", "/replicas/2/stop", strings.NewReader(""))
+	req := httptest.NewRequest("POST", "/replicas/2/start", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", testOrigin)
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
@@ -618,7 +620,7 @@ func TestAuditLogCopyWhenNotStored(t *testing.T) {
 func TestAuditOutcomeNewlinesFlattened(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	f.err = errors.New("baris satu\nbaris dua\r\nbaris tiga")
-	e.do("POST", "/replicas/2/stop", noForm, e.cookie())
+	e.do("POST", "/replicas/2/start", noForm, e.cookie())
 	got := auditEntries(t, e.st)
 	if len(got) != 1 {
 		t.Fatalf("audit entries = %+v", got)

@@ -632,3 +632,103 @@ func TestRetrySentRefusalShownOnJobPage(t *testing.T) {
 	wantBody(t, rec, template.HTMLEscapeString(t14b))
 	wantCalls(t, f, "retry "+sentJob)
 }
+
+// restartJob is a prepare_master of the master (server 1) waiting for the
+// approval of its MySQL restart.
+const restartJob = "4444444444444444444444444444444a"
+
+// restartButton is the light confirming button of the restart approval of
+// restartJob.
+const restartButton = `data-confirm-action="job_approve:` + restartJob + `" data-confirm-kind="job" data-confirm-id="1" data-confirm-light="1"`
+
+// TestApproveMasterRestartNeedsConfirm (spec 5.1): "Restart MySQL di master
+// sekarang" is a light action: without a token it is refused with 403 and
+// the orchestrator is not called; a window token for job_approve:<id> lets
+// it through, and the orchestrator is not told the approval was confirmed
+// with the password. "Sudah saya restart — periksa lagi" stays without one.
+func TestApproveMasterRestartNeedsConfirm(t *testing.T) {
+	e, f, _ := windowEnv(t)
+	c := e.cookie()
+	waitingJobFor(t, e.st, restartJob, orchestrator.KindPrepareMaster, orchestrator.WaitRestart)
+	approve := "/jobs/" + restartJob + "/approve"
+
+	rec := e.do("GET", "/jobs/"+restartJob, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, restartButton, "Restart MySQL di master sekarang")
+
+	for _, tok := range []string{"", "salah"} {
+		form := url.Values{}
+		if tok != "" {
+			form.Set("confirm_token", tok)
+		}
+		rec = e.do("POST", approve, form, c)
+		wantCode(t, rec, http.StatusForbidden)
+		wantBody(t, rec, msgConfirmInvalid)
+	}
+	// A token for another job's approval does not do either.
+	waitingJobFor(t, e.st, restartJob2, orchestrator.KindPrepareMaster, orchestrator.WaitRestart)
+	wantCode(t, e.do("POST", approve, url.Values{"confirm_token": {windowToken(t, e, "job_approve:"+restartJob2, "job", 1, c)}}, c),
+		http.StatusForbidden)
+	wantCalls(t, f)
+	if st := jobStatus(t, e.st, restartJob); st != store.JobWaiting {
+		t.Fatalf("job after a refused approval = %s", st)
+	}
+
+	// The recheck (Ulangi of the waiting job) restarts nothing: no token.
+	wantCode(t, e.do("POST", "/jobs/"+restartJob+"/retry", noForm, c), http.StatusSeeOther)
+	wantCalls(t, f, "retry "+restartJob)
+
+	rec = e.do("POST", approve, url.Values{"confirm_token": {windowToken(t, e, "job_approve:"+restartJob, "job", 1, c)}}, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/jobs/"+restartJob)
+	wantCalls(t, f, "retry "+restartJob, "approve "+restartJob)
+	if ack := f.lastAck(t); ack.Confirmed {
+		t.Fatalf("ack of a restart approval = %+v; a light token must not confirm a heavy approval", ack)
+	}
+	// A password token does too, still without Confirmed.
+	rec = e.do("POST", approve, withToken(t, e, noForm, "job_approve:"+restartJob, "job", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	if ack := f.lastAck(t); ack.Confirmed {
+		t.Fatalf("ack of a restart approval with the password = %+v", ack)
+	}
+}
+
+const restartJob2 = "4444444444444444444444444444444b"
+
+// TestApproveHeavyJobRefusesWindowToken (spec 5.1): whether an approval is
+// heavy is decided from the job when it is approved. A job that needs a
+// heavy confirmation (here a prepare_master the orchestrator now calls
+// heavy, and a waiting load that drops data) approved with a window token
+// is refused with 403, the orchestrator is not called, the job stays
+// waiting and the token unused; the same approval with the password
+// reaches the orchestrator confirmed.
+func TestApproveHeavyJobRefusesWindowToken(t *testing.T) {
+	e, f, _ := windowEnv(t)
+	c := e.cookie()
+	waitingJobFor(t, e.st, restartJob, orchestrator.KindPrepareMaster, orchestrator.WaitRestart)
+	const dropping = "4444444444444444444444444444444c"
+	waitingJobFor(t, e.st, dropping, orchestrator.KindCreateReplica, orchestrator.WaitClone)
+	f.mu.Lock()
+	f.confirms = map[string]bool{restartJob: true}
+	f.drops = map[string]bool{dropping: true}
+	f.mu.Unlock()
+	for _, id := range []string{restartJob, dropping} {
+		tok := windowToken(t, e, "job_approve:"+id, "job", 1, c)
+		rec := e.do("POST", "/jobs/"+id+"/approve", url.Values{"confirm_token": {tok}}, c)
+		wantCode(t, rec, http.StatusForbidden)
+		wantBody(t, rec, msgConfirmInvalid)
+		wantCalls(t, f)
+		if st := jobStatus(t, e.st, id); st != store.JobWaiting {
+			t.Fatalf("job %s after a window token = %s", id, st)
+		}
+	}
+	if _, unused := confirmRows(t, e); unused != 2 {
+		t.Fatalf("unused window tokens = %d, want 2 (not burnt)", unused)
+	}
+	rec := e.do("POST", "/jobs/"+restartJob+"/approve", withToken(t, e, noForm, "job_approve:"+restartJob, "job", 1), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "approve "+restartJob)
+	if ack := f.lastAck(t); !ack.Confirmed {
+		t.Fatalf("ack of a heavy approval with the password = %+v", ack)
+	}
+}

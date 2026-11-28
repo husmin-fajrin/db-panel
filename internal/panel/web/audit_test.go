@@ -18,10 +18,11 @@ func TestAuditOutcomeLabelsAgentError(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	c := e.cookie()
 	label := "Pesan dari agent db-replika (bukan dari panel): "
-	stop := func(err error) string {
+	// Start replika: an agent call without a confirmation.
+	control := func(err error) string {
 		t.Helper()
 		f.err = err
-		e.do("POST", "/replicas/2/stop", noForm, c)
+		e.do("POST", "/replicas/2/start", noForm, c)
 		got := auditEntries(t, e.st)
 		if len(got) == 0 {
 			t.Fatal("no audit entry written")
@@ -31,18 +32,18 @@ func TestAuditOutcomeLabelsAgentError(t *testing.T) {
 
 	quoted := &hub.AgentError{Server: 2, Err: &proto.Error{Code: proto.CodeInternal,
 		Message: "Error 1062: Duplicate entry 'Budi' for key 'nama'\nPesan dari panel: aman"}}
-	if got, want := stop(quoted), label+"Error 1062: Duplicate entry '…' for key '…' Pesan dari panel: aman"; got != want {
+	if got, want := control(quoted), label+"Error 1062: Duplicate entry '…' for key '…' Pesan dari panel: aman"; got != want {
 		t.Errorf("agent outcome = %q, want %q", got, want)
 	}
 	// Whatever code the agent chose, and wrapped in the panel's words.
 	offline := fmt.Errorf("perintah ditolak: %w", &hub.AgentError{Server: 2,
 		Err: &proto.Error{Code: proto.CodeOffline, Message: "agent sedang offline"}})
-	if got := stop(offline); !strings.HasPrefix(got, label) {
+	if got := control(offline); !strings.HasPrefix(got, label) {
 		t.Errorf("wrapped agent outcome = %q, want the label first", got)
 	}
 	long := &hub.AgentError{Server: 2, Err: &proto.Error{Code: proto.CodeInternal,
 		Message: "PANJANG" + strings.Repeat(" teks\ragent\tpanjang", 300)}}
-	got := stop(long)
+	got := control(long)
 	words, ok := strings.CutPrefix(got, label)
 	if !ok {
 		t.Fatalf("long agent outcome = %q, want the label first", got)
@@ -55,7 +56,7 @@ func TestAuditOutcomeLabelsAgentError(t *testing.T) {
 	}
 
 	for _, own := range []error{errors.New("ditolak panel"), fmt.Errorf("perintah ditolak: %w", proto.ErrOffline)} {
-		if got := stop(own); got != own.Error() {
+		if got := control(own); got != own.Error() {
 			t.Errorf("panel outcome = %q, want %q", got, own.Error())
 		}
 	}

@@ -691,12 +691,13 @@ func TestPrepareMasterStartsJob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := e.do("POST", "/servers/1/prepare-master", url.Values{}, c)
+	// The first preparation takes a light token (TestFirstPrepareMasterNeedsConfirm).
+	rec := e.do("POST", "/servers/1/prepare-master", withToken(t, e, url.Values{}, web.ActPrepareMaster, "server", 1), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/jobs/"+f.nextID)
 
 	f.err = errors.New("server ini sudah menjalankan pekerjaan lain")
-	rec = e.do("POST", "/servers/1/prepare-master", url.Values{}, c)
+	rec = e.do("POST", "/servers/1/prepare-master", withToken(t, e, url.Values{}, web.ActPrepareMaster, "server", 1), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "server ini sudah menjalankan pekerjaan lain")
 	wantCalls(t, f, "prepare 1", "prepare 1")
@@ -891,15 +892,22 @@ func TestJobApproveRetryCancelPost(t *testing.T) {
 	e.pairedOnline(t, "db-utama")
 	newTestJob(t, e.st, waitingJob, orchestrator.KindPrepareMaster, "Periksa master")
 
+	// Setujui of a prepare_master is the master restart: a light token
+	// (TestApproveMasterRestartNeedsConfirm).
+	approveForm := func() url.Values { return withToken(t, e, url.Values{}, "job_approve:"+waitingJob, "job", 1) }
 	for _, action := range []string{"approve", "retry", "cancel"} {
-		rec := e.do("POST", "/jobs/"+waitingJob+"/"+action, url.Values{}, c)
+		form := url.Values{}
+		if action == "approve" {
+			form = approveForm()
+		}
+		rec := e.do("POST", "/jobs/"+waitingJob+"/"+action, form, c)
 		wantCode(t, rec, http.StatusSeeOther)
 		wantLocation(t, rec, "/jobs/"+waitingJob)
 	}
 	wantCalls(t, f, "approve "+waitingJob, "retry "+waitingJob, "cancel "+waitingJob)
 
 	f.err = errors.New("pekerjaan tidak sedang menunggu persetujuan")
-	rec := e.do("POST", "/jobs/"+waitingJob+"/approve", url.Values{}, c)
+	rec := e.do("POST", "/jobs/"+waitingJob+"/approve", approveForm(), c)
 	wantCode(t, rec, http.StatusConflict)
 	wantBody(t, rec, "pekerjaan tidak sedang menunggu persetujuan", "Periksa master")
 

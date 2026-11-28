@@ -74,24 +74,35 @@ func binlogKeep(sec int64) string {
 	return fmt.Sprintf("%d hari", (sec+12*3600)/(24*3600))
 }
 
+// msgStopReplicaConfirm is T30 (spec 5.11), the dialog of Stop replika.
+const msgStopReplicaConfirm = "Hentikan replikasi di %s? Lag membesar sampai replikasi dijalankan lagi; data yang masuk ke master sesudah ini tidak ada di replika ini."
+
+// stopReplica is Stop replika: a light confirmation (ActStopReplica, spec
+// 5.1). A replica stopped unnoticed loses data at the next emergency
+// promote. Start replika and Kunci kembali ask for nothing: they are on
+// the way out of an outage.
 func (a *app) stopReplica(w http.ResponseWriter, r *http.Request) {
-	a.replicaControl(w, r, "replica_stop", "dihentikan", a.Orchestrator.StopReplica)
+	a.replicaControl(w, r, "replica_stop", "dihentikan", ActStopReplica, a.Orchestrator.StopReplica)
 }
 
 func (a *app) startReplica(w http.ResponseWriter, r *http.Request) {
-	a.replicaControl(w, r, "replica_start", "dijalankan", a.Orchestrator.StartReplica)
+	a.replicaControl(w, r, "replica_start", "dijalankan", "", a.Orchestrator.StartReplica)
 }
 
 func (a *app) relockReplica(w http.ResponseWriter, r *http.Request) {
-	a.replicaControl(w, r, "replica_relock", "dikunci", a.Orchestrator.Relock)
+	a.replicaControl(w, r, "replica_relock", "dikunci", "", a.Orchestrator.Relock)
 }
 
 // replicaControl runs do on the replica of {id} and returns to its page
-// with notice; a refusal is shown there with 400.
-func (a *app) replicaControl(w http.ResponseWriter, r *http.Request, action, notice string,
+// with notice; a refusal is shown there with 400. A non-empty confirm is
+// the light action whose token the post needs, checked first.
+func (a *app) replicaControl(w http.ResponseWriter, r *http.Request, action, notice, confirm string,
 	do func(ctx context.Context, serverID int64) error) {
 	srv, rep, ok := a.replicaFromPath(w, r)
 	if !ok {
+		return
+	}
+	if confirm != "" && !a.requireConfirmLight(w, r, confirm, auditReplica, srv.ID) {
 		return
 	}
 	err := do(r.Context(), srv.ID)

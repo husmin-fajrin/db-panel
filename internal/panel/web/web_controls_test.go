@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -137,7 +138,7 @@ func TestStopStartButtonsCallOrchestrator(t *testing.T) {
 		`action="/servers/2/check"`, `action="/servers/2/snooze"`)
 	wantNoBody(t, rec, `action="/replicas/2/start"`, `action="/replicas/2/relock"`)
 
-	rec = e.do("POST", "/replicas/2/stop", noForm, c)
+	rec = e.do("POST", "/replicas/2/stop", withToken(t, e, noForm, web.ActStopReplica, "replica", 2), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/replicas/2?pesan=dihentikan")
 	wantBody(t, e.do("GET", "/replicas/2?pesan=dihentikan", nil, c), "Replikasi dihentikan")
@@ -169,7 +170,7 @@ func TestStopStartButtonsCallOrchestrator(t *testing.T) {
 
 	// A refusal is shown on the replica page.
 	f.err = errors.New("server ini masih punya pekerjaan yang belum selesai")
-	rec = e.do("POST", "/replicas/2/stop", noForm, c)
+	rec = e.do("POST", "/replicas/2/stop", withToken(t, e, noForm, web.ActStopReplica, "replica", 2), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "server ini masih punya pekerjaan yang belum selesai", "Replika db-replika")
 	wantCalls(t, f, "stop-replica 2", "start-replica 2", "relock 2", "stop-replica 2")
@@ -599,8 +600,9 @@ func TestControlRefusalLogCensored(t *testing.T) {
 	c := e.cookie()
 	f.err = fmt.Errorf("jalankan replikasi: %w",
 		&proto.Error{Code: proto.CodeInternal, Message: "Error 1062: Duplicate entry 'Budi' for key 'nama'"})
-	for _, path := range []string{"/replicas/2/stop", "/replicas/2/start", "/replicas/2/relock"} {
-		wantCode(t, e.do("POST", path, noForm, c), http.StatusBadRequest)
+	stop := withToken(t, e, noForm, web.ActStopReplica, "replica", 2)
+	for path, form := range map[string]url.Values{"/replicas/2/stop": stop, "/replicas/2/start": noForm, "/replicas/2/relock": noForm} {
+		wantCode(t, e.do("POST", path, form, c), http.StatusBadRequest)
 	}
 	out := logs.String()
 	if !strings.Contains(out, "replica control refused") || strings.Contains(out, "Budi") {
@@ -685,5 +687,115 @@ func TestDeleteNewMasterRefusedNamesOldMasterRow(t *testing.T) {
 	wantBody(t, rec, template.HTMLEscapeString(f8))
 	if _, err := e.st.GetServer(1); err != nil {
 		t.Fatalf("server gone after a refused delete: %v", err)
+	}
+}
+
+// msgStopReplicaConfirm is T30 (spec 5.11).
+const msgStopReplicaConfirm = "Hentikan replikasi di %s? Lag membesar sampai replikasi dijalankan lagi; data yang masuk ke master sesudah ini tidak ada di replika ini."
+
+// TestStopReplicaNeedsConfirm (spec 5.1): Stop replika is a light action
+// (ActStopReplica on the replica): without a token 403 and the
+// orchestrator is not called; a window token stops it.
+func TestStopReplicaNeedsConfirm(t *testing.T) {
+	e, f, _ := windowEnv(t)
+	c := e.cookie()
+	for _, tok := range []string{"", "salah"} {
+		form := url.Values{}
+		if tok != "" {
+			form.Set("confirm_token", tok)
+		}
+		rec := e.do("POST", "/replicas/2/stop", form, c)
+		wantCode(t, rec, http.StatusForbidden)
+		wantBody(t, rec, msgConfirmInvalid)
+	}
+	// A token for another replica action does not do either.
+	wantCode(t, e.do("POST", "/replicas/2/stop", withToken(t, e, noForm, web.ActResync, "replica", 2), c), http.StatusForbidden)
+	wantCalls(t, f)
+	rec := e.do("POST", "/replicas/2/stop", url.Values{"confirm_token": {windowToken(t, e, web.ActStopReplica, "replica", 2, c)}}, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/replicas/2?pesan=dihentikan")
+	wantCalls(t, f, "stop-replica 2")
+}
+
+// TestOutagePathStaysTokenless (spec 5.1 table, K23): what an operator
+// needs during an outage asks for no password: Jangan ganggu, Batalkan,
+// Sudah saya alihkan, Start replika and Kunci kembali, approving a job that
+// drops no data, and the settings other than the Telegram ones.
+func TestOutagePathStaysTokenless(t *testing.T) {
+	e, f, mon := controlEnv(t)
+	c := e.cookie()
+	const running = "5555555555555555555555555555555a"
+	storeJob(t, e.st, running, orchestrator.KindCreateReplica, 2, `{"master_server_id":1}`, store.JobRunning, "Periksa master")
+	const reconnect = "5555555555555555555555555555555b"
+	waitingJobFor(t, e.st, reconnect, orchestrator.KindCreateReplica, orchestrator.WaitReconnect)
+	for _, p := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/servers/2/snooze", url.Values{"hours": {"2"}}},
+		{"/servers/2/snooze", url.Values{"hours": {"0"}}},
+		{"/jobs/" + running + "/cancel", noForm},
+		{"/replicas/2/start", noForm},
+		{"/replicas/2/relock", noForm},
+		{"/jobs/" + reconnect + "/approve", noForm},
+	} {
+		rec := e.do("POST", p.path, p.form, c)
+		if rec.Code != http.StatusSeeOther {
+			t.Errorf("POST %s %v without a token: status %d, want 303: %s", p.path, p.form, rec.Code, rec.Body)
+		}
+	}
+	wantCalls(t, f, "cancel "+running, "start-replica 2", "relock 2", "approve "+reconnect)
+	if n := len(mon.snoozes); n != 2 {
+		t.Errorf("snoozes = %d, want 2", n)
+	}
+
+	p, pf, topo := promotedEnv(t)
+	rec := p.do("POST", "/masters/2/cutover/done", noForm, p.cookie())
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, pf, "confirm-cutover "+itoa(topo.ID))
+
+	s := settingsEnv(t)
+	form := with(validSettings(), "chat_id", "")
+	form["kinds"] = monitor.AllKinds()
+	wantCode(t, s.do("POST", "/settings", form, s.cookie()), http.StatusSeeOther)
+	wantCode(t, s.do("POST", "/settings", with(form, "disk_warn", "70"), s.cookie()), http.StatusSeeOther)
+}
+
+// TestLightButtonsCarryDialogTexts: Stop replika carries T30 with the
+// replica's name and Simpan pengaturan T31, both as light confirming
+// buttons; Simpan pengaturan opens its dialog only when a Telegram field
+// changed (data-confirm-when-changed), and always on a form shown again
+// whose Telegram fields differ from the stored ones.
+func TestLightButtonsCarryDialogTexts(t *testing.T) {
+	e, _, mon := controlEnv(t)
+	mon.setView(monitor.View{ServerID: 2, Role: store.RoleReplica, Status: monitor.Status{Code: monitor.StatusSynced}})
+	rec := e.do("GET", "/replicas/2", nil, e.cookie())
+	wantBody(t, rec, `<form method="post" action="/replicas/2/stop"><button type="submit" class="btn btn-warning" `+
+		`data-confirm-action="stop_replica" data-confirm-kind="replica" data-confirm-id="2" data-confirm-light="1" `+
+		`data-confirm-text="`+fmt.Sprintf(msgStopReplicaConfirm, "db-replika")+`">Ya, stop</button></form>`)
+
+	s := settingsEnv(t)
+	save := `<button type="submit" class="btn btn-primary" data-confirm-action="telegram_settings" data-confirm-kind="settings" ` +
+		`data-confirm-id="0" data-confirm-light="1" data-confirm-text="` + msgTelegramConfirm + `"`
+	rec = s.do("GET", "/settings", nil, s.cookie())
+	wantBody(t, rec, save+` data-confirm-when-changed="token chat_id kinds">Simpan pengaturan</button>`)
+	// Shown again after a refused range with a new chat id: the stored
+	// one differs, so the dialog always opens.
+	rec = s.do("POST", "/settings", withToken(t, s.env, with(validSettings(), "check_every", "5"), web.ActTelegram, "settings", 0),
+		s.cookie())
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, save+`>Simpan pengaturan</button>`)
+
+	// app.js lets the form go without the dialog only when no named field
+	// changed; a box ticked on is no change.
+	js, err := os.ReadFile("../../../web/static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`btn.dataset.confirmWhenChanged !== undefined && btn.form && !berubah(btn)`,
+		`return el.defaultChecked && !el.checked;`, `el.value.trim() !== (el.defaultValue || "").trim()`} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("app.js lacks %q", want)
+		}
 	}
 }

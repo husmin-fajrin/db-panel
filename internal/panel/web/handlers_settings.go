@@ -268,6 +268,12 @@ type settingsPage struct {
 	PlainBaseURL bool
 	Cert         CertInfo
 	ExtraNames   string // https_extra_names, as stored
+	// TelegramConfirm is T31, the text of the save button's light
+	// confirmation. TelegramChanged: the form's Telegram fields already
+	// differ from the stored ones (a form shown again after a refusal),
+	// so the dialog opens on every save, not only after a field changes.
+	TelegramConfirm string
+	TelegramChanged bool
 }
 
 func (a *app) renderSettings(w http.ResponseWriter, r *http.Request, status int, f settingsForm, tokenSaved bool, flash string) {
@@ -286,6 +292,13 @@ func (a *app) renderSettings(w http.ResponseWriter, r *http.Request, status int,
 			{Label: "panel.key sudah dicadangkan", Action: "/settings/panel-key-backed-up", Mark: panelKey},
 			{Label: "Log audit diteruskan ke server lain", Action: "/settings/audit-forwarded", Mark: auditForward},
 		}
+	}
+	p.TelegramConfirm = msgTelegramConfirm
+	if chat, kinds, err := a.storedTelegram(); err != nil {
+		a.Logger.Warn("load telegram settings", "err", err)
+		p.TelegramChanged = true
+	} else {
+		p.TelegramChanged = telegramChange(f, "", chat, kinds)
 	}
 	p.Flash = flash
 	p.Notice = notices[r.URL.Query().Get("pesan")]
@@ -354,8 +367,43 @@ func (a *app) showSettings(w http.ResponseWriter, r *http.Request) {
 	a.renderStoredSettings(w, r, http.StatusOK, "")
 }
 
+// msgTelegramConfirm is T31 (spec 5.11), the dialog of a save that
+// changes the Telegram notifications.
+const msgTelegramConfirm = "Simpan perubahan pemberitahuan Telegram? Peringatan akan dikirim ke tujuan baru, atau tidak dikirim lagi untuk jenis yang dimatikan."
+
+// telegramChange reports whether a save of f with the bot token field
+// token changes where alerts go or silences some (spec 5.1): a bot token
+// filled in, a chat id other than chat, or a kind on in kinds (as stored:
+// a kind not listed is on) turned off. Turning a kind on is not one.
+func telegramChange(f settingsForm, token, chat string, kinds map[string]bool) bool {
+	if token != "" || f.ChatID != chat {
+		return true
+	}
+	for _, k := range monitor.AllKinds() {
+		if on, ok := kinds[k]; (!ok || on) && !f.Kinds[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// saveSettings stores the settings form. A save that changes the
+// Telegram notifications (telegramChange) needs a light confirmation
+// (ActTelegram, spec 5.1) before any other check; the browser asks for it
+// only when a Telegram field changed (data-confirm-when-changed), the
+// panel whatever the browser did. Other saves need none.
 func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 	f := readSettingsForm(r)
+	token := strings.TrimSpace(r.PostFormValue("token"))
+	prevChat, prevKinds, err := a.storedTelegram()
+	if err != nil {
+		a.internalError(w, "load telegram settings", err)
+		return
+	}
+	if telegramChange(f, token, prevChat, prevKinds) &&
+		!a.requireConfirmLight(w, r, ActTelegram, auditSettings, 0) {
+		return
+	}
 	prev, err := a.Settings.Load()
 	if err != nil {
 		a.internalError(w, "load settings", err)
@@ -385,12 +433,6 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 		refuse(msg)
 		return
 	}
-	prevChat, prevKinds, err := a.storedTelegram()
-	if err != nil {
-		a.internalError(w, "load telegram settings", err)
-		return
-	}
-	token := strings.TrimSpace(r.PostFormValue("token"))
 	if token != "" {
 		// First, so a refused token leaves every setting as it was. The
 		// error never holds the token.

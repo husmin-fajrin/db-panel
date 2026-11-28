@@ -275,7 +275,7 @@
   </form>
   {{if and .CanPrepare (not .PrepareAgain)}}
   <form method="post" action="/servers/{{.Server.ID}}/prepare-master">
-    <button type="submit" class="btn btn-primary btn-sm"{{if and .PrepareGate .PrepareGate.Off}} disabled{{end}}>Siapkan sebagai master</button>
+    <button type="submit" class="btn btn-primary btn-sm"{{if and .PrepareGate .PrepareGate.Off}} disabled{{end}} data-confirm-action="prepare_master" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-light="1" data-confirm-text="Siapkan {{.Server.Name}} sebagai master? Panel mengubah pengaturan MySQL di server itu dan membuat akun replikasi; bila MySQL perlu dimulai ulang, panel meminta persetujuan Anda dulu.">Siapkan sebagai master</button>
   </form>
   {{end}}
 </div>
@@ -362,7 +362,7 @@
     <input class="input input-sm w-full" type="text" name="host" value="{{.Connect.Host}}" placeholder="Host (opsional)" maxlength="255" autocomplete="off">
   </label>
   <p class="help">Kosongkan untuk memakai socket lokal (disarankan).</p>
-  <div><button type="submit" class="btn btn-primary btn-sm">Hubungkan MySQL</button></div>
+  <div><button type="submit" class="btn btn-primary btn-sm"{{if .Inventory.Connected}} data-confirm-action="connect_mysql" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-light="1" data-confirm-text="Ganti akun MySQL yang dipakai agent di {{.Server.Name}}? Penjaga dan promote server itu memakai akun yang baru."{{end}}>Hubungkan MySQL</button></div>
 </form>
 {{end}}
 

@@ -105,7 +105,9 @@ func TestConnectFormHost(t *testing.T) {
 	}
 	f.result = proto.ConnectResult{Status: proto.MySQLStatus{Version: "8.0.39"}}
 	for _, host := range []string{"", "10.0.0.5", "db-1.lan", "::1"} {
-		rec := e.do("POST", "/servers/1/mysql/connect", url.Values{"user": {"root"}, "host": {host}}, c)
+		// Once connected, the account is stored: a light token reconnects.
+		form := withToken(t, e, url.Values{"user": {"root"}, "host": {host}}, web.ActConnectMySQL, "server", 1)
+		rec := e.do("POST", "/servers/1/mysql/connect", form, c)
 		wantCode(t, rec, http.StatusSeeOther)
 	}
 }

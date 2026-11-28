@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -48,14 +50,27 @@ func TestFlashesLabelAgentText(t *testing.T) {
 		{"Amankan data tertinggal", fmt.Sprintf("/servers/%d/salvage", old.ID), old.ID, "db-lama"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			form := noForm
+			base := noForm
 			if strings.HasSuffix(tc.path, "/connect") {
-				form = map[string][]string{"user": {"admin"}, "password": {"rahasia"}}
+				base = map[string][]string{"user": {"admin"}, "password": {"rahasia"}}
+			}
+			// Reconnecting server 1 (its account is stored) and Stop
+			// replika take a light token, one per post.
+			light := map[string]struct {
+				action, kind string
+			}{"/servers/1/mysql/connect": {web.ActConnectMySQL, "server"}, "/replicas/2/stop": {web.ActStopReplica, "replica"}}
+			post := func() *httptest.ResponseRecorder {
+				t.Helper()
+				form := base
+				if l, ok := light[tc.path]; ok {
+					form = withToken(t, e, base, l.action, l.kind, tc.server)
+				}
+				return e.do("POST", tc.path, form, c)
 			}
 			for _, code := range []string{proto.CodeInternal, proto.CodeOffline} {
 				f.err = fmt.Errorf("perintah ditolak: %w", &hub.AgentError{Server: tc.server,
 					Err: &proto.Error{Code: code, Message: hostileAgentText}})
-				rec := e.do("POST", tc.path, form, c)
+				rec := post()
 				wantCode(t, rec, http.StatusBadRequest)
 				want := "perintah ditolak: Pesan dari agent " + tc.serverName + " (bukan dari panel): " + hostileAgentFlat
 				wantBody(t, rec, template.HTMLEscapeString(want))
@@ -63,11 +78,11 @@ func TestFlashesLabelAgentText(t *testing.T) {
 			}
 			// The hub's own failure is the panel's text.
 			f.err = fmt.Errorf("perintah ditolak: %w", proto.ErrOffline)
-			rec := e.do("POST", tc.path, form, c)
+			rec := post()
 			wantBody(t, rec, "perintah ditolak: koneksi agent terputus")
 			wantNoBody(t, rec, "(bukan dari panel)")
 			f.err = errors.New("ditolak panel")
-			wantNoBody(t, e.do("POST", tc.path, form, c), "(bukan dari panel)")
+			wantNoBody(t, post(), "(bukan dari panel)")
 			f.err = nil
 		})
 	}

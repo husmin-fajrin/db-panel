@@ -429,9 +429,10 @@ func TestUnlockMasterNeedsToken(t *testing.T) {
 func TestPrepareMasterAgainNeedsTokenOnlyWithTopology(t *testing.T) {
 	e, f, _ := controlEnv(t)
 	c := e.cookie()
-	// Server 3 is no master yet: no token needed.
+	// Server 3 is no master yet: a light token (TestFirstPrepareMasterNeedsConfirm).
 	fresh := e.pairedOnline(t, "db-baru")
-	rec := e.do("POST", "/servers/"+strconv.FormatInt(fresh.ID, 10)+"/prepare-master", noForm, c)
+	rec := e.do("POST", "/servers/"+strconv.FormatInt(fresh.ID, 10)+"/prepare-master",
+		withToken(t, e, noForm, web.ActPrepareMaster, "server", fresh.ID), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantCalls(t, f, "prepare 3")
 

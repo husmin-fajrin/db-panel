@@ -184,7 +184,7 @@
   </section>
 
   <div class="flex justify-end">
-    <button type="submit" class="btn btn-primary">Simpan pengaturan</button>
+    <button type="submit" class="btn btn-primary" data-confirm-action="telegram_settings" data-confirm-kind="settings" data-confirm-id="0" data-confirm-light="1" data-confirm-text="{{.TelegramConfirm}}"{{if not .TelegramChanged}} data-confirm-when-changed="token chat_id kinds"{{end}}>Simpan pengaturan</button>
   </div>
 </form>
 

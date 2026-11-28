@@ -84,7 +84,7 @@ func TestPrepareAgainUnderAdvanced(t *testing.T) {
 	if strings.Contains(body, "data-advanced") {
 		t.Errorf("non-master page folds Siapkan sebagai master away:\n%s", body)
 	}
-	if !regexp.MustCompile(`<button type="submit" class="[^"]*btn-primary[^"]*">Siapkan sebagai master</button>`).MatchString(body) {
+	if !regexp.MustCompile(`<button type="submit" class="[^"]*btn-primary[^"]*"[^>]*>Siapkan sebagai master</button>`).MatchString(body) {
 		t.Errorf("non-master page has no primary Siapkan sebagai master:\n%s", body)
 	}
 }
@@ -282,4 +282,71 @@ func TestMasterSourceBanner(t *testing.T) {
 	wantBody(t, rec, "data-set-source", "Alamat ini dipasang panel saat promote (pekerjaan "+jobID+") pada "+
 		swapped.Local().Format("02-01-2006 15:04")+".")
 	wantNoBody(t, rec, t5)
+}
+
+// TestFirstPrepareMasterNeedsConfirm (spec 5.1): "Siapkan sebagai master"
+// of a server without a topology is a light action (ActPrepareMaster):
+// without a token 403 and no job; a window token starts it. A light token
+// never prepares a master again (ActPrepareMasterAgain stays heavy).
+func TestFirstPrepareMasterNeedsConfirm(t *testing.T) {
+	e, f, _ := windowEnv(t)
+	c := e.cookie()
+	fresh := e.pairedOnline(t, "db-baru") // server 3, connected, no topology
+	if err := e.st.SetInventory(store.Inventory{ServerID: fresh.ID, Connected: true, Version: "8.0.39", Series: "8.0",
+		UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/servers/3/prepare-master"
+	wantBody(t, e.do("GET", "/servers/3", nil, c), `action="`+path+`"`,
+		`data-confirm-action="prepare_master" data-confirm-kind="server" data-confirm-id="3" data-confirm-light="1"`)
+	for _, tok := range []string{"", "salah"} {
+		form := url.Values{}
+		if tok != "" {
+			form.Set("confirm_token", tok)
+		}
+		rec := e.do("POST", path, form, c)
+		wantCode(t, rec, http.StatusForbidden)
+		wantBody(t, rec, msgConfirmInvalid)
+	}
+	wantCalls(t, f)
+	rec := e.do("POST", path, url.Values{"confirm_token": {windowToken(t, e, web.ActPrepareMaster, "server", fresh.ID, c)}}, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "prepare 3")
+
+	// Server 1 is a master already: a light token does not prepare it again.
+	rec = e.do("POST", "/servers/1/prepare-master", url.Values{"confirm_token": {windowToken(t, e, web.ActPrepareMaster, "server", 1, c)}}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantCalls(t, f, "prepare 3")
+}
+
+// TestReconnectMySQLNeedsConfirmOnlyWithStoredAccount (spec 5.1):
+// "Hubungkan MySQL" on a server whose account is stored (inventory
+// Connected) is a light action (ActConnectMySQL), asked before any other
+// check; the first connection of a server needs no token.
+func TestReconnectMySQLNeedsConfirmOnlyWithStoredAccount(t *testing.T) {
+	e, f, _ := windowEnv(t)
+	c := e.cookie()
+	form := url.Values{"user": {"admin"}, "password": {mysqlSecret}}
+	wantBody(t, e.do("GET", "/servers/1", nil, c), `action="/servers/1/mysql/connect"`,
+		`data-confirm-action="connect_mysql" data-confirm-kind="server" data-confirm-id="1" data-confirm-light="1"`)
+	for _, post := range []url.Values{form, {"user": {""}}, {"user": {"admin"}, "confirm_token": {"salah"}}} {
+		rec := e.do("POST", "/servers/1/mysql/connect", post, c)
+		wantCode(t, rec, http.StatusForbidden)
+		wantBody(t, rec, msgConfirmInvalid)
+		wantNoBody(t, rec, "Nama pengguna MySQL wajib diisi")
+	}
+	wantCalls(t, f)
+	confirmed := url.Values{"user": form["user"], "password": form["password"],
+		"confirm_token": {windowToken(t, e, web.ActConnectMySQL, "server", 1, c)}}
+	rec := e.do("POST", "/servers/1/mysql/connect", confirmed, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/servers/1?pesan=terhubung")
+	wantCalls(t, f, "connect 1")
+
+	// Server 3 has never been connected: no token, and its form asks for none.
+	e.pairedOnline(t, "db-baru")
+	wantNoBody(t, e.do("GET", "/servers/3", nil, c), `data-confirm-action="connect_mysql"`)
+	rec = e.do("POST", "/servers/3/mysql/connect", form, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "connect 1", "connect 3")
 }

@@ -308,9 +308,22 @@ func (a *app) inventory(serverID int64) (store.Inventory, error) {
 	return inv, err
 }
 
+// connectMySQL is "Hubungkan MySQL": the agent stores the account and
+// answers the inventory. On a server whose account is stored already
+// (inventory Connected) it replaces the account the agent's guard and
+// promote use: a light confirmation (ActConnectMySQL, spec 5.1), before
+// any other check. The first connection needs none.
 func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok {
+		return
+	}
+	inv, err := a.inventory(srv.ID)
+	if err != nil {
+		a.internalError(w, "get inventory", err)
+		return
+	}
+	if inv.Connected && !a.requireConfirmLight(w, r, ActConnectMySQL, auditServer, srv.ID) {
 		return
 	}
 	form := connectForm{
@@ -339,7 +352,7 @@ func (a *app) connectMySQL(w http.ResponseWriter, r *http.Request) {
 	// The host goes as typed: empty makes the agent use the local socket,
 	// which also reaches root@localhost with auth_socket, a non-default
 	// port and a server without networking.
-	_, err := a.Orchestrator.Connect(r.Context(), srv.ID, proto.ConnectParams{User: form.User, Password: password, Host: form.Host})
+	_, err = a.Orchestrator.Connect(r.Context(), srv.ID, proto.ConnectParams{User: form.User, Password: password, Host: form.Host})
 	if err != nil {
 		a.Logger.Warn("mysql connect failed", "server", srv.ID, "err", logErr(err))
 		fail(a.shownError(err))
@@ -386,14 +399,20 @@ func (a *app) prepareMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Preparing a server that already is a master (it has a topology)
-	// again needs the password confirmed.
+	// again needs the password confirmed; the first preparation changes
+	// MySQL settings applications may already rely on: a light
+	// confirmation (spec 5.1), its token may come through the window.
 	_, err := a.Store.GetTopologyByMaster(srv.ID)
 	switch {
 	case err == nil:
 		if !a.requireConfirm(w, r, ActPrepareMasterAgain, auditServer, srv.ID) {
 			return
 		}
-	case !errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound):
+		if !a.requireConfirmLight(w, r, ActPrepareMaster, auditServer, srv.ID) {
+			return
+		}
+	default:
 		a.internalError(w, "get topology", err)
 		return
 	}
@@ -1086,6 +1105,8 @@ type replicaPage struct {
 	Busy bool
 	// The controls that make sense now.
 	CanStop, CanStart, CanRelock, CanResync, CanDetach bool
+	// StopConfirm is T30, the text of Stop replika's light confirmation.
+	StopConfirm string
 	// Quarantined: the server is an old master whose quarantine has not
 	// ended (role quarantined, its rebuild running or failed before its
 	// settle): neither Resync ulang nor Lepas replika is offered, T23
@@ -1264,6 +1285,7 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 	stopped := p.Health != nil &&
 		(p.Health.Status.Code == monitor.StatusStopped || p.Health.Status.Code == monitor.StatusStoppedOutside)
 	p.CanStop = controllable && !rep.Paused && !stopped
+	p.StopConfirm = fmt.Sprintf(msgStopReplicaConfirm, srv.Name)
 	p.CanStart = controllable && (rep.Paused || stopped)
 	p.CanRelock = controllable && p.Health != nil && p.Health.Status.LockLost
 	p.CanResync = !p.Busy && (canChangeDatabases(rep) || rep.State == store.ReplicaFailed ||

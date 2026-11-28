@@ -119,6 +119,28 @@
     return text.replace("%s", () => value);
   }
 
+  // berubah melaporkan apakah tombol btn dengan data-confirm-when-changed
+  // (nama isian formulirnya, dipisah spasi) perlu dialog konfirmasinya:
+  // isian teks yang nilainya lain dari nilai awal halaman, atau kotak
+  // centang yang tadinya tercentang lalu dikosongkan (mencentang tidak
+  // dihitung). Hanya kemudahan: panel memutuskan sendiri apakah tokennya
+  // diperlukan.
+  function berubah(btn) {
+    const names = (btn.dataset.confirmWhenChanged || "").split(" ").filter((n) => n !== "");
+    return Array.from(btn.form.elements).some((el) => {
+      if (!names.includes(el.name)) {
+        return false;
+      }
+      if (el.type === "checkbox" || el.type === "radio") {
+        return el.defaultChecked && !el.checked;
+      }
+      if (el.tagName === "SELECT") {
+        return Array.from(el.options).some((o) => o.selected !== o.defaultSelected);
+      }
+      return typeof el.value === "string" && el.value.trim() !== (el.defaultValue || "").trim();
+    });
+  }
+
   // isiTersembunyi mengisi <input type="hidden" name=name> di form,
   // membuatnya bila belum ada.
   function isiTersembunyi(form, name, value) {
@@ -392,6 +414,9 @@
     // menjawab 401 need_password (jendela kata sandi sesi tertutup), isian
     // kata sandi muncul dengan kalimat T2 dan kiriman berikutnya membawa
     // kata sandi. Browser tidak menyimpan keadaan jendela.
+    // Tombol dengan data-confirm-when-changed membuka dialognya hanya bila
+    // salah satu isian yang disebutnya berubah (berubah); bila tidak,
+    // formulirnya dikirim tanpa token.
     window.Alpine.data("confirmModal", () => ({
       text: "",
       name: "",
@@ -416,6 +441,11 @@
         document.addEventListener("click", (e) => {
           const btn = e.target.closest("[data-confirm-action]");
           if (!btn) {
+            return;
+          }
+          // Tanpa perubahan yang perlu dikonfirmasi, formulir dikirim
+          // biasa (data-confirm-when-changed).
+          if (btn.dataset.confirmWhenChanged !== undefined && btn.form && !berubah(btn)) {
             return;
           }
           e.preventDefault();

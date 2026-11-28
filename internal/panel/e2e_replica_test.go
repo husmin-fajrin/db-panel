@@ -97,14 +97,14 @@ func TestE2ECreateReplica(t *testing.T) {
 	// Hubungkan MySQL on both servers as the agents' account over the
 	// socket.
 	for _, id := range []int64{masterSrv, replicaSrv} {
-		loc := ui.postRedirect(serverPath(id)+"/mysql/connect", e2eAdminForm())
+		loc := ui.connectMySQL(id, e2eAdminForm())
 		if want := serverPath(id) + "?pesan=terhubung"; loc != want {
 			t.Fatalf("connect MySQL on server %d redirected to %q, want %q", id, loc, want)
 		}
 	}
 
 	// Siapkan master.
-	prepareID := ui.postJob(serverPath(masterSrv)+"/prepare-master", nil)
+	prepareID := ui.prepareMaster(masterSrv)
 	prepareWaited := false
 	job := waitJob(t, p, prepareID, e2ePrepareTimeout, func(j store.Job) bool {
 		if j.Status != store.JobWaiting {
@@ -118,7 +118,7 @@ func TestE2ECreateReplica(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("prepare_master waits for approval at %q (%s); approving", steps[j.CurrentStep].Name, steps[j.CurrentStep].Message)
-		ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
+		ui.approveJob(j)
 		return true
 	})
 	if job.Status != store.JobSucceeded {
@@ -234,7 +234,7 @@ func TestE2ECreateReplica(t *testing.T) {
 
 	// Buat replika of every database on a bare target: CLONE.
 	cloneSrv, clonePins := startE2EAgent(t, p, "replika-clone", cloneInst, &logs)
-	if loc := ui.postRedirect(serverPath(cloneSrv)+"/mysql/connect",
+	if loc := ui.connectMySQL(cloneSrv,
 		url.Values{"user": {"adm_e2e"}, "password": {cloneAdminPW}, "host": {""}}); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
 		t.Fatalf("connect MySQL on the clone target redirected to %q", loc)
 	}
@@ -255,7 +255,7 @@ func TestE2ECreateReplica(t *testing.T) {
 			!strings.Contains(body, "Sudah saya hubungkan ulang") {
 			t.Fatalf("job page lacks the reconnect link or button:\n%s", body)
 		}
-		if loc := ui.postRedirect(serverPath(cloneSrv)+"/mysql/connect", e2eAdminForm()); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
+		if loc := ui.connectMySQL(cloneSrv, e2eAdminForm()); loc != serverPath(cloneSrv)+"?pesan=terhubung" {
 			t.Fatalf("reconnect redirected to %q", loc)
 		}
 		ui.postRedirect("/jobs/"+j.ID+"/approve", nil)
@@ -686,7 +686,8 @@ func TestE2EMonitoring(t *testing.T) {
 	stepStart = time.Now()
 	openBefore := strings.Join(openKinds(t, p, rep), ",")
 	msgsBefore := len(e.tg.messages())
-	if loc := ui.postRedirect(repPath+"/stop", nil); loc != repPath+"?pesan=dihentikan" {
+	stop := url.Values{"confirm_token": {ui.confirmToken(web.ActStopReplica, "replica", rep)}}
+	if loc := ui.postRedirect(repPath+"/stop", stop); loc != repPath+"?pesan=dihentikan" {
 		t.Fatalf("stop redirected to %q", loc)
 	}
 	waitStatus(t, p, rep, healthmon.StatusPaused)

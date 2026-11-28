@@ -138,7 +138,7 @@
     <p class="py-2">Lag akan membesar selama replika berhenti.{{with .BinlogKeep}} Master menyimpan binlog {{.}}; lebih dari itu replika harus disync ulang.{{end}}</p>
     <div class="modal-action">
       <form method="dialog"><button class="btn">Batal</button></form>
-      <form method="post" action="/replicas/{{.Server.ID}}/stop"><button type="submit" class="btn btn-warning">Ya, stop</button></form>
+      <form method="post" action="/replicas/{{.Server.ID}}/stop"><button type="submit" class="btn btn-warning" data-confirm-action="stop_replica" data-confirm-kind="replica" data-confirm-id="{{.Server.ID}}" data-confirm-light="1" data-confirm-text="{{.StopConfirm}}">Ya, stop</button></form>
     </div>
   </div>
   <form method="dialog" class="modal-backdrop"><button>tutup</button></form>

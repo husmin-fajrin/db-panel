@@ -177,7 +177,7 @@ func TestSettingsPageShowsDefaults(t *testing.T) {
 func TestSettingsSaveSealsTokenAndNeverEchoes(t *testing.T) {
 	e := settingsEnv(t)
 	c := e.cookie()
-	rec := e.do("POST", "/settings", with(validSettings(), "token", botToken), c)
+	rec := e.saveSettings(t, with(validSettings(), "token", botToken), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/settings?pesan=pengaturan")
 	wantNoBody(t, rec, botToken)
@@ -200,19 +200,19 @@ func TestSettingsSaveSealsTokenAndNeverEchoes(t *testing.T) {
 	}
 
 	// An empty token field keeps the saved token.
-	wantCode(t, e.do("POST", "/settings", validSettings(), c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, validSettings(), c), http.StatusSeeOther)
 	if cfg, _ := e.tg.LoadConfig(); cfg.Token != botToken {
 		t.Errorf("token after a save without one = %q, want it kept", cfg.Token)
 	}
 
 	// A refused form does not echo the posted token either.
-	rec = e.do("POST", "/settings", with(validSettings(), "token", botToken, "check_every", "5"), c)
+	rec = e.saveSettings(t, with(validSettings(), "token", botToken, "check_every", "5"), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantNoBody(t, rec, botToken, "rahasiaBot")
 
 	// A malformed token is refused without saving anything.
 	saves, _ := e.set.counts()
-	rec = e.do("POST", "/settings", with(validSettings(), "token", "bukan token", "check_every", "40"), c)
+	rec = e.saveSettings(t, with(validSettings(), "token", "bukan token", "check_every", "40"), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "token bot tidak valid")
 	wantNoBody(t, rec, "bukan token")
@@ -262,7 +262,7 @@ func TestSettingsValidatesRanges(t *testing.T) {
 		{"chat_id", "chat saya", "Chat id"},
 	}
 	for _, tc := range cases {
-		rec := e.do("POST", "/settings", with(validSettings(), tc.field, tc.value), c)
+		rec := e.saveSettings(t, with(validSettings(), tc.field, tc.value), c)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s=%q: status %d, want 400", tc.field, tc.value, rec.Code)
 			continue
@@ -290,8 +290,8 @@ func TestSettingsValidatesRanges(t *testing.T) {
 	}
 	// An empty base URL is allowed (messages then carry no links), and
 	// stays empty: clearing a saved address persists.
-	wantCode(t, e.do("POST", "/settings", validSettings(), c), http.StatusSeeOther)
-	wantCode(t, e.do("POST", "/settings", with(validSettings(), "base_url", ""), c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, validSettings(), c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, with(validSettings(), "base_url", ""), c), http.StatusSeeOther)
 	if got, _ := monitor.LoadSettings(e.st); got.PanelBaseURL != "" {
 		t.Errorf("base URL after clearing = %q", got.PanelBaseURL)
 	}
@@ -306,7 +306,7 @@ func attrEscape(s string) string {
 func TestSettingsSaveReconfiguresMonitor(t *testing.T) {
 	e := settingsEnv(t)
 	c := e.cookie()
-	rec := e.do("POST", "/settings", validSettings(), c)
+	rec := e.saveSettings(t, validSettings(), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	if saves, reconf := e.set.counts(); saves != 1 || reconf != 1 {
 		t.Fatalf("saved %d times, reconfigured %d times; want 1 and 1", saves, reconf)
@@ -344,7 +344,7 @@ func TestSettingsSaveReconfiguresMonitor(t *testing.T) {
 	// Weekly summary off; the page shows the saved values back.
 	form := validSettings()
 	form.Del("weekly_summary")
-	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, form, c), http.StatusSeeOther)
 	if got, _ := monitor.LoadSettings(e.st); got.WeeklySummary {
 		t.Error("weekly summary still on")
 	}
@@ -376,7 +376,7 @@ func TestTelegramTestButton(t *testing.T) {
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Telegram belum diatur")
 
-	wantCode(t, e.do("POST", "/settings", with(validSettings(), "token", botToken), c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, with(validSettings(), "token", botToken), c), http.StatusSeeOther)
 	rec = e.do("POST", "/settings/telegram-test", noForm, c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/settings?pesan=tes-terkirim")
@@ -421,7 +421,7 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 		"weekly_day": {"Mon"}, "weekly_time": {"07:00"}, "base_url": {""},
 		"alerts_retention": {"90"}, "events_retention": {"180"},
 	}
-	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, form, c), http.StatusSeeOther)
 
 	var entries []store.AuditEntry
 	for _, a := range auditEntries(t, e.st) {
@@ -462,7 +462,7 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 	// A new panel base URL is recorded with its value too.
 	form.Set("base_url", "https://phish.example.net")
 	form.Del("token")
-	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, form, c), http.StatusSeeOther)
 	all := auditEntries(t, e.st)
 	last := all[len(all)-1]
 	for _, x := range all {
@@ -484,7 +484,7 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 		t.Fatalf("test URL is %d bytes, want %d", len(long), maxBaseURL)
 	}
 	form.Set("base_url", long)
-	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, form, c), http.StatusSeeOther)
 	all = auditEntries(t, e.st)
 	last = all[0]
 	for _, x := range all {
@@ -516,7 +516,7 @@ func TestRetentionSettingsValidation(t *testing.T) {
 		{"events_retention", "3651", "Retensi riwayat status harus 1 sampai 3650 hari"},
 		{"events_retention", "", "Retensi riwayat status harus 1 sampai 3650 hari"},
 	} {
-		rec := e.do("POST", "/settings", with(validSettings(), tc.field, tc.value), c)
+		rec := e.saveSettings(t, with(validSettings(), tc.field, tc.value), c)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s=%q: status %d, want 400", tc.field, tc.value, rec.Code)
 			continue
@@ -530,7 +530,7 @@ func TestRetentionSettingsValidation(t *testing.T) {
 	}
 
 	for _, ok := range [][2]string{{"1", "3650"}, {"3650", "1"}} {
-		rec := e.do("POST", "/settings", with(validSettings(), "alerts_retention", ok[0], "events_retention", ok[1]), c)
+		rec := e.saveSettings(t, with(validSettings(), "alerts_retention", ok[0], "events_retention", ok[1]), c)
 		wantCode(t, rec, http.StatusSeeOther)
 		kv, err := e.st.GetSettings(store.SettingAlertsRetentionDays, store.SettingEventsRetentionDays)
 		if err != nil || kv[store.SettingAlertsRetentionDays] != ok[0] || kv[store.SettingEventsRetentionDays] != ok[1] {
@@ -553,7 +553,7 @@ func TestSamplesRetentionValidation(t *testing.T) {
 	wantBody(t, rec, `name="samples_retention" value="7"`)
 
 	for _, v := range []string{"0", "91", "abc", ""} {
-		rec := e.do("POST", "/settings", with(validSettings(), "samples_retention", v), c)
+		rec := e.saveSettings(t, with(validSettings(), "samples_retention", v), c)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("samples_retention=%q: status %d, want 400", v, rec.Code)
 			continue
@@ -568,14 +568,14 @@ func TestSamplesRetentionValidation(t *testing.T) {
 	}
 
 	for _, ok := range []string{"1", "90"} {
-		rec := e.do("POST", "/settings", with(validSettings(), "samples_retention", ok), c)
+		rec := e.saveSettings(t, with(validSettings(), "samples_retention", ok), c)
 		wantCode(t, rec, http.StatusSeeOther)
 		if v, err := e.st.GetSetting(store.SettingSamplesRetentionDays); err != nil || v != ok {
 			t.Fatalf("stored samples retention = %q, %v; want %s", v, err, ok)
 		}
 	}
 	// validSettings has no samples_retention: the stored 90 stays.
-	wantCode(t, e.do("POST", "/settings", validSettings(), c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, validSettings(), c), http.StatusSeeOther)
 	if v, _ := e.st.GetSetting(store.SettingSamplesRetentionDays); v != "90" {
 		t.Fatalf("samples retention after a post without the field = %q, want 90", v)
 	}
@@ -631,7 +631,7 @@ func TestSettingsNoOverflowStructure(t *testing.T) {
 func TestSettingsFormRejectsCheckEveryAbove300(t *testing.T) {
 	e := settingsEnv(t)
 	c := e.cookie()
-	rec := e.do("POST", "/settings", with(validSettings(), "check_every", "301"), c)
+	rec := e.saveSettings(t, with(validSettings(), "check_every", "301"), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "Interval pemeriksaan harus 10 sampai 300 detik")
 	page := e.do("GET", "/settings", nil, c)
@@ -639,7 +639,7 @@ func TestSettingsFormRejectsCheckEveryAbove300(t *testing.T) {
 		"10–300. Seberapa sering agent memeriksa MySQL.",
 		`name="summary_every" value="120" min="10" max="3600"`)
 	form := with(with(validSettings(), "check_every", "300"), "summary_every", "3600")
-	wantCode(t, e.do("POST", "/settings", form, c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, form, c), http.StatusSeeOther)
 }
 
 // The two marks of the settings page (B8): who set each and when is
@@ -743,4 +743,113 @@ func TestSettingsMarks(t *testing.T) {
 
 	// The audit page names the actions.
 	wantBody(t, rig.do("GET", "/audit", nil, budi), "Tanda cadangan panel.key", "Tanda penerusan log audit")
+}
+
+// saveSettings posts form to /settings as the session of c, with a
+// telegram_settings token (with the password) as the save button's dialog
+// adds when a Telegram field changed; a save that changes none leaves it
+// unused.
+func (e *env) saveSettings(t *testing.T, form url.Values, c *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	return e.do("POST", "/settings", withToken(t, e, form, web.ActTelegram, "settings", 0), c)
+}
+
+// msgTelegramConfirm is T31 (spec 5.11).
+const msgTelegramConfirm = "Simpan perubahan pemberitahuan Telegram? Peringatan akan dikirim ke tujuan baru, atau tidak dikirim lagi untuk jenis yang dimatikan."
+
+// telegramBaseline is settingsEnv on a window clock whose settings were
+// saved once as validSettings() with botToken (with the password).
+func telegramBaseline(t *testing.T) *settingsRig {
+	t.Helper()
+	_, s, mod := windowDeps()
+	e := settingsEnv(t, mod)
+	e.sessions = s
+	form := withToken(t, e.env, with(validSettings(), "token", botToken), web.ActTelegram, "settings", 0)
+	wantCode(t, e.do("POST", "/settings", form, e.cookie()), http.StatusSeeOther)
+	return e
+}
+
+// telegramStored is the stored chat id, kind switches and bot token.
+func telegramStored(t *testing.T, e *settingsRig) string {
+	t.Helper()
+	kv, err := e.st.GetSettings(store.SettingTelegramChatID, store.SettingTelegramKinds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := e.tg.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kv[store.SettingTelegramChatID] + "|" + kv[store.SettingTelegramKinds] + "|" + cfg.Token
+}
+
+// TestTelegramChangeNeedsConfirm (spec 5.1): a save that fills in the bot
+// token, changes the chat id or turns a kind that was on off is refused
+// with 403 without a telegram_settings token, before anything is checked
+// or stored; with a window token it is saved.
+func TestTelegramChangeNeedsConfirm(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		form url.Values
+	}{
+		{"token", with(validSettings(), "token", "987654321:AAH-tokenBaruYangLain_12")},
+		{"chat id", with(validSettings(), "chat_id", "-1009999999999")},
+		{"kind off", with(validSettings(), "kinds", monitor.KindMasterDown)},
+		// Refused before the range check: the session learns nothing.
+		{"chat id and a bad range", with(validSettings(), "chat_id", "@lain", "check_every", "5")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := telegramBaseline(t)
+			c := e.cookie()
+			before := telegramStored(t, e)
+			saves, _ := e.set.counts()
+			for _, tok := range []string{"", "salah"} {
+				form := with(tc.form)
+				if tok != "" {
+					form.Set("confirm_token", tok)
+				}
+				rec := e.do("POST", "/settings", form, c)
+				wantCode(t, rec, http.StatusForbidden)
+				wantBody(t, rec, msgConfirmInvalid)
+				wantNoBody(t, rec, "harus 10 sampai")
+			}
+			if n, _ := e.set.counts(); n != saves || telegramStored(t, e) != before {
+				t.Fatalf("saved without a token: saves %d -> %d, telegram %q -> %q", saves, n, before, telegramStored(t, e))
+			}
+			form := with(tc.form, "confirm_token", windowToken(t, e.env, web.ActTelegram, "settings", 0, c))
+			rec := e.do("POST", "/settings", form, c)
+			if tc.form.Get("check_every") == "5" {
+				wantCode(t, rec, http.StatusBadRequest)
+				return
+			}
+			wantCode(t, rec, http.StatusSeeOther)
+			if telegramStored(t, e) == before {
+				t.Fatalf("telegram settings unchanged after a confirmed save: %q", before)
+			}
+		})
+	}
+}
+
+// TestOtherSettingsSaveNeedsNoConfirm (spec 5.1): a save that changes only
+// a threshold, or only turns a kind on, needs no token; neither does the
+// first save of the defaults (no chat id, every kind on).
+func TestOtherSettingsSaveNeedsNoConfirm(t *testing.T) {
+	fresh := settingsEnv(t)
+	defaults := with(validSettings(), "chat_id", "")
+	defaults["kinds"] = monitor.AllKinds()
+	wantCode(t, fresh.do("POST", "/settings", defaults, fresh.cookie()), http.StatusSeeOther)
+
+	e := telegramBaseline(t)
+	c := e.cookie()
+	rec := e.do("POST", "/settings", with(validSettings(), "lag", "120"), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	if set, _ := e.set.Load(); set.Lag != 120*time.Second {
+		t.Fatalf("lag after a save = %s", set.Lag)
+	}
+	more := with(validSettings())
+	more["kinds"] = append(more["kinds"], monitor.KindDiskWarn)
+	wantCode(t, e.do("POST", "/settings", more, c), http.StatusSeeOther)
+	if !strings.Contains(telegramStored(t, e), `"`+monitor.KindDiskWarn+`":true`) {
+		t.Fatalf("telegram after turning a kind on = %q", telegramStored(t, e))
+	}
 }
