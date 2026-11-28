@@ -222,7 +222,7 @@ func newLockedMaster(t *testing.T) *lockedMaster {
 	cand := testmysql.Start(t, testmysql.Options{})
 	logVersion(t, master)
 	replUser(t, master)
-	replUser(t, cand)
+	candReplUser(t, cand)
 	dir := pinDir(t, "master", "")
 	m := &lockedMaster{master: master, cand: cand, r: newPinRig(t, master.Host(), dir), dir: dir,
 		cred: proto.PeerCred{Host: "127.0.0.1", Port: cand.Port, User: "dbpanel_repl", Password: replPassword}}

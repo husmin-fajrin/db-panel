@@ -240,11 +240,19 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams, lockBy *tim
 	mode := p.Mode
 	step := resumeOpen(ro, sro)
 	if step == openRefuse {
-		// Nothing read or changed yet: the marker, replication and the
-		// flags stay as they are.
-		return res, &commands.ParamError{Msg: textPromoteAppsLocked}
-	}
-	if step == openResume || step == openFinish {
+		// Nothing changed yet. What this server holds that the old master
+		// lacks decides: nothing, refuse (relocking is safe); writes of
+		// its own under a locked old master, this server is the master in
+		// fact; otherwise refuse with nothing changed.
+		ownOpen, err := d.appsLockedVerdict(j, db, p)
+		if err != nil {
+			return res, err
+		}
+		if mode, err = d.openOwnWrites(j, db, p, ownOpen); err != nil {
+			return res, err
+		}
+		res.Resumed = true
+	} else if step == openResume || step == openFinish {
 		// Never opens writes itself: an earlier run opened them, after
 		// its verification, and left the promoting marker.
 		m, err := d.checkResume(ctx, db, p)
@@ -309,6 +317,63 @@ func resumeOpen(ro, sro bool) openStep {
 		return openRefuse
 	}
 	return openVerify
+}
+
+// appsLockedVerdict is step 1 on read_only ON with super_read_only OFF.
+// It reads the old master (the one read this needs) and compares
+// transactions on this server's MySQL. It returns the old master's key
+// when this server holds transactions the old master lacks while the old
+// master refuses every write (a planned run): writes are opened then
+// (openOwnWrites). Every other outcome is a refusal with nothing changed:
+// nothing of its own (textPromoteAppsLocked: relock, then run again), or
+// writes of its own beside an old master that may take writes, cannot be
+// read, or an emergency run (divergedText).
+func (d *Driver) appsLockedVerdict(j *jobs.Job, db *sql.DB, p proto.PromoteParams) (string, error) {
+	ctx := j.Context()
+	key := peerKey(p.OldSource)
+	const done = "Promote ditolak dan tidak ada yang diubah."
+	st := readPeer(ctx, p.OldSource, peerTimeout)
+	if !st.Reachable {
+		return "", &commands.ParamError{Msg: divergedText(key, "", st.Err, false, done)}
+	}
+	own, err := ownWrites(ctx, db, st.GTIDExecuted)
+	if err != nil {
+		return "", fmt.Errorf("%w; promote ditolak dan tidak ada yang diubah", err)
+	}
+	switch {
+	case own == "":
+		return "", &commands.ParamError{Msg: textPromoteAppsLocked}
+	case p.Mode != proto.PromotePlanned || !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return "", &commands.ParamError{Msg: divergedText(key, own, "", !NoWrites(st.ReadOnly, st.SuperReadOnly), done)}
+	}
+	j.Logf("warn", "server ini memuat transaksi yang tidak ada di master lama %s (%s), dan master lama itu terkunci: "+
+		"server ini sudah menjadi master; tulis dibuka dan promote dilanjutkan", key, cutText(own, maxGTIDText))
+	return key, nil
+}
+
+// openOwnWrites opens writes on a server that is the master in fact
+// (appsLockedVerdict): replication stopped, the promoting marker (the
+// earlier run's mode and time when it names the same old master), then
+// the two write-opening statements of promote_open.go. Nothing is rolled
+// back: a statement that left this server read-only is reported, the
+// marker and stopped replication stay, and the run can be repeated.
+func (d *Driver) openOwnWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams, key string) (string, error) {
+	ctx := context.WithoutCancel(j.Context())
+	if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
+		return "", fmt.Errorf("STOP REPLICA: %w; tulis belum dibuka, jalankan promote lagi", err)
+	}
+	m := Promoting{Mode: p.Mode, OldSource: key, At: d.now()}
+	if old, ok, err := d.pins.ReadPromoting(); err == nil && ok && strings.EqualFold(old.OldSource, key) {
+		m.Mode = old.Mode
+	}
+	c, m, err := d.writeOpeningConn(ctx, db, m)
+	if err != nil {
+		return "", fmt.Errorf("%w; tulis belum dibuka, jalankan promote lagi", err)
+	}
+	keep := func(cause error) error {
+		return fmt.Errorf("%w; tulis belum terbuka, tidak ada yang dikembalikan (replikasi tetap berhenti): jalankan promote lagi", cause)
+	}
+	return m.Mode, d.sendWriteOpening(j, db, c, m, keep)
 }
 
 // textPromoteAppsLocked refuses a promote run on read_only ON with
@@ -403,6 +468,11 @@ func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams, lock
 	restore := func(cause error) error {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancel()
+		// Replication is never started over writes of this server's own.
+		if held := d.ownWritesHeld(rctx, db, p); held != "" {
+			j.Logf("error", "%s", held)
+			return fmt.Errorf("%s (%w)", held, cause)
+		}
 		if err := d.pins.ClearPromoting(); err != nil {
 			j.Logf("error", "%v", err)
 			cause = fmt.Errorf("%w; catatan promote juga gagal dihapus (%v)", cause, err)
@@ -446,6 +516,34 @@ func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams, lock
 	}
 	crashPoint("after-open")
 	return applied, unapplied, nil
+}
+
+// ownWritesHeld is restore's check before it starts replication again:
+// "" when this server holds nothing the old master lacks, else the text
+// to refuse with (replication not started, marker kept). The old master
+// is read once more; when it cannot be read, this server's own server_uuid
+// in its gtid_executed stands for writes of its own.
+func (d *Driver) ownWritesHeld(ctx context.Context, db *sql.DB, p proto.PromoteParams) string {
+	key := peerKey(p.OldSource)
+	const done = "Promote dibatalkan; replikasi tidak dijalankan kembali dan catatan promote dibiarkan."
+	if st := readPeer(ctx, p.OldSource, peerTimeout); st.Reachable {
+		own, err := ownWrites(ctx, db, st.GTIDExecuted)
+		if err != nil {
+			return divergedText(key, "", err.Error(), false, done)
+		}
+		if own != "" {
+			return divergedText(key, own, "", !NoWrites(st.ReadOnly, st.SuperReadOnly), done)
+		}
+		return ""
+	}
+	var set, uuid string
+	if err := db.QueryRowContext(ctx, "SELECT @@global.gtid_executed, @@global.server_uuid").Scan(&set, &uuid); err != nil {
+		return divergedText(key, "", "gtid_executed server ini tidak bisa dibaca: "+err.Error(), false, done)
+	}
+	if gtidHasUUID(set, uuid) {
+		return divergedText(key, uuid+" (transaksi server ini sendiri)", "", true, done)
+	}
+	return ""
 }
 
 // verifyOldSource is step 2. planned reports whether this is a planned

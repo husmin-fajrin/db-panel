@@ -160,6 +160,13 @@ func newLockRig(t *testing.T, candidate string) *lockRig {
 	r.d.Events = r.ev
 	r.ev.flush = r.d.FlushEvents
 	t.Cleanup(mysql.SetReadPeer(r.peer.read))
+	// Nine transactions of its own, so that the fake candidates' sets
+	// (this server's uuid:1-3, :1-9) hold nothing this master lacks: the
+	// guard keeps the lock for a candidate with transactions of its own.
+	execAll(t, r.db, "CREATE DATABASE lockrig", "CREATE TABLE lockrig.t (id INT PRIMARY KEY)")
+	for i := 1; i <= 7; i++ {
+		execAll(t, r.db, fmt.Sprintf("INSERT INTO lockrig.t VALUES (%d)", i))
+	}
 	execAll(t, r.db, "SET PERSIST super_read_only = ON")
 	if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: candidate, Deadline: r.deadline}); err != nil {
 		t.Fatal(err)
@@ -239,7 +246,7 @@ func TestLockRequiresConnectedCandidate(t *testing.T) {
 	replUser(t, master)
 	// The candidate takes the replication account too (the lock logs in
 	// to it before locking).
-	replUser(t, replica)
+	candReplUser(t, replica)
 	mdb := rootDB(t, master)
 	dir := pinDir(t, "master", "")
 	r := newPinRig(t, master.Host(), dir)
@@ -971,8 +978,8 @@ func countingReadPeer(t *testing.T) func() int {
 func TestLockKeptWhileListedReplicaDownThenOpens(t *testing.T) {
 	b := testmysql.Start(t, testmysql.Options{})
 	c := testmysql.Start(t, testmysql.Options{})
-	replUser(t, b)
-	replUser(t, c)
+	candReplUser(t, b)
+	candReplUser(t, c)
 	execAll(t, rootDB(t, b), "SET PERSIST super_read_only = ON")
 	execAll(t, rootDB(t, c), "SET PERSIST super_read_only = ON")
 	keyB := "127.0.0.1:" + strconv.Itoa(b.Port)

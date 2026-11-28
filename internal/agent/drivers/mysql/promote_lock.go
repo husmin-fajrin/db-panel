@@ -529,14 +529,28 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 			"alamat kandidat %s tidak tercatat di kunci promosi, kandidat tidak bisa diperiksa; buka kunci di server ini dengan: sudo dbpanel agent unlock-master", key)}
 	}
 	at := dialAt(c, addr)
-	if err := unlockCandidateRefusal(key, peerKey(at), readPeer(ctx, at, peerTimeout)); err != nil {
-		return err
+	cst := readPeer(ctx, at, peerTimeout)
+	if !cst.Reachable || AppsWrite(cst.ReadOnly) {
+		return unlockCandidateRefusal(key, peerKey(at), cst)
 	}
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	// A candidate not writable for applications that holds transactions
+	// this server lacks took writes of its own: this master stays locked,
+	// and the way out is the promote, not a relock.
+	own, err := peerOwnWrites(ctx, db, cst.GTIDExecuted)
+	if err != nil {
+		return fmt.Errorf("%w; kunci tidak dibuka", err)
+	}
+	if own != "" {
+		return &commands.ParamError{Msg: candidateOwnText(key, peerKey(at), own) + "; kunci tidak dibuka"}
+	}
+	if err := unlockCandidateRefusal(key, peerKey(at), cst); err != nil {
+		return err
+	}
 	// Another replica may have been promoted meanwhile (an emergency
 	// promote with this server out of reach): every replica readable when
 	// the lock was set is read first, as the guard does (spec 5.4).
@@ -598,15 +612,17 @@ func unlockCandidateRefusal(key, readAt string, st PeerState) error {
 // is locked for applications only, and how to lock it fully.
 func candidateAppsLockedText(key, readAt string) string {
 	return fmt.Sprintf("kandidat %s (dibaca di %s) %s, jadi belum pasti masih replika; %s", key, readAt, appsOnlyLocked,
-		strings.Replace(relockThere, "server itu", "kandidat itu", 1))
+		strings.ReplaceAll(relockThere, "server itu", "kandidat itu"))
 }
 
 // listedAppsLockedText says that the listed replicas hosts (host:port,
 // as read; at most n named) are locked for applications only, and how to
 // lock them fully.
 func listedAppsLockedText(hosts []string, n int) string {
-	return fmt.Sprintf("replika %s (terbaca saat kunci dipasang) %s, jadi belum pasti masih replika; %s", listHosts(hosts, n),
-		appsOnlyLocked, strings.Replace(relockThere, "server itu", "replika itu", 1))
+	return fmt.Sprintf("replika %s (terbaca saat kunci dipasang) %s, jadi belum pasti masih replika; %s; bila server itu "+
+		"tidak punya halaman replika di panel (bukan replika yang dikelola panel), jalankan di server master ini: "+
+		"sudo dbpanel agent forget-replica <host> untuk mengeluarkannya dari daftar", listHosts(hosts, n),
+		appsOnlyLocked, strings.ReplaceAll(relockThere, "server itu", "replika itu"))
 }
 
 // candidateConnected reports whether a Binlog Dump thread on this server
@@ -744,7 +760,23 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		return nil
 	}
 	st := readPeer(ctx, dialAt(*g.cred, addr), peerTimeout)
-	switch guardCandidateStep(st, !g.graceAt.IsZero()) {
+	step := guardCandidateStep(st, !g.graceAt.IsZero())
+	if step != guardUnreachable && step != guardPromoted {
+		// Whatever its flags read, a candidate holding transactions this
+		// server lacks took writes of its own: this master is never opened
+		// beside it. A comparison that fails keeps the lock too (the
+		// round's error; the next round reads again).
+		own, err := peerOwnWrites(ctx, db, st.GTIDExecuted)
+		if err != nil {
+			return err
+		}
+		if own != "" {
+			g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
+			d.keepLock(now, key, candidateOwnText(key, peerKey(dialAt(*g.cred, addr)), own))
+			return nil
+		}
+	}
+	switch step {
 	case guardUnreachable:
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
 		d.keepLock(now, key, "kandidat tidak terjangkau: "+st.Err)

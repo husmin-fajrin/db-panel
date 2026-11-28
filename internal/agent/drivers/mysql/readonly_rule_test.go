@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
+	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql/testmysql"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -168,8 +169,10 @@ func TestPromoteRerunOnAppsLockedCandidateRefusesUntouched(t *testing.T) {
 			t.Errorf("refusal %q does not hold %q", d.Error, part)
 		}
 	}
-	if n := peer.count(); n != 0 {
-		t.Errorf("the refused run read the old master %d times", n)
+	// The one read the refusal needs: what this server holds that the old
+	// master lacks (nothing here, so relocking is safe).
+	if n := peer.count(); n != 1 {
+		t.Errorf("the refused run read the old master %d times, want 1", n)
 	}
 	if got := readFlags(t, r.replica); got != flagsBefore {
 		t.Errorf("flags after the refusal: %s, before %s", got, flagsBefore)
@@ -265,5 +268,198 @@ func TestGuardOpensAfterAppsLockedCandidateIsLockedAgain(t *testing.T) {
 		r.peer.setAt(a, st)
 		r.tick(lockGrace + mysql.LockRecheck)
 		wantOpen(r, "the next read after the listed replica read both ON")
+	})
+}
+
+// foreignUUID is a server_uuid no rig server has.
+const foreignUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+// TestGuardKeepsLockWhileCandidateHoldsOwnTransactions: a candidate that
+// reads read-only for every account but holds a transaction this master
+// lacks has taken writes of its own: the guard keeps the lock past the
+// grace, says why and names the way out, and mysql.unlockPromote refuses
+// with that text. With the candidate's set the same as the master's, the
+// master opens after the grace as before.
+func TestGuardKeepsLockWhileCandidateHoldsOwnTransactions(t *testing.T) {
+	r := newLockRig(t, guardCandidateKey)
+	set := gtidExecuted(t, r.db)
+	r.peer.set(mysql.PeerState{Reachable: true, ReadOnly: true, SuperReadOnly: true, GTIDExecuted: set + "," + foreignUUID + ":1"})
+	r.tick(0)
+	r.tick(lockGrace)
+	r.tick(2 * lockGrace)
+	r.wantLocked("candidate with a transaction of its own")
+	ev := r.ev.lockEvent(t, 0)
+	if ev.Action != "kept" || !strings.Contains(ev.Reason, foreignUUID+":1") || !strings.Contains(ev.Reason, "Ulangi") ||
+		!strings.Contains(ev.Reason, "Jangan buka kunci master ini") {
+		t.Errorf("kept event = %+v", ev)
+	}
+	resp := r.dispatch("mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: guardCandidate})
+	wantRefused(t, "unlock while the candidate holds its own transactions", resp, guardCandidateKey, foreignUUID+":1",
+		"Ulangi", "kunci tidak dibuka")
+	r.wantLocked("after the refused unlock")
+
+	r.peer.set(mysql.PeerState{Reachable: true, ReadOnly: true, SuperReadOnly: true, GTIDExecuted: set})
+	r.tick(2*lockGrace + mysql.LockRecheck)
+	r.wantLocked("same set: the grace starts")
+	r.tick(2*lockGrace + mysql.LockRecheck + lockGrace)
+	if sro, ro := readOnly(t, r.db); sro || ro {
+		t.Errorf("same set, after the grace: super_read_only=%v read_only=%v, want the master opened", sro, ro)
+	}
+}
+
+// ownTxRig is a promote rig whose replica took a transaction of its own
+// (applications wrote while it was open) and is now read_only ON with
+// super_read_only OFF, replication running again, under the marker of an
+// earlier planned run. old is how the old master reads.
+func ownTxRig(t *testing.T, old mysql.PeerState) (*promoteRig, *fakePeer) {
+	t.Helper()
+	r := newPromoteRig(t)
+	if err := r.d.Pins().WritePromoting(mysql.Promoting{Mode: proto.PromotePlanned, OldSource: r.source,
+		At: time.Now().UTC().Truncate(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	execAll(t, r.rdb, "SET GLOBAL super_read_only = OFF", "SET GLOBAL read_only = OFF", "INSERT INTO toko.t VALUES (500)",
+		"SET PERSIST read_only = ON", "SET PERSIST super_read_only = OFF")
+	if !mysql.GTIDHasUUID(gtidExecuted(t, r.rdb), r.replicaServerID) {
+		t.Fatal("the replica has no transaction of its own")
+	}
+	if s := readFlags(t, r.replica); s.running() != (runFlags{RO: true}) {
+		t.Fatalf("replica flags %s, want running ON/OFF", s)
+	}
+	old.GTIDExecuted = gtidExecuted(t, r.mdb)
+	peer := &fakePeer{}
+	peer.set(old)
+	t.Cleanup(mysql.SetReadPeer(peer.read))
+	return r, peer
+}
+
+// runExpired runs a planned promote whose old master's lock has run out.
+func (r *promoteRig) runExpired() proto.JobDone {
+	r.t.Helper()
+	p := r.params(proto.PromotePlanned)
+	none := 0
+	p.LockRemainingSec = &none
+	return r.run(p)
+}
+
+// TestPromoteOnAppsLockedCandidateWithOwnTransactionsFinishesOpening: a
+// server found read_only ON, super_read_only OFF, holding transactions the
+// old master lacks while the old master refuses every write, is the master
+// in fact: the run opens writes (both statements, through promote_open.go)
+// and ends as a resumed promote, even with the lock run out.
+func TestPromoteOnAppsLockedCandidateWithOwnTransactionsFinishesOpening(t *testing.T) {
+	r, peer := ownTxRig(t, mysql.PeerState{Reachable: true, ReadOnly: true, SuperReadOnly: true})
+	d := r.runExpired()
+	if !d.OK {
+		t.Fatalf("promote = %q; want the opening finished", d.Error)
+	}
+	res := promoteResult(t, d)
+	if !res.Resumed || res.Mode != proto.PromotePlanned {
+		t.Errorf("result = %+v; want resumed as planned", res)
+	}
+	if peer.count() != 1 {
+		t.Errorf("old master read %d times, want 1", peer.count())
+	}
+	wantFlags(t, r.replica, "after the promote", runFlags{})
+	if n := count(t, r.rdb, "SELECT COUNT(*) FROM performance_schema.replication_connection_configuration"); n != 0 {
+		t.Errorf("%d replication channels left", n)
+	}
+	if got := pinFile(t, r.dir, mysql.RoleFile); got != "master" {
+		t.Errorf("role pin = %q, want master", got)
+	}
+	if got := pinFile(t, r.dir, mysql.PromotingFile); got != "" {
+		t.Errorf("marker left: %s", got)
+	}
+	if n := count(t, r.rdb, "SELECT COUNT(*) FROM toko.t WHERE id = 500"); n != 1 {
+		t.Errorf("own row count = %d, want 1", n)
+	}
+}
+
+// TestPromoteOnAppsLockedCandidateWithOwnTransactionsRefusesWhenOldMasterTakesWrites:
+// the same server, with an old master that may take writes or cannot be
+// read, is refused with nothing changed and a text that says the two
+// servers may hold different writes and nothing is to be done by hand.
+func TestPromoteOnAppsLockedCandidateWithOwnTransactionsRefusesWhenOldMasterTakesWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		old  mysql.PeerState
+	}{
+		{"old master writable", mysql.PeerState{Reachable: true}},
+		{"old master apps-locked", mysql.PeerState{Reachable: true, ReadOnly: true}},
+		{"old master unreadable", mysql.PeerState{Err: "dial tcp: i/o timeout"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := ownTxRig(t, tc.old)
+			flags, marker, repl := readFlags(t, r.replica), pinFile(t, r.dir, mysql.PromotingFile), replState(t, r.rdb)
+			d := r.runExpired()
+			if d.OK {
+				t.Fatal("promote succeeded; want refused")
+			}
+			for _, part := range []string{"tulisan yang berbeda", "tidak ada yang diubah", "Jangan kunci, buka kunci", "administrator MySQL"} {
+				if !strings.Contains(d.Error, part) {
+					t.Errorf("refusal %q does not hold %q", d.Error, part)
+				}
+			}
+			if got := readFlags(t, r.replica); got != flags {
+				t.Errorf("flags %s, before %s", got, flags)
+			}
+			if got := pinFile(t, r.dir, mysql.PromotingFile); got != marker {
+				t.Errorf("marker %q, before %q", got, marker)
+			}
+			time.Sleep(time.Second)
+			if got := replState(t, r.rdb); got != repl {
+				t.Errorf("replication %s, before %s", got, repl)
+			}
+		})
+	}
+}
+
+// TestPromoteRerunDoesNotStartReplicationOverOwnTransactions: a server
+// locked fully again (both flags ON) that holds a transaction the old
+// master lacks takes the verified path; when that path fails after the
+// relay-log step, replication is not started again and the marker is
+// kept: the refusal says the two servers may hold different writes.
+func TestPromoteRerunDoesNotStartReplicationOverOwnTransactions(t *testing.T) {
+	r, _ := ownTxRig(t, mysql.PeerState{Reachable: true, ReadOnly: true, SuperReadOnly: true})
+	execAll(t, r.rdb, "SET PERSIST super_read_only = ON")
+	marker := pinFile(t, r.dir, mysql.PromotingFile)
+	d := r.runExpired()
+	if d.OK {
+		t.Fatal("promote succeeded; want refused on the lock margin")
+	}
+	for _, part := range []string{"tulisan yang berbeda", "replikasi tidak dijalankan", "administrator MySQL"} {
+		if !strings.Contains(d.Error, part) {
+			t.Errorf("refusal %q does not hold %q", d.Error, part)
+		}
+	}
+	time.Sleep(time.Second)
+	if got := replState(t, r.rdb); !strings.HasPrefix(got, "receiver OFF") {
+		t.Errorf("replication after the refusal: %s; want the receiver not started", got)
+	}
+	if got := pinFile(t, r.dir, mysql.PromotingFile); got != marker {
+		t.Errorf("marker %q, before %q", got, marker)
+	}
+	wantFlags(t, r.replica, "after the refusal", runFlags{RO: true, SRO: true})
+}
+
+// candReplUser makes dbpanel_repl@'%' on a candidate without writing its
+// binary log, as the agent makes accounts on a pinned replica
+// (accountMode.local): a candidate holds no transaction of its own, which
+// the old master's guard would take for writes the candidate took.
+func candReplUser(t *testing.T, inst *testmysql.Instance) {
+	t.Helper()
+	withDB(t, inst, func(db *sql.DB) {
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		for _, q := range []string{"SET SESSION sql_log_bin = 0",
+			"CREATE USER IF NOT EXISTS 'dbpanel_repl'@'%' IDENTIFIED BY " + sqlLiteral(replPassword),
+			"GRANT REPLICATION SLAVE, BACKUP_ADMIN ON *.* TO 'dbpanel_repl'@'%'"} {
+			if _, err := conn.ExecContext(context.Background(), q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
 	})
 }
