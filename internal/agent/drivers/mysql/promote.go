@@ -34,8 +34,10 @@ import (
 //     minutes left (the seconds the panel gave, LockRemainingSec, less
 //     what passed on this server's clock since the request came) and
 //     the old master is still read-only with nothing this server lacks.
-//  5. The promoting marker (synced), STOP REPLICA, then SET PERSIST
-//     read_only/super_read_only OFF: the point of no return.
+//  5. The promoting marker (synced, naming the connection of the next
+//     statements), STOP REPLICA, then SET PERSIST read_only/super_read_only
+//     OFF on that connection: the point of no return. A statement whose
+//     outcome is unknown is settled before anything else (promote_open.go).
 //  6. RESET REPLICA ALL, the replication account for its own replicas,
 //     pin master, write the promotion record, remove the marker.
 //
@@ -220,6 +222,9 @@ func validatePromote(p *proto.PromoteParams) error {
 func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams, lockBy *time.Time) (proto.PromoteResult, error) {
 	var res proto.PromoteResult
 	ctx := j.Context()
+	if err := d.waitLeftOpen(j); err != nil {
+		return res, err
+	}
 	db, err := openAdmin(ctx, h)
 	if err != nil {
 		return res, err
@@ -362,21 +367,21 @@ func (d *Driver) openWrites(j *jobs.Job, db *sql.DB, p proto.PromoteParams, lock
 		j.Logf("warn", "master lama %s menjawab lagi sebelum tulis dibuka", key)
 		return 0, "", restore(oldMasterAlive(key))
 	}
-	if err := d.pins.WritePromoting(Promoting{Mode: p.Mode, OldSource: key, At: d.now()}); err != nil {
-		return 0, "", restore(fmt.Errorf("catatan promote gagal ditulis: %w", err))
+	// The marker names the connection the write-opening statements go on
+	// (promote_open.go).
+	conn, m, err := d.writeOpeningConn(ctx, db, Promoting{Mode: p.Mode, OldSource: key, At: d.now()})
+	if err != nil {
+		return 0, "", restore(err)
 	}
+	defer conn.Close()
 	if _, err := db.ExecContext(ctx, "STOP REPLICA"); err != nil {
 		return 0, "", restore(fmt.Errorf("STOP REPLICA: %w", err))
 	}
 	crashPoint("before-open")
 	// The point of no return: no rollback once read_only is off.
 	j.Logf("info", "membuka tulis di server ini (titik tanpa balik)")
-	wctx := context.WithoutCancel(ctx)
-	if _, err := db.ExecContext(wctx, "SET PERSIST read_only = OFF"); err != nil {
-		return 0, "", restore(fmt.Errorf("SET PERSIST read_only = OFF: %w", err))
-	}
-	if _, err := db.ExecContext(wctx, "SET PERSIST super_read_only = OFF"); err != nil {
-		return 0, "", fmt.Errorf("SET PERSIST super_read_only = OFF: %w; tulis sudah terbuka, jalankan promote lagi untuk melanjutkan", err)
+	if err := d.sendWriteOpening(j, db, conn, m, restore); err != nil {
+		return 0, "", err
 	}
 	crashPoint("after-open")
 	return applied, unapplied, nil

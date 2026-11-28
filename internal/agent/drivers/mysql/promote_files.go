@@ -155,21 +155,32 @@ type promotedJSON struct {
 // Promoting is the marker of a promotion that passed its verification
 // and is about to open writes (or did): its mode, the old master
 // (host:port) and when.
+//
+// ConnID and Boot, when ConnID is not 0, name the MySQL connection the
+// write-opening statements are (about to be) sent on and the mysqld
+// instance it belongs to (its start time, instanceBoot; 0 when unknown);
+// they are written before the first statement leaves (promote_open.go).
+// A marker without them (an older agent's) is read as before.
 type Promoting struct {
 	Mode      string
 	OldSource string
 	At        time.Time
+	ConnID    uint64
+	Boot      int64
 }
 
 type promotingJSON struct {
 	Mode      string `json:"mode"`
 	OldSource string `json:"old_source"`
 	At        string `json:"at"`
+	ConnID    uint64 `json:"conn_id,omitempty"`
+	Boot      int64  `json:"mysqld_boot,omitempty"`
 }
 
 // WritePromoting writes the marker (synced to disk), replacing any.
 func (p *Pins) WritePromoting(m Promoting) error {
-	return writeJSON(p.path(PromotingFile), promotingJSON{Mode: m.Mode, OldSource: m.OldSource, At: m.At.UTC().Format(time.RFC3339)})
+	return writeJSON(p.path(PromotingFile), promotingJSON{Mode: m.Mode, OldSource: m.OldSource, At: m.At.UTC().Format(time.RFC3339),
+		ConnID: m.ConnID, Boot: m.Boot})
 }
 
 // ReadPromoting reads the marker; ok is false when there is none.
@@ -183,7 +194,7 @@ func (p *Pins) ReadPromoting() (Promoting, bool, error) {
 	if err != nil || v.OldSource == "" {
 		return Promoting{}, false, fmt.Errorf("%s tidak valid", p.path(PromotingFile))
 	}
-	return Promoting{Mode: v.Mode, OldSource: v.OldSource, At: at}, true, nil
+	return Promoting{Mode: v.Mode, OldSource: v.OldSource, At: at, ConnID: v.ConnID, Boot: v.Boot}, true, nil
 }
 
 // ClearPromoting removes the marker; none is not an error.

@@ -747,3 +747,45 @@ func SetAccountGrantsReadHook(f func()) (restore func()) {
 	accountGrantsRead = f
 	return func() { accountGrantsRead = old }
 }
+
+// SetOpenExec replaces how a write-opening statement of mysql.promote is
+// sent on its connection.
+func SetOpenExec(f func(ctx context.Context, c *sql.Conn, q string) error) (restore func()) {
+	old := openExec
+	openExec = f
+	return func() { openExec = old }
+}
+
+// SetOpenSettleHook calls f at the start of every settling try; an error
+// fails the try.
+func SetOpenSettleHook(f func() error) (restore func()) {
+	old := openSettleHook
+	openSettleHook = f
+	return func() { openSettleHook = old }
+}
+
+// SetOpenSettle changes the bound of a settling try and the pause between
+// two.
+func SetOpenSettle(try, pause time.Duration) (restore func()) {
+	oldTry, oldPause := openSettleTry, openSettlePause
+	openSettleTry, openSettlePause = try, pause
+	return func() { openSettleTry, openSettlePause = oldTry, oldPause }
+}
+
+// InstanceBoot is the start of the mysqld db is connected to, as the
+// promoting marker records it.
+func InstanceBoot(ctx context.Context, db *sql.DB) (int64, error) {
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	return instanceBoot(ctx, c), nil
+}
+
+// SettleOpenOnce is one settling try of the connection connID of the
+// mysqld started at boot, on db.
+func SettleOpenOnce(ctx context.Context, db *sql.DB, connID uint64, boot int64) (readOnly bool, err error) {
+	return settleOpenOnce(ctx, Promoting{ConnID: connID, Boot: boot},
+		func(context.Context) (*sql.DB, func(), error) { return db, func() {}, nil })
+}

@@ -197,6 +197,10 @@ type Driver struct {
 	// promoteReqs counts the mysql.promote requests read and not ended
 	// (promote_pending.go).
 	promoteReqs atomic.Int64
+	// leftOpen is closed once the settling of a write-opening connection
+	// named by the promoting marker this agent started with is done
+	// (promote_open.go); nil when there was none. Set by Register.
+	leftOpen chan struct{}
 
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
@@ -215,6 +219,7 @@ func (d *Driver) Register(reg *commands.Registry) {
 		d.pins = p
 	}
 	d.liftGate()
+	d.settleLeftOpenAtStart()
 	if d.relocked == nil {
 		d.relocked = d.reportRelocked
 	}
