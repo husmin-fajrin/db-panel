@@ -252,6 +252,60 @@ func TestEmergencyPromoteNotGated(t *testing.T) {
 	e.waitJob(id, store.JobSucceeded)
 }
 
+// TestEmergencyNotRefusedByChangedRows (spec 5.1): the rows this plan
+// changed hold no emergency promote: a disk at 96% under a threshold of
+// 99 and a backup folder whose state is pending.
+func TestEmergencyNotRefusedByChangedRows(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	for k, v := range map[string]string{store.SettingDiskWarn: "90", store.SettingDiskCrit: "99"} {
+		if err := e.st.SetSetting(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, fa := range []*fakeAgent{g.m, g.c} {
+		v, _ := g.h.View(fa.id)
+		s := *v.Snap
+		s.DiskTotal, s.DiskFree = 100, 4
+		if fa == g.m {
+			s.Backup = &proto.BackupState{Status: proto.BackupPending}
+		}
+		v.Snap = &s
+		g.h.set(fa.id, v)
+	}
+	g.offline(g.d)
+	for _, fa := range []*fakeAgent{g.c, g.b} {
+		fa.reply("mysql.probeSource", proto.ProbeSourceResult{Reachable: false, Err: "connection refused", Host: "10.0.0.1", Port: 3306})
+	}
+	// The planned gate asks for the tick on the same reports.
+	if res, err := e.r.Gate(GateInput{Action: GatePromotePlanned, MasterID: g.m.id, TargetID: g.c.id}); err != nil ||
+		!res.NeedsBackupAck() {
+		t.Fatalf("planned gate = %+v, %v; want the backup tick asked", res.Rows, err)
+	}
+	// The master's MySQL goes down, its agent still connected and its
+	// backup folder still pending: an emergency.
+	now := time.Now()
+	g.h.set(g.m.id, monitor.View{Status: monitor.Status{Code: monitor.StatusDown}, ReceivedAt: now,
+		Snap: &proto.HealthSnapshot{MySQLOK: false, RolePin: "master", ClockUnixMS: now.UnixMilli(), DiskTotal: 100,
+			DiskFree: 4, Backup: &proto.BackupState{Status: proto.BackupPending}}})
+	g.h.mu.Lock()
+	delete(g.h.green, g.m.id) // the scripted report, as it is
+	g.h.mu.Unlock()
+	if mode := e.r.PromoteMode(g.m.id); mode != proto.PromoteEmergency {
+		t.Fatalf("mode = %q, want emergency", mode)
+	}
+	res, err := e.r.Gate(GateInput{Action: GatePromoteEmergency, MasterID: g.m.id, TargetID: g.c.id})
+	if err != nil || res.NeedsBackupAck() {
+		t.Fatalf("emergency gate = %+v, %v; want no tick asked", res.Rows, err)
+	}
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{OldMasterDeadAck: true, MasterServerID: g.m.id,
+		CandidateServerID: g.c.id, Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}})
+	if err != nil {
+		t.Fatalf("emergency promote with the disk at 96%% under 99 and the backup pending: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+}
+
 func TestPlannedPromoteNeedsBackupAck(t *testing.T) {
 	ctx := context.Background()
 	// A folder set and a fresh backup in it: the tick is not asked.

@@ -1045,17 +1045,21 @@ func (e *e2ePromoteTopology) wantEmergencyAudit(t *testing.T, id string) {
 		var d struct {
 			OldMasterDead    bool      `json:"old_master_dead"`
 			MasterLastReport *string   `json:"master_last_report"`
+			ReportReceived   *string   `json:"master_report_received"`
 			SkippedRed       *[]string `json:"skipped_red"`
 		}
 		if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
 			t.Fatal(err)
 		}
-		if !d.OldMasterDead || d.MasterLastReport == nil || d.SkippedRed == nil {
+		if !d.OldMasterDead || d.MasterLastReport == nil || d.ReportReceived == nil || d.SkippedRed == nil {
 			t.Fatalf("emergency promote audit = %s", a.DetailJSON)
 		}
-		if *d.MasterLastReport != "" {
-			if _, err := time.Parse(time.RFC3339, *d.MasterLastReport); err != nil {
-				t.Fatalf("master_last_report %q: %v", *d.MasterLastReport, err)
+		for name, v := range map[string]string{"master_last_report": *d.MasterLastReport,
+			"master_report_received": *d.ReportReceived} {
+			if v != "" {
+				if _, err := time.Parse(time.RFC3339, v); err != nil {
+					t.Fatalf("%s %q: %v", name, v, err)
+				}
 			}
 		}
 		return

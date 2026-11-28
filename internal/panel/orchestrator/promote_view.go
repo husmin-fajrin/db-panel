@@ -76,6 +76,10 @@ type PromoteView struct {
 	Mode         string
 	Master       store.Server
 	LastReportAt *time.Time // the master's last health report
+	// LastReportArrivedAt: when the panel received that report, by its
+	// own clock (LastReportAt is that less the age the agent states); nil
+	// when none arrived since the panel started.
+	LastReportArrivedAt *time.Time
 	// LastMasterGTID is the master's gtid_executed: from its binary logs
 	// when its agent answered mysql.binlogTail (exact), else from its last
 	// report ("" when none).
@@ -174,6 +178,10 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 	if !mv.ReceivedAt.IsZero() {
 		t := mv.ReceivedAt
 		v.LastReportAt = &t
+	}
+	if !mv.ArrivedAt.IsZero() {
+		t := mv.ArrivedAt
+		v.LastReportArrivedAt = &t
 	}
 	reportGTID, masterUUID := "", ""
 	if mv.Snap != nil {

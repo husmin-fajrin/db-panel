@@ -109,6 +109,7 @@ SET PERSIST read_only=OFF;</pre><p>Bila Anda memilih <code>unassigned</code>, bi
     <h3 class="mt-2 font-semibold">Ruang disk</h3>
     <p>Tertulis: "Disk &lt;server&gt; terpakai &lt;angka&gt;% (ambang kritis &lt;angka&gt;%)."</p>
     <p>Perbaikan: "Kosongkan ruang di server itu, klik Periksa sekarang di halaman server, lalu muat ulang halaman ini."</p>
+    <p>Di belakangnya bisa tertulis: "Ambang kritis diatur &lt;angka&gt;%; gerbang menilai merah mulai 95%." Kosongkan ruang sampai pemakaian disk di bawah 95%: menaikkan ambang kritis di Pengaturan tidak mengubah baris ini.</p>
     <h3 class="mt-2 font-semibold">Akun panel</h3>
     <p>Tertulis: "Agent di &lt;server&gt; masuk ke MySQL sebagai root."</p>
     <p>Perbaikan: "Buat akun MySQL khusus panel lalu hubungkan lagi (Panduan, "Memperbaiki baris merah"). Bila akunnya sudah diganti di server, klik Segarkan di kartu MySQL halaman server itu."</p>
@@ -128,6 +129,7 @@ GRANT ALL PRIVILEGES ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;</pre
     <h3 class="mt-2 font-semibold">Cadangan (backup)</h3>
     <p>Tertulis (kuning): "Folder cadangan master &lt;server&gt; belum diisi, jadi panel tidak bisa melihat umur cadangan."</p>
     <p>Perbaikan: "Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru." Caranya ada di panduan "<a class="link" href="#jadwal-cadangan">Memindahkan jadwal cadangan sesudah promote</a>".</p>
+    <p>Atau tertulis (kuning), tanpa perbaikan: "Keadaan folder cadangan belum diketahui (folder baru diubah, atau agent master belum melapor). Centang bila Anda sudah memastikan sendiri cadangan terbaru ada." Tunggu sampai kartu <strong>Cadangan (backup)</strong> di halaman server master menulis "Berkas terbaru: … lalu, …", atau isi centang cadangan sesudah Anda memeriksa sendiri cadangan terbaru di server master.</p>
     <p>Tertulis (merah), salah satu dari:</p>
     <ul class="ml-6 flex list-disc flex-col gap-1"><li>"Berkas terbaru di folder cadangan master &lt;server&gt; berumur &lt;umur&gt; (batas &lt;jam&gt; jam)."</li><li>"Berkas terbaru di folder cadangan master &lt;server&gt; kosong (0 byte)."</li><li>"Folder cadangan master &lt;server&gt; tidak berisi berkas."</li><li>"Folder cadangan master &lt;server&gt; tidak bisa dibaca agent: &lt;sebab&gt;."</li></ul>
     <p>Di belakang teks pertama atau kedua bisa tertulis: "Folder ini berisi lebih dari 10.000 berkas, jadi agent hanya memeriksa sebagian dan berkas yang lebih baru bisa terlewat. Arahkan folder cadangan ke subfolder yang berisi lebih sedikit berkas." Bila begitu, kerjakan saran itu dulu: berkas terbaru mungkin ada tetapi tidak terlihat oleh agent.</p>

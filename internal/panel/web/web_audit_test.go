@@ -310,7 +310,7 @@ func TestScrubDetail(t *testing.T) {
 		t.Errorf("ScrubDetail(nil) = %q", got)
 	}
 
-	// SEC-44: strings and lists are cut, the whole is at most 2 KiB.
+	// SEC-44: strings and lists are cut, the whole is at most 16 KiB.
 	long := strings.Repeat("é", 300)
 	many := make([]string, 100)
 	for i := range many {
@@ -329,11 +329,32 @@ func TestScrubDetail(t *testing.T) {
 		t.Errorf("cut detail = %s", got)
 	}
 	huge := map[string]any{}
-	for i := range 64 {
-		huge[fmt.Sprintf("k%02d", i)] = strings.Repeat("x", 128)
+	for i := range 160 {
+		huge[fmt.Sprintf("k%03d", i)] = strings.Repeat("x", 128)
 	}
-	if got := web.ScrubDetail(huge, false); len(got) > 2048 || !strings.Contains(got, `"dipotong":true`) {
-		t.Errorf("detail over 2 KiB = %d bytes: %.200s", len(got), got)
+	if got := web.ScrubDetail(huge, false); len(got) > 16<<10 || !strings.Contains(got, `"dipotong":true`) {
+		t.Errorf("detail over 16 KiB = %d bytes: %.200s", len(got), got)
+	}
+	// Under a key kept whole, a string and the strings of an object stay
+	// whole (spec 5.1: a folder, a base URL old and new); other values
+	// there are still cut.
+	folder := "/srv/" + strings.Repeat("<", 1019)
+	got = web.ScrubDetail(map[string]any{"backup_dir": folder, "old_backup_dir": folder,
+		"changes": map[string]any{"panel_base_url": map[string]any{"old": long, "new": long, "list": many}}}, false)
+	var kept struct {
+		Dir     string `json:"backup_dir"`
+		OldDir  string `json:"old_backup_dir"`
+		Changes map[string]struct {
+			Old, New string
+			List     []string
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal([]byte(got), &kept); err != nil {
+		t.Fatalf("detail %.200s: %v", got, err)
+	}
+	if c := kept.Changes["panel_base_url"]; kept.Dir != folder || kept.OldDir != folder || c.Old != long || c.New != long ||
+		len(c.List) != 65 {
+		t.Errorf("kept detail = %.300s (%d bytes)", got, len(got))
 	}
 	// A refused or failed action keeps names and lengths only.
 	got = web.ScrubDetail(map[string]any{"confirm_name": "rahasia", "wipe_list": []string{"a", "b", "c"},
@@ -767,6 +788,9 @@ func TestAuditDetailSummaryPromote(t *testing.T) {
 		{"server_delete", "{}", ""},
 		{"server_delete", "", ""},
 		{"settings_update", `{"changed":["monitor_check_every","lag_threshold"]}`, "diubah: monitor_check_every, lag_threshold"},
+		{"settings_update", `{"changes":{"disk_crit_pct":{"old":92,"new":99},"telegram_bot":"diubah"}}`,
+			"perubahan: disk_crit_pct 92 → 99, telegram_bot diubah"},
+		{"settings_update", `{"changes":{"nama_instansi":{"old":"","new":"RS"}}}`, "perubahan: nama_instansi (kosong) → RS"},
 		{"server_snooze", `{"hours":24}`, "lama: 24 jam"},
 		{"remove_databases", `{"databases":["a","b"],"drop_data":true}`, "database: a, b; hapus data: ya"},
 		{"mysql_connect", `{"mysql_user_len":5,"host_len":9}`, "pengguna MySQL: 5 karakter; host: 9 karakter"},

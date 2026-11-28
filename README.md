@@ -1538,7 +1538,7 @@ Baris yang diperiksa:
 | Pin master | agent master tidak melaporkan pin peran `master` (juga bila belum ada laporan) | promote, Buat replika, Resync ulang, Tambah database |
 | Jam (clock) | jam server berbeda lebih dari 30 detik dari jam host panel | promote |
 | Pemeriksaan sertifikat TLS | master belum punya sertifikat MySQL dari panel; pada promote juga bila ada replika yang belum memeriksa sertifikat master | promote, Bangun ulang |
-| Ruang disk | disk server mencapai ambang kritis di Pengaturan | Buat replika, Bangun ulang, Resync ulang, Tambah database |
+| Ruang disk | disk server mencapai ambang kritis di Pengaturan atau 95%, mana yang lebih rendah | Buat replika, Bangun ulang, Resync ulang, Tambah database |
 | Akun panel | agent masuk ke MySQL sebagai `root` | semua tindakan di atas |
 | performance_schema | `performance_schema` mati di master | Buat replika, Bangun ulang, Resync ulang, Tambah database |
 | Cadangan (backup) | berkas terbaru di folder cadangan master terlalu tua, kosong, tidak ada, atau folder tidak bisa dibaca agent (lihat "Cadangan (backup)" di "Pemantauan") | promote, Bangun ulang |
@@ -1557,7 +1557,9 @@ baris **Port MySQL master** selalu bertanda "Terpenuhi".
 
 Baris **Cadangan (backup)** kuning bila folder cadangan master belum diisi:
 "Folder cadangan master <server> belum diisi, jadi panel tidak bisa melihat
-umur cadangan." Pada promote terencana dan bangun ulang, layar lalu meminta
+umur cadangan." Baris itu juga kuning bila folder sudah diisi tetapi
+keadaannya belum diketahui panel (folder baru diubah, atau agent master
+belum melapor). Pada promote terencana dan bangun ulang, layar lalu meminta
 centang "Saya sudah memastikan ada cadangan (backup) terbaru". Tanpa
 centang itu, kiriman ditolak dengan "Centang "Saya sudah memastikan ada
 cadangan (backup) terbaru" untuk melanjutkan." Di bawah baris itu tertulis
@@ -3503,6 +3505,10 @@ Tertulis: "Disk <server> terpakai <angka>% (ambang kritis <angka>%)."
 Perbaikan: "Kosongkan ruang di server itu, klik Periksa sekarang di halaman
 server, lalu muat ulang halaman ini."
 
+Di belakangnya bisa tertulis: "Ambang kritis diatur <angka>%; gerbang
+menilai merah mulai 95%." Kosongkan ruang sampai pemakaian disk di bawah
+95%: menaikkan ambang kritis di Pengaturan tidak mengubah baris ini.
+
 #### Akun panel
 
 Tertulis: "Agent di <server> masuk ke MySQL sebagai root."
@@ -3625,6 +3631,13 @@ tidak bisa melihat umur cadangan."
 Perbaikan: "Isi folder cadangan di halaman server master, atau pastikan
 sendiri ada cadangan terbaru." Caranya ada di panduan
 "Memindahkan jadwal cadangan sesudah promote".
+
+Atau tertulis (kuning), tanpa perbaikan: "Keadaan folder cadangan belum
+diketahui (folder baru diubah, atau agent master belum melapor). Centang
+bila Anda sudah memastikan sendiri cadangan terbaru ada." Tunggu sampai
+kartu **Cadangan (backup)** di halaman server master menulis "Berkas
+terbaru: … lalu, …", atau isi centang cadangan sesudah Anda memeriksa
+sendiri cadangan terbaru di server master.
 
 Tertulis (merah), salah satu dari:
 
@@ -3776,9 +3789,11 @@ berhasil dan gagal, logout, perubahan pengaturan, tes Telegram, Siapkan
 master, Buat replika, tambah dan lepas database, setujui/ulangi/batalkan
 pekerjaan, serta semua tombol di "Kontrol replika". Setiap baris berisi
 waktu, pengguna, IP, tindakan, target, dan hasilnya (berhasil, atau alasan
-ditolak); sandi dan token tidak pernah dicatat. Perubahan chat id dan
-alamat dasar panel dicatat dengan nilai barunya, utuh. Isi rincian tiap baris
-dibatasi (2 KiB); untuk tindakan yang ditolak atau gagal hanya nama isian
+ditolak); sandi dan token tidak pernah dicatat. Perubahan pengaturan
+dicatat dengan nilai lama dan barunya (untuk token bot hanya "diubah");
+chat id, alamat dasar panel dan folder cadangan dicatat utuh, lama dan
+baru. Isi rincian tiap baris
+dibatasi (16 KiB); untuk tindakan yang ditolak atau gagal hanya nama isian
 dan panjang nilainya yang dicatat, dan login gagal dengan nama pengguna
 yang tidak ada dicatat sebagai `(tidak dikenal)` dengan hash pendek (hash
 itu hanya ada di `panel.db`, tidak di salinan journal, karena nama yang

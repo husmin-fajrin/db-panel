@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -272,6 +273,10 @@ const (
 	wantG8uf  = "Isi folder cadangan di halaman server master, atau pastikan sendiri ada cadangan terbaru."
 	wantG10af = "Pastikan agent di server itu berjalan dan tersambung ke panel, lalu muat ulang halaman ini."
 	wantG13f  = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
+	// wantT7 and wantT8 are T7 and T8 of the spec (5.11), word for word.
+	wantT7 = "Ambang kritis diatur %d%%; gerbang menilai merah mulai 95%%."
+	wantT8 = "Keadaan folder cadangan belum diketahui (folder baru diubah, atau agent master belum melapor). Centang " +
+		"bila Anda sudah memastikan sendiri cadangan terbaru ada."
 	// wantG10bAccountF: the account row's fix while a connected server's
 	// account is not reported (Ruling R40).
 	wantG10bAccountF = "Klik Segarkan di kartu MySQL halaman server itu, lalu muat ulang halaman ini."
@@ -472,6 +477,55 @@ func TestGateDisk(t *testing.T) {
 		"Disk db-old terpakai 100% (ambang kritis 90%). Ruang disk belum diketahui: agent db-master belum melaporkannya.", wantG5f)
 }
 
+// TestGateDiskCeiling (spec 5.1, T7): the disk row is red from the lower
+// of the critical threshold and 95%, so raising the threshold does not
+// turn the row off; above 95 the row says so.
+func TestGateDiskCeiling(t *testing.T) {
+	g := newGateRig(t)
+	setCrit := func(warn, crit string) {
+		t.Helper()
+		for k, v := range map[string]string{store.SettingDiskWarn: warn, store.SettingDiskCrit: crit} {
+			if err := g.e.st.SetSetting(k, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	setCrit("90", "99")
+	g.snap(g.rep, func(s *proto.HealthSnapshot) { s.DiskFree = 40 })
+	wantRow(t, g.row(GateResync, "disk"), GateRed,
+		"Disk db-replica terpakai 96% (ambang kritis 99%). "+fmt.Sprintf(wantT7, 99), wantG5f)
+	g.snap(g.rep, func(s *proto.HealthSnapshot) { s.DiskFree = 60 })
+	wantGreen(t, g.row(GateResync, "disk"))
+
+	setCrit("80", "90")
+	g.snap(g.rep, func(s *proto.HealthSnapshot) { s.DiskFree = 80 })
+	wantRow(t, g.row(GateResync, "disk"), GateRed, "Disk db-replica terpakai 92% (ambang kritis 90%).", wantG5f)
+}
+
+// TestBackupAckOnUnknownFolderState (spec 5.1, T8): a folder set whose
+// state the panel does not know yet (pending, or no backup state in a
+// connected agent's report) asks for the tick on a planned promote and a
+// rebuild.
+func TestBackupAckOnUnknownFolderState(t *testing.T) {
+	for _, b := range []*proto.BackupState{{Status: proto.BackupPending}, nil} {
+		g := newGateRig(t)
+		g.snap(g.m, func(s *proto.HealthSnapshot) { s.Backup = b })
+		for _, a := range allGateActions {
+			res := g.gate(g.input(a))
+			want := a == GatePromotePlanned || a == GateRebuildOldMaster
+			if res.NeedsBackupAck() != want {
+				t.Errorf("backup %+v, %s: NeedsBackupAck = %v, want %v", b, a, res.NeedsBackupAck(), want)
+			}
+			if want {
+				wantRow(t, gateRow(t, res, "backup"), GateYellow, wantT8, "")
+			}
+		}
+		if g.gate(g.input(GateCreateReplica)).NeedsBackupAck() {
+			t.Errorf("backup %+v: Buat replika asks for the tick", b)
+		}
+	}
+}
+
 func TestGateAccountSplitsAtLastAt(t *testing.T) {
 	g := newGateRig(t)
 	for _, c := range []struct {
@@ -597,10 +651,11 @@ func TestGateBackup(t *testing.T) {
 	wantRow(t, g.row(GatePromotePlanned, "backup"), GateRed,
 		"Folder cadangan master db-master tidak bisa dibaca agent: izin ditolak.", wantG8f)
 	backup(&proto.BackupState{Status: proto.BackupPending})
-	wantRow(t, g.row(GatePromotePlanned, "backup"), GateYellow,
-		"Cadangan (backup) belum diketahui: agent db-master belum melaporkannya.", "")
+	wantRow(t, g.row(GatePromotePlanned, "backup"), GateYellow, wantT8, "")
 	backup(nil)
-	wantRow(t, g.row(GatePromotePlanned, "backup"), GateYellow,
+	wantRow(t, g.row(GatePromotePlanned, "backup"), GateYellow, wantT8, "")
+	// An emergency asks for no tick: its row keeps G10b.
+	wantRow(t, g.row(GatePromoteEmergency, "backup"), GateYellow,
 		"Cadangan (backup) belum diketahui: agent db-master belum melaporkannya.", "")
 	backup(&proto.BackupState{Status: proto.BackupOK, NewestAgeSec: 60, NewestSize: 10})
 	wantGreen(t, g.row(GatePromotePlanned, "backup"))

@@ -26,7 +26,8 @@ const auditSettings = "settings"
 
 // auditTelegramBot names a newly saved bot token among the changed keys of
 // settings_update, so the entry says that it changed without the value
-// (the new chat id and panel base URL are recorded with their values).
+// (auditSecretChanged in changes; the other keys are recorded with their
+// old and new values).
 const auditTelegramBot = "telegram_bot"
 
 const (
@@ -458,25 +459,34 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	a.Settings.Reconfigure()
 
-	changed := changedSettings(prev, set)
+	diffs := settingChanges(prev, set)
 	if f.ChatID != prevChat {
-		changed = append(changed, store.SettingTelegramChatID)
+		diffs = append(diffs, settingChange{store.SettingTelegramChatID, prevChat, f.ChatID})
 	}
 	if !sameKinds(prevKinds, f.Kinds) {
-		changed = append(changed, store.SettingTelegramKinds)
+		diffs = append(diffs, settingChange{store.SettingTelegramKinds, kindsOn(prevKinds, true), kindsOn(f.Kinds, false)})
 	}
 	if f.Instansi != prevLook.Instansi {
-		changed = append(changed, store.SettingNamaInstansi)
+		diffs = append(diffs, settingChange{store.SettingNamaInstansi, prevLook.Instansi, f.Instansi})
 	}
 	if f.TemaBawaan != prevLook.Tema {
-		changed = append(changed, store.SettingTemaBawaan)
+		diffs = append(diffs, settingChange{store.SettingTemaBawaan, prevLook.Tema, f.TemaBawaan})
+	}
+	changed := make([]string, 0, len(diffs)+1)
+	changes := make(map[string]any, len(diffs)+1)
+	for _, d := range diffs {
+		changed = append(changed, d.key)
+		changes[d.key] = auditChange(d.before, d.after)
 	}
 	if token != "" {
+		// A secret: that it changed, never its value, old or new.
 		changed = append(changed, auditTelegramBot)
+		changes[auditTelegramBot] = auditSecretChanged
 	}
-	// The new values of the keys that redirect messages or their links are
-	// recorded (SEC-47); the token never is.
-	detail := map[string]any{"changed": changed}
+	// The old and new value of each changed key (spec 5.1); the new values
+	// of the keys that redirect messages or their links stay at the top as
+	// before (SEC-47). The token never is recorded.
+	detail := map[string]any{"changed": changed, "changes": changes}
 	if f.ChatID != prevChat {
 		detail[store.SettingTelegramChatID] = f.ChatID
 	}
@@ -500,33 +510,60 @@ func sameKinds(prev, cur map[string]bool) bool {
 	return true
 }
 
-// changedSettings lists the setting keys whose value differs between prev
-// and cur; never nil.
-func changedSettings(prev, cur monitor.Settings) []string {
+// auditSecretChanged is what settings_update records of a secret that
+// changed (the bot token): never its value.
+const auditSecretChanged = "diubah"
+
+// settingChange is one setting key whose value changed, with the old and
+// the new value as the form shows them (seconds, hours, percentages).
+type settingChange struct {
+	key           string
+	before, after any
+}
+
+// auditChange is a changed key's entry in settings_update's changes.
+func auditChange(before, after any) map[string]any {
+	return map[string]any{"old": before, "new": after}
+}
+
+// kindsOn lists the kinds switched on in kinds, in monitor.AllKinds'
+// order; with unlistedOn a kind not in kinds counts as on (as stored).
+// Never nil.
+func kindsOn(kinds map[string]bool, unlistedOn bool) []string {
 	out := []string{}
-	for _, c := range []struct {
-		key  string
-		same bool
-	}{
-		{store.SettingMonitorCheckEvery, prev.CheckEvery == cur.CheckEvery},
-		{store.SettingMonitorSummaryEvery, prev.SummaryEvery == cur.SummaryEvery},
-		{store.SettingLagThreshold, prev.Lag == cur.Lag},
-		{store.SettingDisconnectAlert, prev.DisconnectAlert == cur.DisconnectAlert},
-		{store.SettingDownAfter, prev.DownAfter == cur.DownAfter},
-		{store.SettingDiskWarn, prev.DiskWarn == cur.DiskWarn},
-		{store.SettingDiskCrit, prev.DiskCrit == cur.DiskCrit},
-		{store.SettingConnPct, prev.ConnPct == cur.ConnPct},
-		{store.SettingAlertRepeatHours, prev.AlertRepeat == cur.AlertRepeat},
-		{store.SettingLaggingAlert, prev.LaggingAlert == cur.LaggingAlert},
-		{store.SettingWeeklySummary, prev.WeeklySummary == cur.WeeklySummary},
-		{store.SettingWeeklySummaryAt, prev.WeeklySummaryAt == cur.WeeklySummaryAt},
-		{store.SettingPanelBaseURL, prev.PanelBaseURL == cur.PanelBaseURL},
-		{store.SettingAlertsRetentionDays, prev.AlertsRetentionDays == cur.AlertsRetentionDays},
-		{store.SettingEventsRetentionDays, prev.EventsRetentionDays == cur.EventsRetentionDays},
-		{store.SettingSamplesRetentionDays, prev.SamplesRetentionDays == cur.SamplesRetentionDays},
+	for _, k := range monitor.AllKinds() {
+		if on, ok := kinds[k]; on || (!ok && unlistedOn) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// settingChanges lists the setting keys whose value differs between prev
+// and cur, with both values in the form's units; never nil.
+func settingChanges(prev, cur monitor.Settings) []settingChange {
+	sec := func(d time.Duration) int64 { return int64(d / time.Second) }
+	out := []settingChange{}
+	for _, c := range []settingChange{
+		{store.SettingMonitorCheckEvery, sec(prev.CheckEvery), sec(cur.CheckEvery)},
+		{store.SettingMonitorSummaryEvery, sec(prev.SummaryEvery), sec(cur.SummaryEvery)},
+		{store.SettingLagThreshold, sec(prev.Lag), sec(cur.Lag)},
+		{store.SettingDisconnectAlert, sec(prev.DisconnectAlert), sec(cur.DisconnectAlert)},
+		{store.SettingDownAfter, sec(prev.DownAfter), sec(cur.DownAfter)},
+		{store.SettingDiskWarn, prev.DiskWarn, cur.DiskWarn},
+		{store.SettingDiskCrit, prev.DiskCrit, cur.DiskCrit},
+		{store.SettingConnPct, prev.ConnPct, cur.ConnPct},
+		{store.SettingAlertRepeatHours, int64(prev.AlertRepeat / time.Hour), int64(cur.AlertRepeat / time.Hour)},
+		{store.SettingLaggingAlert, sec(prev.LaggingAlert), sec(cur.LaggingAlert)},
+		{store.SettingWeeklySummary, prev.WeeklySummary, cur.WeeklySummary},
+		{store.SettingWeeklySummaryAt, prev.WeeklySummaryAt, cur.WeeklySummaryAt},
+		{store.SettingPanelBaseURL, prev.PanelBaseURL, cur.PanelBaseURL},
+		{store.SettingAlertsRetentionDays, prev.AlertsRetentionDays, cur.AlertsRetentionDays},
+		{store.SettingEventsRetentionDays, prev.EventsRetentionDays, cur.EventsRetentionDays},
+		{store.SettingSamplesRetentionDays, prev.SamplesRetentionDays, cur.SamplesRetentionDays},
 	} {
-		if !c.same {
-			out = append(out, c.key)
+		if c.before != c.after {
+			out = append(out, c)
 		}
 	}
 	return out

@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,41 @@ func wantBackupStored(t *testing.T, e *env, id int64, dir string, hours int) {
 	}
 }
 
+// TestBackupDirAuditedWhole (SEC-274): server_backup records the folder
+// whole, up to its 1024-byte limit, before and after, with the age limit
+// before and after.
+func TestBackupDirAuditedWhole(t *testing.T) {
+	e, _, srv := backupEnv(t)
+	c := e.cookie()
+	folder := func(fill string) string {
+		p := "/srv/" + strings.Repeat(fill, 1000-len("/srv/")-len("/x")) + "/x"
+		if len(p) != 1000 {
+			t.Fatalf("test folder is %d bytes", len(p))
+		}
+		return p
+	}
+	first, second := folder("a"), folder("b")
+	wantCode(t, e.do("POST", "/servers/1/backup", backupForm(first, "24"), c), http.StatusSeeOther)
+	wantCode(t, e.do("POST", "/servers/1/backup", backupForm(second, "72"), c), http.StatusSeeOther)
+	wantBackupStored(t, e, srv.ID, second, 72)
+	entries := auditEntries(t, e.st)
+	last := entries[len(entries)-1]
+	var d struct {
+		OldDir   *string `json:"old_backup_dir"`
+		Dir      *string `json:"backup_dir"`
+		OldHours *int    `json:"old_max_age_hours"`
+		Hours    *int    `json:"max_age_hours"`
+	}
+	if err := json.Unmarshal([]byte(last.DetailJSON), &d); err != nil {
+		t.Fatal(err)
+	}
+	if last.Action != "server_backup" || d.OldDir == nil || *d.OldDir != first || d.Dir == nil || *d.Dir != second ||
+		d.OldHours == nil || *d.OldHours != 24 || d.Hours == nil || *d.Hours != 72 ||
+		strings.Contains(last.DetailJSON, "dipotong") {
+		t.Fatalf("server_backup detail = %.300s… (%d bytes)", last.DetailJSON, len(last.DetailJSON))
+	}
+}
+
 func TestSaveServerBackup(t *testing.T) {
 	e, mon, srv := backupEnv(t)
 	c := e.cookie()
@@ -59,7 +95,8 @@ func TestSaveServerBackup(t *testing.T) {
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/servers/1?pesan=cadangan")
 	wantBackupStored(t, e, srv.ID, "/var/backups/mysql", 24)
-	wantAuditDetail(t, e, "server_backup", `"backup_dir":"/var/backups/mysql"`, `"backup_max_age_hours":24`)
+	wantAuditDetail(t, e, "server_backup", `"backup_dir":"/var/backups/mysql"`, `"max_age_hours":24`,
+		`"old_backup_dir":""`, `"old_max_age_hours":48`)
 	if got := mon.configured(); len(got) != 1 || got[0] != srv.ID {
 		t.Errorf("ConfigureServer calls = %v, want [%d]", got, srv.ID)
 	}

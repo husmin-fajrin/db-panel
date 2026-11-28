@@ -36,19 +36,31 @@ const auditOK = "ok"
 const maxAuditOutcome = 500
 
 // Bounds of an audit entry's detail (SEC-44): the log is append-only, so
-// one entry may never be large.
+// one entry may never be large. maxAuditDetail holds server_backup's two
+// whole folders (spec 5.1: 1024 bytes each, old and new) even when JSON
+// writes each of their bytes as a six-byte escape (\u003c), with room
+// for settings_update's old and new values.
 const (
-	maxAuditDetail = 2048 // bytes of detail_json
-	maxAuditString = 128  // runes of each string
-	maxAuditList   = 64   // items of each list
+	maxAuditDetail = 16 << 10 // bytes of detail_json
+	maxAuditString = 128      // runes of each string
+	maxAuditList   = 64       // items of each list
 	auditCutMark   = "…(dipotong)"
 )
 
 // auditFullKeys are detail keys whose string value is never cut: where
-// alerts and their links go (SEC-47) must be readable whole. Their own
-// validation bounds them (a base URL at maxBaseURL, a chat id at 32
-// characters), well inside maxAuditDetail.
-var auditFullKeys = map[string]bool{store.SettingPanelBaseURL: true, store.SettingTelegramChatID: true}
+// alerts and their links go (SEC-47) and the backup folder the gate judges
+// (spec 5.1) must be readable whole. Under such a key, the strings of an
+// object (settings_update's {"old": …, "new": …}) are kept whole too.
+// Their own validation bounds them (a base URL at maxBaseURL, a chat id at
+// 32 characters, a folder at maxBackupFolderLen), inside maxAuditDetail.
+var auditFullKeys = map[string]bool{store.SettingPanelBaseURL: true, store.SettingTelegramChatID: true,
+	auditBackupDir: true, auditOldBackupDir: true}
+
+// Detail keys of server_backup: the folder after and before the save.
+const (
+	auditBackupDir    = "backup_dir"
+	auditOldBackupDir = "old_backup_dir"
+)
 
 // auditKeptKeys are detail keys whose string value is kept even when the
 // action did not succeed: the handler checked it against a fixed list
@@ -70,7 +82,7 @@ const unknownUser = "(tidak dikenal)"
 // detail is stored as JSON without any field whose name mentions a
 // password, token or secret, each string cut to 128 runes (except the
 // values of auditFullKeys), each list to 64
-// items, and at most 2 KiB in all; outcome is auditOK or the reason it
+// items, and at most maxAuditDetail (16 KiB) in all; outcome is auditOK or the reason it
 // failed. The values of an action that did not succeed (input refused, or
 // an action that failed) are never stored: only the field names with the
 // length of each string and list (SEC-44). A failed write is logged, never
@@ -204,7 +216,8 @@ func scrubDetail(detail any, lengthsOnly bool) string {
 
 // limit cuts every string to maxAuditString runes and every list to
 // maxAuditList items, marking each cut; a string under one of
-// auditFullKeys stays whole.
+// auditFullKeys stays whole, and so do the strings of an object under
+// one.
 func limit(v any) any {
 	switch x := v.(type) {
 	case string:
@@ -213,10 +226,21 @@ func limit(v any) any {
 		}
 	case map[string]any:
 		for k, val := range x {
-			if _, ok := val.(string); ok && auditFullKeys[k] {
+			if !auditFullKeys[k] {
+				x[k] = limit(val)
 				continue
 			}
-			x[k] = limit(val)
+			switch y := val.(type) {
+			case string:
+			case map[string]any:
+				for kk, vv := range y {
+					if _, ok := vv.(string); !ok {
+						y[kk] = limit(vv)
+					}
+				}
+			default:
+				x[k] = limit(val)
+			}
 		}
 	case []any:
 		if len(x) > maxAuditList {

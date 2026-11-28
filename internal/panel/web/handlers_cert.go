@@ -270,6 +270,7 @@ func (a *app) baseURLToHTTPS(w http.ResponseWriter, r *http.Request) {
 	err = a.Settings.Save(next)
 	a.audit(r, "settings_update", auditSettings, 0, map[string]any{
 		"changed": []string{store.SettingPanelBaseURL}, store.SettingPanelBaseURL: next.PanelBaseURL,
+		"changes": map[string]any{store.SettingPanelBaseURL: auditChange(set.PanelBaseURL, next.PanelBaseURL)},
 	}, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "save settings", err)

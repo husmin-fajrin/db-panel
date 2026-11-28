@@ -333,13 +333,12 @@ func (a *app) startPromote(w http.ResponseWriter, r *http.Request) {
 		detail["backup_ack"] = true
 	}
 	if emergency {
-		// What the user ticked, and when the panel last heard from the
-		// master (its own clock, not the agent's).
+		// What the user ticked, when the master's last report was taken
+		// (the panel's clock less the age its agent stated) and when the
+		// panel received it (its own clock alone, SEC-274).
 		detail["old_master_dead"] = params.OldMasterDeadAck
-		detail["master_last_report"] = ""
-		if view.LastReportAt != nil {
-			detail["master_last_report"] = view.LastReportAt.UTC().Format(time.RFC3339)
-		}
+		detail["master_last_report"] = auditTime(view.LastReportAt)
+		detail["master_report_received"] = auditTime(view.LastReportArrivedAt)
 	}
 	id, flashJob := "", ""
 	status, outcome := http.StatusBadRequest, msg
@@ -765,4 +764,13 @@ func promoteEmergency(online bool, v monitor.View, monitored bool) bool {
 		return true
 	}
 	return false
+}
+
+// auditTime is t as an audit detail records it: RFC 3339 in UTC, "" for
+// nil.
+func auditTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }

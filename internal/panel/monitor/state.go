@@ -50,7 +50,8 @@ type serverState struct {
 	lastSeq      uint64
 	snap         *proto.HealthSnapshot // never modified once stored
 	receivedAt   time.Time
-	snapBacklog  bool // snap came from the agent's backlog
+	arrivedAt    time.Time // when the panel received snap (View.ArrivedAt)
+	snapBacklog  bool      // snap came from the agent's backlog
 	// snapRestored: snap was loaded from the store at startup and no
 	// report has been taken since (View.Restored).
 	snapRestored bool
@@ -116,7 +117,7 @@ func (m *Monitor) state(id int64) *serverState {
 }
 
 func (s *serverState) view(id int64) View {
-	v := View{ServerID: id, Role: s.role, Status: s.status, Since: s.since, ReceivedAt: s.receivedAt,
+	v := View{ServerID: id, Role: s.role, Status: s.status, Since: s.since, ReceivedAt: s.receivedAt, ArrivedAt: s.arrivedAt,
 		Snap: s.snap, Backlog: s.snapBacklog, Restored: s.snapRestored, NeedsUpgrade: s.needsUpgrade, QuarantinePending: s.quarantinePending}
 	if s.snooze != nil {
 		t := *s.snooze

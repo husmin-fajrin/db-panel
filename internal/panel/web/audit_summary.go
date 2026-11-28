@@ -15,17 +15,18 @@ import (
 
 // How auditDetailSummary words a detail field's value.
 const (
-	sumText   = iota // the string or number as it is
-	sumID            // a topology id: #3
-	sumServer        // a server id: its name when known, else #3
-	sumFlag          // a boolean shown only when true: "ya"
-	sumList          // a list: a, b
-	sumHours         // hours: 24 jam
-	sumTime          // an RFC 3339 time: dd-mm-yyyy HH:MM
-	sumJob           // a job id, its first 8 characters
-	sumKind          // a job kind (kindLabel)
-	sumAction        // a confirmation's action
-	sumMode          // a promote mode: terencana, darurat
+	sumText    = iota // the string or number as it is
+	sumID             // a topology id: #3
+	sumServer         // a server id: its name when known, else #3
+	sumFlag           // a boolean shown only when true: "ya"
+	sumList           // a list: a, b
+	sumHours          // hours: 24 jam
+	sumTime           // an RFC 3339 time: dd-mm-yyyy HH:MM
+	sumJob            // a job id, its first 8 characters
+	sumKind           // a job kind (kindLabel)
+	sumAction         // a confirmation's action
+	sumMode           // a promote mode: terencana, darurat
+	sumChanges        // settings_update's changes: key old → new, …
 )
 
 // auditSummaryRunes caps each value of a detail summary.
@@ -66,6 +67,7 @@ var auditDetailFields = []auditDetailField{
 	{"hours", "lama", sumHours},
 	{"until", "sampai", sumTime},
 	{"changed", "diubah", sumList},
+	{"changes", "perubahan", sumChanges},
 	{store.SettingTelegramChatID, "chat id", sumText},
 	{store.SettingPanelBaseURL, "alamat dasar", sumText},
 	{"names", "nama sertifikat", sumList},
@@ -178,6 +180,9 @@ func summaryValue(v any, how int, names map[int64]string) string {
 		}
 		return cutRunes(strings.Join(items, ", "), auditSummaryRunes)
 	case map[string]any:
+		if how == sumChanges {
+			return changesSummary(x)
+		}
 		raw, err := json.Marshal(x) // compact JSON, not Go's map[k:v]
 		if err != nil {
 			return ""
@@ -219,6 +224,33 @@ func summaryValue(v any, how int, names map[int64]string) string {
 		return auditActionLabel(s)
 	}
 	return cutRunes(s, auditSummaryRunes)
+}
+
+// changesSummary words settings_update's changes: each key, in order,
+// with "old → new" ("(kosong)" for an empty value), or the word it holds
+// instead (a secret's "diubah"); cut to auditSummaryRunes.
+func changesSummary(changes map[string]any) string {
+	keys := make([]string, 0, len(changes))
+	for k := range changes {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	word := func(v any) string {
+		if s := summaryValue(v, sumText, nil); s != "" {
+			return s
+		}
+		return "(kosong)"
+	}
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		c, ok := changes[k].(map[string]any)
+		if !ok {
+			parts = append(parts, k+" "+word(changes[k]))
+			continue
+		}
+		parts = append(parts, k+" "+word(c["old"])+" → "+word(c["new"]))
+	}
+	return cutRunes(strings.Join(parts, ", "), auditSummaryRunes)
 }
 
 // cutRunes is s cut to n runes, with "…" when cut.

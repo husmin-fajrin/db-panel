@@ -62,10 +62,14 @@ type View struct {
 	// in no topology and so not monitored (Status is then zero).
 	Role       string
 	Status     Status
-	Since      time.Time             // when Status.Code took its current value
-	ReceivedAt time.Time             // when the last report was taken, by the panel's clock
-	Snap       *proto.HealthSnapshot // shared with the Monitor: read only
-	Backlog    bool                  // Snap came from the agent's backlog, not a live report
+	Since      time.Time // when Status.Code took its current value
+	ReceivedAt time.Time // when the last report was taken, by the panel's clock
+	// ArrivedAt: when the panel received the last report taken, by its own
+	// clock (ReceivedAt is that less the age the agent states); zero when
+	// none arrived since the panel started.
+	ArrivedAt time.Time
+	Snap      *proto.HealthSnapshot // shared with the Monitor: read only
+	Backlog   bool                  // Snap came from the agent's backlog, not a live report
 	// Restored: Snap was loaded from the store at startup and no report
 	// has been taken since (in memory only; no migration).
 	Restored     bool
@@ -571,6 +575,7 @@ func (m *Monitor) report(serverID int64, he proto.HealthEvent) {
 	ups, taken := m.ingest(serverID, he, at)
 	var alerts []alertUpdate
 	if taken {
+		m.state(serverID).arrivedAt = now
 		// The start state of a report older than one already taken (a
 		// forced-check reply overtaken by the event stream) is stale.
 		alerts = m.startResultFromSnapshot(serverID, &he.Snapshot, at)

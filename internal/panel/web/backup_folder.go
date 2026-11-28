@@ -176,14 +176,18 @@ func (a *app) saveServerBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg != "" {
 		a.audit(r, "server_backup", auditServer, srv.ID,
-			map[string]any{"backup_dir": dir, "backup_max_age_hours": rawAge}, msg)
+			map[string]any{auditBackupDir: dir, "max_age_hours": rawAge}, msg)
 		form := backupCard{Dir: shownBackupFolder(dir), MaxAgeHours: shownBackupFolder(rawAge)}
 		a.renderServerWith(w, r, srv, serverView{Status: http.StatusBadRequest, Flash: msg}, &form)
 		return
 	}
 	err = a.Store.SetServerBackup(srv.ID, dir, maxAge)
-	a.audit(r, "server_backup", auditServer, srv.ID,
-		map[string]any{"backup_dir": dir, "backup_max_age_hours": maxAge}, a.outcomeOf(err))
+	// The folder and the limit before and after, whole (spec 5.1): the
+	// stored folder passed the same rule when it was saved.
+	a.audit(r, "server_backup", auditServer, srv.ID, map[string]any{
+		auditOldBackupDir: srv.BackupDir, auditBackupDir: dir,
+		"old_max_age_hours": srv.BackupMaxAgeHours, "max_age_hours": maxAge,
+	}, a.outcomeOf(err))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, msgServerNotFound, http.StatusNotFound)

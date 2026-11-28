@@ -991,6 +991,48 @@ func TestEmergencyPromoteAuditFields(t *testing.T) {
 	}
 }
 
+// TestPromoteAuditReportReceived (SEC-274): beside master_last_report
+// (the panel's clock less the age the agent stated), an emergency
+// promote's audit records when the panel received that report, RFC 3339
+// in UTC, and "" when none arrived since the panel started.
+func TestPromoteAuditReportReceived(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	c := e.cookie()
+	v := emergencyView()
+	arrived := time.Date(2026, 11, 2, 10, 4, 0, 0, time.FixedZone("WITA", 8*3600))
+	v.LastReportArrivedAt = &arrived
+	f.setView(v)
+	f.setGate(nil)
+	lastDetail := func() map[string]any {
+		t.Helper()
+		entries := withoutConfirms(auditEntries(t, e.st))
+		last := entries[len(entries)-1]
+		if last.Action != "promote" || last.Outcome != "ok" {
+			t.Fatalf("audit = %+v", last)
+		}
+		var d map[string]any
+		if err := json.Unmarshal([]byte(last.DetailJSON), &d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	wantCode(t, e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c),
+		http.StatusSeeOther)
+	d := lastDetail()
+	if d["master_report_received"] != "2026-11-02T02:04:00Z" ||
+		d["master_last_report"] != v.LastReportAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("audit detail = %v; want master_report_received 2026-11-02T02:04:00Z beside master_last_report", d)
+	}
+
+	v.LastReportArrivedAt = nil
+	f.setView(v)
+	wantCode(t, e.do("POST", "/masters/1/promote", withToken(t, e, tickedPost(), web.ActPromote, "master", 1), c),
+		http.StatusSeeOther)
+	if got, ok := lastDetail()["master_report_received"]; !ok || got != "" {
+		t.Fatalf("master_report_received without an arrival = %v (present %v), want \"\"", got, ok)
+	}
+}
+
 // TestEmergencyPromoteCandidateRulesUnchanged (K1, K2): with the tick, a
 // candidate whose agent is of another version still cannot be chosen, and
 // an unfinished job of the topology still blocks the screen and refuses.

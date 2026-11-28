@@ -49,9 +49,9 @@ type GateRow struct {
 	Status GateStatus
 	Detail string // "" when green
 	Fix    string // "" when green
-	// NeedsAck: the backup row with no backup folder set, on a planned
-	// promote and a rebuild: the operator ticks that the master is backed
-	// up some other way.
+	// NeedsAck: the backup row with no backup folder set, or a folder
+	// whose state is not known yet (T8), on a planned promote and a
+	// rebuild: the operator ticks that the master is backed up.
 	NeedsAck bool
 }
 
@@ -204,7 +204,19 @@ const (
 	// textG11w is T6 (spec 5.1): the address changed within the master's
 	// ten-minute probe slot; %s is when the slot ends.
 	textG11w = "Alamat master baru saja diubah; port diperiksa lagi paling cepat pukul %s."
+	// textG5c is T7 (spec 5.1), after a red disk row while the critical
+	// threshold is above gateDiskCeiling; %d is the threshold.
+	textG5c = "Ambang kritis diatur %d%%; gerbang menilai merah mulai 95%%."
+	// textG8k is T8 (spec 5.1): a folder set whose state the panel does
+	// not know yet, on an action that asks for the backup tick.
+	textG8k = "Keadaan folder cadangan belum diketahui (folder baru diubah, atau agent master belum melapor). Centang " +
+		"bila Anda sudah memastikan sendiri cadangan terbaru ada."
 )
+
+// gateDiskCeiling is the disk use, in percent, from which the disk row is
+// red whatever the critical threshold (spec 5.1): raising the threshold
+// does not turn the row off. The disk alert keeps the threshold.
+const gateDiskCeiling = 95
 
 // textG10bf is the account row's fix while a connected server's
 // account is not known yet (Ruling R40): stored before the panel read it
@@ -492,24 +504,30 @@ func (c *gateCtx) tlsRow() (GateRow, error) {
 	return combine(keyTLS, labelTLS, vs, fix), nil
 }
 
-// diskRow: each server's data directory under the critical threshold
-// (G5).
+// diskRow: each server's data directory under the critical threshold or
+// gateDiskCeiling, whichever is lower (G5); a red row under a threshold
+// above the ceiling says so (T7).
 func (c *gateCtx) diskRow() (GateRow, error) {
 	set, err := monitor.LoadSettings(c.r.d.Store)
 	if err != nil {
 		return GateRow{}, fmt.Errorf("prasyarat: pengaturan: %w", err)
 	}
 	crit := set.Thresholds.DiskCrit
-	return c.perServer(keyDisk, labelDisk, textG5f, func(s *gateServer) verdict {
+	limit := min(crit, gateDiskCeiling)
+	row := c.perServer(keyDisk, labelDisk, textG5f, func(s *gateServer) verdict {
 		pct, ok := monitor.DiskPercent(s.view.Snap)
 		switch {
 		case !s.online || !ok:
 			return unknown(labelDisk, s)
-		case pct >= crit:
+		case pct >= limit:
 			return red(textG5a, s.srv.Name, pct, crit)
 		}
 		return verdict{}
-	}), nil
+	})
+	if row.Status == GateRed && crit > gateDiskCeiling {
+		row.Detail += " " + fmt.Sprintf(textG5c, crit)
+	}
+	return row, nil
 }
 
 // accountRow: no agent logs in to MySQL as root (G6). The target of Buat
@@ -577,13 +595,16 @@ func (c *gateCtx) perfSchemaRow() (GateRow, error) {
 // whether or not the agent is connected (Ruling R26): yellow, with its own
 // fix, and it asks for the operator's tick on a planned promote and a
 // rebuild. With a folder set and the agent away, the last report is not
-// judged (Ruling R25).
+// judged (Ruling R25). With a folder set, the agent connected and the
+// folder's state not known (pending, or not in the report), a planned
+// promote and a rebuild ask for the tick too (T8, spec 5.1); an emergency
+// asks for none and keeps G10b.
 func (c *gateCtx) backupRow() (GateRow, error) {
 	m := c.master
 	if m.srv.BackupDir == "" {
 		row := combine(keyBackup, labelBackup, []verdict{yellow(textG8u, m.srv.Name)}, textG8f)
 		row.Fix = textG8uf
-		row.NeedsAck = c.in.Action == GatePromotePlanned || c.in.Action == GateRebuildOldMaster
+		row.NeedsAck = c.ackAction()
 		return row, nil
 	}
 	if !m.online {
@@ -600,7 +621,18 @@ func (c *gateCtx) backupRow() (GateRow, error) {
 		}
 		return combine(keyBackup, labelBackup, []verdict{{status: GateRed, text: monitor.BackupMessage(b, m.srv.Name, maxAge)}}, textG8f), nil
 	}
+	if c.ackAction() {
+		row := combine(keyBackup, labelBackup, []verdict{yellow(textG8k)}, textG8f)
+		row.NeedsAck = true
+		return row, nil
+	}
 	return combine(keyBackup, labelBackup, []verdict{unknown(labelBackup, m)}, textG8f), nil
+}
+
+// ackAction reports whether the action asks for the backup tick when the
+// backup row cannot be judged: a planned promote and a rebuild.
+func (c *gateCtx) ackAction() bool {
+	return c.in.Action == GatePromotePlanned || c.in.Action == GateRebuildOldMaster
 }
 
 // approvalRow: root on the old master approved its rebuild (G9).

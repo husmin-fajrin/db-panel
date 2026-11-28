@@ -340,3 +340,28 @@ func TestStartPromoteStoresAcceptFlags(t *testing.T) {
 		t.Fatalf("state accept_branched %v, accept_unreachable %v", st.AcceptBranched, st.AcceptUnreachable)
 	}
 }
+
+// TestPromoteViewReportArrival (SEC-274): the view carries when the panel
+// received the master's last report, by its own clock, beside the time
+// the report was taken (the panel's clock less the age the agent states).
+func TestPromoteViewReportArrival(t *testing.T) {
+	g := newPromoteRig(t)
+	taken := time.Now().Add(-90 * time.Second).Truncate(time.Second)
+	arrived := taken.Add(80 * time.Second)
+	v, _ := g.h.View(g.m.id)
+	v.ReceivedAt, v.ArrivedAt = taken, arrived
+	g.h.set(g.m.id, v)
+	pv, err := g.e.r.PromoteView(context.Background(), g.m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pv.LastReportAt == nil || !pv.LastReportAt.Equal(taken) || pv.LastReportArrivedAt == nil ||
+		!pv.LastReportArrivedAt.Equal(arrived) {
+		t.Fatalf("view report times = %v, %v; want %v, %v", pv.LastReportAt, pv.LastReportArrivedAt, taken, arrived)
+	}
+	v.ArrivedAt = time.Time{}
+	g.h.set(g.m.id, v)
+	if pv, err = g.e.r.PromoteView(context.Background(), g.m.id); err != nil || pv.LastReportArrivedAt != nil {
+		t.Fatalf("view without an arrival = %v, %v; want nil", pv.LastReportArrivedAt, err)
+	}
+}

@@ -139,7 +139,7 @@ type auditRow struct {
 	store.AuditEntry
 	ActionLabel, Target string
 	// Summary is the detail in words (auditDetailSummary); Detail the raw
-	// JSON in full (scrubDetail keeps it under 2 KiB), for the row's
+	// JSON in full (scrubDetail keeps it under maxAuditDetail), for the row's
 	// <details>.
 	Summary, Detail string
 	OK              bool

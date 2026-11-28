@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -494,6 +495,96 @@ func TestSettingsUpdateAuditHasNoToken(t *testing.T) {
 	}
 	if !strings.Contains(last.DetailJSON, `"panel_base_url":"`+long+`"`) || strings.Contains(last.DetailJSON, "dipotong") {
 		t.Errorf("settings_update after a %d-byte base URL = %s", len(long), last.DetailJSON)
+	}
+}
+
+// lastSettingsChanges is the changes of the last settings_update entry,
+// each key's value as raw JSON, and the entry.
+func lastSettingsChanges(t *testing.T, e *settingsRig) (map[string]json.RawMessage, store.AuditEntry) {
+	t.Helper()
+	entries := auditEntries(t, e.st)
+	for i := len(entries) - 1; i >= 0; i-- {
+		if a := entries[i]; a.Action == "settings_update" {
+			var d struct {
+				Changes map[string]json.RawMessage `json:"changes"`
+			}
+			if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
+				t.Fatal(err)
+			}
+			return d.Changes, a
+		}
+	}
+	t.Fatal("no settings_update entry")
+	return nil, store.AuditEntry{}
+}
+
+// TestSettingsAuditOldAndNew (spec 5.1): settings_update records, beside
+// the changed keys, the old and the new value of each, and nothing of
+// the keys that did not change.
+func TestSettingsAuditOldAndNew(t *testing.T) {
+	e := settingsEnv(t)
+	c := e.cookie()
+	wantCode(t, e.saveSettings(t, validSettings(), c), http.StatusSeeOther)
+	form := with(validSettings(), "disk_crit", "99", "base_url", "https://panel2.example.com",
+		"chat_id", "@kanal_baru", "nama_instansi", "RS Sehat")
+	form["kinds"] = []string{monitor.KindReplicaStopped, monitor.KindMasterDown}
+	form.Del("weekly_summary")
+	wantCode(t, e.saveSettings(t, form, c), http.StatusSeeOther)
+
+	changes, a := lastSettingsChanges(t, e)
+	want := map[string]string{
+		store.SettingDiskCrit:       `{"new":99,"old":92}`,
+		store.SettingPanelBaseURL:   `{"new":"https://panel2.example.com","old":"https://panel.example.com"}`,
+		store.SettingTelegramChatID: `{"new":"@kanal_baru","old":"` + chatID + `"}`,
+		store.SettingTelegramKinds: `{"new":["` + monitor.KindReplicaStopped + `","` + monitor.KindMasterDown + `"],"old":["` +
+			monitor.KindReplicaStopped + `","` + monitor.KindMasterDown + `","` + monitor.KindJobFailed + `"]}`,
+		store.SettingWeeklySummary: `{"new":false,"old":true}`,
+		store.SettingNamaInstansi:  `{"new":"RS Sehat","old":""}`,
+	}
+	if len(changes) != len(want) {
+		t.Errorf("changes = %s, want the keys of %v", a.DetailJSON, want)
+	}
+	for k, w := range want {
+		if got := string(changes[k]); got != w {
+			t.Errorf("changes[%s] = %s, want %s", k, got, w)
+		}
+	}
+	for _, k := range []string{store.SettingMonitorCheckEvery, store.SettingDiskWarn, store.SettingWeeklySummaryAt} {
+		if strings.Contains(a.DetailJSON, `"`+k+`"`) {
+			t.Errorf("detail %s names unchanged key %s", a.DetailJSON, k)
+		}
+	}
+	if !strings.Contains(a.DetailJSON, `"changed":[`) {
+		t.Errorf("detail %s lost the changed list", a.DetailJSON)
+	}
+	// Durations in the form's units: seconds, and hours for the repeat.
+	wantCode(t, e.saveSettings(t, with(form, "check_every", "45", "alert_repeat", "24"), c), http.StatusSeeOther)
+	changes, _ = lastSettingsChanges(t, e)
+	if string(changes[store.SettingMonitorCheckEvery]) != `{"new":45,"old":30}` ||
+		string(changes[store.SettingAlertRepeatHours]) != `{"new":24,"old":12}` {
+		t.Errorf("changes = %v", changes)
+	}
+}
+
+// TestSettingsAuditSecretSaysOnlyChanged (spec 5.1): a new bot token is
+// recorded as "diubah" only; neither the old nor the new token is ever in
+// the audit log.
+func TestSettingsAuditSecretSaysOnlyChanged(t *testing.T) {
+	e := settingsEnv(t)
+	c := e.cookie()
+	const second = "987654321:AAH-tokenBaruYangLain_12"
+	wantCode(t, e.saveSettings(t, with(validSettings(), "token", botToken), c), http.StatusSeeOther)
+	wantCode(t, e.saveSettings(t, with(validSettings(), "token", second), c), http.StatusSeeOther)
+	changes, a := lastSettingsChanges(t, e)
+	if got := string(changes["telegram_bot"]); got != `"diubah"` || len(changes) != 1 {
+		t.Errorf("changes = %s, want telegram_bot \"diubah\" alone", a.DetailJSON)
+	}
+	for _, x := range auditEntries(t, e.st) {
+		for _, tok := range []string{botToken, second, "rahasiaBot", "tokenBaru"} {
+			if strings.Contains(x.DetailJSON, tok) || strings.Contains(x.Outcome, tok) {
+				t.Errorf("audit row %s carries the token %q: %s", x.Action, tok, x.DetailJSON)
+			}
+		}
 	}
 }
 
