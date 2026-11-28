@@ -528,7 +528,8 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 		return &commands.ParamError{Msg: fmt.Sprintf(
 			"alamat kandidat %s tidak tercatat di kunci promosi, kandidat tidak bisa diperiksa; buka kunci di server ini dengan: sudo dbpanel agent unlock-master", key)}
 	}
-	if err := unlockCandidateRefusal(key, readPeer(ctx, dialAt(c, addr), peerTimeout)); err != nil {
+	at := dialAt(c, addr)
+	if err := unlockCandidateRefusal(key, peerKey(at), readPeer(ctx, at, peerTimeout)); err != nil {
 		return err
 	}
 	db, err := openAdmin(ctx, h)
@@ -557,8 +558,9 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 		return &commands.ParamError{Msg: fmt.Sprintf("replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang (%s); "+
 			"kunci tidak dibuka", strings.Join(unreadable, ", "))}
 	case len(appsLocked) > 0:
-		return &commands.ParamError{Msg: fmt.Sprintf("replika %s %s, jadi belum pasti masih replika; kunci tidak dibuka",
-			strings.Join(appsLocked, ", "), appsOnlyLocked)}
+		return &commands.ParamError{Msg: listedAppsLockedText(appsLocked, len(appsLocked)) +
+			`; kunci tidak dibuka. Tekan "Buka kunci promote" lagi sesudah itu, atau biarkan: master ini membuka kuncinya ` +
+			"sendiri pada pemeriksaan berikutnya (tiap menit) sesudah replika itu terkunci penuh"}
 	}
 	// Both flags stored OFF; on an error the lock file stays and the
 	// guard locks again on its next round (fail closed).
@@ -573,17 +575,38 @@ func (d *Driver) unlockPromote(ctx context.Context, h Host, c proto.PeerCred) er
 }
 
 // unlockCandidateRefusal refuses unlockPromote on the candidate's read
-// st unless the candidate refuses writes from every account (NoWrites):
-// only a candidate still read-only for everyone is proved not promoted.
-func unlockCandidateRefusal(key string, st PeerState) error {
+// st (made at readAt, host:port) unless the candidate refuses writes from
+// every account (NoWrites): only a candidate still read-only for everyone
+// is proved not promoted. read_only ON with super_read_only OFF says so
+// and names the way out.
+func unlockCandidateRefusal(key, readAt string, st PeerState) error {
 	switch {
 	case !st.Reachable:
 		return &commands.ParamError{Msg: fmt.Sprintf("kandidat %s tidak bisa dibaca (%s); kunci tidak dibuka", key, st.Err)}
+	case !AppsWrite(st.ReadOnly) && !NoWrites(st.ReadOnly, st.SuperReadOnly):
+		return &commands.ParamError{Msg: candidateAppsLockedText(key, readAt) +
+			`; kunci tidak dibuka. Sesudah itu tekan "Buka kunci promote" lagi atau ulangi promote ke kandidat itu; ` +
+			"tanpa keduanya master ini membuka kuncinya sendiri sekitar dua menit sesudah kandidat terkunci penuh"}
 	case !NoWrites(st.ReadOnly, st.SuperReadOnly):
 		return &commands.ParamError{Msg: fmt.Sprintf(
 			"kandidat %s bisa ditulis (%s) dan mungkin sudah menjadi master; kunci tidak dibuka", key, writableFlags(st))}
 	}
 	return nil
+}
+
+// candidateAppsLockedText says that the candidate key, read at readAt,
+// is locked for applications only, and how to lock it fully.
+func candidateAppsLockedText(key, readAt string) string {
+	return fmt.Sprintf("kandidat %s (dibaca di %s) %s, jadi belum pasti masih replika; %s", key, readAt, appsOnlyLocked,
+		strings.Replace(relockThere, "server itu", "kandidat itu", 1))
+}
+
+// listedAppsLockedText says that the listed replicas hosts (host:port,
+// as read; at most n named) are locked for applications only, and how to
+// lock them fully.
+func listedAppsLockedText(hosts []string, n int) string {
+	return fmt.Sprintf("replika %s (terbaca saat kunci dipasang) %s, jadi belum pasti masih replika; %s", listHosts(hosts, n),
+		appsOnlyLocked, strings.Replace(relockThere, "server itu", "replika itu", 1))
 }
 
 // candidateConnected reports whether a Binlog Dump thread on this server
@@ -740,7 +763,8 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 		// Neither promoted nor proved a replica: the master is not opened
 		// on it; the grace starts over once it reads read-only.
 		g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
-		d.keepLock(now, key, "kandidat "+appsOnlyLocked+", jadi belum pasti masih replika")
+		d.keepLock(now, key, candidateAppsLockedText(key, peerKey(dialAt(*g.cred, addr)))+
+			"; sesudah itu master ini membuka kuncinya sendiri sekitar dua menit kemudian, atau promote bisa diulang")
 	case guardGraceStart:
 		// Read-only: still a replica. Read again after the grace.
 		g.graceAt, g.nextRead = now, now.Add(lockGrace)
@@ -768,12 +792,16 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 			d.keepLock(now, key, "replika yang terbaca saat kunci dipasang tidak bisa dibaca sekarang", unreadable...)
 			return nil
 		case len(appsLocked) > 0:
-			g.graceAt, g.nextRead = time.Time{}, now.Add(lockRecheck)
-			// Not in the event's Hosts: the panel words those as replicas
-			// that cannot be read.
+			// The candidate read read-only at both reads: the grace stays,
+			// so the next read (lockRecheck) opens once the candidate still
+			// reads read-only and these replicas read both ON. Not in the
+			// event's Hosts: the panel words those as replicas that cannot
+			// be read.
+			g.nextRead = now.Add(lockRecheck)
 			d.warnLimited("promote lock expired but a listed replica is locked for applications only; lock kept",
 				"candidate", key, "hosts", appsLocked)
-			d.keepLock(now, key, "replika yang terbaca saat kunci dipasang "+appsOnlyLocked+", jadi belum pasti masih replika")
+			d.keepLock(now, key, listedAppsLockedText(appsLocked, maxReasonHosts)+
+				"; sesudah itu master ini membuka kuncinya sendiri pada pemeriksaan berikutnya (tiap menit)")
 			return nil
 		}
 		// Every listed replica read read-only (or writable without this
@@ -795,6 +823,9 @@ func (d *Driver) guardExpired(ctx context.Context, db *sql.DB, l PromoteLock, no
 	}
 	return nil
 }
+
+// maxReasonHosts is how many hosts a kept lock's reason names.
+const maxReasonHosts = 5
 
 // guardStep is what the guard does with the candidate's read at the
 // lock's deadline.

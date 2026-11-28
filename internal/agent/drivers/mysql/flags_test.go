@@ -3,6 +3,7 @@ package mysql_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -50,7 +51,7 @@ func wantParamError(t *testing.T, what string, err error, parts ...string) {
 
 const (
 	mixFlagsText      = "read_only=OFF, super_read_only=ON"
-	appsOnlyFlagsText = "terkunci untuk aplikasi saja (read_only=ON, super_read_only=OFF"
+	appsOnlyFlagsText = "terkunci untuk aplikasi saja (read_only=ON, super_read_only=OFF)"
 )
 
 func TestFlagHelpersAgent(t *testing.T) {
@@ -68,20 +69,19 @@ func TestFlagHelpersAgent(t *testing.T) {
 
 // TestResumeFlagCombinations: a promote run on a server whose
 // applications can write resumes (never verifies again or rolls back);
-// with super_read_only still on it finishes the opening first. read_only
-// ON with super_read_only OFF was not opened by the promote and is
-// verified as read-only is.
+// with super_read_only still on it finishes the opening first. Only both
+// ON takes the verified path; read_only ON with super_read_only OFF is
+// refused with nothing changed.
 func TestResumeFlagCombinations(t *testing.T) {
-	want := map[string][2]bool{
-		"off_off":        {true, false},
-		"mix":            {true, true},
-		"read_only_only": {false, false},
-		"on_on":          {false, false},
+	want := map[string]mysql.OpenStep{
+		"off_off":        mysql.OpenResume,
+		"mix":            mysql.OpenFinish,
+		"read_only_only": mysql.OpenRefuse,
+		"on_on":          mysql.OpenVerify,
 	}
 	for _, c := range flagCombos {
-		resume, finish := mysql.ResumeOpen(c.ro, c.sro)
-		if w := want[c.name]; resume != w[0] || finish != w[1] {
-			t.Errorf("%s: resume=%v finish=%v, want resume=%v finish=%v", c.name, resume, finish, w[0], w[1])
+		if got := mysql.ResumeOpen(c.ro, c.sro); got != want[c.name] {
+			t.Errorf("%s: step %d, want %d", c.name, got, want[c.name])
 		}
 	}
 }
@@ -149,22 +149,39 @@ func TestReadListedFlagCombinations(t *testing.T) {
 }
 
 // TestUnlockCandidateFlagCombinations: mysql.unlockPromote opens the
-// master only on a candidate read-only for every account.
+// master only on a candidate read-only for every account. The refusal
+// keeps its old text for a writable candidate, names both flags for the
+// mix, and for read_only ON with super_read_only OFF says what was read,
+// where, and the way out.
 func TestUnlockCandidateFlagCombinations(t *testing.T) {
+	const readAt = "10.9.9.10:3306"
+	const oldText = "kandidat " + guardCandidateKey + " bisa ditulis (%s) dan mungkin sudah menjadi master; kunci tidak dibuka"
 	for _, c := range flagCombos {
-		err := mysql.UnlockCandidateRefusal(guardCandidateKey, peerIn(c, "u"))
+		err := mysql.UnlockCandidateRefusal(guardCandidateKey, readAt, peerIn(c, "u"))
+		var pe *commands.ParamError
+		errors.As(err, &pe)
 		switch c.name {
 		case "on_on":
 			if err != nil {
 				t.Errorf("%s: %v, want the unlock to go on", c.name, err)
 			}
+		case "off_off":
+			if pe == nil || pe.Msg != fmt.Sprintf(oldText, "super_read_only=OFF") {
+				t.Errorf("%s: %v, want the old text", c.name, err)
+			}
 		case "mix":
-			wantParamError(t, c.name, err, guardCandidateKey, "kunci tidak dibuka", mixFlagsText)
+			if pe == nil || pe.Msg != fmt.Sprintf(oldText, mixFlagsText) {
+				t.Errorf("%s: %v, want the old text naming both flags", c.name, err)
+			}
 		default:
-			wantParamError(t, c.name, err, guardCandidateKey, "kunci tidak dibuka", "(super_read_only=OFF)")
+			wantParamError(t, c.name, err, guardCandidateKey, readAt, appsOnlyFlagsText, "aplikasi biasa tidak bisa menulis",
+				"SUPER atau CONNECTION_ADMIN bisa", "Kunci kembali", "kunci tidak dibuka", "ulangi promote")
+			if pe != nil && strings.Contains(pe.Msg, "mungkin sudah menjadi master") {
+				t.Errorf("%s: %q calls the candidate a possible master", c.name, pe.Msg)
+			}
 		}
 	}
-	wantParamError(t, "unreachable", mysql.UnlockCandidateRefusal(guardCandidateKey, mysql.PeerState{Err: "x"}), "tidak bisa dibaca")
+	wantParamError(t, "unreachable", mysql.UnlockCandidateRefusal(guardCandidateKey, readAt, mysql.PeerState{Err: "x"}), "tidak bisa dibaca")
 }
 
 // lockedPeerRefusals are the places that need a peer locked for every

@@ -238,14 +238,20 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams, lockBy *tim
 		return res, fmt.Errorf("baca read_only: %w", err)
 	}
 	mode := p.Mode
-	if resume, finish := resumeOpen(ro, sro); resume {
+	step := resumeOpen(ro, sro)
+	if step == openRefuse {
+		// Nothing read or changed yet: the marker, replication and the
+		// flags stay as they are.
+		return res, &commands.ParamError{Msg: textPromoteAppsLocked}
+	}
+	if step == openResume || step == openFinish {
 		// Never opens writes itself: an earlier run opened them, after
 		// its verification, and left the promoting marker.
 		m, err := d.checkResume(ctx, db, p)
 		if err != nil {
 			return res, err
 		}
-		if finish {
+		if step == openFinish {
 			// read_only OFF with super_read_only ON: the first
 			// write-opening statement was applied and a MySQL restart came
 			// before the second was stored. Every account writes already;
@@ -272,19 +278,47 @@ func (d *Driver) promote(j *jobs.Job, h Host, p proto.PromoteParams, lockBy *tim
 	return res, nil
 }
 
-// resumeOpen is step 1's decision on this server's flags. resume: an
-// earlier run's writes are open (AppsWrite), so it is resumed, never
-// verified again or rolled back. finish: super_read_only is still on
-// there (read_only OFF, super_read_only ON, which only a restart between
-// the two write-opening statements produces), so the opening is finished
-// first. read_only ON with super_read_only OFF is not open: the promote's
-// own first statement never leaves it (it turns both off), so that state
-// came from elsewhere (a root SQL session, a load) and is verified as
-// read-only is.
-func resumeOpen(ro, sro bool) (resume, finish bool) {
-	resume = AppsWrite(ro)
-	return resume, resume && sro
+// openStep is step 1's decision on this server's flags (resumeOpen).
+type openStep int
+
+const (
+	openVerify openStep = iota // read-only for every account: verify the old master, then open
+	openResume                 // writes open (both flags off): resume at 6
+	openFinish                 // read_only OFF, super_read_only ON: the second statement, then resume
+	openRefuse                 // read_only ON, super_read_only OFF: refuse, change nothing
+)
+
+// resumeOpen is step 1's decision on this server's flags. Applications
+// can write (AppsWrite): an earlier run's writes are open, so it is
+// resumed, never verified again or rolled back; with super_read_only still
+// on (a restart between the two write-opening statements) the opening is
+// finished first. Only both ON (NoWrites) takes the verified path.
+// read_only ON with super_read_only OFF is neither: an earlier run may
+// have opened writes (its first statement answered with an error packet
+// after the running value changed, then a restart brought read_only
+// back), or a load lifted super_read_only; a rollback there could cut off
+// a server that took writes, and a resume could open one that never was,
+// so the run refuses and touches nothing (textPromoteAppsLocked).
+func resumeOpen(ro, sro bool) openStep {
+	switch {
+	case AppsWrite(ro) && sro:
+		return openFinish
+	case AppsWrite(ro):
+		return openResume
+	case !NoWrites(ro, sro):
+		return openRefuse
+	}
+	return openVerify
 }
+
+// textPromoteAppsLocked refuses a promote run on read_only ON with
+// super_read_only OFF. "Kunci kembali" (mysql.setReadOnly on) stores both
+// flags ON; the next run then takes the verified path, which reads the old
+// master from the start and writes its own marker.
+var textPromoteAppsLocked = "server ini " + appsOnlyLocked + ", jadi belum pasti apakah promote sebelumnya sudah membuka tulis; " +
+	"promote ditolak dan tidak ada yang diubah (catatan promote, replikasi dan read_only dibiarkan seperti adanya). " +
+	`Kunci penuh server ini dulu dengan tombol "Kunci kembali" di halaman replika ini (bila server ini sedang memuat data, ` +
+	"tunggu sampai selesai), lalu ulangi promote: master lama diperiksa lagi dari awal"
 
 // checkResume allows step 1's resume only for a promotion of this replica
 // from the same old master that wrote the promoting marker (so passed its

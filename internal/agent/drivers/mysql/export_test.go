@@ -830,3 +830,17 @@ const (
 	GuardGraceStart  = guardGraceStart
 	GuardGraceDone   = guardGraceDone
 )
+
+// LockRecheck is how often the guard reads again a candidate or listed
+// replica that keeps the lock.
+const LockRecheck = lockRecheck
+
+// OpenStep is resumeOpen's answer.
+type OpenStep = openStep
+
+const (
+	OpenVerify = openVerify
+	OpenResume = openResume
+	OpenFinish = openFinish
+	OpenRefuse = openRefuse
+)

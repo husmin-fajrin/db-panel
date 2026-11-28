@@ -2,6 +2,8 @@ package mysql_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -103,4 +105,165 @@ func TestGuardDoesNotOpenMasterForMixCandidate(t *testing.T) {
 		}
 	}
 	r.wantEvents(proto.EventQuarantined)
+}
+
+// replState is the replication channel's receiver and applier state.
+func replState(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var io, applier string
+	if err := db.QueryRow(`SELECT c.SERVICE_STATE, a.SERVICE_STATE FROM performance_schema.replication_connection_status c
+		JOIN performance_schema.replication_applier_status a USING (CHANNEL_NAME) WHERE CHANNEL_NAME = ''`).Scan(&io, &applier); err != nil {
+		t.Fatal(err)
+	}
+	return "receiver " + io + ", applier " + applier
+}
+
+// TestPromoteRerunOnAppsLockedCandidateRefusesUntouched: a promote run
+// that finds this server with read_only ON and super_read_only OFF (an
+// earlier run may have opened writes and a restart brought read_only
+// back, or a load lifted super_read_only) refuses before anything: the
+// flags, the promoting marker and replication stay as they were, and the
+// refusal says what was read and to lock the server fully first.
+func TestPromoteRerunOnAppsLockedCandidateRefusesUntouched(t *testing.T) {
+	r := newPromoteRig(t)
+	at := time.Now().UTC().Truncate(time.Second)
+	if err := r.d.Pins().WritePromoting(mysql.Promoting{Mode: proto.PromotePlanned, OldSource: r.source, At: at}); err != nil {
+		t.Fatal(err)
+	}
+	execAll(t, r.rdb, "SET PERSIST super_read_only = OFF")
+	flagsBefore := readFlags(t, r.replica)
+	if flagsBefore.running() != (runFlags{RO: true}) {
+		t.Fatalf("before the rerun: %s, want running ON/OFF", flagsBefore)
+	}
+	markerBefore := pinFile(t, r.dir, mysql.PromotingFile)
+	replBefore := replState(t, r.rdb)
+
+	// The old master reads locked, its lock has run out: the verified path
+	// would refuse on the lock margin and roll back.
+	peer := &fakePeer{}
+	peer.set(mysql.PeerState{Reachable: true, ReadOnly: true, SuperReadOnly: true, GTIDExecuted: gtidExecuted(t, r.mdb)})
+	t.Cleanup(mysql.SetReadPeer(peer.read))
+	p := r.params(proto.PromotePlanned)
+	none := 0
+	p.LockRemainingSec = &none
+	resp := r.dispatch("mysql.promote", p)
+	if !resp.OK {
+		t.Fatalf("mysql.promote = %+v; want a job started (a refusal inside the job, not an unknown command)", resp.Error)
+	}
+	var started proto.StartedJob
+	if err := json.Unmarshal(resp.Result, &started); err != nil || started.JobID == "" {
+		t.Fatalf("mysql.promote result %s: %v", resp.Result, err)
+	}
+	var d proto.JobDone
+	select {
+	case d = <-r.ev.done:
+	case <-time.After(5 * time.Minute):
+		t.Fatal("promote did not finish")
+	}
+	if d.OK {
+		t.Fatal("promote on read_only ON, super_read_only OFF succeeded; want refused")
+	}
+	for _, part := range []string{"read_only=ON, super_read_only=OFF", "tidak ada yang diubah", "Kunci kembali", "ulangi promote"} {
+		if !strings.Contains(d.Error, part) {
+			t.Errorf("refusal %q does not hold %q", d.Error, part)
+		}
+	}
+	if n := peer.count(); n != 0 {
+		t.Errorf("the refused run read the old master %d times", n)
+	}
+	if got := readFlags(t, r.replica); got != flagsBefore {
+		t.Errorf("flags after the refusal: %s, before %s", got, flagsBefore)
+	}
+	if got := pinFile(t, r.dir, mysql.PromotingFile); got != markerBefore {
+		t.Errorf("marker after the refusal = %q, before %q", got, markerBefore)
+	}
+	time.Sleep(time.Second)
+	if got := replState(t, r.rdb); got != replBefore {
+		t.Errorf("replication after the refusal: %s, before %s", got, replBefore)
+	}
+	if got := pinFile(t, r.dir, mysql.RoleFile); got != "replica" {
+		t.Errorf("role pin = %q, want replica", got)
+	}
+}
+
+// TestGuardOpensAfterAppsLockedCandidateIsLockedAgain: a candidate, or a
+// listed replica, read with read_only ON and super_read_only OFF keeps the
+// old master locked, and the unlock refusal says so, naming that server
+// and the way out. Once it reads both ON, the guard opens the master by
+// itself: for the candidate after the grace (two read-only reads, as
+// always), for a listed replica at its next read.
+func TestGuardOpensAfterAppsLockedCandidateIsLockedAgain(t *testing.T) {
+	locked := mysql.PeerState{Reachable: true, ReadOnly: true, SuperReadOnly: true}
+	appsLocked := mysql.PeerState{Reachable: true, ReadOnly: true}
+	unlock := func(r *lockRig) proto.Response {
+		return r.dispatch("mysql.unlockPromote", proto.UnlockPromoteParams{Candidate: guardCandidate})
+	}
+	wantOpen := func(r *lockRig, when string) {
+		t.Helper()
+		if sro, ro := readOnly(t, r.db); sro || ro {
+			t.Errorf("%s: super_read_only=%v read_only=%v, want the master opened", when, sro, ro)
+		}
+		if got := pinFile(t, r.dir, mysql.LockFile); got != "" {
+			t.Errorf("%s: lock file = %q", when, got)
+		}
+	}
+
+	t.Run("candidate", func(t *testing.T) {
+		r := newLockRig(t, guardCandidateKey)
+		st := appsLocked
+		st.GTIDExecuted = r.uuid + ":1-3"
+		r.peer.set(st)
+		r.tick(0)
+		r.tick(lockGrace)
+		r.wantLocked("candidate read_only ON, super_read_only OFF")
+		ev := r.ev.lockEvent(t, 0)
+		if ev.Action != "kept" || !strings.Contains(ev.Reason, "read_only=ON, super_read_only=OFF") ||
+			!strings.Contains(ev.Reason, guardCandidateKey) || !strings.Contains(ev.Reason, "Kunci kembali") {
+			t.Errorf("kept event = %+v", ev)
+		}
+		resp := unlock(r)
+		wantRefused(t, "unlock on an apps-locked candidate", resp, guardCandidateKey, "read_only=ON, super_read_only=OFF",
+			"aplikasi biasa tidak bisa menulis", "Kunci kembali")
+		if resp.Error != nil && strings.Contains(resp.Error.Message, "mungkin sudah menjadi master") {
+			t.Errorf("unlock refusal calls the apps-locked candidate a possible master: %s", resp.Error.Message)
+		}
+		r.wantLocked("after the refused unlock")
+
+		st.SuperReadOnly = true
+		r.peer.set(st)
+		r.tick(lockGrace + mysql.LockRecheck)
+		r.wantLocked("candidate locked again: the grace starts")
+		r.tick(lockGrace + mysql.LockRecheck + lockGrace)
+		wantOpen(r, "a grace after the candidate read both ON")
+	})
+
+	t.Run("listed replica", func(t *testing.T) {
+		r := newLockRig(t, guardCandidateKey)
+		const a = "10.9.9.7:3306"
+		if err := r.d.Pins().WriteLock(mysql.PromoteLock{Candidate: guardCandidateKey, Deadline: r.deadline, Readable: []string{a}}); err != nil {
+			t.Fatal(err)
+		}
+		r.d.ArmGuard(guardCandidate)
+		r.peer.set(locked)
+		st := appsLocked
+		st.GTIDExecuted = r.uuid + ":1-3"
+		r.peer.setAt(a, st)
+		r.tick(0)
+		r.tick(lockGrace)
+		r.wantLocked("listed replica read_only ON, super_read_only OFF")
+		ev := r.ev.lockEvent(t, 0)
+		if ev.Action != "kept" || !strings.Contains(ev.Reason, a) || !strings.Contains(ev.Reason, "read_only=ON, super_read_only=OFF") ||
+			strings.Contains(ev.Reason, "kandidat") || len(ev.Hosts) != 0 {
+			t.Errorf("kept event = %+v; want the replica named in the reason, not the candidate, and no unreadable hosts", ev)
+		}
+		resp := unlock(r)
+		wantRefused(t, "unlock with an apps-locked listed replica", resp, a, "read_only=ON, super_read_only=OFF",
+			"aplikasi biasa tidak bisa menulis", "Kunci kembali")
+		r.wantLocked("after the refused unlock")
+
+		st.SuperReadOnly = true
+		r.peer.setAt(a, st)
+		r.tick(lockGrace + mysql.LockRecheck)
+		wantOpen(r, "the next read after the listed replica read both ON")
+	})
 }
