@@ -153,31 +153,6 @@ func TestProbeErrorsLabelled(t *testing.T) {
 	}
 }
 
-// TestPromoteJobMayRunLabelled: why a candidate's promote job could not be
-// checked names the agent's words labelled; the hub's timeout is not.
-func TestPromoteJobMayRunLabelled(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		err  error
-		want string
-	}{
-		{"agent", &hub.AgentError{Err: &proto.Error{Code: proto.CodeInternal, Message: hostileText}},
-			"tidak bisa diperiksa (" + agentLabelOf("db-x") + hostileFlat + ")"},
-		{"hub timeout", hubTimeout, "tidak bisa diperiksa (batas waktu perintah habis)"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			e := newEnv(t)
-			id := testServer(t, e, "db-x", answerConn{c.err})
-			jr := testRun(e)
-			jr.st.AgentServerID, jr.st.AgentJobID, jr.st.AgentCmd = id, "abc", "mysql.promote"
-			running, why := jr.promoteJobMayRun(context.Background())
-			if !running || why != c.want {
-				t.Fatalf("promoteJobMayRun = %v, %q, want true, %q", running, why, c.want)
-			}
-		})
-	}
-}
-
 // TestRevertUnverifiedLabelsSecondError: when putting replication back
 // without verification fails too, that second failure is the agent's
 // words labelled; the hub's timeout is not.

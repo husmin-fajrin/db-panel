@@ -474,10 +474,16 @@ type masterPage struct {
 	// (Orchestrator.UnlockLockJob); "" for none, or when that job sent
 	// mysql.promote.
 	UnlockLockJob string
-	Controls      serverControls
-	Status        statusView
-	Facts         masterFacts
-	Timeline      timelineView
+	// SentLockJob and SentLockText: while Locked, the planned promote job
+	// whose lock record stands and whose mysql.promote was sent (spec 5.2
+	// row 5): no "Buka kunci promote", but T14 with its tail T14t and a
+	// link to the job.
+	SentLockJob  string
+	SentLockText string
+	Controls     serverControls
+	Status       statusView
+	Facts        masterFacts
+	Timeline     timelineView
 	// NoCert: the master has no MySQL certificate from the panel. The
 	// "Wajibkan pemeriksaan sertifikat TLS" box shows when it has none or a
 	// replica is Unverified (Tighten).
@@ -572,6 +578,18 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan="+notice, http.StatusSeeOther)
 }
 
+// sentLockText is T14 with its tail T14t for the planned promote job
+// jobID of master, whose mysql.promote was sent.
+func (a *app) sentLockText(jobID, master string) string {
+	cand := "?"
+	if job, _, err := a.Store.GetJob(jobID); err == nil {
+		cand = a.serverName(promoteParamsOf(job).CandidateServerID)
+	}
+	e := &orchestrator.PromoteSentError{Code: orchestrator.PromoteSentUnreadable, Candidate: cand,
+		Tail: orchestrator.PromoteSentTailPlannedLocked, Master: master}
+	return e.Error()
+}
+
 // renderMaster fills p's inventory, replicas and jobs and renders it.
 func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p masterPage) {
 	srv, topo := p.Server, p.Topology
@@ -584,6 +602,8 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 			a.Logger.Warn("promote lock job", "master", srv.ID, "err", logErr(err))
 		} else if !sent {
 			p.UnlockLockJob = id
+		} else if id != "" {
+			p.SentLockJob, p.SentLockText = id, a.sentLockText(id, srv.Name)
 		}
 	}
 	p.Status = newStatusView(srv.ID, srv.Role, v, monitored, a.Now())

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -581,4 +583,52 @@ func TestJobPagePlannedRetryIsConfirmButton(t *testing.T) {
 	if !strings.Contains(form, `name="backup_ack"`) || !strings.Contains(form, button) {
 		t.Fatalf("the tick is not in the retry's form:\n%s", form)
 	}
+}
+
+// TestMasterPageShowsT14ForSentJob (spec 5.2): the Terkunci master's
+// planned promote job whose lock record stands sent mysql.promote: no
+// "Buka kunci promote", but T14 with its tail T14t and a link to the job;
+// "Buka kunci master" stays.
+func TestMasterPageShowsT14ForSentJob(t *testing.T) {
+	e, f, mon := controlEnv(t)
+	c := e.cookie()
+	const sentJob = "5555555555555555555555555555555c"
+	storeJob(t, e.st, sentJob, orchestrator.KindPromotePlanned, 1,
+		`{"master_server_id":1,"candidate_server_id":2,"lock_tried":true,"promote_sent":true}`, store.JobPartial,
+		"Kunci master", "Jadikan master baru")
+	f.unlockJob, f.unlockSent = sentJob, true
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, Status: monitor.Status{Code: monitor.StatusLocked}})
+	want := (&orchestrator.PromoteSentError{Code: orchestrator.PromoteSentUnreadable, Candidate: "db-replika",
+		Tail: orchestrator.PromoteSentTailPlannedLocked, Master: "db-master"}).Error()
+	const t14 = `Kandidat db-replika belum bisa dibaca, jadi panel belum tahu apakah ia sudah menerima tulisan. Tidak ada ` +
+		`yang diubah. Tekan "Ulangi dari tahap ini" lagi sesudah agent kandidat tersambung. Master db-master tetap ` +
+		`baca-saja selama itu. Bila kandidat tidak akan kembali, buka master di servernya: sudo dbpanel agent ` +
+		`unlock-master. Jalankan itu hanya sesudah Anda memastikan kandidat bukan master dan tidak akan menjadi ` +
+		`master: MySQL-nya terbaca baca-saja di server kandidat itu sendiri, atau host-nya mati.`
+	if want != t14 {
+		t.Fatalf("T14 with T14t = %q", want)
+	}
+	rec := e.do("GET", "/masters/1", nil, c)
+	wantBody(t, rec, template.HTMLEscapeString(t14), `href="/jobs/`+sentJob+`"`, "data-promote-sent",
+		`action="/masters/1/unlock"`, "Buka kunci master")
+	wantNoBody(t, rec, `action="/jobs/`+sentJob+`/unlock-lock"`, ">Buka kunci promote<")
+}
+
+// TestRetrySentRefusalShownOnJobPage: "Ulangi" of a sent promote refused
+// with T14b: the job page shows the text, with the job as it was.
+func TestRetrySentRefusalShownOnJobPage(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	const sentJob = "5555555555555555555555555555555d"
+	storeJob(t, e.st, sentJob, orchestrator.KindPromoteEmergency, 1,
+		`{"master_server_id":1,"candidate_server_id":2,"promote_sent":true}`, store.JobPartial, "Jadikan master baru")
+	over := time.Date(2026, 11, 28, 22, 47, 20, 0, time.Local)
+	f.err = &orchestrator.PromoteSentError{Code: orchestrator.PromoteSentRunning, Candidate: "db-replika", Over: over}
+	rec := e.do("POST", "/jobs/"+sentJob+"/retry", noForm, c)
+	wantCode(t, rec, http.StatusConflict)
+	const t14b = `Pekerjaan promote di kandidat db-replika masih berjalan, atau belum terbukti berakhir. Tidak ada yang ` +
+		`diubah. Tunggu sebentar, lalu tekan "Ulangi dari tahap ini" lagi. Bila agent kandidat tidak melaporkannya, ` +
+		`panel menganggapnya berakhir pukul 28-11-2026 22:47:20.`
+	wantBody(t, rec, template.HTMLEscapeString(t14b))
+	wantCalls(t, f, "retry "+sentJob)
 }

@@ -164,6 +164,8 @@ func TestPromoteRetryPastPointStillRuns(t *testing.T) {
 		g.c.mu.Lock()
 		g.c.dropReply = nil
 		g.c.mu.Unlock()
+		// The lost answer's job opened writes: Ulangi reads the candidate.
+		g.c.reply("mysql.status", proto.MySQLStatus{Port: 3306})
 		if err := e.r.Retry(id, JobAck{}); err != nil {
 			t.Fatalf("Retry past the point: %v", err)
 		}
@@ -718,6 +720,8 @@ func TestPromoteRetryPastPointTokenlessAndUngated(t *testing.T) {
 		}
 		redEverything(t, g)
 		wantRetryOffered(t, e, id)
+		// The candidate opened writes: Ulangi reads it first.
+		g.c.reply("mysql.status", proto.MySQLStatus{Port: 3306})
 		if err := e.r.Retry(id, JobAck{}); err != nil {
 			t.Fatalf("Retry of a sent promote: %v", err)
 		}

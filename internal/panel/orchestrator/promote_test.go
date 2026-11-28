@@ -977,8 +977,10 @@ func TestPromoteRetryAfterDeadlineSkipsRelock(t *testing.T) {
 	}
 
 	// Past the lock's deadline; the guard quarantined the master, which
-	// refuses a lock now. The candidate answers from its promotion record.
+	// refuses a lock now. The candidate opened writes (Ulangi reads it
+	// first) and answers from its promotion record.
 	e.r.now = func() time.Time { return time.Now().Add(time.Hour) }
+	g.c.reply("mysql.status", proto.MySQLStatus{Port: 3306})
 	g.m.fail("mysql.lockForPromote", "perintah mysql.lockForPromote hanya untuk server yang dipin sebagai master; server ini dipin sebagai quarantined")
 	g.c.job("mysql.promote", func(j *jobs.Job, _ json.RawMessage) (any, error) {
 		return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Resumed: true, Mode: proto.PromotePlanned}, nil
@@ -1049,10 +1051,15 @@ func TestPromoteStartCallLostEndsPartial(t *testing.T) {
 	}
 }
 
+// A refusal carries no job id, so the start stays unanswered (spec 5.2):
+// the candidate's agent saying no promote request is pending (this
+// version) is what fails the job.
 func TestPromoteStartRefusedFails(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
 	g.c.fail("mysql.promote", "master lama: password wajib diisi")
+	g.c.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Port: 3306, GTIDExecuted: masterGTID,
+		SuperReadOnly: true, ReadOnly: true, TLSAvailable: true, PromoteRequest: new(false)})
 	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
 	if err != nil {
 		t.Fatalf("StartPromote: %v", err)

@@ -116,6 +116,7 @@
     <h2>Kontrol</h2>
     {{if .Locked}}
     <div class="flex flex-wrap gap-2"><button type="button" class="btn btn-sm btn-warning" data-open-modal="modal-unlock">Buka kunci master</button>{{with .UnlockLockJob}}<form method="post" action="/jobs/{{.}}/unlock-lock" data-unlock-lock><button type="submit" class="btn btn-sm btn-warning">Buka kunci promote</button></form>{{end}}</div>
+    {{with .SentLockJob}}<div role="alert" class="banner banner-warning mb-0" data-promote-sent>{{template "banner-icon" "warning"}}<div class="flex-1">{{$.SentLockText}} <a class="link mono" href="/jobs/{{.}}">{{.}}</a></div></div>{{end}}
     {{end}}
     {{template "server-controls" .Controls}}
   </div>

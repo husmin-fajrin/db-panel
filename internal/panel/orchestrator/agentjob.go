@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
@@ -46,9 +47,21 @@ func (jr *jobRun) runAgentJob(ctx context.Context, serverID int64, cmd string, p
 	}()
 
 	if agentID == "" {
+		promote := cmd == "mysql.promote"
+		if promote {
+			if err := jr.markPromoteSending(); err != nil {
+				return err
+			}
+		}
 		var started proto.StartedJob
 		if err := jr.call(ctx, serverID, cmd, params, &started); err != nil {
 			jr.startRefused = jr.lastRefused
+			if promote && commandUnknownToAgent(err) {
+				// The agent's registry answered before any handler: an
+				// agent without mysql.promote started nothing.
+				jr.st.PromoteUnanswered = false
+				jr.save()
+			}
 			return err
 		}
 		agentID = started.JobID
@@ -57,9 +70,38 @@ func (jr *jobRun) runAgentJob(ctx context.Context, serverID int64, cmd string, p
 		jr.lj.watchJob = agentID
 		r.mu.Unlock()
 		jr.st.AgentServerID, jr.st.AgentJobID, jr.st.AgentCmd = serverID, agentID, cmd
+		if promote && agentID != "" {
+			jr.st.PromoteUnanswered = false
+		}
 		jr.save()
 	}
 	return jr.waitAgentJob(ctx, serverID, agentID, result)
+}
+
+// commandUnknownToAgent reports whether err, as jr.call returns it, is the
+// agent itself answering that it does not know the command
+// (unknown_command, sent by the agent or labelled as its words).
+func commandUnknownToAgent(err error) bool {
+	_, labelled := errors.AsType[agentTextError](err)
+	return (labelled || hub.SentByAgent(err)) && errors.Is(err, &proto.Error{Code: proto.CodeUnknownCommand})
+}
+
+// markPromoteSending stores, before mysql.promote goes out, that it is
+// sent (spec 5.2 row 5): the agent job id of an earlier attempt is
+// forgotten, PromoteSent and PromoteSentAt (now) set, and the start
+// marked unanswered until an answer brings a job id. When the state
+// cannot be stored nothing is sent (C-1) and the job's state is left as
+// it was.
+func (jr *jobRun) markPromoteSending() error {
+	prev := jr.st
+	now := jr.r.now()
+	jr.st.AgentServerID, jr.st.AgentJobID, jr.st.AgentCmd = 0, "", ""
+	jr.st.PromoteSent, jr.st.PromoteSentAt, jr.st.PromoteUnanswered = true, &now, true
+	if err := jr.saveState(); err != nil {
+		jr.st = prev
+		return err
+	}
+	return nil
 }
 
 // waitAgentJob waits for the agent job's job.done event, polling job.status

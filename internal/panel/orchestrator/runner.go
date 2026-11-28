@@ -1045,7 +1045,12 @@ func (r *Runner) refuseCutWipeList(j store.Job) error {
 // that it needs what its start needs (confirmPlannedRetry, spec 5.2 row
 // 1) and runs from the earlier of its failed step and "Kunci master"
 // (K15). Past the point of no return, or once mysql.promote was sent, a
-// promote's Retry needs nothing more: no gate, no token (F13).
+// promote's Retry needs nothing more: no gate, no token (F13). Once sent
+// and not past the point, the candidate's evidence is read before startMu
+// (promoteSentVerdict) and applied under it (settleSentRetry): writable
+// goes on past the point; proven over fails the job (T13, T13b; a
+// planned one's lock lifted after startMu); otherwise T14 or T14b
+// refuses and nothing changes.
 func (r *Runner) Retry(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
 	if err := r.rebuildApprovalForJob(jobID, ack.Approval); err != nil {
@@ -1053,6 +1058,15 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 	}
 	// Agent reads, before startMu; judged under it.
 	view, viewed, viewErr := r.plannedRetryView(jobID)
+	sent := r.sentRetryVerdict(jobID)
+	// A planned promotion proven over lifts its lock after startMu is
+	// released (defers run last in, first out).
+	var undo func()
+	defer func() {
+		if undo != nil {
+			undo()
+		}
+	}()
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	j, steps, err := r.d.Store.GetJob(jobID)
@@ -1080,6 +1094,14 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 		}
 		if promoteRetryRefused(j) {
 			return ErrPromoteRetryBeforePoint
+		}
+		// Sent, not past the point of no return (spec 5.2 row 5): the
+		// candidate's evidence, read before startMu, decides; never
+		// refused by a lock record.
+		if st, ok := sentNotPast(j); ok && isPromote(j.Kind) {
+			if j, undo, err = r.settleSentRetry(j, st, sent); err != nil {
+				return err
+			}
 		}
 		// Before anything is sent (the checks above only read the
 		// store): a relock would move the window of a lock that may
@@ -1745,10 +1767,18 @@ type jobState struct {
 	// undoes anything and ends partial instead of failed.
 	PastPoint bool `json:"past_point,omitempty"`
 	// PromoteSent: mysql.promote was sent at least once; until PastPoint
-	// or a read-only candidate says otherwise, its outcome is unknown and
+	// or the candidate's evidence (promoteSentVerdict) says otherwise, its
+	// outcome is unknown and
 	// the job is never failed (finding 1 of the Task 7 review): it ends
 	// partial, so no other promotion of the topology can start.
 	PromoteSent bool `json:"promote_sent,omitempty"`
+	// PromoteSentAt: when mysql.promote was last sent; PromoteUnanswered:
+	// that send's start call has not been answered with a job id. Both
+	// are stored before the command goes out (markPromoteSending), and
+	// only a start answer carrying a job id clears PromoteUnanswered.
+	// A job of 0.2.0 has neither (promoteSentAt, promoteUnanswered).
+	PromoteSentAt     *time.Time `json:"promote_sent_at,omitempty"`
+	PromoteUnanswered bool       `json:"promote_unanswered,omitempty"`
 	// LockTried: mysql.lockForPromote was sent; an undo then always asks
 	// for unlockPromote ("not locked" is harmless). LockTriedAt is when it
 	// was last sent.
@@ -1847,10 +1877,6 @@ type jobRun struct {
 	// copyWatch: the agent job being waited for is the copy of a rebuild
 	// (H-1d): its progress events are evidence that the copy began.
 	copyWatch bool
-	// promoteStartUnknown: the start call of mysql.promote failed without
-	// an answer from the agent (a timeout, a dropped link), so the agent
-	// may have started the job anyway.
-	promoteStartUnknown bool
 	// preflightFresh: replicaPreflight succeeded in this run. Never stored:
 	// a new run (an Approve, a Retry, a restart) runs the preflight again
 	// before anything is dropped.

@@ -723,20 +723,11 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	// "Sent" is stored before the command goes out (C-1), or it is not
 	// sent: a promote the stored state calls not sent would get the gate
 	// and the token on its Ulangi, and could be relocked and sent again.
-	jr.st.PromoteSent = true
-	if err := jr.saveState(); err != nil {
-		jr.st.PromoteSent = false
-		return outcome{}, err
-	}
+	// runAgentJob stores it (markPromoteSending), with the send's time
+	// and its start unanswered; promoteFailed settles a failure from
+	// the candidate's evidence (promoteSentVerdict).
 	var res proto.PromoteResult
-	jr.promoteStartUnknown = false
 	if err := jr.runAgentJob(ctx, jr.candidate(), "mysql.promote", params, &res); err != nil {
-		// A start call the agent answered with an error (a refusal) is
-		// definite; any other failure of it (a timeout, a dropped link)
-		// may have started the job unseen. The hub reports a timeout or
-		// a lost link as a *proto.Error it makes itself, without an agent
-		// reply, so those codes are no answer too.
-		jr.promoteStartUnknown = !jr.agentStarted && !promoteStartRefused(err)
 		return outcome{}, jr.promoteAgainErr(jr.r.promoteCmdErr(jr.candidate(), err))
 	}
 	jr.st.PastPoint = true
@@ -990,48 +981,44 @@ func (jr *jobRun) setPromotionStatus(status string) {
 // promoteFailed decides how a failed promotion step ends the job. Before
 // the point of no return the master's lock is lifted (planned) and the
 // job fails; after it nothing is undone and the job is partial. When
-// mysql.promote failed, the candidate is asked whether it opened writes
-// anyway; when it cannot answer, the lock is kept (the master's guard
-// decides at its deadline) and the job fails (Retry resumes the promote).
+// mysql.promote was sent, the candidate's evidence decides
+// (promoteSentVerdict): writable is past the point of no return; a job
+// proven over is stored not sent first, and only then is the lock lifted
+// (a failed store keeps the lock and ends partial: the next Ulangi reads
+// the candidate again); unreadable, or a job that may still run, keeps
+// the lock and ends partial, which blocks any other promotion of the
+// topology until a retry settles it.
 func (jr *jobRun) promoteFailed() string {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(jr.lj.ctx), cancelTimeout)
 	defer cancel()
 	if !jr.st.PastPoint && jr.st.PromoteSent {
-		var cs proto.MySQLStatus
-		err := jr.r.d.Hub.Call(ctx, jr.candidate(), "mysql.status", nil, &cs)
-		switch {
-		case err != nil:
-			// Unknown: the candidate may have opened writes. Nothing is
-			// undone and the job is partial, which blocks any other
-			// promotion of the topology until a retry settles it.
-			jr.logf("warn", "Keadaan kandidat tidak bisa dibaca (%v); kandidat mungkin sudah menerima tulisan, jadi kunci master "+
-				"tidak dibuka. Tekan Ulangi untuk melanjutkan promote.", err)
+		v, _ := jr.r.promoteSentVerdict(ctx, jr.job, jr.st)
+		switch v {
+		case sentUnreadable:
+			jr.logf("warn", "Keadaan kandidat tidak bisa dibaca; kandidat mungkin sudah menerima tulisan, jadi kunci master "+
+				"tidak dibuka. Tekan Ulangi untuk melanjutkan promote.")
 			jr.setPromotionStatus(promotionPartial)
 			return store.JobPartial
-		case !cs.ReadOnly && !cs.SuperReadOnly:
+		case sentWritable:
 			jr.st.PastPoint = true
 			jr.save()
 			jr.logf("warn", "Kandidat sudah menerima tulisan: promote tidak dibatalkan. Tekan Ulangi untuk melanjutkan.")
-		default:
-			// Still read-only, but the agent job may still be running
-			// (the wait ended while it was away, and it came back): it
-			// could open writes later. Only a job known to be over lets
-			// the job fail.
-			if jr.promoteStartUnknown {
-				jr.logf("warn", "Perintah promote mungkin sudah diterima kandidat tanpa jawaban; kunci master tidak dibuka. "+
-					"Tekan Ulangi untuk melanjutkan promote.")
+		case sentRunning:
+			jr.logf("warn", "Pekerjaan promote di kandidat masih berjalan, atau belum terbukti berakhir; kunci master tidak "+
+				"dibuka. Tekan Ulangi untuk melanjutkan promote.")
+			jr.setPromotionStatus(promotionPartial)
+			return store.JobPartial
+		default: // sentOver: the agent restored it; the next attempt sends anew.
+			prev := jr.st
+			jr.st.PromoteSent, jr.st.PromoteUnanswered, jr.st.PromoteSentAt = false, false, nil
+			if err := jr.saveState(); err != nil {
+				jr.st = prev
+				jr.r.log.Warn("save job params", "job", jr.job.ID, "err", err)
+				jr.logf("warn", "Keadaan pekerjaan tidak bisa disimpan (%v), jadi kunci master tidak dibuka. Tekan Ulangi "+
+					"untuk mencobanya lagi.", err)
 				jr.setPromotionStatus(promotionPartial)
 				return store.JobPartial
 			}
-			if running, why := jr.promoteJobMayRun(ctx); running {
-				jr.logf("warn", "Pekerjaan promote di kandidat %s; kunci master tidak dibuka. Tekan Ulangi untuk melanjutkan promote.", why)
-				jr.setPromotionStatus(promotionPartial)
-				return store.JobPartial
-			}
-			// The agent restored it; the next attempt sends
-			// mysql.promote anew.
-			jr.st.PromoteSent = false
-			jr.save()
 		}
 	}
 	if jr.st.PastPoint {
@@ -1040,29 +1027,6 @@ func (jr *jobRun) promoteFailed() string {
 	}
 	jr.promoteUndo(ctx)
 	return store.JobFailed
-}
-
-// promoteJobMayRun reports whether the candidate's mysql.promote agent job
-// the step waited for may still be running, and why: a job still known to
-// the agent as running, or whose state cannot be read. A job the agent no
-// longer knows (it restarted; its jobs ended with it) or that ended is
-// over.
-func (jr *jobRun) promoteJobMayRun(ctx context.Context) (bool, string) {
-	if jr.st.AgentJobID == "" || jr.st.AgentCmd != "mysql.promote" {
-		return false, "" // ended: agentJobEnded forgot it
-	}
-	var s proto.JobStatus
-	err := jr.r.d.Hub.Call(ctx, jr.st.AgentServerID, "job.status", proto.JobIDParams{JobID: jr.st.AgentJobID}, &s)
-	var pe *proto.Error
-	switch {
-	case errors.As(err, &pe) && pe.Code == proto.CodeBadParams:
-		return false, ""
-	case err != nil:
-		return true, "tidak bisa diperiksa (" + jr.r.agentErrText(err) + ")"
-	case s.State == "running":
-		return true, "masih berjalan"
-	}
-	return false, ""
 }
 
 // promoteUndo lifts the master's promote lock of a promotion that did not
