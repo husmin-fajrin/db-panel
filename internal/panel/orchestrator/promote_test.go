@@ -361,7 +361,8 @@ func TestPromotePlannedCatchUpTimeoutUnlocks(t *testing.T) {
 	if p := g.promotion(); p.Status != "failed" {
 		t.Fatalf("promotion status = %s", p.Status)
 	}
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	// Before the send it needs a token, as its start did.
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatalf("Retry of a failed promote before the point of no return: %v", err)
 	}
 	e.waitJob(id, store.JobFailed)
@@ -896,7 +897,7 @@ func TestPromoteFailureAtNewMasterUnlocksOrGoesPartial(t *testing.T) {
 	// It fails again, but the candidate answers writable this time: past
 	// the point of no return, nothing is undone and the job is partial.
 	g.c.reply("mysql.status", proto.MySQLStatus{Port: 3306})
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil { // not sent: a token
 		t.Fatalf("Retry: %v", err)
 	}
 	j, _ = e.waitJob(id, store.JobPartial)

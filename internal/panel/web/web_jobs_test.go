@@ -387,11 +387,12 @@ func TestWipeApprovalListsEveryName(t *testing.T) {
 
 // TestPromoteRetryStillTokenless and TestTightenTLSRetryTokenless: jobs
 // that drop nothing keep their plain buttons and need no token: a planned
-// promote in every state, and a promote of either kind past the point of
-// no return (an emergency one that failed before it offers no Ulangi,
+// promote once mysql.promote was sent (a planned one before it needs a
+// token, TestGateRefusesPlannedRetryBeforeTokenIsConsumed), and a promote
+// of either kind past the point of no return (an emergency one that failed before it offers no Ulangi,
 // TestPromoteRetryRefusedHidesButton).
 func TestPromoteRetryStillTokenless(t *testing.T) {
-	tokenlessRetry(t, orchestrator.KindPromotePlanned, `{}`)
+	tokenlessRetry(t, orchestrator.KindPromotePlanned, `{"promote_sent":true}`)
 	tokenlessRetry(t, orchestrator.KindPromotePlanned, `{"promote_sent":true,"past_point":true}`)
 	tokenlessRetry(t, orchestrator.KindPromoteEmergency, `{"promote_sent":true}`)
 }
@@ -449,4 +450,135 @@ func TestApproveLoadRefusalLinksJob(t *testing.T) {
 		"mengkarantina master. Tekan &#34;Buka kunci promote&#34; pada pekerjaan promote "+
 		`<a class="link mono" href="/jobs/`+promote+`">`+promote+`</a> dulu.`)
 	wantCalls(t, f, "approve "+id)
+}
+
+// plannedRetryJob is a planned promote of master 1 to its replica 2 that
+// failed in "Replika mengejar" before mysql.promote was sent, having
+// accepted that db-mati (4) is repointed later; the orchestrator says it
+// needs a confirmation.
+const plannedRetryJob = "5555555555555555555555555555555a"
+
+func failedPlannedPromote(t *testing.T, e *env, f *fakeOrch) {
+	t.Helper()
+	storeJob(t, e.st, plannedRetryJob, orchestrator.KindPromotePlanned, 1,
+		`{"master_server_id":1,"candidate_server_id":2,"promotion_id":1,"accept_unreachable":[4],"lock_tried":true,"lock_unlocked":true}`,
+		store.JobFailed, "Buat akun replikasi di kandidat", "Kunci master", "Replika mengejar")
+	f.mu.Lock()
+	f.confirms = map[string]bool{plannedRetryJob: true}
+	f.mu.Unlock()
+}
+
+// TestGateRefusesPlannedRetryBeforeTokenIsConsumed (spec 5.1, 5.2 row 1):
+// "Ulangi" of a planned promote not sent posted with a valid token while
+// a row is red is refused with 409 and G14 before the token is used; a
+// backup row that asks for the tick refuses without it (G15); once green
+// and ticked the same token is accepted and the orchestrator gets a
+// confirmed Retry with the tick. Without a token it is refused (403).
+func TestGateRefusesPlannedRetryBeforeTokenIsConsumed(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	failedPlannedPromote(t, e, f)
+	path := "/jobs/" + plannedRetryJob + "/retry"
+
+	rec := e.do("POST", path, url.Values{}, c)
+	wantCode(t, rec, http.StatusForbidden)
+	wantCalls(t, f)
+
+	f.setGate(redDisk)
+	form := withToken(t, e, url.Values{}, "job_retry:"+plannedRetryJob, "job", 1)
+	rec = e.do("POST", path, form, c)
+	wantCode(t, rec, http.StatusConflict)
+	wantBody(t, rec, wantG14Disk)
+	wantCalls(t, f)
+	if got := f.gateInputs(); len(got) == 0 || got[0] != (orchestrator.GateInput{Action: orchestrator.GatePromotePlanned,
+		MasterID: 1, TargetID: 2}) {
+		t.Fatalf("gate inputs = %+v", got)
+	}
+	if s := jobStatus(t, e.st, plannedRetryJob); s != store.JobFailed {
+		t.Fatalf("job status after a refused retry = %s", s)
+	}
+
+	f.setGate(backupUnset)
+	rec = e.do("POST", path, form, c)
+	wantCode(t, rec, http.StatusBadRequest)
+	wantBody(t, rec, wantG15)
+	wantCalls(t, f)
+
+	form.Set("backup_ack", "1")
+	rec = e.do("POST", path, form, c) // the same token
+	wantCode(t, rec, http.StatusSeeOther)
+	wantCalls(t, f, "retry "+plannedRetryJob)
+	if ack := f.lastAck(t); !ack.Confirmed || !ack.BackupAck {
+		t.Fatalf("ack = %+v", ack)
+	}
+}
+
+// TestRetryPlannedPromoteAudit (spec 5.2): Ulangi of a planned promote not
+// sent is audited with the fields of its start; Ulangi of a promote past
+// the point of no return as a continuation.
+func TestRetryPlannedPromoteAudit(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	failedPlannedPromote(t, e, f)
+	form := withToken(t, e, url.Values{"backup_ack": {"1"}}, "job_retry:"+plannedRetryJob, "job", 1)
+	wantCode(t, e.do("POST", "/jobs/"+plannedRetryJob+"/retry", form, c), http.StatusSeeOther)
+	entries := withoutConfirms(auditEntries(t, e.st))
+	last := entries[len(entries)-1]
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(last.DetailJSON), &detail); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"job_id": plannedRetryJob, "kind": orchestrator.KindPromotePlanned, "candidate": float64(2),
+		"mode": proto.PromotePlanned, "accept_partial": false, "accept_unreachable": []any{float64(4)},
+		"accept_branched": false, "backup_ack": true}
+	if last.Action != "job_retry" || last.TargetID != 1 || fmt.Sprint(detail) != fmt.Sprint(want) {
+		t.Fatalf("audit = %+v\ndetail %v\nwant   %v", last, detail, want)
+	}
+	wantNoSecretInDetail(t, last)
+
+	const past = "5555555555555555555555555555555b"
+	storeJob(t, e.st, past, orchestrator.KindPromotePlanned, 1, `{"candidate_server_id":2,"promote_sent":true,"past_point":true}`,
+		store.JobPartial, "Karantina master lama")
+	wantCode(t, e.do("POST", "/jobs/"+past+"/retry", url.Values{}, c), http.StatusSeeOther)
+	entries = withoutConfirms(auditEntries(t, e.st))
+	last = entries[len(entries)-1]
+	detail = nil
+	if err := json.Unmarshal([]byte(last.DetailJSON), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if last.Action != "job_retry" || detail["continuation"] != true || detail["job_id"] != past || detail["candidate"] != nil {
+		t.Fatalf("audit of the continuation = %+v", last)
+	}
+}
+
+// TestJobPagePlannedRetryIsConfirmButton: the job page of a planned
+// promote not sent lists the gate's red rows, the backup tick when asked,
+// and "Ulangi dari tahap ini" as a confirmed button (job_retry), disabled
+// while a row is red.
+func TestJobPagePlannedRetryIsConfirmButton(t *testing.T) {
+	e, f, _ := controlEnv(t)
+	c := e.cookie()
+	failedPlannedPromote(t, e, f)
+	button := `data-confirm-action="job_retry:` + plannedRetryJob + `"`
+	rec := e.do("GET", "/jobs/"+plannedRetryJob, nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, `action="/jobs/`+plannedRetryJob+`/retry"`, "data-promote-retry", button,
+		`data-confirm-kind="job" data-confirm-id="1" data-confirm-danger="1"`,
+		`data-confirm-text="Promote terencana db-replika menjadi master baru menggantikan db-master."`, ">Ulangi dari tahap ini<")
+	wantNoBody(t, rec, "/retry/prepare", `name="backup_ack"`, "data-gate-list")
+	wantOn(t, rec.Body.String(), button)
+
+	f.setGate(redDisk)
+	rec = e.do("GET", "/jobs/"+plannedRetryJob, nil, c)
+	body := rec.Body.String()
+	wantOff(t, body, button)
+	wantBody(t, rec, wantD2, "Belum terpenuhi", "Ruang disk", "Kosongkan ruang")
+
+	f.setGate(backupUnset)
+	rec = e.do("GET", "/jobs/"+plannedRetryJob, nil, c)
+	wantBody(t, rec, `name="backup_ack" value="1" required`)
+	form := between(rec.Body.String(), "data-promote-retry", "</form>")
+	if !strings.Contains(form, `name="backup_ack"`) || !strings.Contains(form, button) {
+		t.Fatalf("the tick is not in the retry's form:\n%s", form)
+	}
 }

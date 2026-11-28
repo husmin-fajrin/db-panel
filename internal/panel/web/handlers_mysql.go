@@ -43,11 +43,15 @@ type Orchestrator interface {
 	// quarantine never arrived (a dead server); guard it with a typed
 	// confirmation.
 	DeleteUnquarantined(ctx context.Context, serverID int64) error
-	// Approve and Retry refuse a job that drops data (DropsData) without
-	// ack.Confirmed: the handler consumes a job_approve or job_retry token
-	// for that job first.
+	// Approve and Retry refuse a job that needs a confirmation
+	// (NeedsConfirm: it drops data, or it is a planned promote whose
+	// mysql.promote was not sent) without ack.Confirmed: the handler
+	// judges its gate, then consumes a job_approve or job_retry token for
+	// that job first. DropsData says whether it drops data (the database
+	// list of its dialog).
 	Approve(jobID string, ack orchestrator.JobAck) error
 	Retry(jobID string, ack orchestrator.JobAck) error
+	NeedsConfirm(jobID string) (bool, error)
 	DropsData(jobID string) (bool, error)
 	Cancel(jobID string) error
 	// Superseded says why a job may no longer be approved or retried; "".

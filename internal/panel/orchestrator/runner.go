@@ -625,11 +625,15 @@ func (r *Runner) failUnrunnable(j store.Job, rows []store.JobStep, cause error) 
 }
 
 // JobAck is what the user confirmed for an Approve or a Retry. A job that
-// drops data (dropsData) is refused without Confirmed, whatever calls it.
+// needs a confirmation (needsConfirm) is refused without Confirmed,
+// whatever calls it.
 type JobAck struct {
 	// Confirmed: the web consumed a fresh job_retry or job_approve token
 	// bound to this job and its server.
 	Confirmed bool
+	// BackupAck: the backup tick of a planned promote's Retry (form
+	// backup_ack=1), needed when the gate's backup row asks for it.
+	BackupAck bool
 	// WipeOnly: the databases of the job's WipeList acknowledged again as
 	// existing only on the replica (replaces jobState.WipeOnly on Retry).
 	WipeOnly []string
@@ -679,6 +683,21 @@ func dropsData(kind string, st jobState) bool {
 	return false
 }
 
+// needsConfirm: a Retry or Approve of the job needs a password token typed
+// for it: it drops data (dropsData), or it is a planned promote whose
+// mysql.promote was not sent yet (spec 5.1, 5.2 row 1: it finishes the
+// switch of the master, like its start). Past the point of no return, or
+// once mysql.promote was sent, a promote's Ulangi never needs one (F13).
+func needsConfirm(kind string, st jobState) bool {
+	return dropsData(kind, st) || plannedNotSentState(kind, st)
+}
+
+// plannedNotSentState: a planned promote whose mysql.promote was not sent
+// and that is not past the point of no return.
+func plannedNotSentState(kind string, st jobState) bool {
+	return kind == KindPromotePlanned && !st.PromoteSent && !st.PastPoint
+}
+
 // refuseRedGate judges in (Gate) for a Start function, a Retry or an
 // Approve; callers hold startMu, after their own checks and before their
 // first write. A red row refuses with a *GateError (its text names the red
@@ -715,11 +734,17 @@ func (r *Runner) refuseRedJobGate(j store.Job) error {
 }
 
 // gateActionForJob is the gate action a Retry or Approve of a job of kind
-// with st judges: the action that started it. A promote job is never
-// judged again (K4), nor are the kinds without a gated start; ok is false
-// for them.
+// with st judges: the action that started it. A planned promote is judged
+// again only while its mysql.promote was not sent (spec 5.2 row 1); past
+// the point of no return, once sent, and for an emergency promote it is
+// never judged again (K4), nor are the kinds without a gated start; ok is
+// false for them.
 func gateActionForJob(kind string, st jobState) (GateAction, bool) {
 	switch kind {
+	case KindPromotePlanned:
+		if plannedNotSentState(kind, st) {
+			return GatePromotePlanned, true
+		}
 	case KindCreateReplica:
 		if st.RebuildOldMaster {
 			return GateRebuildOldMaster, true
@@ -736,22 +761,51 @@ func gateActionForJob(kind string, st jobState) (GateAction, bool) {
 }
 
 // JobGateInput is the gate a Retry or Approve of j judges before it runs
-// on: only for a job whose remaining steps drop data (dropsData) and whose
+// on: only for a job that needs a confirmation (needsConfirm) and whose
 // kind has a gate (gateActionForJob); ok is false otherwise, and for a job
 // whose params cannot be read (newRun fails it before any step). The
 // master is the one the job copies from (its MasterServerID; for a rebuild
-// the new master), the target the job's server. Approval is left nil: the
-// caller that read root's approval fills it.
+// the new master), the target the job's server; for a planned promote the
+// master and its candidate. Approval is left nil: the caller that read
+// root's approval fills it.
 func JobGateInput(j store.Job) (GateInput, bool) {
-	st, drops, err := jobDropsData(j)
-	if err != nil || !drops {
+	st, need, err := jobNeedsConfirm(j)
+	if err != nil || !need {
 		return GateInput{}, false
 	}
 	action, ok := gateActionForJob(j.Kind, st)
 	if !ok {
 		return GateInput{}, false
 	}
-	return GateInput{Action: action, MasterID: st.MasterServerID, TargetID: j.ServerID}, true
+	target := j.ServerID
+	if action == GatePromotePlanned {
+		target = st.CandidateServerID
+	}
+	return GateInput{Action: action, MasterID: st.MasterServerID, TargetID: target}, true
+}
+
+// jobNeedsConfirm is needsConfirm of j; a job whose params cannot be read
+// needs one (fail closed), with the error.
+func jobNeedsConfirm(j store.Job) (jobState, bool, error) {
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		return st, true, err
+	}
+	return st, needsConfirm(j.Kind, st), nil
+}
+
+// NeedsConfirm reports whether a Retry or Approve of the job needs a
+// password token typed for it (needsConfirm): the web asks the gate
+// before it consumes that token. A job that cannot be read, or whose
+// params cannot be read, answers true with the error: Retry refuses such
+// a job anyway (it cannot tell whether mysql.promote was sent).
+func (r *Runner) NeedsConfirm(jobID string) (bool, error) {
+	j, _, err := r.d.Store.GetJob(jobID)
+	if err != nil {
+		return true, err
+	}
+	_, need, err := jobNeedsConfirm(j)
+	return need, err
 }
 
 // jobDropsData is dropsData of j; a job whose params cannot be read counts
@@ -765,8 +819,8 @@ func jobDropsData(j store.Job) (jobState, bool, error) {
 }
 
 // DropsData reports whether the job drops data (dropsData): its Approve and
-// Retry need ack.Confirmed. A job whose params cannot be read answers true
-// with the error.
+// Retry need ack.Confirmed, and the web opens the dialog of its database
+// list. A job whose params cannot be read answers true with the error.
 func (r *Runner) DropsData(jobID string) (bool, error) {
 	j, _, err := r.d.Store.GetJob(jobID)
 	if err != nil {
@@ -929,7 +983,9 @@ func (r *Runner) Approve(jobID string, ack JobAck) error {
 	if err != nil {
 		return err
 	}
-	if j.Status != store.JobWaiting {
+	// A promote never waits for an approval; Setujui is no way around the
+	// checks of its Ulangi.
+	if j.Status != store.JobWaiting || isPromote(j.Kind) {
 		return errNotWaiting
 	}
 	// Approving a waiting load drops and loads on the replica as a new
@@ -985,15 +1041,21 @@ func (r *Runner) refuseCutWipeList(j store.Job) error {
 // (ErrConnectionsRemain without ack.AcceptConnections). The new
 // confirmation is stored before the job runs. A planned promote job whose
 // mysql.promote was not sent is refused with T12b while its lock record
-// stands, before anything is sent ("Buka kunci promote" lifts it).
+// stands, before anything is sent ("Buka kunci promote" lifts it); after
+// that it needs what its start needs (confirmPlannedRetry, spec 5.2 row
+// 1) and runs from the earlier of its failed step and "Kunci master"
+// (K15). Past the point of no return, or once mysql.promote was sent, a
+// promote's Retry needs nothing more: no gate, no token (F13).
 func (r *Runner) Retry(jobID string, ack JobAck) error {
 	connsClear := r.retryConnectionsClear(jobID, ack)
 	if err := r.rebuildApprovalForJob(jobID, ack.Approval); err != nil {
 		return err
 	}
+	// Agent reads, before startMu; judged under it.
+	view, viewed, viewErr := r.plannedRetryView(jobID)
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
-	j, _, err := r.d.Store.GetJob(jobID)
+	j, steps, err := r.d.Store.GetJob(jobID)
 	if err != nil {
 		return err
 	}
@@ -1025,7 +1087,13 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 		if err := r.refusePlannedRetryWhileLockStands(j); err != nil {
 			return err
 		}
-		if err := r.refuseRedJobGate(j); err != nil {
+		from := j.CurrentStep
+		if st, planned := plannedNotSent(j); planned {
+			if err := r.confirmPlannedRetry(j, st, plannedView{view, viewed, viewErr}, ack); err != nil {
+				return err
+			}
+			from = plannedRetryFrom(j.CurrentStep, steps)
+		} else if err := r.refuseRedJobGate(j); err != nil {
 			return err
 		}
 		if err := r.confirmDrop(j, ack, true, connsClear); err != nil {
@@ -1039,11 +1107,19 @@ func (r *Runner) Retry(jobID string, ack JobAck) error {
 			if err := r.d.Store.ReopenJob(jobID, r.now()); err != nil {
 				return err
 			}
+			if from != j.CurrentStep {
+				if err := r.d.Store.UpdateJob(jobID, store.JobRunning, from, "", r.now()); err != nil {
+					if uerr := r.d.Store.UpdateJob(jobID, j.Status, j.CurrentStep, j.Error, r.now()); uerr != nil {
+						r.log.Warn("re-fail unmoved retry", "job", jobID, "err", uerr)
+					}
+					return err
+				}
+			}
 			if r.afterReopen != nil {
 				r.afterReopen(jobID)
 			}
 		}
-		if err := r.launch(jobID, action{kind: actRetry, step: j.CurrentStep}); err != nil {
+		if err := r.launch(jobID, action{kind: actRetry, step: from}); err != nil {
 			// A Cancel that came after the reopen is queued and cancels
 			// the reopened job; failing it again would undo that (M2).
 			if reopened && !errors.Is(err, errCanceling) {

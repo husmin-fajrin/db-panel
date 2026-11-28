@@ -346,7 +346,9 @@ func TestRetryGatedOnlyWhenDataIsDropped(t *testing.T) {
 		e.waitJob(id, store.JobSucceeded)
 	})
 	t.Run("promote", func(t *testing.T) {
-		// K4: a promote job is never judged again.
+		// A planned promote not sent is judged again, as its start
+		// (spec 5.2 row 1); past the point it never is
+		// (TestPromoteRetryPastPointTokenlessAndUngated).
 		g := newPromoteRig(t)
 		e := g.e
 		e.r.promoteCatchUp = 100 * time.Millisecond
@@ -364,10 +366,10 @@ func TestRetryGatedOnlyWhenDataIsDropped(t *testing.T) {
 		if res, _ := e.r.Gate(GateInput{Action: GatePromotePlanned, MasterID: g.m.id, TargetID: g.c.id}); len(res.Red()) == 0 {
 			t.Fatalf("gate = %+v, want a red row", res.Rows)
 		}
-		if err := e.r.Retry(id, JobAck{}); err != nil {
-			t.Fatalf("Retry of a failed promote with a red row: %v", err)
+		wantGateRed(t, e.r.Retry(id, JobAck{Confirmed: true}), "Pemeriksaan sertifikat TLS")
+		if j, _, _ := e.st.GetJob(id); j.Status != store.JobFailed {
+			t.Fatalf("job after a refused retry = %+v", j)
 		}
-		e.waitJob(id, store.JobFailed)
 	})
 	t.Run("rebuild_approval", func(t *testing.T) {
 		// Approve of a rebuild without root's approval is refused as before
@@ -429,7 +431,9 @@ func TestGateActionForJob(t *testing.T) {
 		{KindResyncReplica, jobState{}, GateResync, true},
 		{KindAddDatabases, jobState{}, GateAddDatabases, true},
 		{KindRemoveDatabases, jobState{DropData: true}, GateRemoveWithDrop, true},
-		{KindPromotePlanned, jobState{}, "", false},
+		{KindPromotePlanned, jobState{}, GatePromotePlanned, true},
+		{KindPromotePlanned, jobState{PromoteSent: true}, "", false},
+		{KindPromotePlanned, jobState{PromoteSent: true, PastPoint: true}, "", false},
 		{KindPromoteEmergency, jobState{}, "", false},
 		{KindPrepareMaster, jobState{}, "", false},
 	} {

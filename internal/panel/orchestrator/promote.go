@@ -220,6 +220,11 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	st := jobState{MasterServerID: p.MasterServerID, CandidateServerID: p.CandidateServerID, PromotionID: promID,
 		PartialCandidate: cand.Partial, OldSourceHost: topo.SourceHost, OldSourcePort: topo.SourcePort,
 		LastMasterGTID: view.LastMasterGTID, AcceptUnreachable: p.AcceptUnreachable, AcceptBranched: p.AcceptBranched}
+	if mode == proto.PromotePlanned {
+		// Its first confirmation: its Ulangi before the send is bound to
+		// confirmMaxAge from the last one (T12).
+		st.ConfirmedAt = r.now()
+	}
 	kind, names := KindPromotePlanned, promotePlannedStepNames()
 	if mode == proto.PromoteEmergency {
 		kind, names = KindPromoteEmergency, promoteEmergencyStepNames()
@@ -1655,10 +1660,11 @@ func promoteRetryRefused(j store.Job) bool {
 }
 
 // RetryRefused is why Ulangi of the job is refused whatever is acked
-// (ErrPromoteRetryBeforePoint's text, or T12b while the lock record of a
-// planned promote job not sent stands); "" when it is not, or when the job
-// cannot be read (Retry decides then). The job page hides Ulangi for it.
-// It writes nothing (LockRecords).
+// (ErrPromoteRetryBeforePoint's text; T12b while the lock record of a
+// planned promote job not sent stands; T12 for such a job last confirmed
+// more than confirmMaxAge ago); "" when it is not, or when the job cannot
+// be read (Retry decides then). The job page hides Ulangi for it. It
+// writes nothing (LockRecords).
 func (r *Runner) RetryRefused(jobID string) string {
 	j, _, err := r.d.Store.GetJob(jobID)
 	if err != nil {
@@ -1675,5 +1681,140 @@ func (r *Runner) RetryRefused(jobID string) string {
 	if stands {
 		return (&PromoteLockStandsError{Master: r.nameOf(master)}).Error()
 	}
+	if st, planned := plannedNotSent(j); planned && plannedConfirmStale(j, st, r.now()) {
+		return ErrPromoteRetryStale.Error()
+	}
 	return ""
+}
+
+// ErrPromoteRetryStale (T12) refuses Ulangi of a planned promote job not
+// sent whose last confirmation is more than confirmMaxAge old.
+var ErrPromoteRetryStale = errors.New(`Promote ini terakhir dikonfirmasi lebih dari 24 jam lalu, jadi "Ulangi dari tahap ` +
+	`ini" tidak tersedia lagi. Mulai promote baru dari halaman master.`)
+
+// plannedNotSent is j's state when j is a planned promote job whose
+// mysql.promote was not sent (plannedNotSentState); false for any other
+// job and for one whose params cannot be read (left to the checks that
+// refuse it: promoteSupersededBy, newRun).
+func plannedNotSent(j store.Job) (jobState, bool) {
+	if j.Kind != KindPromotePlanned {
+		return jobState{}, false
+	}
+	var st jobState
+	if err := json.Unmarshal([]byte(j.ParamsJSON), &st); err != nil {
+		return jobState{}, false
+	}
+	return st, plannedNotSentState(j.Kind, st)
+}
+
+// plannedConfirmStale: the last confirmation of j (ConfirmedAt; its
+// creation for a job of 0.2.0, which stored none) is more than
+// confirmMaxAge before now.
+func plannedConfirmStale(j store.Job, st jobState, now time.Time) bool {
+	last := st.ConfirmedAt
+	if last.IsZero() {
+		last = j.CreatedAt
+	}
+	return now.Sub(last) > confirmMaxAge
+}
+
+// plannedView is the consideration data plannedRetryView read for a
+// Retry: ok when it was read (err its failure).
+type plannedView struct {
+	view PromoteView
+	ok   bool
+	err  error
+}
+
+// plannedRetryView reads, before startMu, a fresh PromoteView of the
+// master of a failed planned promote job not sent, for its Retry to judge
+// with promoteRefusals (spec 5.2 row 1). It reads nothing for any other
+// job, nor while T12b or an unlock in flight refuses the Retry anyway
+// (both are checked again under startMu): ok is false then.
+func (r *Runner) plannedRetryView(jobID string) (PromoteView, bool, error) {
+	j, _, err := r.d.Store.GetJob(jobID)
+	if err != nil || (j.Status != store.JobFailed && j.Status != store.JobPartial) {
+		return PromoteView{}, false, nil
+	}
+	st, planned := plannedNotSent(j)
+	if !planned {
+		return PromoteView{}, false, nil
+	}
+	if _, stands, err := r.plannedLockStands(j, r.LockRecords); err != nil || stands {
+		return PromoteView{}, false, nil
+	}
+	if err := r.refuseUnlockInFlightNow(st.MasterServerID); err != nil {
+		return PromoteView{}, false, nil
+	}
+	ctx, cancel := context.WithTimeout(r.base, callTimeout)
+	defer cancel()
+	view, err := r.PromoteView(ctx, st.MasterServerID)
+	return view, true, err
+}
+
+// confirmPlannedRetry checks a Retry of j, a planned promote job not sent
+// (st), as StartPromote checks its start, and stores the new confirmation
+// (ConfirmedAt) before the caller launches it; nothing is stored when it
+// refuses. In order: the refusals of the start (promoteRefusals, mode
+// planned, the params the job was started with) judged on pv, read for
+// this Retry before startMu; the gate (GateError); the backup tick when
+// the gate asks for it (ErrBackupAck); the token (ErrJobNeedsConfirm);
+// the last confirmation at most confirmMaxAge old (T12). A Retry for
+// which no view was read (the job changed in between) is refused: it is
+// asked again. Callers hold startMu.
+func (r *Runner) confirmPlannedRetry(j store.Job, st jobState, pv plannedView, ack JobAck) error {
+	if pv.err != nil {
+		return pv.err
+	}
+	if !pv.ok {
+		return errBusy
+	}
+	topo, err := r.d.Store.GetTopologyByMaster(st.MasterServerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return errors.New("server ini bukan master")
+	}
+	if err != nil {
+		return err
+	}
+	p := PromoteParams{MasterServerID: st.MasterServerID, CandidateServerID: st.CandidateServerID, Mode: proto.PromotePlanned,
+		AcceptPartial: st.PartialCandidate, AcceptUnreachable: st.AcceptUnreachable, AcceptBranched: st.AcceptBranched,
+		BackupAck: ack.BackupAck}
+	if _, _, err := r.promoteRefusals(p, pv.view, topo); err != nil {
+		return err
+	}
+	res, err := r.refuseRedGate(GateInput{Action: GatePromotePlanned, MasterID: st.MasterServerID, TargetID: st.CandidateServerID})
+	if err != nil {
+		return err
+	}
+	if res.NeedsBackupAck() && !ack.BackupAck {
+		return ErrBackupAck
+	}
+	if !ack.Confirmed {
+		return ErrJobNeedsConfirm
+	}
+	now := r.now()
+	if plannedConfirmStale(j, st, now) {
+		return ErrPromoteRetryStale
+	}
+	if err := r.launchRefused(j.ID); err != nil {
+		return err
+	}
+	st.ConfirmedAt = now
+	b, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return r.d.Store.SetJobParams(j.ID, string(b))
+}
+
+// plannedRetryFrom is the step a Retry of a planned promote job not sent
+// runs from (K15): the earlier of its failed step and "Kunci master" (a
+// failure lifted the lock; the candidate catches up under a new one). A
+// job failed in "Buat akun replikasi di kandidat" starts there.
+func plannedRetryFrom(failed int, steps []store.JobStep) int {
+	lock := slices.IndexFunc(steps, func(s store.JobStep) bool { return s.Name == stepPromoteLock })
+	if lock < 0 {
+		return failed // an unknown step list: newRun fails it
+	}
+	return min(failed, lock)
 }

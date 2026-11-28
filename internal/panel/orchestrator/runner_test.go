@@ -224,9 +224,13 @@ func TestApproveRefreshesConfirmedAt(t *testing.T) {
 	}
 }
 
-// TestPromoteRetryStillTokenless: a promote drops nothing; its Retry needs
-// no confirmation (spec 5.6).
-func TestPromoteRetryStillTokenless(t *testing.T) {
+// TestPromoteRetryTokenOnlyBeforeSend (it replaces
+// TestPromoteRetryStillTokenless; spec 5.1, 5.2 row 1): a promote drops
+// nothing (no database list), but a planned one's Retry before
+// mysql.promote was sent needs a confirmation, as its start did; past the
+// point of no return no promote's Retry does
+// (TestPromoteRetryPastPointTokenlessAndUngated).
+func TestPromoteRetryTokenOnlyBeforeSend(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
 	e.r.promoteCatchUp = 100 * time.Millisecond
@@ -241,8 +245,15 @@ func TestPromoteRetryStillTokenless(t *testing.T) {
 	if drops, err := e.r.DropsData(id); err != nil || drops {
 		t.Fatalf("DropsData = %v, %v; want false", drops, err)
 	}
-	if err := e.r.Retry(id, JobAck{}); err != nil {
-		t.Fatalf("Retry of a promote without confirmation: %v", err)
+	if need, err := e.r.NeedsConfirm(id); err != nil || !need {
+		t.Fatalf("NeedsConfirm = %v, %v; want true", need, err)
+	}
+	e.waitIdle(id)
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Retry of a planned promote not sent without confirmation = %v, want ErrJobNeedsConfirm", err)
+	}
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatalf("confirmed Retry: %v", err)
 	}
 	e.waitJob(id, store.JobFailed)
 	if n := g.m.count("mysql.lockForPromote"); n != 2 {

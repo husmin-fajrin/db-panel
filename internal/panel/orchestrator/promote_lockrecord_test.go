@@ -186,12 +186,13 @@ func TestRelockRefusalKeepsRecordAndTimes(t *testing.T) {
 	// While the record stands Ulangi is refused (T12b); once it was
 	// settled open (a live report of the master past its Until) Ulangi
 	// relocks.
-	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrPromoteLockStands) {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); !errors.Is(err, ErrPromoteLockStands) {
 		t.Fatalf("Retry while the record stands = %v, want T12b", err)
 	}
 	e.setState(id, func(st *jobState) { st.LockUnlocked = true })
+	g.reportsAt(later) // the reports its start would judge, fresh
 	g.m.fail("mysql.lockForPromote", "server ini sudah dikunci untuk promosi (kandidat 10.0.0.2:3306); kunci baru ditolak")
-	if err := e.r.Retry(id, JobAck{}); err != nil {
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
 	e.waitJob(id, store.JobFailed)
@@ -513,11 +514,12 @@ func TestRelockErrorMayHaveLockedCountsFromRetry(t *testing.T) {
 			before := e.storedState(id)
 			later := before.LockDeadline.Add(time.Hour)
 			e.r.now = func() time.Time { return later }
+			g.reportsAt(later)
 			tc.script(g)
 			// Settled open (a live report past its Until), so Ulangi
 			// relocks (T12b refuses it while the record stands).
 			e.setState(id, func(st *jobState) { st.LockUnlocked = true })
-			if err := e.r.Retry(id, JobAck{}); err != nil {
+			if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
 				t.Fatalf("Retry: %v", err)
 			}
 			e.waitJob(id, store.JobFailed)

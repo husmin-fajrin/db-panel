@@ -61,6 +61,9 @@ type fakeOrch struct {
 	// dropping job without ack.Confirmed.
 	drops map[string]bool
 	acks  []orchestrator.JobAck
+	// confirms answers NeedsConfirm per job id, besides drops (a planned
+	// promote not sent needs a confirmation and drops nothing).
+	confirms map[string]bool
 	// view is what PromoteView answers; promoteErr what StartPromote
 	// refuses with; promotes the parameters StartPromote received.
 	view       orchestrator.PromoteView
@@ -298,9 +301,9 @@ func (f *fakeOrch) jobAck(call, id string, ack orchestrator.JobAck) error {
 	f.decideApproval(ack.Approval)
 	f.mu.Lock()
 	f.acks = append(f.acks, ack)
-	drops := f.drops[id]
+	needs := f.drops[id] || f.confirms[id]
 	f.mu.Unlock()
-	if drops && !ack.Confirmed {
+	if needs && !ack.Confirmed {
 		return orchestrator.ErrJobNeedsConfirm
 	}
 	return f.err
@@ -310,6 +313,12 @@ func (f *fakeOrch) DropsData(id string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.drops[id], nil
+}
+
+func (f *fakeOrch) NeedsConfirm(id string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.drops[id] || f.confirms[id], nil
 }
 func (f *fakeOrch) PromoteView(_ context.Context, masterServerID int64) (orchestrator.PromoteView, error) {
 	f.record(fmt.Sprintf("promote-view %d", masterServerID))

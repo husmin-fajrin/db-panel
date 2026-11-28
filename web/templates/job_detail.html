@@ -91,6 +91,12 @@
         {{if .DropsData}}
         {{/* A job that drops data: the fresh lists first, then the dialog. */}}
         <form method="post" action="/jobs/{{.Job.ID}}/retry/prepare"><button type="submit" class="btn btn-primary"{{if and $.Gate $.Gate.Off}} disabled{{end}} data-gate-button>Ulangi dari tahap ini</button></form>
+        {{else if .PromoteRetry}}
+        {{/* A planned promote not sent: what its start needs (spec 5.2 row 1). */}}
+        <form method="post" action="/jobs/{{.Job.ID}}/retry" class="flex w-full flex-col items-start gap-2" data-promote-retry>
+          {{if and $.Gate $.Gate.NeedsAck}}{{template "backup-ack"}}{{end}}
+          <button type="submit" class="btn btn-primary"{{if and $.Gate $.Gate.Off}} disabled{{end}} data-gate-button data-confirm-action="job_retry:{{.Job.ID}}" data-confirm-kind="job" data-confirm-id="{{.Job.ServerID}}" data-confirm-danger="1" data-confirm-text="{{.PromoteRetryText}}">Ulangi dari tahap ini</button>
+        </form>
         {{else}}
         <form method="post" action="/jobs/{{.Job.ID}}/retry"><button type="submit" class="btn btn-primary">Ulangi dari tahap ini</button></form>
         {{end}}

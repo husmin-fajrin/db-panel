@@ -160,6 +160,14 @@ type jobPage struct {
 	DropsData bool
 	OpenRetry bool
 	Retry     *retryView
+	// NeedsConfirm: approving or retrying the job needs a token typed for
+	// it (Orchestrator.NeedsConfirm), after its gate (Gate).
+	NeedsConfirm bool
+	// PromoteRetry: "Ulangi dari tahap ini" of a planned promote not sent
+	// (spec 5.2 row 1): a confirmed button, after the gate's red rows and
+	// the backup tick when asked; PromoteRetryText is its dialog's text.
+	PromoteRetry     bool
+	PromoteRetryText string
 	// TypeDatabases: the databases an add_databases waiting for
 	// WaitAddExisting drops once approved; the approve dialog asks for
 	// each name typed (confirm_db[]), which the orchestrator compares.
@@ -172,7 +180,8 @@ type jobPage struct {
 	// approve form.
 	ApproveConns *retryView
 	// Gate: the red rows of the precondition gate a Setujui or Ulangi of a
-	// data-dropping job judges (JobGateInput); nil for a job without one.
+	// job that needs a confirmation judges (JobGateInput); nil for a job
+	// without one.
 	// While it is Off, both are disabled (the handler refuses them anyway).
 	Gate *gateView
 }
@@ -383,12 +392,23 @@ func (a *app) renderJobFlash(w http.ResponseWriter, r *http.Request, status int,
 			a.Logger.Warn("drops data check", "job", job.ID, "err", logErr(err))
 		}
 		p.DropsData = drops || err != nil
+		need, err := a.Orchestrator.NeedsConfirm(job.ID)
+		if err != nil {
+			a.Logger.Warn("needs confirm check", "job", job.ID, "err", logErr(err))
+		}
+		p.NeedsConfirm = need || err != nil || p.DropsData
 	}
-	if (p.CanApprove || p.CanRetry) && p.DropsData {
+	if (p.CanApprove || p.CanRetry) && p.NeedsConfirm {
 		// The list G14 points at; the gate asks no agent.
 		if in, gated := orchestrator.JobGateInput(job); gated {
 			p.Gate = a.gateFor(in, true)
 		}
+	}
+	if p.CanRetry && p.NeedsConfirm && !p.DropsData && job.Kind == orchestrator.KindPromotePlanned {
+		pp := promoteParamsOf(job)
+		p.PromoteRetry = true
+		p.PromoteRetryText = fmt.Sprintf("Promote %s %s menjadi master baru menggantikan %s.", modeWord(proto.PromotePlanned),
+			a.serverName(pp.CandidateServerID), a.serverName(params.MasterServerID))
 	}
 	if p.CanApprove && p.DropsData && params.RebuildOldMaster && job.Kind == orchestrator.KindCreateReplica {
 		p.ApproveConns = &retryView{Server: srv, AcceptLabel: acceptLabel(a.connectionsOf(r.Context(), srv)), Form: "form-setujui"}
@@ -528,18 +548,26 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 	if !ok {
 		return
 	}
-	drops, err := a.Orchestrator.DropsData(job.ID)
+	need, err := a.Orchestrator.NeedsConfirm(job.ID)
 	if err != nil {
-		a.internalError(w, "drops data check", err)
+		a.internalError(w, "needs confirm check", err)
 		return
 	}
 	ack := orchestrator.JobAck{Approval: &orchestrator.ApprovalSeen{}}
-	if drops {
+	detail := retryAuditDetail(job, name, need)
+	if need {
 		// The precondition gate of what the job runs on, before the token
-		// (a promote job is never judged again).
+		// (a promote past the point of no return, or sent, is never judged
+		// again); a planned promote's also asks for the backup tick.
 		if in, gated := orchestrator.JobGateInput(job); gated {
-			if g := a.gateCheck(in, nil); g.status != 0 {
-				a.audit(r, name, auditJob, job.ServerID, map[string]any{"job_id": job.ID, "kind": job.Kind}, g.outcome)
+			var backupAck *bool
+			if in.Action == orchestrator.GatePromotePlanned {
+				ack.BackupAck = r.PostFormValue("backup_ack") == "1"
+				backupAck = &ack.BackupAck
+				detail["backup_ack"] = ack.BackupAck
+			}
+			if g := a.gateCheck(in, backupAck); g.status != 0 {
+				a.audit(r, name, auditJob, job.ServerID, detail, g.outcome)
 				a.renderJob(w, r, g.status, g.flash)
 				return
 			}
@@ -570,7 +598,51 @@ func (a *app) confirmedJobAction(w http.ResponseWriter, r *http.Request, name st
 			}
 		}
 	}
-	a.jobAction(w, r, job, name, ack.Approval, func(id string) error { return do(id, ack) })
+	a.jobActionDetail(w, r, job, name, ack.Approval, detail, func(id string) error { return do(id, ack) })
+}
+
+// retryAuditDetail is the audit detail of action name (Setujui or Ulangi)
+// of job: its id and kind; for Ulangi of a promote, the fields its start
+// recorded when it needs a confirmation (a planned promote not sent:
+// candidate, mode, the acceptances, backup_ack; spec 5.2), else that it
+// continues a promote past the point of no return or sent
+// (continuation).
+func retryAuditDetail(job store.Job, name string, need bool) map[string]any {
+	detail := map[string]any{"job_id": job.ID, "kind": job.Kind}
+	switch {
+	case name != ActJobRetry:
+	case job.Kind == orchestrator.KindPromotePlanned && need:
+		pp := promoteParamsOf(job)
+		detail["candidate"] = pp.CandidateServerID
+		detail["mode"] = proto.PromotePlanned
+		detail["accept_partial"] = pp.PartialCandidate
+		detail["accept_unreachable"] = pp.AcceptUnreachable
+		detail["accept_branched"] = pp.AcceptBranched
+		detail["backup_ack"] = false
+	case job.Kind == orchestrator.KindPromotePlanned || job.Kind == orchestrator.KindPromoteEmergency:
+		detail["continuation"] = true
+	}
+	return detail
+}
+
+// promoteJobParams are the fields of a promote job's params its retry's
+// audit and page read.
+type promoteJobParams struct {
+	CandidateServerID int64   `json:"candidate_server_id"`
+	PartialCandidate  bool    `json:"partial_candidate"`
+	AcceptUnreachable []int64 `json:"accept_unreachable"`
+	AcceptBranched    bool    `json:"accept_branched"`
+}
+
+// promoteParamsOf reads job's promote params; unreadable params read as
+// none.
+func promoteParamsOf(job store.Job) promoteJobParams {
+	var p promoteJobParams
+	_ = json.Unmarshal([]byte(job.ParamsJSON), &p)
+	if p.AcceptUnreachable == nil {
+		p.AcceptUnreachable = []int64{}
+	}
+	return p
 }
 
 // retryAckRefused checks the wipe_only[] of a retry against the job's wipe
@@ -679,8 +751,14 @@ func (a *app) prepareRetry(w http.ResponseWriter, r *http.Request) {
 // rebuild's retry or approval decided on (audited).
 func (a *app) jobAction(w http.ResponseWriter, r *http.Request, job store.Job, name string, seen *orchestrator.ApprovalSeen,
 	do func(jobID string) error) {
+	a.jobActionDetail(w, r, job, name, seen, map[string]any{"job_id": job.ID, "kind": job.Kind}, do)
+}
+
+// jobActionDetail is jobAction auditing detail (with the approval a
+// rebuild decided on added).
+func (a *app) jobActionDetail(w http.ResponseWriter, r *http.Request, job store.Job, name string, seen *orchestrator.ApprovalSeen,
+	detail map[string]any, do func(jobID string) error) {
 	err := do(job.ID)
-	detail := map[string]any{"job_id": job.ID, "kind": job.Kind}
 	if seen != nil && job.Kind == orchestrator.KindCreateReplica && paramsOf(job).RebuildOldMaster {
 		localApprovalDetail(seen, detail)
 	}
