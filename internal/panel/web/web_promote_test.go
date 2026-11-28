@@ -444,7 +444,7 @@ func TestPromoteWritableCandidateNotSelectable(t *testing.T) {
 	f.setView(v)
 	rec := e.do("GET", "/masters/1/promote", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Bisa ditulis (super_read_only mati)", "db-sebagian bisa ditulis")
+	wantBody(t, rec, "Bisa ditulis (super_read_only mati)", "Replika db-sebagian melaporkan bisa ditulis")
 	wantNoBody(t, rec, `name="candidate" value="3"`)
 
 	form := withToken(t, e, promoteForm("3", "planned", "accept_unreachable", "4", "accept_partial", "3",
@@ -1092,4 +1092,69 @@ func TestLockRefusalLinksJob(t *testing.T) {
 	rec := e.do("POST", "/masters/1/promote", withToken(t, e, form, web.ActPromote, "master", 1), e.cookie())
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, wantT12cStart, `<a class="link mono" href="/jobs/`+job+`">`+job+`</a>`+wantT12cEnd)
+}
+
+// TestPromoteScreenShowsWritableTextBeforeTyping (R-198): another replica
+// read writable (T24), not answering with a writable last report (T24b),
+// or, planned, not readable (T24c) blocks the screen on GET, before
+// anything is typed: the text is shown and no candidate or button is
+// offered.
+func TestPromoteScreenShowsWritableTextBeforeTyping(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(c *orchestrator.Candidate)
+		want string
+	}{
+		{"writable", func(c *orchestrator.Candidate) { c.Writable = true },
+			"Replika db-mati melaporkan bisa ditulis (super_read_only mati), jadi mungkin sudah menjadi master; promote ditolak, " +
+				"juga promote darurat. Bila db-mati memang bukan master (misalnya dibuka dengan tangan untuk perbaikan): kunci lagi " +
+				"di halaman replikanya, atau lepas dengan Lepas replika, lalu buka halaman ini lagi. Bila aplikasi sudah menulis ke " +
+				"db-mati: jangan promote; periksa server itu dulu."},
+		{"writable silent", func(c *orchestrator.Candidate) { c.WritableSilent = true },
+			"Replika db-mati terakhir melaporkan bisa ditulis dan sekarang tidak menjawab, jadi panel tidak bisa memastikannya; " +
+				"promote ditolak, juga promote darurat. Bila Anda yakin db-mati bukan master: lepas dengan Lepas replika, lalu " +
+				"buka halaman ini lagi."},
+		{"unreadable", func(c *orchestrator.Candidate) { c.Unread = true },
+			"Replika db-mati tidak bisa dibaca sekarang, jadi panel tidak bisa memastikan ia masih baca-saja; promote terencana " +
+				"ditolak. Sambungkan agent replika itu, atau lepas dengan Lepas replika, lalu buka halaman ini lagi."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, f, _ := promoteEnv(t)
+			v := plannedView()
+			tc.set(&v.Candidates[2])
+			f.setView(v)
+			rec := e.do("GET", "/masters/1/promote", nil, e.cookie())
+			wantCode(t, rec, http.StatusOK)
+			if got := between(rec.Body.String(), "data-promote-blocked>", "</div>\n</div>"); !strings.Contains(got, tc.want) {
+				t.Fatalf("blocked banner = %q, want %q", got, tc.want)
+			}
+			wantNoBody(t, rec, `name="candidate" value="2"`, `<button type="submit" class="btn btn-error`)
+
+			// The post is refused with the same text.
+			form := withToken(t, e, promoteForm("2", "planned", "accept_unreachable", "4"), web.ActPromote, "master", 1)
+			rec = e.do("POST", "/masters/1/promote", form, e.cookie())
+			wantCode(t, rec, http.StatusBadRequest)
+			wantBody(t, rec, tc.want)
+			if len(f.promoteList()) != 0 {
+				t.Fatal("promote started over another replica")
+			}
+		})
+	}
+}
+
+// TestEmergencyScreenNamesUnreadReplicas (T24d, NR-7): an emergency is
+// not held by replicas that could not be read and last reported read-only
+// or never reported; the screen names them and still offers the start.
+func TestEmergencyScreenNamesUnreadReplicas(t *testing.T) {
+	e, f, _ := promoteEnv(t)
+	v := emergencyView()
+	v.Candidates[1].Unread, v.Candidates[2].Unread = true, true
+	v.Unread = []string{"db-sebagian", "db-mati"}
+	f.setView(v)
+	rec := e.do("GET", "/masters/1/promote", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "Replika berikut tidak bisa dibaca sekarang; panel memakai laporan terakhirnya (baca-saja), atau tidak "+
+		"punya laporan sama sekali: db-sebagian, db-mati.", `<button type="submit" class="btn btn-error`)
+	wantNoBody(t, rec, "data-promote-blocked")
 }

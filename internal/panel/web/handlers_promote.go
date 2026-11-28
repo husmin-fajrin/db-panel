@@ -40,7 +40,6 @@ const (
 	msgPromoteReach      = "Setujui bahwa replika %s diarahkan ulang ke master baru saat tersambung lagi (centang kotaknya) untuk melanjutkan."
 	msgPromoteTypeMaster = "Ketik nama master lama %s untuk melanjutkan."
 	msgPromoteTypeRep    = "Ketik nama replika %s untuk melanjutkan."
-	msgPromoteWritable   = "Replika %s bisa ditulis (super_read_only mati) dan mungkin sudah menjadi master; promote ditolak. Periksa server itu dulu."
 	msgPromoteNone       = "Tidak ada replika yang bisa dipilih saat ini; lihat kolom alasan di tabel."
 	msgPromoteCutover    = "Promote sebelumnya masih menunggu pengalihan aplikasi; tekan \"Sudah saya alihkan\" setelah semua aplikasi memakai master baru."
 	msgPromoteUnfinished = "Promote sebelumnya di topologi ini belum tuntas; buka pekerjaannya dan tekan Ulangi."
@@ -51,6 +50,8 @@ const (
 	// the old master is dead or cut off from the applications.
 	msgOldMasterAck = `Centang "Saya sudah memastikan master lama mati atau terputus dari aplikasi" untuk melanjutkan promote darurat.`
 
+	// reasonWritable: a replica read writable, or not answering with a
+	// writable last report (T24, T24b name it in the blocker).
 	reasonWritable = "Bisa ditulis (super_read_only mati); mungkin sudah menjadi master"
 	// reasonAgentOffline is the orchestrator's reason for a replica whose
 	// agent is offline (an unreachable replica).
@@ -181,7 +182,7 @@ func rowBadges(row promoteRow) []Badge {
 	if row.Branched {
 		b = append(b, Badge{"error", "Bercabang"})
 	}
-	if row.Writable {
+	if row.Writable || row.WritableSilent {
 		b = append(b, Badge{"error", "Bisa ditulis"})
 	}
 	return b
@@ -407,10 +408,8 @@ func checkPromote(v orchestrator.PromoteView, choice promoteChoice) (orchestrato
 		return params, msgPromotePick
 	}
 	cand := v.Candidates[i]
-	for _, c := range v.Candidates {
-		if c.Writable {
-			return params, fmt.Sprintf(msgPromoteWritable, c.Name)
-		}
+	if err := v.OtherReplicaRefusal(); err != nil {
+		return params, err.Error() // T24, T24b, T24c
 	}
 	if !cand.Eligible {
 		return params, fmt.Sprintf(msgPromoteNotPick, cand.Name, cand.Reason)
@@ -537,7 +536,6 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		p.LastReport = v.LastReportAt.Local().Format("15:04:05")
 		p.LastReportAgo = agoWords(now.Sub(*v.LastReportAt))
 	}
-	writable := ""
 	for _, c := range v.Candidates {
 		row := promoteRow{Candidate: c, Lag: "-", Freshness: "belum ada laporan", Unreachable: unreachable(c),
 			MasterName: masterNameToType(v), ReplicaName: replicaNameToType(v, c), ConfirmText: confirmText(v, c)}
@@ -549,11 +547,8 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		}
 		row.Position, row.Backlog = positionText(v, c, p.LastReport), backlogText(c)
 		switch {
-		case c.Writable:
+		case c.Writable || c.WritableSilent:
 			row.NotSelectable = reasonWritable
-			if writable == "" {
-				writable = c.Name
-			}
 		case !c.Eligible:
 			row.NotSelectable = c.Reason
 		default:
@@ -608,6 +603,7 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 	}
 
 	// Why the promotion cannot start now, if it cannot.
+	other := v.OtherReplicaRefusal()
 	prev, err := a.Store.LatestPromotion(topo.ID)
 	switch {
 	case err != nil && !errors.Is(err, store.ErrNotFound):
@@ -617,8 +613,8 @@ func (a *app) newPromotePage(r *http.Request, srv store.Server, topo store.Topol
 		p.BlockedJob = prev.JobID
 	case err == nil && (prev.Status == "running" || prev.Status == "partial"):
 		p.Blocked, p.BlockedJob = msgPromoteUnfinished, prev.JobID
-	case writable != "":
-		p.Blocked = fmt.Sprintf(msgPromoteWritable, writable)
+	case other != nil:
+		p.Blocked = other.Error() // T24, T24b, T24c
 	case !slices.ContainsFunc(p.Rows, func(row promoteRow) bool { return row.Selectable }):
 		p.Blocked = msgPromoteNone
 	case !p.Emergency && a.plannedLockRefusal(&p):

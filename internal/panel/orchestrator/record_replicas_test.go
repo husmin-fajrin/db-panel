@@ -119,7 +119,8 @@ func TestRecordReplicasCalledAfterVerify(t *testing.T) {
 	})
 	t.Run("OnOnline", func(t *testing.T) {
 		g := newPromoteRig(t)
-		g.offline(g.d)
+		g.d.fail("mysql.probeSource", "tidak terjangkau")
+		g.offlineAtLock(g.d)
 		id, err := g.e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id,
 			AcceptUnreachable: []int64{g.d.id}})
 		if err != nil {

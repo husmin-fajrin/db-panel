@@ -51,9 +51,16 @@ type Candidate struct {
 	// one holds transactions no other eligible replica covers; choosing
 	// one of them needs PromoteParams.AcceptBranched.
 	Branched bool
-	// Writable: its last report shows super_read_only off; it may already
-	// be a master the panel does not know about, and StartPromote refuses.
-	Writable bool
+	// How the panel knows the replica is read-only (spec 5.7, R-198): from
+	// a live read (one mysql.status, PromoteView) or a live report.
+	// Writable: read now, or reported live, with super_read_only off; it
+	// may already be a master the panel does not know about (T24).
+	// WritableSilent: not readable now and its last report says writable
+	// (T24b). Unread: not readable now; its last report says read-only,
+	// or it has none (T24c on a planned promote, T24d on an emergency).
+	Writable       bool
+	WritableSilent bool
+	Unread         bool
 	// ProbeOK is whether the master answered the replica's probe of its
 	// pinned source (mysql.probeSource); nil when not asked (agent
 	// offline) or when the probe itself failed (ProbeErr).
@@ -82,6 +89,8 @@ type PromoteView struct {
 	// PendingOldMaster is the name of the topology's old master while its
 	// quarantine has not ended (pendingOldMaster); "" when there is none.
 	PendingOldMaster string
+	// Unread are the names of the Unread candidates, in row order (T24d).
+	Unread []string
 }
 
 // Reasons a replica cannot be chosen.
@@ -200,6 +209,8 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 	}
 	probes := make([]probe, len(reps))
 	var wg sync.WaitGroup
+	// The live reads of the replicas (R-198), alongside the probes.
+	reads := r.readReplicas(ctx, &wg, reps, v.Mode)
 	for i, rep := range reps {
 		if !r.d.Hub.IsOnline(rep.ServerID) {
 			continue
@@ -249,7 +260,6 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 			}
 			e, ok1 := parseGTIDSet(exec)
 			rs, ok2 := parseGTIDSet(retr)
-			c.Writable = !rv.Snap.SuperReadOnly
 			if ok1 && ok2 && exec != "" {
 				executed, held, setsOK = e, e.union(rs), true
 				c.ApplyBacklog = rs.minusCount(e, "")
@@ -260,6 +270,10 @@ func (r *Runner) PromoteView(ctx context.Context, masterServerID int64) (Promote
 					c.GapToLastReport = report.minusCount(held, "")
 				}
 			}
+		}
+		c.Writable, c.WritableSilent, c.Unread = reads[i].judge(rv)
+		if c.Unread {
+			v.Unread = append(v.Unread, c.Name)
 		}
 		if len(rep.Databases) > 0 {
 			c.Partial = true

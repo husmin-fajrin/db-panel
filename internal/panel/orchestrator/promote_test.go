@@ -193,6 +193,18 @@ func (g *promoteRig) offline(fa *fakeAgent) {
 	g.h.set(fa.id, monitor.View{Status: monitor.Status{Code: monitor.StatusAgentOffline}})
 }
 
+// offlineAtLock takes fa's agent away once the master is asked to lock: a
+// replica that answered the consideration data (a planned promote refuses
+// one it cannot read, T24c) and is gone by the time it is repointed.
+func (g *promoteRig) offlineAtLock(fa *fakeAgent) {
+	now := time.Now()
+	g.m.on("mysql.lockForPromote", func(json.RawMessage) (any, error) {
+		g.offline(fa)
+		return proto.LockForPromoteResult{LockedAt: now, Deadline: now.Add(30 * time.Minute), ServerUUID: masterUUID,
+			GTIDExecuted: masterGTID}, nil
+	})
+}
+
 func (g *promoteRig) promotion() store.Promotion {
 	g.e.t.Helper()
 	p, err := g.e.st.LatestPromotion(g.topo.ID)
@@ -210,7 +222,10 @@ func plannedSteps() []string {
 func TestPromotePlannedStepsAndCommands(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
-	g.offline(g.d)
+	// d is read-only but does not answer its probe of the master, and its
+	// agent is gone by the time the replicas are repointed.
+	g.d.fail("mysql.probeSource", "tidak terjangkau")
+	g.offlineAtLock(g.d)
 	ctx := context.Background()
 
 	// d is unreachable: refused until the user accepts it.
@@ -623,9 +638,13 @@ func TestPromoteViewMarksPartialAndMostCurrent(t *testing.T) {
 		b.GapToMaster != 1 || b.ApplyBacklog != 1 {
 		t.Fatalf("candidate b = %+v", b)
 	}
-	if d.Eligible || d.Reason != "Agent offline" || d.ProbeOK != nil {
+	if d.Eligible || d.Reason != "Agent offline" || d.ProbeOK != nil || !d.Unread {
 		t.Fatalf("candidate d = %+v", d)
 	}
+	// A planned promote reads every replica (T24c): d's agent back, its
+	// report read-only.
+	g.d.attach()
+	g.h.set(g.d.id, replicaView(masterGTID, masterGTID))
 
 	// A partial candidate needs AcceptPartial; an outdated agent is refused.
 	if _, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.b.id,
@@ -707,8 +726,9 @@ func TestPromoteRefusesWritableReplica(t *testing.T) {
 	v := replicaView(masterGTID, masterGTID)
 	v.Snap.SuperReadOnly = false
 	g.h.set(g.b.id, v)
+	g.b.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Port: 3306, GTIDExecuted: masterGTID})
 	if _, err := g.e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id}); err == nil ||
-		!strings.Contains(err.Error(), "rep-b bisa ditulis") {
+		!strings.Contains(err.Error(), "Replika rep-b melaporkan bisa ditulis") {
 		t.Fatalf("StartPromote with a writable replica: %v", err)
 	}
 }
@@ -1726,8 +1746,9 @@ func TestEmergencyPromoteIgnoresWritableOldMaster(t *testing.T) {
 	v := replicaView(masterGTID, masterGTID)
 	v.Snap.SuperReadOnly = false
 	g2.h.set(g2.b.id, v)
+	g2.b.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Port: 3306, GTIDExecuted: masterGTID})
 	_, err = g2.e.r.StartPromote(ctx, PromoteParams{MasterServerID: g2.m.id, CandidateServerID: g2.c.id, Mode: proto.PromotePlanned})
-	if want := "replika rep-b bisa ditulis (super_read_only mati) dan mungkin sudah menjadi master"; err == nil ||
+	if want := "Replika rep-b melaporkan bisa ditulis (super_read_only mati), jadi mungkin sudah menjadi master"; err == nil ||
 		!strings.Contains(err.Error(), want) {
 		t.Fatalf("planned promote with a writable replica = %v, want %q", err, want)
 	}
@@ -1904,7 +1925,7 @@ func TestEmergencyPromoteNeedsDeadMasterTick(t *testing.T) {
 			t.Fatalf("mode %q without the tick = %v, want ErrOldMasterAck", mode, err)
 		}
 		noPromotionStarted(t, g)
-		onlyCmds(t, marks, "mysql.probeSource")
+		onlyCmds(t, marks, "mysql.probeSource", "mysql.status") // the consideration data's probes and live reads
 	}
 	id, err := e.r.StartPromote(ctx, PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id,
 		Mode: proto.PromoteEmergency, AcceptUnreachable: []int64{g.d.id}, OldMasterDeadAck: true})

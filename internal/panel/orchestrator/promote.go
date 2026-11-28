@@ -156,9 +156,10 @@ var ErrOldMasterAck = errors.New("centang master lama mati belum diisi")
 // master's status does not permit, an emergency without OldMasterDeadAck
 // (ErrOldMasterAck), an outdated agent (SEC-62), a topology with an
 // unfinished job or a cutover still pending, an emergency while an earlier
-// planned promote's lock is within its Until (SEC-66), and a planned one
+// planned promote's lock is within its Until (SEC-66), a planned one
 // while such a lock record stands or the master reads Terkunci (T12c,
-// T12d).
+// T12d), and another replica read writable or not readable (R-198: T24,
+// T24b, T24c); promoteRefusals holds those refusals, the gate follows.
 func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, error) {
 	if p.MasterServerID == p.CandidateServerID {
 		return "", errors.New("kandidat tidak boleh master itu sendiri")
@@ -194,115 +195,9 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	if err != nil {
 		return "", err
 	}
-	if topo.CutoverPending {
-		return "", errCutoverStillPending
-	}
-	if err := r.refuseUnlockInFlight(topo.MasterServerID); err != nil {
-		return "", err
-	}
-	mode := view.Mode
-	switch p.Mode {
-	case "", mode:
-	case proto.PromotePlanned:
-		return "", errors.New("promote terencana butuh agent master tersambung dan MySQL master hidup; status master sekarang hanya mengizinkan promote darurat")
-	case proto.PromoteEmergency:
-		return "", errors.New("master masih sehat; jalankan promote terencana")
-	default:
-		return "", fmt.Errorf("mode promote tidak dikenal: %q", p.Mode)
-	}
-	// An emergency while the old master still takes writes makes two
-	// masters: the user ticks that it is dead or cut off (D5).
-	if mode == proto.PromoteEmergency && !p.OldMasterDeadAck {
-		return "", ErrOldMasterAck
-	}
-	// An emergency is never held back by it: the master is gone.
-	if mode == proto.PromotePlanned {
-		if err := r.refuseOldMasterPending(topo); err != nil {
-			return "", err
-		}
-	}
-	rep, err := r.d.Store.GetReplicaByServer(p.CandidateServerID)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && rep.TopologyID != topo.ID) {
-		return "", errors.New("kandidat bukan replika master ini")
-	}
+	cand, mode, err := r.promoteRefusals(p, view, topo)
 	if err != nil {
 		return "", err
-	}
-	i := slices.IndexFunc(view.Candidates, func(c Candidate) bool { return c.ServerID == p.CandidateServerID })
-	if i < 0 {
-		return "", errors.New("kandidat bukan replika master ini")
-	}
-	cand := view.Candidates[i]
-	if view.Branched && !p.AcceptBranched {
-		return "", errors.New("replika bercabang: masing-masing punya transaksi yang tidak dimiliki yang lain, " +
-			"sehingga tidak ada replika yang memuat semuanya. Pilih satu dan setujui bahwa replika lain yang bercabang " +
-			"dibangun ulang dari master baru")
-	}
-	// A replica that already takes writes may be a master the panel does
-	// not know about (an earlier promotion whose outcome was lost).
-	for _, c := range view.Candidates {
-		if c.Writable {
-			return "", fmt.Errorf("replika %s bisa ditulis (super_read_only mati) dan mungkin sudah menjadi master; "+
-				"promote ditolak. Periksa server itu dulu", c.Name)
-		}
-	}
-	if prev, err := r.d.Store.LatestPromotion(topo.ID); err == nil && (prev.Status == promotionRunning || prev.Status == promotionPartial) {
-		return "", errors.New("promote sebelumnya di topologi ini belum tuntas; buka pekerjaannya dan tekan Ulangi")
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return "", err
-	}
-	if mode == proto.PromoteEmergency {
-		if err := r.refuseWhileLockMayStand(p.MasterServerID, verbEmergency); err != nil {
-			return "", err
-		}
-	} else if err := r.refusePlannedWhileLockStands(p.MasterServerID); err != nil {
-		return "", err
-	}
-	if !cand.Eligible {
-		return "", fmt.Errorf("%s tidak bisa dipromosikan: %s", cand.Name, cand.Reason)
-	}
-	// SEC-62: on a planned promotion the master's agent takes part too.
-	if mode == proto.PromotePlanned && r.agentOutdated(view.Master) {
-		return "", fmt.Errorf("agent master %s: Agent perlu dimutakhirkan", view.Master.Name)
-	}
-	if cand.Partial && !p.AcceptPartial {
-		missing := "sebagian database"
-		if len(cand.MissingDatabases) > 0 {
-			missing = strings.Join(nameList(cand.MissingDatabases), ", ")
-		}
-		return "", fmt.Errorf("%s hanya mereplikasi sebagian database; %s tidak akan ada di master baru. "+
-			"Setujui itu dulu untuk melanjutkan", cand.Name, missing)
-	}
-	var unreachable []string
-	for _, c := range view.Candidates {
-		if c.ServerID != cand.ServerID && candidateUnreachable(c) && !slices.Contains(p.AcceptUnreachable, c.ServerID) {
-			unreachable = append(unreachable, c.Name)
-		}
-	}
-	if len(unreachable) > 0 {
-		return "", fmt.Errorf("replika berikut tidak terjangkau: %s. Setujui bahwa replika itu diarahkan ulang ke master baru "+
-			"saat tersambung lagi untuk melanjutkan", strings.Join(unreachable, ", "))
-	}
-	if _, busy, err := r.d.Store.ActiveJobForTopology(topo.ID); err != nil {
-		return "", err
-	} else if busy {
-		return "", fmt.Errorf("topologi ini %w", ErrBusy)
-	}
-	if err := r.refuseBusy(p.MasterServerID, "master"); err != nil {
-		return "", err
-	}
-	reps, err := r.d.Store.ListReplicas(topo.ID)
-	if err != nil {
-		return "", err
-	}
-	for _, x := range reps {
-		who := "replika "
-		if srv, err := r.d.Store.GetServer(x.ServerID); err == nil && srv.Role == store.RoleQuarantined {
-			who = "master lama " // an old master's row (its rebuild), no replica (promoteReplicas)
-		}
-		if err := r.refuseBusy(x.ServerID, who+r.nameOf(x.ServerID)); err != nil {
-			return "", err
-		}
 	}
 	// The precondition gate (spec 5.7), last before the first write; an
 	// emergency is never refused by a row.
@@ -324,7 +219,7 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	}
 	st := jobState{MasterServerID: p.MasterServerID, CandidateServerID: p.CandidateServerID, PromotionID: promID,
 		PartialCandidate: cand.Partial, OldSourceHost: topo.SourceHost, OldSourcePort: topo.SourcePort,
-		LastMasterGTID: view.LastMasterGTID}
+		LastMasterGTID: view.LastMasterGTID, AcceptUnreachable: p.AcceptUnreachable, AcceptBranched: p.AcceptBranched}
 	kind, names := KindPromotePlanned, promotePlannedStepNames()
 	if mode == proto.PromoteEmergency {
 		kind, names = KindPromoteEmergency, promoteEmergencyStepNames()

@@ -173,6 +173,9 @@ type Runner struct {
 	// unlockTimeout bounds mysql.unlockPromote (callTimeout); tests
 	// shorten it.
 	unlockTimeout time.Duration
+	// otherReadTimeout bounds PromoteView's live read of each other
+	// replica (otherReplicaReadTimeout); tests shorten it.
+	otherReadTimeout time.Duration
 	// afterUnlockAnswer, when set (tests), runs in UnlockPromoteLock
 	// between the agent's answer and the repeated checks.
 	afterUnlockAnswer func(jobID string)
@@ -227,7 +230,7 @@ func New(d Deps) *Runner {
 		d: d, log: d.Logger, now: d.Now,
 		offlineGrace: defaultOfflineGrace, pollEvery: defaultPollEvery, catchUpMax: defaultCatchUpMax,
 		promoteCatchUp: defaultPromoteCatchUp, verifyIOWait: defaultVerifyIOWait, unlockTimeout: callTimeout,
-		base: base, stop: stop, live: make(map[string]*liveJob), unlocking: make(map[int64]bool),
+		otherReadTimeout: otherReplicaReadTimeout, base: base, stop: stop, live: make(map[string]*liveJob), unlocking: make(map[int64]bool),
 	}
 }
 
@@ -1647,11 +1650,15 @@ type jobState struct {
 
 	// promote_planned and promote_emergency (promote.go); MasterServerID
 	// is the old master.
-	PromotionID       int64  `json:"promotion_id,omitempty"`
-	CandidateServerID int64  `json:"candidate_server_id,omitempty"`
-	PartialCandidate  bool   `json:"partial_candidate,omitempty"`
-	OldSourceHost     string `json:"old_source_host,omitempty"` // the old master as its replicas reach it
-	OldSourcePort     int    `json:"old_source_port,omitempty"`
+	PromotionID       int64 `json:"promotion_id,omitempty"`
+	CandidateServerID int64 `json:"candidate_server_id,omitempty"`
+	PartialCandidate  bool  `json:"partial_candidate,omitempty"`
+	// AcceptUnreachable and AcceptBranched: what the start accepted
+	// (PromoteParams), recorded for a later Ulangi.
+	AcceptUnreachable []int64 `json:"accept_unreachable,omitempty"`
+	AcceptBranched    bool    `json:"accept_branched,omitempty"`
+	OldSourceHost     string  `json:"old_source_host,omitempty"` // the old master as its replicas reach it
+	OldSourcePort     int     `json:"old_source_port,omitempty"`
 	// Learned: the candidate's MySQL port, the master's promote lock (its
 	// deadline; nil until locked), its last gtid_executed.
 	CandidatePort  int        `json:"candidate_port,omitempty"`

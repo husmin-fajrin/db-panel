@@ -76,6 +76,7 @@
 <div role="alert" class="banner banner-warning" data-split-network>{{template "banner-icon" "warning"}}
   <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
   {{with .ProbeSilent}}<p>Master tidak menjawab dari replika {{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}.</p>{{end}}
+  {{with .View.UnreadNote}}<p data-unread-replicas>{{.}}</p>{{end}}
   {{range .ProbeAnswered}}
   <p><strong>Master menjawab dari replika {{.}}; masalahnya mungkin di jaringan panel atau agent master, bukan MySQL-nya. Promote darurat akan ditolak agent.</strong> Pulihkan agent master (<code>systemctl restart dbpanel-agent</code> di server master) lalu jalankan promote terencana. Master yang masih menjawab, terkunci atau tidak, bukan keadaan darurat: agent replika menolak promote darurat selama MySQL master menjawab. Bila master terkunci dan harus dipakai lagi, buka kuncinya di server master dengan <code>sudo dbpanel agent unlock-master</code>.</p>
   {{end}}
