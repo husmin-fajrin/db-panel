@@ -173,8 +173,8 @@ func DeriveReplica(in ReplicaInput, th Thresholds) Status {
 
 	// Only a replica that is judged (ready/attention, agent up and current,
 	// MySQL answering) carries these; a replica being created or resynced
-	// has no lock to lose yet.
-	st.LockLost = !snap.SuperReadOnly
+	// has no lock to lose yet. The lock holds only while both flags are ON.
+	st.LockLost = !NoWrites(snap.ReadOnly, snap.SuperReadOnly)
 	rs := snap.Replica
 	if rs == nil {
 		// MySQL answered, but no replication source is configured.
@@ -278,6 +278,14 @@ func DeriveMaster(in MasterInput, th Thresholds) Status {
 	}
 	return set(StatusHealthy, "Master menjawab dan bisa ditulisi")
 }
+
+// NoWrites reports whether MySQL refuses writes from every account: both
+// read_only and super_read_only ON. Anything else may take writes from
+// someone: read_only ON alone lets accounts with SUPER or CONNECTION_ADMIN
+// write, and read_only OFF with super_read_only ON (left by a restart)
+// takes writes from every account. It is the panel's one meaning of "this
+// server cannot take writes".
+func NoWrites(readOnly, superReadOnly bool) bool { return readOnly && superReadOnly }
 
 // offlineNote tells, on a status the store's state decides, that the
 // agent is away (why a repoint has not happened yet); "" when it is not.

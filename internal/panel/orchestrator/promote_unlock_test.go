@@ -762,3 +762,29 @@ func TestUnlockInFlightRefusesStartInsidePromoteView(t *testing.T) {
 		t.Fatalf("UnlockPromoteLock: %v", err)
 	}
 }
+
+// TestUnlockTailFlagCombinations: after the agent's refusal, a candidate
+// whose read_only is OFF (with either super_read_only) gets T11c, one
+// whose read_only is ON gets T11.
+func TestUnlockTailFlagCombinations(t *testing.T) {
+	const words = "kunci tidak dibuka"
+	quoted := "Pesan dari agent db-master (bukan dari panel): " + words
+	for _, c := range flagCombos {
+		t.Run(c.name, func(t *testing.T) {
+			code, want := UnlockRefused, fmt.Sprintf(wantT11, quoted)
+			if !c.readOnly {
+				code, want = UnlockCandidateWritable, fmt.Sprintf(wantT11c, quoted)
+			}
+			g := newPromoteRig(t)
+			id, _ := g.plantStanding(time.Now().Add(-time.Minute))
+			g.m.fail("mysql.unlockPromote", words)
+			g.c.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Port: 3306, GTIDExecuted: masterGTID,
+				ReadOnly: c.readOnly, SuperReadOnly: c.superReadOnly, TLSAvailable: true})
+			_, err := g.e.r.UnlockPromoteLock(context.Background(), id)
+			wantUnlockRefused(t, err, code, want)
+			if !g.hasRecord(id) {
+				t.Fatal("a refused unlock removed the record")
+			}
+		})
+	}
+}

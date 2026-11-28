@@ -546,3 +546,72 @@ func TestPromoteFailedSaveFailureKeepsLock(t *testing.T) {
 		t.Fatalf("mysql.unlockPromote sent %d times after the Ulangi, want 1", n)
 	}
 }
+
+// TestSentVerdictFlagCombinations: read_only OFF on the candidate, with
+// either super_read_only, is writable whatever the evidence says;
+// read_only ON with super_read_only OFF is unreadable; only both ON reach
+// the evidence (the field, the bound). The mix on the candidate, the field
+// saying no request or the panel inside or outside the bound, is never
+// over, and the old master's lock is not lifted.
+func TestSentVerdictFlagCombinations(t *testing.T) {
+	evidence := []struct {
+		name    string
+		request *bool         // the field: nil, an agent of 0.2.0
+		at      time.Duration // the panel's clock after the send
+		bothOn  sentVerdict   // the verdict when both flags are ON
+	}{
+		{"field none", new(false), time.Minute, sentOver},
+		{"inside bound", nil, promoteUnansweredBound - time.Minute, sentRunning},
+		{"outside bound", nil, promoteUnansweredBound, sentOver},
+	}
+	for _, c := range flagCombos {
+		for _, ev := range evidence {
+			want := ev.bothOn
+			switch {
+			case !c.readOnly:
+				want = sentWritable
+			case !c.superReadOnly:
+				want = sentUnreadable
+			}
+			t.Run(c.name+"/"+ev.name, func(t *testing.T) {
+				g := newPromoteRig(t)
+				e := g.e
+				id, sent, release := g.sentUnanswered(t, false)
+				g.c.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Port: 3306, GTIDExecuted: masterGTID,
+					ReadOnly: c.readOnly, SuperReadOnly: c.superReadOnly, TLSAvailable: true, PromoteRequest: ev.request})
+				e.r.now = func() time.Time { return sent.Add(ev.at) }
+				j, _, _ := e.st.GetJob(id)
+				if v, _ := e.r.promoteSentVerdict(context.Background(), j, e.storedState(id)); v != want {
+					t.Fatalf("verdict = %v, want %v", v, want)
+				}
+				if c.name != "mix" {
+					return
+				}
+				// Ulangi goes on with the promote: nothing failed, the
+				// old master not unlocked.
+				close(release)
+				e.waitFor("agent job ended", func() bool {
+					s, ok := g.c.jobs.Status(g.c.lastJob())
+					return ok && s.State != "running"
+				})
+				g.c.job("mysql.promote", func(*jobs.Job, json.RawMessage) (any, error) {
+					return proto.PromoteResult{GTIDExecuted: masterGTID, ServerUUID: targetUUID, Resumed: true, Mode: proto.PromotePlanned}, nil
+				})
+				unlocks := g.m.count("mysql.unlockPromote")
+				if err := e.r.Retry(id, JobAck{}); err != nil {
+					t.Fatalf("Retry: %v", err)
+				}
+				if st := e.storedState(id); !st.PastPoint {
+					t.Fatalf("job state = %+v, want past the point", st)
+				}
+				e.waitIdle(id)
+				if j, _, _ := e.st.GetJob(id); j.Status == store.JobFailed {
+					t.Fatalf("job failed: %s", j.Error)
+				}
+				if n := g.m.count("mysql.unlockPromote") - unlocks; n != 0 {
+					t.Fatalf("mysql.unlockPromote sent %d times", n)
+				}
+			})
+		}
+	}
+}

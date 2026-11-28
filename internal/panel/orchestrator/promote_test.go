@@ -135,7 +135,7 @@ func healthyView(code, gtid string, replica *proto.ReplicaStatus) monitor.View {
 func replicaView(executed, retrieved string) monitor.View {
 	lag := int64(0)
 	return monitor.View{Role: store.RoleReplica, Status: monitor.Status{Code: monitor.StatusSynced, LagSec: &lag}, ReceivedAt: time.Now(),
-		Snap: &proto.HealthSnapshot{MySQLOK: true, GTIDExecuted: executed, SuperReadOnly: true,
+		Snap: &proto.HealthSnapshot{MySQLOK: true, GTIDExecuted: executed, ReadOnly: true, SuperReadOnly: true,
 			Replica: &proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes", ExecutedGTID: executed, RetrievedGTID: retrieved}}}
 }
 

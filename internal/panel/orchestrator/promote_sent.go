@@ -96,14 +96,15 @@ const sentStatusRead = 10 * time.Second
 type sentVerdict int
 
 const (
-	// sentWritable: the candidate opened writes, past the point of no
-	// return.
+	// sentWritable: the candidate opened writes (read_only OFF), past the
+	// point of no return.
 	sentWritable sentVerdict = iota + 1
-	// sentOver: read-only, and its agent job is proven ended.
+	// sentOver: both flags ON, and its agent job is proven ended.
 	sentOver
-	// sentUnreadable: the candidate could not be read.
+	// sentUnreadable: the candidate could not be read, or read read_only
+	// ON with super_read_only OFF.
 	sentUnreadable
-	// sentRunning: read-only, and its agent job may still run.
+	// sentRunning: both flags ON, and its agent job may still run.
 	sentRunning
 )
 
@@ -141,8 +142,10 @@ func promoteUnanswered(st jobState) bool {
 // promoteSentVerdict reads the candidate of j (state st, mysql.promote
 // sent, not past the point of no return) and says what its evidence is
 // (spec 5.2 row 5); the time is when B passes since the send (T14b).
-// mysql.status within sentStatusRead: unreadable; writable; read-only
-// with PromoteRequest true running (it beats every other evidence),
+// mysql.status within sentStatusRead: unreadable; writable when read_only
+// is OFF (appsWrite), whatever super_read_only says; unreadable when
+// read_only is ON and super_read_only OFF; only both ON (noWrites) reach
+// the evidence: PromoteRequest true running (it beats every other evidence),
 // false over; without the field (an agent of 0.2.0): a held job id is
 // over when job.status says it ended or the agent no longer knows it
 // (CodeBadParams), running otherwise; an unanswered start is over only
@@ -159,8 +162,12 @@ func (r *Runner) promoteSentVerdict(ctx context.Context, j store.Job, st jobStat
 	switch {
 	case err != nil:
 		return sentUnreadable, over
-	case !cs.ReadOnly && !cs.SuperReadOnly:
+	case appsWrite(cs.ReadOnly):
 		return sentWritable, over
+	case !noWrites(cs.ReadOnly, cs.SuperReadOnly):
+		// read_only ON, super_read_only OFF: not the state the evidence
+		// below was written for; never over.
+		return sentUnreadable, over
 	case cs.PromoteRequest != nil:
 		if *cs.PromoteRequest {
 			return sentRunning, over

@@ -66,24 +66,25 @@ func (v PromoteView) UnreadNote() string {
 
 // replicaRead is how PromoteView learned whether a replica is read-only.
 type replicaRead struct {
-	// known: it answered (or, planned, its live report said read-only);
-	// superReadOnly is the answer.
-	known, superReadOnly bool
+	// known: it answered (or, planned, its live report said both flags
+	// ON); readOnly and superReadOnly are the answer.
+	known, readOnly, superReadOnly bool
 }
 
 // readReplicas starts the live reads of reps for a promote in mode (spec
 // 5.7, R-198), each one mysql.status bounded by otherReadTimeout, all at
 // once on wg; the slot of each is filled once wg is done. Planned: every
-// replica whose report is not live, is missing, or says writable is read;
-// one with a live read-only report is not read again (its report stands
-// as the answer). Emergency: every replica whose agent is connected is
-// read. Only the answer's typed super_read_only is used.
+// replica whose report is not live, is missing, or does not say both
+// flags ON is read; one with a live report of both ON is not read again
+// (its report stands as the answer). Emergency: every replica whose agent
+// is connected is read. Only the answer's typed read_only and
+// super_read_only are used.
 func (r *Runner) readReplicas(ctx context.Context, wg *sync.WaitGroup, reps []store.Replica, mode string) []replicaRead {
 	reads := make([]replicaRead, len(reps))
 	for i, rep := range reps {
 		if mode == proto.PromotePlanned {
-			if rv, live := r.liveView(rep.ServerID); live && reportReadOnly(rv) {
-				reads[i] = replicaRead{known: true, superReadOnly: true}
+			if rv, live := r.liveView(rep.ServerID); live && reportNoWrites(rv) {
+				reads[i] = replicaRead{known: true, readOnly: true, superReadOnly: true}
 				continue
 			}
 		}
@@ -100,33 +101,34 @@ func (r *Runner) readReplicas(ctx context.Context, wg *sync.WaitGroup, reps []st
 				r.log.Debug("replica read for promote", "server_id", rep.ServerID, "err", logErr(err))
 				return
 			}
-			reads[i].known, reads[i].superReadOnly = true, st.SuperReadOnly
+			reads[i] = replicaRead{known: true, readOnly: st.ReadOnly, superReadOnly: st.SuperReadOnly}
 		}()
 	}
 	return reads
 }
 
 // judge is what the read says of a replica whose last report is rv:
-// writable when it answered super_read_only off; when it could not be
-// read, writableSilent if its last report says writable, else unread.
+// writable when it answered anything but both flags ON (noWrites); when
+// it could not be read, writableSilent if its last report may take
+// writes, else unread.
 func (rd replicaRead) judge(rv monitor.View) (writable, writableSilent, unread bool) {
 	switch {
 	case rd.known:
-		return !rd.superReadOnly, false, false
-	case reportWritable(rv):
+		return !noWrites(rd.readOnly, rd.superReadOnly), false, false
+	case reportMayWrite(rv):
 		return false, true, false
 	}
 	return false, false, true
 }
 
-// reportReadOnly and reportWritable: what the report says of
-// super_read_only; neither when it has no answer of MySQL.
-func reportReadOnly(rv monitor.View) bool {
-	return rv.Snap != nil && rv.Snap.MySQLOK && rv.Snap.SuperReadOnly
+// reportNoWrites and reportMayWrite: whether the report says both flags
+// ON (noWrites) or anything else; neither when it has no answer of MySQL.
+func reportNoWrites(rv monitor.View) bool {
+	return rv.Snap != nil && rv.Snap.MySQLOK && noWrites(rv.Snap.ReadOnly, rv.Snap.SuperReadOnly)
 }
 
-func reportWritable(rv monitor.View) bool {
-	return rv.Snap != nil && rv.Snap.MySQLOK && !rv.Snap.SuperReadOnly
+func reportMayWrite(rv monitor.View) bool {
+	return rv.Snap != nil && rv.Snap.MySQLOK && !noWrites(rv.Snap.ReadOnly, rv.Snap.SuperReadOnly)
 }
 
 // OtherReplicaRefusal is the refusal a promote of this view meets over a

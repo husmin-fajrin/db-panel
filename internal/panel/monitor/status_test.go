@@ -31,6 +31,7 @@ func healthyReplica() ReplicaInput {
 		Now:         now,
 		Snap: &proto.HealthSnapshot{
 			MySQLOK:       true,
+			ReadOnly:      true,
 			SuperReadOnly: true,
 			Replica: &proto.ReplicaStatus{
 				IORunning: "Yes", SQLRunning: "Yes", SecondsBehind: i64(0),

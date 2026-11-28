@@ -3768,3 +3768,37 @@ func TestLockKeptAlertNamesUnlockLock(t *testing.T) {
 		t.Fatalf("kept notice = %q\nwant %q", msg, want)
 	}
 }
+
+// TestReplicaLockLostFlagCombinations: a judged replica's lock is lost,
+// and replica_unlocked open, unless both MySQL flags are ON; the mix a
+// restart leaves (read_only OFF, super_read_only ON) takes writes.
+func TestReplicaLockLostFlagCombinations(t *testing.T) {
+	for _, c := range []struct {
+		name                    string
+		readOnly, superReadOnly bool
+	}{
+		{"both off", false, false},
+		{"mix", false, true},
+		{"read_only only", true, false},
+		{"both on", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			want := !(c.readOnly && c.superReadOnly)
+			in := healthyReplica()
+			in.Snap.ReadOnly, in.Snap.SuperReadOnly = c.readOnly, c.superReadOnly
+			if got := DeriveReplica(in, th); got.LockLost != want || got.Code != StatusSynced {
+				t.Fatalf("LockLost = %v code %q, want %v Sinkron", got.LockLost, got.Code, want)
+			}
+			r := newRig(t)
+			_, topo := r.master("db-master")
+			rID := r.replica("db-replica", topo)
+			ra := r.agent(rID, true, replicaSnap(srcUUID+":1-100")).attach()
+			r.clk.Add(10 * time.Second)
+			ra.setSnap(func(s *proto.HealthSnapshot) { s.ReadOnly, s.SuperReadOnly = c.readOnly, c.superReadOnly })
+			ra.send()
+			if got := r.isOpen(rID, KindReplicaUnlocked); got != want {
+				t.Fatalf("replica_unlocked open = %v, want %v", got, want)
+			}
+		})
+	}
+}

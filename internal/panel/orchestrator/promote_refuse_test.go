@@ -365,3 +365,89 @@ func TestPromoteViewReportArrival(t *testing.T) {
 		t.Fatalf("view without an arrival = %v, %v; want nil", pv.LastReportArrivedAt, err)
 	}
 }
+
+// flagCombos are the four read_only/super_read_only combinations; mix is
+// the one only a restart leaves (read_only OFF, super_read_only ON), which
+// takes writes from every account.
+var flagCombos = []struct {
+	name                    string
+	readOnly, superReadOnly bool
+}{
+	{"both off", false, false},
+	{"mix", false, true},
+	{"read_only only", true, false},
+	{"both on", true, true},
+}
+
+// TestJudgeFlagCombinations: another replica counts as read-only only
+// with both flags ON. In every other combination it is writable: a live
+// read refuses with T24 in both modes, a planned promote reads again a
+// live report that is not both ON, and one that cannot be read whose last
+// report is not both ON refuses an emergency with T24b.
+func TestJudgeFlagCombinations(t *testing.T) {
+	for _, c := range flagCombos {
+		want := !(c.readOnly && c.superReadOnly) // writable
+		t.Run(c.name, func(t *testing.T) {
+			for _, mode := range []string{proto.PromotePlanned, proto.PromoteEmergency} {
+				t.Run("live "+mode, func(t *testing.T) {
+					g := newPromoteRig(t)
+					if mode == proto.PromoteEmergency {
+						g = emergencyRigFrom(g)
+					}
+					v := replicaView(masterGTID, masterGTID)
+					v.Snap.ReadOnly, v.Snap.SuperReadOnly = c.readOnly, c.superReadOnly
+					g.h.set(g.b.id, v) // live
+					g.b.reply("mysql.status", proto.MySQLStatus{Version: "8.4.3", Port: 3306, GTIDExecuted: masterGTID,
+						ReadOnly: c.readOnly, SuperReadOnly: c.superReadOnly, TLSAvailable: true})
+					mark := g.b.mark()
+					view, err := g.e.r.PromoteView(context.Background(), g.m.id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					i := slices.IndexFunc(view.Candidates, func(c Candidate) bool { return c.ServerID == g.b.id })
+					if i < 0 {
+						t.Fatal("rep-b not in the view")
+					}
+					if cb := view.Candidates[i]; cb.Writable != want || cb.WritableSilent || cb.Unread {
+						t.Fatalf("rep-b writable=%v silent=%v unread=%v, want writable=%v", cb.Writable, cb.WritableSilent, cb.Unread, want)
+					}
+					read := slices.Contains(g.b.cmds(mark), "mysql.status")
+					if wantRead := mode == proto.PromoteEmergency || want; read != wantRead {
+						t.Fatalf("rep-b read live = %v, want %v", read, wantRead)
+					}
+					err = view.OtherReplicaRefusal()
+					var we *PromoteWritableError
+					switch {
+					case want && (!errors.As(err, &we) || we.Code != "writable" || we.Name != "rep-b"):
+						t.Fatalf("OtherReplicaRefusal = %v, want T24 for rep-b", err)
+					case !want && err != nil:
+						t.Fatalf("OtherReplicaRefusal = %v, want none", err)
+					}
+				})
+			}
+			t.Run("unread emergency", func(t *testing.T) {
+				g := emergencyRigFrom(newPromoteRig(t))
+				v := replicaView(masterGTID, masterGTID)
+				v.Snap.ReadOnly, v.Snap.SuperReadOnly = c.readOnly, c.superReadOnly
+				g.h.set(g.b.id, v)
+				g.b.detach() // its report stays
+				view, err := g.e.r.PromoteView(context.Background(), g.m.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				i := slices.IndexFunc(view.Candidates, func(c Candidate) bool { return c.ServerID == g.b.id })
+				if cb := view.Candidates[i]; cb.Writable || cb.WritableSilent != want || cb.Unread == want {
+					t.Fatalf("rep-b writable=%v silent=%v unread=%v, want silent=%v", cb.Writable, cb.WritableSilent, cb.Unread, want)
+				}
+				err = view.OtherReplicaRefusal()
+				var we *PromoteWritableError
+				switch {
+				case want && (!errors.As(err, &we) || we.Code != "writable_silent" || we.Name != "rep-b"):
+					t.Fatalf("OtherReplicaRefusal = %v, want T24b for rep-b", err)
+				case !want && err != nil:
+					t.Fatalf("OtherReplicaRefusal = %v, want none", err)
+				}
+			})
+		})
+	}
+}

@@ -506,7 +506,8 @@ func (r *Runner) refuseRetryWhileUnlocking(j store.Job) error {
 // t: its words labelled and bounded, followed by a tail picked from the
 // state the panel reads, never from those words: the master quarantined
 // (its role, or the pin its live report shows) T11d; the candidate read
-// writable T11c; otherwise (read-only, or not readable) T11.
+// with read_only OFF (appsWrite, whatever super_read_only says) T11c;
+// otherwise (read_only ON, or not readable) T11.
 func (r *Runner) unlockRefusal(ctx context.Context, t unlockTarget, err error) error {
 	words, _ := fromAgent(err)
 	e := &UnlockLockError{Code: UnlockRefused, Master: r.nameOf(t.master), Candidate: r.nameOf(t.candidate),
@@ -518,7 +519,7 @@ func (r *Runner) unlockRefusal(ctx context.Context, t unlockTarget, err error) e
 	cctx, cancel := context.WithTimeout(ctx, unlockCandidateRead)
 	defer cancel()
 	var cs proto.MySQLStatus
-	if err := r.d.Hub.Call(cctx, t.candidate, "mysql.status", nil, &cs); err == nil && !cs.SuperReadOnly {
+	if err := r.d.Hub.Call(cctx, t.candidate, "mysql.status", nil, &cs); err == nil && appsWrite(cs.ReadOnly) {
 		e.Code = UnlockCandidateWritable
 	}
 	return e
