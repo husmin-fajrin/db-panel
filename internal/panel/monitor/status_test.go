@@ -392,6 +392,33 @@ func TestMasterLocked(t *testing.T) {
 	}
 }
 
+// TestMasterStatusFlagCombinations: the master status reads both MySQL
+// read-only flags (spec 5.4 step 3). A master with only read_only ON
+// refuses every application write (ERROR 1290) and must not read as
+// healthy; super_read_only ON with read_only OFF (left by an older agent's
+// unlock after a restart) reads as locked so "Buka kunci master" is offered,
+// with its own explanation.
+func TestMasterStatusFlagCombinations(t *testing.T) {
+	cases := []struct {
+		readOnly, superReadOnly bool
+		code, detail            string
+	}{
+		{false, false, StatusHealthy, "Master menjawab dan bisa ditulisi"},
+		{true, true, StatusLocked, "Master dikunci (super_read_only aktif); aplikasi tidak bisa menulis"},
+		{false, true, StatusLocked, "Pengaturan hanya-baca MySQL master ini tidak sejalan: super_read_only ON tetapi read_only OFF. Tekan Buka kunci master untuk membereskannya."},
+		{true, false, StatusLocked, "Master dikunci (read_only aktif, super_read_only mati): akun aplikasi tanpa hak SUPER tidak bisa menulis"},
+	}
+	for _, c := range cases {
+		in := healthyMaster()
+		in.Snap.ReadOnly, in.Snap.SuperReadOnly = c.readOnly, c.superReadOnly
+		got := DeriveMaster(in, th)
+		if got.Code != c.code || got.Detail != c.detail {
+			t.Errorf("read_only=%v super_read_only=%v: got %q/%q, want %q/%q",
+				c.readOnly, c.superReadOnly, got.Code, got.Detail, c.code, c.detail)
+		}
+	}
+}
+
 func TestSeverityOf(t *testing.T) {
 	cases := map[string]Severity{
 		StatusNotReady: SevNeutral, StatusNeedsUpgrade: SevNeutral,

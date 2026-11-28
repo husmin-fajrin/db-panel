@@ -262,8 +262,19 @@ func DeriveMaster(in MasterInput, th Thresholds) Status {
 		}
 		return set(StatusUnreachable, detail)
 	}
-	if in.Snap.SuperReadOnly {
+	// Both MySQL read-only flags count (spec 5.4): read_only alone refuses
+	// every application write without SUPER (ERROR 1290). super_read_only
+	// ON with read_only OFF (left by an older agent's unlock after a
+	// restart) also reads as locked, so the page offers "Buka kunci master",
+	// which stores both OFF; its text claims nothing about writes.
+	switch {
+	case in.Snap.SuperReadOnly && in.Snap.ReadOnly:
 		return set(StatusLocked, "Master dikunci (super_read_only aktif); aplikasi tidak bisa menulis")
+	case in.Snap.SuperReadOnly:
+		return set(StatusLocked, "Pengaturan hanya-baca MySQL master ini tidak sejalan: super_read_only ON tetapi read_only OFF. "+
+			"Tekan Buka kunci master untuk membereskannya.")
+	case in.Snap.ReadOnly:
+		return set(StatusLocked, "Master dikunci (read_only aktif, super_read_only mati): akun aplikasi tanpa hak SUPER tidak bisa menulis")
 	}
 	return set(StatusHealthy, "Master menjawab dan bisa ditulisi")
 }

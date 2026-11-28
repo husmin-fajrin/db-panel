@@ -497,6 +497,44 @@ func TestMessageNeverContainsRawError(t *testing.T) {
 	}
 }
 
+// TestMasterLockedAlertOnReadOnlyOnly: master_locked follows the status,
+// so it opens for a master with only read_only ON (or only super_read_only
+// ON) and closes only once both flags are OFF.
+func TestMasterLockedAlertOnReadOnlyOnly(t *testing.T) {
+	r := newRig(t)
+	mID, _ := r.master("db-master")
+	ma := r.agent(mID, true, masterSnap(srcUUID+":1-100")).attach()
+	step := func(f func(s *proto.HealthSnapshot)) {
+		r.clk.Add(10 * time.Second)
+		ma.setSnap(f)
+		ma.send()
+	}
+
+	step(func(s *proto.HealthSnapshot) { s.ReadOnly, s.SuperReadOnly = true, false })
+	if a := r.openAlert(mID, KindMasterLocked); !strings.Contains(a.Message,
+		"Master dikunci (read_only aktif, super_read_only mati): akun aplikasi tanpa hak SUPER tidak bisa menulis") {
+		t.Fatalf("master_locked message = %q", a.Message)
+	}
+	step(func(s *proto.HealthSnapshot) { s.ReadOnly, s.SuperReadOnly = false, false })
+	if r.isOpen(mID, KindMasterLocked) {
+		t.Fatal("master_locked open on a master with both flags OFF")
+	}
+
+	step(func(s *proto.HealthSnapshot) { s.ReadOnly, s.SuperReadOnly = false, true })
+	if a := r.openAlert(mID, KindMasterLocked); !strings.Contains(a.Message, "super_read_only ON tetapi read_only OFF") ||
+		strings.Contains(a.Message, "..") {
+		t.Fatalf("master_locked message = %q", a.Message)
+	}
+	step(func(s *proto.HealthSnapshot) { s.ReadOnly, s.SuperReadOnly = true, false })
+	if !r.isOpen(mID, KindMasterLocked) {
+		t.Fatal("master_locked closed while read_only is still ON")
+	}
+	step(func(s *proto.HealthSnapshot) { s.ReadOnly, s.SuperReadOnly = false, false })
+	if r.isOpen(mID, KindMasterLocked) {
+		t.Fatal("master_locked open on a master with both flags OFF")
+	}
+}
+
 func TestStatusAlertsOpenAndClose(t *testing.T) {
 	r := newRig(t)
 	mID, topo := r.master("db-master")

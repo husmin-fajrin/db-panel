@@ -196,7 +196,8 @@ var alertRules = []alertRule{
 			if !isMaster(v) || v.Status.Code != StatusLocked {
 				return false, ""
 			}
-			return true, redact.Quotes(v.Status.Detail) + ". " + masterLockedAdvice
+			// The detail may end with its own full stop (P13).
+			return true, strings.TrimSuffix(redact.Quotes(v.Status.Detail), ".") + ". " + masterLockedAdvice
 		},
 		close: func(v View, _ ruleCtx) bool {
 			return !isMaster(v) || v.Status.Code == StatusHealthy
