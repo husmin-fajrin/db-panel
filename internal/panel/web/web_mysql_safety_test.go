@@ -10,6 +10,7 @@ import (
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
+	"github.com/husmin-fajrin/db-panel/internal/panel/web"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
 )
 
@@ -127,13 +128,13 @@ func TestMasterSourceAddressEdit(t *testing.T) {
 		{"source_host": {"192.168.5.9"}, "source_port": {"70000"}},
 		{"source_host": {""}, "source_port": {"3306"}},
 	} {
-		rec := e.do("POST", "/masters/1/source", bad, c)
+		rec := e.do("POST", "/masters/1/source", withToken(t, e, bad, web.ActMasterSource, "master", 1), c)
 		wantCode(t, rec, http.StatusBadRequest)
 	}
 	if got, _ := e.st.GetTopology(topo.ID); got.SourceHost != "10.0.0.1" || got.SourcePort != 3306 {
 		t.Fatalf("refused edits changed the topology: %+v", got)
 	}
-	rec = e.do("POST", "/masters/1/source", url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3307"}}, c)
+	rec = e.do("POST", "/masters/1/source", withToken(t, e, url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3307"}}, web.ActMasterSource, "master", 1), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/masters/1?pesan=sumber")
 	if got, _ := e.st.GetTopology(topo.ID); got.SourceHost != "192.168.5.9" || got.SourcePort != 3307 {
@@ -148,9 +149,9 @@ func TestMasterSourceAddressEdit(t *testing.T) {
 		InstalledAt: time.Now(), Hosts: []string{"192.168.5.9"}}); err != nil {
 		t.Fatal(err)
 	}
-	rec = e.do("POST", "/masters/1/source", url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3306"}}, c)
+	rec = e.do("POST", "/masters/1/source", withToken(t, e, url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3306"}}, web.ActMasterSource, "master", 1), c)
 	wantLocation(t, rec, "/masters/1?pesan=sumber")
-	rec = e.do("POST", "/masters/1/source", url.Values{"source_host": {"db-baru.kantor.local"}, "source_port": {"3306"}}, c)
+	rec = e.do("POST", "/masters/1/source", withToken(t, e, url.Values{"source_host": {"db-baru.kantor.local"}, "source_port": {"3306"}}, web.ActMasterSource, "master", 1), c)
 	wantLocation(t, rec, "/masters/1?pesan=sumber-sertifikat")
 	rec = e.do("GET", "/masters/1?pesan=sumber-sertifikat", nil, c)
 	wantBody(t, rec, "sertifikat MySQL master belum memuat alamat ini", "Perbarui sertifikat MySQL")

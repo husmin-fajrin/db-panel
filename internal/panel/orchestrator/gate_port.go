@@ -12,9 +12,13 @@ import (
 
 // The master_port row's probe: can the panel host open a TCP connection
 // to the master's MySQL port? It dials from the panel host, sends
-// nothing and closes at once. Each master's answer is kept 10 minutes (by
-// Deps.Now), and gates that need it meanwhile, or while a probe is on the
-// way, share it: concurrent gates for one master make one dial.
+// nothing and closes at once. Each master gets at most one dial per 10
+// minutes (by Deps.Now), whatever its address: the answer is kept that
+// long, and gates that need it meanwhile, or while a probe is on the way,
+// share it (concurrent gates for one master make one dial). An address
+// changed within those 10 minutes (spec 5.1, "Alamat master") waits for
+// the master's next slot rather than being dialled at once, so whoever
+// can change the address cannot make the panel connect anywhere at will.
 
 const (
 	// portProbeTimeout bounds one probe.
@@ -47,31 +51,48 @@ func masterSourceAddr(topo store.Topology) string {
 	return net.JoinHostPort(topo.SourceHost, strconv.Itoa(topo.SourcePort))
 }
 
-// masterPortOpen reports whether hostPort, master masterID's MySQL port,
-// answered the panel host's last probe; it probes when the master has no
-// answer under 10 minutes old for that address, or waits for the probe on
-// the way.
-func (r *Runner) masterPortOpen(masterID int64, hostPort string) bool {
+// masterPortOpen reports whether master masterID's MySQL port answered
+// the panel host's last probe. It probes hostPort when the master has no
+// answer under 10 minutes old, or waits for the probe on the way. When
+// the kept answer is for another address (the address was changed within
+// those 10 minutes), hostPort is not dialled: open is that kept answer
+// and waitUntil the end of the master's slot, when hostPort may be
+// probed; waitUntil is zero otherwise.
+func (r *Runner) masterPortOpen(masterID int64, hostPort string) (open bool, waitUntil time.Time) {
 	now := r.now()
 	r.ports.mu.Lock()
 	if r.ports.byMaster == nil {
 		r.ports.byMaster = map[int64]*portProbe{}
 	}
-	p := r.ports.byMaster[masterID]
-	if p != nil && p.hostPort == hostPort {
+	for {
+		p := r.ports.byMaster[masterID]
+		if p == nil {
+			break
+		}
 		select {
 		case <-p.done:
-			if age := now.Sub(p.at); age >= 0 && age < portProbeKeep {
-				r.ports.mu.Unlock()
-				return p.open
-			}
-		default: // on the way: share it
+		default: // on the way, for this address or another: wait for it, then decide again
 			r.ports.mu.Unlock()
 			<-p.done
-			return p.open
+			if p.hostPort == hostPort {
+				return p.open, time.Time{}
+			}
+			// Read the clock again: the probe waited for is stamped with
+			// its own start, which may be later than this call's.
+			now = r.now()
+			r.ports.mu.Lock()
+			continue
 		}
+		if age := now.Sub(p.at); age < 0 || age >= portProbeKeep {
+			break // the slot has passed (or the last probe panicked: p.at is zero)
+		}
+		r.ports.mu.Unlock()
+		if p.hostPort != hostPort {
+			return p.open, p.at.Add(portProbeKeep)
+		}
+		return p.open, time.Time{}
 	}
-	p = &portProbe{hostPort: hostPort, done: make(chan struct{})}
+	p := &portProbe{hostPort: hostPort, done: make(chan struct{})}
 	r.ports.byMaster[masterID] = p
 	r.ports.mu.Unlock()
 
@@ -83,7 +104,7 @@ func (r *Runner) masterPortOpen(masterID int64, hostPort string) bool {
 	if ok {
 		p.at = now
 	} // else p.at stays zero: the answer is not kept and the next gate probes again
-	return open
+	return open, time.Time{}
 }
 
 // probePort is dialPort with a panic of the probe recovered: the port then

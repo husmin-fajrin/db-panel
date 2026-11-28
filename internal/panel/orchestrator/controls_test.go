@@ -246,7 +246,7 @@ func TestDeleteQuarantinedRefusedWhileCutoverPending(t *testing.T) {
 	if _, err := e.st.AddReplica(topo.ID, c.id, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306); err != nil {
+	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -281,7 +281,7 @@ func TestDeleteQuarantinedNeverReleasesRole(t *testing.T) {
 	if _, err := e.st.AddReplica(topo.ID, c.id, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306); err != nil {
+	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.r.ConfirmCutover(topo.ID); err != nil {
@@ -304,7 +304,7 @@ func TestDeleteOldMasterWhileQuarantinePending(t *testing.T) {
 	if _, err := e.st.AddReplica(topo.ID, c.id, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306); err != nil {
+	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	// An emergency promotion whose quarantine never reached the old master.
@@ -346,7 +346,7 @@ func TestDeleteUnquarantinedRefusedWhenQuarantineNotPending(t *testing.T) {
 	if err := e.r.DeleteUnquarantined(ctx, c.id); !errors.Is(err, ErrNotQuarantinePending) {
 		t.Fatalf("DeleteUnquarantined of a replica: %v", err)
 	}
-	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306); err != nil {
+	if err := e.st.SwapMaster(topo.ID, m.id, c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: proto.PromotePlanned, OldMasterServerID: m.id,

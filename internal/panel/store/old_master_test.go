@@ -16,7 +16,7 @@ import (
 func oldMasterTopology(t *testing.T, s *Store) (Topology, Server, Server) {
 	t.Helper()
 	topo, oldM, newM := mustTopology(t, s)
-	if err := s.SwapMaster(topo.ID, oldM.ID, newM.ID, "10.0.0.2", 3306); err != nil {
+	if err := s.SwapMaster(topo.ID, oldM.ID, newM.ID, "10.0.0.2", 3306, "job:j1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	return topo, oldM, newM

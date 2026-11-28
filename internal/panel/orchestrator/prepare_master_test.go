@@ -415,7 +415,7 @@ func TestMasterVerifyUsesStoredSource(t *testing.T) {
 	e := newEnv(t)
 	fa, topo := e.readyMaster("db-master")
 	scriptPrepare(fa)
-	if err := e.st.SetTopologySource(topo.ID, "198.51.100.9", 13306); err != nil {
+	if err := e.st.SetTopologySource(topo.ID, "198.51.100.9", 13306, "admin", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	id, err := e.r.StartPrepareMaster(context.Background(), fa.id)
@@ -436,7 +436,7 @@ func TestMasterVerifyUsesStoredSource(t *testing.T) {
 	}
 
 	// A topology without an address yet takes the server's and MySQL's.
-	if err := e.st.SetTopologySource(topo.ID, "", 0); err != nil {
+	if err := e.st.SetTopologySource(topo.ID, "", 0, "", time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	id, err = e.r.StartPrepareMaster(context.Background(), fa.id)
@@ -444,8 +444,11 @@ func TestMasterVerifyUsesStoredSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitJob(id, store.JobSucceeded)
-	if got, _ := e.st.GetTopologyByMaster(fa.id); got.SourceHost != "10.0.0.1" || got.SourcePort != 3306 {
-		t.Fatalf("topology source = %s:%d, want 10.0.0.1:3306", got.SourceHost, got.SourcePort)
+	// The panel took the address itself: no one is named as its author.
+	if got, _ := e.st.GetTopologyByMaster(fa.id); got.SourceHost != "10.0.0.1" || got.SourcePort != 3306 ||
+		got.SourceChangedBy != "" || got.SourceChangedAt != nil {
+		t.Fatalf("topology source = %s:%d (by %q at %v), want 10.0.0.1:3306 by no one", got.SourceHost, got.SourcePort,
+			got.SourceChangedBy, got.SourceChangedAt)
 	}
 }
 

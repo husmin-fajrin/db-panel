@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -194,5 +195,80 @@ func TestGatePortProbePanicReleasesWaiters(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("probes = %d, want 2 (a panicked probe is not kept)", n)
+	}
+}
+
+// TestPortProbeOncePerMasterPerTenMinutes (spec 5.1, "Alamat master"): a
+// master's port is dialled at most once per 10 minutes whatever its
+// address. An address changed within that slot is not dialled: the row
+// is yellow with T6 (the time the slot ends), without a fix; once the
+// slot has passed the new address is probed.
+func TestPortProbeOncePerMasterPerTenMinutes(t *testing.T) {
+	g := newGateRig(t)
+	g.probeOpen = true
+	start := g.now()
+	wantRow(t, g.row(GatePromotePlanned, "master_port"), GateYellow,
+		"Port MySQL master db-master bisa dijangkau dari host panel; sebaiknya hanya terbuka untuk replika.", wantG11f)
+
+	g.advance(3 * time.Minute)
+	wantT6 := "Alamat master baru saja diubah; port diperiksa lagi paling cepat pukul " +
+		start.Add(10*time.Minute).Local().Format("15:04") + "."
+	for i, addr := range []string{"203.0.113.7", "198.51.100.8", "203.0.113.7"} {
+		if err := g.e.st.SetTopologySource(g.topo.ID, addr, 3306, "admin", g.now()); err != nil {
+			t.Fatal(err)
+		}
+		wantRow(t, g.row(GatePromotePlanned, "master_port"), GateYellow, wantT6, "")
+		wantRow(t, g.row(GateRebuildOldMaster, "master_port"), GateYellow, wantT6, "")
+		g.advance(time.Duration(i+1) * time.Minute)
+	}
+	if got := g.probed(); !slices.Equal(got, []string{"10.0.0.1:3306"}) {
+		t.Fatalf("probes within the slot = %v, want only the first address", got)
+	}
+
+	// The slot has passed: the address now stored is probed, once.
+	g.advance(start.Add(10 * time.Minute).Sub(g.now()))
+	g.probeMu.Lock()
+	g.probeOpen = false
+	g.probeMu.Unlock()
+	wantGreen(t, g.row(GatePromotePlanned, "master_port"))
+	wantGreen(t, g.row(GatePromoteEmergency, "master_port"))
+	if got := g.probed(); !slices.Equal(got, []string{"10.0.0.1:3306", "203.0.113.7:3306"}) {
+		t.Fatalf("probes after the slot = %v", got)
+	}
+	// Changing it back right away waits for the next slot again.
+	if err := g.e.st.SetTopologySource(g.topo.ID, "10.0.0.1", 3306, "admin", g.now()); err != nil {
+		t.Fatal(err)
+	}
+	wantRow(t, g.row(GatePromotePlanned, "master_port"), GateYellow, "Alamat master baru saja diubah; port diperiksa lagi paling cepat pukul "+
+		g.now().Add(10*time.Minute).Local().Format("15:04")+".", "")
+	if got := g.probed(); len(got) != 2 {
+		t.Fatalf("probes after changing back = %v", got)
+	}
+}
+
+// TestPortRowNeverRed: the master_port row is green or yellow whatever the
+// probe answers, whether the address waits for its slot or not; while it
+// waits it offers no fix.
+func TestPortRowNeverRed(t *testing.T) {
+	g := newGateRig(t)
+	for _, open := range []bool{true, false} {
+		g.probeMu.Lock()
+		g.probeOpen = open
+		g.probeMu.Unlock()
+		g.advance(time.Hour)
+		for _, addr := range []string{"10.0.0.1", "203.0.113.7"} {
+			if err := g.e.st.SetTopologySource(g.topo.ID, addr, 3306, "admin", g.now()); err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range []GateAction{GatePromotePlanned, GatePromoteEmergency, GateRebuildOldMaster} {
+				row := g.row(a, "master_port")
+				if row.Status == GateRed {
+					t.Fatalf("%s master_port (probe open %v, %s) = %+v", a, open, addr, row)
+				}
+				if strings.HasPrefix(row.Detail, "Alamat master baru saja diubah") && row.Fix != "" {
+					t.Fatalf("%s master_port waiting for its slot offers a fix: %+v", a, row)
+				}
+			}
+		}
 	}
 }

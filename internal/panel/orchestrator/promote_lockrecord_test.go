@@ -294,7 +294,7 @@ func TestLockRecordNotCountedAfterMasterChanged(t *testing.T) {
 	if n := len(g.lockRecords()); n != 1 {
 		t.Fatalf("records before the change = %d, want 1", n)
 	}
-	if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306); err != nil {
+	if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if recs := g.lockRecords(); len(recs) != 0 {
@@ -788,7 +788,7 @@ func TestLoadIgnoresRecordOfFormerMaster(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
 	g.plantStanding(time.Now().Add(-time.Minute))
-	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306); err != nil {
+	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.st.CreateJob(store.Job{ID: "busy-d", Kind: KindMySQLTLS, ServerID: g.d.id, ParamsJSON: "{}",

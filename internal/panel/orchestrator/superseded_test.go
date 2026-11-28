@@ -321,7 +321,7 @@ func TestRetryRefusedAfterMasterSwapped(t *testing.T) {
 		t.Fatalf("Superseded before the swap = %q", got)
 	}
 	other := e.replicaAgent("db-baru", "dump")
-	if err := e.st.SwapMaster(topo.ID, topo.MasterServerID, other.id, "10.0.0.9", 3306); err != nil {
+	if err := e.st.SwapMaster(topo.ID, topo.MasterServerID, other.id, "10.0.0.9", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	mark := r.mark()
@@ -387,7 +387,7 @@ func TestRetryStillRefusedWhenSuperseded(t *testing.T) {
 			g.e.failedJob("4444444444444444444444444444444e", KindMySQLTLS, g.m.id, 0, "{}", mysqlTLSStepNames(), 0)
 		}},
 		{"master changed", "master topologi ini sudah berganti", func(t *testing.T, g *promoteRig) {
-			if err := g.e.st.SwapMaster(g.topo.ID, g.c.id, g.b.id, "10.0.0.3", 3306); err != nil {
+			if err := g.e.st.SwapMaster(g.topo.ID, g.c.id, g.b.id, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}},

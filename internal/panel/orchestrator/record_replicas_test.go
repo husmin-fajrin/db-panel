@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -106,7 +107,7 @@ func TestRecordReplicasCalledAfterVerify(t *testing.T) {
 	})
 	t.Run("RepointNow", func(t *testing.T) {
 		g := newPromoteRig(t)
-		if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306); err != nil {
+		if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if err := g.e.st.SetReplicaState(g.b.id, store.ReplicaNeedsRepoint, ""); err != nil {
@@ -138,7 +139,7 @@ func TestRecordReplicasCalledAfterVerify(t *testing.T) {
 	})
 	t.Run("repoint with the receiver not connected records nothing", func(t *testing.T) {
 		g := newPromoteRig(t)
-		if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306); err != nil {
+		if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if err := g.e.st.SetReplicaState(g.b.id, store.ReplicaNeedsRepoint, ""); err != nil {

@@ -26,10 +26,10 @@ func TestSwapMasterAtomic(t *testing.T) {
 	topo, oldM, newM := mustTopology(t, s)
 
 	// New server row missing: nothing changes.
-	if err := s.SwapMaster(topo.ID, oldM.ID, 9999, "10.0.0.9", 3307); !errors.Is(err, ErrNotFound) {
+	if err := s.SwapMaster(topo.ID, oldM.ID, 9999, "10.0.0.9", 3307, "job:j1", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SwapMaster missing new: %v", err)
 	}
-	if err := s.SwapMaster(topo.ID, 9999, newM.ID, "10.0.0.9", 3307); !errors.Is(err, ErrNotFound) {
+	if err := s.SwapMaster(topo.ID, 9999, newM.ID, "10.0.0.9", 3307, "job:j1", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SwapMaster missing old: %v", err)
 	}
 	got, err := s.GetTopology(topo.ID)
@@ -43,7 +43,8 @@ func TestSwapMasterAtomic(t *testing.T) {
 		t.Fatalf("replica row lost: %v", err)
 	}
 
-	if err := s.SwapMaster(topo.ID, oldM.ID, newM.ID, "10.0.0.2", 3308); err != nil {
+	at := time.Date(2026, 11, 28, 9, 15, 0, 0, time.UTC)
+	if err := s.SwapMaster(topo.ID, oldM.ID, newM.ID, "10.0.0.2", 3308, "job:j1", at); err != nil {
 		t.Fatalf("SwapMaster: %v", err)
 	}
 	got, err = s.GetTopology(topo.ID)
@@ -51,7 +52,8 @@ func TestSwapMasterAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.MasterServerID != newM.ID || got.SourceHost != "10.0.0.2" || got.SourcePort != 3308 ||
-		got.OldMasterServerID != oldM.ID || !got.CutoverPending {
+		got.OldMasterServerID != oldM.ID || !got.CutoverPending || got.SourceChangedBy != "job:j1" ||
+		got.SourceChangedAt == nil || !got.SourceChangedAt.Equal(at) {
 		t.Fatalf("topology = %+v", got)
 	}
 	if mustRole(t, s, newM.ID) != RoleMaster || mustRole(t, s, oldM.ID) != RoleQuarantined {

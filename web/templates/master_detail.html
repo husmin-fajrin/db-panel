@@ -41,6 +41,7 @@
 <div role="status" class="banner banner-warning" data-set-source>{{template "banner-icon" "warning"}}
   <div class="flex min-w-0 flex-1 flex-col items-start gap-2">
     <h3 class="font-semibold">Arahkan agent replika ke alamat master {{.Source}}</h3>
+    {{with .SourceChange}}<p class="text-sm" data-source-change>{{.}}</p>{{end}}
     <p class="text-sm">Agent di tiap replika hanya menerima master yang alamatnya ia ingat, dan menolak alamat lain dari panel (Resync ulang dan salin data akan gagal). Jalankan perintah ini di server replika masing-masing:</p>
     <ul class="flex flex-col gap-1 text-sm">
       {{range .SetSource}}
@@ -175,7 +176,7 @@
             <span>Port MySQL</span>
             <input class="input input-sm w-full" type="number" name="source_port" value="{{if .SourceOpen}}{{.SourcePort}}{{else}}{{.Topology.SourcePort}}{{end}}" placeholder="Port MySQL" min="1" max="65535" required>
           </label>
-          <div><button type="submit" class="btn btn-primary btn-sm">Simpan alamat</button></div>
+          <div><button type="submit" class="btn btn-primary btn-sm" data-confirm-action="master_source" data-confirm-kind="master" data-confirm-id="{{.Server.ID}}" data-confirm-light="1" data-confirm-text="{{.SourceConfirm}}" data-confirm-value-from="source_host source_port">Simpan alamat</button></div>
         </form>
       </details>
       {{if not .Inventory.MasterReady}}

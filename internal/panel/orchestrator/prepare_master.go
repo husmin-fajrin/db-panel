@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
 	"github.com/husmin-fajrin/db-panel/internal/proto"
@@ -351,7 +352,9 @@ func (jr *jobRun) masterVerify(ctx context.Context, _ bool) (outcome, error) {
 	host, port := topo.SourceHost, topo.SourcePort
 	if host == "" || port == 0 {
 		host, port = r.sourceHost(srv), st.Port
-		if err := r.d.Store.SetTopologySource(topo.ID, host, port); err != nil {
+		// The panel takes the address itself: no one is recorded as
+		// having set it (the master page then names no author).
+		if err := r.d.Store.SetTopologySource(topo.ID, host, port, "", time.Time{}); err != nil {
 			return outcome{}, err
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/husmin-fajrin/db-panel/internal/agent/drivers/mysql"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
@@ -244,7 +245,7 @@ func TestRepointErrantShownOnlyAsGTIDSet(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			g := newPromoteRig(t)
 			e := g.e
-			if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306); err != nil {
+			if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			if err := e.st.SetReplicaState(g.b.id, store.ReplicaNeedsRepoint, ""); err != nil {

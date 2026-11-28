@@ -305,6 +305,10 @@ func TestPromotePlannedStepsAndCommands(t *testing.T) {
 		!topo.CutoverPending || topo.OldMasterServerID != g.m.id {
 		t.Fatalf("topology after promote = %+v", topo)
 	}
+	// The address is recorded as set by the promote job (K25).
+	if topo.SourceChangedBy != "job:"+id || topo.SourceChangedAt == nil || topo.SourceChangedAt.IsZero() {
+		t.Fatalf("topology after promote: address set by %q at %v, want job:%s", topo.SourceChangedBy, topo.SourceChangedAt, id)
+	}
 	if srv, _ := e.st.GetServer(g.m.id); srv.Role != store.RoleQuarantined {
 		t.Fatalf("old master role = %s", srv.Role)
 	}
@@ -846,7 +850,7 @@ func TestPromoteExpiredLockIsTakenAgain(t *testing.T) {
 func TestRepointNowNeedsRebuildState(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
-	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306); err != nil {
+	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.c.id, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.st.SetReplicaState(g.b.id, store.ReplicaNeedsRepoint, ""); err != nil {
@@ -938,7 +942,7 @@ func TestPromoteRetrySupersededByTopologyChange(t *testing.T) {
 	}
 	e.waitJob(id, store.JobFailed)
 	// Another promotion made b the master since.
-	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306); err != nil {
+	if err := e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.r.Retry(id, JobAck{}); err == nil || !strings.Contains(err.Error(), "sudah berganti") {

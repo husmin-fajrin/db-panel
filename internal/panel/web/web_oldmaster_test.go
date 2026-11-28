@@ -44,7 +44,7 @@ func promotedEnv(t *testing.T, mods ...func(*web.Deps)) (*env, *fakeOrch, store.
 		t.Fatal(err)
 	}
 	e.addReadyReplica(t, topo, "db-lain")
-	if err := e.st.SwapMaster(topo.ID, 1, 2, "10.0.0.2", 3306); err != nil {
+	if err := e.st.SwapMaster(topo.ID, 1, 2, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	// The inventory the promote leaves on the new master: connected as a
@@ -1536,7 +1536,7 @@ func TestOldMasterSupersededShowsPendingQuarantine(t *testing.T) {
 	if err := e.st.UpdatePromotion(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.SwapMaster(topo.ID, 2, 3, "10.0.0.3", 3306); err != nil {
+	if err := e.st.SwapMaster(topo.ID, 2, 3, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "emergency", OldMasterServerID: 2,
@@ -1584,7 +1584,7 @@ func TestOldMasterAfterSecondPromote(t *testing.T) {
 				}
 				storeRebuildJob(t, e, "66666666666666666666666666666666", 1)
 			}
-			if err := e.st.SwapMaster(topo.ID, 2, 3, "10.0.0.3", 3306); err != nil {
+			if err := e.st.SwapMaster(topo.ID, 2, 3, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := e.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "emergency", OldMasterServerID: 2,

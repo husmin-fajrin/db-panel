@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -190,15 +191,67 @@ func TestSetTopologySource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetTopologySource(topo.ID, "10.0.0.9", 3307); err != nil {
+	if topo.SourceChangedBy != "" || topo.SourceChangedAt != nil {
+		t.Fatalf("new topology says who changed its address: %+v", topo)
+	}
+	at := time.Date(2026, 11, 28, 9, 15, 0, 0, time.UTC)
+	if err := s.SetTopologySource(topo.ID, "10.0.0.9", 3307, "admin", at); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetTopology(topo.ID)
-	if err != nil || got.SourceHost != "10.0.0.9" || got.SourcePort != 3307 {
+	if err != nil || got.SourceHost != "10.0.0.9" || got.SourcePort != 3307 || got.SourceChangedBy != "admin" ||
+		got.SourceChangedAt == nil || !got.SourceChangedAt.Equal(at) {
 		t.Fatalf("topology = %+v, %v", got, err)
 	}
-	if err := s.SetTopologySource(999, "h", 1); !errors.Is(err, ErrNotFound) {
+	// An address the panel takes itself (by "") records no one.
+	if err := s.SetTopologySource(topo.ID, "10.0.0.1", 3306, "", at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetTopology(topo.ID); err != nil || got.SourceHost != "10.0.0.1" || got.SourceChangedBy != "" ||
+		got.SourceChangedAt != nil {
+		t.Fatalf("topology after the panel's own address = %+v, %v", got, err)
+	}
+	if err := s.SetTopologySource(999, "h", 1, "admin", at); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMigration0015NullableColumns: 0015 adds topologies.source_changed_by
+// and source_changed_at to a schema-14 database; its topology reads as
+// never changed by anyone ("" and nil), and opening it again changes
+// nothing.
+func TestMigration0015NullableColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.db")
+	db := openAtVersion(t, path, 14)
+	if _, err := db.Exec(`INSERT INTO servers (name, created_at) VALUES ('db1', '2026-10-30T10:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO topologies (master_server_id, repl_user, repl_password_enc, source_host, source_port, created_at)
+		VALUES (1, 'repl', x'00', '10.0.0.1', 3306, '2026-10-30T10:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	for range 2 {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		for _, col := range []string{"source_changed_by", "source_changed_at"} {
+			var n, notNull int
+			if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX("notnull"), 0) FROM pragma_table_info('topologies') WHERE name = ?`,
+				col).Scan(&n, &notNull); err != nil || n != 1 || notNull != 0 {
+				t.Fatalf("topologies.%s after 0015: n=%d, notnull=%d, err=%v", col, n, notNull, err)
+			}
+		}
+		topo, err := s.GetTopologyByMaster(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if topo.SourceHost != "10.0.0.1" || topo.SourcePort != 3306 || topo.SourceChangedBy != "" || topo.SourceChangedAt != nil {
+			t.Fatalf("old topology after 0015 = %+v", topo)
+		}
+		s.Close()
 	}
 }
 

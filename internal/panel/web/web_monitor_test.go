@@ -554,7 +554,7 @@ func TestMasterPageSetSourceGuidance(t *testing.T) {
 	following("10.0.0.1", 3306)
 	wantNoBody(t, e.do("GET", "/masters/1", nil, c), "data-set-source", "dbpanel agent set-source")
 
-	rec := e.do("POST", "/masters/1/source", url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3307"}}, c)
+	rec := e.do("POST", "/masters/1/source", withToken(t, e, url.Values{"source_host": {"192.168.5.9"}, "source_port": {"3307"}}, web.ActMasterSource, "master", 1), c)
 	wantLocation(t, rec, "/masters/1?pesan=sumber")
 	rec = e.do("GET", "/masters/1?pesan=sumber", nil, c)
 	wantBody(t, rec, "data-set-source", `href="/replicas/2">db-replika</a>`, "sudo dbpanel agent set-source 192.168.5.9:3307",

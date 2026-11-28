@@ -216,6 +216,15 @@ const (
 	msgSourcePortBad     = "Port MySQL master harus angka antara 1 dan 65535."
 	msgTargetUnconnected = "MySQL di server tujuan sudah terpasang tetapi belum dihubungkan. Buka halaman server itu dan jalankan Hubungkan MySQL dulu."
 
+	// msgSourceConfirm is T4 (spec 5.1), the light confirmation of a new
+	// address for replicas; the browser fills %s with the address typed
+	// (data-confirm-value-from), as text.
+	msgSourceConfirm = "Ubah alamat master untuk replika menjadi %s? Replika baru dan Resync ulang akan menyalin dari alamat itu."
+	// msgSourceByUser (T5) and msgSourceByJob (T5b): who set the address
+	// the "Arahkan agent replika" banner asks replicas to follow, and when.
+	msgSourceByUser = "Alamat ini diubah oleh %s pada %s. Pastikan itu memang alamat server %s sebelum menjalankan perintah di bawah."
+	msgSourceByJob  = "Alamat ini dipasang panel saat promote (pekerjaan %s) pada %s."
+
 	maxMySQLUser     = 32 // MySQL's limit for a user name
 	maxMySQLPassword = 256
 	maxMySQLHost     = 255
@@ -468,6 +477,11 @@ type masterPage struct {
 	// address was saved, otherwise those whose last report shows another
 	// source.
 	SetSource []setSourceRow
+	// SourceChange says on that banner who set the address and when (T5
+	// or T5b); "" when the topology does not record it.
+	SourceChange string
+	// SourceConfirm is T4, the text of the address form's save button.
+	SourceConfirm string
 	// Source is the address for replicas as host:port.
 	Source string
 	// Locked: the monitor reports it read-only (Buka kunci master is
@@ -544,9 +558,17 @@ func (a *app) masterDetail(w http.ResponseWriter, r *http.Request) {
 // setMasterSource changes the address replicas reach the master's MySQL
 // at (multi-homed hosts, NAT, VPN). It is checked from each replica when
 // the next one is created (its preflight's reachability check).
+//
+// It needs a light confirmation (ActMasterSource, spec 5.1) before any
+// other check, so a session without the password learns nothing from the
+// validation answers. The audit entry holds the address before and after;
+// the topology records who changed it and when.
 func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 	srv, topo, ok := a.masterFromPath(w, r)
 	if !ok {
+		return
+	}
+	if !a.requireConfirmLight(w, r, ActMasterSource, auditMaster, srv.ID) {
 		return
 	}
 	host := strings.TrimSpace(r.PostFormValue("source_host"))
@@ -560,13 +582,14 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 	case err != nil || port < 1 || port > 65535:
 		p.Flash = msgSourcePortBad
 	}
-	detail := map[string]any{"source_host": host, "source_port": portText}
+	detail := map[string]any{"old_source_host": topo.SourceHost, "old_source_port": topo.SourcePort,
+		"source_host": host, "source_port": portText}
 	if p.Flash != "" {
 		a.audit(r, "master_source", auditMaster, srv.ID, detail, p.Flash)
 		a.renderMaster(w, r, http.StatusBadRequest, p)
 		return
 	}
-	err = a.Store.SetTopologySource(topo.ID, host, port)
+	err = a.Store.SetTopologySource(topo.ID, host, port, auth.UsernameFrom(r.Context()), a.Now())
 	a.audit(r, "master_source", auditMaster, srv.ID, detail, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "set topology source", err)
@@ -580,6 +603,21 @@ func (a *app) setMasterSource(w http.ResponseWriter, r *http.Request) {
 		notice = "sumber-sertifikat"
 	}
 	http.Redirect(w, r, "/masters/"+strconv.FormatInt(srv.ID, 10)+"?pesan="+notice, http.StatusSeeOther)
+}
+
+// sourceChangeText is T5 (a user set topo's address) or T5b (a promote
+// job did, K25) for master; "" when topo does not record who set it
+// (topologies from before that record, or an address the panel took
+// itself).
+func sourceChangeText(topo store.Topology, master string) string {
+	if topo.SourceChangedBy == "" || topo.SourceChangedAt == nil {
+		return ""
+	}
+	at := topo.SourceChangedAt.Local().Format("02-01-2006 15:04")
+	if job, ok := strings.CutPrefix(topo.SourceChangedBy, "job:"); ok {
+		return fmt.Sprintf(msgSourceByJob, job, at)
+	}
+	return fmt.Sprintf(msgSourceByUser, topo.SourceChangedBy, at, master)
 }
 
 // sentLockText is T14 with its tail T14t for the planned promote job
@@ -634,6 +672,8 @@ func (a *app) renderMaster(w http.ResponseWriter, r *http.Request, status int, p
 		return
 	}
 	p.Source = net.JoinHostPort(topo.SourceHost, strconv.Itoa(topo.SourcePort))
+	p.SourceChange = sourceChangeText(topo, srv.Name)
+	p.SourceConfirm = msgSourceConfirm
 	if _, err := a.Store.GetServerTLS(srv.ID); errors.Is(err, store.ErrNotFound) {
 		p.NoCert = true
 	} else if err != nil {

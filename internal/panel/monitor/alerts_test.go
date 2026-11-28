@@ -888,7 +888,7 @@ func TestWebCertExpiringAlert(t *testing.T) {
 // finished promotion does, and records the promotion with status.
 func (r *rig) promoted(topo store.Topology, oldID, newID int64, status, replicasJSON string) int64 {
 	r.t.Helper()
-	if err := r.st.SwapMaster(topo.ID, oldID, newID, "10.0.0.2", 3306); err != nil {
+	if err := r.st.SwapMaster(topo.ID, oldID, newID, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		r.t.Fatal(err)
 	}
 	return r.promotion(topo, oldID, newID, status, replicasJSON)
@@ -986,7 +986,7 @@ func TestPromotePartialAlert(t *testing.T) {
 
 	// A retry runs it again: the alert stays open, through the swap.
 	r.setPromotionStatus(pid, "running")
-	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	r.m.tick()
@@ -1233,7 +1233,7 @@ func TestPromotePartialMessageSaysWhatStopped(t *testing.T) {
 	}
 
 	// Swapped, the old master not quarantined yet.
-	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = r.st.GetPromotion(pid)
@@ -1501,7 +1501,7 @@ func TestMasterUnpinnedAlertAfterThreeReports(t *testing.T) {
 		ma.send()
 	}
 	r.openAlert(mID, KindMasterUnpinned)
-	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	ma.setSnap(rolePin("quarantined"))
@@ -3185,7 +3185,7 @@ func TestLateAlertAfterSecondPromote(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := r.replica("db-ketiga", topo)
-	if err := r.st.SwapMaster(topo.ID, topo.MasterServerID, third, "10.0.0.3", 3306); err != nil {
+	if err := r.st.SwapMaster(topo.ID, topo.MasterServerID, third, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	r.m.tick()
@@ -3237,7 +3237,7 @@ func TestStartLateTextWhenTopologyDeleted(t *testing.T) {
 			}
 		} else {
 			third := r.replica("db-ketiga", topo)
-			if err := r.st.SwapMaster(topo.ID, topo.MasterServerID, third, "10.0.0.3", 3306); err != nil {
+			if err := r.st.SwapMaster(topo.ID, topo.MasterServerID, third, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}

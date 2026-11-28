@@ -68,7 +68,7 @@ func TestMySQLTLSJobInstallsAndRecords(t *testing.T) {
 	m, topo := e.readyMaster("db-master")
 	// Replicas reach the master at a name: it goes into the certificate
 	// next to the server's address.
-	if err := e.st.SetTopologySource(topo.ID, "db.example.test", 3306); err != nil {
+	if err := e.st.SetTopologySource(topo.ID, "db.example.test", 3306, "admin", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -648,7 +648,7 @@ func TestReplicaRefusesMasterAddressOutsideCert(t *testing.T) {
 	if err != nil || !slices.Equal(rec.Hosts, []string{"10.0.0.1"}) {
 		t.Fatalf("server_tls = %+v, %v; want hosts [10.0.0.1]", rec, err)
 	}
-	if err := e.st.SetTopologySource(topo.ID, "db-baru.example.test", 3306); err != nil {
+	if err := e.st.SetTopologySource(topo.ID, "db-baru.example.test", 3306, "admin", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	r := e.replicaAgent("replica1", "dump")

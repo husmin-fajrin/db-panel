@@ -22,25 +22,47 @@ type Topology struct {
 	// it replaced (0 when never promoted).
 	CutoverPending    bool
 	OldMasterServerID int64
+	// SourceChangedBy is who last set SourceHost and SourcePort: a panel
+	// user's name, or "job:<id>" for the promote job that set them; ""
+	// when never recorded (topologies from before migration 0015, or an
+	// address the panel took itself). SourceChangedAt is when; nil then.
+	SourceChangedBy string
+	SourceChangedAt *time.Time
 }
 
-const topologyColumns = `id, master_server_id, repl_user, repl_password_enc, source_host, source_port, created_at, cutover_pending, old_master_server_id`
+const topologyColumns = `id, master_server_id, repl_user, repl_password_enc, source_host, source_port, created_at, cutover_pending, old_master_server_id, source_changed_by, source_changed_at`
 
 func scanTopology(r rowScanner) (Topology, error) {
 	var (
-		t       Topology
-		created string
-		pending int
+		t         Topology
+		created   string
+		pending   int
+		changedBy sql.NullString
+		changedAt sql.NullString
 	)
-	if err := r.Scan(&t.ID, &t.MasterServerID, &t.ReplUser, &t.ReplPasswordEnc, &t.SourceHost, &t.SourcePort, &created, &pending, &t.OldMasterServerID); err != nil {
+	if err := r.Scan(&t.ID, &t.MasterServerID, &t.ReplUser, &t.ReplPasswordEnc, &t.SourceHost, &t.SourcePort, &created, &pending,
+		&t.OldMasterServerID, &changedBy, &changedAt); err != nil {
 		return Topology{}, err
 	}
 	t.CutoverPending = pending != 0
+	t.SourceChangedBy = changedBy.String
 	var err error
 	if t.CreatedAt, err = parseTime(created); err != nil {
 		return Topology{}, err
 	}
+	if t.SourceChangedAt, err = parseNullTime(changedAt); err != nil {
+		return Topology{}, err
+	}
 	return t, nil
+}
+
+// sourceChange is the source_changed_by and source_changed_at values for
+// an address set by by at at: both NULL when by is "" (no one to name).
+func sourceChange(by string, at time.Time) (any, any) {
+	if by == "" {
+		return nil, nil
+	}
+	return by, formatTime(at)
 }
 
 // Replica states.
@@ -209,9 +231,12 @@ func (s *Store) GetTopologyByMaster(serverID int64) (Topology, error) {
 }
 
 // SetTopologySource sets the address and MySQL port replicas use to reach
-// the topology's master.
-func (s *Store) SetTopologySource(id int64, host string, port int) error {
-	return s.execOne(`UPDATE topologies SET source_host = ?, source_port = ? WHERE id = ?`, host, port, id)
+// the topology's master, and records that by (a panel user's name) set it
+// at at. by "" (the panel took the address itself) records no one.
+func (s *Store) SetTopologySource(id int64, host string, port int, by string, at time.Time) error {
+	changedBy, changedAt := sourceChange(by, at)
+	return s.execOne(`UPDATE topologies SET source_host = ?, source_port = ?, source_changed_by = ?, source_changed_at = ?
+		WHERE id = ?`, host, port, changedBy, changedAt, id)
 }
 
 // ListTopologies returns all topologies ordered by id.
@@ -447,10 +472,12 @@ func (s *Store) SetCutoverPending(topologyID int64, pending bool) error {
 
 // SwapMaster makes newServerID the topology's master and quarantines
 // oldServerID, in one transaction: the topology points at the new master's
-// address with cutover pending, the new master's replica row is deleted and
+// address with cutover pending (recorded as set by by at at: the promote
+// job's "job:<id>"), the new master's replica row is deleted and
 // both roles change. Nothing changes when a server or the topology is
 // missing (ErrNotFound).
-func (s *Store) SwapMaster(topologyID, oldServerID, newServerID int64, newHost string, newPort int) error {
+func (s *Store) SwapMaster(topologyID, oldServerID, newServerID int64, newHost string, newPort int, by string, at time.Time) error {
+	changedBy, changedAt := sourceChange(by, at)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -462,8 +489,8 @@ func (s *Store) SwapMaster(topologyID, oldServerID, newServerID int64, newHost s
 		}
 	}
 	res, err := tx.Exec(`UPDATE topologies SET master_server_id = ?, source_host = ?, source_port = ?,
-		old_master_server_id = ?, cutover_pending = 1 WHERE id = ?`,
-		newServerID, newHost, newPort, oldServerID, topologyID)
+		source_changed_by = ?, source_changed_at = ?, old_master_server_id = ?, cutover_pending = 1 WHERE id = ?`,
+		newServerID, newHost, newPort, changedBy, changedAt, oldServerID, topologyID)
 	if err != nil {
 		return fmt.Errorf("update topology: %w", err)
 	}

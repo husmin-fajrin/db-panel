@@ -9,7 +9,9 @@
      dibingkai warna error dan tombol Konfirmasi menjadi btn-error;
      selain itu btn-primary (spec 5.5). Tombol tindakan ringan membawa
      data-confirm-light="1": isian kata sandi tersembunyi sampai panel
-     menjawab need_password, lalu tampil dengan kalimat T2 (spec 5.1). */}}
+     menjawab need_password, lalu tampil dengan kalimat T2 (spec 5.1).
+     data-confirm-value-from (nama isian formulir tombol itu) mengisi %s
+     di data-confirm-text dengan nilai yang diketik, sebagai teks. */}}
 <dialog id="modal-konfirmasi" class="modal" x-data="confirmModal">
   <form class="modal-box flex flex-col gap-4 bg-base-100" @submit.prevent="submit">
     <h2>Konfirmasi dengan kata sandi</h2>

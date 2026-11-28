@@ -818,7 +818,9 @@ func (jr *jobRun) promoteSwap(ctx context.Context, _ bool) (outcome, error) {
 	if err != nil {
 		return outcome{}, err
 	}
-	if err := jr.r.d.Store.SwapMaster(jr.job.TopologyID, jr.master(), jr.candidate(), host, port); err != nil {
+	// The address is recorded as the job's (K25): the master page names
+	// it, not a user, as the author of the address replicas follow.
+	if err := jr.r.d.Store.SwapMaster(jr.job.TopologyID, jr.master(), jr.candidate(), host, port, "job:"+jr.job.ID, jr.r.now()); err != nil {
 		return outcome{}, err
 	}
 	if err := jr.r.updateInventory(jr.candidate(), func(inv *store.Inventory) { inv.MasterReady = true }); err != nil {

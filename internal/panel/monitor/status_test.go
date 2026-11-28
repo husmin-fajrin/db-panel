@@ -546,7 +546,7 @@ func TestQuarantinedStatusAndExplain(t *testing.T) {
 	if !r.isOpen(mID, KindMasterDown) {
 		t.Fatal("master_down not open before the promotion")
 	}
-	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306); err != nil {
+	if err := r.st.SwapMaster(topo.ID, mID, rID, "10.0.0.2", 3306, "job:test", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.st.AddPromotion(store.Promotion{TopologyID: topo.ID, Mode: "emergency", OldMasterServerID: mID,

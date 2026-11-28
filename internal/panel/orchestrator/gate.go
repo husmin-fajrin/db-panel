@@ -200,6 +200,10 @@ const (
 	textG12f  = "Teruskan journal host panel ke server lain (systemd-journal-upload), lalu tandai di Pengaturan."
 	textG13a  = "panel.key belum ditandai sudah dicadangkan."
 	textG13f  = "Cadangkan panel.key (README, \"Cadangkan kunci panel\"), lalu tandai di Pengaturan."
+
+	// textG11w is T6 (spec 5.1): the address changed within the master's
+	// ten-minute probe slot; %s is when the slot ends.
+	textG11w = "Alamat master baru saja diubah; port diperiksa lagi paling cepat pukul %s."
 )
 
 // textG10bf is the account row's fix while a connected server's
@@ -625,9 +629,10 @@ func (c *gateCtx) markRow(key, label, setting, detail, fix string) (GateRow, err
 	return row, nil
 }
 
-// masterPortRow (yellow only): the master's MySQL port answers the panel
-// host, which is neither the master, the action's target nor one of its
-// replicas (G11).
+// masterPortRow (yellow only, never red): the master's MySQL port answers
+// the panel host, which is neither the master, the action's target nor one
+// of its replicas (G11); or the address changed and waits for the master's
+// next probe slot (T6).
 func (c *gateCtx) masterPortRow() (GateRow, error) {
 	row := GateRow{Key: keyMasterPort, Label: labelMasterPort}
 	if c.topo.SourceHost == "" || c.topo.SourcePort == 0 {
@@ -650,7 +655,13 @@ func (c *gateCtx) masterPortRow() (GateRow, error) {
 			}
 		}
 	}
-	if c.r.masterPortOpen(c.master.srv.ID, masterSourceAddr(*c.topo)) {
+	open, waitUntil := c.r.masterPortOpen(c.master.srv.ID, masterSourceAddr(*c.topo))
+	switch {
+	case !waitUntil.IsZero():
+		// The address changed within the master's slot: not dialled until
+		// it ends (spec 5.1). Yellow, and nothing for the user to fix.
+		row.Status, row.Detail = GateYellow, fmt.Sprintf(textG11w, waitUntil.Local().Format("15:04"))
+	case open:
 		row.Status, row.Detail, row.Fix = GateYellow, fmt.Sprintf(textG11a, c.master.srv.Name), textG11f
 	}
 	return row, nil

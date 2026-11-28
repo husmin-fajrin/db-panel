@@ -124,7 +124,8 @@ func TestEveryPostWritesAudit(t *testing.T) {
 	}
 	// Light actions: their token comes through the session's window.
 	needsLightToken := map[string]string{
-		"/servers/2/token": web.ActRepairToken,
+		"/servers/2/token":  web.ActRepairToken,
+		"/masters/1/source": web.ActMasterSource,
 	}
 	for i, rt := range routes {
 		form := rt.form
@@ -132,7 +133,12 @@ func TestEveryPostWritesAudit(t *testing.T) {
 			form = withToken(t, e, form, action, rt.targetKind, rt.targetID)
 		}
 		if action, ok := needsLightToken[rt.path]; ok {
-			form = url.Values{"confirm_token": {windowToken(t, e, action, rt.targetKind, rt.targetID, c)}}
+			light := url.Values{}
+			for k, v := range form {
+				light[k] = v
+			}
+			light.Set("confirm_token", windowToken(t, e, action, rt.targetKind, rt.targetID, c))
+			form = light
 		}
 		rec := e.do("POST", rt.path, form, c)
 		if rec.Code >= 500 {

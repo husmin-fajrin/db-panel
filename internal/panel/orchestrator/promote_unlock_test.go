@@ -194,7 +194,7 @@ func TestUnlockPromoteLockSuperseded(t *testing.T) {
 	cases := map[string]func(g *promoteRig){
 		"later promotion done": func(g *promoteRig) { g.laterPromotion(promotionDone) },
 		"master changed": func(g *promoteRig) {
-			if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306); err != nil {
+			if err := g.e.st.SwapMaster(g.topo.ID, g.m.id, g.b.id, "10.0.0.3", 3306, "job:test", time.Now()); err != nil {
 				g.e.t.Fatal(err)
 			}
 		},

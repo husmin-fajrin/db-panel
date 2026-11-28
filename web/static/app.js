@@ -95,6 +95,30 @@
     }
   }
 
+  // teksKonfirmasi adalah data-confirm-text tombol btn. Bila tombol
+  // membawa data-confirm-value-from (nama isian formulirnya, dipisah
+  // spasi), %s pertama diganti nilai yang diketik di isian itu, digabung
+  // ":" seperti host:port (alamat IPv6 diberi kurung siku). Hasilnya
+  // hanya ditampilkan lewat x-text (textContent), tidak pernah sebagai
+  // HTML; panel memeriksa nilainya sendiri.
+  function teksKonfirmasi(btn) {
+    const text = btn.dataset.confirmText || "";
+    const names = (btn.dataset.confirmValueFrom || "").split(" ").filter((n) => n !== "");
+    if (names.length === 0 || !btn.form) {
+      return text;
+    }
+    const values = names.map((n) => {
+      const el = btn.form.elements.namedItem(n);
+      return el && typeof el.value === "string" ? el.value.trim() : "";
+    });
+    if (values.length > 1 && values[0].includes(":")) {
+      values[0] = "[" + values[0] + "]";
+    }
+    const value = values.join(":");
+    // Fungsi pengganti: "$&" dan sejenisnya di nilai tetap teks biasa.
+    return text.replace("%s", () => value);
+  }
+
   // isiTersembunyi mengisi <input type="hidden" name=name> di form,
   // membuatnya bila belum ada.
   function isiTersembunyi(form, name, value) {
@@ -403,7 +427,7 @@
       },
       open(btn) {
         this.tombol = btn;
-        this.text = btn.dataset.confirmText || "";
+        this.text = teksKonfirmasi(btn);
         // Destructive actions (data-confirm-danger="1") get the pink
         // confirm button and a framed warning; the rest primary.
         this.danger = btn.dataset.confirmDanger === "1";
