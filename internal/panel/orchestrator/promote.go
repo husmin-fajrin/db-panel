@@ -195,7 +195,7 @@ func (r *Runner) StartPromote(ctx context.Context, p PromoteParams) (string, err
 	if err != nil {
 		return "", err
 	}
-	cand, mode, err := r.promoteRefusals(p, view, topo)
+	cand, mode, err := r.promoteRefusals(p, view, topo, 0)
 	if err != nil {
 		return "", err
 	}
@@ -556,10 +556,18 @@ func (jr *jobRun) promoteLock(ctx context.Context, _ bool) (outcome, error) {
 		return outcome{}, err
 	}
 	var res proto.LockForPromoteResult
+	oldLockTried, oldUnlocked := jr.st.LockTried, jr.st.LockUnlocked
 	oldTried, oldDeadline := jr.st.LockTriedAt, jr.st.LockDeadline
 	tried := jr.r.now()
-	jr.st.LockTried, jr.st.LockTriedAt, jr.st.LockUnlocked = true, &tried, false
-	jr.save()
+	// The record stands before the lock is asked for (C-1): from tried,
+	// with no deadline (lockUntil), until the answer says more. When it
+	// cannot be stored, nothing is sent: a lock the panel has no record of
+	// would let a load or an emergency start on it.
+	jr.st.LockTried, jr.st.LockTriedAt, jr.st.LockUnlocked, jr.st.LockDeadline = true, &tried, false, nil
+	if err := jr.saveState(); err != nil {
+		jr.st.LockTried, jr.st.LockTriedAt, jr.st.LockUnlocked, jr.st.LockDeadline = oldLockTried, oldTried, oldUnlocked, oldDeadline
+		return outcome{}, err
+	}
 	if err := jr.call(ctx, jr.master(), "mysql.lockForPromote",
 		proto.LockForPromoteParams{Candidate: cred, TimeoutSec: promoteLockSec}, &res); err != nil {
 		if lockRefused(err) {
@@ -712,8 +720,14 @@ func (jr *jobRun) promoteNewMaster(ctx context.Context, _ bool) (outcome, error)
 	if prom, err := jr.r.d.Store.GetPromotion(jr.st.PromotionID); err == nil {
 		params.NotBefore = prom.StartedAt.Add(-promoteClockSkew)
 	}
+	// "Sent" is stored before the command goes out (C-1), or it is not
+	// sent: a promote the stored state calls not sent would get the gate
+	// and the token on its Ulangi, and could be relocked and sent again.
 	jr.st.PromoteSent = true
-	jr.save()
+	if err := jr.saveState(); err != nil {
+		jr.st.PromoteSent = false
+		return outcome{}, err
+	}
 	var res proto.PromoteResult
 	jr.promoteStartUnknown = false
 	if err := jr.runAgentJob(ctx, jr.candidate(), "mysql.promote", params, &res); err != nil {
@@ -1779,7 +1793,7 @@ func (r *Runner) confirmPlannedRetry(j store.Job, st jobState, pv plannedView, a
 	p := PromoteParams{MasterServerID: st.MasterServerID, CandidateServerID: st.CandidateServerID, Mode: proto.PromotePlanned,
 		AcceptPartial: st.PartialCandidate, AcceptUnreachable: st.AcceptUnreachable, AcceptBranched: st.AcceptBranched,
 		BackupAck: ack.BackupAck}
-	if _, _, err := r.promoteRefusals(p, pv.view, topo); err != nil {
+	if _, _, err := r.promoteRefusals(p, pv.view, topo, st.PromotionID); err != nil {
 		return err
 	}
 	res, err := r.refuseRedGate(GateInput{Action: GatePromotePlanned, MasterID: st.MasterServerID, TargetID: st.CandidateServerID})

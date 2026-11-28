@@ -168,9 +168,11 @@ func (v PromoteView) OtherReplicaRefusal() error {
 // planned promote's lock records or locked master), the candidate's
 // eligibility, the master's agent version (SEC-62), a partial candidate,
 // unreachable replicas, and another job of the topology or its servers.
-// It sends nothing to an agent: it judges the view it is given. cand is
-// the chosen candidate's row, mode the promotion's.
-func (r *Runner) promoteRefusals(p PromoteParams, view PromoteView, topo store.Topology) (cand Candidate, mode string, err error) {
+// It sends nothing to an agent: it judges the view it is given. own is
+// the promotion of the job a Retry runs again (0 for a start): it is not
+// "an earlier promotion" (I-1). cand is the chosen candidate's row, mode
+// the promotion's.
+func (r *Runner) promoteRefusals(p PromoteParams, view PromoteView, topo store.Topology, own int64) (cand Candidate, mode string, err error) {
 	if topo.CutoverPending {
 		return Candidate{}, "", errCutoverStillPending
 	}
@@ -221,7 +223,8 @@ func (r *Runner) promoteRefusals(p PromoteParams, view PromoteView, topo store.T
 	if err := view.OtherReplicaRefusal(); err != nil {
 		return Candidate{}, "", err
 	}
-	if prev, err := r.d.Store.LatestPromotion(topo.ID); err == nil && (prev.Status == promotionRunning || prev.Status == promotionPartial) {
+	if prev, err := r.d.Store.LatestPromotion(topo.ID); err == nil && (own == 0 || prev.ID != own) &&
+		(prev.Status == promotionRunning || prev.Status == promotionPartial) {
 		return Candidate{}, "", errors.New("promote sebelumnya di topologi ini belum tuntas; buka pekerjaannya dan tekan Ulangi")
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return Candidate{}, "", err

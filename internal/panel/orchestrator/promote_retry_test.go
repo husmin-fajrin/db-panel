@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/husmin-fajrin/db-panel/internal/agent/commands"
 	"github.com/husmin-fajrin/db-panel/internal/agent/jobs"
 	"github.com/husmin-fajrin/db-panel/internal/panel/monitor"
 	"github.com/husmin-fajrin/db-panel/internal/panel/store"
@@ -756,4 +758,205 @@ func TestPromoteRetryPastPointTokenlessAndUngated(t *testing.T) {
 		}
 		e.waitFor("quarantine resent", func() bool { return g.m.count("mysql.quarantine") > quarantines })
 	})
+}
+
+// ---- Fix round 1: "sent" and the lock record are stored before the
+// command goes out, or it is not sent (C-1); a retry does not count its
+// own promotion as an earlier one unfinished (I-1). ----
+
+// failParamsWith makes the job params store fail every write whose JSON
+// holds marker (first only: only the first such write fails).
+func failParamsWith(e *env, marker string, first bool) {
+	var mu sync.Mutex
+	failed := false
+	e.r.paramsStore = func(jobID, paramsJSON string) error {
+		mu.Lock()
+		hit := strings.Contains(paramsJSON, marker) && !(first && failed)
+		if hit {
+			failed = true
+		}
+		mu.Unlock()
+		if hit {
+			return errors.New("database is locked")
+		}
+		return e.st.SetJobParams(jobID, paramsJSON)
+	}
+}
+
+// TestPromoteSentSaveFailureSendsNothing: when "sent" cannot be stored,
+// mysql.promote is not sent and the job fails before the switch; its
+// stored state reads not sent and its Ulangi follows the before-send
+// rules.
+func TestPromoteSentSaveFailureSendsNothing(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	failParamsWith(e, `"promote_sent":true`, false)
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	j, steps := e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	if steps[j.CurrentStep].Name != stepPromoteNewMaster || !strings.Contains(j.Error, "database is locked") {
+		t.Fatalf("job failed at %q with %q, want the new-master step failing on the save", steps[j.CurrentStep].Name, j.Error)
+	}
+	if n := g.c.count("mysql.promote"); n != 0 {
+		t.Fatalf("mysql.promote sent %d times", n)
+	}
+	st := e.storedState(id)
+	if st.PromoteSent || st.PastPoint {
+		t.Fatalf("stored state = %+v, want not sent", st)
+	}
+	if p := g.promotion(); p.Status != promotionFailed {
+		t.Fatalf("promotion = %s, want failed", p.Status)
+	}
+	e.r.paramsStore = nil
+	if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+		t.Fatalf("Retry without a token = %v, want ErrJobNeedsConfirm", err)
+	}
+	if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+		t.Fatalf("confirmed Retry: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+}
+
+// TestLockRecordSaveFailureSendsNoLock: when the lock record cannot be
+// stored, mysql.lockForPromote is not sent and the job fails.
+func TestLockRecordSaveFailureSendsNoLock(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	failParamsWith(e, `"lock_tried":true`, false)
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	j, steps := e.waitJob(id, store.JobFailed)
+	e.waitIdle(id)
+	if steps[j.CurrentStep].Name != stepPromoteLock || !strings.Contains(j.Error, "database is locked") {
+		t.Fatalf("job failed at %q with %q, want the lock step failing on the save", steps[j.CurrentStep].Name, j.Error)
+	}
+	if n := g.m.count("mysql.lockForPromote"); n != 0 {
+		t.Fatalf("mysql.lockForPromote sent %d times", n)
+	}
+	if st := e.storedState(id); st.LockTried || st.LockTriedAt != nil {
+		t.Fatalf("stored state = %+v, want no lock asked for", st)
+	}
+	if recs := g.lockRecords(); len(recs) != 0 {
+		t.Fatalf("lock records = %+v, want none", recs)
+	}
+}
+
+// TestLockDeadlineSaveFailureKeepsRecord: the master answered the lock but
+// its deadline could not be stored: the record stands from the time the
+// lock was asked for (as for a lost answer), never from an older deadline.
+func TestLockDeadlineSaveFailureKeepsRecord(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	failParamsWith(e, `"lock_deadline"`, true)
+	var seen jobState
+	var recs []LockRecord
+	var once sync.Once
+	g.c.on("mysql.waitSynced", func(json.RawMessage) (any, error) {
+		once.Do(func() {
+			j, _, _ := e.st.GetJob(g.promotion().JobID)
+			json.Unmarshal([]byte(j.ParamsJSON), &seen)
+			recs, _ = e.r.LockRecords(g.m.id)
+		})
+		return proto.WaitSyncedResult{Synced: true, Executed: masterGTID,
+			Status: proto.ReplicaStatus{IORunning: "Yes", SQLRunning: "Yes"}}, nil
+	})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobSucceeded)
+	if !seen.LockTried || seen.LockTriedAt == nil || seen.LockDeadline != nil {
+		t.Fatalf("stored while catching up = %+v, want the lock asked for, no deadline", seen)
+	}
+	want := seen.LockTriedAt.Add(promoteLockSec*time.Second + lockCallSlack + proto.PromoteLockGrace)
+	if len(recs) != 1 || recs[0].JobID != id || !recs[0].Until.Equal(want) {
+		t.Fatalf("records while catching up = %+v, want one until %v", recs, want)
+	}
+}
+
+// TestPastPointSaveFailureReadsSent: the candidate opened writes but
+// PastPoint could not be stored: the stored state still reads sent, so
+// Ulangi stays one click.
+func TestPastPointSaveFailureReadsSent(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	failParamsWith(e, `"past_point":true`, true)
+	var seen jobState
+	g.m.on("mysql.quarantine", func(json.RawMessage) (any, error) {
+		j, _, _ := e.st.GetJob(g.promotion().JobID)
+		json.Unmarshal([]byte(j.ParamsJSON), &seen)
+		return nil, &commands.ParamError{Msg: "master lama tidak menjawab"}
+	})
+	id, err := e.r.StartPromote(context.Background(), PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id})
+	if err != nil {
+		t.Fatalf("StartPromote: %v", err)
+	}
+	e.waitJob(id, store.JobPartial)
+	e.waitIdle(id)
+	if !seen.PromoteSent {
+		t.Fatalf("stored after the switch = %+v, want sent", seen)
+	}
+	if need, err := e.r.NeedsConfirm(id); err != nil || need {
+		t.Fatalf("NeedsConfirm = %v, %v; want false", need, err)
+	}
+}
+
+// TestPlannedRetryOwnPromotionUnfinished (I-1): the job's own promotion
+// left running or partial does not refuse its Ulangi as "an earlier
+// promote unfinished": it goes on to the gate and the token.
+func TestPlannedRetryOwnPromotionUnfinished(t *testing.T) {
+	for _, status := range []string{promotionRunning, promotionPartial} {
+		t.Run(status, func(t *testing.T) {
+			g := newPromoteRig(t)
+			e := g.e
+			id := g.failedAtCatchUp(t)
+			p := g.promotion()
+			p.Status = status
+			if err := e.st.UpdatePromotion(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.r.Retry(id, JobAck{}); !errors.Is(err, ErrJobNeedsConfirm) {
+				t.Fatalf("Retry without a token = %v, want ErrJobNeedsConfirm (past the refusals)", err)
+			}
+			g.skewClock(g.c, 31*time.Second)
+			wantGateRed(t, e.r.Retry(id, JobAck{Confirmed: true}), "Jam (clock)")
+			g.skewClock(g.c, 0)
+			if err := e.r.Retry(id, JobAck{Confirmed: true}); err != nil {
+				t.Fatalf("Retry: %v", err)
+			}
+			e.waitJob(id, store.JobSucceeded)
+		})
+	}
+}
+
+// TestPromoteRefusalsOtherUnfinishedPromotion (I-1): another promotion of
+// the topology left unfinished still refuses, with the existing text,
+// whichever promotion is the caller's own.
+func TestPromoteRefusalsOtherUnfinishedPromotion(t *testing.T) {
+	g := newPromoteRig(t)
+	e := g.e
+	id := g.failedAtCatchUp(t)
+	own := e.storedState(id).PromotionID
+	if _, err := e.st.AddPromotion(store.Promotion{TopologyID: g.topo.ID, Mode: proto.PromotePlanned, OldMasterServerID: g.m.id,
+		NewMasterServerID: g.b.id, StartedAt: time.Now(), Status: promotionRunning}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := e.r.PromoteView(context.Background(), g.m.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "promote sebelumnya di topologi ini belum tuntas; buka pekerjaannya dan tekan Ulangi"
+	p := PromoteParams{MasterServerID: g.m.id, CandidateServerID: g.c.id, Mode: proto.PromotePlanned}
+	e.r.startMu.Lock()
+	defer e.r.startMu.Unlock()
+	for _, prom := range []int64{0, own} {
+		if _, _, err := e.r.promoteRefusals(p, view, g.topo, prom); err == nil || err.Error() != want {
+			t.Fatalf("promoteRefusals (own %d) = %v, want %q", prom, err, want)
+		}
+	}
 }
