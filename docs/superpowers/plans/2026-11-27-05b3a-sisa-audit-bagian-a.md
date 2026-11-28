@@ -1537,25 +1537,62 @@ tidak bisa dijalankan di mesin pelaksana. Nilai ditulis `read_only` /
 `super_read_only`; "tersimpan" adalah isi
 `performance_schema.persisted_variables` (`-` berarti tidak tersimpan).
 
-| Baris | Tersimpan sebelum restart | Sesudah restart, di head `8caee75` | Wajib | Sesudah Task 16 |
+Terukur oleh Task 15 dengan `TestReadOnlyAcrossRestart` pada head `b3a1a9d`,
+mysqld `SELECT VERSION()` = `8.0.46-0ubuntu0.24.04.4`. "OF" = baris
+`read_only=ON` dan `super_read_only=ON` di berkas opsi. Sel "berjalan" adalah
+nilai berjalan sesudah restart terakhir; tersimpan ditulis sesudah tanda `;`.
+
+| Baris | Tersimpan sebelum restart | Sesudah restart, di head `b3a1a9d` | Wajib | Sesudah Task 16 |
 |---|---|---|---|---|
-| premis-1 | | | OFF/OFF | |
-| premis-2 | | | ON/ON | |
-| premis-3 | | | ON/ON | |
-| premis-4 | | | OFF/OFF | |
-| jenis1-kunci | | | ON/ON | |
-| jenis1-buka | | | OFF/OFF | |
-| jenis2-kunci | | | ON/ON | |
-| jenis2-buka | | | OFF/OFF | |
-| jenis3-dari-1 | | | OFF/OFF | |
-| jenis3-dari-2 | | | OFF/OFF | |
+| premis-1 | OFF/OFF (OF ada) | OFF/OFF; OFF/OFF | OFF/OFF | |
+| premis-2 | ON/ON (tanpa OF) | ON/ON; ON/ON | ON/ON | |
+| premis-3 | ON/ON (OF ada) | ON/ON; ON/ON | ON/ON | |
+| premis-4 | OFF/OFF (tanpa OF) | OFF/OFF; OFF/OFF | OFF/OFF | |
+| jenis1-kunci | `lockForPromote`: -/ON; `lock-master`: -/ON | keduanya ON/ON; -/ON | ON/ON | |
+| jenis1-buka | `unlockPromote`: -/-; `unlock-master`: -/- | keduanya OFF/OFF; -/- | OFF/OFF | |
+| jenis2-kunci | OFF/ON (OF ada) | ON/ON; OFF/ON | ON/ON | |
+| jenis2-buka | OFF/- (OF ada) | **OFF/ON**; OFF/- | OFF/OFF | |
+| jenis3-dari-1 | ON/- (tanpa OF) | **ON/OFF**; ON/- | OFF/OFF | |
+| jenis3-dari-2 | ON/- (OF ada) | **ON/ON**; ON/- | OFF/OFF | |
+
+Baris premis semua lulus di head: aturan berhenti tidak berlaku. Tiga baris
+yang tebal gagal di head; test menegaskan nilai terukurnya (K28) sampai Task 16.
+
+Langkah per baris (berjalan; tersimpan, sesudah tiap langkah):
+
+- premis-1: mulai OFF/OFF; -/- → OF ditulis → `SET PERSIST super_read_only = OFF`, `SET PERSIST read_only = OFF`: OFF/OFF; OFF/OFF → restart: OFF/OFF; OFF/OFF.
+- premis-2: mulai OFF/OFF; -/- → `SET PERSIST super_read_only = ON`, `SET PERSIST read_only = ON`: ON/ON; ON/ON → restart: ON/ON; ON/ON.
+- premis-3: mulai OFF/OFF; -/- → OF ditulis → kedua `SET PERSIST … = ON`: ON/ON; ON/ON → restart: ON/ON; ON/ON.
+- premis-4: mulai OFF/OFF; -/- → kedua `SET PERSIST … = OFF`: OFF/OFF; OFF/OFF → restart: OFF/OFF; OFF/OFF.
+- jenis1-kunci/lockForPromote: master polos OFF/OFF; -/- → `mysql.lockForPromote` (kandidat replika sungguhan): ON/ON; -/ON → restart: ON/ON; -/ON.
+- jenis1-kunci/lock-master: master polos OFF/OFF; -/- → `agent lock-master`: ON/ON; -/ON → restart: ON/ON; -/ON.
+- jenis1-buka/unlockPromote: master polos OFF/OFF; -/- → `mysql.lockForPromote`: ON/ON; -/ON → restart: ON/ON; -/ON → `mysql.unlockPromote`: OFF/OFF; -/- → restart: OFF/OFF; -/-.
+- jenis1-buka/unlock-master: master polos OFF/OFF; -/- → `agent lock-master`: ON/ON; -/ON → restart: ON/ON; -/ON → `agent unlock-master`: OFF/OFF; -/- → restart: OFF/OFF; -/-.
+- jenis2-kunci: replika: OF ditulis, `SetReadOnly(true)`: ON/ON; ON/ON → `mysql.promote` terencana (kedua pernyataan pembuka tulis): OFF/OFF; OFF/OFF → `mysql.lockForPromote` (kandidat: master lama yang kini mengikutinya): ON/ON; OFF/ON → restart selagi terkunci, dibaca sebelum penjaga: ON/ON; OFF/ON → putaran penjaga pertama (`ensureLocked`): ON/ON; OFF/ON.
+- jenis2-buka: sama sampai putaran penjaga pertama (ON/ON; OFF/ON) → `mysql.unlockPromote`: OFF/OFF; OFF/- → restart: OFF/ON; OFF/-.
+- jenis3-dari-1: master polos OFF/OFF; -/- → `mysql.quarantine` (`persistReadOnly`; kunci start ditulis): ON/ON; ON/ON → `agent set-role master --ya` (melepas kunci start): ON/ON; ON/ON → `agent unlock-master`: OFF/OFF; ON/- → restart: ON/OFF; ON/-.
+- jenis3-dari-2: replika → promote seperti jenis2 (OFF/OFF; OFF/OFF) → `mysql.quarantine`: ON/ON; ON/ON → `agent set-role master --ya`: ON/ON; ON/ON → `agent unlock-master`: OFF/OFF; ON/- → restart: ON/ON; ON/-.
+
+Catatan: jenis2-buka menyala dengan `read_only=OFF` dan `super_read_only=ON`
+sekaligus, keadaan yang tidak bisa dibuat dengan `SET` saat berjalan (OF
+memasang `super_read_only`, nilai tersimpan `read_only=OFF` dimuat sesudahnya
+tanpa menurunkan `super_read_only`). Apakah aplikasi bisa menulis pada
+keadaan ini tidak diukur; bagaimanapun barisnya tidak memberi OFF/OFF.
 
 - Apakah `SET PERSIST super_read_only = ON` ikut menyimpan `read_only`:
-  (diisi Task 15)
+  **tidak**. Sesudahnya berjalan ON/ON (MySQL ikut menyalakan `read_only`),
+  tersimpan `-`/ON; sesudah restart tetap ON/ON; -/ON (tanpa OF, karena
+  `super_read_only=ON` yang dimuat menyalakan `read_only`).
 - Apakah `setReadOnly(false)` diterima saat hanya `read_only` yang ON:
-  (diisi Task 15)
+  **ya**. Pada master yang dipin, sesudah `SET PERSIST read_only = ON`
+  (berjalan ON/OFF; tersimpan ON/-), `mysql.setReadOnly{on:false}` berhasil:
+  OFF/OFF; OFF/OFF, dan sesudah restart OFF/OFF; OFF/OFF.
 - Apakah server terkunci menyala bisa ditulis di head (`jenis2-kunci`), dan
-  karena itu catatan pembaruan mendapat kalimat tambahan: (diisi Task 15)
+  karena itu catatan pembaruan mendapat kalimat tambahan: **tidak**. Master
+  jenis 2 yang di-restart selagi terkunci menyala ON/ON (tersimpan OFF/ON, OF
+  ada) sebelum penjaga bekerja; catatan pembaruan tidak mendapat kalimat
+  "jangan me-restart MySQL master selama promote terencana sampai agentnya
+  diperbarui" (Task 24).
 - Aturan field `restart_read_only` yang diturunkan dari tabel ini: (diisi
   Task 19)
 
