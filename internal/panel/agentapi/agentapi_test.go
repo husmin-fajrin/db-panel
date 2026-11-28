@@ -521,7 +521,10 @@ func TestWSLogsReplacedConnection(t *testing.T) {
 	cfg := e.pair(t, token, t.TempDir())
 	startAgent(t, cfg, stubRegistry())
 	waitID(t, e.l.online, "first OnOnline")
-	if strings.Contains(e.logs.String(), "replaced") {
+	// The connection's own log line, not any line with the word: the
+	// pairing's audit row carries a "replaced" field of its own.
+	const replacedLine = `msg="agent connection replaced an existing one`
+	if strings.Contains(e.logs.String(), replacedLine) {
 		t.Fatalf("first connection logged as a replacement:\n%s", e.logs.String())
 	}
 
@@ -532,7 +535,7 @@ func TestWSLogsReplacedConnection(t *testing.T) {
 	// The hub reports the connection online inside Attach; the handler
 	// logs the replacement after Attach returns, so wait for the line.
 	replaced := func(out string) bool {
-		return strings.Contains(out, `level=WARN msg="agent connection replaced an existing one`) &&
+		return strings.Contains(out, `level=WARN `+replacedLine) &&
 			strings.Contains(out, "remote=127.0.0.1:")
 	}
 	deadline := time.Now().Add(wait)
