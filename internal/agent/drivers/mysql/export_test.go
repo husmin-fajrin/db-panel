@@ -789,3 +789,11 @@ func SettleOpenOnce(ctx context.Context, db *sql.DB, connID uint64, boot int64) 
 	return settleOpenOnce(ctx, Promoting{ConnID: connID, Boot: boot},
 		func(context.Context) (*sql.DB, func(), error) { return db, func() {}, nil })
 }
+
+// SetOpenReadFlags replaces how the flags are read after a write-opening
+// statement was answered with an error packet.
+func SetOpenReadFlags(f func(ctx context.Context, db *sql.DB) (ro, sro bool, err error)) (restore func()) {
+	old := openReadFlags
+	openReadFlags = f
+	return func() { openReadFlags = old }
+}

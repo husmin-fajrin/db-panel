@@ -42,6 +42,22 @@ var (
 // openKillPoll is how often a try reads the process list after the KILL.
 const openKillPoll = 50 * time.Millisecond
 
+// bootTolerance: two instance starts this close are the same instance.
+// UNIX_TIMESTAMP() and Uptime are whole seconds, so the start read twice
+// may differ by one; a false "another instance" would skip the KILL.
+const bootTolerance = 2
+
+// restartedSince reports whether mysqld started at now is another
+// instance than the one started at rec: both known and more than
+// bootTolerance apart.
+func restartedSince(rec, now int64) bool {
+	if rec == 0 || now == 0 {
+		return false
+	}
+	d := now - rec
+	return d > bootTolerance || d < -bootTolerance
+}
+
 // errUnknownThread is ER_NO_SUCH_THREAD: KILL of an id mysqld does not
 // have.
 const errUnknownThread = 1094
@@ -64,7 +80,8 @@ var openExec = func(ctx context.Context, c *sql.Conn, q string) error {
 var openSettleHook func() error
 
 // knownOutcome reports whether err is an answer of the server: none, or
-// an error packet.
+// an error packet. An answer ends the statement; an error packet still
+// does not say what it changed (sendWriteOpening reads the flags).
 func knownOutcome(err error) bool {
 	var me *drv.MySQLError
 	return err == nil || errors.As(err, &me)
@@ -107,23 +124,39 @@ const (
 )
 
 // sendWriteOpening runs the two write-opening statements on c (named in
-// the marker m) in their order. A known failure of the first rolls back
-// (restore) as before; an unknown outcome is settled first (settleOpen):
-// still read-only rolls back, writable goes on with the second on a new
-// connection the marker names. Writes are open when it returns nil.
+// the marker m) in their order. An error packet is not proof that a
+// statement did nothing (MySQL changes the global value before it writes
+// mysqld-auto.cnf, and answers an error when that write fails), so after
+// one the flags are read again (answeredWritable). For the first: still
+// read-only rolls back (restore) as before, writable goes on as after an
+// OK. An outcome that is unknown, or flags that cannot be read after an
+// error packet, is settled first (settleOpen): still read-only rolls
+// back, writable goes on with the second on a new connection the marker
+// names. Writes are open when it returns nil.
 func (d *Driver) sendWriteOpening(j *jobs.Job, db *sql.DB, c *sql.Conn, m Promoting, restore func(error) error) error {
 	// Past the point of no return a cancel does not stop anything.
 	ctx := context.WithoutCancel(j.Context())
 	defer func() { c.Close() }()
 	jobDB := func(context.Context) (*sql.DB, func(), error) { return db, func() {}, nil }
 	err := openExec(ctx, c, openReadOnlyStmt)
-	switch {
-	case err == nil:
-	case knownOutcome(err):
-		return restore(fmt.Errorf("%s: %w", openReadOnlyStmt, err))
-	default:
+	unknown := !knownOutcome(err)
+	if err != nil && !unknown {
+		writable, rerr := answeredWritable(ctx, db)
+		switch {
+		case rerr != nil:
+			j.Logf("warn", "MySQL menjawab %s dengan galat (%v), lalu read_only tidak bisa dibaca (%v)", openReadOnlyStmt, err, rerr)
+			unknown = true
+		case writable:
+			j.Logf("warn", "MySQL menjawab %s dengan galat (%v), tetapi server ini sudah bisa ditulis: tulis terbuka, promote dilanjutkan",
+				openReadOnlyStmt, err)
+			err = nil
+		default:
+			return restore(fmt.Errorf("%s: %w", openReadOnlyStmt, err))
+		}
+	}
+	if unknown {
 		c.Close()
-		j.Logf("warn", "MySQL tidak menjawab %s (%v); promote ditahan sampai pasti perintah itu sudah berhenti di MySQL", openReadOnlyStmt, err)
+		j.Logf("warn", "MySQL tidak menjawab %s dengan pasti (%v); promote ditahan sampai pasti perintah itu sudah berhenti di MySQL", openReadOnlyStmt, err)
 		if settleOpen(ctx, m, jobDB, j.Logf) {
 			j.Logf("info", "perintah pembuka tulis sudah berhenti di MySQL dan server ini tetap baca-saja (read-only)")
 			return restore(fmt.Errorf("%s: %w; perintah itu sudah dipastikan berhenti di MySQL dan server ini tetap baca-saja (read-only)",
@@ -140,15 +173,45 @@ func (d *Driver) sendWriteOpening(j *jobs.Job, db *sql.DB, c *sql.Conn, m Promot
 		c, m = next, nm
 	}
 	if err := openExec(ctx, c, openSuperOnlyStmt); err != nil {
-		if !knownOutcome(err) {
+		// Writes are open either way; only an unknown outcome, or flags
+		// that cannot be read after an error packet, is settled before the
+		// error of before is returned.
+		unknown := !knownOutcome(err)
+		if !unknown {
+			if _, rerr := answeredWritable(ctx, db); rerr != nil {
+				j.Logf("warn", "MySQL menjawab %s dengan galat (%v), lalu read_only tidak bisa dibaca (%v)", openSuperOnlyStmt, err, rerr)
+				unknown = true
+			}
+		}
+		if unknown {
 			c.Close()
-			j.Logf("warn", "MySQL tidak menjawab %s (%v); promote ditahan sampai pasti perintah itu sudah berhenti di MySQL", openSuperOnlyStmt, err)
+			j.Logf("warn", "MySQL tidak menjawab %s dengan pasti (%v); promote ditahan sampai pasti perintah itu sudah berhenti di MySQL", openSuperOnlyStmt, err)
 			settleOpen(ctx, m, jobDB, j.Logf)
 			j.Logf("info", "perintah pembuka tulis sudah berhenti di MySQL")
 		}
 		return fmt.Errorf("%s: %w; tulis sudah terbuka, jalankan promote lagi untuk melanjutkan", openSuperOnlyStmt, err)
 	}
 	return nil
+}
+
+// openReadFlags reads read_only and super_read_only on db; tests replace
+// it.
+var openReadFlags = func(ctx context.Context, db *sql.DB) (ro, sro bool, err error) {
+	err = db.QueryRowContext(ctx, "SELECT @@global.read_only, @@global.super_read_only").Scan(&ro, &sro)
+	return ro, sro, err
+}
+
+// answeredWritable reads, within openSettleTry, whether writes are open
+// after a write-opening statement was answered with an error packet (the
+// statement has ended: it was answered): read_only OFF.
+func answeredWritable(ctx context.Context, db *sql.DB) (bool, error) {
+	rctx, cancel := context.WithTimeout(ctx, openSettleTry)
+	defer cancel()
+	ro, _, err := openReadFlags(rctx, db)
+	if err != nil {
+		return false, err
+	}
+	return !ro, nil
 }
 
 // settleOpen returns once the connection m names is gone from mysqld, with
@@ -167,7 +230,8 @@ func settleOpen(ctx context.Context, m Promoting, open func(context.Context) (*s
 			return ro
 		}
 		if try == 1 || time.Since(logged) >= openSettleLogEvery {
-			logf("warn", "belum bisa dipastikan perintah pembuka tulis sudah berhenti di MySQL (percobaan ke-%d): %v; dicoba lagi tiap %s",
+			logf("warn", "belum bisa dipastikan perintah pembuka tulis sudah berhenti di MySQL (percobaan ke-%d): %v; dicoba lagi tiap %s. "+
+				"Bila MySQL tidak pulih, mulai ulang MySQL di server ini: perintah yang tertahan ikut berhenti, lalu agent memastikannya sendiri",
 				try, err, openSettlePause)
 			logged = time.Now()
 		}
@@ -181,10 +245,11 @@ func settleOpen(ctx context.Context, m Promoting, open func(context.Context) (*s
 }
 
 // settleOpenOnce is one try of settleOpen on a fresh connection: the
-// connection of m is gone when mysqld is another instance than m's (both
-// starts known and different), when this try's own connection has its id
-// (ids are not reused by one instance), or once KILL found it unknown or
-// it left the process list after the KILL. Then the flags are read.
+// connection of m is gone when mysqld is another instance than m's
+// (restartedSince), when this try's own connection has its id (ids are
+// not reused by one instance), or once it is absent from the process list
+// (after a KILL when the row is of this try's own account, or KILL found
+// the id unknown). Then the flags are read.
 func settleOpenOnce(ctx context.Context, m Promoting, open func(context.Context) (*sql.DB, func(), error)) (bool, error) {
 	if openSettleHook != nil {
 		if err := openSettleHook(); err != nil {
@@ -206,22 +271,40 @@ func settleOpenOnce(ctx context.Context, m Promoting, open func(context.Context)
 		return false, fmt.Errorf("baca CONNECTION_ID(): %w", err)
 	}
 	boot := instanceBoot(ctx, c)
-	if restarted := m.Boot != 0 && boot != 0 && boot != m.Boot; !restarted && self != m.ConnID {
-		id := strconv.FormatUint(m.ConnID, 10)
-		var me *drv.MySQLError
-		if _, err := c.ExecContext(ctx, "KILL "+id); err != nil && !(errors.As(err, &me) && me.Number == errUnknownThread) {
-			return false, fmt.Errorf("KILL %s: %w", id, err)
+	if !restartedSince(m.Boot, boot) && self != m.ConnID {
+		// A restart within bootTolerance reads as the same instance, and
+		// its connection with the recorded id is not ours: only a row of
+		// this try's own account is killed. Any other row is waited for.
+		var own string
+		if err := c.QueryRowContext(ctx, "SELECT USER FROM information_schema.PROCESSLIST WHERE ID = CONNECTION_ID()").Scan(&own); err != nil {
+			return false, fmt.Errorf("baca daftar proses MySQL: %w", err)
 		}
+		id := strconv.FormatUint(m.ConnID, 10)
+		killed := false
 		for {
-			var n int
-			if err := c.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = ?", m.ConnID).Scan(&n); err != nil {
+			var user sql.NullString
+			err := c.QueryRowContext(ctx, "SELECT USER FROM information_schema.PROCESSLIST WHERE ID = ?", m.ConnID).Scan(&user)
+			if errors.Is(err, sql.ErrNoRows) {
+				break
+			}
+			if err != nil {
 				return false, fmt.Errorf("baca daftar proses MySQL: %w", err)
 			}
-			if n == 0 {
-				break
+			if !killed && user.Valid && user.String == own {
+				var me *drv.MySQLError
+				if _, err := c.ExecContext(ctx, "KILL "+id); err != nil {
+					if errors.As(err, &me) && me.Number == errUnknownThread {
+						break
+					}
+					return false, fmt.Errorf("KILL %s: %w", id, err)
+				}
+				killed = true
 			}
 			select {
 			case <-ctx.Done():
+				if !killed {
+					return false, fmt.Errorf("sambungan %s milik akun lain (%s) masih ada di daftar proses MySQL", id, user.String)
+				}
 				return false, fmt.Errorf("sambungan %s masih ada di daftar proses MySQL setelah KILL", id)
 			case <-time.After(openKillPoll):
 			}

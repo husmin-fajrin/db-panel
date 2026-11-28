@@ -505,3 +505,177 @@ func TestKillAndConfirmGone(t *testing.T) {
 		t.Fatalf("settling an unknown id: %v", err)
 	}
 }
+
+// TestOpenWritesErrorPacketButWritableContinues: the first SET is
+// answered with an error packet after MySQL already changed the global
+// value (as when mysqld-auto.cnf cannot be written): writes are open, so
+// nothing is rolled back, the marker stays and the job goes on to its end.
+func TestOpenWritesErrorPacketButWritableContinues(t *testing.T) {
+	r := newPromoteRig(t)
+	execAll(t, r.mdb, "SET GLOBAL super_read_only = ON")
+	answered := make(chan struct{}, 1)
+	t.Cleanup(mysql.SetOpenExec(func(ctx context.Context, c *sql.Conn, q string) error {
+		if q != setReadOnlyOff {
+			_, err := c.ExecContext(ctx, q)
+			return err
+		}
+		// The global value changes, then the statement fails with an
+		// error packet (1231 here; ER_VARIABLE_NOT_PERSISTED in the field).
+		if _, err := c.ExecContext(ctx, "SET GLOBAL read_only = OFF"); err != nil {
+			return err
+		}
+		_, err := c.ExecContext(ctx, "SET PERSIST read_only = 'tidak'")
+		if got := pinFile(t, r.dir, mysql.PromotingFile); got == "" {
+			t.Error("no promoting marker while the first SET is answered")
+		}
+		answered <- struct{}{}
+		return err
+	}))
+	t.Cleanup(mysql.SetOpenSettleHook(func() error {
+		t.Error("an answered statement with the flags readable was settled")
+		return nil
+	}))
+	res := promoteResult(t, r.run(r.params(proto.PromotePlanned)))
+	recv(t, answered, "the first write-opening statement")
+	if r.ev.logged("replikasi dijalankan kembali") || r.ev.logged("promote dibatalkan") {
+		t.Error("rolled back although writes were open")
+	}
+	if !r.ev.logged("sudah bisa ditulis: tulis terbuka, promote dilanjutkan") {
+		t.Error("the job log does not say writes were found open after the error")
+	}
+	if sro, ro := readOnly(t, r.rdb); sro || ro {
+		t.Errorf("after promote: super_read_only=%v read_only=%v", sro, ro)
+	}
+	if got := pinFile(t, r.dir, mysql.RoleFile); got != "master" {
+		t.Errorf("role pin = %q, want master", got)
+	}
+	if pr, ok, err := r.d.Pins().ReadPromoted(); err != nil || !ok || pr.GTIDExecuted != res.GTIDExecuted {
+		t.Errorf("promotion record = %+v, %v, %v", pr, ok, err)
+	}
+	// What was not persisted stays as it was: read_only comes back ON
+	// after a mysqld restart (the report says so; nothing is built for it).
+	if got := persisted(t, r.rdb, "read_only"); got != "ON" {
+		t.Errorf("persisted read_only = %q; the stand-in persisted nothing", got)
+	}
+	if promoteRequest(t, r.dispatch("mysql.status", nil)) {
+		t.Error("mysql.status: promote_request true after the job ended")
+	}
+}
+
+// TestOpenWritesErrorPacketFlagsUnreadableSettles: an error packet on the
+// first SET whose flags cannot be read after it is an unknown outcome:
+// settled before anything else (here: still read-only, rolled back).
+func TestOpenWritesErrorPacketFlagsUnreadableSettles(t *testing.T) {
+	r := newPromoteRig(t)
+	execAll(t, r.mdb, "SET GLOBAL super_read_only = ON")
+	shortSettle(t)
+	t.Cleanup(mysql.SetOpenExec(func(ctx context.Context, c *sql.Conn, q string) error {
+		if q == setReadOnlyOff {
+			q = "SET PERSIST read_only = 'tidak'" // an error packet (1231)
+		}
+		_, err := c.ExecContext(ctx, q)
+		return err
+	}))
+	t.Cleanup(mysql.SetOpenReadFlags(func(context.Context, *sql.DB) (bool, bool, error) {
+		return false, false, errors.New("tidak terbaca (test)")
+	}))
+	tries, release := holdSettle(t)
+	r.startJob(r.params(proto.PromotePlanned))
+	recv(t, tries, "a settling try")
+	select {
+	case d := <-r.ev.done:
+		t.Fatalf("the job ended before the statement was settled: %+v", d)
+	default:
+	}
+	if !promoteRequest(t, r.dispatch("mysql.status", nil)) {
+		t.Error("mysql.status: promote_request false while unsettled")
+	}
+	release()
+	r.wantFailed(r.waitJob(), "tetap baca-saja")
+}
+
+// TestOpenSettleKillsWhenBootDiffersByOne: a start read one second off is the
+// same instance: the recorded connection is still killed and waited for.
+func TestOpenSettleKillsWhenBootDiffersByOne(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	ctx := context.Background()
+	c, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id uint64
+	if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	qctx, cancel := context.WithTimeout(ctx, time.Second)
+	_, _ = c.ExecContext(qctx, "DO SLEEP(600)")
+	cancel()
+	c.Close()
+	if !inProcessList(t, db, id) {
+		t.Fatal("the stand-in statement is not running")
+	}
+	boot, err := mysql.InstanceBoot(ctx, db)
+	if err != nil || boot == 0 {
+		t.Fatalf("instance boot = %d, %v", boot, err)
+	}
+	for _, off := range []int64{1, -1, 2} {
+		tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, err := mysql.SettleOpenOnce(tctx, db, id, boot+off)
+		cancel()
+		if err != nil {
+			t.Fatalf("boot%+d: %v", off, err)
+		}
+		if inProcessList(t, db, id) {
+			t.Fatalf("boot%+d: read as another instance, the connection was not killed", off)
+		}
+	}
+}
+
+// TestOpenSettleWaitsForAnotherAccountsConnection: a row with the recorded id
+// that belongs to another account is never killed; the try does not
+// settle while it is there.
+func TestOpenSettleWaitsForAnotherAccountsConnection(t *testing.T) {
+	inst := testmysql.Start(t, testmysql.Options{})
+	db := rootDB(t, inst)
+	ctx := context.Background()
+	execAll(t, db, "CREATE USER 'lain'@'localhost' IDENTIFIED BY 'Lain-pw-1'")
+	other, err := sql.Open("mysql", mysql.DSN(proto.ConnectParams{User: "lain", Password: "Lain-pw-1"}, inst.Socket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { other.Close() })
+	c, err := other.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	var id uint64
+	if err := c.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	boot, err := mysql.InstanceBoot(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tctx, cancel := context.WithTimeout(ctx, time.Second)
+	_, err = mysql.SettleOpenOnce(tctx, db, id, boot)
+	cancel()
+	if err == nil {
+		t.Fatal("settled while another account's connection with the id is there")
+	}
+	if err := c.PingContext(ctx); err != nil {
+		t.Fatalf("another account's connection was killed: %v", err)
+	}
+	c.Close()
+	other.Close() // ends the session
+	deadline := time.Now().Add(30 * time.Second)
+	for inProcessList(t, db, id) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	tctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := mysql.SettleOpenOnce(tctx, db, id, boot); err != nil {
+		t.Fatalf("not settled once the connection ended: %v", err)
+	}
+}
