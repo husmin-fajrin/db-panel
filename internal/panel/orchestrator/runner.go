@@ -200,8 +200,12 @@ type Runner struct {
 	// unlocking: masters whose "Buka kunci promote" has mysql.unlockPromote
 	// on its way (C-1); guarded by startMu, in memory only.
 	unlocking map[int64]bool
-	invMu     sync.Mutex // serialises read-modify-write of inventories
-	promoMu   sync.Mutex // serialises read-modify-write of promotions
+	// notSentStore replaces Store.MarkPromoteNotSent when set (tests).
+	notSentStore func(id, oldParams, params string, promotionID int64) error
+	// failSentStore replaces Store.FailSentPromote when set (tests).
+	failSentStore func(id, oldParams, params string, step int, errMsg string, promotionID int64, now time.Time) error
+	invMu         sync.Mutex // serialises read-modify-write of inventories
+	promoMu       sync.Mutex // serialises read-modify-write of promotions
 	// repointMu serialises mysql.repoint and mysql.quarantine sent outside
 	// a job step (OnOnline, RepointNow) with each other and with the job.
 	repointMu sync.Mutex

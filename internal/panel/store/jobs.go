@@ -287,6 +287,9 @@ func (s *Store) NewerJobExistsExcept(jobID string, serverID int64, kinds ...stri
 // failed or was canceled: a finished job never changes again.
 var ErrJobFinished = errors.New("pekerjaan sudah selesai")
 
+// ErrJobChanged: the job is not in the state a write was checked against.
+var ErrJobChanged = errors.New("keadaan pekerjaan berubah")
+
 // UpdateJob sets a job's status, current step and error. started_at is set
 // the first time the status becomes running, finished_at when it becomes
 // succeeded, failed, partial or canceled. A job that is already in one of
@@ -418,4 +421,70 @@ func (s *Store) ReopenJob(id string, now time.Time) error {
 		return ErrJobFinished
 	}
 	return fmt.Errorf("pekerjaan berstatus %s, bukan gagal", status)
+}
+
+// FailSentPromote fails, in one transaction, a promote job whose
+// mysql.promote is proven to have changed nothing: the job (failed or
+// partial, its params still oldParams) gets params, status failed at step
+// with errMsg, and its promotion promotionID (0: none) status failed. When
+// any of it cannot be done nothing is changed: the job is not failed or
+// partial with oldParams any more (ErrJobChanged), or a write failed.
+func (s *Store) FailSentPromote(id, oldParams, params string, step int, errMsg string, promotionID int64, now time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	ts := formatTime(now)
+	res, err := tx.Exec(`UPDATE jobs SET params_json = ?, status = ?, current_step = ?, error = ?, finished_at = ?
+		WHERE id = ? AND status IN (?, ?) AND params_json = ?`,
+		params, JobFailed, step, errMsg, ts, id, JobFailed, JobPartial, oldParams)
+	if err != nil {
+		return fmt.Errorf("fail job: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("fail job: %w", err)
+	} else if n != 1 {
+		return ErrJobChanged
+	}
+	if promotionID != 0 {
+		if _, err := tx.Exec(`UPDATE promotions SET status = 'failed' WHERE id = ?`, promotionID); err != nil {
+			return fmt.Errorf("fail promotion: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// MarkPromoteNotSent stores, in one transaction, that the running promote
+// job id's mysql.promote is proven to have changed nothing: its params
+// (oldParams before) become params and its promotion promotionID (0: none)
+// is failed. When any of it cannot be done nothing is changed
+// (ErrJobChanged when the params are not oldParams any more).
+func (s *Store) MarkPromoteNotSent(id, oldParams, params string, promotionID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE jobs SET params_json = ? WHERE id = ? AND params_json = ?`, params, id, oldParams)
+	if err != nil {
+		return fmt.Errorf("store job params: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store job params: %w", err)
+	} else if n != 1 {
+		return ErrJobChanged
+	}
+	if promotionID != 0 {
+		if _, err := tx.Exec(`UPDATE promotions SET status = 'failed' WHERE id = ?`, promotionID); err != nil {
+			return fmt.Errorf("fail promotion: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }

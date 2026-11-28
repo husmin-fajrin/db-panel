@@ -374,39 +374,38 @@ func (r *Runner) settleSentRetry(j store.Job, st jobState, sr sentRetry) (store.
 }
 
 // failSentOver fails j, whose mysql.promote is proven to have changed
-// nothing at the candidate (sentOver), in the order that fails to the
-// safe side: "not sent" is stored first, and when it cannot be, nothing
-// else happens (the master stays locked; the next Ulangi reads the
-// candidate again); then the job and its promotion are failed; the lock
-// of a planned one is lifted by promoteUndo after startMu, with the
-// master marked in flight meanwhile (P11 for its other actions).
+// nothing at the candidate (sentOver). The job's params ("not sent"), its
+// status (failed, with T13 or T13b) and its promotion's status (failed)
+// are written in one store transaction (store.FailSentPromote, through
+// the failSentStore seam): when it fails nothing has changed, the job is
+// still partial or failed and stored sent, the master stays locked, and
+// the next Ulangi reads the candidate again (P6 when the job changed
+// meanwhile). Only after it is the lock of a planned promotion lifted, by
+// promoteUndo after startMu, with the master marked in flight meanwhile
+// (P11 for its other actions); an unlock that fails leaves the lock
+// record standing, so "Buka kunci promote" is offered (row 2), as T13b
+// says.
 func (r *Runner) failSentOver(j store.Job, st jobState, cand string, master int64) (store.Job, func(), error) {
 	st.PromoteSent, st.PromoteUnanswered, st.PromoteSentAt = false, false, nil
 	b, err := json.Marshal(st)
 	if err != nil {
 		return j, nil, err
 	}
-	if err := r.d.Store.SetJobParams(j.ID, string(b)); err != nil {
-		return j, nil, err
-	}
-	j.ParamsJSON = string(b)
 	e := &PromoteSentError{Code: PromoteSentOverEmergency, Candidate: cand}
 	if j.Kind == KindPromotePlanned {
 		e.Code = PromoteSentOverPlanned
 	}
-	// UpdateJob changes only an unfinished job: reopened, then failed
-	// (no goroutine runs it meanwhile; startMu is held).
-	now := r.now()
-	if err := r.d.Store.ReopenJob(j.ID, now); err != nil {
-		return j, nil, err
+	fail := r.d.Store.FailSentPromote
+	if r.failSentStore != nil {
+		fail = r.failSentStore
 	}
-	if err := r.d.Store.UpdateJob(j.ID, store.JobFailed, j.CurrentStep, e.Error(), now); err != nil {
-		if uerr := r.d.Store.UpdateJob(j.ID, j.Status, j.CurrentStep, j.Error, now); uerr != nil {
-			r.log.Warn("re-fail sent promote", "job", j.ID, "err", uerr)
+	if err := fail(j.ID, j.ParamsJSON, string(b), j.CurrentStep, e.Error(), st.PromotionID, r.now()); err != nil {
+		if errors.Is(err, store.ErrJobChanged) {
+			return j, nil, &PromoteSentError{Code: PromoteSentChanged}
 		}
 		return j, nil, err
 	}
-	r.updatePromotion(st.PromotionID, func(p *store.Promotion) { p.Status = promotionFailed })
+	j.ParamsJSON = string(b)
 	r.appendJobLog(j.ID, "warn", e.Error())
 	r.d.Publish("job_update", map[string]any{"id": j.ID, "kind": j.Kind, "server_id": j.ServerID,
 		"status": store.JobFailed, "step": j.CurrentStep, "error": e.Error()})

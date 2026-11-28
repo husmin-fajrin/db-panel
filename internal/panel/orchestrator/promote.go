@@ -1009,11 +1009,8 @@ func (jr *jobRun) promoteFailed() string {
 			jr.setPromotionStatus(promotionPartial)
 			return store.JobPartial
 		default: // sentOver: the agent restored it; the next attempt sends anew.
-			prev := jr.st
-			jr.st.PromoteSent, jr.st.PromoteUnanswered, jr.st.PromoteSentAt = false, false, nil
-			if err := jr.saveState(); err != nil {
-				jr.st = prev
-				jr.r.log.Warn("save job params", "job", jr.job.ID, "err", err)
+			if err := jr.storeNotSent(); err != nil {
+				jr.r.log.Warn("store promote not sent", "job", jr.job.ID, "err", err)
 				jr.logf("warn", "Keadaan pekerjaan tidak bisa disimpan (%v), jadi kunci master tidak dibuka. Tekan Ulangi "+
 					"untuk mencobanya lagi.", err)
 				jr.setPromotionStatus(promotionPartial)
@@ -1027,6 +1024,33 @@ func (jr *jobRun) promoteFailed() string {
 	}
 	jr.promoteUndo(ctx)
 	return store.JobFailed
+}
+
+// storeNotSent stores, before anything is unlocked, that the job's
+// mysql.promote changed nothing: its params "not sent" and its promotion
+// failed, in one transaction (store.MarkPromoteNotSent, through the
+// notSentStore seam). When it fails nothing has changed and the job's
+// state in memory is left as it was.
+func (jr *jobRun) storeNotSent() error {
+	cur, _, err := jr.r.d.Store.GetJob(jr.job.ID)
+	if err != nil {
+		return err
+	}
+	st := jr.st
+	st.PromoteSent, st.PromoteUnanswered, st.PromoteSentAt = false, false, nil
+	b, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	mark := jr.r.d.Store.MarkPromoteNotSent
+	if jr.r.notSentStore != nil {
+		mark = jr.r.notSentStore
+	}
+	if err := mark(jr.job.ID, cur.ParamsJSON, string(b), st.PromotionID); err != nil {
+		return err
+	}
+	jr.st = st
+	return nil
 }
 
 // promoteUndo lifts the master's promote lock of a promotion that did not

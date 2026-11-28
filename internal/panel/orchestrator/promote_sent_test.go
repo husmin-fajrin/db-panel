@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -520,17 +519,9 @@ func TestRetrySentChangedMeanwhile(t *testing.T) {
 func TestPromoteFailedSaveFailureKeepsLock(t *testing.T) {
 	g := newPromoteRig(t)
 	e := g.e
-	// Once the agent job ran, a state that reads not sent cannot be
-	// stored.
-	var ran atomic.Bool
-	e.r.paramsStore = func(jobID, paramsJSON string) error {
-		if ran.Load() && !strings.Contains(paramsJSON, `"promote_sent":true`) {
-			return errors.New("database is locked")
-		}
-		return e.st.SetJobParams(jobID, paramsJSON)
-	}
+	// "Not sent" cannot be stored (the in-run transaction fails).
+	e.r.notSentStore = func(string, string, string, int64) error { return errors.New("database is locked") }
 	g.c.job("mysql.promote", func(*jobs.Job, json.RawMessage) (any, error) {
-		ran.Store(true)
 		return nil, errors.New("master lama tidak read-only")
 	})
 	candStatus(g.c, true, nil)
@@ -546,7 +537,10 @@ func TestPromoteFailedSaveFailureKeepsLock(t *testing.T) {
 	if st := e.storedState(id); !st.PromoteSent {
 		t.Fatalf("stored state = %+v, want still sent", st)
 	}
-	e.r.paramsStore = nil
+	if p := g.promotion(); p.Status != promotionPartial {
+		t.Fatalf("promotion = %s, want partial", p.Status)
+	}
+	e.r.notSentStore = nil
 	sentRefusal(t, e.r.Retry(id, JobAck{}), PromoteSentOverPlanned, fmt.Sprintf(wantT13b, "cand"))
 	if n := g.m.count("mysql.unlockPromote"); n != 1 {
 		t.Fatalf("mysql.unlockPromote sent %d times after the Ulangi, want 1", n)

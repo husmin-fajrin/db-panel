@@ -87,6 +87,8 @@ type fakeAgent struct {
 	// forgetJobs: that many job.status calls answer "job tidak dikenal"
 	// (as an agent that restarted), whatever the job's state.
 	forgetJobs atomic.Int32
+	// jobStatusFail: job.status answers this internal error ("": none).
+	jobStatusFail string
 }
 
 func newFakeAgent(t *testing.T, e *env, id int64, name string) *fakeAgent {
@@ -111,6 +113,12 @@ func newFakeAgent(t *testing.T, e *env, id int64, name string) *fakeAgent {
 	}
 	fa.reg.Register("job.status", func(ctx context.Context, params json.RawMessage) (any, error) {
 		fa.record("job.status", params)
+		fa.mu.Lock()
+		failText := fa.jobStatusFail
+		fa.mu.Unlock()
+		if failText != "" {
+			return nil, errors.New(failText)
+		}
 		var p proto.JobIDParams
 		json.Unmarshal(params, &p)
 		st, ok := fa.jobs.Status(p.JobID)
