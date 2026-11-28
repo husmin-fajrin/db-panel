@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -438,8 +439,10 @@ func TestServersListNeedsUpgradeBadge(t *testing.T) {
 	mon.setView(monitor.View{ServerID: 2, Role: store.RoleReplica, ReceivedAt: monNow,
 		Status: monitor.Status{Code: monitor.StatusSynced, Severity: monitor.SevOK}})
 	mon.setView(monitor.View{ServerID: other.ID, NeedsUpgrade: true})
-	// Server 1 has a re-pairing token from this process: its command is shown.
-	if _, err := e.st.CreatePairToken(1, monNow, time.Hour); err != nil {
+	// Server 1 has a re-pairing token from this process: the list says
+	// until when it is active (T3b), never its command (spec 5.1).
+	tok, err := e.st.CreatePairToken(1, monNow, time.Hour)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -448,10 +451,14 @@ func TestServersListNeedsUpgradeBadge(t *testing.T) {
 	body := rec.Body.String()
 	wantBody(t, rec, "Status pemantauan", "Versi agent")
 	row1 := between(body, `href="/servers/1"`, "</tr>")
-	for _, s := range []string{"v0.2.0", "perlu dimutakhirkan", "Agent perlu dimutakhirkan", "/agent/install?token=", "sha256sum -c"} {
+	for _, s := range []string{"v0.2.0", "perlu dimutakhirkan", "Agent perlu dimutakhirkan",
+		fmt.Sprintf(wantT3b, tok.ExpiresAt.Local().Format("15:04")), `href="/servers/1"`} {
 		if !strings.Contains(row1, s) {
 			t.Errorf("row 1 lacks %q:\n%s", s, row1)
 		}
+	}
+	if strings.Contains(row1, "/agent/install") || strings.Contains(row1, tok.Token) {
+		t.Errorf("row 1 shows the re-pairing command:\n%s", row1)
 	}
 	row2 := between(body, `href="/servers/2"`, "</tr>")
 	if !strings.Contains(row2, "Sinkron") || !strings.Contains(row2, "v0.3.0") || strings.Contains(row2, "perlu dimutakhirkan") {

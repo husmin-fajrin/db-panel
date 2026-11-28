@@ -76,7 +76,7 @@ var auditActionLabels = map[string]string{
 	"confirm_issued":         "Konfirmasi kata sandi",
 	"confirm_failed":         "Konfirmasi kata sandi gagal",
 	"confirm_rejected":       "Konfirmasi ditolak",
-	"agent_pair":             "Pemasangan agent ditolak",
+	"agent_pair":             "Pemasangan agent",
 	"server_create":          "Tambah server",
 	"server_token":           "Perintah pemasangan dibuat",
 	"server_delete":          "Hapus server",

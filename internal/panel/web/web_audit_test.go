@@ -122,10 +122,17 @@ func TestEveryPostWritesAudit(t *testing.T) {
 		"/masters/1/unlock":            web.ActUnlockMaster,
 		"/servers/2/delete":            web.ActDeleteServer,
 	}
+	// Light actions: their token comes through the session's window.
+	needsLightToken := map[string]string{
+		"/servers/2/token": web.ActRepairToken,
+	}
 	for i, rt := range routes {
 		form := rt.form
 		if action, ok := needsToken[rt.path]; ok {
 			form = withToken(t, e, form, action, rt.targetKind, rt.targetID)
+		}
+		if action, ok := needsLightToken[rt.path]; ok {
+			form = url.Values{"confirm_token": {windowToken(t, e, action, rt.targetKind, rt.targetID, c)}}
 		}
 		rec := e.do("POST", rt.path, form, c)
 		if rec.Code >= 500 {

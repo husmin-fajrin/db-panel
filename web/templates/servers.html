@@ -29,9 +29,8 @@
             {{if .NeedsUpgrade}}
             {{if .Local}}
             <p class="help mt-1">Agent ini dipasang bersama panel; perbarui panel dengan install.sh untuk memutakhirkannya.</p>
-            {{else if .UpgradeCommand}}
-            <p class="help mt-1">Jalankan di server ini untuk memasang ulang agent:</p>
-            <pre class="mt-1 whitespace-pre-wrap break-all rounded bg-base-200 p-2 text-xs"><code>{{.UpgradeCommand}}</code></pre>
+            {{else if .RepairActive}}
+            <p class="help mt-1">{{.RepairActive}} <a class="link" href="/servers/{{.ID}}">Halaman server</a></p>
             {{else}}
             <p class="help mt-1">Buat perintah pemasangan ulang di <a class="link" href="/servers/{{.ID}}">halaman server</a>, lalu jalankan di server ini.</p>
             {{end}}

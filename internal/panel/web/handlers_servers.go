@@ -21,11 +21,27 @@ import (
 )
 
 const (
-	pairTokenTTL      = 24 * time.Hour
+	pairTokenTTL = 24 * time.Hour
+	// repairTokenTTL is how long a paired server's re-pairing token lasts
+	// (spec 5.1): its command is shown once, so a lost one is made again.
+	repairTokenTTL    = 15 * time.Minute
 	msgServerNotFound = "Server tidak ditemukan"
 	msgLocalDelete    = "Server ini adalah host panel dan tidak bisa dihapus"
 	msgLocalToken     = "Server ini adalah host panel; agent-nya dipasangkan oleh install.sh panel"
+	// msgRepairConfirm is T3 (spec 5.11), the confirmation of a
+	// re-pairing; %s is the server's name.
+	msgRepairConfirm = "Pasang ulang agent di %s? Agent yang sekarang tetap bekerja sampai agent baru terpasang. " +
+		"Perintah pemasangannya ditampilkan sekali dan berlaku 15 menit."
+	// msgRepairActive is T3b (spec 5.11), what the server page and the
+	// server list say while a re-pairing token is active; %s is the time
+	// it ends.
+	msgRepairActive = "Token pasang ulang aktif sampai pukul %s. Perintahnya hanya ditampilkan sekali; bila hilang, buat token baru."
 )
+
+// repairActiveText is T3b for a re-pairing token that ends at expires.
+func repairActiveText(expires time.Time) string {
+	return fmt.Sprintf(msgRepairActive, expires.Local().Format("15:04"))
+}
 
 // isLocal reports whether srv is the panel host's own server.
 func (a *app) isLocal(srv store.Server) bool {
@@ -105,11 +121,12 @@ type serverRow struct {
 	OS           string
 	Status       statusView
 	Local        bool // the panel host: its agent is installed with the panel
-	// NeedsUpgrade: the agent is too old for monitoring. UpgradeCommand
-	// reinstalls it; "" when no re-pairing token of this process is active
-	// (the server page creates one).
-	NeedsUpgrade   bool
-	UpgradeCommand string
+	// NeedsUpgrade: the agent is too old for monitoring; the server page
+	// makes the command that reinstalls it. RepairActive is T3b while a
+	// re-pairing token is active, else "": the list never shows the
+	// command (spec 5.1).
+	NeedsUpgrade bool
+	RepairActive string
 }
 
 type serversPage struct {
@@ -127,15 +144,22 @@ type serverDetailPage struct {
 	Server store.Server
 	Online bool
 	Probe  *proto.ProbeResult // nil until the first probe
-	// Command is the pairing command: always for an unpaired server, and for
-	// a paired one while a re-pairing token is active.
+	// Command is the pairing command: for an unpaired server while its
+	// token is active, and for a paired one only in the answer to the post
+	// that created its re-pairing token (spec 5.1: shown once).
 	Command      string
 	TokenExpires time.Time
-	// TokenHidden: a token is active, but only its hash is stored and this
-	// panel process did not create it (it was restarted since), so the
-	// command cannot be shown; a new token has to be created.
+	// TokenHidden (unpaired servers): a token is active, but only its hash
+	// is stored and this panel process did not create it (it was restarted
+	// since), so the command cannot be shown; a new token has to be
+	// created.
 	TokenHidden bool
-	Local       bool // the panel host itself: no delete, no re-pairing
+	// RepairActive (paired servers) is T3b while a re-pairing token is
+	// active and the page is not the answer that shows its command; "".
+	RepairActive string
+	// RepairConfirm is T3, the text of the confirmed re-pairing buttons.
+	RepairConfirm string
+	Local         bool // the panel host itself: no delete, no re-pairing
 
 	// MySQL card (paired servers).
 	Inventory  store.Inventory // Connected false until "Hubungkan MySQL"
@@ -587,29 +611,18 @@ func (a *app) listServers(w http.ResponseWriter, r *http.Request) {
 		row.Status = newStatusView(s.ID, s.Role, v, ok, now)
 		row.NeedsUpgrade = ok && v.NeedsUpgrade
 		if row.NeedsUpgrade && !row.Local {
-			var err error
-			if row.UpgradeCommand, err = a.upgradeCommand(s.ID, now); err != nil {
-				a.internalError(w, "upgrade command", err)
+			tok, found, err := a.Store.ActivePairToken(s.ID, now)
+			if err != nil {
+				a.internalError(w, "pair token", err)
 				return
+			}
+			if found {
+				row.RepairActive = repairActiveText(tok.ExpiresAt)
 			}
 		}
 		p.Rows = append(p.Rows, row)
 	}
 	a.render.Render(w, "servers", p)
-}
-
-// upgradeCommand is the pairing command that reinstalls the server's
-// agent, or "" when this panel process holds no active token for it.
-func (a *app) upgradeCommand(id int64, now time.Time) (string, error) {
-	tok, found, err := a.Store.ActivePairToken(id, now)
-	if err != nil || !found || tok.Token == "" {
-		return "", err
-	}
-	sum, err := a.InstallScriptSHA256(tok.Token)
-	if err != nil {
-		return "", err
-	}
-	return pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin)
 }
 
 func (a *app) newServerForm(w http.ResponseWriter, r *http.Request) {
@@ -755,11 +768,21 @@ func (a *app) renderServer(w http.ResponseWriter, r *http.Request, srv store.Ser
 	a.renderServerWith(w, r, srv, v, nil)
 }
 
+// pairCommandFor is the pairing command of tok, whose plaintext is known.
+func (a *app) pairCommandFor(tok store.PairToken) (string, error) {
+	sum, err := a.InstallScriptSHA256(tok.Token)
+	if err != nil {
+		return "", fmt.Errorf("install script hash: %w", err)
+	}
+	return pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin)
+}
+
 // renderServerWith is renderServer with the backup form as posted
 // (backupForm's Dir and MaxAgeHours) in place of the stored values; nil
 // shows the stored ones.
 func (a *app) renderServerWith(w http.ResponseWriter, r *http.Request, srv store.Server, v serverView, backupForm *backupCard) {
-	p := serverDetailPage{Page: a.page(r), Server: srv, Local: a.isLocal(srv), Connect: v.Form}
+	p := serverDetailPage{Page: a.page(r), Server: srv, Local: a.isLocal(srv), Connect: v.Form,
+		RepairConfirm: fmt.Sprintf(msgRepairConfirm, srv.Name)}
 	p.Flash, p.Notice = v.Flash, v.Notice
 	now := a.Now()
 	tok, found, err := a.Store.ActivePairToken(srv.ID, now)
@@ -836,16 +859,22 @@ func (a *app) renderServerWith(w http.ResponseWriter, r *http.Request, srv store
 	}
 	switch {
 	case !found || p.Local:
+	case srv.Paired && v.Repair != nil && v.Repair.Token != "":
+		// The answer to the post that created this re-pairing token: the
+		// only page that shows its command (spec 5.1).
+		if p.Command, err = a.pairCommandFor(*v.Repair); err != nil {
+			a.internalError(w, "pairing command", err)
+			return
+		}
+		p.TokenExpires = v.Repair.ExpiresAt
+	case srv.Paired:
+		// Any other page of a paired server never rebuilds the command.
+		p.RepairActive = repairActiveText(tok.ExpiresAt)
 	case tok.Token == "":
 		p.TokenHidden = true
 		p.TokenExpires = tok.ExpiresAt
 	default:
-		sum, err := a.InstallScriptSHA256(tok.Token)
-		if err != nil {
-			a.internalError(w, "install script hash", err)
-			return
-		}
-		if p.Command, err = pairCommand(a.PublicURL(), tok.Token, sum, a.CertInfo().Pin); err != nil {
+		if p.Command, err = a.pairCommandFor(tok); err != nil {
 			a.internalError(w, "pairing command", err)
 			return
 		}
@@ -885,11 +914,18 @@ func pairCommand(publicURL, token, scriptSHA256, webPin string) (string, error) 
 }
 
 // newToken issues a fresh pairing token. For a paired server this starts a
-// re-pairing: the current agent keeps working until an agent pairs with the
-// new token, which replaces its certificate.
+// re-pairing (spec 5.1): it needs a light confirmation (ActRepairToken),
+// the token lasts repairTokenTTL, and the answer is the server page with
+// the command, the only page that shows it. The current agent keeps
+// working until an agent pairs with the new token, which replaces its
+// certificate. An unpaired server's token needs no confirmation: no agent
+// is replaced.
 func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 	srv, ok := a.serverFromPath(w, r)
 	if !ok {
+		return
+	}
+	if srv.Paired && !a.requireConfirmLight(w, r, ActRepairToken, auditServer, srv.ID) {
 		return
 	}
 	if a.isLocal(srv) {
@@ -897,17 +933,23 @@ func (a *app) newToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msgLocalToken, http.StatusConflict)
 		return
 	}
+	ttl := pairTokenTTL
+	if srv.Paired {
+		ttl = repairTokenTTL
+	}
 	// The token itself never goes into the audit log.
-	_, err := a.Store.CreatePairToken(srv.ID, a.Now(), pairTokenTTL)
+	tok, err := a.Store.CreatePairToken(srv.ID, a.Now(), ttl)
 	a.audit(r, "server_token", auditServer, srv.ID, map[string]any{"repair": srv.Paired}, a.outcomeOf(err))
 	if err != nil {
 		a.internalError(w, "create pair token", err)
 		return
 	}
-	if srv.Paired {
-		a.Logger.Info("re-pairing token created", "id", srv.ID, "by", auth.UsernameFrom(r.Context()))
+	if !srv.Paired {
+		http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
+		return
 	}
-	http.Redirect(w, r, serverURL(srv.ID), http.StatusSeeOther)
+	a.Logger.Info("re-pairing token created", "id", srv.ID, "by", auth.UsernameFrom(r.Context()))
+	a.renderServer(w, r, srv, serverView{Status: http.StatusOK, Repair: &tok})
 }
 
 // deleteServer removes a server once the password is confirmed and its

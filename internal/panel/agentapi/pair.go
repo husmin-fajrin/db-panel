@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/husmin-fajrin/db-panel/internal/panel/ca"
 	"github.com/husmin-fajrin/db-panel/internal/panel/hub"
@@ -19,6 +21,38 @@ import (
 
 // maxPairBody caps the pairing request body.
 const maxPairBody = 64 << 10
+
+const (
+	// maxHostnameRunes bounds the request's hostname in the audit log and
+	// the journal (spec 5.1).
+	maxHostnameRunes = 255
+	// maxAgentFieldRunes bounds the request's agent_version and arch there.
+	maxAgentFieldRunes = 64
+)
+
+// boundHostname is a pairing request's hostname as the audit log and the
+// journal keep it: the request comes from the machine being paired and is
+// untrusted, so it is one line without control characters, cut at 255
+// runes.
+func boundHostname(s string) string { return boundText(s, maxHostnameRunes) }
+
+// boundText is s as one line of at most n runes: invalid UTF-8, control
+// and format characters (bidi overrides among them) and line or paragraph
+// separators each become a space.
+func boundText(s string, n int) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(s, " ") {
+		if n == 0 {
+			break
+		}
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			r = ' '
+		}
+		b.WriteRune(r)
+		n--
+	}
+	return b.String()
+}
 
 // Deps are the panel services the agent endpoints use.
 type Deps struct {
@@ -96,6 +130,11 @@ func PairHandler(d Deps) http.Handler {
 		if err != nil {
 			ip = r.RemoteAddr
 		}
+		// What the request says of the machine is untrusted: bounded
+		// before it reaches a log line or an audit row.
+		hostname := boundHostname(req.Hostname)
+		arch := boundText(req.Arch, maxAgentFieldRunes)
+		agentVersion := boundText(req.AgentVersion, maxAgentFieldRunes)
 		// SEC-63g: the panel host's own server pairs with the token the
 		// panel writes to local-pair-token for its local agent, which
 		// connects over loopback. From anywhere else that token is
@@ -103,8 +142,8 @@ func PairHandler(d Deps) http.Handler {
 		remoteLocal := d.LocalServerID != 0 && !isLoopback(ip)
 		refuseLocal := func(serverID int64) {
 			log.Warn("pairing rejected: the panel host's token used from another address", "server_id", serverID,
-				"remote", ip, "hostname", req.Hostname)
-			d.auditPairRefused(serverID, ip, req.Hostname, outcomeLocalNotLoopback)
+				"remote", ip, "hostname", hostname)
+			d.auditPairRefused(serverID, ip, hostname, outcomeLocalNotLoopback)
 			writeError(w, http.StatusForbidden, msgLocalNotLoopback)
 		}
 		if remoteLocal {
@@ -129,7 +168,7 @@ func PairHandler(d Deps) http.Handler {
 			return
 		}
 		if errors.Is(err, store.ErrTokenInvalid) {
-			log.Warn("pairing rejected: invalid token", "remote", ip, "hostname", req.Hostname)
+			log.Warn("pairing rejected: invalid token", "remote", ip, "hostname", hostname)
 			writeError(w, http.StatusForbidden, "token ditolak")
 			return
 		}
@@ -147,6 +186,17 @@ func PairHandler(d Deps) http.Handler {
 		address := ip
 		if d.LocalServerID != 0 && pt.ServerID == d.LocalServerID && d.PublicHost != "" {
 			address = d.PublicHost
+		}
+		// Whether this pairing replaces an agent, read before MarkPaired.
+		before, err := d.Store.GetServer(pt.ServerID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusForbidden, "token ditolak")
+			return
+		}
+		if err != nil {
+			log.Error("pairing: get server", "server_id", pt.ServerID, "err", err)
+			writeError(w, http.StatusInternalServerError, "kesalahan internal")
+			return
 		}
 		if err := d.Store.MarkPaired(pt.ServerID, serial, address); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -167,8 +217,10 @@ func PairHandler(d Deps) http.Handler {
 		if d.OnPaired != nil {
 			d.OnPaired(pt.ServerID)
 		}
-		log.Info("agent paired", "server_id", pt.ServerID, "remote", ip, "hostname", req.Hostname,
-			"arch", req.Arch, "agent_version", req.AgentVersion, "cert_serial", serial)
+		d.auditPaired(pt.ServerID, ip, map[string]any{"address": address, "replaced": before.Paired,
+			"cert_serial": serial, "agent_version": agentVersion, "arch": arch, "hostname": hostname})
+		log.Info("agent paired", "server_id", pt.ServerID, "remote", ip, "hostname", hostname,
+			"arch", arch, "agent_version", agentVersion, "cert_serial", serial)
 		writeJSON(w, http.StatusOK, proto.PairResponse{
 			ServerID:  pt.ServerID,
 			CertPEM:   string(certPEM),
@@ -195,10 +247,27 @@ func isLoopback(ip string) bool {
 	return a != nil && a.IsLoopback()
 }
 
-// auditPairRefused writes a refused pairing to the audit log (the agent
-// has no panel user: the username is "agent").
+// outcomePaired is the audit outcome of a pairing that succeeded.
+const outcomePaired = "ok"
+
+// auditPairRefused writes a refused pairing to the audit log; hostname is
+// already bounded (boundHostname).
 func (d Deps) auditPairRefused(serverID int64, ip, hostname, outcome string) {
-	detail, _ := json.Marshal(map[string]string{"hostname": hostname})
+	d.auditPair(serverID, ip, map[string]any{"hostname": hostname}, outcome)
+}
+
+// auditPaired writes a successful pairing to the audit log (spec 5.1):
+// detail holds the address, whether it replaced an agent, the new
+// certificate's serial and the agent's bounded version, arch and
+// hostname.
+func (d Deps) auditPaired(serverID int64, ip string, detail map[string]any) {
+	d.auditPair(serverID, ip, detail, outcomePaired)
+}
+
+// auditPair writes an agent_pair entry to the audit log and its journald
+// copy (the agent has no panel user: the username is "agent").
+func (d Deps) auditPair(serverID int64, ip string, detailMap map[string]any, outcome string) {
+	detail, _ := json.Marshal(detailMap)
 	e := store.AuditEntry{TS: d.now(), Username: "agent", IP: ip, Action: "agent_pair",
 		TargetKind: "server", TargetID: serverID, DetailJSON: string(detail), Outcome: outcome}
 	rec, err := d.Store.AddAuditRecord(e)

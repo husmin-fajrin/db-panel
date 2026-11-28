@@ -595,8 +595,15 @@ func TestServerDetailTokenFromEarlierProcess(t *testing.T) {
 		before, _, _ := e.st.ActivePairToken(id, time.Now())
 		rec := e.do("GET", fmt.Sprintf("/servers/%d", id), nil, c)
 		wantCode(t, rec, http.StatusOK)
-		wantBody(t, rec, "Perintah pemasangan tidak bisa ditampilkan lagi", "Buat token baru",
-			fmt.Sprintf(`action="/servers/%d/token"`, id))
+		wantBody(t, rec, "Buat token baru", fmt.Sprintf(`action="/servers/%d/token"`, id))
+		if id == unpaired.ID {
+			wantBody(t, rec, "Perintah pemasangan tidak bisa ditampilkan lagi")
+		} else {
+			// A paired server's page never rebuilds the command: it says
+			// until when the token is active (T3b), from this process or not.
+			wantBody(t, rec, "Token pasang ulang aktif sampai pukul")
+			wantNoBody(t, rec, "Perintah pemasangan tidak bisa ditampilkan lagi")
+		}
 		if strings.Contains(rec.Body.String(), "/agent/install") {
 			t.Errorf("server %d: page shows a pairing command without the token", id)
 		}
@@ -686,7 +693,8 @@ func TestDeleteLocalServerRefused(t *testing.T) {
 	if _, err := e.st.GetServer(srv.ID); err != nil {
 		t.Fatalf("local server gone after refused delete: %v", err)
 	}
-	wantCode(t, e.do("POST", "/servers/1/token", url.Values{}, c), http.StatusConflict)
+	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
+	wantCode(t, e.do("POST", "/servers/1/token", form, c), http.StatusConflict)
 
 	// Unpaired, its page creates no token: the panel's local-pair-token
 	// would be replaced.
@@ -707,23 +715,26 @@ func TestRepairPairedServer(t *testing.T) {
 
 	rec := e.do("GET", "/servers/1", nil, c)
 	wantCode(t, rec, http.StatusOK)
-	wantBody(t, rec, "Pasang ulang agent", `id="modal-pasang-ulang"`, `action="/servers/1/token"`)
+	// Pasang ulang agent is a light confirmed button with T3 (spec 5.1).
+	wantBody(t, rec, "Pasang ulang agent", `id="modal-pasang-ulang"`, `action="/servers/1/token"`,
+		`data-confirm-action="repair_token" data-confirm-kind="server" data-confirm-id="1" data-confirm-light="1"`,
+		`data-confirm-text="`+fmt.Sprintf(wantT3, "db-diganti")+`"`)
 	if strings.Contains(rec.Body.String(), "/agent/install") {
 		t.Fatal("paired server shows a pairing command before re-pairing was asked for")
 	}
 
-	rec = e.do("POST", "/servers/1/token", url.Values{}, c)
-	wantCode(t, rec, http.StatusSeeOther)
-	if l := rec.Header().Get("Location"); l != "/servers/1" {
-		t.Errorf("Location = %q", l)
-	}
+	// The answer to the confirmed post is the server page with the command.
+	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
+	rec = e.do("POST", "/servers/1/token", form, c)
+	wantCode(t, rec, http.StatusOK)
 	tok, ok, err := e.st.ActivePairToken(srv.ID, time.Now())
 	if err != nil || !ok {
 		t.Fatalf("no active token after re-pair: %v %v", ok, err)
 	}
-	rec = e.do("GET", "/servers/1", nil, c)
-	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, "/agent/install?token="+tok.Token, "Agent lama tetap bekerja")
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control of the answer with the command = %q, want no-store", got)
+	}
 	if got, _ := e.st.GetServer(srv.ID); got.CertSerial != "serial-lama" || !got.Paired {
 		t.Fatalf("server after asking to re-pair = %+v, want the old pairing kept", got)
 	}

@@ -275,6 +275,10 @@ type serverView struct {
 	Status        int
 	Flash, Notice string
 	Form          connectForm
+	// Repair is the re-pairing token the post being answered created; the
+	// page shows its command (spec 5.1: only this answer does). nil
+	// otherwise.
+	Repair *store.PairToken
 }
 
 func (a *app) serverDetail(w http.ResponseWriter, r *http.Request) {

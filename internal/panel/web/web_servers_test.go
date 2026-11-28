@@ -311,3 +311,158 @@ func TestBackupCardAfterSaveForgetsOldReport(t *testing.T) {
 		t.Errorf("the rest of the view was dropped: %+v", v.Snap)
 	}
 }
+
+// Texts T3 and T3b of plan 5b-3 (spec 5.11), word for word.
+const (
+	wantT3 = "Pasang ulang agent di %s? Agent yang sekarang tetap bekerja sampai agent baru terpasang. " +
+		"Perintah pemasangannya ditampilkan sekali dan berlaku 15 menit."
+	wantT3b = "Token pasang ulang aktif sampai pukul %s. Perintahnya hanya ditampilkan sekali; bila hilang, buat token baru."
+)
+
+// repairEnv is one paired, online server (db1, id 1) with a fake monitor,
+// on a fake clock whose session store the env uses.
+func repairEnv(t *testing.T) (*env, *fakeMonitor, *fakeClock, store.Server) {
+	t.Helper()
+	clock, s, mod := windowDeps()
+	mon := &fakeMonitor{}
+	e := newEnv(t, mod, func(d *web.Deps) { d.Monitor = mon })
+	e.sessions = s
+	return e, mon, clock, e.pairedOnline(t, "db1")
+}
+
+// TestRepairTokenNeedsConfirm (spec 5.1, R-182): a re-pairing token for a
+// paired server needs a confirmation; without one the answer is 403 and
+// no token exists. A token through the session's window will do.
+func TestRepairTokenNeedsConfirm(t *testing.T) {
+	e, _, clock, srv := repairEnv(t)
+	c := e.cookie()
+	for _, form := range []url.Values{{}, {"confirm_token": {"salah"}}} {
+		rec := e.do("POST", "/servers/1/token", form, c)
+		wantCode(t, rec, http.StatusForbidden)
+		wantBody(t, rec, msgConfirmInvalid)
+		wantNoBody(t, rec, "/agent/install")
+		if _, found, err := e.st.ActivePairToken(srv.ID, clock.Now()); err != nil || found {
+			t.Fatalf("token after a post without confirmation: %v, %v", found, err)
+		}
+	}
+	// A token for another server does not do either.
+	other := e.pairedOnline(t, "db2")
+	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", other.ID, c)}}
+	wantCode(t, e.do("POST", "/servers/1/token", form, c), http.StatusForbidden)
+	if _, found, _ := e.st.ActivePairToken(srv.ID, clock.Now()); found {
+		t.Fatal("token after a post with another server's confirmation")
+	}
+
+	form = url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
+	wantCode(t, e.do("POST", "/servers/1/token", form, c), http.StatusOK)
+	if _, found, err := e.st.ActivePairToken(srv.ID, clock.Now()); err != nil || !found {
+		t.Fatalf("no token after a confirmed post: %v, %v", found, err)
+	}
+	var audited bool
+	for _, en := range auditEntries(t, e.st) {
+		if en.Action == "server_token" && en.TargetID == srv.ID && en.Outcome == "ok" && en.DetailJSON == `{"repair":true}` {
+			audited = true
+		}
+	}
+	if !audited {
+		t.Errorf("no server_token entry for the re-pairing: %+v", auditEntries(t, e.st))
+	}
+}
+
+// TestRepairCommandShownOnce (spec 5.1, S-6): the install command of a
+// re-pairing is in the answer to the post that made it, its token lasts 15
+// minutes, and the server page shows only T3b with the time it ends and a
+// confirmed Buat token baru.
+func TestRepairCommandShownOnce(t *testing.T) {
+	e, _, clock, srv := repairEnv(t)
+	c := e.cookie()
+	issued := clock.Now()
+	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
+	rec := e.do("POST", "/servers/1/token", form, c)
+	wantCode(t, rec, http.StatusOK)
+	tok, found, err := e.st.ActivePairToken(srv.ID, clock.Now())
+	if err != nil || !found {
+		t.Fatalf("no active token: %v, %v", found, err)
+	}
+	wantBody(t, rec, "agent/install?token="+tok.Token, "sha256sum -c")
+	wantNoBody(t, rec, "Token pasang ulang aktif sampai pukul")
+	if want := issued.Add(15 * time.Minute).UTC().Truncate(time.Second); !tok.ExpiresAt.Equal(want) {
+		t.Errorf("re-pairing token expires %v, want %v (15 minutes)", tok.ExpiresAt, want)
+	}
+
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, "agent/install?token=", tok.Token)
+	wantBody(t, rec, fmt.Sprintf(wantT3b, issued.Add(15*time.Minute).Local().Format("15:04")),
+		"Buat token baru", `action="/servers/1/token"`,
+		`data-confirm-action="repair_token" data-confirm-kind="server" data-confirm-id="1" data-confirm-light="1"`)
+	// Also on a page answered after another post.
+	rec = e.do("POST", "/servers/1/check", url.Values{}, c)
+	wantNoBody(t, rec, "agent/install?token=", tok.Token)
+
+	// A new token, also confirmed, replaces it and is shown once too.
+	clock.Add(time.Minute)
+	form = url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
+	rec = e.do("POST", "/servers/1/token", form, c)
+	wantCode(t, rec, http.StatusOK)
+	tok2, _, _ := e.st.ActivePairToken(srv.ID, clock.Now())
+	if tok2.Token == "" || tok2.Token == tok.Token {
+		t.Fatalf("token not replaced: %q", tok2.Token)
+	}
+	wantBody(t, rec, "agent/install?token="+tok2.Token)
+	wantNoBody(t, e.do("GET", "/servers/1", nil, c), "agent/install?token=", tok2.Token)
+
+	// Once it has expired the page says nothing of it.
+	clock.Add(15 * time.Minute)
+	wantNoBody(t, e.do("GET", "/servers/1", nil, c), "Token pasang ulang aktif sampai pukul", "agent/install?token=")
+}
+
+// TestServerListShowsNoRepairCommand (spec 5.1): the server list never
+// rebuilds a re-pairing command, also for an agent that needs upgrading;
+// while the token is active it shows T3b.
+func TestServerListShowsNoRepairCommand(t *testing.T) {
+	e, mon, clock, srv := repairEnv(t)
+	c := e.cookie()
+	mon.setView(monitor.View{ServerID: srv.ID, NeedsUpgrade: true})
+	form := url.Values{"confirm_token": {windowToken(t, e, web.ActRepairToken, "server", srv.ID, c)}}
+	wantCode(t, e.do("POST", "/servers/1/token", form, c), http.StatusOK)
+	tok, _, _ := e.st.ActivePairToken(srv.ID, clock.Now())
+
+	rec := e.do("GET", "/servers", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, "agent/install", tok.Token)
+	wantBody(t, rec, "perlu dimutakhirkan",
+		fmt.Sprintf(wantT3b, tok.ExpiresAt.Local().Format("15:04")))
+}
+
+// TestUnpairedTokenStillPasswordless (spec 5.1): an unpaired server's
+// token needs no confirmation, lasts 24 hours and its command is on the
+// server page.
+func TestUnpairedTokenStillPasswordless(t *testing.T) {
+	clock, s, mod := windowDeps()
+	e := newEnv(t, mod)
+	e.sessions = s
+	srv, err := e.st.CreateServer("db-baru")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := e.cookie()
+	clock.Add(11 * time.Minute) // the session's window is closed: it does not matter
+	rec := e.do("POST", "/servers/1/token", url.Values{}, c)
+	wantCode(t, rec, http.StatusSeeOther)
+	if l := rec.Header().Get("Location"); l != "/servers/1" {
+		t.Errorf("Location = %q", l)
+	}
+	tok, found, err := e.st.ActivePairToken(srv.ID, clock.Now())
+	if err != nil || !found {
+		t.Fatalf("no token: %v, %v", found, err)
+	}
+	if want := clock.Now().Add(24 * time.Hour).UTC().Truncate(time.Second); !tok.ExpiresAt.Equal(want) {
+		t.Errorf("token expires %v, want %v (24 hours)", tok.ExpiresAt, want)
+	}
+	rec = e.do("GET", "/servers/1", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, "agent/install?token="+tok.Token, `action="/servers/1/token"`, "Buat token baru")
+	wantNoBody(t, rec, `data-confirm-action="repair_token"`, "Token pasang ulang aktif")
+	wantBody(t, e.do("GET", "/servers/1", nil, c), "agent/install?token="+tok.Token)
+}

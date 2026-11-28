@@ -47,17 +47,19 @@
   </div>
 </section>
 {{else}}
-{{if or .Command .TokenHidden}}
+{{if or .Command .RepairActive}}
 <section class="card bg-base-100 mb-4">
   <div class="card-body gap-3 p-6">
     <h2>Pasang ulang agent</h2>
+    {{if .Command}}
     {{template "pair-command" .}}
-    {{if .TokenHidden}}
+    <p class="help">Perintah ini hanya ditampilkan sekali. Token berlaku sampai <span class="mono">{{fmtDateTime .TokenExpires}}</span> dan hanya bisa dipakai sekali. Agent lama tetap bekerja sampai agent baru berhasil dipasangkan; saat itu koneksi agent lama langsung diputus dan sertifikatnya tidak diterima lagi.</p>
+    {{else}}
+    <div role="status" class="banner banner-info mb-0">{{template "banner-icon" "info"}}<div class="flex-1">{{.RepairActive}}</div></div>
     <form method="post" action="/servers/{{.Server.ID}}/token">
-      <button type="submit" class="btn btn-sm">Buat token baru</button>
+      <button type="submit" class="btn btn-sm" data-confirm-action="repair_token" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-light="1" data-confirm-text="{{.RepairConfirm}}">Buat token baru</button>
     </form>
     {{end}}
-    <p class="help">Token berlaku sampai <span class="mono">{{fmtDateTime .TokenExpires}}</span> dan hanya bisa dipakai sekali. Agent lama tetap bekerja sampai agent baru berhasil dipasangkan; saat itu koneksi agent lama langsung diputus dan sertifikatnya tidak diterima lagi.</p>
   </div>
 </section>
 {{end}}
@@ -170,7 +172,7 @@
     <p class="py-4">Gunakan ini bila server dipasang ulang atau isi <code>/etc/dbpanel</code> hilang. Panel membuat token pemasangan baru dan menampilkan perintahnya. Begitu agent baru berhasil dipasangkan, koneksi agent lama langsung diputus, sertifikatnya tidak berlaku lagi, dan agent lama tidak bisa terhubung. Sampai saat itu agent lama tetap bekerja.</p>
     <div class="modal-action">
       <form method="dialog"><button class="btn">Batal</button></form>
-      <form method="post" action="/servers/{{.Server.ID}}/token"><button type="submit" class="btn btn-primary">Ya, buat token</button></form>
+      <form method="post" action="/servers/{{.Server.ID}}/token"><button type="submit" class="btn btn-primary" data-confirm-action="repair_token" data-confirm-kind="server" data-confirm-id="{{.Server.ID}}" data-confirm-light="1" data-confirm-text="{{.RepairConfirm}}">Ya, buat token</button></form>
     </div>
   </div>
   <form method="dialog" class="modal-backdrop"><button>tutup</button></form>
