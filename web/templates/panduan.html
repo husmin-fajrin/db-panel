@@ -138,6 +138,7 @@ GRANT ALL PRIVILEGES ON *.* TO 'panel_admin'@'localhost' WITH GRANT OPTION;</pre
     <h3 class="mt-2 font-semibold">Port MySQL master</h3>
     <p>Tertulis (kuning): "Port MySQL master &lt;server&gt; bisa dijangkau dari host panel; sebaiknya hanya terbuka untuk replika."</p>
     <p>Perbaikan: "Batasi port itu di firewall master hanya untuk alamat replika."</p>
+    <p>Tertulis (kuning), tanpa perbaikan: "Alamat master baru saja diubah; port diperiksa lagi paling cepat pukul &lt;jam&gt;." Tunggu sampai jam yang tertulis, lalu buka lagi halaman ini: panel memeriksa satu alamat per master setiap sepuluh menit.</p>
     <h3 class="mt-2 font-semibold">Log audit</h3>
     <p>Tertulis (kuning): "Log audit belum ditandai diteruskan ke server lain."</p>
     <p>Perbaikan: "Teruskan journal host panel ke server lain (systemd-journal-upload), lalu tandai di Pengaturan."</p>

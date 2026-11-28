@@ -3659,6 +3659,11 @@ panel; sebaiknya hanya terbuka untuk replika."
 
 Perbaikan: "Batasi port itu di firewall master hanya untuk alamat replika."
 
+Tertulis (kuning), tanpa perbaikan: "Alamat master baru saja diubah; port
+diperiksa lagi paling cepat pukul <jam>." Tunggu sampai jam yang tertulis,
+lalu buka lagi halaman ini: panel memeriksa satu alamat per master setiap
+sepuluh menit.
+
 #### Log audit
 
 Tertulis (kuning): "Log audit belum ditandai diteruskan ke server lain."
