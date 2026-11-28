@@ -1386,12 +1386,14 @@ ditolak.
     menghentikannya sendiri.
   - **Lepas dan hentikan replikasi:** replikasi dihentikan dan
     pengaturannya dihapus, dan agent melepas peran `replica`. MySQL tetap
-    hanya-baca; untuk membukanya jalankan di server itu
-    `mysql -e "SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF"`.
-    `SET PERSIST` (bukan `SET GLOBAL`) membuat perubahan itu bertahan saat
-    MySQL di-restart: dbpanel mengunci dengan `SET PERSIST` dan baris
-    `read_only`/`super_read_only` di blok my.cnf-nya, dan nilai yang
-    di-PERSIST menang atas my.cnf.
+    hanya-baca, juga setelah di-restart. Kapan aman membukanya, dan
+    caranya, ada di panduan "Memakai bekas replika sebagai server mandiri"
+    (bagian "Panduan" di bawah).
+
+  Selagi master "Diduga tumbang", dialog **Lepas replika** menampilkan
+  peringatan: bila replika ini harus menggantikan master, jangan lepas,
+  tetapi jalankan Promote darurat dari halaman master. Peringatan itu tidak
+  menghalangi pelepasan.
 
   Akun replikasi di master tidak disentuh (dipakai bersama oleh semua
   replika master itu).
@@ -2927,6 +2929,7 @@ dulu syarat yang tertulis tepat di atasnya.
 7. Memakai lagi server yang dihapus saat masih dikarantina
 8. Memperbaiki baris merah
 9. Replika yang tersambung di luar alur panel
+10. Memakai bekas replika sebagai server mandiri
 
 ### Promote darurat
 
@@ -3781,6 +3784,65 @@ admin MySQL.
 
 Bila salah satu pemeriksaan di atas tidak cocok, atau sebuah langkah gagal:
 jangan sambungkan master lama ke aplikasi, dan panggil admin MySQL.
+
+### Memakai bekas replika sebagai server mandiri
+
+Kapan dipakai: sesudah **Lepas replika** dengan pilihan **Lepas dan
+hentikan replikasi**, bila server itu akan dipakai aplikasi sendiri,
+terpisah dari master lamanya. Replikasinya sudah dihentikan dan
+pengaturannya dihapus, tetapi MySQL-nya tetap terkunci baca-saja
+(read-only), juga setelah MySQL di-restart.
+
+Buka hanya bila server ini akan dipakai aplikasi sebagai server mandiri dan
+master lamanya tidak lagi dipakai aplikasi mana pun. Bila master sedang
+tumbang dan replika ini harus menggantikannya, jangan lewat jalan ini: pakai
+Promote darurat, yang juga mengkarantina master lama.
+
+Dua server yang sama-sama ditulis aplikasi menyimpan data yang berbeda, dan
+panel tidak bisa menyatukannya lagi.
+
+1. Pastikan syarat di atas terpenuhi. Bila halaman master lama menulis
+   "Diduga tumbang", berhenti dan ikuti panduan "Promote darurat". Bila
+   Anda memilih **Lepas, biarkan replikasi berjalan**, server ini masih
+   mengikuti master: jangan buka.
+2. Masuk ke server bekas replika itu. Pastikan dulu Anda memang di server
+   itu. Jalankan perintah ini; jawabannya harus sama dengan **Hostname** di
+   halaman server itu di panel. Bila berbeda, berhenti: Anda berada di
+   server lain.
+
+   ```sh
+   hostname
+   ```
+
+3. Masuk ke MySQL sebagai root MySQL (misalnya lewat `sudo mysql`, atau
+   `mysql -u root -p` bila root MySQL memakai kata sandi). Periksa bahwa
+   MySQL-nya masih terkunci. Jawabannya `1 1`.
+
+   ```sql
+   SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;
+   ```
+
+4. Buka kuncinya, di MySQL yang sama:
+
+   ```sql
+   SET PERSIST super_read_only=OFF;
+   SET PERSIST read_only=OFF;
+   ```
+
+   `SET PERSIST` (bukan `SET GLOBAL`) membuat perubahan itu bertahan saat
+   MySQL di-restart: dbpanel mengunci dengan `SET PERSIST` dan baris
+   `read_only`/`super_read_only` di blok my.cnf-nya, dan nilai yang
+   di-PERSIST menang atas my.cnf.
+5. Periksa lagi. Jawabannya kini harus `0 0`.
+
+   ```sql
+   SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;
+   ```
+
+6. Baru sesudah itu arahkan aplikasinya ke server ini.
+
+Bila salah satu pemeriksaan di atas tidak cocok, atau sebuah langkah gagal:
+jangan arahkan aplikasi ke server ini, dan panggil admin MySQL.
 
 ## Catatan audit
 

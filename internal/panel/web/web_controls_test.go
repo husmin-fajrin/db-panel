@@ -383,9 +383,10 @@ func TestDetachModes(t *testing.T) {
 	wantBody(t, rec, `action="/replicas/2/detach"`, `name="mode" value="keep"`, `name="mode" value="stop"`,
 		"Lepas, biarkan replikasi berjalan", "Lepas dan hentikan replikasi",
 		"MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; panel tidak lagi memantaunya.",
-		// dbpanel locked with SET PERSIST: a SET GLOBAL unlock would not survive a restart.
-		`mysql -e "SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF"`, "tetap terbuka walau MySQL di-restart")
-	wantNoBody(t, rec, "SET GLOBAL super_read_only")
+		// P7: the unlock SQL is in the guide only, under its condition (R-190).
+		"Replikasi dihentikan dan pengaturannya dihapus. MySQL di server ini tetap terkunci hanya-baca. "+
+			"Kapan aman membukanya, dan caranya, ada di Panduan: \"")
+	wantNoBody(t, rec, "super_read_only=OFF", "SET PERSIST", "SET GLOBAL super_read_only")
 
 	// Wrong name or no mode: nothing is called.
 	for _, form := range []url.Values{
@@ -405,14 +406,55 @@ func TestDetachModes(t *testing.T) {
 	rec = e.do("POST", "/replicas/2/detach", withToken(t, e, url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, web.ActDetach, "replica", 2), c)
 	wantCode(t, rec, http.StatusSeeOther)
 	wantLocation(t, rec, "/servers/2?pesan=dilepas-henti")
-	wantBody(t, e.do("GET", "/servers/2?pesan=dilepas-henti", nil, c),
-		"SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF", "tetap terbuka walau MySQL di-restart")
 
 	f.err = errors.New("server ini masih punya pekerjaan yang belum selesai")
 	rec = e.do("POST", "/replicas/2/detach", withToken(t, e, url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}}, web.ActDetach, "replica", 2), c)
 	wantCode(t, rec, http.StatusBadRequest)
 	wantBody(t, rec, "server ini masih punya pekerjaan yang belum selesai")
 	wantCalls(t, f, "detach 2 stop=false", "detach 2 stop=true", "detach 2 stop=true")
+}
+
+// msgDetachMasterDown is T26 (spec 5.11).
+const msgDetachMasterDown = "Master %s sedang diduga tumbang. Bila replika ini harus menggantikannya, jangan lepas: " +
+	"jalankan Promote darurat dari halaman master, yang juga mengkarantina master lama. Replika yang dilepas lalu " +
+	"dibuka dengan tangan menjadi master kedua saat master lama hidup lagi."
+
+// TestDetachDialogWarnsWhenMasterDown (spec 5.9, R-190): while the
+// master is "Diduga tumbang" the Lepas replika dialog shows T26 with the
+// master's name; not while it is healthy. The warning does not block: the
+// dialog asks for nothing new and the same form still detaches.
+func TestDetachDialogWarnsWhenMasterDown(t *testing.T) {
+	e, f, mon := controlEnv(t)
+	c := e.cookie()
+	warn := fmt.Sprintf(msgDetachMasterDown, "db-master")
+
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster, Status: monitor.Status{Code: monitor.StatusSynced}})
+	rec := e.do("GET", "/replicas/2", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	wantNoBody(t, rec, "sedang diduga tumbang")
+	healthy := between(rec.Body.String(), `<dialog id="modal-detach"`, "</dialog>")
+
+	mon.setView(monitor.View{ServerID: 1, Role: store.RoleMaster,
+		Status: monitor.Status{Code: monitor.StatusDown, Severity: monitor.SevCrit, Detail: "Diduga tumbang (agent offline)"}})
+	rec = e.do("GET", "/replicas/2", nil, c)
+	wantCode(t, rec, http.StatusOK)
+	dialog := between(rec.Body.String(), `<dialog id="modal-detach"`, "</dialog>")
+	if !strings.Contains(dialog, warn) {
+		t.Fatalf("detach dialog lacks T26:\n%s", dialog)
+	}
+	if n := strings.Count(rec.Body.String(), "sedang diduga tumbang"); n != 1 {
+		t.Errorf("T26 shown %d times, want once (in the dialog)", n)
+	}
+	// Nothing new to fill in: the same inputs as while healthy.
+	inputRe := regexp.MustCompile(`<(input|select|textarea)\b[^>]*>`)
+	if a, b := inputRe.FindAllString(dialog, -1), inputRe.FindAllString(healthy, -1); !reflect.DeepEqual(a, b) {
+		t.Errorf("detach dialog inputs while the master is down = %q, want those while healthy %q", a, b)
+	}
+	rec = e.do("POST", "/replicas/2/detach", withToken(t, e, url.Values{"confirm_name": {"db-replika"}, "mode": {"stop"}},
+		web.ActDetach, "replica", 2), c)
+	wantCode(t, rec, http.StatusSeeOther)
+	wantLocation(t, rec, "/servers/2?pesan=dilepas-henti")
+	wantCalls(t, f, "detach 2 stop=true")
 }
 
 func TestUnlockMasterRequiresTypedName(t *testing.T) {

@@ -2,11 +2,15 @@ package web_test
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -700,4 +704,70 @@ func TestNoTemplatePromotesByHand(t *testing.T) {
 			}
 		}
 	}
+}
+
+// unlockSQLRe matches a statement that opens MySQL for writes, however it
+// is spaced or cased.
+var unlockSQLRe = regexp.MustCompile(`(?i)super_read_only\s*=\s*OFF`)
+
+// TestNoUnlockSQLOutsideGuide (spec 5.9, R-190): the SQL that opens a
+// server for writes is given only by the guide page, under its condition.
+// No other template, no script, and no text of the panel's code (its
+// flashes and notices) holds it; in the guide "Memakai bekas replika
+// sebagai server mandiri" it comes after B4.
+func TestNoUnlockSQLOutsideGuide(t *testing.T) {
+	files, err := filepath.Glob("../../../web/templates/*.html")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("templates: %v %v", files, err)
+	}
+	scripts, err := filepath.Glob("../../../web/static/*.js")
+	if err != nil || len(scripts) == 0 {
+		t.Fatalf("scripts: %v %v", scripts, err)
+	}
+	for _, f := range append(files, scripts...) {
+		if filepath.Base(f) == "panduan.html" {
+			continue
+		}
+		if m := unlockSQLRe.FindString(readFile(t, f)); m != "" {
+			t.Errorf("%s contains %q", f, m)
+		}
+	}
+	// Every string literal of the panel's code: a flash or notice is one.
+	var sources []string
+	err = filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			sources = append(sources, path)
+		}
+		return err
+	})
+	if err != nil || len(sources) < 20 {
+		t.Fatalf("panel sources: %d %v", len(sources), err)
+	}
+	for _, path := range sources {
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if s, err := strconv.Unquote(lit.Value); err == nil && unlockSQLRe.MatchString(s) {
+					t.Errorf("%s: a panel text holds the unlock SQL: %q", path, s)
+				}
+			}
+			return true
+		})
+	}
+	// In the new guide, the condition comes first.
+	for _, g := range pageGuides(readFile(t, guideTemplatePath)) {
+		if g.id != "bekas-replika-mandiri" {
+			continue
+		}
+		text := plainText(g.body)
+		c, sql := strings.Index(text, guideB4), unlockSQLRe.FindStringIndex(text)
+		if c < 0 || sql == nil || c > sql[0] {
+			t.Errorf("guide bekas-replika-mandiri: B4 at %d, unlock SQL at %v; want B4 first:\n%s", c, sql, text)
+		}
+		return
+	}
+	t.Error("guide page has no bekas-replika-mandiri")
 }

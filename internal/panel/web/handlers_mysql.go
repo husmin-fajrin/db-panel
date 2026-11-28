@@ -225,6 +225,15 @@ const (
 	msgSourceByUser = "Alamat ini diubah oleh %s pada %s. Pastikan itu memang alamat server %s sebelum menjalankan perintah di bawah."
 	msgSourceByJob  = "Alamat ini dipasang panel saat promote (pekerjaan %s) pada %s."
 
+	// msgDetachMasterDown is T26 (spec 5.9, R-190), in the Lepas replika
+	// dialog while the master (%s) is "Diduga tumbang": a replica detached
+	// and then opened by hand becomes a second master when the old one
+	// comes back. A warning only: during an outage detaching must stay
+	// possible.
+	msgDetachMasterDown = "Master %s sedang diduga tumbang. Bila replika ini harus menggantikannya, jangan lepas: " +
+		"jalankan Promote darurat dari halaman master, yang juga mengkarantina master lama. Replika yang dilepas lalu " +
+		"dibuka dengan tangan menjadi master kedua saat master lama hidup lagi."
+
 	maxMySQLUser     = 32 // MySQL's limit for a user name
 	maxMySQLPassword = 256
 	maxMySQLHost     = 255
@@ -248,9 +257,10 @@ var notices = map[string]string{
 	"dikunci":    "Replika dikunci hanya-baca lagi.",
 	"dilepas": "Replika dilepas. MySQL di server ini terus mengikuti master sampai Anda menghentikannya sendiri; " +
 		"panel tidak lagi memantaunya.",
-	"dilepas-henti": "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca; " +
-		"untuk membukanya jalankan di server itu: mysql -e \"SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF\" " +
-		"(SET PERSIST: tetap terbuka walau MySQL di-restart).",
+	// T27 (spec 5.9, R-190): no SQL here; the guide gives it under its
+	// condition.
+	"dilepas-henti": "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca. " +
+		"Kapan aman membukanya, dan caranya, ada di Panduan: \"Memakai bekas replika sebagai server mandiri\".",
 	"kunci-dibuka":       "Kunci hanya-baca master dibuka; aplikasi bisa menulis lagi.",
 	"diperiksa":          "Server sudah diperiksa; status di bawah memakai laporan terbaru.",
 	"senyap":             "Pemberitahuan untuk server ini ditunda (Jangan ganggu).",
@@ -1107,6 +1117,9 @@ type replicaPage struct {
 	CanStop, CanStart, CanRelock, CanResync, CanDetach bool
 	// StopConfirm is T30, the text of Stop replika's light confirmation.
 	StopConfirm string
+	// DetachWarning is T26, shown in the Lepas replika dialog while the
+	// master is "Diduga tumbang"; "" otherwise. It does not block.
+	DetachWarning string
 	// Quarantined: the server is an old master whose quarantine has not
 	// ended (role quarantined, its rebuild running or failed before its
 	// settle): neither Resync ulang nor Lepas replika is offered, T23
@@ -1256,7 +1269,8 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 		a.internalError(w, "timeline", err)
 		return
 	}
-	if mv, ok := a.Monitor.View(p.Master.ID); ok && mv.Snap != nil {
+	mv, masterMonitored := a.Monitor.View(p.Master.ID)
+	if masterMonitored && mv.Snap != nil {
 		p.BinlogKeep = binlogKeep(mv.Snap.BinlogExpireSec)
 	}
 	masterInv, err := a.inventory(p.Master.ID)
@@ -1300,6 +1314,9 @@ func (a *app) renderReplica(w http.ResponseWriter, r *http.Request, status int, 
 	if srv.Role == store.RoleQuarantined {
 		p.Quarantined = true
 		p.CanResync, p.CanDetach = false, false
+	}
+	if p.CanDetach && masterMonitored && mv.Status.Code == monitor.StatusDown {
+		p.DetachWarning = fmt.Sprintf(msgDetachMasterDown, p.Master.Name)
 	}
 	if p.CanResync {
 		p.ResyncGate = a.gateFor(orchestrator.GateInput{Action: orchestrator.GateResync, MasterID: p.Master.ID,

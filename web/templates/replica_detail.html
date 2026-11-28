@@ -208,6 +208,7 @@
 <dialog id="modal-detach" class="modal">
   <form method="post" action="/replicas/{{.Server.ID}}/detach" class="modal-box flex flex-col gap-2">
     <h2>Lepas replika {{.Server.Name}}?</h2>
+    {{with .DetachWarning}}<div role="alert" class="banner banner-warning mb-0" data-detach-master-down>{{template "banner-icon" "warning"}}<div class="min-w-0 flex-1">{{.}}</div></div>{{end}}
     <p>Panel berhenti mengelola server ini sebagai replika master <strong>{{.Master.Name}}</strong>. Akun replikasi di master tidak disentuh.</p>
     <label class="flex gap-2 items-start">
       <input type="radio" class="radio radio-sm mt-1" name="mode" value="keep" required>
@@ -215,7 +216,7 @@
     </label>
     <label class="flex gap-2 items-start">
       <input type="radio" class="radio radio-sm mt-1" name="mode" value="stop">
-      <span><strong>Lepas dan hentikan replikasi.</strong> Replikasi dihentikan dan pengaturannya dihapus. MySQL di server ini tetap terkunci hanya-baca; untuk membukanya jalankan di server itu: <code>mysql -e "SET PERSIST super_read_only=OFF; SET PERSIST read_only=OFF"</code> (tetap terbuka walau MySQL di-restart).</span>
+      <span><strong>Lepas dan hentikan replikasi.</strong> Replikasi dihentikan dan pengaturannya dihapus. MySQL di server ini tetap terkunci hanya-baca. Kapan aman membukanya, dan caranya, ada di Panduan: "<a class="link" href="/panduan#bekas-replika-mandiri">Memakai bekas replika sebagai server mandiri</a>".</span>
     </label>
     <!-- The confirming button comes first, so Enter uses it. -->
     <div class="modal-action flex-row-reverse justify-start">

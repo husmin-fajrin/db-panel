@@ -15,7 +15,7 @@ import (
 	"github.com/husmin-fajrin/db-panel/internal/panel/orchestrator"
 )
 
-// guideTable is the guide page's nine guides, in order: their <h2> title
+// guideTable is the guide page's ten guides, in order: their <h2> title
 // (### in the README) and their anchor.
 var guideTable = []struct{ id, title string }{
 	{"promote-darurat", "Promote darurat"},
@@ -27,7 +27,14 @@ var guideTable = []struct{ id, title string }{
 	{"pakai-lagi-server-dikarantina", "Memakai lagi server yang dihapus saat masih dikarantina"},
 	{"baris-merah", "Memperbaiki baris merah"},
 	{"replika-di-luar-panel", "Replika yang tersambung di luar alur panel"},
+	{"bekas-replika-mandiri", "Memakai bekas replika sebagai server mandiri"},
 }
+
+// guideB4 is B4 (spec 5.11), the condition of the guide
+// "Memakai bekas replika sebagai server mandiri", written above its SQL.
+const guideB4 = "Buka hanya bila server ini akan dipakai aplikasi sebagai server mandiri dan master lamanya tidak lagi " +
+	"dipakai aplikasi mana pun. Bila master sedang tumbang dan replika ini harus menggantikannya, jangan lewat jalan " +
+	"ini: pakai Promote darurat, yang juga mengkarantina master lama."
 
 const (
 	guideTemplatePath = "../../../web/templates/panduan.html"
@@ -164,7 +171,7 @@ func TestGuidePageNeedsLogin(t *testing.T) {
 	}
 }
 
-func TestGuidePageHasNineGuides(t *testing.T) {
+func TestGuidePageHasTenGuides(t *testing.T) {
 	e := newEnv(t)
 	if _, err := e.st.CreateServer("db-rahasia-9"); err != nil {
 		t.Fatal(err)
@@ -200,7 +207,7 @@ func TestGuidePageHasNineGuides(t *testing.T) {
 	}
 }
 
-// TestGuideMatchesREADME: the README's "## Panduan" has the page's nine
+// TestGuideMatchesREADME: the README's "## Panduan" has the page's ten
 // guides, in the same order, and each guide the same commands in the same
 // order.
 func TestGuideMatchesREADME(t *testing.T) {
@@ -422,6 +429,7 @@ const (
 	linkRebuild = `<a class="link" href="/panduan#bangun-ulang-master-lama">Panduan: Bangun ulang master lama</a>`
 	linkAccount = `<a class="link" href="/panduan#baris-merah">Panduan: Memperbaiki baris merah</a>`
 	linkBackup  = `<a class="link" href="/panduan#jadwal-cadangan">Panduan: Memindahkan jadwal cadangan sesudah promote</a>`
+	linkFormer  = `Panduan: "<a class="link" href="/panduan#bekas-replika-mandiri">Memakai bekas replika sebagai server mandiri</a>"`
 	wantD8      = "Pindahkan jadwal cadangan (backup) ke master baru, lalu isi folder cadangan di halaman servernya."
 )
 
@@ -461,10 +469,21 @@ func TestScreensLinkToGuides(t *testing.T) {
 	wantCode(t, rec, http.StatusOK)
 	wantBody(t, rec, wantD8, linkBackup)
 
+	// The Lepas replika dialog, at its "Lepas dan hentikan replikasi"
+	// choice (P7).
+	e4, _, _ := controlEnv(t)
+	rec = e4.do("GET", "/replicas/2", nil, e4.cookie())
+	wantCode(t, rec, http.StatusOK)
+	choice := between(rec.Body.String(), `name="mode" value="stop"`, "</label>")
+	if !strings.Contains(choice, linkFormer) {
+		t.Errorf("the detach choice has no link to the guide:\n%s", choice)
+	}
+
 	// Every anchor is on the guide page.
 	rec = e3.do("GET", "/panduan", nil, e3.cookie())
 	wantCode(t, rec, http.StatusOK)
-	for _, id := range []string{"promote-darurat", "bangun-ulang-master-lama", "baris-merah", "jadwal-cadangan"} {
+	for _, id := range []string{"promote-darurat", "bangun-ulang-master-lama", "baris-merah", "jadwal-cadangan",
+		"bekas-replika-mandiri"} {
 		wantBody(t, rec, `id="`+id+`"`)
 	}
 }

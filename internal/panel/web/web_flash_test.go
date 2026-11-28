@@ -87,3 +87,18 @@ func TestFlashesLabelAgentText(t *testing.T) {
 		})
 	}
 }
+
+// msgDetachedStopped is T27 (spec 5.11), the flash after Lepas dan
+// hentikan replikasi.
+const msgDetachedStopped = "Replika dilepas dan replikasinya dihentikan. MySQL di server ini tetap terkunci hanya-baca. " +
+	"Kapan aman membukanya, dan caranya, ada di Panduan: \"Memakai bekas replika sebagai server mandiri\"."
+
+// TestDetachFlashT27 (spec 5.9, R-190): the flash after Lepas dan
+// hentikan replikasi is T27; it names the guide and gives no SQL.
+func TestDetachFlashT27(t *testing.T) {
+	e, _, _ := controlEnv(t)
+	rec := e.do("GET", "/servers/2?pesan=dilepas-henti", nil, e.cookie())
+	wantCode(t, rec, http.StatusOK)
+	wantBody(t, rec, template.HTMLEscapeString(msgDetachedStopped))
+	wantNoBody(t, rec, "super_read_only=OFF", "SET PERSIST", "mysql -e")
+}
