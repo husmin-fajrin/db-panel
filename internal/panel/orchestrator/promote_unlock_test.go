@@ -764,15 +764,14 @@ func TestUnlockInFlightRefusesStartInsidePromoteView(t *testing.T) {
 }
 
 // TestUnlockTailFlagCombinations: after the agent's refusal, a candidate
-// whose read_only is OFF (with either super_read_only) gets T11c, one
-// whose read_only is ON gets T11.
+// gets T11c unless both its flags are ON; only both ON gets T11.
 func TestUnlockTailFlagCombinations(t *testing.T) {
 	const words = "kunci tidak dibuka"
 	quoted := "Pesan dari agent db-master (bukan dari panel): " + words
 	for _, c := range flagCombos {
 		t.Run(c.name, func(t *testing.T) {
 			code, want := UnlockRefused, fmt.Sprintf(wantT11, quoted)
-			if !c.readOnly {
+			if !(c.readOnly && c.superReadOnly) {
 				code, want = UnlockCandidateWritable, fmt.Sprintf(wantT11c, quoted)
 			}
 			g := newPromoteRig(t)
