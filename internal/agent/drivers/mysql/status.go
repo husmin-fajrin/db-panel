@@ -16,6 +16,10 @@ import (
 
 func (d *Driver) registerStatus(reg *commands.Registry) {
 	reg.Register("mysql.status", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		// Read before MySQL's state, so "no promote request" never comes
+		// with a read-only state read before a promote that ended in
+		// between had opened writes.
+		pending := d.PromoteRequestPending()
 		h, err := d.host()
 		if err != nil {
 			return nil, err
@@ -25,7 +29,12 @@ func (d *Driver) registerStatus(reg *commands.Registry) {
 			return nil, err
 		}
 		defer db.Close()
-		return Status(ctx, db)
+		st, err := Status(ctx, db)
+		if err != nil {
+			return nil, err
+		}
+		st.PromoteRequest = &pending
+		return st, nil
 	})
 }
 

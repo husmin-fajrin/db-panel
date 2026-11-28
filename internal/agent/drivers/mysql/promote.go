@@ -73,6 +73,7 @@ var (
 var errRelayWaitTimeout = errors.New("WAIT_FOR_EXECUTED_GTID_SET habis waktu")
 
 func (d *Driver) registerPromoteJob(reg *commands.Registry) {
+	d.trackPromoteRequests(reg)
 	reg.Register("mysql.promote", func(ctx context.Context, params json.RawMessage) (any, error) {
 		var p proto.PromoteParams
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -96,7 +97,7 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 			if err != nil {
 				return nil, err
 			}
-			id, err := d.Jobs.Start("mysql.promote", func(j *jobs.Job) (any, error) {
+			id, err := d.startPromoteJob(func(j *jobs.Job) (any, error) {
 				res := proto.PromoteResult{GTIDExecuted: pr.GTIDExecuted, Mode: pr.Mode, Resumed: true}
 				db, err := openAdmin(j.Context(), h)
 				if err != nil {
@@ -130,7 +131,7 @@ func (d *Driver) registerPromoteJob(reg *commands.Registry) {
 				err.Error() + "; promote ditolak"}
 		}
 		lockBy := promoteLockBy(p, d.now())
-		id, err := d.Jobs.Start("mysql.promote", func(j *jobs.Job) (any, error) {
+		id, err := d.startPromoteJob(func(j *jobs.Job) (any, error) {
 			res, err := d.promote(j, h, p, lockBy)
 			if err != nil {
 				d.warn("mysql promote failed", "job", j.ID(), "mode", p.Mode, "old_source", old, "err", err)

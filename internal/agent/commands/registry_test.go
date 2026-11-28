@@ -252,3 +252,37 @@ func TestGateRunsBeforeHandler(t *testing.T) {
 
 // errPanic makes TestGateRunsBeforeHandler's gate panic.
 var errPanic = errors.New("panic")
+
+// TestPromoteRequestTrackCallsOnlyItsCommand: NoteRead and NoteAnswered call
+// the funcs Track gave for that command, with the answer's outcome, and do
+// nothing for another command or one nobody tracks.
+func TestPromoteRequestTrackCallsOnlyItsCommand(t *testing.T) {
+	r := NewRegistry()
+	var got []string
+	r.Track("mysql.promote", func() { got = append(got, "read") },
+		func(ok bool) { got = append(got, fmt.Sprintf("answered %v", ok)) })
+	r.NoteRead("mysql.status")
+	r.NoteAnswered("mysql.status", true)
+	r.NoteRead("nope")
+	r.NoteAnswered("nope", false)
+	r.NoteRead("mysql.promote")
+	r.NoteAnswered("mysql.promote", false)
+	r.NoteRead("mysql.promote")
+	r.NoteAnswered("mysql.promote", true)
+	if s := strings.Join(got, ","); s != "read,answered false,read,answered true" {
+		t.Errorf("calls = %s", s)
+	}
+}
+
+// TestPromoteRequestTrackTwicePanics: a command is tracked once, so no
+// request is counted twice.
+func TestPromoteRequestTrackTwicePanics(t *testing.T) {
+	r := NewRegistry()
+	r.Track("mysql.promote", func() {}, func(bool) {})
+	defer func() {
+		if recover() == nil {
+			t.Fatal("second Track did not panic")
+		}
+	}()
+	r.Track("mysql.promote", func() {}, func(bool) {})
+}

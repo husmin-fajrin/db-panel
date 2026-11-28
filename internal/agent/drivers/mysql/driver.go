@@ -194,6 +194,10 @@ type Driver struct {
 	liftOnce sync.Once
 	lift     *liftGate
 
+	// promoteReqs counts the mysql.promote requests read and not ended
+	// (promote_pending.go).
+	promoteReqs atomic.Int64
+
 	// Test hooks; nil means the real installer and NewRealHost.
 	inst    installer
 	newHost hostFactory

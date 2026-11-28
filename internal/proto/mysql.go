@@ -59,6 +59,9 @@ type MySQLStatus struct {
 	// last CLONE into this server ("" when none ran or the plugin is off).
 	CloneState string `json:"clone_state,omitempty"`
 	CloneError string `json:"clone_error,omitempty"`
+	// PromoteRequest: this agent has read a mysql.promote request whose job
+	// has not ended (true), or none (false); nil from an agent before this field.
+	PromoteRequest *bool `json:"promote_request,omitempty"`
 }
 
 // ReplicaStatus is the default channel's row of SHOW REPLICA STATUS.

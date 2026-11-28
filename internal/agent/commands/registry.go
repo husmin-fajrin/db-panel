@@ -50,6 +50,56 @@ type Registry struct {
 	denied   map[string]bool // disabled by the host's local policy
 	gate     Gate            // asked before every handler; nil: none
 	logger   *slog.Logger    // one line per command; nil: none
+	tracked  map[string]tracker
+}
+
+// tracker is what Track was given for one command.
+type tracker struct {
+	read     func()
+	answered func(ok bool)
+}
+
+// Track makes NoteRead(cmd) call read and NoteAnswered(cmd, ok) call
+// answered(ok), so the command's owner can count the requests for cmd that
+// have been read and not yet answered. The agent's session notes every
+// request it reads, once each way. Track is called while the commands are
+// registered, before any request is read: a request read before it would
+// be answered without having been counted. It panics if cmd is tracked
+// already.
+func (r *Registry) Track(cmd string, read func(), answered func(ok bool)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, dup := r.tracked[cmd]; dup {
+		panic("commands: duplicate tracking of " + cmd)
+	}
+	if r.tracked == nil {
+		r.tracked = make(map[string]tracker)
+	}
+	r.tracked[cmd] = tracker{read: read, answered: answered}
+}
+
+// NoteRead is called by the session's read loop for every request it
+// reads, before it reads the next one and before the request is
+// dispatched.
+func (r *Registry) NoteRead(cmd string) {
+	r.mu.RLock()
+	t, ok := r.tracked[cmd]
+	r.mu.RUnlock()
+	if ok {
+		t.read()
+	}
+}
+
+// NoteAnswered is called once for every request NoteRead was called for,
+// by the request's goroutine after Dispatch returned; ok is the answer's
+// OK.
+func (r *Registry) NoteAnswered(cmd string, ok bool) {
+	r.mu.RLock()
+	t, found := r.tracked[cmd]
+	r.mu.RUnlock()
+	if found {
+		t.answered(ok)
+	}
 }
 
 // SetGate makes Dispatch ask g before running a registered command's

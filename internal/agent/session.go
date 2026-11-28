@@ -93,10 +93,15 @@ func (a *Agent) serve(ctx context.Context, ws *websocket.Conn) error {
 			continue
 		}
 		req := *env.Request
+		// Noted here, before the next request is read: a mysql.status
+		// read after a mysql.promote, on this session or the next, sees
+		// the promote even while its handler has not started (spec 5.2).
+		a.reg.NoteRead(req.Cmd)
 		requests.Go(func() {
 			rctx, rcancel := context.WithTimeout(sctx, requestTimeout)
 			defer rcancel()
 			resp := a.reg.Dispatch(rctx, req)
+			a.reg.NoteAnswered(req.Cmd, resp.OK)
 			if err := s.send(proto.Envelope{Kind: proto.KindResponse, Response: &resp}); err != nil && sctx.Err() == nil {
 				a.logger.Warn("cannot send response", "cmd", req.Cmd, "id", req.ID, "err", err)
 			}
